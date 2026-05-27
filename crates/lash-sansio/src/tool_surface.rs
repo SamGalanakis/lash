@@ -3,8 +3,8 @@ use std::sync::{Arc, OnceLock};
 
 use crate::llm::types::LlmToolSpec;
 use crate::{
-    ExecutionMode, PromptContribution, PromptFingerprint, ToolAvailability, ToolContract,
-    ToolDefinition, ToolManifest, prompt_tool_names_fingerprint,
+    PromptContribution, PromptFingerprint, ToolAvailability, ToolContract, ToolDefinition,
+    ToolManifest, prompt_tool_names_fingerprint,
 };
 
 pub type ToolContractResolver =
@@ -13,7 +13,6 @@ pub type ToolContractResolver =
 #[derive(Clone)]
 pub struct ToolSurfaceBuildInput {
     pub tools: Vec<ToolManifest>,
-    pub mode: ExecutionMode,
     pub resolve_contract: Option<ToolContractResolver>,
     pub contributions: Vec<ToolSurfaceContribution>,
 }
@@ -109,41 +108,37 @@ impl Default for ToolSurface {
 }
 
 impl ToolSurface {
-    pub fn from_tool_definitions(tools: Vec<ToolDefinition>, mode: ExecutionMode) -> Self {
+    pub fn from_tool_definitions(tools: Vec<ToolDefinition>) -> Self {
         let contracts = tools
             .iter()
             .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
             .collect();
         Self::from_tools(
             tools.into_iter().map(|tool| tool.manifest()).collect(),
-            mode,
             contracts,
         )
     }
 
     pub fn from_tools(
         tools: Vec<ToolManifest>,
-        mode: ExecutionMode,
         contracts: BTreeMap<String, Arc<ToolContract>>,
     ) -> Self {
         let resolver_contracts = Arc::new(contracts);
         Self::from_tool_manifests(
             tools,
-            &mode,
             Some(Arc::new(move |name| resolver_contracts.get(name).cloned())),
         )
     }
 
     fn from_tool_manifests(
         tools: Vec<ToolManifest>,
-        mode: &ExecutionMode,
         resolve_contract: Option<ToolContractResolver>,
     ) -> Self {
         Self {
             tools: tools
                 .into_iter()
                 .map(|manifest| ToolSurfaceEntry {
-                    availability: manifest.effective_availability(mode),
+                    availability: manifest.effective_availability(),
                     manifest,
                 })
                 .collect(),
@@ -305,8 +300,7 @@ impl ToolSurface {
 }
 
 pub fn build_tool_surface(input: ToolSurfaceBuildInput) -> ToolSurface {
-    let mode = input.mode;
-    let mut surface = ToolSurface::from_tool_manifests(input.tools, &mode, input.resolve_contract);
+    let mut surface = ToolSurface::from_tool_manifests(input.tools, input.resolve_contract);
     for contribution in input.contributions {
         apply_contribution(&mut surface, contribution);
     }
@@ -337,7 +331,7 @@ fn apply_contribution(surface: &mut ToolSurface, contribution: ToolSurfaceContri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ToolActivation, ToolAvailabilityConfig, ToolExecutionMode};
+    use crate::{ToolActivation, ToolAvailabilityConfig, ToolScheduling};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn tool(name: &str, availability: ToolAvailability) -> ToolDefinition {
@@ -354,13 +348,12 @@ mod tests {
         );
         definition.availability = ToolAvailabilityConfig::same(availability);
         definition.activation = ToolActivation::Always;
-        definition.execution_mode = ToolExecutionMode::Parallel;
+        definition.scheduling = ToolScheduling::Parallel;
         definition
     }
 
     fn build_input(
         tools: Vec<ToolDefinition>,
-        mode: crate::ExecutionMode,
         contributions: Vec<ToolSurfaceContribution>,
     ) -> ToolSurfaceBuildInput {
         let contracts = tools
@@ -369,7 +362,6 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         ToolSurfaceBuildInput {
             tools: tools.into_iter().map(|tool| tool.manifest()).collect(),
-            mode,
             resolve_contract: Some(Arc::new(move |name| contracts.get(name).cloned())),
             contributions,
         }
@@ -384,7 +376,6 @@ mod tests {
                 tool("grep", ToolAvailability::Callable),
                 tool("privileged_tool", ToolAvailability::Searchable),
             ],
-            crate::ExecutionMode::new("test_mode"),
             Vec::new(),
         ));
 
@@ -398,7 +389,6 @@ mod tests {
     fn explicit_contributions_override_availability() {
         let surface = build_tool_surface(build_input(
             vec![tool("read_file", ToolAvailability::Showcased)],
-            crate::ExecutionMode::new("test_mode"),
             vec![ToolSurfaceContribution {
                 overrides: vec![ToolSurfaceOverride {
                     tool_name: "read_file".to_string(),
@@ -429,7 +419,6 @@ mod tests {
     fn prompt_gate_requires_matching_tool_availability() {
         let surface = build_tool_surface(build_input(
             vec![tool("search_tools", ToolAvailability::Showcased)],
-            crate::ExecutionMode::standard(),
             Vec::new(),
         ));
 
@@ -460,7 +449,6 @@ mod tests {
         let resolver_count = Arc::clone(&contract_resolutions);
         let surface = build_tool_surface(ToolSurfaceBuildInput {
             tools: vec![searchable.manifest(), showcased.manifest()],
-            mode: crate::ExecutionMode::new("rlm"),
             resolve_contract: Some(Arc::new(move |name| {
                 resolver_count.fetch_add(1, Ordering::SeqCst);
                 match name {
@@ -488,7 +476,6 @@ mod tests {
         let resolver_count = Arc::clone(&contract_resolutions);
         let surface = build_tool_surface(ToolSurfaceBuildInput {
             tools: vec![callable.manifest()],
-            mode: crate::ExecutionMode::new("custom"),
             resolve_contract: Some(Arc::new(move |name| {
                 resolver_count.fetch_add(1, Ordering::SeqCst);
                 (name == "large_callable").then(|| Arc::new(callable.contract()))
@@ -512,7 +499,6 @@ mod tests {
         let resolver_count = Arc::clone(&contract_resolutions);
         let surface = build_tool_surface(ToolSurfaceBuildInput {
             tools: vec![callable.manifest()],
-            mode: crate::ExecutionMode::standard(),
             resolve_contract: Some(Arc::new(move |name| {
                 resolver_count.fetch_add(1, Ordering::SeqCst);
                 (name == "read_file").then(|| Arc::new(callable.contract()))
@@ -534,7 +520,6 @@ mod tests {
                 tool("read_file", ToolAvailability::Callable),
                 tool("search_tools", ToolAvailability::Showcased),
             ],
-            crate::ExecutionMode::standard(),
             Vec::new(),
         ));
 

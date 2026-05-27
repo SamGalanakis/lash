@@ -38,11 +38,11 @@ impl TurnCommitDraft {
         self.apply_message_projection(messages);
     }
 
-    pub(super) fn append_mode_events<I>(&mut self, events: I)
+    pub(super) fn append_protocol_events<I>(&mut self, events: I)
     where
-        I: IntoIterator<Item = crate::ModeEvent>,
+        I: IntoIterator<Item = crate::ProtocolEvent>,
     {
-        self.graph.append_mode_events(events);
+        self.graph.append_protocol_events(events);
     }
 
     pub(super) fn record_tool_calls<I>(&mut self, records: I)
@@ -56,14 +56,14 @@ impl TurnCommitDraft {
         &self,
         policy: crate::SessionPolicy,
         turn_index: usize,
-        mode_turn_options: crate::ModeTurnOptions,
+        protocol_turn_options: crate::ProtocolTurnOptions,
         messages: MessageSequence,
     ) -> SessionReadView {
         SessionReadView::derived_from_persisted_state(
             &self.state,
             policy,
             turn_index,
-            mode_turn_options,
+            protocol_turn_options,
             self.graph.base_graph(),
             messages,
             self.graph.tool_calls_arc(),

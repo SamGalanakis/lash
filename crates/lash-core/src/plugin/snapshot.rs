@@ -1,4 +1,4 @@
-//! Plugin snapshot types: how plugins persist their mode-specific state
+//! Plugin snapshot types: how plugins persist their protocol-specific state
 //! across session reloads.
 //!
 //! Split out of `plugin/mod.rs` purely for file size; `pub use` in

@@ -181,7 +181,7 @@ fn plan_exit_fresh_context_tool_does_not_queue_ui_turn_or_switch() {
 fn non_manual_error_sets_transient_status() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        mode_iteration: 0,
+        protocol_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -213,7 +213,7 @@ fn non_manual_error_sets_transient_status() {
 fn retry_status_stays_visible_when_retry_request_starts() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        mode_iteration: 0,
+        protocol_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -237,7 +237,7 @@ fn retry_status_stays_visible_when_retry_request_starts() {
     );
 
     app.handle_session_event(SessionEvent::LlmRequest {
-        mode_iteration: 0,
+        protocol_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -258,7 +258,7 @@ fn retry_status_stays_visible_when_retry_request_starts() {
 fn transient_status_expires_on_tick() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        mode_iteration: 0,
+        protocol_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });

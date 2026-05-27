@@ -5,10 +5,10 @@ pub use lash_sansio::session_model::prompt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use crate::ModelSpec;
 use crate::llm::types::{LlmEventSender, LlmStreamEvent};
 use crate::plugin::PluginMessage;
 use crate::provider::ProviderHandle;
-use crate::{ExecutionMode, ModelSpec, StandardContextApproach};
 
 pub use lash_sansio::format_tool_output_content;
 pub use lash_sansio::session_model::{
@@ -24,74 +24,76 @@ pub fn fresh_message_id() -> String {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ModeEvent {
-    pub mode_id: ExecutionMode,
+pub struct ProtocolEvent {
+    pub plugin_id: String,
     pub payload: serde_json::Value,
 }
 
-impl ModeEvent {
-    pub fn typed<T>(mode_id: ExecutionMode, event: T) -> Result<Self, serde_json::Error>
+impl ProtocolEvent {
+    pub fn typed<T>(plugin_id: impl Into<String>, event: T) -> Result<Self, serde_json::Error>
     where
         T: serde::Serialize,
     {
         Ok(Self {
-            mode_id,
+            plugin_id: plugin_id.into(),
             payload: serde_json::to_value(event)?,
         })
     }
 
-    pub fn decode<T>(&self, expected_mode: &ExecutionMode) -> Result<Option<T>, serde_json::Error>
+    pub fn decode<T>(&self, expected_plugin_id: &str) -> Result<Option<T>, serde_json::Error>
     where
         T: for<'de> serde::Deserialize<'de>,
     {
-        if &self.mode_id != expected_mode {
+        if self.plugin_id != expected_plugin_id {
             return Ok(None);
         }
         serde_json::from_value(self.payload.clone()).map(Some)
     }
 }
 
-impl serde::Serialize for ModeEvent {
+impl serde::Serialize for ProtocolEvent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         #[derive(serde::Serialize)]
         struct Tagged<'a> {
-            mode_id: &'a ExecutionMode,
+            plugin_id: &'a str,
             payload: &'a serde_json::Value,
         }
         Tagged {
-            mode_id: &self.mode_id,
+            plugin_id: &self.plugin_id,
             payload: &self.payload,
         }
         .serialize(serializer)
     }
 }
 
-impl<'de> serde::Deserialize<'de> for ModeEvent {
+impl<'de> serde::Deserialize<'de> for ProtocolEvent {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
         if let Some(object) = value.as_object()
-            && let (Some(mode_id), Some(payload)) = (object.get("mode_id"), object.get("payload"))
+            && let (Some(plugin_id), Some(payload)) =
+                (object.get("plugin_id"), object.get("payload"))
         {
-            let mode_id =
-                ExecutionMode::deserialize(mode_id.clone()).map_err(serde::de::Error::custom)?;
             return Ok(Self {
-                mode_id,
+                plugin_id: plugin_id
+                    .as_str()
+                    .ok_or_else(|| serde::de::Error::custom("plugin_id must be a string"))?
+                    .to_string(),
                 payload: payload.clone(),
             });
         }
         Err(serde::de::Error::custom(
-            "mode events must be tagged with mode_id and payload",
+            "protocol events must be tagged with plugin_id and payload",
         ))
     }
 }
 
-pub type SessionEventRecord = lash_sansio::session_model::SessionEventRecord<ModeEvent>;
+pub type SessionEventRecord = lash_sansio::session_model::SessionEventRecord<ProtocolEvent>;
 
 /// Send an event to the channel if it's still open.
 pub(crate) async fn send_event(tx: &mpsc::Sender<SessionEvent>, event: SessionEvent) {
@@ -144,9 +146,6 @@ pub struct SessionPolicy {
     #[serde(default)]
     pub autonomous: bool,
     pub max_turns: Option<usize>,
-    pub execution_mode: ExecutionMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub standard_context_approach: Option<StandardContextApproach>,
     #[serde(default, skip_serializing_if = "crate::PromptLayer::is_empty")]
     pub prompt: crate::PromptLayer,
 }
@@ -163,18 +162,6 @@ impl SessionPolicy {
     pub fn context_window_tokens(&self) -> usize {
         self.model.context_window_tokens()
     }
-
-    /// Drop policy fields that only apply to the standard execution mode.
-    pub fn normalize_for_execution_mode(&mut self) {
-        if self.execution_mode != ExecutionMode::standard() {
-            self.standard_context_approach = None;
-        }
-    }
-
-    pub fn normalized_for_execution_mode(mut self) -> Self {
-        self.normalize_for_execution_mode();
-        self
-    }
 }
 
 /// Reusable session configuration overlay.
@@ -187,7 +174,6 @@ pub struct SessionSpec {
     inherit: bool,
     pub provider: Option<ProviderHandle>,
     pub model: Option<ModelSpec>,
-    pub execution_mode: Option<ExecutionMode>,
     pub max_turns: Option<Option<usize>>,
     pub prompt: Option<crate::PromptLayer>,
 }
@@ -200,7 +186,6 @@ impl SessionSpec {
             inherit: false,
             provider: None,
             model: None,
-            execution_mode: None,
             max_turns: None,
             prompt: None,
         }
@@ -226,11 +211,6 @@ impl SessionSpec {
 
     pub fn model(mut self, model: ModelSpec) -> Self {
         self.model = Some(model);
-        self
-    }
-
-    pub fn mode(mut self, mode: ExecutionMode) -> Self {
-        self.execution_mode = Some(mode);
         self
     }
 
@@ -260,9 +240,6 @@ impl SessionSpec {
         if let Some(max_turns) = self.max_turns {
             policy.max_turns = max_turns;
         }
-        if let Some(execution_mode) = self.execution_mode.as_ref() {
-            policy.execution_mode = execution_mode.clone();
-        }
         if let Some(prompt) = self.prompt.as_ref() {
             policy.prompt = prompt.clone();
         }
@@ -284,8 +261,6 @@ impl Default for SessionPolicy {
             session_id: None,
             autonomous: false,
             max_turns: None,
-            execution_mode: ExecutionMode::standard(),
-            standard_context_approach: Some(StandardContextApproach::default()),
             prompt: crate::PromptLayer::default(),
         }
     }
@@ -321,14 +296,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_event_writes_tagged_payload() {
-        let event = ModeEvent::typed(
-            ExecutionMode::new("test"),
-            serde_json::json!({ "value": 42 }),
-        )
-        .expect("typed event");
+    fn protocol_event_writes_tagged_payload() {
+        let event = ProtocolEvent::typed("test_protocol", serde_json::json!({ "value": 42 }))
+            .expect("typed event");
         let serialized = serde_json::to_value(event).expect("serialize");
-        assert_eq!(serialized["mode_id"], "test");
+        assert_eq!(serialized["plugin_id"], "test_protocol");
         assert!(serialized.get("payload").is_some());
     }
 }

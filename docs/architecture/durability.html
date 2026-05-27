@@ -75,7 +75,7 @@
             </article>
             <article class="panel">
               <h3><code>WaitingCheckpoint</code></h3>
-              <p><code>effect_id</code>, the <code>CheckpointKind</code> being run, and an <code>on_empty</code> resume action — whether to prepare another mode iteration or finish the turn if the checkpoint plugin contributes no messages.</p>
+              <p><code>effect_id</code>, the <code>CheckpointKind</code> being run, and an <code>on_empty</code> resume action — whether to prepare another protocol iteration or finish the turn if the checkpoint plugin contributes no messages.</p>
             </article>
             <article class="panel">
               <h3><code>WaitingExecutionSurface</code></h3>
@@ -83,7 +83,7 @@
             </article>
             <article class="panel">
               <h3>Non-waiting</h3>
-              <p><code>PreparingMode</code>, <code>PrepareIteration</code>, and <code>Finished</code> hold no outstanding effect. Restoring into these is a no-op for re-emission; the machine just resumes from the persisted message and event log.</p>
+              <p><code>PreparingProtocol</code>, <code>PrepareIteration</code>, and <code>Finished</code> hold no outstanding effect. Restoring into these is a no-op for re-emission; the machine just resumes from the persisted message and event log.</p>
             </article>
           </div>
         </div>
@@ -93,7 +93,7 @@
             <h2>Invocation Metadata</h2>
             <p><code>EffectId(u64)</code> is a monotonic counter held in the machine. The next id is allocated on each yielded effect; the counter is part of <code>TurnCheckpoint</code> and is restored on resume. The first effect of a fresh turn is always <code>EffectId(1)</code>; the n-th effect is always <code>EffectId(n)</code> regardless of how many times the workflow crashed and replayed in between.</p>
           </div>
-          <p>Every controller invocation receives serializable <code>EffectInvocationMetadata</code>: session id, origin, turn id and turn index for turn effects, mode iteration, effect id, effect kind, stable idempotency key, and a SHA-256 checkpoint digest for turn-originated effects. The live <code>RuntimeEffectEnvelope</code> also is fully serializable, but it carries only the digest, not the checkpoint payload. The payload lives in <code>RuntimeTurnCheckpoint</code>; completed nondeterministic outcomes live in <code>RuntimeEffectJournalRecord</code>. When <code>RuntimePersistence</code> is configured, any named turn effect with a turn id must execute under a matching <code>RuntimeTurnLease</code>; missing ownership fails before the controller is invoked. While the controller is still pending, Lash renews the same lease on an interval; if renewal fails, the effect returns a controller error and no journal outcome is saved. Cancellation, streams, provider trace sinks, and attachment byte hydration stay in the local executor or host workflow.</p>
+          <p>Every controller invocation receives serializable <code>EffectInvocationMetadata</code>: session id, origin, turn id and turn index for turn effects, protocol iteration, effect id, effect kind, stable idempotency key, and a SHA-256 checkpoint digest for turn-originated effects. The live <code>RuntimeEffectEnvelope</code> also is fully serializable, but it carries only the digest, not the checkpoint payload. The payload lives in <code>RuntimeTurnCheckpoint</code>; completed nondeterministic outcomes live in <code>RuntimeEffectJournalRecord</code>. When <code>RuntimePersistence</code> is configured, any named turn effect with a turn id must execute under a matching <code>RuntimeTurnLease</code>; missing ownership fails before the controller is invoked. While the controller is still pending, Lash renews the same lease on an interval; if renewal fails, the effect returns a controller error and no journal outcome is saved. Cancellation, streams, provider trace sinks, and attachment byte hydration stay in the local executor or host workflow.</p>
           <p>The built turn idempotency key includes <code>session_id</code>, <code>turn_id</code>, <code>turn_index</code>, <code>mode_iteration</code>, effect kind, and <code>EffectId</code>; per-tool invocations append the model tool call id. Scoped durable runs require a non-empty stable <code>turn_id</code>. Direct completions derive stable keys from the request payload, usage source, parent tool call id when present, and optional caller-provided <code>DirectRequest::idempotency_key</code>.</p>
           <p><code>EffectId</code> is local to one turn. Across turns, the counter resets to 1; use the full idempotency key, not the bare id, for globally unique effect identity.</p>
         </div>
@@ -103,7 +103,7 @@
             <h2>Checkpoint Primitive</h2>
             <p>The sans-IO turn machine exposes a serializable checkpoint primitive:</p>
           </div>
-          <pre><code>impl&lt;M: ModeProtocol&gt; TurnMachine&lt;M&gt; {
+          <pre><code>impl&lt;M: TurnProtocol&gt; TurnMachine&lt;M&gt; {
     pub fn checkpoint(&amp;self) -&gt; TurnCheckpoint&lt;M&gt;;
 
     pub fn restore_from_checkpoint(
@@ -118,12 +118,12 @@
             <li><code>next_effect_id: u64</code> — counter, preserves id determinism.</li>
             <li><code>messages: Vec&lt;Message&gt;</code> — prompt history committed so far.</li>
             <li><code>events: Vec&lt;SessionEventRecord&lt;M::Event&gt;&gt;</code> — semantic event log committed so far.</li>
-            <li><code>mode_iteration</code>, <code>mode_run_offset</code> — turn position.</li>
+            <li><code>mode_iteration</code>, <code>protocol_run_offset</code> — turn position.</li>
             <li><code>cumulative_usage: TokenUsage</code> — running token totals for this turn.</li>
             <li><code>termination: TurnTerminationPolicyState</code> — max-turns / forced-final state.</li>
-            <li><code>synced_mode_iteration: Option&lt;usize&gt;</code> — last iteration the execution surface was synced.</li>
+            <li><code>synced_protocol_iteration: Option&lt;usize&gt;</code> — last iteration the execution surface was synced.</li>
           </ul>
-          <p><code>restore_from_checkpoint</code> is the pure machine rehydration primitive behind <code>LashRuntime::resume_turn</code> and the <code>lash</code> facade's <code>LashSession::resume_turn(turn_id)</code> handle. The runtime claims a fresh <code>RuntimeTurnLease</code>, loads <code>RuntimeTurnCheckpoint</code>, verifies the stored checkpoint hash against the machine checkpoint payload, rebuilds the <code>TurnMachineConfig</code> from the captured runtime snapshot plus the live host protocol driver, and continues the same effect loop. Serializable mode turn options, provider/model selection, prompt layer, tool specs, and the built execution surface fingerprint are captured in the checkpoint record; live-only plugin inputs and mode extensions are rejected on durable turn start.</p>
+          <p><code>restore_from_checkpoint</code> is the pure machine rehydration primitive behind <code>LashRuntime::resume_turn</code> and the <code>lash</code> facade's <code>LashSession::resume_turn(turn_id)</code> handle. The runtime claims a fresh <code>RuntimeTurnLease</code>, loads <code>RuntimeTurnCheckpoint</code>, verifies the stored checkpoint hash against the machine checkpoint payload, rebuilds the <code>TurnMachineConfig</code> from the captured runtime snapshot plus the live host protocol driver, and continues the same effect loop. Serializable protocol turn options, provider/model selection, prompt layer, tool specs, and the built execution surface fingerprint are captured in the checkpoint record; live-only plugin inputs and protocol extensions are rejected on durable turn start.</p>
         </div>
 
         <div class="section">
@@ -219,7 +219,7 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Test Coverage</h2>
-            <p>The durability properties above are pinned by unit and integration tests across the runtime host, sans-IO machine, and mode drivers:</p>
+            <p>The durability properties above are pinned by unit and integration tests across the runtime host, sans-IO machine, and protocol drivers:</p>
           </div>
           <div class="table">
             <table>
@@ -236,7 +236,7 @@ flowchart LR
                 <tr><td><code>scoped_transfer_and_cleanup_use_process_effect_controller_metadata</code><br><code>crates/lash-core/src/runtime/session_manager/process_runners/mod.rs</code></td><td>Process handle transfer and unreferenced-handle cleanup route through <code>ProcessRequestScope</code>, carrying the active process effect metadata and controller.</td></tr>
                 <tr><td><code>process_control_fails_loudly_when_process_registry_is_unavailable</code><br><code>crates/lash-core/src/runtime/session_manager/process_runners/mod.rs</code></td><td>Process validation, non-empty transfer, and cleanup fail clearly without an installed <code>ProcessRegistry</code>, while empty transfer remains an explicit no-op.</td></tr>
                 <tr><td><code>lashlang_process_uses_stored_linked_module_for_nested_starts</code><br><code>crates/lash-core/src/runtime/session_manager/process_runners/mod.rs</code></td><td>A durable Lashlang process with a stored <code>LinkedModule</code> can compile and run nested <code>start</code>/<code>await</code> even when the current plugin session has process abilities disabled; relinking against the current surface would fail.</td></tr>
-                <tr><td><code>executor_reports_disabled_lashlang_abilities_at_link_time</code><br><code>crates/lash-mode-rlm/src/executor.rs</code></td><td>Disabled process declarations, starts, process sleep/signals, triggers, and cron schedules parse but fail during link with <code>lashlang feature `...` is disabled by this host</code>, producing no runtime tool calls or observations.</td></tr>
+                <tr><td><code>executor_reports_disabled_lashlang_abilities_at_link_time</code><br><code>crates/lash-protocol-rlm/src/executor.rs</code></td><td>Disabled process declarations, starts, process sleep/signals, triggers, and cron schedules parse but fail during link with <code>lashlang feature `...` is disabled by this host</code>, producing no runtime tool calls or observations.</td></tr>
                 <tr><td><code>durable_controller_error_abandons_lease_and_preserves_resume_state</code><br><code>crates/lash-core/src/runtime/tests/effect.rs</code></td><td>Controller/runtime errors abandon the lease best-effort while preserving the checkpoint and completed journal rows for a future resume.</td></tr>
                 <tr><td><code>durable_finalize_error_abandons_lease_and_preserves_resume_state</code><br><code>crates/lash-core/src/runtime/tests/effect.rs</code></td><td>Plugin finalization failures use the shared leased finisher's non-commit cleanup path: the lease is abandoned and resumable checkpoint/journal data is preserved.</td></tr>
                 <tr><td><code>durable_turn_resume_uses_leased_finisher_and_clears_resume_state</code><br><code>crates/lash-core/src/runtime/tests/effect.rs</code></td><td>Fresh and resumed durable turns converge through the same lease-fenced final commit path, and a successful resumed finish clears checkpoint and journal rows only at commit.</td></tr>
@@ -259,7 +259,7 @@ flowchart LR
                 <tr><td><code>checkpoint_preserves_parallel_tool_batch_before_any_result</code><br><code>:706</code></td><td>Round-tripping a <code>WaitingTools</code> state preserves every <code>PendingToolCall</code> with its id and arguments intact.</td></tr>
                 <tr><td><code>checkpoint_after_mixed_tool_batch_results_replays_model_feedback_once</code><br><code>:757</code></td><td>Mixed success / failure / cancellation tool outcomes round-trip without re-emitting per-tool events to the stream.</td></tr>
                 <tr><td><code>checkpoint_round_trips_waiting_exec_driver_state</code><br><code>:871</code></td><td>RLM exec waits round-trip with their driver state intact; the same code block and trajectory cursor resume after restore.</td></tr>
-                <tr><td><code>standard_checkpoint_redrives_parallel_tool_batch_without_losing_calls</code><br><code>crates/lash-mode-rlm/tests/protocol_drivers.rs:254</code></td><td>End-to-end through a protocol driver: standard-mode parallel tool batches resume identically after restore.</td></tr>
+                <tr><td><code>standard_checkpoint_redrives_parallel_tool_batch_without_losing_calls</code><br><code>crates/lash-protocol-rlm/tests/protocol_drivers.rs:254</code></td><td>End-to-end through a protocol driver: standard-protocol parallel tool batches resume identically after restore.</td></tr>
                 <tr><td><code>standard_checkpoint_after_tool_control_finish_preserves_terminal_outcome</code><br><code>:311</code></td><td>A tool that authored a terminal value via tool-control finishes the same way on replay.</td></tr>
                 <tr><td><code>rlm_checkpoint_redrives_pending_exec_code_with_driver_state</code><br><code>:716</code></td><td>RLM pending <code>ExecCode</code> re-runs with the same driver state and projected-binding snapshot context intact.</td></tr>
                 <tr><td><code>rlm_checkpoint_after_exec_parallel_tool_outputs_preserves_structured_outcomes</code><br><code>:786</code></td><td>RLM exec results carrying parallel tool outcomes preserve success / failure / cancellation structure across restore.</td></tr>

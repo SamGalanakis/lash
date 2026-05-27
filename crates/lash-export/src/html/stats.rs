@@ -107,7 +107,7 @@ pub(crate) fn compute_stats(session: &LoadedSession) -> SessionStats {
             ChronologicalPayload::ToolCall(record) => {
                 record_tool_call(&mut s, &mut tool_counts, record);
             }
-            ChronologicalPayload::ModeEvent(event) => {
+            ChronologicalPayload::ProtocolEvent(event) => {
                 let Some(step) = chronological_rlm_step(event) else {
                     continue;
                 };

@@ -1,0 +1,33 @@
+[package]
+name = "lash-protocol-rlm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "RLM protocol (persistent Lashlang execution) for the lash agent runtime."
+keywords = ["lash", "agent", "rlm", "lashlang", "llm"]
+categories = ["asynchronous", "api-bindings"]
+
+[dependencies]
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9" }
+lash-plugin-tool-output-budget = { path = "../lash-plugin-tool-output-budget", version = "=0.1.0-alpha.9" }
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.9" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.9" }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+jsonschema = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tempfile = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9", features = ["testing"] }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.9" }
+lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.9" }
+insta = "1"

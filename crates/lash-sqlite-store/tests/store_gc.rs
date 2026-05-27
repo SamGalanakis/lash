@@ -1,13 +1,12 @@
 use lash_core::{
-    AttachmentId, AttachmentIntent, AttachmentManifest, ExecutionMode, HostModeProtocol,
-    HydratedSessionCheckpoint, ModeConfig, ModePreamble, ModeTurnOptions, ModelSpec,
-    PersistedSessionConfig, PersistedTurnState, PluginSessionSnapshot, PreparedPrompt,
-    PromptContext, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit,
-    RuntimeEffectJournalRecord, RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence,
-    RuntimeSessionState, RuntimeTurnCheckpoint, RuntimeTurnCompletion,
-    RuntimeTurnMachineConfigSnapshot, SessionGraph, SessionHead, SessionPolicy, SessionReadScope,
-    SessionStoreCreateRequest, SessionStoreFactory, StandardContextApproach, StoreError,
-    TokenLedgerEntry, TokenUsage, ToolState,
+    AttachmentId, AttachmentIntent, AttachmentManifest, HostTurnProtocol,
+    HydratedSessionCheckpoint, ModelSpec, PersistedSessionConfig, PersistedTurnState,
+    PluginSessionSnapshot, PreparedPrompt, PromptContext, ProtocolTurnOptions,
+    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit, RuntimeEffectJournalRecord,
+    RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence, RuntimeSessionState,
+    RuntimeTurnCheckpoint, RuntimeTurnCompletion, RuntimeTurnMachineConfigSnapshot, SessionGraph,
+    SessionHead, SessionPolicy, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
+    StoreError, TokenLedgerEntry, TokenUsage, ToolState, TurnDriverConfig, TurnDriverPreamble,
 };
 use lash_sqlite_store::{
     BlobArtifactDescriptor, BuiltinBlobProfile, SqliteSessionStoreFactory, Store, StoreGcPolicy,
@@ -31,7 +30,7 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
             turn_index: 1,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
-            mode_turn_options: Default::default(),
+            protocol_turn_options: Default::default(),
         },
         tool_state_ref: None,
         tool_state: Some(ToolState::default().with_generation(7)),
@@ -50,8 +49,6 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
         config: PersistedSessionConfig {
             provider_id: "openai-compatible".into(),
             model: test_model_spec(),
-            execution_mode: ExecutionMode::standard(),
-            standard_context_approach: Some(StandardContextApproach::default()),
         },
         checkpoint_ref: Some(stored.checkpoint_ref.clone()),
         token_ledger: Vec::new(),
@@ -588,8 +585,8 @@ async fn active_runtime_turn_lease_fences_competing_claims() {
 
 struct NoopDriver;
 
-impl lash_sansio::ProtocolDriverHandle<HostModeProtocol> for NoopDriver {
-    fn prepare_mode_iteration(
+impl lash_sansio::ProtocolDriverHandle<HostTurnProtocol> for NoopDriver {
+    fn prepare_protocol_iteration(
         &self,
         _ctx: lash_core::DriverContextView<'_>,
     ) -> Vec<lash_core::DriverAction> {
@@ -599,7 +596,7 @@ impl lash_sansio::ProtocolDriverHandle<HostModeProtocol> for NoopDriver {
     fn handle_llm_success(
         &self,
         _ctx: lash_core::DriverContextView<'_>,
-        _waiting: lash_sansio::WaitingLlmState<HostModeProtocol>,
+        _waiting: lash_sansio::WaitingLlmState<HostTurnProtocol>,
         _llm_response: lash_core::LlmResponse,
         _text_streamed: bool,
     ) -> Vec<lash_core::DriverAction> {
@@ -617,7 +614,7 @@ impl lash_sansio::ProtocolDriverHandle<HostModeProtocol> for NoopDriver {
     fn handle_exec_result(
         &self,
         _ctx: lash_core::DriverContextView<'_>,
-        _waiting: lash_sansio::WaitingExecState<HostModeProtocol>,
+        _waiting: lash_sansio::WaitingExecState<HostTurnProtocol>,
         _result: Result<lash_core::ExecResponse, String>,
     ) -> Vec<lash_core::DriverAction> {
         Vec::new()
@@ -625,10 +622,10 @@ impl lash_sansio::ProtocolDriverHandle<HostModeProtocol> for NoopDriver {
 }
 
 fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckpoint {
-    let termination = ModeTurnOptions::default();
+    let termination = ProtocolTurnOptions::default();
     let tool_names = Arc::new(Vec::new());
-    let mode_preamble = Arc::new(ModePreamble {
-        config: ModeConfig::chat(
+    let turn_driver_preamble = Arc::new(TurnDriverPreamble {
+        config: TurnDriverConfig::chat(
             Arc::new(NoopDriver),
             false,
             Arc::new(|message_id, _max_turns| lash_core::Message {
@@ -650,11 +647,10 @@ fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckp
         run_session_id: None,
         autonomous: false,
         model: "mock-model".to_string(),
-        mode: ExecutionMode::standard(),
         messages: lash_core::MessageSequence::default(),
         events: Arc::new(Vec::new()),
-        mode_run_offset: 0,
-        mode_preamble: Arc::clone(&mode_preamble),
+        protocol_run_offset: 0,
+        turn_driver_preamble: Arc::clone(&turn_driver_preamble),
         prepared_prompt: PreparedPrompt {
             context: PromptContext::default(),
             system_prompt: Arc::from(""),
@@ -673,10 +669,9 @@ fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckp
         session_id: session_id.to_string(),
         turn_id: turn_id.to_string(),
         turn_index: 1,
-        mode_iteration: 0,
+        protocol_iteration: 0,
         checkpoint_hash,
         machine_config: RuntimeTurnMachineConfigSnapshot {
-            execution_mode: ExecutionMode::standard(),
             session_id: session_id.to_string(),
             run_session_id: None,
             autonomous: false,
@@ -689,7 +684,7 @@ fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckp
             termination,
         },
         checkpoint,
-        mode_turn_options: ModeTurnOptions::default(),
+        protocol_turn_options: ProtocolTurnOptions::default(),
         turn_prompt_layer: lash_core::PromptLayer::new(),
         provider_id: "mock-provider".to_string(),
         model: model_spec("mock-model"),

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::session_graph::SessionReadModel;
 use crate::session_graph::build_active_read_replacement;
 use crate::session_graph::tool_call_record_active_read_key;
-use crate::session_model::{ModeEvent, SessionEventRecord};
+use crate::session_model::{ProtocolEvent, SessionEventRecord};
 use crate::store::GraphCommitDelta;
 use crate::{
     BaseRenderCache, Message, MessageSequence, SessionGraph, SessionNodeRecord, ToolCallRecord,
@@ -99,18 +99,18 @@ impl TurnGraphEditor {
         self.append_tool_call_records(appendable_tool_calls);
     }
 
-    pub(super) fn append_mode_events<I>(&mut self, events: I)
+    pub(super) fn append_protocol_events<I>(&mut self, events: I)
     where
-        I: IntoIterator<Item = ModeEvent>,
+        I: IntoIterator<Item = ProtocolEvent>,
     {
         let events = events.into_iter().collect::<Vec<_>>();
         if events.is_empty() {
             return;
         }
-        let nodes = self.append_builder.append_mode_events(events);
+        let nodes = self.append_builder.append_protocol_events(events);
         Arc::make_mut(&mut self.active_events).extend(nodes.iter().filter_map(|node| {
-            if let Some(SessionEventRecord::Mode(event)) = node.event() {
-                Some(SessionEventRecord::Mode(event.clone()))
+            if let Some(SessionEventRecord::Protocol(event)) = node.event() {
+                Some(SessionEventRecord::Protocol(event.clone()))
             } else {
                 None
             }

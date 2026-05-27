@@ -39,7 +39,7 @@ pub(super) async fn handle_tools(
     _runtime: &Option<lash::LashSession>,
     desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
-    current_execution_mode: ExecutionMode,
+    _current_execution_mode: ExecutionMode,
 ) -> anyhow::Result<bool> {
     let raw = raw.unwrap_or_default();
     let raw_trim = raw.trim();
@@ -52,9 +52,7 @@ pub(super) async fn handle_tools(
             ),
         ];
         for (name, spec) in desired_tool_state.iter() {
-            let availability = spec
-                .manifest()
-                .effective_availability(&current_execution_mode);
+            let availability = spec.manifest().effective_availability();
             lines.push(format!(
                 "  - {} availability={}",
                 name,
@@ -111,7 +109,7 @@ pub(super) async fn handle_tools(
             }
             if let Some(inject) = kv.get("injected") {
                 let injected = inject == "true";
-                let availability = manifest.effective_availability(&current_execution_mode);
+                let availability = manifest.effective_availability();
                 manifest.availability_override =
                     Some(update_documentation_state(availability, injected));
             }

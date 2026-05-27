@@ -160,10 +160,10 @@ impl RuntimeTurnDriver<'_> {
         Ok(current.unwrap_or(original))
     }
 
-    pub(in crate::runtime) async fn run_standard_llm_call(
+    pub(in crate::runtime) async fn run_llm_call(
         &mut self,
         request: Arc<LlmRequest>,
-        mode_iteration: usize,
+        protocol_iteration: usize,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
@@ -191,12 +191,12 @@ impl RuntimeTurnDriver<'_> {
             }
         };
         let trace_enabled = self.host.core.trace_sink.is_some();
-        let llm_call_id = trace_enabled.then(|| self.llm_call_id(mode_iteration));
+        let llm_call_id = trace_enabled.then(|| self.llm_call_id(protocol_iteration));
         if let Some(llm_call_id) = llm_call_id.as_ref() {
             crate::runtime::effect::emit_llm_trace_started(
                 &self.host.core.trace_sink,
                 &self.host.core.trace_context,
-                self.trace_context(mode_iteration)
+                self.trace_context(protocol_iteration)
                     .for_llm_call(llm_call_id.clone()),
                 &request,
             );
@@ -205,7 +205,7 @@ impl RuntimeTurnDriver<'_> {
             tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
         let mut debug = LlmStreamDebugState::new();
         let provider_trace =
-            self.provider_trace_sender(mode_iteration, llm_call_id.clone(), &debug);
+            self.provider_trace_sender(protocol_iteration, llm_call_id.clone(), &debug);
         let llm_request = LlmRequest {
             stream_events: transport_stream_events(&self.policy.provider, Some(llm_stream_tx)),
             provider_trace,
@@ -221,16 +221,16 @@ impl RuntimeTurnDriver<'_> {
 
         let mut text_streamed = false;
         let mut streamed_usage = LlmUsage::default();
-        let mut stream_accumulator = StandardStreamAccumulator::default();
+        let mut stream_accumulator = LlmStreamAccumulator::default();
         let mut abort_requested = false;
         let mut assistant_prose_correlation = None;
         let mut reasoning_correlation = None;
-        let mut stream_state = StandardStreamState {
+        let mut stream_state = LlmStreamState {
             text_streamed: &mut text_streamed,
             streamed_usage: &mut streamed_usage,
             stream_accumulator: &mut stream_accumulator,
             debug: &mut debug,
-            mode_iteration,
+            protocol_iteration,
             assistant_prose_correlation: &mut assistant_prose_correlation,
             reasoning_correlation: &mut reasoning_correlation,
             abort_requested: &mut abort_requested,
@@ -250,7 +250,7 @@ impl RuntimeTurnDriver<'_> {
                 }
                 Some(stream_event) = llm_stream_rx.recv() => {
                     if let Err(err) = self
-                        .forward_standard_stream_event(event_tx, stream_event, &mut stream_state)
+                        .forward_provider_stream_event(event_tx, stream_event, &mut stream_state)
                         .await
                     {
                         break Err(err);
@@ -263,9 +263,9 @@ impl RuntimeTurnDriver<'_> {
                         // event. Some providers attach usage there, and the
                         // next prompt's budget contribution depends on the
                         // driver seeing that accounting before the next
-                        // mode_iteration starts.
+                        // protocol_iteration starts.
                         if let Err(err) = self
-                            .drain_standard_stream_queue(event_tx, &mut llm_stream_rx, &mut stream_state)
+                            .drain_provider_stream_queue(event_tx, &mut llm_stream_rx, &mut stream_state)
                             .await
                         {
                             break Err(err);
@@ -310,7 +310,7 @@ impl RuntimeTurnDriver<'_> {
                     };
                     self.policy.provider = provider_after;
                     if let Err(err) = self
-                        .drain_standard_stream_queue(event_tx, &mut llm_stream_rx, &mut stream_state)
+                        .drain_provider_stream_queue(event_tx, &mut llm_stream_rx, &mut stream_state)
                         .await
                     {
                         break Err(err);
@@ -351,7 +351,7 @@ impl RuntimeTurnDriver<'_> {
         if let Err(err) = &result {
             tracing::error!(
                 session_id = %self.session_id,
-                turn = mode_iteration,
+                turn = protocol_iteration,
                 retryable = err.retryable,
                 code = ?err.code,
                 raw_present = err.raw.is_some(),
@@ -367,7 +367,8 @@ impl RuntimeTurnDriver<'_> {
                     crate::runtime::effect::emit_llm_trace_completed(
                         &self.host.core.trace_sink,
                         &self.host.core.trace_context,
-                        self.trace_context(mode_iteration).for_llm_call(llm_call_id),
+                        self.trace_context(protocol_iteration)
+                            .for_llm_call(llm_call_id),
                         response,
                         debug.elapsed_ms(),
                         Some(stream_summary.clone()),
@@ -377,7 +378,8 @@ impl RuntimeTurnDriver<'_> {
                     crate::runtime::effect::emit_llm_trace_failed(
                         &self.host.core.trace_sink,
                         &self.host.core.trace_context,
-                        self.trace_context(mode_iteration).for_llm_call(llm_call_id),
+                        self.trace_context(protocol_iteration)
+                            .for_llm_call(llm_call_id),
                         crate::runtime::effect::LlmTraceFailure::from(error),
                         Some(stream_summary.clone()),
                     );
@@ -386,7 +388,7 @@ impl RuntimeTurnDriver<'_> {
         }
         if trace_enabled {
             self.llm_stream_summaries
-                .insert(mode_iteration, debug.summary);
+                .insert(protocol_iteration, debug.summary);
         }
         (result, text_streamed)
     }
@@ -399,22 +401,22 @@ impl RuntimeTurnDriver<'_> {
         match event {
             crate::sansio::LogEvent::LlmDebug {
                 session_id,
-                mode_iteration,
+                protocol_iteration,
                 usage,
                 provider_usage,
                 response_text,
                 response_parts,
                 ..
             } => {
-                let stream_summary = self.llm_stream_summaries.remove(&mode_iteration);
+                let stream_summary = self.llm_stream_summaries.remove(&protocol_iteration);
                 crate::trace::emit_trace(
                     &self.host.core.trace_sink,
                     &self.host.core.trace_context,
-                    self.trace_context(mode_iteration)
+                    self.trace_context(protocol_iteration)
                         .for_session(session_id)
                         .for_llm_call(format!(
                             "{}:{}:{}:log",
-                            self.session_id, self.turn_index, mode_iteration
+                            self.session_id, self.turn_index, protocol_iteration
                         )),
                     TraceEvent::LlmCallCompleted {
                         response: crate::trace::trace_llm_response(
@@ -431,7 +433,7 @@ impl RuntimeTurnDriver<'_> {
             }
             crate::sansio::LogEvent::LlmError {
                 session_id,
-                mode_iteration,
+                protocol_iteration,
                 message,
                 retryable,
                 raw,
@@ -439,15 +441,15 @@ impl RuntimeTurnDriver<'_> {
                 terminal_reason,
                 ..
             } => {
-                let stream_summary = self.llm_stream_summaries.remove(&mode_iteration);
+                let stream_summary = self.llm_stream_summaries.remove(&protocol_iteration);
                 crate::trace::emit_trace(
                     &self.host.core.trace_sink,
                     &self.host.core.trace_context,
-                    self.trace_context(mode_iteration)
+                    self.trace_context(protocol_iteration)
                         .for_session(session_id)
                         .for_llm_call(format!(
                             "{}:{}:{}:log",
-                            self.session_id, self.turn_index, mode_iteration
+                            self.session_id, self.turn_index, protocol_iteration
                         )),
                     TraceEvent::LlmCallFailed {
                         error: TraceError {
@@ -507,14 +509,14 @@ impl RuntimeTurnDriver<'_> {
         crate::trace::emit_trace(
             &self.host.core.trace_sink,
             &self.host.core.trace_context,
-            self.trace_context(log.mode_iteration),
+            self.trace_context(log.protocol_iteration),
             TraceEvent::RuntimeStreamEvent { event },
         );
     }
 
     fn provider_trace_sender(
         &self,
-        mode_iteration: usize,
+        protocol_iteration: usize,
         llm_call_id: Option<String>,
         debug: &LlmStreamDebugState,
     ) -> Option<LlmProviderTraceSender> {
@@ -525,7 +527,7 @@ impl RuntimeTurnDriver<'_> {
         let llm_call_id = llm_call_id?;
         let sink = self.host.core.trace_sink.clone();
         let base_context = self.host.core.trace_context.clone();
-        let context = self.trace_context(mode_iteration);
+        let context = self.trace_context(protocol_iteration);
         let created_at = debug.created_at;
         let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
@@ -556,11 +558,11 @@ impl RuntimeTurnDriver<'_> {
         ))
     }
 
-    async fn forward_standard_stream_event(
+    async fn forward_provider_stream_event(
         &mut self,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         stream_event: LlmStreamEvent,
-        state: &mut StandardStreamState<'_>,
+        state: &mut LlmStreamState<'_>,
     ) -> Result<(), LlmCallError> {
         match stream_event {
             LlmStreamEvent::Delta(delta) => {
@@ -602,7 +604,7 @@ impl RuntimeTurnDriver<'_> {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            mode_iteration: state.mode_iteration,
+                            protocol_iteration: state.protocol_iteration,
                             event_type: "delta",
                             text: LlmDebugText {
                                 raw: raw_delta.as_deref(),
@@ -638,7 +640,7 @@ impl RuntimeTurnDriver<'_> {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            mode_iteration: state.mode_iteration,
+                            protocol_iteration: state.protocol_iteration,
                             event_type: "reasoning_delta",
                             text: LlmDebugText {
                                 raw: None,
@@ -714,7 +716,7 @@ impl RuntimeTurnDriver<'_> {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            mode_iteration: state.mode_iteration,
+                            protocol_iteration: state.protocol_iteration,
                             event_type: "text_part",
                             text: LlmDebugText {
                                 raw: raw_text.as_deref(),
@@ -755,7 +757,7 @@ impl RuntimeTurnDriver<'_> {
                 self.log_llm_stream_event(
                     state.debug,
                     LlmStreamEventLog {
-                        mode_iteration: state.mode_iteration,
+                        protocol_iteration: state.protocol_iteration,
                         event_type: "tool_call_part",
                         text: LlmDebugText {
                             raw: None,
@@ -780,7 +782,7 @@ impl RuntimeTurnDriver<'_> {
                     self.log_llm_stream_event(
                         state.debug,
                         LlmStreamEventLog {
-                            mode_iteration: state.mode_iteration,
+                            protocol_iteration: state.protocol_iteration,
                             event_type: "reasoning_part",
                             text: LlmDebugText {
                                 raw: None,
@@ -823,7 +825,7 @@ impl RuntimeTurnDriver<'_> {
                 self.log_llm_stream_event(
                     state.debug,
                     LlmStreamEventLog {
-                        mode_iteration: state.mode_iteration,
+                        protocol_iteration: state.protocol_iteration,
                         event_type: "usage",
                         text: LlmDebugText {
                             raw: None,
@@ -858,14 +860,14 @@ impl RuntimeTurnDriver<'_> {
         Ok(())
     }
 
-    async fn drain_standard_stream_queue(
+    async fn drain_provider_stream_queue(
         &mut self,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,
-        state: &mut StandardStreamState<'_>,
+        state: &mut LlmStreamState<'_>,
     ) -> Result<(), LlmCallError> {
         while let Ok(stream_event) = llm_stream_rx.try_recv() {
-            self.forward_standard_stream_event(event_tx, stream_event, state)
+            self.forward_provider_stream_event(event_tx, stream_event, state)
                 .await?;
         }
         Ok(())
@@ -915,7 +917,7 @@ fn stream_correlation_id(
 /// Wait up to 2s for a late `Usage` event from the provider after an
 /// RLM stream-mask abort. The usage is returned on the response itself so
 /// sansio records it synchronously, which makes prompt-budget guidance
-/// available to the next mode iteration.
+/// available to the next protocol iteration.
 async fn collect_trailing_usage_before_abort<T>(
     llm_task: &mut tokio::task::JoinHandle<T>,
     llm_stream_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LlmStreamEvent>,

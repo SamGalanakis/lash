@@ -52,8 +52,8 @@ pub mod tools {
     pub use lash_core::{
         PreparedToolCall, ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability,
         ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord, ToolContext,
-        ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest,
-        ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
+        ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolManifest, ToolOutputContract,
+        ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult, ToolScheduling,
         ToolSourceHandle,
     };
 }
@@ -71,8 +71,8 @@ pub mod direct {
 
 pub mod persistence {
     pub use lash_core::{
-        AttachmentStore, BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, ModeEvent,
-        PersistedSessionConfig, PersistedSessionRead, PersistedTurnState,
+        AttachmentStore, BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint,
+        PersistedSessionConfig, PersistedSessionRead, PersistedTurnState, ProtocolEvent,
         RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
         RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
         RuntimeEffectJournalRecord, RuntimePersistence, RuntimeSessionState, RuntimeTurnCheckpoint,
@@ -118,6 +118,7 @@ pub mod messages {
 
 pub mod advanced {
     pub use crate::AdvancedLashCoreBuilder;
+    pub use crate::mode::ExecutionMode;
     pub use lash_core::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
     // Benchmarks and diagnostics still need a semantic harness facade for
     // preloaded state, event capture, plugin-stack presets, and graph seeding.
@@ -125,17 +126,17 @@ pub mod advanced {
     pub use lash_core::{
         AssembledTurn, DirectCompletionClient, DirectRequestSpec, DurableProcessWorker,
         DurableProcessWorkerConfig, EffectInvocationMetadata, EffectOrigin, EmbeddedRuntimeHost,
-        EventSink, ExecutionMode, InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec,
-        LlmRequestSpec, ModeSessionExtensionHandle, ModeTurnOptions, NoopEventSink,
-        NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage, ProcessCreatorScope,
-        ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessRecord,
-        ProcessRegistry, Residency, RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand,
+        EventSink, InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
+        NoopEventSink, NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage,
+        ProcessCreatorScope, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
+        ProcessRecord, ProcessRegistry, ProtocolSessionExtensionHandle, ProtocolTurnOptions,
+        Residency, RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand,
         RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
         RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
         RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode,
         RuntimeHandle, RuntimeObservation, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionEvent,
-        SessionHandle, SessionPolicy, SessionStateEnvelope, StandardContextApproach,
-        TerminationPolicy, TurnContext, TurnFinish, TurnOutcome, TurnStop,
+        SessionHandle, SessionPolicy, SessionStateEnvelope, TerminationPolicy, TurnContext,
+        TurnFinish, TurnOutcome, TurnStop,
     };
 }
 

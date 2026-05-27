@@ -7,7 +7,7 @@ pub struct TurnBuilder {
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
     pub(crate) input: TurnInput,
     pub(crate) cancel: CancellationToken,
-    pub(crate) mode_turn_options: Option<ModeTurnOptions>,
+    pub(crate) protocol_turn_options: Option<ProtocolTurnOptions>,
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) model: Option<lash_core::ModelSpec>,
 }
@@ -18,8 +18,8 @@ impl TurnBuilder {
         self
     }
 
-    pub fn mode_turn_options(mut self, options: ModeTurnOptions) -> Self {
-        self.mode_turn_options = Some(options);
+    pub fn protocol_turn_options(mut self, options: ProtocolTurnOptions) -> Self {
+        self.protocol_turn_options = Some(options);
         self
     }
 
@@ -81,10 +81,7 @@ impl TurnBuilder {
     }
 
     fn rlm_termination(self, termination: lash_rlm_types::RlmTermination) -> Result<Self> {
-        Ok(self.mode_turn_options(ModeTurnOptions::typed(
-            ExecutionMode::new("rlm"),
-            termination,
-        )?))
+        Ok(self.protocol_turn_options(ProtocolTurnOptions::typed(termination)?))
     }
 
     /// Attach typed per-turn input for an activated plugin binding.
@@ -160,8 +157,8 @@ impl TurnBuilder {
     }
 
     pub(crate) fn prepare(mut self) -> Result<(RuntimeHandle, TurnInput, CancellationToken)> {
-        if let Some(options) = self.mode_turn_options {
-            self.input.mode_turn_options = Some(options);
+        if let Some(options) = self.protocol_turn_options {
+            self.input.protocol_turn_options = Some(options);
         }
         if let Some(provider) = self.provider {
             self.input.turn_context.set_provider(provider);
@@ -530,9 +527,9 @@ pub(crate) async fn stream_prepared_followed(
 ) -> Result<lash_core::FollowedTurn> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
-    if let Some(extension) = input.mode_extension.as_ref() {
+    if let Some(extension) = input.protocol_extension.as_ref() {
         writer
-            .validate_mode_turn_extension(extension)
+            .validate_protocol_turn_extension(extension)
             .await
             .map_err(EmbedError::Session)?;
     }
@@ -555,9 +552,9 @@ pub(crate) async fn stream_prepared_followed_with_effect_scope(
 ) -> Result<lash_core::FollowedTurn> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
-    if let Some(extension) = input.mode_extension.as_ref() {
+    if let Some(extension) = input.protocol_extension.as_ref() {
         writer
-            .validate_mode_turn_extension(extension)
+            .validate_protocol_turn_extension(extension)
             .await
             .map_err(EmbedError::Session)?;
     }

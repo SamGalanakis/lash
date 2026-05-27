@@ -611,7 +611,7 @@ function eventCard(record, index, className = 'event') {
     <div class="event-rail">
       <span class="kind ${badgeClass}">${escapeHtml(kind)}</span>
       <div class="meta-line">${escapeHtml(shortTime(record.timestamp))}</div>
-      <div class="meta-line">turn ${record.context?.turn_index ?? 'na'} · step ${record.context?.mode_iteration ?? 'na'}</div>
+      <div class="meta-line">turn ${record.context?.turn_index ?? 'na'} · step ${record.context?.protocol_iteration ?? 'na'}</div>
     </div>
     <div class="event-body">
       <div class="title-line">${escapeHtml(eventTitle(record))}</div>
@@ -680,8 +680,8 @@ function eventSummary(record) {
       return `seq ${record.event.sequence}, ${record.event.elapsed_ms} ms, raw ${record.event.raw_len} chars, sha ${record.event.raw_sha256}`;
     case 'runtime_stream_event':
       return record.event.visible_text || record.event.raw_text || JSON.stringify(record.event);
-    case 'mode_step':
-      return `${record.mode}\n${JSON.stringify(record.payload)}`;
+    case 'protocol_step':
+      return `${record.plugin_id}\n${JSON.stringify(record.payload)}`;
     case 'token_usage':
       return usageText(record.usage, record.cumulative);
     case 'custom':

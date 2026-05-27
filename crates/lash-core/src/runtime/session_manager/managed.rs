@@ -1,6 +1,22 @@
 use super::*;
 use crate::runtime::host::{EmbeddedRuntimeHost, ProcessRuntimeHost};
 
+struct SessionCreatePlan {
+    session_id: String,
+    relation: SessionRelation,
+    parent_session_id: Option<String>,
+    start_snapshot: SessionSnapshot,
+    policy: SessionPolicy,
+    initial_runtime_state: SessionSnapshot,
+    plugin_authority: crate::plugin::SessionAuthorityContext,
+    plugin_source: crate::SessionPluginSource,
+    plugin_options: crate::PluginOptions,
+    context_surface: crate::SessionContextSurface,
+    store_binding: Option<Arc<dyn crate::store::RuntimePersistence>>,
+    usage_source: Option<String>,
+    first_turn_input: Option<crate::PluginMessage>,
+}
+
 impl ManagedSessionCapability {
     pub(in crate::runtime::session_manager) fn build_runtime_state(
         &self,
@@ -17,12 +33,11 @@ impl ManagedSessionCapability {
         base
     }
 
-    pub(in crate::runtime::session_manager) async fn create_session(
+    async fn resolve_create_plan(
         &self,
         current: &CurrentSessionCapability,
-        usage: &UsageCapability,
         request: SessionCreateRequest,
-    ) -> Result<SessionHandle, crate::PluginError> {
+    ) -> Result<SessionCreatePlan, crate::PluginError> {
         let session_id = request
             .session_id
             .clone()
@@ -35,7 +50,7 @@ impl ManagedSessionCapability {
             )));
         }
         let parent_session_id = request.relation.parent_session_id().map(ToOwned::to_owned);
-        let snapshot = match &request.start {
+        let start_snapshot = match &request.start {
             SessionStartPoint::Empty => SessionSnapshot {
                 session_id: session_id.clone(),
                 ..Default::default()
@@ -51,41 +66,22 @@ impl ManagedSessionCapability {
             .clone()
             .unwrap_or_else(|| match &request.start {
                 SessionStartPoint::Empty => current.policy.clone(),
-                _ => snapshot.policy.clone(),
+                _ => start_snapshot.policy.clone(),
             });
         if parent_session_id.is_some() {
             policy.session_id = Some(session_id.clone());
         }
-        let state = self.build_runtime_state(session_id.clone(), &request, snapshot, &policy);
-        let authority = crate::plugin::SessionAuthorityContext {
+        let initial_runtime_state = self.build_runtime_state(
+            session_id.clone(),
+            &request,
+            start_snapshot.clone(),
+            &policy,
+        );
+        let plugin_authority = crate::plugin::SessionAuthorityContext {
             tool_access: request.tool_access.clone(),
             subagent: request.subagent.clone(),
         };
-        let plugins = match request.plugin_mode {
-            crate::SessionPluginMode::Fresh => current
-                .plugins
-                .host()
-                .build_session_with_parent(
-                    &session_id,
-                    parent_session_id.clone(),
-                    policy.execution_mode.clone(),
-                    policy.standard_context_approach.clone(),
-                    None,
-                    authority,
-                )
-                .map_err(|err| crate::PluginError::Session(err.to_string()))?,
-            crate::SessionPluginMode::InheritCurrent => current
-                .plugins
-                .fork_for_child_session(
-                    &session_id,
-                    parent_session_id.clone(),
-                    policy.execution_mode.clone(),
-                    policy.standard_context_approach.clone(),
-                    authority,
-                )
-                .map_err(|err| crate::PluginError::Session(err.to_string()))?,
-        };
-        let session_store = match &current.host.session_store_factory {
+        let store_binding = match &current.host.session_store_factory {
             Some(factory) => {
                 let store = factory
                     .create_store(&SessionStoreCreateRequest {
@@ -110,7 +106,49 @@ impl ManagedSessionCapability {
             }
             None => None,
         };
-        let mut runtime = match (&current.host.process_registry, &session_store) {
+        Ok(SessionCreatePlan {
+            session_id,
+            relation: request.relation,
+            parent_session_id,
+            start_snapshot,
+            policy,
+            initial_runtime_state,
+            plugin_authority,
+            plugin_source: request.plugin_source,
+            plugin_options: request.plugin_options,
+            context_surface: request.context_surface,
+            store_binding,
+            usage_source: request.usage_source,
+            first_turn_input: request.first_turn_input,
+        })
+    }
+
+    async fn materialize_create_plan(
+        &self,
+        current: &CurrentSessionCapability,
+        plan: &SessionCreatePlan,
+    ) -> Result<LashRuntime, crate::PluginError> {
+        let plugins = match plan.plugin_source {
+            crate::SessionPluginSource::CurrentHostFresh => current
+                .plugins
+                .host()
+                .build_session_with_parent(
+                    &plan.session_id,
+                    plan.parent_session_id.clone(),
+                    None,
+                    plan.plugin_authority.clone(),
+                )
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?,
+            crate::SessionPluginSource::CurrentSessionFork => current
+                .plugins
+                .fork_for_child_session(
+                    &plan.session_id,
+                    plan.parent_session_id.clone(),
+                    plan.plugin_authority.clone(),
+                )
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?,
+        };
+        let mut runtime = match (&current.host.process_registry, &plan.store_binding) {
             (Some(executor), Some(store)) => {
                 let host = ProcessRuntimeHost::new(
                     EmbeddedRuntimeHost {
@@ -120,10 +158,10 @@ impl ManagedSessionCapability {
                     Arc::clone(executor),
                 );
                 LashRuntime::from_persistent_background_state(
-                    policy.clone(),
+                    plan.policy.clone(),
                     host,
                     crate::PersistentRuntimeServices::new(plugins, Arc::clone(store)),
-                    state,
+                    plan.initial_runtime_state.clone(),
                 )
                 .await
             }
@@ -136,10 +174,10 @@ impl ManagedSessionCapability {
                     Arc::clone(executor),
                 );
                 LashRuntime::from_background_state(
-                    policy.clone(),
+                    plan.policy.clone(),
                     host,
                     RuntimeServices::new(plugins),
-                    state,
+                    plan.initial_runtime_state.clone(),
                 )
                 .await
             }
@@ -149,10 +187,10 @@ impl ManagedSessionCapability {
                     session_store_factory: current.host.session_store_factory.clone(),
                 };
                 LashRuntime::from_persistent_embedded_state(
-                    policy.clone(),
+                    plan.policy.clone(),
                     host,
                     crate::PersistentRuntimeServices::new(plugins, Arc::clone(store)),
-                    state,
+                    plan.initial_runtime_state.clone(),
                 )
                 .await
             }
@@ -162,33 +200,59 @@ impl ManagedSessionCapability {
                     session_store_factory: current.host.session_store_factory.clone(),
                 };
                 LashRuntime::from_embedded_state(
-                    policy.clone(),
+                    plan.policy.clone(),
                     host,
                     RuntimeServices::new(plugins),
-                    state,
+                    plan.initial_runtime_state.clone(),
                 )
                 .await
             }
         }
         .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        let mode_session = runtime
+        let protocol_session = runtime
             .session
             .as_ref()
-            .map(|session| Arc::clone(session.plugins().mode_session()));
-        if let Some(mode_session) = mode_session {
-            mode_session.configure_runtime_from_request(
-                crate::plugin::ModeRuntimeContext::new(&mut runtime),
-                &request,
-            );
+            .map(|session| Arc::clone(session.plugins().protocol_session()));
+        if let Some(protocol_session) = protocol_session {
+            protocol_session
+                .configure_runtime_from_request(
+                    crate::plugin::ProtocolRuntimeContext::new(&mut runtime),
+                    &SessionCreateRequest {
+                        session_id: Some(plan.session_id.clone()),
+                        relation: plan.relation.clone(),
+                        start: SessionStartPoint::Snapshot {
+                            snapshot: Box::new(plan.start_snapshot.clone()),
+                        },
+                        policy: Some(plan.policy.clone()),
+                        plugin_source: plan.plugin_source,
+                        initial_nodes: Vec::new(),
+                        first_turn_input: plan.first_turn_input.clone(),
+                        tool_access: plan.plugin_authority.tool_access.clone(),
+                        subagent: plan.plugin_authority.subagent.clone(),
+                        context_surface: plan.context_surface.clone(),
+                        plugin_options: plan.plugin_options.clone(),
+                        usage_source: plan.usage_source.clone(),
+                    },
+                )
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         }
         if let Some(session) = runtime.session.as_mut() {
             session.set_context_surface(
-                request.context_surface.tool_providers.clone(),
-                request.context_surface.prompt_contributions.clone(),
-                request.context_surface.include_base_tools,
+                plan.context_surface.tool_providers.clone(),
+                plan.context_surface.prompt_contributions.clone(),
+                plan.context_surface.include_base_tools,
             );
         }
-        if let Some(store) = &session_store {
+        Ok(runtime)
+    }
+
+    async fn register_materialized_session(
+        &self,
+        usage: &UsageCapability,
+        plan: SessionCreatePlan,
+        runtime: LashRuntime,
+    ) -> Result<SessionHandle, crate::PluginError> {
+        if let Some(store) = &plan.store_binding {
             let mut persisted_state = runtime.export_persisted_state();
             super::normalize_session_graph(&mut persisted_state);
             persisted_state.graph_replace_required = true;
@@ -202,34 +266,46 @@ impl ManagedSessionCapability {
         self.registry
             .lock()
             .await
-            .insert(session_id.clone(), RuntimeHandle::new(runtime));
+            .insert(plan.session_id.clone(), RuntimeHandle::new(runtime));
         if let crate::SessionRelation::Handoff {
             parent_session_id, ..
-        } = &request.relation
+        } = &plan.relation
         {
             self.active_handoff_continuations
                 .lock()
                 .await
-                .insert(parent_session_id.clone(), session_id.clone());
+                .insert(parent_session_id.clone(), plan.session_id.clone());
         }
-        if let Some(source) = &request.usage_source {
+        if let Some(source) = &plan.usage_source {
             usage
                 .child_sources
                 .lock()
                 .expect("child usage sources lock")
-                .insert(session_id.clone(), source.clone());
+                .insert(plan.session_id.clone(), source.clone());
         }
-        if let Some(seed) = request.first_turn_input.clone() {
+        if let Some(seed) = plan.first_turn_input.clone() {
             self.pending_first_turn_inputs
                 .lock()
                 .expect("pending first turn inputs lock")
-                .insert(session_id.clone(), seed);
+                .insert(plan.session_id.clone(), seed);
         }
         Ok(SessionHandle {
-            session_id,
-            parent_session_id,
-            policy,
+            session_id: plan.session_id,
+            parent_session_id: plan.parent_session_id,
+            policy: plan.policy,
         })
+    }
+
+    pub(in crate::runtime::session_manager) async fn create_session(
+        &self,
+        current: &CurrentSessionCapability,
+        usage: &UsageCapability,
+        request: SessionCreateRequest,
+    ) -> Result<SessionHandle, crate::PluginError> {
+        let plan = self.resolve_create_plan(current, request).await?;
+        let runtime = self.materialize_create_plan(current, &plan).await?;
+        self.register_materialized_session(usage, plan, runtime)
+            .await
     }
 
     pub(in crate::runtime::session_manager) async fn close_session(

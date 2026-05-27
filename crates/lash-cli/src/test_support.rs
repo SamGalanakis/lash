@@ -172,8 +172,10 @@ impl UiHarness {
 
 fn test_session_event_to_turn_event(event: &SessionEvent) -> Option<TurnEvent> {
     match event {
-        SessionEvent::LlmRequest { mode_iteration, .. } => Some(TurnEvent::ModelRequestStarted {
-            mode_iteration: *mode_iteration,
+        SessionEvent::LlmRequest {
+            protocol_iteration, ..
+        } => Some(TurnEvent::ModelRequestStarted {
+            protocol_iteration: *protocol_iteration,
         }),
         SessionEvent::ToolCall {
             call_id,
@@ -212,7 +214,7 @@ mod tests {
         harness.user_turn("write a poem");
         harness.start_turn();
         harness.dispatch_event(SessionEvent::LlmRequest {
-            mode_iteration: 0,
+            protocol_iteration: 0,
             message_count: 1,
             tool_list: "read_file, shell".to_string(),
         });
@@ -381,7 +383,7 @@ mod tests {
         harness.user_turn("write lines");
         harness.start_turn();
         harness.dispatch_event(SessionEvent::LlmRequest {
-            mode_iteration: 0,
+            protocol_iteration: 0,
             message_count: 1,
             tool_list: "read_file".into(),
         });
@@ -439,7 +441,7 @@ mod tests {
         harness.user_turn("write a very long answer please");
         harness.start_turn();
         harness.dispatch_event(SessionEvent::LlmRequest {
-            mode_iteration: 0,
+            protocol_iteration: 0,
             message_count: 1,
             tool_list: String::new(),
         });

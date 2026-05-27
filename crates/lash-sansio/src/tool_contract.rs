@@ -1,21 +1,18 @@
-use crate::ExecutionMode;
-
 /// How a tool's invocations should be scheduled relative to other tools in
 /// the same batch of model-produced tool calls.
 ///
 /// Tools that only *read* state (`read_file`, `grep`, `glob`, ...) can run
-/// in parallel safely and should use the default [`ToolExecutionMode::Parallel`].
+/// in parallel safely and should use the default [`ToolScheduling::Parallel`].
 /// Tools that *mutate* shared state (`apply_patch`, `exec_command`,
 /// `write_stdin`) should declare
-/// [`ToolExecutionMode::Serial`] so the dispatcher runs them one-at-a-time
+/// [`ToolScheduling::Serial`] so the dispatcher runs them one-at-a-time
 /// and avoids interleaving with each other.
 ///
-/// The name is intentionally distinct from the turn-level [`ExecutionMode`]
-/// (which selects the execution driver) so the two concepts don't
-/// collide in scope.
+/// This controls scheduling within a batch of tool calls; protocol ownership
+/// is selected by the host plugin stack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ToolExecutionMode {
+pub enum ToolScheduling {
     /// Safe to run concurrently with other parallel tools in the same batch.
     #[default]
     Parallel,
@@ -23,17 +20,17 @@ pub enum ToolExecutionMode {
     Serial,
 }
 
-fn default_tool_execution_mode() -> ToolExecutionMode {
-    ToolExecutionMode::default()
+fn default_tool_scheduling() -> ToolScheduling {
+    ToolScheduling::default()
 }
 
-fn is_default_tool_execution_mode(mode: &ToolExecutionMode) -> bool {
-    *mode == ToolExecutionMode::default()
+fn is_default_tool_scheduling(mode: &ToolScheduling) -> bool {
+    *mode == ToolScheduling::default()
 }
 
 /// Automatic retry policy for a tool's execution.
 ///
-/// This is intentionally separate from [`ToolExecutionMode`]: scheduling
+/// This is intentionally separate from [`ToolScheduling`]: scheduling
 /// decides whether different tool calls may run together, while retry policy
 /// decides whether one failed call may be attempted again inside its scheduled
 /// slot.
@@ -169,17 +166,12 @@ impl ToolAvailability {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolAvailabilityConfig {
-    pub standard: ToolAvailability,
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub modes: std::collections::HashMap<String, ToolAvailability>,
+    pub base: ToolAvailability,
 }
 
 impl ToolAvailabilityConfig {
     pub fn same(availability: ToolAvailability) -> Self {
-        Self {
-            standard: availability,
-            modes: std::collections::HashMap::new(),
-        }
+        Self { base: availability }
     }
 
     pub fn showcased() -> Self {
@@ -194,11 +186,8 @@ impl ToolAvailabilityConfig {
         Self::same(ToolAvailability::Off)
     }
 
-    pub fn for_mode(&self, mode: &ExecutionMode) -> ToolAvailability {
-        self.modes
-            .get(mode.plugin_id())
-            .copied()
-            .unwrap_or(self.standard)
+    pub fn base(&self) -> ToolAvailability {
+        self.base
     }
 }
 
@@ -403,10 +392,10 @@ pub struct ToolManifest {
     )]
     pub argument_projection: ToolArgumentProjectionPolicy,
     #[serde(
-        default = "default_tool_execution_mode",
-        skip_serializing_if = "is_default_tool_execution_mode"
+        default = "default_tool_scheduling",
+        skip_serializing_if = "is_default_tool_scheduling"
     )]
-    pub execution_mode: ToolExecutionMode,
+    pub scheduling: ToolScheduling,
     #[serde(
         default = "default_tool_retry_policy",
         skip_serializing_if = "is_default_tool_retry_policy"
@@ -415,9 +404,9 @@ pub struct ToolManifest {
 }
 
 impl ToolManifest {
-    pub fn effective_availability(&self, mode: &ExecutionMode) -> ToolAvailability {
+    pub fn effective_availability(&self) -> ToolAvailability {
         self.availability_override
-            .unwrap_or_else(|| self.availability.for_mode(mode))
+            .unwrap_or_else(|| self.availability.base())
     }
 }
 
@@ -559,12 +548,12 @@ pub struct ToolDefinition {
     )]
     pub argument_projection: ToolArgumentProjectionPolicy,
     /// How this tool should be scheduled relative to peers when the model
-    /// emits a batch of tool calls. Defaults to [`ToolExecutionMode::Parallel`].
+    /// emits a batch of tool calls. Defaults to [`ToolScheduling::Parallel`].
     #[serde(
-        default = "default_tool_execution_mode",
-        skip_serializing_if = "is_default_tool_execution_mode"
+        default = "default_tool_scheduling",
+        skip_serializing_if = "is_default_tool_scheduling"
     )]
-    pub execution_mode: ToolExecutionMode,
+    pub scheduling: ToolScheduling,
     /// Whether this tool may be retried automatically after a failure that
     /// explicitly opts into safe retry.
     #[serde(
@@ -697,7 +686,7 @@ impl ToolDefinition {
             availability_override: None,
             discovery: ToolDiscoveryMetadata::default(),
             argument_projection: ToolArgumentProjectionPolicy::default(),
-            execution_mode: ToolExecutionMode::Parallel,
+            scheduling: ToolScheduling::Parallel,
             retry_policy: ToolRetryPolicy::Never,
         };
         let contract = ToolContract {
@@ -789,8 +778,8 @@ impl ToolDefinition {
         self
     }
 
-    pub fn with_execution_mode(mut self, execution_mode: ToolExecutionMode) -> Self {
-        self.execution_mode = execution_mode;
+    pub fn with_scheduling(mut self, scheduling: ToolScheduling) -> Self {
+        self.scheduling = scheduling;
         self
     }
 
@@ -878,9 +867,9 @@ impl ToolDefinition {
             .compact_contract_with_example_limit(&self.manifest(), example_limit)
     }
 
-    pub fn effective_availability(&self, mode: &ExecutionMode) -> ToolAvailability {
+    pub fn effective_availability(&self) -> ToolAvailability {
         self.availability_override
-            .unwrap_or_else(|| self.availability.for_mode(mode))
+            .unwrap_or_else(|| self.availability.base())
     }
 
     pub fn model_tool(&self) -> ModelTool {
@@ -898,7 +887,7 @@ impl ToolDefinition {
             availability_override: self.availability_override,
             discovery: self.discovery.clone(),
             argument_projection: self.argument_projection.clone(),
-            execution_mode: self.execution_mode,
+            scheduling: self.scheduling,
             retry_policy: self.retry_policy,
         };
         manifest.compact_contract = Some(self.contract().compact_contract(&manifest));
@@ -932,7 +921,7 @@ impl ToolDefinition {
             availability_override: manifest.availability_override,
             discovery: manifest.discovery,
             argument_projection: manifest.argument_projection,
-            execution_mode: manifest.execution_mode,
+            scheduling: manifest.scheduling,
             retry_policy: manifest.retry_policy,
         }
     }

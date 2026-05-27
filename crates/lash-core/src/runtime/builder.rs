@@ -272,12 +272,7 @@ impl EmbeddedRuntimeBuilder {
                     self.process_registry.is_some(),
                 ))
                 .isolated_registry()
-                .build_session(
-                    state.session_id.clone(),
-                    state.policy.execution_mode.clone(),
-                    state.policy.standard_context_approach.clone(),
-                    None,
-                )
+                .build_session(state.session_id.clone(), None)
                 .map_err(|err| SessionError::Protocol(err.to_string())),
         }
     }

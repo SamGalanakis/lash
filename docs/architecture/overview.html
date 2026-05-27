@@ -19,14 +19,14 @@
 <body class="docs-page" data-cover-source="<code>Cargo.toml</code>, <code>crates/lash-core/src/runtime</code>, <code>crates/lash/src/lib.rs</code>, <code>crates/lash-sansio/src</code>.">
 <section class="opener">
     <h1 class="opener__title">overview<span class="slash">/</span>map</h1>
-    <p class="opener__lede">Lash is organized as a narrow protocol kernel plus an async host runtime. The app-facing <code>lash</code> facade and the CLI compose replaceable edges — providers, mode plugins, tools, dynamic tool plugins (including MCP via <code>lash-plugin-mcp</code>), UI extensions, persistence, tracing, and the TUI — around that core.</p>
+    <p class="opener__lede">Lash is organized as a narrow protocol kernel plus an async host runtime. The app-facing <code>lash</code> facade and the CLI compose replaceable edges — providers, protocol plugins, tools, dynamic tool plugins (including MCP via <code>lash-plugin-mcp</code>), UI extensions, persistence, tracing, and the TUI — around that core.</p>
   </section>
 
   <main class="body" id="content">
 <div class="section">
           <div class="section-header">
             <h2>System Shape</h2>
-            <p>Dependency direction runs from host surfaces inward to the runtime, then into the sans-IO protocol model. Providers, modes, tools, and plugins are replaceable edges around the runtime core.</p>
+            <p>Dependency direction runs from host surfaces inward to the runtime, then into the sans-IO protocol model. Providers, protocol plugins, tools, and plugins are replaceable edges around the runtime core.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Workspace topology</div>
@@ -56,7 +56,7 @@ flowchart TD
   end
 
   subgraph Extensions["Replaceable edges"]
-    Modes["mode plugins<br/>standard + rlm"]
+    Protocols["protocol plugins<br/>standard + rlm"]
     Providers["provider crates<br/>OpenAI, Codex, Anthropic, Google"]
     Plugins["tool/plugin crates<br/>llm_query, plan, memory, context, UI activity"]
     Mcp["lash-plugin-mcp<br/>rmcp-based MCP plugin<br/>stdio / streamable-http / sse"]
@@ -78,7 +78,7 @@ flowchart TD
   L --> Trace
   Graph --> Read
   L --> Tools
-  Modes --> L
+  Protocols --> L
   Providers --> L
   Plugins --> L
   Mcp --> L
@@ -109,7 +109,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Graph is durable.</h3>
-                <p><code>SessionGraph</code> stores conversation records, tool events, mode events, plugin nodes, active-path metadata, checkpoint references, and replay material.</p>
+                <p><code>SessionGraph</code> stores conversation records, tool events, protocol events, plugin nodes, active-path metadata, checkpoint references, and replay material.</p>
               </div>
             </li>
             <li>
@@ -120,8 +120,8 @@ flowchart TD
             </li>
             <li>
               <div>
-                <h3>Modes own protocol behavior.</h3>
-                <p><code>ModeBuildInput</code>, <code>ModePreamble</code>, <code>ContextProjector</code>, and <code>ProtocolDriverHandle</code> decide what providers see and how model output advances a turn. Runtime-owned <code>ModeBuildInput</code> carries the effective tool and Lashlang surfaces into the mode; RLM additionally projects read-only host bindings (e.g., <code>history</code>) into Lashlang scope through the <code>ProjectedBindings</code> seam.</p>
+                <h3>Protocol plugins own protocol behavior.</h3>
+                <p><code>ProtocolBuildInput</code>, <code>TurnDriverPreamble</code>, <code>ContextProjector</code>, and <code>ProtocolDriverHandle</code> decide what providers see and how model output advances a turn. Runtime-owned <code>ProtocolBuildInput</code> carries the effective tool and Lashlang surfaces into the protocol plugin; RLM additionally projects read-only host bindings (e.g., <code>history</code>) into Lashlang scope through the <code>ProjectedBindings</code> seam.</p>
               </div>
             </li>
             <li>

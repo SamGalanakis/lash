@@ -2,7 +2,7 @@ use std::{fmt::Write as _, sync::Arc};
 
 use lash::{
     LashCore, ModeId, ModePreset,
-    advanced::{PluginMessage, StandardContextApproach, TurnOutcome},
+    advanced::{ExecutionMode, PluginMessage, TurnOutcome},
     messages::MessageRole,
     persistence::SessionStateEnvelope,
     plugins::{PluginSpec, StaticPluginFactory},
@@ -12,7 +12,7 @@ use lash_core::SessionEventRecord;
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ACTIVE_STATE_PLUGIN_TYPE as OM_ACTIVE_STATE_PLUGIN_TYPE;
 use lash_provider_openai::OpenAiCompatibleProvider;
-use lash_rlm_types::{RlmModeEvent, RlmTrajectoryEntry};
+use lash_rlm_types::{RlmProtocolEvent, RlmTrajectoryEntry};
 use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
 
 use super::openai_compat::OpenAiCompatBenchServer;
@@ -74,7 +74,7 @@ impl BenchmarkRuntime {
         self.session = Some(
             self.core
                 .session(format!("runtime-perf-{}", scenario.name()))
-                .mode(ModeId::new(scenario.execution_mode().plugin_id()))
+                .mode(ModeId::new(scenario.execution_mode().as_str()))
                 .store(store)
                 .open_with_state(state)
                 .await?,
@@ -168,7 +168,7 @@ pub(crate) fn validate_runtime_perf_turn(
             diagnostics
         );
     }
-    if scenario.execution_mode() == lash_core::ExecutionMode::new("rlm")
+    if scenario.execution_mode() == ExecutionMode::rlm()
         && matches!(
             turn.outcome,
             TurnOutcome::Finished(lash::advanced::TurnFinish::AssistantMessage { .. })
@@ -251,21 +251,20 @@ fn rlm_trajectory_errors(turn: &lash::TurnResult) -> Vec<RlmTrajectoryEntry> {
 }
 
 fn rlm_trajectory_entries(turn: &lash::TurnResult) -> Vec<RlmTrajectoryEntry> {
-    let rlm_mode = lash_core::ExecutionMode::new("rlm");
     turn.state
         .read_view()
         .active_events()
         .iter()
         .filter_map(|event| {
-            let SessionEventRecord::Mode(event) = event else {
+            let SessionEventRecord::Protocol(event) = event else {
                 return None;
             };
-            match event.decode::<RlmModeEvent>(&rlm_mode) {
-                Ok(Some(RlmModeEvent::RlmTrajectoryEntry(entry))) => Some(entry),
+            match event.decode::<RlmProtocolEvent>(lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID) {
+                Ok(Some(RlmProtocolEvent::RlmTrajectoryEntry(entry))) => Some(entry),
                 Ok(Some(
-                    RlmModeEvent::RlmDiagnostic(_)
-                    | RlmModeEvent::RlmGlobalsPatch(_)
-                    | RlmModeEvent::RlmSeed(_),
+                    RlmProtocolEvent::RlmDiagnostic(_)
+                    | RlmProtocolEvent::RlmGlobalsPatch(_)
+                    | RlmProtocolEvent::RlmSeed(_),
                 ))
                 | Ok(None)
                 | Err(_) => None,
@@ -306,7 +305,7 @@ fn runtime_perf_turn_diagnostics(turn: &lash::TurnResult) -> String {
             let _ = writeln!(
                 out,
                 "- iteration={} error={}",
-                entry.mode_iteration,
+                entry.protocol_iteration,
                 preview(entry.error.as_deref().unwrap_or_default(), 900)
             );
             if !entry.code.trim().is_empty() {
@@ -317,7 +316,7 @@ fn runtime_perf_turn_diagnostics(turn: &lash::TurnResult) -> String {
         let _ = writeln!(
             out,
             "last_rlm_step: iteration={} final_output={}",
-            entry.mode_iteration,
+            entry.protocol_iteration,
             entry
                 .final_output
                 .as_ref()
@@ -359,7 +358,7 @@ pub(crate) fn build_embed_core(
         .provider(benchmark_provider(scenario).into_handle())
         .model(benchmark_model_spec())
         .store_factory(Arc::new(RuntimePerfStoreFactory { store }));
-    if scenario.execution_mode() == lash_core::ExecutionMode::new("rlm") {
+    if scenario.execution_mode() == ExecutionMode::rlm() {
         builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);
     }
     builder.build().map_err(anyhow::Error::from)
@@ -397,11 +396,12 @@ pub(crate) async fn build_runtime_with_store(
         ),
         _ => benchmark_provider(scenario).into_handle(),
     };
-    let mode_id = ModeId::new(execution_mode.plugin_id());
+    let mode_id = ModeId::new(execution_mode.as_str());
     let store = store.unwrap_or_else(|| Arc::new(RuntimePerfStore::default()));
     let mut plugin_stack = standard_tool_stack(StandardToolStackOptions {
         standard_context_approach: standard_context_approach.clone(),
         tavily_api_key: None,
+        include_cancel_process: execution_mode == ExecutionMode::standard(),
     });
     plugin_stack.push(Arc::new(StaticPluginFactory::new(
         "runtime_perf_tools",
@@ -417,7 +417,7 @@ pub(crate) async fn build_runtime_with_store(
         )));
     }
     let mut builder = LashCore::builder()
-        .install_mode(mode_preset(&mode_id, standard_context_approach)?)
+        .install_mode(mode_preset(&mode_id)?)
         .default_mode(mode_id.clone())
         .provider(provider)
         .model(benchmark_model_spec())
@@ -426,7 +426,7 @@ pub(crate) async fn build_runtime_with_store(
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
         ))
         .plugins(plugin_stack);
-    if scenario.execution_mode() == lash_core::ExecutionMode::new("rlm") {
+    if scenario.execution_mode() == ExecutionMode::rlm() {
         builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);
     }
     // RlmGlobals profiles live per-turn projected bindings. Store-backed turns
@@ -457,14 +457,9 @@ pub(crate) async fn build_runtime_with_store(
     })
 }
 
-fn mode_preset(
-    mode: &ModeId,
-    standard_context_approach: Option<StandardContextApproach>,
-) -> anyhow::Result<ModePreset> {
+fn mode_preset(mode: &ModeId) -> anyhow::Result<ModePreset> {
     match mode.as_str() {
-        "standard" => {
-            Ok(ModePreset::standard().with_standard_context_approach(standard_context_approach))
-        }
+        "standard" => Ok(ModePreset::standard()),
         "rlm" => Ok(ModePreset::rlm()),
         other => anyhow::bail!("unsupported runtime perf mode `{other}`"),
     }
@@ -557,8 +552,8 @@ pub(crate) async fn prepare_turn(
 pub(crate) fn rlm_perf_projected_bindings(
     scenario: RuntimePerfScenario,
     turn_index: usize,
-) -> anyhow::Result<lash_mode_rlm::RlmProjectedBindings> {
-    Ok(lash_mode_rlm::RlmProjectedBindings::new()
+) -> anyhow::Result<lash_protocol_rlm::RlmProjectedBindings> {
+    Ok(lash_protocol_rlm::RlmProjectedBindings::new()
         .bind_json(
             "benchmark",
             serde_json::json!({

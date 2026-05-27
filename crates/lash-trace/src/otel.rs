@@ -265,7 +265,9 @@ where
             }
             TraceEvent::SessionStarted { .. } => self.emit_instant(record, "lash.session", None),
             TraceEvent::PromptBuilt { .. } => self.emit_instant(record, "lash.prompt", None),
-            TraceEvent::ModeStep { .. } => self.emit_instant(record, "lash.mode_step", None),
+            TraceEvent::ProtocolStep { .. } => {
+                self.emit_instant(record, "lash.protocol_step", None)
+            }
             TraceEvent::TokenUsage { .. } => self.emit_instant(record, "lash.token_usage", None),
             TraceEvent::Custom { .. } => self.emit_instant(record, "lash.custom", None),
         }
@@ -331,10 +333,10 @@ fn context_attributes(
     if let Some(turn_index) = context.turn_index {
         attrs.push(KeyValue::new("lash.context.turn_index", turn_index as i64));
     }
-    if let Some(mode_iteration) = context.mode_iteration {
+    if let Some(protocol_iteration) = context.protocol_iteration {
         attrs.push(KeyValue::new(
-            "lash.context.mode_iteration",
-            mode_iteration as i64,
+            "lash.context.protocol_iteration",
+            protocol_iteration as i64,
         ));
     }
     push_opt(attrs, "lash.context.effect_id", &context.effect_id);
@@ -539,9 +541,9 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
                 &output.value_for_projection(),
             );
         }
-        TraceEvent::ModeStep { mode, payload } => {
-            attrs.push(KeyValue::new("lash.mode", mode.clone()));
-            push_payload_json(&mut attrs, options, "lash.mode.payload_json", payload);
+        TraceEvent::ProtocolStep { plugin_id, payload } => {
+            attrs.push(KeyValue::new("lash.protocol.plugin_id", plugin_id.clone()));
+            push_payload_json(&mut attrs, options, "lash.protocol.payload_json", payload);
         }
         TraceEvent::TokenUsage { usage, cumulative } => {
             usage_attributes(&mut attrs, "lash.usage", usage);
@@ -691,7 +693,7 @@ fn event_type(event: &TraceEvent) -> &'static str {
         TraceEvent::RuntimeStreamEvent { .. } => "runtime_stream_event",
         TraceEvent::ToolCallStarted { .. } => "tool_call_started",
         TraceEvent::ToolCallCompleted { .. } => "tool_call_completed",
-        TraceEvent::ModeStep { .. } => "mode_step",
+        TraceEvent::ProtocolStep { .. } => "protocol_step",
         TraceEvent::TokenUsage { .. } => "token_usage",
         TraceEvent::TurnCompleted { .. } => "turn_completed",
         TraceEvent::Custom { .. } => "custom",

@@ -12,7 +12,7 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 lash-restate = { path = "../../crates/lash-restate", version = "=0.1.0-alpha.9", optional = true }
 lash-sqlite-store = { path = "../../crates/lash-sqlite-store", version = "=0.1.0-alpha.9" }
-lash-runtime = { path = "../../crates/lash", version = "=0.1.0-alpha.9" }
+lash = { package = "lash-runtime", path = "../../crates/lash", version = "=0.1.0-alpha.9" }
 lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.9" }
 reqwest = { workspace = true, features = ["json", "rustls", "http2"], optional = true }
 restate-sdk = { workspace = true, optional = true }

@@ -95,16 +95,16 @@ pub(crate) fn compute_prompt_insertions(
     let has_rlm_steps = chronological.iter().any(|e| {
         matches!(
             &e.payload,
-            ChronologicalPayload::ModeEvent(event) if chronological_rlm_step(event).is_some()
+            ChronologicalPayload::ProtocolEvent(event) if chronological_rlm_step(event).is_some()
         )
     });
 
     if has_rlm_steps {
-        let mut by_mode_iteration: HashMap<u64, VecDeque<usize>> = HashMap::new();
+        let mut by_protocol_iteration: HashMap<u64, VecDeque<usize>> = HashMap::new();
         for (idx, prompt) in prompts.iter().enumerate() {
-            if let Some(mode_iteration) = prompt.mode_iteration {
-                by_mode_iteration
-                    .entry(mode_iteration)
+            if let Some(protocol_iteration) = prompt.protocol_iteration {
+                by_protocol_iteration
+                    .entry(protocol_iteration)
                     .or_default()
                     .push_back(idx);
             }
@@ -115,18 +115,18 @@ pub(crate) fn compute_prompt_insertions(
         // rather than to the mode iteration's first tool/rlm output —
         // otherwise the user message would appear *above* the prompt
         // that contextualised it.
-        let mut initial_user_anchor_mode_iteration = None;
+        let mut initial_user_anchor_protocol_iteration = None;
         let first_user_idx = chronological.iter().position(|e| {
             matches!(&e.payload, ChronologicalPayload::Message(m)
                 if matches!(m.role, MessageRole::User) && !m.is_transient())
         });
-        if let (Some(idx), Some(queue)) = (first_user_idx, by_mode_iteration.get_mut(&0))
+        if let (Some(idx), Some(queue)) = (first_user_idx, by_protocol_iteration.get_mut(&0))
             && let Some(pi) = queue.pop_front()
             && !consumed[pi]
         {
             before_index[idx].push(pi);
             consumed[pi] = true;
-            initial_user_anchor_mode_iteration = Some(0);
+            initial_user_anchor_protocol_iteration = Some(0);
         }
 
         let mut run_start: Option<usize> = None;
@@ -137,15 +137,15 @@ pub(crate) fn compute_prompt_insertions(
                         run_start = Some(i);
                     }
                 }
-                ChronologicalPayload::ModeEvent(event) => {
+                ChronologicalPayload::ProtocolEvent(event) => {
                     let Some(step) = chronological_rlm_step(event) else {
                         continue;
                     };
                     let begin = run_start.unwrap_or(i);
-                    let mode_iteration = step.mode_iteration as u64;
-                    if initial_user_anchor_mode_iteration == Some(mode_iteration) {
-                        initial_user_anchor_mode_iteration = None;
-                    } else if let Some(queue) = by_mode_iteration.get_mut(&mode_iteration) {
+                    let protocol_iteration = step.protocol_iteration as u64;
+                    if initial_user_anchor_protocol_iteration == Some(protocol_iteration) {
+                        initial_user_anchor_protocol_iteration = None;
+                    } else if let Some(queue) = by_protocol_iteration.get_mut(&protocol_iteration) {
                         while let Some(pi) = queue.pop_front() {
                             if consumed[pi] {
                                 continue;
@@ -265,7 +265,7 @@ pub(crate) fn render_system_prompt(
     let id = ctx.next_id();
     let repeat_of = prev_hash.filter(|h| *h == prompt.system_hash.as_str());
     let iter_label = prompt
-        .mode_iteration
+        .protocol_iteration
         .map(|i| format!("step {i}"))
         .unwrap_or_else(|| "llm call".to_string());
     let model_label = match (prompt.model.as_deref(), prompt.model_variant.as_deref()) {
@@ -527,7 +527,7 @@ pub(crate) fn write_usage_chart_bar(
     context_window_tokens: Option<u64>,
 ) {
     let iter_label = prompt
-        .mode_iteration
+        .protocol_iteration
         .map(|i| i.to_string())
         .unwrap_or_else(|| "llm".to_string());
     let Some(usage) = prompt.usage.as_ref() else {

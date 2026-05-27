@@ -1,6 +1,7 @@
+use lash_core::SessionGraph;
 use lash_core::plugin::PluginError;
-use lash_core::{ObservationalMemoryConfig, SessionGraph};
 
+use crate::ObservationalMemoryConfig;
 use crate::constants::{
     ACTIVE_STATE_PLUGIN_TYPE, BUFFERED_OBSERVATION_PLUGIN_TYPE, BUFFERED_REFLECTION_PLUGIN_TYPE,
 };

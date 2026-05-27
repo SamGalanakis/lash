@@ -13,8 +13,8 @@ use lash::prompt::{
 use lash::provider::ProviderHandle;
 #[cfg(test)]
 use lash::tools::{
-    ToolAvailabilityConfig, ToolCall, ToolContract, ToolDefinition, ToolExecutionMode,
-    ToolManifest, ToolProvider, ToolResult,
+    ToolAvailabilityConfig, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
+    ToolResult, ToolScheduling,
 };
 use lash::tracing::TraceLevel;
 use lash::{ModelSpec, PluginStack, SessionSpec};
@@ -23,7 +23,9 @@ use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
 use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
-use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
+use lash_standard_plugins::{
+    StandardContextApproach, StandardToolStackOptions, standard_tool_stack,
+};
 use lash_subagents::{SubagentsPluginFactory, default_registry};
 use lash_tui::Terminal;
 use serde_json::Value as JsonValue;
@@ -74,9 +76,10 @@ fn resolve_agent_model_specs(
 
 struct PluginFactorySurfaceInput<'a> {
     autonomous: bool,
+    execution_mode: ExecutionMode,
+    standard_context_approach: Option<StandardContextApproach>,
     tavily_key: String,
     instruction_source: Arc<dyn InstructionSource>,
-    session_policy: SessionPolicy,
     agent_model_specs: &'a BTreeMap<String, ModelSpec>,
     host_docs_dir: Option<std::path::PathBuf>,
     prompt_bridge: CliPromptBridge,
@@ -85,9 +88,10 @@ struct PluginFactorySurfaceInput<'a> {
 fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginStack {
     let PluginFactorySurfaceInput {
         autonomous,
+        execution_mode,
+        standard_context_approach,
         tavily_key,
         instruction_source,
-        session_policy,
         agent_model_specs,
         host_docs_dir,
         prompt_bridge,
@@ -95,7 +99,8 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
     let capability_registry = Arc::new(default_registry(agent_model_specs));
 
     let runtime_options = StandardToolStackOptions {
-        standard_context_approach: session_policy.standard_context_approach.clone(),
+        standard_context_approach: standard_context_approach.clone(),
+        include_cancel_process: execution_mode == ExecutionMode::standard(),
         tavily_api_key: if tavily_key.is_empty() {
             None
         } else {
@@ -106,6 +111,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
     plugin_stack.push(Arc::new(PromptContextPluginFactory::new(
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
+        execution_mode.clone(),
     )) as Arc<dyn PluginFactory>);
     if !autonomous {
         if let Some(host_docs_dir) = host_docs_dir {
@@ -126,10 +132,13 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
         plugin_stack.push(Arc::new(UpdatePlanPluginFactory));
     }
     plugin_stack.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
-    plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
-    plugin_stack.push(Arc::new(
-        SubagentsPluginFactory::new(capability_registry).with_session_spec(SessionSpec::inherit()),
-    ));
+    if execution_mode == ExecutionMode::rlm() {
+        plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
+        plugin_stack.push(Arc::new(
+            SubagentsPluginFactory::new(capability_registry)
+                .with_session_spec(SessionSpec::inherit()),
+        ));
+    }
     plugin_stack
 }
 
@@ -172,8 +181,8 @@ fn parse_rlm_var_arg(raw: &str) -> Result<(String, JsonValue), String> {
 
 fn resolve_rlm_projected_bindings(
     args: &Args,
-) -> Result<Option<lash_mode_rlm::RlmProjectedBindings>, String> {
-    let mut bindings = lash_mode_rlm::RlmProjectedBindings::new();
+) -> Result<Option<lash_protocol_rlm::RlmProjectedBindings>, String> {
+    let mut bindings = lash_protocol_rlm::RlmProjectedBindings::new();
     let mut has_bindings = false;
     if let Some(path) = &args.rlm_vars_file {
         let raw = std::fs::read_to_string(path)
@@ -251,7 +260,7 @@ fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode) -> Prompt
                 .with_priority(100),
         );
     }
-    if *execution_mode == ExecutionMode::new("rlm") {
+    if *execution_mode == ExecutionMode::rlm() {
         layer.add_contribution(
             PromptContribution::new(
                 PromptSlot::Execution,
@@ -489,9 +498,9 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let run_session_id = session_bootstrap_probe
         .as_ref()
         .and_then(|bootstrap| bootstrap.run_session_id());
-    let persisted_session_config = session_bootstrap_probe
+    let persisted_host_config = session_bootstrap_probe
         .as_ref()
-        .and_then(|bootstrap| bootstrap.persisted_config());
+        .and_then(|bootstrap| bootstrap.persisted_host_config());
 
     // Execution mode: CLI flag wins, then persisted config, then Standard.
     // Resolved BEFORE building the plugin host + runtime so the lashlang
@@ -501,7 +510,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             ensure_supported_execution_mode(parse_execution_mode(raw).map_err(anyhow::Error::msg)?)
                 .map_err(anyhow::Error::msg)?
         }
-        None => persisted_session_config
+        None => persisted_host_config
             .as_ref()
             .map(|config| config.execution_mode.clone())
             .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
@@ -525,7 +534,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let configured_standard_context_approach = if execution_mode == ExecutionMode::standard() {
         let approach = match args.standard_context_approach.as_deref() {
             Some(raw) => parse_standard_context_approach(raw).map_err(anyhow::Error::msg)?,
-            None => persisted_session_config
+            None => persisted_host_config
                 .as_ref()
                 .and_then(|config| config.standard_context_approach.clone())
                 .unwrap_or_default(),
@@ -549,7 +558,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     };
     let rlm_projected_bindings =
         resolve_rlm_projected_bindings(&args).map_err(anyhow::Error::msg)?;
-    let rlm_globals_supported = execution_mode == ExecutionMode::new("rlm");
+    let rlm_globals_supported = execution_mode == ExecutionMode::rlm();
     if rlm_projected_bindings.is_some() && !rlm_globals_supported {
         return Err(anyhow::anyhow!(
             "`--rlm-var` and `--rlm-vars-file` require `--execution-mode rlm`."
@@ -566,8 +575,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         provider: active_provider.clone(),
         session_id: run_session_id.clone(),
         autonomous,
-        execution_mode: execution_mode.clone(),
-        standard_context_approach: configured_standard_context_approach.clone(),
+        prompt: prompt_layer.clone(),
         ..Default::default()
     };
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
@@ -575,9 +583,10 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
 
     let mut plugin_stack = plugin_factories_for_surface(PluginFactorySurfaceInput {
         autonomous,
+        execution_mode: execution_mode.clone(),
+        standard_context_approach: configured_standard_context_approach.clone(),
         tavily_key,
         instruction_source: Arc::clone(&instruction_source),
-        session_policy: session_policy.clone(),
         agent_model_specs: &agent_model_specs,
         host_docs_dir: host_docs.as_ref().map(|docs| docs.dir().to_path_buf()),
         prompt_bridge: prompt_bridge.clone(),
@@ -599,7 +608,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
                 &model,
                 session_policy.model.variant.as_deref(),
                 &execution_mode,
-                session_policy.standard_context_approach.as_ref(),
+                configured_standard_context_approach.as_ref(),
                 Some(resolved_model_spec.context_window()),
                 None,
                 &cwd,
@@ -628,6 +637,8 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         .open(
             SessionBootstrapSource::from_resume_arg(args.resume.clone()),
             session_policy.clone(),
+            execution_mode.clone(),
+            configured_standard_context_approach.clone(),
         )
         .await?;
     let session = opened_session.session;
@@ -714,7 +725,7 @@ mod tests {
             serde_json::json!({ "type": "null" }),
         )
         .with_availability(ToolAvailabilityConfig::callable())
-        .with_execution_mode(ToolExecutionMode::Parallel)
+        .with_scheduling(ToolScheduling::Parallel)
     }
 
     #[async_trait::async_trait]
@@ -748,17 +759,13 @@ mod tests {
     }
 
     fn plugin_factory_ids_for_autonomous(autonomous: bool) -> Vec<&'static str> {
-        let provider =
-            ProviderHandle::new(OpenAiCompatibleProvider::new("test", "").into_components());
         let agent_model_specs = BTreeMap::new();
         plugin_factories_for_surface(PluginFactorySurfaceInput {
             autonomous,
+            execution_mode: ExecutionMode::standard(),
+            standard_context_approach: None,
             tavily_key: String::new(),
             instruction_source: Arc::new(FsInstructionSource::default()),
-            session_policy: SessionPolicy {
-                provider,
-                ..Default::default()
-            },
             agent_model_specs: &agent_model_specs,
             host_docs_dir: (!autonomous)
                 .then(|| std::path::PathBuf::from("/tmp/lash-home/docs/lash-cli")),
@@ -774,8 +781,8 @@ mod tests {
     fn cli_surface_stack_does_not_install_mode_factories() {
         let ids = plugin_factory_ids_for_autonomous(false);
 
-        assert!(!ids.contains(&"mode_standard"));
-        assert!(!ids.contains(&"mode_rlm"));
+        assert!(!ids.contains(&"standard_protocol"));
+        assert!(!ids.contains(&"rlm_protocol"));
     }
 
     #[test]
@@ -789,7 +796,7 @@ mod tests {
 
     #[test]
     fn rlm_prompt_config_uses_execution_slot_and_contribution() {
-        let layer = cli_prompt_config(false, &ExecutionMode::new("rlm"));
+        let layer = cli_prompt_config(false, &ExecutionMode::rlm());
         let template = layer.template.as_ref().expect("cli prompt template");
         let contributions = layer
             .slots

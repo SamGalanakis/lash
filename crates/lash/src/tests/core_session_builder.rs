@@ -236,8 +236,54 @@ async fn rlm_core_opens_rlm_session_and_rejects_standard_session() -> Result<()>
 }
 
 #[tokio::test]
-async fn rlm_projection_errors_surface_from_mode_extensions() -> Result<()> {
-    use lash_mode_rlm::{RlmProjectedBindings, RlmTurnInputExt};
+async fn malformed_rlm_create_extras_fail_child_session_creation() -> Result<()> {
+    let core = LashCore::rlm()
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .build()?;
+    let session = core.session("rlm-root").open().await?;
+    let mut plugin_options = lash_core::PluginOptions {
+        plugins: BTreeMap::new(),
+    };
+    plugin_options.plugins.insert(
+        lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID.to_string(),
+        serde_json::json!({
+            "termination": {
+                "kind": "unknown"
+            }
+        }),
+    );
+
+    let err = session
+        .control()
+        .children()
+        .create_session(SessionCreateRequest {
+            session_id: Some("rlm-child-bad-extras".to_string()),
+            relation: lash_core::SessionRelation::Child {
+                parent_session_id: "rlm-root".to_string(),
+                originating_tool_call_id: None,
+            },
+            start: lash_core::SessionStartPoint::Empty,
+            policy: None,
+            plugin_source: lash_core::SessionPluginSource::CurrentSessionFork,
+            initial_nodes: Vec::new(),
+            first_turn_input: None,
+            tool_access: lash_core::SessionToolAccess::default(),
+            subagent: None,
+            context_surface: lash_core::SessionContextSurface::default(),
+            plugin_options,
+            usage_source: None,
+        })
+        .await
+        .expect_err("malformed RLM create extras should fail session creation");
+
+    assert!(err.to_string().contains("invalid RLM create options"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn rlm_projection_errors_surface_from_protocol_extensions() -> Result<()> {
+    use lash_protocol_rlm::{RlmProjectedBindings, RlmTurnInputExt};
 
     let core = LashCore::rlm()
         .provider(mock_provider())
@@ -247,7 +293,7 @@ async fn rlm_projection_errors_surface_from_mode_extensions() -> Result<()> {
     session
         .control()
         .mode()
-        .apply_session_extension(lash_mode_rlm::rlm_session_projection_extension(
+        .apply_session_extension(lash_protocol_rlm::rlm_session_projection_extension(
             RlmProjectedBindings::new()
                 .bind_json("current_query", serde_json::json!("session"))
                 .expect("session bind"),
@@ -308,7 +354,6 @@ async fn store_factory_reopens_persisted_session_state() -> Result<()> {
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
             model: mock_model_spec(),
-            execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
         ..Default::default()
@@ -338,7 +383,6 @@ async fn active_path_residency_opens_with_active_path_scope() -> Result<()> {
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
             model: mock_model_spec(),
-            execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
         ..Default::default()
@@ -384,7 +428,6 @@ async fn keep_all_residency_opens_with_full_graph_scope() -> Result<()> {
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
             model: mock_model_spec(),
-            execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
         ..Default::default()
@@ -415,7 +458,6 @@ async fn store_session_id_mismatch_is_rejected() -> Result<()> {
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
             model: mock_model_spec(),
-            execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
         ..Default::default()
@@ -449,7 +491,6 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
             model: mock_model_spec(),
-            execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
         ..Default::default()
@@ -519,13 +560,13 @@ async fn core_store_factory_is_used_for_managed_child_sessions() -> Result<()> {
             },
             start: lash_core::SessionStartPoint::Empty,
             policy: None,
-            plugin_mode: lash_core::SessionPluginMode::InheritCurrent,
+            plugin_source: lash_core::SessionPluginSource::CurrentSessionFork,
             initial_nodes: Vec::new(),
             first_turn_input: None,
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             context_surface: lash_core::SessionContextSurface::default(),
-            mode_extras: lash_core::ModeExtras::default(),
+            plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })
         .await?;
@@ -565,13 +606,13 @@ async fn reused_root_store_factory_reports_child_store_guidance() -> Result<()> 
             },
             start: lash_core::SessionStartPoint::Empty,
             policy: None,
-            plugin_mode: lash_core::SessionPluginMode::InheritCurrent,
+            plugin_source: lash_core::SessionPluginSource::CurrentSessionFork,
             initial_nodes: Vec::new(),
             first_turn_input: None,
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             context_surface: lash_core::SessionContextSurface::default(),
-            mode_extras: lash_core::ModeExtras::default(),
+            plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })
         .await
@@ -610,13 +651,13 @@ async fn explicit_root_store_keeps_configured_child_store_factory() -> Result<()
             },
             start: lash_core::SessionStartPoint::Empty,
             policy: None,
-            plugin_mode: lash_core::SessionPluginMode::InheritCurrent,
+            plugin_source: lash_core::SessionPluginSource::CurrentSessionFork,
             initial_nodes: Vec::new(),
             first_turn_input: None,
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             context_surface: lash_core::SessionContextSurface::default(),
-            mode_extras: lash_core::ModeExtras::default(),
+            plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })
         .await?;
@@ -635,7 +676,6 @@ async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Re
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
             model: mock_model_spec(),
-            execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
         ..Default::default()
@@ -676,17 +716,13 @@ async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Re
 #[test]
 fn turn_result_total_usage_sums_parent_and_children() {
     use lash_core::{
-        ExecutionMode, ExecutionSummary, OutputState, SessionPolicy, SessionStateEnvelope,
-        TurnFinish, TurnOutcome,
+        ExecutionSummary, OutputState, SessionPolicy, SessionStateEnvelope, TurnFinish, TurnOutcome,
     };
 
     let result = TurnResult {
         state: SessionStateEnvelope {
             session_id: "s".to_string(),
-            policy: SessionPolicy {
-                execution_mode: ExecutionMode::standard(),
-                ..Default::default()
-            },
+            policy: SessionPolicy::default(),
             ..Default::default()
         },
         outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
@@ -727,7 +763,6 @@ fn turn_result_total_usage_sums_parent_and_children() {
         ],
         tool_calls: Vec::new(),
         execution: ExecutionSummary {
-            mode: ExecutionMode::standard(),
             had_tool_calls: false,
             had_code_execution: false,
         },

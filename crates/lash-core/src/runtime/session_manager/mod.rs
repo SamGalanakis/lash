@@ -118,7 +118,7 @@ impl CurrentSessionCapability {
             turn_index: runtime.state.turn_index,
             token_usage: runtime.state.token_usage.clone(),
             last_prompt_usage: runtime.state.last_prompt_usage.clone(),
-            mode_turn_options: runtime.mode_turn_options.clone(),
+            protocol_turn_options: runtime.protocol_turn_options.clone(),
             tool_state_ref: runtime.state.tool_state_ref.clone(),
             tool_state_generation: runtime.state.tool_state_generation,
             tool_state_snapshot: None,

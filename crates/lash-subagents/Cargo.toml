@@ -16,7 +16,7 @@ categories = ["asynchronous", "api-bindings"]
 [dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9", default-features = false }
 lash-llm-tools = { path = "../lash-llm-tools", version = "=0.1.0-alpha.9" }
-lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.9" }
+lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.9" }
 lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.9" }
 async-trait = { workspace = true }
 serde = { workspace = true }

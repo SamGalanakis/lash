@@ -14,13 +14,13 @@ pub fn lashlang_value_to_json(
         .map_err(|err| ExecutionHostError::new(format!("failed to serialize value: {err}")))
 }
 
-pub fn mode_tool_reply_to_lashlang_value(
-    reply: crate::ModeToolReply,
+pub fn protocol_tool_reply_to_lashlang_value(
+    reply: crate::ToolInvocationReply,
 ) -> Result<LashlangValue, ExecutionHostError> {
-    mode_tool_output_to_lashlang_value(&reply.output)
+    protocol_tool_output_to_lashlang_value(&reply.output)
 }
 
-pub fn mode_tool_output_to_lashlang_value(
+pub fn protocol_tool_output_to_lashlang_value(
     output: &crate::ToolCallOutput,
 ) -> Result<LashlangValue, ExecutionHostError> {
     let value = output.value_for_projection();

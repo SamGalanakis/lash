@@ -19,14 +19,14 @@ use sha2::{Digest, Sha256};
 
 use lash_core::PreparedContext;
 use lash_core::plugin::{
-    HistoryError, HistoryRewriter, HistoryState, ModeExtras, PluginError, PluginFactory,
+    HistoryError, HistoryRewriter, HistoryState, PluginError, PluginFactory, PluginOptions,
     PluginRegistrar, PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
     SessionCreateRequest, SessionPlugin, SessionStartPoint, TurnContextTransform,
     TurnTransformContext,
 };
 use lash_core::{
-    ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind, PromptUsage,
-    RollingHistoryConfig, SessionStateEnvelope, StandardContextApproach, ToolCallRecord, TurnInput,
+    InputItem, Message, MessageOrigin, MessageRole, Part, PartKind, PromptUsage,
+    SessionStateEnvelope, ToolCallRecord, TurnInput,
 };
 use lash_plugin_tool_output_budget::{
     DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES, DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES,
@@ -52,6 +52,9 @@ const COMPACTION_PROMPT: &str = "Provide a detailed summary of the conversation 
 const PRUNE_PROTECTED_TOOLS: &[&str] = &["skill"];
 const PRUNED_IMAGE_PLACEHOLDER: &str = "[Image omitted from older context]";
 const COMPACTED_IMAGE_PLACEHOLDER: &str = "[Image omitted during compaction]";
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RollingHistoryConfig;
 
 fn compaction_update_prompt(previous_summary: &str) -> String {
     format!(
@@ -537,7 +540,6 @@ async fn summarize_compaction_prefix(
     }
 
     let mut snapshot = lash_core::RuntimeSessionState::from_state(state.clone());
-    snapshot.policy.execution_mode = ExecutionMode::standard();
     snapshot.policy.max_turns = Some(1);
     let mut messages = prefix_messages;
     strip_all_image_attachments(&mut messages, COMPACTED_IMAGE_PLACEHOLDER);
@@ -561,7 +563,6 @@ async fn summarize_compaction_prefix(
 
     let compaction_session_id = format!("{session_id}-compaction");
     let mut policy = snapshot.policy.clone();
-    policy.execution_mode = ExecutionMode::standard();
     policy.max_turns = Some(1);
     let request = SessionCreateRequest::child(
         session_id,
@@ -569,7 +570,7 @@ async fn summarize_compaction_prefix(
             snapshot: Box::new(snapshot),
         },
         policy,
-        ModeExtras::default(),
+        PluginOptions::default(),
         "compaction",
     )
     .with_context_surface(SessionContextSurface {
@@ -595,9 +596,9 @@ async fn summarize_compaction_prefix(
             TurnInput {
                 items: vec![InputItem::Text { text: prompt_text }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: lash_core::TurnContext::default(),
             },
         )
@@ -687,36 +688,10 @@ impl PluginFactory for RollingHistoryPluginFactory {
         ROLLING_HISTORY_PLUGIN_ID
     }
 
-    fn supported_standard_context_approaches(
-        &self,
-    ) -> &'static [lash_core::StandardContextApproachKind] {
-        &[lash_core::StandardContextApproachKind::RollingHistory]
-    }
-
-    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        if ctx.execution_mode != ExecutionMode::standard()
-            || !matches!(
-                ctx.standard_context_approach,
-                Some(StandardContextApproach::RollingHistory(_))
-            )
-        {
-            return Ok(Arc::new(DisabledRollingHistoryPlugin));
-        }
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(RollingHistoryPlugin {
             config: self.config.clone(),
         }))
-    }
-}
-
-struct DisabledRollingHistoryPlugin;
-
-impl SessionPlugin for DisabledRollingHistoryPlugin {
-    fn id(&self) -> &'static str {
-        ROLLING_HISTORY_PLUGIN_ID
-    }
-
-    fn register(&self, _reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        Ok(())
     }
 }
 
@@ -1143,10 +1118,7 @@ mod tests {
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
         let state = SessionStateEnvelope {
             session_id: "root".to_string(),
-            policy: SessionPolicy {
-                execution_mode: ExecutionMode::standard(),
-                ..Default::default()
-            },
+            policy: SessionPolicy::default(),
             ..Default::default()
         };
         let ctx = build_turn_ctx(

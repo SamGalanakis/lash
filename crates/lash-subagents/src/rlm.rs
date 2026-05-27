@@ -1,4 +1,4 @@
-//! RLM-mode subagent spawning surface.
+//! RLM protocol subagent spawning surface.
 //!
 //! Examples are written in lashlang receiver-operation syntax. Prompt prose is
 //! tuned for schema-first results and binding subagent output.
@@ -8,8 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lash_core::{
     PreparedToolCall, SessionSpec, SubagentSessionContext, ToolArgumentProjectionPolicy, ToolCall,
-    ToolContext, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolPrepareCall,
-    ToolProvider, ToolResult,
+    ToolContext, ToolContract, ToolDefinition, ToolManifest, ToolPrepareCall, ToolProvider,
+    ToolResult, ToolScheduling,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,7 +56,7 @@ impl RlmSubagentToolsProvider {
         }
         let output_schema = lash_llm_tools::parse_output_schema(args.get("output"))
             .map_err(|err| ToolResult::err(serde_json::json!(err)))?;
-        let seed = lash_mode_rlm::RlmSeed::from_tool_args(args)
+        let seed = lash_protocol_rlm::RlmSeed::from_tool_args(args)
             .map_err(|err| ToolResult::err(serde_json::json!(err)))?;
         let current_snapshot = context
             .session_snapshot()
@@ -218,7 +218,7 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
         description,
         spawn_agent_input_schema(capability_names),
         examples,
-        ToolExecutionMode::Serial,
+        ToolScheduling::Serial,
     )
     .with_argument_projection(
         ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"),

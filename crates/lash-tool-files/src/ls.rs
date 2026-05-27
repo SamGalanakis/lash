@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
-    ToolResult, ToolRetryPolicy,
+    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
+    ToolRetryPolicy, ToolScheduling,
 };
 use lash_tool_support::{
     FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
@@ -155,7 +155,7 @@ fn ls_tool_definition() -> ToolDefinition {
                 "filesystem",
                 &["list_files", "list_directory"],
             ))
-            .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
 

@@ -157,7 +157,7 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
                 .as_deref()
                 .map(|call_id| (call_id, record.clone())),
             lash_core::ChronologicalPayload::Message(_)
-            | lash_core::ChronologicalPayload::ModeEvent(_) => None,
+            | lash_core::ChronologicalPayload::ProtocolEvent(_) => None,
         })
         .collect::<HashMap<_, _>>();
 
@@ -181,9 +181,9 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
                     append_tool_call_record_items(&mut timeline, record, &mut activity_state);
                 }
             }
-            lash_core::ChronologicalPayload::ModeEvent(event) => {
-                if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
-                    lash_mode_rlm::decode_rlm_mode_event(event)
+            lash_core::ChronologicalPayload::ProtocolEvent(event) => {
+                if let Some(lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry)) =
+                    lash_protocol_rlm::decode_rlm_protocol_event(event)
                 {
                     append_rlm_trajectory_items(
                         &mut timeline,
@@ -204,17 +204,17 @@ fn rlm_owned_tool_call_ids(projection: &lash_core::ChronologicalProjection) -> H
         .entries()
         .iter()
         .filter_map(|entry| match &entry.payload {
-            lash_core::ChronologicalPayload::ModeEvent(event) => {
-                lash_mode_rlm::decode_rlm_mode_event(event)
+            lash_core::ChronologicalPayload::ProtocolEvent(event) => {
+                lash_protocol_rlm::decode_rlm_protocol_event(event)
             }
             lash_core::ChronologicalPayload::Message(_)
             | lash_core::ChronologicalPayload::ToolCall(_) => None,
         })
         .flat_map(|event| match event {
-            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry) => entry.tool_call_ids,
-            lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(_)
-            | lash_rlm_types::RlmModeEvent::RlmSeed(_)
-            | lash_rlm_types::RlmModeEvent::RlmDiagnostic(_) => Vec::new(),
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry) => entry.tool_call_ids,
+            lash_rlm_types::RlmProtocolEvent::RlmGlobalsPatch(_)
+            | lash_rlm_types::RlmProtocolEvent::RlmSeed(_)
+            | lash_rlm_types::RlmProtocolEvent::RlmDiagnostic(_) => Vec::new(),
         })
         .collect()
 }
@@ -540,7 +540,7 @@ fn is_internal_rlm_message(message: &Message) -> bool {
     let Some(lash_core::MessageOrigin::Plugin { plugin_id, .. }) = &message.origin else {
         return false;
     };
-    if plugin_id != "mode_rlm" {
+    if plugin_id != "rlm_protocol" {
         return false;
     }
     match message.role {

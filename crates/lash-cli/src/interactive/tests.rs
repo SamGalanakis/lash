@@ -41,7 +41,7 @@ async fn runtime_event_bridge_coalesces_text_before_structural_event() {
     ))
     .await;
     sink.emit(TurnActivity::independent(TurnEvent::ModelRequestStarted {
-        mode_iteration: 0,
+        protocol_iteration: 0,
     }))
     .await;
 

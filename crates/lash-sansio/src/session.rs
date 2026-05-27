@@ -36,7 +36,7 @@ pub struct ExecResponse {
     pub printed_images: Vec<AttachmentRef>,
     pub error: Option<String>,
     pub duration_ms: u64,
-    /// When the surrounding session uses `mode-specific finish`,
+    /// When the surrounding session uses protocol-specific finish behavior,
     /// this carries the value the lashlang program ended with via
     /// `submit <expr>`. The dispatch loop uses it as the terminal
     /// result of the session. `None` for chat-style sessions and for
@@ -63,23 +63,23 @@ pub struct SansIoSessionState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default)]
-    pub mode_iteration: usize,
+    pub protocol_iteration: usize,
     #[serde(default)]
     pub token_usage: crate::TokenUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_usage: Option<PromptUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode_state: Option<serde_json::Value>,
+    pub protocol_state: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct CompletedTurn {
     pub messages: Vec<crate::Message>,
     pub tool_calls: Vec<ToolCallRecord>,
-    pub mode_iteration: usize,
+    pub protocol_iteration: usize,
     pub token_usage: crate::TokenUsage,
     pub last_prompt_usage: Option<PromptUsage>,
-    pub mode_state: Option<serde_json::Value>,
+    pub protocol_state: Option<serde_json::Value>,
 }
 
 pub fn apply_completed_turn(
@@ -88,10 +88,10 @@ pub fn apply_completed_turn(
 ) -> SansIoSessionState {
     state.messages = turn.messages;
     state.tool_calls = turn.tool_calls;
-    state.mode_iteration = turn.mode_iteration;
+    state.protocol_iteration = turn.protocol_iteration;
     state.token_usage = turn.token_usage;
     state.last_prompt_usage = turn.last_prompt_usage;
-    state.mode_state = turn.mode_state;
+    state.protocol_state = turn.protocol_state;
     state
 }
 
@@ -103,13 +103,13 @@ mod tests {
     fn completed_turn_replaces_projected_session_state() {
         let state = SansIoSessionState {
             session_id: "session".to_string(),
-            mode_iteration: 1,
+            protocol_iteration: 1,
             ..SansIoSessionState::default()
         };
         let reduced = apply_completed_turn(
             state,
             CompletedTurn {
-                mode_iteration: 4,
+                protocol_iteration: 4,
                 token_usage: crate::TokenUsage {
                     input_tokens: 10,
                     output_tokens: 3,
@@ -126,7 +126,7 @@ mod tests {
             },
         );
 
-        assert_eq!(reduced.mode_iteration, 4);
+        assert_eq!(reduced.protocol_iteration, 4);
         assert_eq!(reduced.token_usage.input_tokens, 10);
         assert_eq!(
             reduced

@@ -1,7 +1,7 @@
 use serde_json::json;
 
-use super::execution_context::ModeExecutionContext;
-use super::tool_execution::ModeToolReply;
+use super::execution_context::RuntimeExecutionContext;
+use super::tool_execution::ToolInvocationReply;
 use crate::tool_dispatch::ToolPreparationOutcome;
 use crate::{
     ProcessHandleDescriptor, ProcessInput, ProcessRegistration, ToolCallOutput, ToolCallRecord,
@@ -9,7 +9,7 @@ use crate::{
 
 const PROCESS_HANDLE_KIND: &str = "process";
 
-impl ModeExecutionContext<'_> {
+impl RuntimeExecutionContext<'_> {
     pub(super) fn process_handle_value(id: &str, tool_name: &str) -> serde_json::Value {
         let _ = tool_name;
         crate::lashlang_bridge::process_handle_json(id)
@@ -49,7 +49,7 @@ impl ModeExecutionContext<'_> {
         call_id: String,
         tool_name: String,
         args: serde_json::Value,
-    ) -> ModeToolReply {
+    ) -> ToolInvocationReply {
         let handle_id = call_id.clone();
         let pending_call = crate::sansio::PendingToolCall {
             call_id: call_id.clone(),
@@ -62,7 +62,7 @@ impl ModeExecutionContext<'_> {
             ToolPreparationOutcome::Completed(outcome) => {
                 let mut record = outcome.record;
                 record.call_id = Some(call_id);
-                return ModeToolReply::from_output(record.output.clone()).with_record(record);
+                return ToolInvocationReply::from_output(record.output.clone()).with_record(record);
             }
         };
         let registration = ProcessRegistration::new(
@@ -87,7 +87,7 @@ impl ModeExecutionContext<'_> {
             )
             .await
         {
-            return ModeToolReply::error(json!(err.to_string()));
+            return ToolInvocationReply::error(json!(err.to_string()));
         }
 
         let handle_value = Self::process_handle_value(&handle_id, &tool_name);
@@ -98,7 +98,7 @@ impl ModeExecutionContext<'_> {
             output: ToolCallOutput::success(handle_value.clone()),
             duration_ms: 0,
         };
-        ModeToolReply::success(handle_value).with_record(record)
+        ToolInvocationReply::success(handle_value).with_record(record)
     }
 
     fn recorded_process_reply(
@@ -107,7 +107,7 @@ impl ModeExecutionContext<'_> {
         args: serde_json::Value,
         output: ToolCallOutput,
         started: std::time::Instant,
-    ) -> ModeToolReply {
+    ) -> ToolInvocationReply {
         let record = ToolCallRecord {
             call_id: Some(call_id),
             tool: tool.into(),
@@ -115,7 +115,7 @@ impl ModeExecutionContext<'_> {
             output: output.clone(),
             duration_ms: started.elapsed().as_millis() as u64,
         };
-        ModeToolReply::from_output(output).with_record(record)
+        ToolInvocationReply::from_output(output).with_record(record)
     }
 
     fn recorded_process_error(
@@ -124,8 +124,8 @@ impl ModeExecutionContext<'_> {
         args: serde_json::Value,
         message: impl Into<String>,
         started: std::time::Instant,
-    ) -> ModeToolReply {
-        let output = ModeToolReply::error(json!(message.into())).output;
+    ) -> ToolInvocationReply {
+        let output = ToolInvocationReply::error(json!(message.into())).output;
         Self::recorded_process_reply(call_id, tool, args, output, started)
     }
 
@@ -133,7 +133,7 @@ impl ModeExecutionContext<'_> {
         &self,
         call_id: String,
         handle: serde_json::Value,
-    ) -> ModeToolReply {
+    ) -> ToolInvocationReply {
         let started = std::time::Instant::now();
         let args = json!({ "handle": handle.clone() });
         let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
@@ -165,7 +165,7 @@ impl ModeExecutionContext<'_> {
             .await;
         let output = match output {
             Ok(output) => output.into_tool_output(),
-            Err(err) => ModeToolReply::error(json!(err.to_string())).output,
+            Err(err) => ToolInvocationReply::error(json!(err.to_string())).output,
         };
         Self::recorded_process_reply(call_id, "await_process", args, output, started)
     }
@@ -174,7 +174,7 @@ impl ModeExecutionContext<'_> {
         &self,
         call_id: String,
         handle: serde_json::Value,
-    ) -> ModeToolReply {
+    ) -> ToolInvocationReply {
         let started = std::time::Instant::now();
         let args = json!({ "handle": handle.clone() });
         let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
@@ -208,7 +208,7 @@ impl ModeExecutionContext<'_> {
             .await
         {
             Ok(status) => ToolCallOutput::success(Self::process_status_value(&status)),
-            Err(err) => ModeToolReply::error(json!(err.to_string())).output,
+            Err(err) => ToolInvocationReply::error(json!(err.to_string())).output,
         };
         Self::recorded_process_reply(call_id, "cancel_process", args, output, started)
     }
@@ -230,8 +230,8 @@ mod tests {
     use crate::runtime::RuntimeEffectControllerHandle;
     use crate::tool_dispatch::ToolDispatchContext;
     use crate::{
-        ExecutionMode, PreparedToolCall, ProcessRegistry, ToolCall, ToolDefinition,
-        ToolPrepareCall, ToolProvider, ToolResult,
+        PreparedToolCall, ProcessRegistry, ToolCall, ToolDefinition, ToolPrepareCall, ToolProvider,
+        ToolResult,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -295,12 +295,11 @@ mod tests {
             prepares: Arc::clone(&prepares),
         });
         let plugins = PluginHost::empty()
-            .build_standard_session("root", None)
+            .build_session("root", None)
             .expect("plugin session");
         let tools = Arc::clone(&provider);
         let surface = Arc::new(crate::ToolSurface::from_tools(
             provider.tool_manifests(),
-            ExecutionMode::standard(),
             BTreeMap::new(),
         ));
         let host = Arc::new(crate::testing::MockSessionManager::default());
@@ -324,9 +323,8 @@ mod tests {
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
-        let context = ModeExecutionContext::new(
+        let context = RuntimeExecutionContext::new(
             "session".to_string(),
-            ExecutionMode::standard(),
             dispatch,
             Default::default(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -384,11 +382,10 @@ mod tests {
             prepares: Arc::new(AtomicUsize::new(0)),
         });
         let plugins = PluginHost::empty()
-            .build_standard_session("root", None)
+            .build_session("root", None)
             .expect("plugin session");
         let surface = Arc::new(crate::ToolSurface::from_tools(
             provider.tool_manifests(),
-            ExecutionMode::standard(),
             BTreeMap::new(),
         ));
         let host = Arc::new(crate::testing::MockSessionManager::default());
@@ -421,9 +418,8 @@ mod tests {
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
-        let context = ModeExecutionContext::new(
+        let context = RuntimeExecutionContext::new(
             "session".to_string(),
-            ExecutionMode::standard(),
             dispatch,
             Default::default(),
             Arc::new(crate::InMemoryAttachmentStore::new()),

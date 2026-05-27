@@ -161,14 +161,14 @@ impl SessionControl {
         Ok(())
     }
 
-    async fn apply_mode_session_extension(
+    async fn apply_protocol_session_extension(
         &self,
-        extension: lash_core::ModeSessionExtensionHandle,
+        extension: lash_core::ProtocolSessionExtensionHandle,
     ) -> Result<()> {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
         let result = runtime
-            .apply_mode_session_extension(extension)
+            .apply_protocol_session_extension(extension)
             .await
             .map_err(Into::into);
         self.runtime.publish_from(&runtime);
@@ -779,8 +779,10 @@ pub struct ModeControl {
 impl ModeControl {
     pub async fn apply_session_extension(
         &self,
-        extension: lash_core::ModeSessionExtensionHandle,
+        extension: lash_core::ProtocolSessionExtensionHandle,
     ) -> Result<()> {
-        self.control.apply_mode_session_extension(extension).await
+        self.control
+            .apply_protocol_session_extension(extension)
+            .await
     }
 }

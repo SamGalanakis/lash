@@ -87,9 +87,9 @@ async fn tool_result_projector_only_changes_model_observation() {
                     text: "run the tool".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -155,8 +155,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
     }]);
 
     let store = Arc::new(RecordingStore::default());
-    let plugins =
-        plugin_session_with_tools("root", ExecutionMode::standard(), Arc::new(EmptyTools));
+    let plugins = plugin_session_with_tools("root", Arc::new(EmptyTools));
     let mut runtime = LashRuntime::from_persistent_embedded_state(
         standard_test_policy(),
         test_host_config(),
@@ -177,9 +176,9 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
                     text: "where did this go?".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -213,11 +212,7 @@ async fn park_returns_error_when_final_commit_fails() {
             ..crate::SessionHeadMeta::default()
         })
         .await;
-    let plugins = plugin_session_with_tools(
-        "park-session",
-        ExecutionMode::standard(),
-        Arc::new(EmptyTools),
-    );
+    let plugins = plugin_session_with_tools("park-session", Arc::new(EmptyTools));
     let runtime = LashRuntime::from_persistent_embedded_state(
         standard_test_policy(),
         test_host_config(),
@@ -280,9 +275,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
         "base_tools",
         crate::PluginSpec::new().with_tool_provider(Arc::clone(&base_provider_factory)),
     ))]);
-    let plugins = plugin_host
-        .build_standard_session("root", None)
-        .expect("plugins");
+    let plugins = plugin_host.build_session("root", None).expect("plugins");
     let mut runtime = LashRuntime::from_persistent_embedded_state(
         standard_test_policy(),
         test_host_config(),
@@ -303,9 +296,9 @@ async fn completed_turns_are_persisted_in_session_graph() {
                     text: "where did this go?".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),

@@ -2,15 +2,15 @@
 
 use lash_core::plugin::PluginError;
 use lash_core::{
-    AssembledTurn, InputItem, ModeExtras, SessionCreateRequest, SessionPolicy, SessionSnapshot,
+    AssembledTurn, InputItem, PluginOptions, SessionCreateRequest, SessionPolicy, SessionSnapshot,
     SessionSpec, SessionStartPoint, SessionToolAccess, SubagentSessionContext, ToolDefinition,
-    ToolExecutionMode, ToolResult, ToolSurfaceContribution, TurnFinish, TurnInput, TurnOutcome,
+    ToolResult, ToolScheduling, ToolSurfaceContribution, TurnFinish, TurnInput, TurnOutcome,
     TurnStop,
 };
 use lash_rlm_types::RlmTermination;
 use serde_json::{Value, json};
 
-use crate::capability::{CapabilityContext, CapabilityRegistry};
+use crate::capability::{CapabilityContext, CapabilityRegistry, CapabilityResolution};
 use crate::{SubagentSessionConfigurator, SubagentSpawnContext};
 
 #[cfg(test)]
@@ -19,15 +19,15 @@ pub(crate) fn build_session_policy(
     current_policy: &SessionPolicy,
     capability_name: &str,
 ) -> Result<SessionPolicy, String> {
-    let spec = resolve_capability_spec(registry, current_policy, capability_name)?;
-    Ok(spec.resolve_against(current_policy))
+    let resolution = resolve_capability_spec(registry, current_policy, capability_name)?;
+    Ok(resolution.spec.resolve_against(current_policy))
 }
 
 pub(crate) fn resolve_capability_spec(
     registry: &CapabilityRegistry,
     current_policy: &SessionPolicy,
     capability_name: &str,
-) -> Result<SessionSpec, String> {
+) -> Result<CapabilityResolution, String> {
     let capability = registry
         .get(capability_name)
         .ok_or_else(|| unknown_capability_message(capability_name, registry))?;
@@ -43,7 +43,7 @@ pub(crate) struct SpawnCreateRequestInput<'a> {
     pub(crate) session_spec: &'a SessionSpec,
     pub(crate) capability_name: &'a str,
     pub(crate) output_schema: Option<Value>,
-    pub(crate) seed: lash_mode_rlm::RlmSeed,
+    pub(crate) seed: lash_protocol_rlm::RlmSeed,
     pub(crate) parent_subagent: Option<&'a SubagentSessionContext>,
     pub(crate) originating_tool_call_id: Option<&'a str>,
     pub(crate) configurator: &'a dyn SubagentSessionConfigurator,
@@ -65,48 +65,29 @@ pub(crate) async fn build_spawn_create_request(
         configurator,
     } = input;
     let mut policy = session_spec.resolve_against(&current_snapshot.policy);
-    let spec = resolve_capability_spec(registry, &policy, capability_name)?;
-    policy = spec.resolve_against(&policy);
-    let child_mode = policy.execution_mode.clone();
-    if output_schema.is_some() && child_mode != lash_core::ExecutionMode::new("rlm") {
-        return Err(format!(
-            "structured output is RLM-only; child capability `{capability_name}` runs in `{}` mode",
-            child_mode.plugin_id()
-        ));
-    }
-    if !seed.projected.is_empty() && child_mode != lash_core::ExecutionMode::new("rlm") {
-        return Err(format!(
-            "projected seed is RLM-only; child capability `{capability_name}` runs in `{}` mode",
-            child_mode.plugin_id()
-        ));
-    }
-    let mut mode_extras = ModeExtras::default();
-    if child_mode == lash_core::ExecutionMode::new("rlm") {
-        let termination = match output_schema.clone() {
-            Some(schema) => RlmTermination::SubmitRequired {
-                schema: Some(schema),
-            },
-            None => RlmTermination::default(),
-        };
-        mode_extras = ModeExtras::typed(
-            lash_core::ExecutionMode::new("rlm"),
-            lash_rlm_types::RlmCreateExtras { termination },
-        )
-        .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
-    }
-
-    let initial_nodes = if child_mode == lash_core::ExecutionMode::new("rlm") {
-        lash_mode_rlm::rlm_seed_initial_nodes(seed)
-    } else {
-        Vec::new()
+    let capability_resolution = resolve_capability_spec(registry, &policy, capability_name)?;
+    policy = capability_resolution.spec.resolve_against(&policy);
+    let termination = match output_schema.clone() {
+        Some(schema) => RlmTermination::SubmitRequired {
+            schema: Some(schema),
+        },
+        None => RlmTermination::default(),
     };
+    let plugin_options = PluginOptions::typed(
+        lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID,
+        lash_rlm_types::RlmCreateExtras { termination },
+    )
+    .map_err(|err| format!("failed to encode rlm plugin options: {err}"))?;
+
+    let initial_nodes = lash_protocol_rlm::rlm_seed_initial_nodes(seed);
     let mut request = SessionCreateRequest::child(
         parent_session_id,
         SessionStartPoint::Empty,
         policy,
-        mode_extras,
+        plugin_options,
         "subagent",
     )
+    .with_plugin_source(capability_resolution.plugin_source)
     .with_initial_nodes(initial_nodes);
     let child_policy = request.policy.as_ref().expect("child policy set").clone();
     configurator.configure(
@@ -204,9 +185,9 @@ pub(crate) fn turn_input_for_task(text: String) -> TurnInput {
     TurnInput {
         items: vec![InputItem::Text { text }],
         image_blobs: std::collections::HashMap::new(),
-        mode_turn_options: None,
+        protocol_turn_options: None,
         trace_turn_id: None,
-        mode_extension: None,
+        protocol_extension: None,
         turn_context: lash_core::TurnContext::default(),
     }
 }
@@ -244,7 +225,7 @@ pub(crate) fn tool_definition(
     description: impl Into<String>,
     input_schema: Value,
     examples: Vec<String>,
-    execution_mode: ToolExecutionMode,
+    execution_mode: ToolScheduling,
 ) -> ToolDefinition {
     ToolDefinition::raw(
         format!("tool:{name}"),
@@ -254,7 +235,7 @@ pub(crate) fn tool_definition(
         json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(examples)
-    .with_execution_mode(execution_mode)
+    .with_scheduling(execution_mode)
 }
 
 pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
@@ -311,7 +292,7 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
         }),
         json!({ "type": "object", "additionalProperties": true }),
     )
-    .with_execution_mode(ToolExecutionMode::Serial)
+    .with_scheduling(ToolScheduling::Serial)
 }
 
 pub(crate) fn submit_error_tool_result(args: &Value) -> ToolResult {

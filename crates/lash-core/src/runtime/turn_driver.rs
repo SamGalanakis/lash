@@ -1,10 +1,11 @@
 use super::*;
-use crate::{ModePreamble, PluginError, ToolSurface};
+use crate::{PluginError, ToolSurface, TurnDriverPreamble};
 use lash_sansio::{PreparedPrompt, PromptCache, PromptContributionSet, PromptLayer};
 use std::num::NonZeroUsize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod effects;
+mod handlers;
 mod streaming;
 mod tools;
 
@@ -12,14 +13,14 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
     if !event_tx.is_closed() {
         match &event {
             SessionEvent::TokenUsage {
-                mode_iteration,
+                protocol_iteration,
                 usage,
                 cumulative,
             } => {
                 send_independent_turn_event(
                     event_tx,
                     TurnEvent::Usage {
-                        mode_iteration: *mode_iteration,
+                        protocol_iteration: *protocol_iteration,
                         usage: usage.clone(),
                         cumulative: cumulative.clone(),
                     },
@@ -31,11 +32,13 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
             // not here. Child usage events bypass `send_session_event` because
             // they're produced by the session manager rather than the parent's
             // turn driver.
-            SessionEvent::LlmRequest { mode_iteration, .. } => {
+            SessionEvent::LlmRequest {
+                protocol_iteration, ..
+            } => {
                 send_independent_turn_event(
                     event_tx,
                     TurnEvent::ModelRequestStarted {
-                        mode_iteration: *mode_iteration,
+                        protocol_iteration: *protocol_iteration,
                     },
                 )
                 .await;
@@ -150,7 +153,7 @@ async fn send_independent_turn_event(
 async fn emit_semantic_response_parts(
     event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     response: &LlmResponse,
-    strip_lashlang_fences: bool,
+    prose_projector: Option<&dyn crate::plugin::AssistantProseProjectorPlugin>,
 ) {
     let has_text_correlation_ids = response.parts.iter().any(|part| {
         matches!(
@@ -168,7 +171,7 @@ async fn emit_semantic_response_parts(
                 text,
                 response_meta,
             } if has_text_correlation_ids && !text.is_empty() => {
-                let text = semantic_text_part(text, strip_lashlang_fences);
+                let text = project_assistant_prose(text, prose_projector);
                 if text.is_empty() {
                     continue;
                 }
@@ -181,9 +184,7 @@ async fn emit_semantic_response_parts(
                 send_turn_activity(
                     event_tx,
                     correlation_id,
-                    TurnEvent::AssistantProseDelta {
-                        text: text.to_string(),
-                    },
+                    TurnEvent::AssistantProseDelta { text },
                 )
                 .await;
             }
@@ -203,17 +204,14 @@ async fn emit_semantic_response_parts(
             _ => {}
         }
     }
-    let full_text = semantic_text_part(&response.full_text, strip_lashlang_fences);
+    let full_text = project_assistant_prose(&response.full_text, prose_projector);
     let fallback_text;
     let full_text = if full_text.is_empty() && !has_text_correlation_ids {
-        fallback_text = semantic_text_part(
-            &response_text_from_parts(&response.parts),
-            strip_lashlang_fences,
-        )
-        .to_string();
+        fallback_text =
+            project_assistant_prose(&response_text_from_parts(&response.parts), prose_projector);
         fallback_text.as_str()
     } else {
-        full_text
+        full_text.as_str()
     };
     if !emitted_text && !full_text.is_empty() {
         send_independent_turn_event(
@@ -226,12 +224,13 @@ async fn emit_semantic_response_parts(
     }
 }
 
-fn semantic_text_part(text: &str, strip_lashlang_fences: bool) -> &str {
-    if strip_lashlang_fences {
-        prose_before_lashlang_fence(text)
-    } else {
-        text
-    }
+fn project_assistant_prose(
+    text: &str,
+    projector: Option<&dyn crate::plugin::AssistantProseProjectorPlugin>,
+) -> String {
+    projector
+        .map(|projector| projector.project_assistant_prose(text))
+        .unwrap_or_else(|| text.to_string())
 }
 
 fn response_text_from_parts(parts: &[LlmOutputPart]) -> String {
@@ -261,21 +260,6 @@ fn generation_options_from_provider(provider: &crate::ProviderHandle) -> crate::
     }
 }
 
-fn prose_before_lashlang_fence(text: &str) -> &str {
-    let Some(open) = text.find("```") else {
-        return text;
-    };
-    let after_ticks = open + 3;
-    let rest = &text[after_ticks..];
-    let Some(newline) = rest.find('\n') else {
-        return text;
-    };
-    if rest[..newline].trim() == "lashlang" {
-        return text[..open].trim_end();
-    }
-    text
-}
-
 pub(super) struct RuntimeTurnDriver<'a> {
     pub(super) session: Session,
     pub(super) policy: SessionPolicy,
@@ -288,8 +272,8 @@ pub(super) struct RuntimeTurnDriver<'a> {
     pub(super) llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
     pub(super) next_llm_ordinal: usize,
     pub(super) session_manager: Arc<RuntimeSessionManager>,
-    pub(super) mode_turn_options: crate::ModeTurnOptions,
-    pub(super) mode_extension: Option<crate::ModeTurnExtensionHandle>,
+    pub(super) protocol_turn_options: crate::ProtocolTurnOptions,
+    pub(super) protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
     pub(super) turn_context: crate::TurnContext,
     pub(super) turn_lease: Option<crate::RuntimeTurnLease>,
     pub(super) machine_config_snapshot: Option<crate::RuntimeTurnMachineConfigSnapshot>,
@@ -297,9 +281,8 @@ pub(super) struct RuntimeTurnDriver<'a> {
 }
 
 struct PreparedExecutionSurface {
-    execution_mode: ExecutionMode,
     tool_surface: Arc<ToolSurface>,
-    mode_preamble: Arc<ModePreamble>,
+    turn_driver_preamble: Arc<TurnDriverPreamble>,
     prompt: PromptLayer,
 }
 
@@ -312,7 +295,12 @@ impl PreparedExecutionSurface {
         prompt_cache: Option<Arc<PromptCache>>,
     ) -> PreparedPrompt {
         let mut capability_prompt = PromptLayer::new();
-        for contribution in self.mode_preamble.prompt_contributions.iter().cloned() {
+        for contribution in self
+            .turn_driver_preamble
+            .prompt_contributions
+            .iter()
+            .cloned()
+        {
             capability_prompt.add_contribution(contribution);
         }
         let resolved = crate::resolve_prompt_layers([
@@ -328,16 +316,15 @@ impl PreparedExecutionSurface {
         let contributions = PromptContributionSet::new(prompt_contributions);
         lash_sansio::build_prompt_cached(
             crate::PromptBuildInput {
-                mode: self.execution_mode.clone(),
                 template_fingerprint: crate::prompt_template_fingerprint(&resolved.template),
                 template: resolved.template,
                 execution_prompt_fingerprint: crate::prompt_text_fingerprint(
-                    &self.mode_preamble.execution_prompt,
+                    &self.turn_driver_preamble.execution_prompt,
                 ),
-                execution_prompt: Arc::clone(&self.mode_preamble.execution_prompt),
-                tool_names_fingerprint: self.mode_preamble.tool_names_fingerprint,
-                tool_names: Arc::clone(&self.mode_preamble.tool_names),
-                omitted_tool_count: self.mode_preamble.omitted_tool_count,
+                execution_prompt: Arc::clone(&self.turn_driver_preamble.execution_prompt),
+                tool_names_fingerprint: self.turn_driver_preamble.tool_names_fingerprint,
+                tool_names: Arc::clone(&self.turn_driver_preamble.tool_names),
+                omitted_tool_count: self.turn_driver_preamble.omitted_tool_count,
                 contributions,
             },
             prompt_cache.as_deref(),
@@ -359,14 +346,14 @@ impl<'run> RuntimeTurnDriver<'run> {
             origin: EffectOrigin::Turn,
             turn_id: Some(self.turn_id.clone()),
             turn_index: Some(self.turn_index),
-            mode_iteration: Some(machine.mode_iteration()),
+            protocol_iteration: Some(machine.protocol_iteration()),
             effect_id: effect_id.0.to_string(),
             effect_kind,
             idempotency_key: crate::runtime::effect::turn_idempotency_key(
                 &self.session_id,
                 &self.turn_id,
                 self.turn_index,
-                machine.mode_iteration(),
+                machine.protocol_iteration(),
                 effect_kind,
                 effect_id,
             ),
@@ -477,7 +464,7 @@ impl<'run> RuntimeTurnDriver<'run> {
         );
         let prepare_context = self
             .session
-            .mode_execution_context(
+            .code_execution_context(
                 &self.session_id,
                 manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
                 manager.clone() as Arc<dyn crate::ProcessService>,
@@ -485,7 +472,7 @@ impl<'run> RuntimeTurnDriver<'run> {
                 direct_completions,
                 tool_event_tx.clone(),
                 Arc::new(crate::ChronologicalProjection::default()),
-                self.mode_extension.clone(),
+                self.protocol_extension.clone(),
                 self.turn_context.clone(),
             )
             .map_err(|err| {
@@ -632,11 +619,11 @@ impl<'run> RuntimeTurnDriver<'run> {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id.clone(),
             turn_index: self.turn_index,
-            mode_iteration: machine.mode_iteration(),
+            protocol_iteration: machine.protocol_iteration(),
             checkpoint_hash,
             machine_config,
             checkpoint,
-            mode_turn_options: self.mode_turn_options.clone(),
+            protocol_turn_options: self.protocol_turn_options.clone(),
             turn_prompt_layer: self.turn_context.prompt_layer().clone(),
             provider_id: self.policy.provider.kind().to_string(),
             model: self.policy.model.clone(),
@@ -650,35 +637,35 @@ impl<'run> RuntimeTurnDriver<'run> {
         Ok(())
     }
 
-    fn trace_context(&self, mode_iteration: usize) -> lash_trace::TraceContext {
+    fn trace_context(&self, protocol_iteration: usize) -> lash_trace::TraceContext {
         lash_trace::TraceContext::default()
             .for_session(self.session_id.clone())
             .for_turn_index(self.turn_index)
-            .for_mode_iteration(mode_iteration)
+            .for_protocol_iteration(protocol_iteration)
             .for_turn(self.turn_id.clone())
     }
 
-    fn llm_call_id(&mut self, mode_iteration: usize) -> String {
+    fn llm_call_id(&mut self, protocol_iteration: usize) -> String {
         let ordinal = self.next_llm_ordinal;
         self.next_llm_ordinal += 1;
         format!(
             "{}:{}:{}:{}",
-            self.session_id, self.turn_index, mode_iteration, ordinal
+            self.session_id, self.turn_index, protocol_iteration, ordinal
         )
     }
 
-    fn emit_trace(&self, mode_iteration: usize, event: lash_trace::TraceEvent) {
+    fn emit_trace(&self, protocol_iteration: usize, event: lash_trace::TraceEvent) {
         crate::trace::emit_trace(
             &self.host.core.trace_sink,
             &self.host.core.trace_context,
-            self.trace_context(mode_iteration),
+            self.trace_context(protocol_iteration),
             event,
         );
     }
 
-    fn emit_tool_call_trace(&self, mode_iteration: usize, record: &crate::ToolCallRecord) {
+    fn emit_tool_call_trace(&self, protocol_iteration: usize, record: &crate::ToolCallRecord) {
         self.emit_trace(
-            mode_iteration,
+            protocol_iteration,
             lash_trace::TraceEvent::ToolCallCompleted {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),
@@ -691,13 +678,13 @@ impl<'run> RuntimeTurnDriver<'run> {
 
     fn emit_tool_call_started_trace(
         &self,
-        mode_iteration: usize,
+        protocol_iteration: usize,
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
     ) {
         self.emit_trace(
-            mode_iteration,
+            protocol_iteration,
             lash_trace::TraceEvent::ToolCallStarted {
                 call_id,
                 name,
@@ -710,7 +697,7 @@ impl<'run> RuntimeTurnDriver<'run> {
         &mut self,
         messages: crate::MessageSequence,
         event_delta: Vec<crate::SessionEventRecord>,
-        mode_iteration: usize,
+        protocol_iteration: usize,
     ) {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return;
@@ -726,8 +713,8 @@ impl<'run> RuntimeTurnDriver<'run> {
             )
             .await;
         if boundary.persisted {
-            for event in &boundary.mode_events {
-                self.emit_trace(mode_iteration, mode_step_trace_event(event));
+            for event in &boundary.protocol_events {
+                self.emit_trace(protocol_iteration, protocol_step_trace_event(event));
             }
         }
     }
@@ -738,14 +725,14 @@ impl<'run> RuntimeTurnDriver<'run> {
         }
     }
 
-    fn emit_mode_diagnostic_trace(
+    fn emit_protocol_diagnostic_trace(
         &self,
-        mode_iteration: usize,
+        protocol_iteration: usize,
         phase: &str,
         payload: serde_json::Value,
     ) {
-        let mode_event = crate::ModeEvent::typed(
-            self.policy.execution_mode.clone(),
+        let protocol_event = crate::ProtocolEvent::typed(
+            "runtime",
             serde_json::json!({
                 "diagnostic": {
                     "phase": phase,
@@ -753,8 +740,11 @@ impl<'run> RuntimeTurnDriver<'run> {
                 }
             }),
         )
-        .expect("mode diagnostic event serializes");
-        self.emit_trace(mode_iteration, mode_step_trace_event(&mode_event));
+        .expect("protocol diagnostic event serializes");
+        self.emit_trace(
+            protocol_iteration,
+            protocol_step_trace_event(&protocol_event),
+        );
     }
 
     fn mark_phase_end(&self, phase: RuntimeTurnPhase) {
@@ -839,25 +829,22 @@ impl<'run> RuntimeTurnDriver<'run> {
                 ),
             ));
         }
-        let mode_preamble = self
+        let turn_driver_preamble = self
             .session
-            .mode_preamble(
-                &self.session_id,
-                checkpoint_record.machine_config.execution_mode.clone(),
-            )
+            .turn_driver_preamble(&self.session_id)
             .map_err(|err| {
                 RuntimeError::new(
-                    RuntimeErrorCode::RuntimeTurnRestoreModePreamble,
+                    RuntimeErrorCode::RuntimeTurnRestoreTurnDriverPreamble,
                     err.to_string(),
                 )
             })?;
         self.machine_config_snapshot = Some(checkpoint_record.machine_config.clone());
-        self.mode_turn_options = checkpoint_record.mode_turn_options.clone();
+        self.protocol_turn_options = checkpoint_record.protocol_turn_options.clone();
         self.turn_context
             .set_prompt_layer(checkpoint_record.turn_prompt_layer.clone());
         let config = crate::TurnMachineConfig {
-            protocol_driver: mode_preamble.config.protocol.clone(),
-            projector: mode_preamble.config.projector.clone(),
+            protocol_driver: turn_driver_preamble.config.protocol.clone(),
+            projector: turn_driver_preamble.config.projector.clone(),
             sync_execution_surface: checkpoint_record.machine_config.sync_execution_surface,
             model: checkpoint_record.machine_config.model.id.clone(),
             max_turns: checkpoint_record.machine_config.max_turns,
@@ -870,7 +857,7 @@ impl<'run> RuntimeTurnDriver<'run> {
             session_id: checkpoint_record.machine_config.session_id.clone(),
             emit_llm_trace: false,
             termination: checkpoint_record.machine_config.termination.clone(),
-            turn_limit_final_message: mode_preamble.config.turn_limit_final_message.clone(),
+            turn_limit_final_message: turn_driver_preamble.config.turn_limit_final_message.clone(),
         };
         Ok(TurnMachine::restore_from_checkpoint(
             config,
@@ -909,298 +896,49 @@ impl<'run> RuntimeTurnDriver<'run> {
                 Effect::Progress {
                     messages,
                     event_delta,
-                    mode_iteration,
+                    protocol_iteration,
                 } => {
-                    self.persist_progress_boundary(messages, event_delta, mode_iteration)
+                    self.persist_progress_boundary(messages, event_delta, protocol_iteration)
                         .await
                 }
                 Effect::Done {
                     messages,
                     event_delta,
-                    mode_iteration,
+                    protocol_iteration,
                 } => {
                     self.turn_pipeline.apply_event_delta(event_delta);
-                    return Ok((messages, mode_iteration));
+                    return Ok((messages, protocol_iteration));
                 }
                 Effect::LlmCall { id, request } => {
-                    if cancel.is_cancelled() {
-                        emit!(SessionEvent::Done);
-                        return Ok((crate::MessageSequence::default(), run_offset));
-                    }
-                    match self.before_llm_call(&machine, &request).await {
-                        Ok(Some(crate::ModeLlmCallAction::Handoff { session_id })) => {
-                            machine.finish_with_outcome(crate::TurnOutcome::Handoff { session_id });
-                            continue;
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            let err_string = err.to_string();
-                            if self.should_abort_for_runtime_effect_error() {
-                                return Err(RuntimeError::new(
-                                    RuntimeErrorCode::ModeBeforeLlmCall,
-                                    err_string,
-                                ));
-                            }
-                            machine.fail_turn(make_error_event(
-                                "mode_before_llm_call",
-                                Some("before_llm_call_failed"),
-                                err_string.clone(),
-                                Some(err_string),
-                            ));
-                            continue;
-                        }
-                    }
-                    let (result, text_streamed) = match self
-                        .invoke_turn_llm_effect(&mut machine, id, request, &event_tx, &cancel)
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(err) => {
-                            self.fail_or_abort_runtime_effect_controller(&mut machine, err)?;
-                            continue;
-                        }
-                    };
-                    if let Ok(response) = &result {
-                        let usage = crate::runtime::effect::token_usage_from_llm(&response.usage);
-                        self.turn_pipeline.state_mut().last_prompt_usage =
-                            normalize_prompt_usage(&self.policy.provider, &usage);
-                        if !text_streamed {
-                            emit_semantic_response_parts(
-                                &event_tx,
-                                response,
-                                self.policy.execution_mode.plugin_id() == "rlm",
-                            )
-                            .await;
-                        }
-                    }
-                    machine.handle_response(Response::LlmComplete {
-                        id,
-                        result,
-                        text_streamed,
-                    });
+                    self.handle_llm_call_effect(&mut machine, id, request, &event_tx, &cancel)
+                        .await?;
                 }
                 Effect::Checkpoint { id, checkpoint } => {
-                    let result = self
-                        .invoke_turn_checkpoint_effect(
-                            &mut machine,
-                            id,
-                            checkpoint,
-                            &event_tx,
-                            &cancel,
-                        )
-                        .await;
-                    match result {
-                        Ok((messages, transient_messages)) => {
-                            machine.handle_response(Response::Checkpoint {
-                                id,
-                                messages,
-                                transient_messages,
-                            });
-                        }
-                        Err(err) => {
-                            self.fail_or_abort_runtime_effect_controller(&mut machine, err.into())?;
-                        }
-                    }
+                    self.handle_checkpoint_effect(&mut machine, id, checkpoint, &event_tx, &cancel)
+                        .await?;
                 }
                 Effect::SyncExecutionSurface {
                     id,
                     update_machine_config,
                 } => {
-                    let result = match self
-                        .invoke_turn_execution_surface_sync_effect(
-                            &mut machine,
-                            id,
-                            update_machine_config,
-                            &event_tx,
-                            &cancel,
-                        )
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(err) => {
-                            self.fail_or_abort_runtime_effect_controller(&mut machine, err)?;
-                            continue;
-                        }
-                    };
-                    machine.handle_response(Response::ExecutionSurfaceSynced { id, result });
+                    self.handle_execution_surface_sync_effect(
+                        &mut machine,
+                        id,
+                        update_machine_config,
+                        &event_tx,
+                        &cancel,
+                    )
+                    .await?;
                 }
                 Effect::ToolCalls { id, calls } => {
-                    if self.host.core.trace_sink.is_some() {
-                        for pending in &calls {
-                            self.emit_tool_call_started_trace(
-                                machine.mode_iteration(),
-                                Some(pending.call_id.clone()),
-                                pending.tool_name.clone(),
-                                pending.args.clone(),
-                            );
-                        }
-                    }
-                    let results = match self
-                        .invoke_turn_tool_calls_effect(&mut machine, id, calls, &event_tx, &cancel)
-                        .await
-                    {
-                        Ok(results) => results,
-                        Err(err) => {
-                            self.fail_or_abort_runtime_effect_controller(&mut machine, err)?;
-                            continue;
-                        }
-                    };
-                    if self.host.core.trace_sink.is_some() {
-                        for outcome in &results {
-                            let record = ToolCallRecord {
-                                call_id: Some(outcome.call_id.clone()),
-                                tool: outcome.tool_name.clone(),
-                                args: outcome.args.clone(),
-                                output: outcome.output.clone(),
-                                duration_ms: outcome.duration_ms,
-                            };
-                            self.emit_tool_call_trace(machine.mode_iteration(), &record);
-                        }
-                    }
-                    self.turn_pipeline
-                        .record_tool_calls(results.iter().map(|outcome| ToolCallRecord {
-                            call_id: Some(outcome.call_id.clone()),
-                            tool: outcome.tool_name.clone(),
-                            args: outcome.args.clone(),
-                            output: outcome.output.clone(),
-                            duration_ms: outcome.duration_ms,
-                        }));
-                    machine.handle_response(Response::ToolResults { id, results });
+                    self.handle_tool_calls_effect(&mut machine, id, calls, &event_tx, &cancel)
+                        .await?;
                 }
                 Effect::Log { event } => self.handle_log_event(event),
                 Effect::CancelLlm { .. } => {}
                 Effect::ExecCode { id, code } => {
-                    let code_correlation_id = TurnActivityId::new(format!("code:{id:?}"));
-                    let iteration = machine.mode_iteration();
-                    if self.host.core.trace_sink.is_some() {
-                        self.emit_mode_diagnostic_trace(
-                            iteration,
-                            "exec_code_started",
-                            serde_json::json!({
-                                "code": code,
-                                "code_chars": code.chars().count(),
-                            }),
-                        );
-                    }
-                    send_turn_activity(
-                        &event_tx,
-                        code_correlation_id.clone(),
-                        TurnEvent::CodeBlockStarted {
-                            language: "lashlang".to_string(),
-                            code: code.clone(),
-                        },
-                    )
-                    .await;
-                    let exec_created_at = std::time::Instant::now();
-                    let result = match self
-                        .invoke_turn_exec_effect(&mut machine, id, code.clone(), &event_tx, &cancel)
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(err) => {
-                            let message = err.to_string();
-                            send_turn_activity(
-                                &event_tx,
-                                code_correlation_id.clone(),
-                                TurnEvent::CodeBlockCompleted {
-                                    language: "lashlang".to_string(),
-                                    output: String::new(),
-                                    error: Some(message),
-                                    success: false,
-                                    duration_ms: exec_created_at.elapsed().as_millis() as u64,
-                                    tool_call_ids: Vec::new(),
-                                },
-                            )
-                            .await;
-                            self.fail_or_abort_runtime_effect_controller(&mut machine, err)?;
-                            continue;
-                        }
-                    };
-                    match &result {
-                        Ok(output) => {
-                            send_turn_activity(
-                                &event_tx,
-                                code_correlation_id.clone(),
-                                TurnEvent::CodeBlockCompleted {
-                                    language: "lashlang".to_string(),
-                                    output: output.output.clone(),
-                                    error: output.error.clone(),
-                                    success: output.error.is_none(),
-                                    duration_ms: output.duration_ms,
-                                    tool_call_ids: output
-                                        .tool_calls
-                                        .iter()
-                                        .filter_map(|record| record.call_id.clone())
-                                        .collect(),
-                                },
-                            )
-                            .await;
-                        }
-                        Err(error) => {
-                            send_turn_activity(
-                                &event_tx,
-                                code_correlation_id.clone(),
-                                TurnEvent::CodeBlockCompleted {
-                                    language: "lashlang".to_string(),
-                                    output: String::new(),
-                                    error: Some(error.clone()),
-                                    success: false,
-                                    duration_ms: exec_created_at.elapsed().as_millis() as u64,
-                                    tool_call_ids: Vec::new(),
-                                },
-                            )
-                            .await;
-                        }
-                    }
-                    if let Ok(output) = &result {
-                        if self.host.core.trace_sink.is_some() {
-                            self.emit_mode_diagnostic_trace(
-                                iteration,
-                                "exec_code_completed",
-                                serde_json::json!({
-                                    "duration_ms": output.duration_ms,
-                                    "output": output.output,
-                                    "output_chars": output.output.chars().count(),
-                                    "observation_count": output.observations.len(),
-                                    "observation_truncation": output.observation_truncation,
-                                    "error": output.error,
-                                    "terminal_finish": output.terminal_finish,
-                                    "terminal_finish_present": output.terminal_finish.is_some(),
-                                    "tool_call_count": output.tool_calls.len(),
-                                }),
-                            );
-                            if !output.observation_truncation.is_empty() {
-                                self.emit_mode_diagnostic_trace(
-                                    iteration,
-                                    "observation_projection",
-                                    serde_json::json!({
-                                        "projections": output.observation_truncation,
-                                    }),
-                                );
-                            }
-                        }
-                        self.turn_pipeline
-                            .record_tool_calls(output.tool_calls.iter().cloned());
-                    } else if let Err(error) = &result
-                        && self.host.core.trace_sink.is_some()
-                    {
-                        self.emit_mode_diagnostic_trace(
-                            iteration,
-                            "exec_code_failed",
-                            serde_json::json!({ "error": error }),
-                        );
-                    }
-                    let response = match result {
-                        Ok(output) => Response::ExecResult {
-                            id,
-                            result: Ok(output),
-                        },
-                        Err(error) => Response::ExecResult {
-                            id,
-                            result: Err(error),
-                        },
-                    };
-                    machine.handle_response(response);
+                    self.handle_exec_code_effect(&mut machine, id, code, &event_tx, &cancel)
+                        .await?;
                 }
             }
         }
@@ -1223,7 +961,6 @@ impl<'run> RuntimeTurnDriver<'run> {
             };
         }
 
-        let execution_mode = self.policy.execution_mode.clone();
         let mut session_policy = self.runtime_session_policy();
         let model = match self.prepare_provider(&mut session_policy).await {
             Ok(model) => model,
@@ -1234,12 +971,7 @@ impl<'run> RuntimeTurnDriver<'run> {
             }
         };
         let execution_surface = match self
-            .prepare_execution_surface(
-                execution_mode,
-                &session_policy,
-                self.turn_index,
-                messages.clone(),
-            )
+            .prepare_execution_surface(&session_policy, self.turn_index, messages.clone())
             .await
         {
             Ok(surface) => surface,
@@ -1262,7 +994,6 @@ impl<'run> RuntimeTurnDriver<'run> {
             Some(self.session.prompt_cache()),
         );
         let machine_config_snapshot = crate::RuntimeTurnMachineConfigSnapshot {
-            execution_mode: execution_surface.execution_mode.clone(),
             session_id: self.session_id.clone(),
             run_session_id: session_policy.session_id.clone(),
             autonomous: session_policy.autonomous,
@@ -1270,29 +1001,32 @@ impl<'run> RuntimeTurnDriver<'run> {
             generation: generation_options_from_provider(&session_policy.provider),
             max_turns: session_policy.max_turns,
             sync_execution_surface: execution_surface
-                .mode_preamble
+                .turn_driver_preamble
                 .config
                 .sync_execution_surface,
-            tool_specs: execution_surface.mode_preamble.tool_specs.as_ref().clone(),
+            tool_specs: execution_surface
+                .turn_driver_preamble
+                .tool_specs
+                .as_ref()
+                .clone(),
             system_prompt: prepared_prompt.system_prompt.to_string(),
-            termination: self.mode_turn_options.clone(),
+            termination: self.protocol_turn_options.clone(),
         };
         let prepared = crate::build_turn(crate::SansIoTurnInput {
             session_id: self.session_id.clone(),
             run_session_id: session_policy.session_id.clone(),
             autonomous: session_policy.autonomous,
             model,
-            mode: execution_surface.execution_mode,
             messages,
             events: self.turn_pipeline.active_events(),
-            mode_run_offset: run_offset,
-            mode_preamble: execution_surface.mode_preamble,
+            protocol_run_offset: run_offset,
+            turn_driver_preamble: execution_surface.turn_driver_preamble,
             prepared_prompt,
             max_turns: session_policy.max_turns,
             model_variant: session_policy.model.variant.clone(),
             generation: generation_options_from_provider(&session_policy.provider),
             emit_llm_trace: false,
-            termination: self.mode_turn_options.clone(),
+            termination: self.protocol_turn_options.clone(),
         });
         if self.host.core.trace_sink.is_some() {
             let prompt_hash =
@@ -1330,12 +1064,7 @@ impl<'run> RuntimeTurnDriver<'run> {
 
         let policy = self.policy.clone();
         let execution_surface = self
-            .prepare_execution_surface(
-                policy.execution_mode.clone(),
-                &policy,
-                self.turn_index,
-                machine.message_sequence(),
-            )
+            .prepare_execution_surface(&policy, self.turn_index, machine.message_sequence())
             .await
             .map_err(|err| crate::SessionError::Protocol(err.to_string()))?;
         let prepared_prompt = execution_surface.build_prompt(
@@ -1347,23 +1076,18 @@ impl<'run> RuntimeTurnDriver<'run> {
 
         Ok(Some(crate::sansio::ExecutionSurfaceSync {
             system_prompt: prepared_prompt.system_prompt,
-            tool_specs: execution_surface.mode_preamble.tool_specs.clone(),
+            tool_specs: execution_surface.turn_driver_preamble.tool_specs.clone(),
         }))
     }
 
     async fn prepare_execution_surface(
         &mut self,
-        execution_mode: ExecutionMode,
         session_policy: &SessionPolicy,
         turn_index: usize,
         messages: crate::MessageSequence,
     ) -> Result<PreparedExecutionSurface, PluginError> {
-        let tool_surface = self
-            .session
-            .tool_surface(&self.session_id, execution_mode.clone())?;
-        let mode_preamble = self
-            .session
-            .mode_preamble(&self.session_id, execution_mode.clone())?;
+        let tool_surface = self.session.tool_surface(&self.session_id)?;
+        let turn_driver_preamble = self.session.turn_driver_preamble(&self.session_id)?;
         let plugin_prompt_contributions = self
             .session
             .plugins()
@@ -1373,10 +1097,10 @@ impl<'run> RuntimeTurnDriver<'run> {
                 state: self.turn_pipeline.read_view(
                     session_policy.clone(),
                     turn_index,
-                    self.mode_turn_options.clone(),
+                    self.protocol_turn_options.clone(),
                     messages,
                 ),
-                mode_turn_options: self.mode_turn_options.clone(),
+                protocol_turn_options: self.protocol_turn_options.clone(),
                 turn_context: self.turn_context.clone(),
             })
             .await?;
@@ -1387,15 +1111,14 @@ impl<'run> RuntimeTurnDriver<'run> {
         for contribution in plugin_prompt_contributions {
             prompt.add_contribution(contribution);
         }
-        if let Some(extension) = &self.mode_extension {
+        if let Some(extension) = &self.protocol_extension {
             for contribution in extension.prompt_contributions() {
                 prompt.add_contribution(contribution);
             }
         }
         Ok(PreparedExecutionSurface {
-            execution_mode,
             tool_surface,
-            mode_preamble,
+            turn_driver_preamble,
             prompt,
         })
     }
@@ -1404,7 +1127,7 @@ impl<'run> RuntimeTurnDriver<'run> {
         &mut self,
         machine: &TurnMachine,
         request: &LlmRequest,
-    ) -> Result<Option<crate::ModeLlmCallAction>, PluginError> {
+    ) -> Result<Option<crate::ProtocolLlmCallAction>, PluginError> {
         let latest_prompt_usage = self.turn_pipeline.state_mut().last_prompt_usage.clone();
         let effect_controller =
             crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
@@ -1420,16 +1143,16 @@ impl<'run> RuntimeTurnDriver<'run> {
         )?;
         self.session
             .plugins()
-            .mode_session()
+            .protocol_session()
             .before_llm_call(
-                crate::ModeBeforeLlmCallContext {
+                crate::ProtocolBeforeLlmCallContext {
                     session_id: self.session_id.clone(),
                     host: self.session_manager.clone()
                         as Arc<dyn crate::plugin::RuntimeSessionHost>,
                     processes: self.session_manager.clone() as Arc<dyn crate::ProcessService>,
                     state: self.checkpoint_state_view(
                         machine.message_sequence(),
-                        machine.mode_iteration(),
+                        machine.protocol_iteration(),
                     ),
                     latest_prompt_usage,
                     direct_completions,
@@ -1448,21 +1171,21 @@ impl<'run> RuntimeTurnDriver<'run> {
     fn checkpoint_state_view(
         &self,
         messages: crate::MessageSequence,
-        _mode_iteration: usize,
+        _protocol_iteration: usize,
     ) -> crate::SessionReadView {
         self.turn_pipeline.read_view(
             self.policy.clone(),
             self.turn_index,
-            self.mode_turn_options.clone(),
+            self.protocol_turn_options.clone(),
             messages,
         )
     }
 }
 
-fn mode_step_trace_event(mode_event: &crate::ModeEvent) -> lash_trace::TraceEvent {
-    lash_trace::TraceEvent::ModeStep {
-        mode: mode_event.mode_id.plugin_id().to_string(),
-        payload: mode_event.payload.clone(),
+fn protocol_step_trace_event(protocol_event: &crate::ProtocolEvent) -> lash_trace::TraceEvent {
+    lash_trace::TraceEvent::ProtocolStep {
+        plugin_id: protocol_event.plugin_id.clone(),
+        payload: protocol_event.payload.clone(),
     }
 }
 
@@ -1471,22 +1194,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_step_trace_event_preserves_mode_payload() {
-        let mode_event = crate::ModeEvent::typed(
-            crate::ExecutionMode::new("custom"),
+    fn protocol_step_trace_event_preserves_protocol_payload() {
+        let protocol_event = crate::ProtocolEvent::typed(
+            "custom",
             serde_json::json!({
                 "code": "print \"hi\"",
                 "final_output": "done"
             }),
         )
-        .expect("mode event");
+        .expect("protocol event");
 
-        let lash_trace::TraceEvent::ModeStep { mode, payload } = mode_step_trace_event(&mode_event)
+        let lash_trace::TraceEvent::ProtocolStep { plugin_id, payload } =
+            protocol_step_trace_event(&protocol_event)
         else {
-            panic!("expected mode step trace event");
+            panic!("expected protocol step trace event");
         };
 
-        assert_eq!(mode, "custom");
+        assert_eq!(plugin_id, "custom");
         assert_eq!(
             payload.get("code").and_then(serde_json::Value::as_str),
             Some("print \"hi\"")

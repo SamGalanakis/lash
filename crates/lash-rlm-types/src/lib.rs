@@ -1,9 +1,9 @@
-use lash_sansio::{AttachmentRef, ModeProtocol, ToolCallOutput};
+use lash_sansio::{AttachmentRef, ToolCallOutput, TurnProtocol};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct RlmTrajectoryEntry {
     pub id: String,
-    pub mode_iteration: usize,
+    pub protocol_iteration: usize,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reasoning: String,
     pub code: String,
@@ -80,7 +80,7 @@ pub enum RlmHistoryItem {
     },
     RlmStep {
         id: String,
-        mode_iteration: usize,
+        protocol_iteration: usize,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         reasoning: String,
         code: String,
@@ -119,7 +119,7 @@ pub fn apply_globals_patch(
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
-pub enum RlmModeEvent {
+pub enum RlmProtocolEvent {
     RlmTrajectoryEntry(RlmTrajectoryEntry),
     RlmGlobalsPatch(RlmGlobalsPatchPluginBody),
     RlmSeed(RlmSeedPluginBody),
@@ -140,7 +140,7 @@ pub struct RlmProjection {
 }
 
 impl RlmProjection {
-    pub fn from_events(events: impl IntoIterator<Item = RlmModeEvent>) -> Self {
+    pub fn from_events(events: impl IntoIterator<Item = RlmProtocolEvent>) -> Self {
         let mut projection = Self::default();
         for event in events {
             projection.apply_event(event);
@@ -148,15 +148,15 @@ impl RlmProjection {
         projection
     }
 
-    pub fn apply_event(&mut self, event: RlmModeEvent) {
+    pub fn apply_event(&mut self, event: RlmProtocolEvent) {
         match event {
-            RlmModeEvent::RlmTrajectoryEntry(entry) => {
+            RlmProtocolEvent::RlmTrajectoryEntry(entry) => {
                 self.trajectory.push(entry);
             }
-            RlmModeEvent::RlmGlobalsPatch(patch) => {
+            RlmProtocolEvent::RlmGlobalsPatch(patch) => {
                 apply_globals_patch(&mut self.globals, &patch);
             }
-            RlmModeEvent::RlmSeed(seed) => {
+            RlmProtocolEvent::RlmSeed(seed) => {
                 apply_globals_patch(
                     &mut self.globals,
                     &RlmGlobalsPatchPluginBody {
@@ -164,19 +164,19 @@ impl RlmProjection {
                     },
                 );
             }
-            RlmModeEvent::RlmDiagnostic(_) => {}
+            RlmProtocolEvent::RlmDiagnostic(_) => {}
         }
     }
 }
 
 pub fn project_globals(
-    events: impl IntoIterator<Item = RlmModeEvent>,
+    events: impl IntoIterator<Item = RlmProtocolEvent>,
 ) -> serde_json::Map<String, serde_json::Value> {
     RlmProjection::from_events(events).globals
 }
 
 pub fn project_trajectory(
-    events: impl IntoIterator<Item = RlmModeEvent>,
+    events: impl IntoIterator<Item = RlmProtocolEvent>,
 ) -> Vec<RlmTrajectoryEntry> {
     RlmProjection::from_events(events).trajectory
 }
@@ -194,7 +194,7 @@ impl Default for RlmTermination {
     }
 }
 
-/// RLM-mode session config. RLM turns terminate through `submit`,
+/// RLM protocol session config. RLM turns terminate through `submit`,
 /// optionally validated against a schema, unless prose completion is
 /// explicitly enabled for the turn.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -206,7 +206,7 @@ pub struct RlmCreateExtras {
 /// Wire-format snapshot of a set of projected bindings. Pairs of
 /// `(name, json_value)` that get re-projected as host bindings on the child
 /// session at creation time. This is the serializable form of
-/// `lash_mode_rlm::RlmProjectedBindings`; lash-rlm-types stays free of any
+/// `lash_protocol_rlm::RlmProjectedBindings`; lash-rlm-types stays free of any
 /// runtime dependency on lashlang itself.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RlmProjectedSeedSnapshot {
@@ -267,10 +267,10 @@ pub fn projection_ref_inner(value: &serde_json::Value) -> Option<&serde_json::Va
 }
 
 #[derive(Clone, Debug)]
-pub struct RlmModeProtocol;
+pub struct RlmTurnProtocol;
 
-impl ModeProtocol for RlmModeProtocol {
-    type Event = RlmModeEvent;
+impl TurnProtocol for RlmTurnProtocol {
+    type Event = RlmProtocolEvent;
     type Termination = RlmTermination;
     type DriverState = serde_json::Value;
 }
@@ -298,7 +298,7 @@ mod tests {
         };
         let entry = RlmTrajectoryEntry {
             id: "step-1".to_string(),
-            mode_iteration: 1,
+            protocol_iteration: 1,
             code: "submit 1".to_string(),
             ..Default::default()
         };
@@ -311,10 +311,10 @@ mod tests {
         };
 
         let projection = RlmProjection::from_events([
-            RlmModeEvent::RlmGlobalsPatch(first),
-            RlmModeEvent::RlmSeed(seed),
-            RlmModeEvent::RlmTrajectoryEntry(entry.clone()),
-            RlmModeEvent::RlmGlobalsPatch(second),
+            RlmProtocolEvent::RlmGlobalsPatch(first),
+            RlmProtocolEvent::RlmSeed(seed),
+            RlmProtocolEvent::RlmTrajectoryEntry(entry.clone()),
+            RlmProtocolEvent::RlmGlobalsPatch(second),
         ]);
 
         assert_eq!(

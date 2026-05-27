@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9" }
-lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.9" }
+lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.9" }
 lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.9" }
 lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.9" }
 anyhow = { workspace = true }

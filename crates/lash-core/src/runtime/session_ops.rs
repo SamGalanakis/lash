@@ -27,7 +27,7 @@ impl LashRuntime {
                 Some(session.plugins().snapshot_revision_fingerprint());
         }
         self.policy = state.policy.clone();
-        self.mode_turn_options = state.mode_turn_options.clone();
+        self.protocol_turn_options = state.protocol_turn_options.clone();
         self.state = state;
     }
 
@@ -45,11 +45,11 @@ impl LashRuntime {
         }
         let node_ids = append_session_nodes_to_state(&mut self.state, &request.nodes);
         if let Some(session) = self.session.as_mut() {
-            let mode_session = Arc::clone(session.plugins().mode_session());
+            let protocol_session = Arc::clone(session.plugins().protocol_session());
             let session_id = self.state.session_id.clone();
-            mode_session
+            protocol_session
                 .append_session_nodes(
-                    crate::plugin::ModeSessionContext::new(session, &session_id),
+                    crate::plugin::ProtocolSessionContext::new(session, &session_id),
                     &request.nodes,
                 )
                 .await?;
@@ -87,30 +87,30 @@ impl LashRuntime {
         })
     }
 
-    pub async fn apply_mode_session_extension(
+    pub async fn apply_protocol_session_extension(
         &mut self,
-        extension: crate::ModeSessionExtensionHandle,
+        extension: crate::ProtocolSessionExtensionHandle,
     ) -> Result<(), SessionError> {
         let Some(session) = self.session.as_ref() else {
             return Err(SessionError::Protocol(
                 "runtime session is not available".to_string(),
             ));
         };
-        let mode_session = Arc::clone(session.plugins().mode_session());
-        mode_session.apply_session_extension(extension).await
+        let protocol_session = Arc::clone(session.plugins().protocol_session());
+        protocol_session.apply_session_extension(extension).await
     }
 
-    pub async fn validate_mode_turn_extension(
+    pub async fn validate_protocol_turn_extension(
         &mut self,
-        extension: &crate::ModeTurnExtensionHandle,
+        extension: &crate::ProtocolTurnExtensionHandle,
     ) -> Result<(), SessionError> {
         let Some(session) = self.session.as_ref() else {
             return Err(SessionError::Protocol(
                 "runtime session is not available".to_string(),
             ));
         };
-        let mode_session = Arc::clone(session.plugins().mode_session());
-        mode_session.validate_turn_extension(extension).await
+        let protocol_session = Arc::clone(session.plugins().protocol_session());
+        protocol_session.validate_turn_extension(extension).await
     }
 
     pub async fn branch_to_node(
@@ -174,34 +174,43 @@ impl LashRuntime {
         session.reset().await
     }
 
-    /// Explicitly snapshot execution-mode-local state, if any.
+    /// Explicitly snapshot protocol-local execution state, if any.
     pub async fn snapshot_execution_state(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
             ));
         };
-        let mode_session = Arc::clone(session.plugins().mode_session());
+        let code_executor = session
+            .plugins()
+            .code_executor()
+            .ok_or(SessionError::CodeExecutionUnavailable)?;
         let session_id = self.state.session_id.clone();
-        let blob = mode_session
-            .snapshot_execution_state(crate::plugin::ModeSessionContext::new(session, &session_id))
+        let blob = code_executor
+            .snapshot_execution_state(crate::plugin::ProtocolSessionContext::new(
+                session,
+                &session_id,
+            ))
             .await?;
         self.state.execution_state_snapshot = blob.clone();
         Ok(blob)
     }
 
-    /// Explicitly restore execution-mode-local state from an opaque snapshot blob.
+    /// Explicitly restore protocol-local execution state from an opaque snapshot blob.
     pub async fn restore_execution_state(&mut self, snapshot: &[u8]) -> Result<(), SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
             ));
         };
-        let mode_session = Arc::clone(session.plugins().mode_session());
+        let code_executor = session
+            .plugins()
+            .code_executor()
+            .ok_or(SessionError::CodeExecutionUnavailable)?;
         let session_id = self.state.session_id.clone();
-        mode_session
+        code_executor
             .restore_execution_state(
-                crate::plugin::ModeSessionContext::new(session, &session_id),
+                crate::plugin::ProtocolSessionContext::new(session, &session_id),
                 snapshot,
             )
             .await?;

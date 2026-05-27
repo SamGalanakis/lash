@@ -114,7 +114,7 @@ mod tests {
             origin: EffectOrigin::Turn,
             turn_id: Some("turn".to_string()),
             turn_index: Some(0),
-            mode_iteration: Some(0),
+            protocol_iteration: Some(0),
             effect_id: "process:start:call-123".to_string(),
             effect_kind: RuntimeEffectKind::Process,
             idempotency_key: "session:turn:process:start:call-123".to_string(),

@@ -395,7 +395,7 @@ mod tests {
                     turn_index: 1,
                     token_usage,
                     last_prompt_usage: None,
-                    mode_turn_options: Default::default(),
+                    protocol_turn_options: Default::default(),
                 },
                 tool_state_ref: None,
                 tool_state: Some(lash_core::ToolState::default()),
@@ -416,8 +416,6 @@ mod tests {
                     "gpt-test", None, 200_000, None, None,
                 )
                 .expect("valid model spec"),
-                execution_mode: lash_core::ExecutionMode::standard(),
-                standard_context_approach: Some(lash_core::StandardContextApproach::default()),
             },
             checkpoint_ref: Some(checkpoint_ref),
             token_ledger: Vec::new(),

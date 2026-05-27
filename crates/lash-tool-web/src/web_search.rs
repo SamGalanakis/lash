@@ -1,8 +1,7 @@
 use serde_json::{Value, json};
 
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
-    ToolResult,
+    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 
 use lash_tool_support::object_schema;
@@ -123,7 +122,7 @@ fn web_search_tool_definition() -> ToolDefinition {
                 "search_web(query=\"latest Rust release notes\", limit=5)".into(),
             ])
             .with_discovery(lash_tool_support::discovery_metadata("web", &["web_search"]))
-            .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_scheduling(ToolScheduling::Parallel)
 }
 
 #[cfg(test)]
@@ -158,7 +157,7 @@ mod tests {
         );
         assert_eq!(definition.activation, lash_core::ToolActivation::Always);
         assert_eq!(
-            definition.availability.standard,
+            definition.availability.base,
             lash_core::ToolAvailability::Showcased
         );
     }

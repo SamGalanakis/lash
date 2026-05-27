@@ -41,7 +41,7 @@ pub struct PromptHookContext {
     pub session_id: String,
     pub host: Arc<dyn RuntimeSessionHost>,
     pub state: SessionReadView,
-    pub mode_turn_options: ModeTurnOptions,
+    pub protocol_turn_options: ProtocolTurnOptions,
     pub turn_context: crate::TurnContext,
 }
 
@@ -234,7 +234,7 @@ pub struct AssistantStreamTransform {
     /// When `true`, the runtime cancels the in-flight LLM call the
     /// moment this hook returns and finalizes the turn using whatever
     /// text has been streamed so far. Any plugin may set this — the
-    /// first to raise it wins. Used by mode plugins to enforce
+    /// first to raise it wins. Used by protocol plugins to enforce
     /// one-block-per-turn contracts (e.g. the RLM stream mask aborts
     /// as soon as the first lashlang fence closes).
     pub abort_stream: bool,

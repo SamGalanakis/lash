@@ -4,6 +4,7 @@ pub struct SessionBuilder {
     pub(crate) core: LashCore,
     pub(crate) session_id: String,
     pub(crate) spec: SessionSpec,
+    pub(crate) mode: Option<ModeId>,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) store: Option<Arc<dyn RuntimePersistence>>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
@@ -12,17 +13,17 @@ pub struct SessionBuilder {
 
 impl SessionBuilder {
     pub fn standard(mut self) -> Self {
-        self.spec = self.spec.mode(ModeId::standard().execution_mode());
+        self.mode = Some(ModeId::standard());
         self
     }
 
     pub fn rlm(mut self) -> Self {
-        self.spec = self.spec.mode(ModeId::rlm().execution_mode());
+        self.mode = Some(ModeId::rlm());
         self
     }
 
     pub fn mode(mut self, mode: ModeId) -> Self {
-        self.spec = self.spec.mode(mode.execution_mode());
+        self.mode = Some(mode);
         self
     }
 
@@ -122,21 +123,14 @@ impl SessionBuilder {
     }
 
     fn session_policy(&self) -> Result<(SessionPolicy, ModeId)> {
-        let execution_mode = self
-            .spec
-            .execution_mode
+        let mode = self
+            .mode
             .clone()
-            .unwrap_or_else(|| self.core.default_mode.execution_mode());
-        let mode = ModeId::new(execution_mode.plugin_id());
-        let preset = self
-            .core
-            .modes
-            .get(&mode)
-            .ok_or_else(|| EmbedError::ModeNotInstalled { mode: mode.clone() })?;
-        let mut base = self.core.policy.clone();
-        base.execution_mode = execution_mode;
-        base.standard_context_approach = preset.standard_context_approach.clone();
-        let mut policy = self.spec.resolve_against(&base);
+            .unwrap_or_else(|| self.core.default_mode.clone());
+        if !self.core.modes.contains_key(&mode) {
+            return Err(EmbedError::ModeNotInstalled { mode });
+        }
+        let mut policy = self.spec.resolve_against(&self.core.policy);
         policy.session_id = Some(self.session_id.clone());
         Ok((policy, mode))
     }
@@ -229,19 +223,14 @@ impl SessionBuilder {
         store: Option<Arc<dyn RuntimePersistence>>,
     ) -> Result<LashSession> {
         let mut env = self.core.env.clone();
-        if !self.plugin_factories.is_empty() {
-            let mut factories = self.core.plugin_factories.as_ref().clone();
-            factories.extend(self.plugin_factories);
-            let mut plugin_host = PluginHost::new(factories);
-            if env.process_registry.is_some() {
-                let abilities = plugin_host
-                    .lashlang_abilities()
-                    .with_processes()
-                    .with_process_lifecycle();
-                plugin_host = plugin_host.with_lashlang_abilities(abilities);
-            }
-            env.plugin_host = Some(Arc::new(plugin_host));
-        }
+        let plugin_host = build_plugin_host_for_mode(
+            &self.core.modes,
+            &mode,
+            self.core.plugin_factories.as_ref(),
+            self.plugin_factories,
+            env.process_registry.is_some(),
+        )?;
+        env.plugin_host = Some(Arc::new(plugin_host));
         let runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
         let turn_input_injection_bridge = runtime.turn_input_injection_bridge()?;
         let handle = RuntimeHandle::new(runtime);
@@ -347,7 +336,7 @@ impl LashSession {
             active_plugins: self.active_plugins.clone(),
             input,
             cancel: CancellationToken::new(),
-            mode_turn_options: None,
+            protocol_turn_options: None,
             provider: None,
             model: None,
         }

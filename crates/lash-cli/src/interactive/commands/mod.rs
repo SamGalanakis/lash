@@ -318,13 +318,8 @@ async fn handle_slash_command(
             let context_window = app.context_window;
             let cwd = app.cwd.clone();
             let session_name = app.session_name.clone();
-            let standard_context_approach = runtime
-                .as_ref()
-                .map(|rt| async { rt.policy_snapshot().standard_context_approach });
-            let standard_context_approach = match standard_context_approach {
-                Some(future) => future.await,
-                None => None,
-            };
+            let standard_context_approach = (current_execution_mode == &ExecutionMode::standard())
+                .then(lash_standard_plugins::StandardContextApproach::default);
             let session_db_path = logger.db_path().to_string_lossy().to_string();
             push_system_message(
                 app,

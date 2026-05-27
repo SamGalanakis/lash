@@ -613,8 +613,6 @@ pub async fn fork_current_session(
             config: lash_core::PersistedSessionConfig {
                 provider_id: _provider.kind().to_string(),
                 model,
-                execution_mode: lash_core::ExecutionMode::standard(),
-                standard_context_approach: Some(lash_core::StandardContextApproach::default()),
             },
             checkpoint_ref: None,
             token_ledger: Vec::new(),
@@ -676,7 +674,7 @@ mod fork_tests {
                     reasoning_tokens: 2,
                 },
                 last_prompt_usage: None,
-                mode_turn_options: Default::default(),
+                protocol_turn_options: Default::default(),
             },
             tool_state_ref: None,
             tool_state: Some(empty_tool_state()),
@@ -700,8 +698,6 @@ mod fork_tests {
                 provider_id: dummy_provider().kind().to_string(),
                 model: lash_core::ModelSpec::from_token_limits("gpt-test", None, 1024, None, None)
                     .expect("valid model spec"),
-                execution_mode: lash_core::ExecutionMode::standard(),
-                standard_context_approach: Some(lash_core::StandardContextApproach::default()),
             },
             checkpoint_ref: Some(checkpoint_ref),
             token_ledger: Vec::new(),

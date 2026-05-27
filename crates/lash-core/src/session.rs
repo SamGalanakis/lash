@@ -11,12 +11,11 @@ mod execution_context;
 pub(crate) mod process_handles;
 mod tool_execution;
 
-pub use execution_context::ModeExecutionContext;
-pub use tool_execution::{ModeToolBatchItem, ModeToolReply};
+pub use execution_context::RuntimeExecutionContext;
+pub use tool_execution::{ToolInvocation, ToolInvocationReply};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ToolSurfaceCacheKey {
-    mode: crate::ExecutionMode,
     include_base_tools: bool,
     context_surface_revision: u64,
     tool_generation: u64,
@@ -30,7 +29,7 @@ struct ToolSurfaceDerived {
 
 struct ToolSurfaceArtifact {
     surface: Arc<crate::ToolSurface>,
-    preamble: Arc<crate::ModePreamble>,
+    preamble: Arc<crate::TurnDriverPreamble>,
     derived: ToolSurfaceDerived,
 }
 
@@ -42,7 +41,7 @@ impl ToolSurfaceHandle {
         Arc::clone(&self.0.surface)
     }
 
-    fn preamble(&self) -> Arc<crate::ModePreamble> {
+    fn preamble(&self) -> Arc<crate::TurnDriverPreamble> {
         Arc::clone(&self.0.preamble)
     }
 
@@ -123,10 +122,10 @@ pub enum SessionError {
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("rlm execution mode is not available in this build or session")]
-    RlmUnavailable,
-    #[error("rlm runtime exited unexpectedly")]
-    RuntimeExited,
+    #[error("code execution is not available in this session")]
+    CodeExecutionUnavailable,
+    #[error("code execution runtime exited unexpectedly")]
+    CodeExecutionRuntimeStopped,
     #[error("protocol error: {0}")]
     Protocol(String),
 }
@@ -139,7 +138,6 @@ pub struct ExecRequest {
 
 pub struct Session {
     session_id: String,
-    execution_mode: crate::ExecutionMode,
     services: RuntimeServices,
     include_base_tools: bool,
     context_surface_revision: u64,
@@ -155,14 +153,9 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn new(
-        services: RuntimeServices,
-        session_id: &str,
-        execution_mode: crate::ExecutionMode,
-    ) -> Result<Self, SessionError> {
+    pub async fn new(services: RuntimeServices, session_id: &str) -> Result<Self, SessionError> {
         let mut session = Self {
             session_id: session_id.to_string(),
-            execution_mode,
             services,
             include_base_tools: true,
             context_surface_revision: 0,
@@ -173,9 +166,9 @@ impl Session {
             prompt_cache: Arc::new(lash_sansio::PromptCache::new()),
         };
 
-        let mode_session = Arc::clone(session.plugins().mode_session());
-        mode_session
-            .initialize_session(crate::plugin::ModeSessionContext::new(
+        let protocol_session = Arc::clone(session.plugins().protocol_session());
+        protocol_session
+            .initialize_session(crate::plugin::ProtocolSessionContext::new(
                 &mut session,
                 session_id,
             ))
@@ -188,12 +181,9 @@ impl Session {
         &self.session_id
     }
 
-    pub(crate) fn mode_extra_prompt_contributions(
-        &self,
-        _mode: &crate::ExecutionMode,
-    ) -> Vec<PromptContribution> {
-        // Mode-specific prompt contributions are owned by the mode
-        // plugins (`lash-mode-standard`, `lash-mode-rlm`) via their
+    pub(crate) fn protocol_extra_prompt_contributions(&self) -> Vec<PromptContribution> {
+        // Protocol-specific prompt contributions are owned by the protocol
+        // plugins via their
         // `reg.prompt().contribute(...)` hooks. Nothing to add here.
         Vec::new()
     }
@@ -257,9 +247,8 @@ impl Session {
         self.services.store.clone()
     }
 
-    fn tool_surface_cache_key(&self, mode: &crate::ExecutionMode) -> ToolSurfaceCacheKey {
+    fn tool_surface_cache_key(&self) -> ToolSurfaceCacheKey {
         ToolSurfaceCacheKey {
-            mode: mode.clone(),
             include_base_tools: self.include_base_tools,
             context_surface_revision: self.context_surface_revision,
             tool_generation: self.plugins().tool_registry().generation(),
@@ -270,28 +259,15 @@ impl Session {
     fn build_tool_surface_entry(
         &self,
         session_id: &str,
-        mode: crate::ExecutionMode,
     ) -> Result<ToolSurfaceHandle, crate::PluginError> {
         let provider = self.tools();
-        let mut tools = provider.tool_manifests();
+        let tools = provider.tool_manifests();
         let contract_provider = Arc::clone(&provider);
-        let plugins = self.plugins();
-        let native_contract_providers = plugins.mode_native_tools().to_vec();
-        let resolve_contract: lash_sansio::ToolContractResolver = Arc::new(move |name: &str| {
-            contract_provider.resolve_contract(name).or_else(|| {
-                native_contract_providers
-                    .iter()
-                    .find_map(|provider| provider.resolve_contract(name))
-            })
-        });
-        if self.include_base_tools && mode == self.plugins().execution_mode() {
-            let native_tools = self.plugins().mode_native_tool_manifests();
-            tools.extend(native_tools);
-        }
+        let resolve_contract: lash_sansio::ToolContractResolver =
+            Arc::new(move |name: &str| contract_provider.resolve_contract(name));
         let surface = Arc::new(self.plugins().resolve_tool_surface(
             crate::plugin::ToolSurfaceContext {
                 session_id: session_id.to_string(),
-                mode: mode.clone(),
                 tools,
                 resolve_contract: Some(Arc::clone(&resolve_contract)),
                 tool_access: self.plugins().tool_access().clone(),
@@ -299,31 +275,15 @@ impl Session {
                 lashlang_abilities: self.plugins().lashlang_abilities(),
             },
         )?);
-        let input = crate::ModeBuildInput {
-            mode: mode.clone(),
+        let input = crate::ProtocolBuildInput {
             tool_surface: Arc::clone(&surface),
             lashlang_surface: execution_context::lashlang_surface_from_tool_surface(
                 &surface,
                 self.plugins().lashlang_abilities(),
             ),
-            extra_prompt_contributions: self.mode_extra_prompt_contributions(&mode),
+            extra_prompt_contributions: self.protocol_extra_prompt_contributions(),
         };
-        let driver = self.plugins().mode_protocol_driver().unwrap_or_else(|| {
-            panic!(
-                "no protocol driver registered for execution mode `{}` — \
-                 did you forget to register the mode plugin (e.g. \
-                 `lash_mode_standard::BuiltinStandardModePluginFactory` or \
-                 `lash_mode_rlm::BuiltinRlmModePluginFactory`)?",
-                mode.plugin_id()
-            )
-        });
-        assert_eq!(
-            driver.mode_id(),
-            mode.plugin_id(),
-            "protocol driver `{}` does not match session mode `{}`",
-            driver.mode_id(),
-            mode.plugin_id(),
-        );
+        let driver = self.plugins().protocol_driver();
         let preamble = driver.build_preamble(input);
         Ok(ToolSurfaceHandle(Arc::new(ToolSurfaceArtifact {
             surface,
@@ -335,9 +295,8 @@ impl Session {
     fn tool_surface_cache_entry(
         &self,
         session_id: &str,
-        mode: crate::ExecutionMode,
     ) -> Result<ToolSurfaceHandle, crate::PluginError> {
-        let key = self.tool_surface_cache_key(&mode);
+        let key = self.tool_surface_cache_key();
         let mut cache = self
             .tool_surface_cache
             .lock()
@@ -345,7 +304,7 @@ impl Session {
         if let Some((_, entry)) = cache.iter().find(|(entry_key, _)| *entry_key == key) {
             return Ok(entry.clone());
         }
-        let entry = self.build_tool_surface_entry(session_id, mode)?;
+        let entry = self.build_tool_surface_entry(session_id)?;
         cache.push((key, entry.clone()));
         Ok(entry)
     }
@@ -353,40 +312,36 @@ impl Session {
     pub fn tool_surface(
         &self,
         session_id: &str,
-        mode: crate::ExecutionMode,
     ) -> Result<Arc<crate::ToolSurface>, crate::PluginError> {
-        Ok(self.tool_surface_cache_entry(session_id, mode)?.surface())
+        Ok(self.tool_surface_cache_entry(session_id)?.surface())
     }
 
-    pub(crate) fn mode_preamble(
+    pub(crate) fn turn_driver_preamble(
         &self,
         session_id: &str,
-        mode: crate::ExecutionMode,
-    ) -> Result<Arc<crate::ModePreamble>, crate::PluginError> {
-        Ok(self.tool_surface_cache_entry(session_id, mode)?.preamble())
+    ) -> Result<Arc<crate::TurnDriverPreamble>, crate::PluginError> {
+        Ok(self.tool_surface_cache_entry(session_id)?.preamble())
     }
 
     pub(crate) fn shared_tool_catalog(
         &self,
         session_id: &str,
-        mode: crate::ExecutionMode,
     ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {
-        Ok(self.tool_surface_cache_entry(session_id, mode)?.catalog())
+        Ok(self.tool_surface_cache_entry(session_id)?.catalog())
     }
 
     pub fn tool_catalog(
         &self,
         session_id: &str,
-        mode: crate::ExecutionMode,
     ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
-        Ok(self.shared_tool_catalog(session_id, mode)?.as_ref().clone())
+        Ok(self.shared_tool_catalog(session_id)?.as_ref().clone())
     }
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "mode execution bridge carries explicit per-turn runtime dependencies"
+        reason = "code execution bridge carries explicit per-turn runtime dependencies"
     )]
-    pub(crate) fn mode_execution_context<'run>(
+    pub(crate) fn code_execution_context<'run>(
         &self,
         session_id: &str,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
@@ -395,13 +350,13 @@ impl Session {
         direct_completions: crate::DirectCompletionClient<'run>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
-        mode_extension: Option<crate::ModeTurnExtensionHandle>,
+        protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
         turn_context: crate::TurnContext,
-    ) -> Result<ModeExecutionContext<'run>, crate::PluginError> {
+    ) -> Result<RuntimeExecutionContext<'run>, crate::PluginError> {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
             tools: self.tools(),
-            surface: self.tool_surface(session_id, self.execution_mode.clone())?,
+            surface: self.tool_surface(session_id)?,
             host,
             processes,
             effect_controller,
@@ -413,14 +368,13 @@ impl Session {
             attachment_store: Arc::clone(&self.services.attachment_store),
             turn_context: turn_context.clone(),
         });
-        Ok(ModeExecutionContext::new(
+        Ok(RuntimeExecutionContext::new(
             session_id.to_string(),
-            self.execution_mode.clone(),
             dispatch,
             self.plugins().lashlang_abilities(),
             Arc::clone(&self.services.attachment_store),
             chronological_projection,
-            mode_extension,
+            protocol_extension,
             turn_context,
         ))
     }

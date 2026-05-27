@@ -8,8 +8,8 @@ use lash_core::llm::types::{
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode,
-    ToolManifest, ToolOutputContract, ToolProvider, ToolResult,
+    ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolManifest,
+    ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
 };
 
 use super::scenarios::RuntimePerfScenario;
@@ -187,7 +187,7 @@ fn benchmark_echo_tool_definition() -> ToolDefinition {
         }),
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
-    .with_execution_mode(ToolExecutionMode::Parallel)
+    .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn benchmark_slow_tool_definition() -> ToolDefinition {
@@ -205,7 +205,7 @@ fn benchmark_slow_tool_definition() -> ToolDefinition {
         }),
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
-    .with_execution_mode(ToolExecutionMode::Parallel)
+    .with_scheduling(ToolScheduling::Parallel)
 }
 
 #[async_trait::async_trait]
@@ -266,7 +266,7 @@ fn gmail_like_tool_definition(index: usize, name: &str) -> ToolDefinition {
                 .replace('_', " "),
         ],
     })
-    .with_execution_mode(ToolExecutionMode::Parallel);
+    .with_scheduling(ToolScheduling::Parallel);
 
     if index.is_multiple_of(7) {
         definition.output_contract = ToolOutputContract::from_input_schema(
@@ -832,7 +832,7 @@ mod tests {
         let defs = BenchmarkLargeToolSurface::build_tool_definitions();
         assert_eq!(defs.len(), 63);
         assert!(defs.iter().all(|def| {
-            def.availability.standard == ToolAvailability::Callable
+            def.availability.base == ToolAvailability::Callable
                 && def.discovery.namespace.as_deref() == Some("gmail")
                 && !def.input_schema["properties"]
                     .as_object()
@@ -876,7 +876,6 @@ mod tests {
 
         let surface = build_tool_surface(ToolSurfaceBuildInput {
             tools: manifests,
-            mode: lash_core::ExecutionMode::new("rlm"),
             resolve_contract: Some(Arc::new(move |name| {
                 resolver_count.fetch_add(1, Ordering::SeqCst);
                 definitions

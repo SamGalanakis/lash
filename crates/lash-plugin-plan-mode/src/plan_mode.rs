@@ -11,9 +11,9 @@ use lash_core::plugin::{
     SessionPlugin, SnapshotReader, SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride,
 };
 use lash_core::{
-    JsonSchema, PluginMessage, SessionCreateRequest, SessionPluginMode, SessionStartPoint,
-    ToolCall, ToolContext, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest,
-    ToolProvider, ToolResult,
+    JsonSchema, PluginMessage, SessionCreateRequest, SessionPluginSource, SessionStartPoint,
+    ToolCall, ToolContext, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
+    ToolScheduling,
 };
 use lash_tool_apply_patch::{PatchAction, inspect_patch_ops};
 
@@ -173,7 +173,7 @@ fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
     })
 }
 
-fn plan_mode_state_event(
+fn plan_protocol_state_event(
     session_id: &str,
     enabled: bool,
     report: Option<&PlanReport>,
@@ -749,7 +749,7 @@ fn plan_exit_tool_definition() -> ToolDefinition {
     )
     .with_examples(vec!["plan_exit()".into()])
     .with_availability(lash_core::ToolAvailabilityConfig::off())
-    .with_execution_mode(ToolExecutionMode::Parallel)
+    .with_scheduling(ToolScheduling::Parallel)
 }
 
 pub struct PlanModePluginFactory {
@@ -825,7 +825,7 @@ impl SessionPlugin for PlanModePlugin {
                 seed_plan_template(&plan_path).map_err(PluginError::Session)?;
                 let report = read_plan_report(&plan_path).map_err(PluginError::Session)?;
                 Ok(vec![
-                    PluginDirective::emit_runtime_events(vec![plan_mode_state_event(
+                    PluginDirective::emit_runtime_events(vec![plan_protocol_state_event(
                         &ctx.session_id,
                         true,
                         Some(&report),
@@ -854,7 +854,7 @@ impl SessionPlugin for PlanModePlugin {
                 seed_plan_template(&plan_path).map_err(PluginError::Session)?;
                 let report = read_plan_report(&plan_path).map_err(PluginError::Session)?;
                 Ok(vec![
-                    PluginDirective::emit_runtime_events(vec![plan_mode_state_event(
+                    PluginDirective::emit_runtime_events(vec![plan_protocol_state_event(
                         &ctx.session_id,
                         true,
                         Some(&report),
@@ -930,7 +930,7 @@ impl SessionPlugin for PlanModePlugin {
                         .unwrap_or(false);
                 if approved {
                     let mut directives = vec![PluginDirective::emit_runtime_events(vec![
-                        plan_mode_state_event(&ctx.session_id, false, None)?,
+                        plan_protocol_state_event(&ctx.session_id, false, None)?,
                     ])];
                     if result_value
                         .get("execution_mode")
@@ -952,11 +952,11 @@ impl SessionPlugin for PlanModePlugin {
                                 SessionCreateRequest::child_inheriting_policy(
                                     ctx.session_id.clone(),
                                     SessionStartPoint::Empty,
-                                    lash_core::ModeExtras::default(),
+                                    lash_core::PluginOptions::default(),
                                     "plan_execution",
                                 )
                                 .with_session_id(session_id.clone())
-                                .with_plugin_mode(SessionPluginMode::Fresh)
+                                .with_plugin_source(SessionPluginSource::CurrentHostFresh)
                                 .with_first_turn_input(seed),
                             ),
                         });
@@ -985,7 +985,7 @@ impl SessionPlugin for PlanModePlugin {
                 let path = ensure_plan_path_from_snapshot(&state, &snapshot)?;
                 let report = read_plan_report(&path).map_err(PluginError::Session)?;
                 Ok(vec![PluginDirective::emit_runtime_events(vec![
-                    plan_mode_state_event(&ctx.session_id, true, Some(&report))?,
+                    plan_protocol_state_event(&ctx.session_id, true, Some(&report))?,
                 ])])
             })
         }));

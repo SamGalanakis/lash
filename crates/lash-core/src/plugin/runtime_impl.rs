@@ -14,8 +14,6 @@ pub struct PluginHost {
 struct BuildPluginSessionRequest<'a> {
     session_id: String,
     parent_session_id: Option<String>,
-    execution_mode: ExecutionMode,
-    standard_context_approach: Option<crate::StandardContextApproach>,
     snapshot: Option<&'a PluginSessionSnapshot>,
     tool_surface_overlay: ToolSurfaceContribution,
     tool_snapshot: Option<crate::ToolState>,
@@ -69,42 +67,13 @@ impl PluginHost {
         self.factories.as_ref().as_slice()
     }
 
-    pub fn supports_standard_context_approach(
-        &self,
-        standard_context_approach: &crate::StandardContextApproach,
-    ) -> bool {
-        let required = standard_context_approach.kind();
-        self.factories().iter().any(|factory| {
-            factory
-                .supported_standard_context_approaches()
-                .contains(&required)
-        })
-    }
-
-    pub fn build_standard_session(
-        &self,
-        session_id: impl Into<String>,
-        snapshot: Option<&PluginSessionSnapshot>,
-    ) -> Result<Arc<PluginSession>, PluginError> {
-        self.build_session(
-            session_id,
-            ExecutionMode::standard(),
-            Some(crate::StandardContextApproach::default()),
-            snapshot,
-        )
-    }
-
     pub fn build_session(
         &self,
         session_id: impl Into<String>,
-        execution_mode: ExecutionMode,
-        standard_context_approach: Option<crate::StandardContextApproach>,
         snapshot: Option<&PluginSessionSnapshot>,
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_with_surface(
             session_id,
-            execution_mode,
-            standard_context_approach,
             snapshot,
             ToolSurfaceContribution::default(),
             None,
@@ -120,16 +89,12 @@ impl PluginHost {
         &self,
         session_id: impl Into<String>,
         parent_session_id: Option<String>,
-        execution_mode: ExecutionMode,
-        standard_context_approach: Option<crate::StandardContextApproach>,
         snapshot: Option<&PluginSessionSnapshot>,
         authority: SessionAuthorityContext,
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_with_parent_and_surface(
             session_id,
             parent_session_id,
-            execution_mode,
-            standard_context_approach,
             snapshot,
             ToolSurfaceContribution::default(),
             None,
@@ -145,8 +110,6 @@ impl PluginHost {
         &self,
         session_id: impl Into<String>,
         parent_session_id: Option<String>,
-        execution_mode: ExecutionMode,
-        standard_context_approach: Option<crate::StandardContextApproach>,
         snapshot: Option<&PluginSessionSnapshot>,
         tool_surface_overlay: ToolSurfaceContribution,
         tool_snapshot: Option<crate::ToolState>,
@@ -155,8 +118,6 @@ impl PluginHost {
         self.build_session_inner(BuildPluginSessionRequest {
             session_id: session_id.into(),
             parent_session_id,
-            execution_mode,
-            standard_context_approach,
             snapshot,
             tool_surface_overlay,
             tool_snapshot,
@@ -167,8 +128,6 @@ impl PluginHost {
     pub fn build_session_with_surface(
         &self,
         session_id: impl Into<String>,
-        execution_mode: ExecutionMode,
-        standard_context_approach: Option<crate::StandardContextApproach>,
         snapshot: Option<&PluginSessionSnapshot>,
         tool_surface_overlay: ToolSurfaceContribution,
         tool_snapshot: Option<crate::ToolState>,
@@ -176,8 +135,6 @@ impl PluginHost {
         self.build_session_inner(BuildPluginSessionRequest {
             session_id: session_id.into(),
             parent_session_id: None,
-            execution_mode,
-            standard_context_approach,
             snapshot,
             tool_surface_overlay,
             tool_snapshot,
@@ -192,38 +149,13 @@ impl PluginHost {
         let BuildPluginSessionRequest {
             session_id,
             parent_session_id,
-            execution_mode,
-            standard_context_approach,
             snapshot,
             tool_surface_overlay,
             tool_snapshot,
             authority,
         } = request;
-        if execution_mode == ExecutionMode::standard() {
-            let approach = standard_context_approach.as_ref().ok_or_else(|| {
-                PluginError::Registration(
-                    "standard execution requires a standard context approach".to_string(),
-                )
-            })?;
-            if matches!(
-                approach,
-                crate::StandardContextApproach::ObservationalMemory(_)
-            ) && !self.supports_standard_context_approach(approach)
-            {
-                return Err(PluginError::Registration(format!(
-                    "standard context approach `{:?}` requires a supporting plugin factory on this plugin host",
-                    approach.kind()
-                )));
-            }
-        } else if standard_context_approach.is_some() {
-            return Err(PluginError::Registration(
-                "standard context approach only applies to standard execution mode".to_string(),
-            ));
-        }
         let ctx = PluginSessionContext {
             session_id,
-            execution_mode: execution_mode.clone(),
-            standard_context_approach: standard_context_approach.clone(),
             tool_access: authority.tool_access.clone(),
             subagent: authority.subagent.clone(),
             lashlang_abilities: self.lashlang_abilities,
@@ -240,25 +172,14 @@ impl PluginHost {
             plugins.push(plugin);
         }
         let mut contributions = reg.contributions;
-        let mode_session = contributions.mode_session.take().ok_or_else(|| {
-            PluginError::Registration(format!(
-                "missing mode session capability for {:?}",
-                execution_mode
-            ))
+        let protocol_session = contributions.protocol_session.take().ok_or_else(|| {
+            PluginError::Registration("missing protocol session capability".to_string())
         })?;
-        let mode_protocol_driver = contributions.mode_protocol_driver.take();
-        for provider in &contributions.mode_native_tools {
-            for manifest in provider.tool_manifests() {
-                if !reg.tool_names.insert(manifest.name.clone()) {
-                    return Err(PluginError::Registration(format!(
-                        "duplicate mode native tool name `{}`",
-                        manifest.name
-                    )));
-                }
-            }
-        }
-        contributions.mode_session = Some(mode_session);
-        contributions.mode_protocol_driver = mode_protocol_driver;
+        let protocol_driver = contributions.protocol_driver.take().ok_or_else(|| {
+            PluginError::Registration("missing protocol driver capability".to_string())
+        })?;
+        contributions.protocol_session = Some(protocol_session);
+        contributions.protocol_driver = Some(protocol_driver);
         contributions
             .turn_context_transforms
             .sort_by_key(|entry| std::cmp::Reverse(entry.0));
@@ -291,7 +212,6 @@ impl PluginHost {
         let session = Arc::new(PluginSession {
             host: self.clone(),
             session_id: ctx.session_id,
-            execution_mode: execution_mode.clone(),
             plugins,
             tools,
             tool_registry: registry,
@@ -304,8 +224,6 @@ impl PluginHost {
         self.register_session(&session_id, &session)?;
         let ready = SessionReadyContext {
             session_id: session.session_id.clone(),
-            execution_mode,
-            standard_context_approach,
             host: self.clone(),
         };
         for plugin in &session.plugins {
@@ -322,7 +240,7 @@ impl PluginHost {
         name: &str,
         args: serde_json::Value,
     ) -> Result<ToolResult, PluginError> {
-        let session = self.build_standard_session(
+        let session = self.build_session(
             format!("__external__-{}", uuid::Uuid::new_v4().simple()),
             None,
         )?;

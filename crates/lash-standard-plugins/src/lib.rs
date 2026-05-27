@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use lash_core::plugin::{PluginSpec, StaticPluginFactory};
-use lash_core::{PluginStack, StandardContextApproach, ToolProvider};
+use lash_core::{PluginStack, ToolProvider};
+pub use lash_plugin_observational_memory::ObservationalMemoryConfig;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_process_controls::ProcessControlsPluginFactory;
+pub use lash_plugin_rolling_history::RollingHistoryConfig;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
 use lash_plugin_tool_output_budget::{ToolOutputBudgetPluginFactory, tool_output_budget_stack};
@@ -13,17 +15,56 @@ use lash_tool_search::Grep;
 use lash_tool_shell::StandardShellPluginFactory;
 use lash_tool_web::{FetchUrl, WebSearch};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StandardContextApproachKind {
+    RollingHistory,
+    ObservationalMemory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StandardContextApproach {
+    RollingHistory(RollingHistoryConfig),
+    ObservationalMemory(ObservationalMemoryConfig),
+}
+
+impl Default for StandardContextApproach {
+    fn default() -> Self {
+        Self::RollingHistory(RollingHistoryConfig)
+    }
+}
+
+impl StandardContextApproach {
+    pub fn kind(&self) -> StandardContextApproachKind {
+        match self {
+            Self::RollingHistory(_) => StandardContextApproachKind::RollingHistory,
+            Self::ObservationalMemory(_) => StandardContextApproachKind::ObservationalMemory,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct StandardToolStackOptions {
     pub standard_context_approach: Option<StandardContextApproach>,
     pub tavily_api_key: Option<String>,
+    pub include_cancel_process: bool,
+}
+
+impl Default for StandardToolStackOptions {
+    fn default() -> Self {
+        Self {
+            standard_context_approach: None,
+            tavily_api_key: None,
+            include_cancel_process: true,
+        }
+    }
 }
 
 pub fn standard_tool_stack(options: StandardToolStackOptions) -> PluginStack {
     let mut stack = PluginStack::new();
     push_core_runtime_tools(&mut stack);
     push_standard_context_tools(&mut stack, options.standard_context_approach.as_ref());
-    push_local_runtime_tools(&mut stack);
+    push_local_runtime_tools(&mut stack, options.include_cancel_process);
     if let Some(key) = options.tavily_api_key {
         push_web_tools(&mut stack, key);
     }
@@ -43,19 +84,26 @@ fn push_standard_context_tools(
     stack: &mut PluginStack,
     standard_context_approach: Option<&StandardContextApproach>,
 ) {
-    match standard_context_approach.map(StandardContextApproach::kind) {
-        Some(lash_core::StandardContextApproachKind::RollingHistory) => {
-            stack.push(Arc::new(RollingHistoryPluginFactory::default()));
+    match standard_context_approach {
+        Some(StandardContextApproach::RollingHistory(config)) => {
+            stack.push(Arc::new(RollingHistoryPluginFactory::new(config.clone())));
         }
-        Some(lash_core::StandardContextApproachKind::ObservationalMemory) => {
-            stack.push(Arc::new(ObservationalMemoryPluginFactory));
+        Some(StandardContextApproach::ObservationalMemory(config)) => {
+            stack.push(Arc::new(ObservationalMemoryPluginFactory::new(
+                config.clone(),
+            )));
         }
         None => {}
     }
 }
 
-fn push_local_runtime_tools(stack: &mut PluginStack) {
-    stack.push(Arc::new(ProcessControlsPluginFactory::new()));
+fn push_local_runtime_tools(stack: &mut PluginStack, include_cancel_process: bool) {
+    let process_controls = if include_cancel_process {
+        ProcessControlsPluginFactory::new()
+    } else {
+        ProcessControlsPluginFactory::without_cancel_process()
+    };
+    stack.push(Arc::new(process_controls));
     stack.push(Arc::new(StandardShellPluginFactory::new()));
     stack.push(Arc::new(StaticPluginFactory::new(
         "apply_patch",
@@ -102,6 +150,31 @@ mod tests {
             .collect()
     }
 
+    fn tool_names_for_stack(
+        protocol_factories: Vec<Arc<dyn lash_core::plugin::PluginFactory>>,
+        standard_context_approach: Option<StandardContextApproach>,
+        include_cancel_process: bool,
+    ) -> Vec<String> {
+        let mut factories = standard_tool_stack(StandardToolStackOptions {
+            standard_context_approach: standard_context_approach.clone(),
+            include_cancel_process,
+            ..Default::default()
+        })
+        .into_factories();
+        factories.extend(protocol_factories);
+        let host = lash_core::PluginHost::new(factories);
+        let session_id = "test".to_string();
+        let session = host
+            .build_session(session_id.clone(), None)
+            .expect("session");
+        session
+            .tool_surface(&session_id)
+            .expect("tool surface")
+            .tool_names()
+            .as_ref()
+            .clone()
+    }
+
     #[test]
     fn rolling_history_context_installs_rolling_history_only() {
         let stack = standard_tool_stack(StandardToolStackOptions {
@@ -109,6 +182,7 @@ mod tests {
                 Default::default(),
             )),
             tavily_api_key: None,
+            include_cancel_process: true,
         });
         let ids = stack_ids(&stack);
 
@@ -123,14 +197,10 @@ mod tests {
                 Default::default(),
             )),
             tavily_api_key: None,
+            include_cancel_process: true,
         });
-        let host = lash_core::PluginHost::new(stack.into_factories());
-
-        assert!(host.supports_standard_context_approach(
-            &lash_core::StandardContextApproach::ObservationalMemory(
-                lash_core::ObservationalMemoryConfig::default(),
-            )
-        ));
+        let ids = stack_ids(&stack);
+        assert!(ids.contains(&"observational_memory"));
     }
 
     #[test]
@@ -144,5 +214,24 @@ mod tests {
         assert!(!without_web.contains(&"search_web"));
         assert!(with_web.contains(&"search_web"));
         assert!(with_web.contains(&"fetch_url"));
+    }
+
+    #[test]
+    fn shared_stack_exposes_process_list_in_rlm_without_cancel_tool() {
+        let standard_names = tool_names_for_stack(
+            lash_core::testing::test_standard_protocol_factories(),
+            Some(StandardContextApproach::default()),
+            true,
+        );
+        let rlm_names = tool_names_for_stack(
+            lash_core::testing::test_rlm_protocol_factories(),
+            None,
+            false,
+        );
+
+        assert!(standard_names.contains(&"list_process_handles".to_string()));
+        assert!(standard_names.contains(&"cancel_process".to_string()));
+        assert!(rlm_names.contains(&"list_process_handles".to_string()));
+        assert!(!rlm_names.contains(&"cancel_process".to_string()));
     }
 }

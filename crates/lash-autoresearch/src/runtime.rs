@@ -13,7 +13,7 @@ use lash_core::plugin::{
 };
 use lash_core::{
     MessageRole, PluginMessage, PluginRuntimeEvent, PromptContribution, ToolCall, ToolContext,
-    ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
+    ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -426,7 +426,7 @@ fn autoresearch_tool(
         json!({ "type": "object", "additionalProperties": true }),
     )
     .with_availability(lash_core::ToolAvailabilityConfig::off())
-    .with_execution_mode(ToolExecutionMode::Parallel)
+    .with_scheduling(ToolScheduling::Parallel)
 }
 
 #[async_trait]
@@ -1326,9 +1326,11 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             state: Arc::new(Mutex::new(RuntimeState::default())),
         };
-        assert!(tools.tool_manifests().into_iter().all(|tool| {
-            tool.effective_availability(&lash_core::ExecutionMode::standard())
-                == lash_core::ToolAvailability::Off
-        }));
+        assert!(
+            tools
+                .tool_manifests()
+                .into_iter()
+                .all(|tool| { tool.effective_availability() == lash_core::ToolAvailability::Off })
+        );
     }
 }

@@ -2,15 +2,14 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
+use lash::advanced::ExecutionMode;
 use lash_core::PreparedContext;
 use lash_core::PromptContribution;
 use lash_core::plugin::{
     HistoryError, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
     PluginSessionContext, TurnContextTransform, TurnTransformContext,
 };
-use lash_core::{
-    ExecutionMode, Message, MessageRole, Part, PartKind, PluginMessage, PruneState, shared_parts,
-};
+use lash_core::{Message, MessageRole, Part, PartKind, PluginMessage, PruneState, shared_parts};
 
 /// Host-provided source for project instructions.
 ///
@@ -40,16 +39,19 @@ impl Default for PromptContextPluginConfig {
 pub struct PromptContextPluginFactory {
     instruction_source: Arc<dyn InstructionSource>,
     config: PromptContextPluginConfig,
+    execution_mode: ExecutionMode,
 }
 
 impl PromptContextPluginFactory {
     pub fn new(
         instruction_source: Arc<dyn InstructionSource>,
         config: PromptContextPluginConfig,
+        execution_mode: ExecutionMode,
     ) -> Self {
         Self {
             instruction_source,
             config,
+            execution_mode,
         }
     }
 }
@@ -61,12 +63,12 @@ impl PluginFactory for PromptContextPluginFactory {
 
     fn build(
         &self,
-        ctx: &PluginSessionContext,
+        _ctx: &PluginSessionContext,
     ) -> Result<Arc<dyn lash_core::SessionPlugin>, PluginError> {
         Ok(Arc::new(PromptContextPlugin {
             instruction_source: Arc::clone(&self.instruction_source),
             config: self.config.clone(),
-            execution_mode: ctx.execution_mode.clone(),
+            execution_mode: self.execution_mode.clone(),
         }))
     }
 }
@@ -231,7 +233,6 @@ mod tests {
         RuntimeSessionState::from_state(SessionStateEnvelope {
             session_id: "root".to_string(),
             policy: SessionPolicy {
-                execution_mode: ExecutionMode::standard(),
                 session_id: Some(run_session_id.to_string()),
                 ..Default::default()
             },
@@ -247,22 +248,23 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_context_plugin_contributes_environment_and_project_instruction_sections() {
-        let mut factories = lash_core::testing::test_mode_factories();
+        let mut factories = lash_core::testing::test_standard_protocol_factories();
         factories.push(Arc::new(PromptContextPluginFactory::new(
             Arc::new(StaticInstructionSource {
                 text: "Repo rules".to_string(),
                 read_text: String::new(),
             }),
             PromptContextPluginConfig::default(),
+            ExecutionMode::standard(),
         )));
         let host = PluginHost::new(factories);
-        let session = host.build_standard_session("root", None).expect("session");
+        let session = host.build_session("root", None).expect("session");
         let contributions = session
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(mock_session_manager("run-session")),
                 state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
-                mode_turn_options: lash_core::ModeTurnOptions::default(),
+                protocol_turn_options: lash_core::ProtocolTurnOptions::default(),
                 turn_context: lash_core::TurnContext::default(),
             })
             .await

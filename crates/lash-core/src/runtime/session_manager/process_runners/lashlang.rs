@@ -44,10 +44,7 @@ impl RuntimeSessionManager {
                 .and_then(|metadata| metadata.turn_id.clone()),
             self.current.turn_lease.clone(),
         );
-        let dispatch = match self.current.plugins.tool_surface(
-            &self.current.session_id,
-            self.current.policy.execution_mode.clone(),
-        ) {
+        let dispatch = match self.current.plugins.tool_surface(&self.current.session_id) {
             Ok(surface) => crate::tool_dispatch::ToolDispatchContext {
                 plugins: Arc::clone(&self.current.plugins),
                 tools: self.current.plugins.tools(),
@@ -75,9 +72,8 @@ impl RuntimeSessionManager {
                 );
             }
         };
-        let mut ctx = crate::ModeExecutionContext::new(
+        let mut ctx = crate::RuntimeExecutionContext::new(
             self.current.session_id.clone(),
-            self.current.policy.execution_mode.clone(),
             Arc::new(dispatch),
             self.current.plugins.lashlang_abilities(),
             Arc::clone(&self.current.host.core.attachment_store),
@@ -117,7 +113,7 @@ impl RuntimeSessionManager {
 }
 
 struct LashlangProcessHost<'run> {
-    ctx: crate::ModeExecutionContext<'run>,
+    ctx: crate::RuntimeExecutionContext<'run>,
     registry: Arc<dyn crate::ProcessRegistry>,
     process_id: String,
     wake_target_scope_key: Option<String>,
@@ -186,7 +182,7 @@ impl LashlangProcessHost<'_> {
                 0,
             )
             .await;
-        mode_reply_to_lashlang_value(reply)
+        protocol_reply_to_lashlang_value(reply)
     }
 
     async fn await_handle(
@@ -200,7 +196,7 @@ impl LashlangProcessHost<'_> {
                 crate::lashlang_bridge::lashlang_value_to_json(&handle)?,
             )
             .await;
-        mode_reply_to_lashlang_value(reply)
+        protocol_reply_to_lashlang_value(reply)
     }
 
     async fn cancel_handle(
@@ -214,7 +210,7 @@ impl LashlangProcessHost<'_> {
                 crate::lashlang_bridge::lashlang_value_to_json(&handle)?,
             )
             .await;
-        mode_reply_to_lashlang_value(reply)
+        protocol_reply_to_lashlang_value(reply)
     }
 
     async fn start_process(
@@ -235,14 +231,14 @@ impl LashlangProcessHost<'_> {
                     payload,
                 )
                 .await;
-            return mode_reply_to_lashlang_value(reply);
+            return protocol_reply_to_lashlang_value(reply);
         }
         let (registration, label) = self
             .ctx
             .prepare_lashlang_process_start(start)
             .map_err(::lashlang::ExecutionHostError::new)?;
         let reply = self.ctx.start_lashlang_process(registration, label).await;
-        mode_reply_to_lashlang_value(reply)
+        protocol_reply_to_lashlang_value(reply)
     }
 
     async fn process_event(
@@ -376,10 +372,10 @@ impl ::lashlang::ExecutionHost for LashlangProcessHost<'_> {
     }
 }
 
-fn mode_reply_to_lashlang_value(
-    reply: crate::ModeToolReply,
+fn protocol_reply_to_lashlang_value(
+    reply: crate::ToolInvocationReply,
 ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
-    crate::lashlang_bridge::mode_tool_reply_to_lashlang_value(reply)
+    crate::lashlang_bridge::protocol_tool_reply_to_lashlang_value(reply)
 }
 
 fn sleep_duration_ms(

@@ -126,7 +126,6 @@ impl SnapshotReader for EmptySnapshotReader {
 pub struct PluginSession {
     pub(super) host: PluginHost,
     pub(super) session_id: String,
-    pub(super) execution_mode: ExecutionMode,
     pub(super) plugins: Vec<Arc<dyn SessionPlugin>>,
     pub(super) tools: Arc<dyn ToolProvider>,
     pub(super) tool_registry: Arc<crate::ToolRegistry>,
@@ -139,10 +138,6 @@ pub struct PluginSession {
 impl PluginSession {
     pub fn session_id(&self) -> &str {
         &self.session_id
-    }
-
-    pub fn execution_mode(&self) -> ExecutionMode {
-        self.execution_mode.clone()
     }
 
     pub fn tool_access(&self) -> &SessionToolAccess {
@@ -169,59 +164,46 @@ impl PluginSession {
         Arc::clone(&self.tool_registry)
     }
 
-    pub(crate) fn mode_session(&self) -> &Arc<dyn ModeSessionPlugin> {
+    pub(crate) fn protocol_session(&self) -> &Arc<dyn ProtocolSessionPlugin> {
         &self
             .contributions
-            .mode_session
+            .protocol_session
             .as_ref()
-            .expect("plugin session must have a mode session")
+            .expect("plugin session must have a protocol session")
             .hook
     }
 
-    pub(crate) fn mode_native_tools(&self) -> &[Arc<dyn ModeNativeToolsPlugin>] {
-        &self.contributions.mode_native_tools
-    }
-
-    pub(crate) fn mode_native_tool_manifests(&self) -> Vec<ToolManifest> {
+    pub(crate) fn code_executor(&self) -> Option<Arc<dyn CodeExecutorPlugin>> {
         self.contributions
-            .mode_native_tools
-            .iter()
-            .flat_map(|provider| provider.tool_manifests())
-            .collect()
-    }
-
-    /// Plugin-registered protocol driver for this session, if any plugin
-    /// claimed the singleton slot. When `None`, callers fall back to
-    /// `lash_sansio::build_mode_preamble` (hardcoded Standard/RLM).
-    pub fn mode_protocol_driver(&self) -> Option<Arc<dyn ModeProtocolDriverPlugin>> {
-        self.contributions
-            .mode_protocol_driver
+            .code_executor
             .as_ref()
             .map(|entry| Arc::clone(&entry.hook))
     }
 
-    pub fn tool_surface(
+    pub(crate) fn assistant_prose_projector(
         &self,
-        session_id: &str,
-        mode: ExecutionMode,
-    ) -> Result<Arc<crate::ToolSurface>, PluginError> {
-        let mut tools = self.tools.tool_manifests();
+    ) -> Option<Arc<dyn AssistantProseProjectorPlugin>> {
+        self.contributions
+            .assistant_prose_projector
+            .as_ref()
+            .map(|entry| Arc::clone(&entry.hook))
+    }
+
+    pub fn protocol_driver(&self) -> Arc<dyn ProtocolDriverPlugin> {
+        self.contributions
+            .protocol_driver
+            .as_ref()
+            .map(|entry| Arc::clone(&entry.hook))
+            .expect("plugin session must have a protocol driver")
+    }
+
+    pub fn tool_surface(&self, session_id: &str) -> Result<Arc<crate::ToolSurface>, PluginError> {
+        let tools = self.tools.tool_manifests();
         let contract_provider = Arc::clone(&self.tools);
-        let native_contract_providers = self.contributions.mode_native_tools.to_vec();
-        let resolve_contract: lash_sansio::ToolContractResolver = Arc::new(move |name: &str| {
-            contract_provider.resolve_contract(name).or_else(|| {
-                native_contract_providers
-                    .iter()
-                    .find_map(|provider| provider.resolve_contract(name))
-            })
-        });
-        if mode == self.execution_mode {
-            let native_tools = self.mode_native_tool_manifests();
-            tools.extend(native_tools);
-        }
+        let resolve_contract: lash_sansio::ToolContractResolver =
+            Arc::new(move |name: &str| contract_provider.resolve_contract(name));
         Ok(Arc::new(self.resolve_tool_surface(ToolSurfaceContext {
             session_id: session_id.to_string(),
-            mode: mode.clone(),
             tools,
             resolve_contract: Some(Arc::clone(&resolve_contract)),
             tool_access: self.tool_access.clone(),
@@ -230,19 +212,14 @@ impl PluginSession {
         })?))
     }
 
-    pub fn tool_catalog(
-        &self,
-        session_id: &str,
-        mode: ExecutionMode,
-    ) -> Result<Vec<serde_json::Value>, PluginError> {
-        let surface = self.tool_surface(session_id, mode.clone())?;
+    pub fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
+        let surface = self.tool_surface(session_id)?;
         let mut catalog =
             crate::tool_registry::project_tool_catalog(surface.searchable_tools_iter().cloned());
         let contributions = collect_owned_sync(
             &self.contributions.tool_discovery_contributors,
             ToolDiscoveryContext {
                 session_id: session_id.to_string(),
-                mode,
                 catalog: catalog.clone(),
             },
             |hook, ctx| hook(ctx),
@@ -266,7 +243,6 @@ impl PluginSession {
             &self.contributions.tool_surface_contributors,
             ToolSurfaceContext {
                 session_id: ctx.session_id.clone(),
-                mode: ctx.mode.clone(),
                 tools: ctx.tools.clone(),
                 resolve_contract: ctx.resolve_contract.clone(),
                 tool_access: ctx.tool_access.clone(),
@@ -317,7 +293,6 @@ impl PluginSession {
         }
         Ok(crate::build_tool_surface(crate::ToolSurfaceBuildInput {
             tools,
-            mode: ctx.mode,
             resolve_contract,
             contributions,
         }))
@@ -860,14 +835,10 @@ impl PluginSession {
     pub fn fork_for_session(
         &self,
         session_id: impl Into<String>,
-        execution_mode: ExecutionMode,
-        standard_context_approach: Option<crate::StandardContextApproach>,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
         self.host.build_session_with_surface(
             session_id,
-            execution_mode,
-            standard_context_approach,
             Some(&snapshot),
             self.tool_surface_overlay.clone(),
             Some(self.tool_registry.export_state()),
@@ -878,16 +849,12 @@ impl PluginSession {
         &self,
         session_id: impl Into<String>,
         parent_session_id: Option<String>,
-        execution_mode: ExecutionMode,
-        standard_context_approach: Option<crate::StandardContextApproach>,
         authority: super::SessionAuthorityContext,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
         self.host.build_session_with_parent_and_surface(
             session_id,
             parent_session_id,
-            execution_mode,
-            standard_context_approach,
             Some(&snapshot),
             self.tool_surface_overlay.clone(),
             Some(self.tool_registry.export_state()),
@@ -898,15 +865,11 @@ impl PluginSession {
     pub fn fork_for_session_with_tool_surface(
         &self,
         session_id: impl Into<String>,
-        execution_mode: ExecutionMode,
-        standard_context_approach: Option<crate::StandardContextApproach>,
         tool_surface_overlay: ToolSurfaceContribution,
     ) -> Result<Arc<PluginSession>, PluginError> {
         let snapshot = self.snapshot()?;
         self.host.build_session_with_surface(
             session_id,
-            execution_mode,
-            standard_context_approach,
             Some(&snapshot),
             tool_surface_overlay,
             Some(self.tool_registry.export_state()),

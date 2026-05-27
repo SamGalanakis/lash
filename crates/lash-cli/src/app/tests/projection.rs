@@ -267,7 +267,7 @@ fn read_view_timeline_round_trips_to_existing_display_blocks() {
 fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        mode_iteration: 0,
+        protocol_iteration: 0,
         reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"hi\"\n```".to_string(),
         code: "submit \"hi\"".to_string(),
         output: Vec::new(),
@@ -276,8 +276,10 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
         error: None,
         final_output: None,
     };
-    let events = vec![lash_core::SessionEventRecord::Mode(
-        lash_mode_rlm::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)),
+    let events = vec![lash_core::SessionEventRecord::Protocol(
+        lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
+        ),
     )];
 
     let blocks =
@@ -296,7 +298,7 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
 fn rlm_trajectory_final_output_projects_as_assistant_text() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        mode_iteration: 0,
+        protocol_iteration: 0,
         reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
         code: "submit \"Hi!\"".to_string(),
         output: Vec::new(),
@@ -305,8 +307,10 @@ fn rlm_trajectory_final_output_projects_as_assistant_text() {
         error: None,
         final_output: Some(serde_json::json!("Hi!")),
     };
-    let events = vec![lash_core::SessionEventRecord::Mode(
-        lash_mode_rlm::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)),
+    let events = vec![lash_core::SessionEventRecord::Protocol(
+        lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
+        ),
     )];
 
     let blocks =
@@ -326,10 +330,10 @@ fn rlm_trajectory_final_output_projects_as_assistant_text() {
 #[test]
 fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
     let user = text_message("u1", MessageRole::User, "hi");
-    let assistant = plugin_text_message("a1", MessageRole::Assistant, "mode_rlm", "Hi!");
+    let assistant = plugin_text_message("a1", MessageRole::Assistant, "rlm_protocol", "Hi!");
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        mode_iteration: 0,
+        protocol_iteration: 0,
         reasoning: "I'll answer directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
         code: "submit \"Hi!\"".to_string(),
         output: Vec::new(),
@@ -340,8 +344,8 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
     };
     let events = vec![
         conversation_event(user.clone()),
-        lash_core::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
-            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
+        lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
         )),
         conversation_event(assistant.clone()),
     ];
@@ -386,7 +390,7 @@ fn finish_turn_replaces_live_submitted_value_with_projection() {
     let user = text_message("u1", MessageRole::User, "What time is it");
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        mode_iteration: 0,
+        protocol_iteration: 0,
         reasoning:
             "```lashlang\nsubmit \"Current system time: Fri May 15 11:35:52 PM CEST 2026\"\n```"
                 .to_string(),
@@ -401,8 +405,8 @@ fn finish_turn_replaces_live_submitted_value_with_projection() {
     };
     let events = vec![
         conversation_event(user.clone()),
-        lash_core::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
-            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
+        lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
         )),
     ];
 
@@ -449,7 +453,7 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
     };
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        mode_iteration: 0,
+        protocol_iteration: 0,
         reasoning: "I'll inspect the environment.".to_string(),
         code: "now = await TOOL.default.exec_command({ cmd: \"date -u\" })?\nprint now".to_string(),
         output: vec!["2026-04-25 20:05:57 UTC".to_string()],
@@ -458,8 +462,10 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
         error: None,
         final_output: None,
     };
-    let events = vec![lash_core::SessionEventRecord::Mode(
-        lash_mode_rlm::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)),
+    let events = vec![lash_core::SessionEventRecord::Protocol(
+        lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
+        ),
     )];
 
     let blocks =
@@ -489,7 +495,7 @@ fn rlm_trajectory_owns_matching_raw_tool_call_projection() {
     };
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        mode_iteration: 0,
+        protocol_iteration: 0,
         reasoning: "I'll check the system time.".to_string(),
         code: "now = await TOOL.default.exec_command({ cmd: \"date\" })?\nsubmit trim(now.output)"
             .to_string(),
@@ -499,8 +505,10 @@ fn rlm_trajectory_owns_matching_raw_tool_call_projection() {
         error: None,
         final_output: Some(serde_json::json!("Mon May 11 01:51:25 PM CEST 2026")),
     };
-    let events = vec![lash_core::SessionEventRecord::Mode(
-        lash_mode_rlm::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)),
+    let events = vec![lash_core::SessionEventRecord::Protocol(
+        lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry),
+        ),
     )];
 
     let blocks =
@@ -537,7 +545,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
     };
     let first = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
-        mode_iteration: 0,
+        protocol_iteration: 0,
         reasoning: "First check the time.".to_string(),
         code: "now = await TOOL.default.exec_command({ cmd: \"date -u\" })?\nprint now".to_string(),
         output: vec!["time".to_string()],
@@ -557,7 +565,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
     };
     let second = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_1".to_string(),
-        mode_iteration: 1,
+        protocol_iteration: 1,
         reasoning: "Then check files.".to_string(),
         code: "files = await TOOL.default.ls({ path: \".\" })?\nprint files".to_string(),
         output: vec!["files".to_string()],
@@ -568,11 +576,11 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
     };
     let assistant = text_message("a1", MessageRole::Assistant, "Done.");
     let events = vec![
-        lash_core::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
-            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(first),
+        lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(first),
         )),
-        lash_core::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
-            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(second),
+        lash_core::SessionEventRecord::Protocol(lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(second),
         )),
         conversation_event(assistant.clone()),
     ];

@@ -1,5 +1,6 @@
-use lash_core::{
-    ExecutionMode, ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
+use lash::advanced::ExecutionMode;
+use lash_standard_plugins::{
+    ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -120,7 +121,7 @@ impl RuntimePerfScenario {
             | Self::RlmLlmQuery
             | Self::RlmGlobals
             | Self::RlmLargeToolSurface
-            | Self::EmbedRlm => ExecutionMode::new("rlm"),
+            | Self::EmbedRlm => ExecutionMode::rlm(),
         }
     }
 

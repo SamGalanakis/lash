@@ -5,9 +5,8 @@ mod rlm_support;
 use std::sync::Arc;
 
 pub use capability::{
-    Capability, CapabilityContext, CapabilityRegistry, DEFAULT_EXPLORE_EXECUTION_MODE,
-    StaticCapability, TierCapability, TierExecutionMode, default_explore_execution_mode,
-    default_registry,
+    Capability, CapabilityContext, CapabilityRegistry, CapabilityResolution, StaticCapability,
+    TierCapability, TierPluginSource, default_explore_plugin_source, default_registry,
 };
 
 use lash_core::plugin::{PluginError, PluginFactory, PluginSessionContext};
@@ -84,33 +83,24 @@ impl PluginFactory for SubagentsPluginFactory {
         let registry = Arc::clone(&self.registry);
         let session_spec = self.session_spec.clone();
         let configurator = Arc::clone(&self.configurator);
-        let execution_mode = ctx.execution_mode.clone();
         let parent_subagent = ctx.subagent.clone();
 
-        let is_rlm = execution_mode == lash_core::ExecutionMode::new("rlm");
-        let provider: Option<Arc<dyn ToolProvider>> = if is_rlm {
-            Some(Arc::new(rlm::RlmSubagentToolsProvider {
-                registry: Arc::clone(&registry),
-                session_spec: session_spec.clone(),
-                configurator: Arc::clone(&configurator),
-                parent_subagent,
-                include_submit_error: ctx.subagent.is_some(),
-            }))
-        } else {
-            None
-        };
+        let provider: Arc<dyn ToolProvider> = Arc::new(rlm::RlmSubagentToolsProvider {
+            registry: Arc::clone(&registry),
+            session_spec: session_spec.clone(),
+            configurator: Arc::clone(&configurator),
+            parent_subagent,
+            include_submit_error: ctx.subagent.is_some(),
+        });
 
         PluginSpecFactory::new(
             "subagents",
             Arc::new(move |_ctx| {
-                let mut spec =
-                    PluginSpec::new().with_tool_surface_contributor(Arc::new(move |ctx| {
+                Ok(PluginSpec::new()
+                    .with_tool_surface_contributor(Arc::new(move |ctx| {
                         rlm_support::subagent_surface_contribution(ctx)
-                    }));
-                if let Some(provider) = provider.as_ref() {
-                    spec = spec.with_tool_provider(Arc::clone(provider));
-                }
-                Ok(spec)
+                    }))
+                    .with_tool_provider(Arc::clone(&provider)))
             }),
         )
         .build(ctx)

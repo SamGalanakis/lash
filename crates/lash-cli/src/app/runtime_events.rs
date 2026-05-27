@@ -249,9 +249,9 @@ impl App {
                 self.invalidate_live_tool_output_cache();
                 self.scroll_to_bottom();
             }
-            TurnEvent::ModelRequestStarted { mode_iteration } => {
+            TurnEvent::ModelRequestStarted { protocol_iteration } => {
                 self.finalize_live_markdown();
-                self.iteration = mode_iteration + 1;
+                self.iteration = protocol_iteration + 1;
                 if let Some(detail) = self.pending_retry_status.take() {
                     self.set_status("retrying", Some(detail), true);
                 } else {
@@ -408,9 +408,9 @@ impl App {
 #[cfg(test)]
 fn test_session_event_to_turn_activity(event: SessionEvent) -> Option<TurnActivity> {
     let turn_event = match event {
-        SessionEvent::LlmRequest { mode_iteration, .. } => {
-            TurnEvent::ModelRequestStarted { mode_iteration }
-        }
+        SessionEvent::LlmRequest {
+            protocol_iteration, ..
+        } => TurnEvent::ModelRequestStarted { protocol_iteration },
         SessionEvent::TextDelta { content } => TurnEvent::AssistantProseDelta { text: content },
         SessionEvent::ReasoningDelta { content } => TurnEvent::ReasoningDelta { text: content },
         SessionEvent::ToolCallStart {
@@ -442,11 +442,11 @@ fn test_session_event_to_turn_activity(event: SessionEvent) -> Option<TurnActivi
             }
         }
         SessionEvent::TokenUsage {
-            mode_iteration,
+            protocol_iteration,
             usage,
             cumulative,
         } => TurnEvent::Usage {
-            mode_iteration,
+            protocol_iteration,
             usage,
             cumulative,
         },

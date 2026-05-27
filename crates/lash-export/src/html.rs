@@ -30,9 +30,9 @@ use lash_rlm_types::RlmTrajectoryEntry;
 pub use session::render;
 pub use tree::render_tree;
 
-fn chronological_rlm_step(event: &lash_core::ModeEvent) -> Option<RlmTrajectoryEntry> {
-    match lash_mode_rlm::decode_rlm_mode_event(event)? {
-        lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(step) => Some(step),
+fn chronological_rlm_step(event: &lash_core::ProtocolEvent) -> Option<RlmTrajectoryEntry> {
+    match lash_protocol_rlm::decode_rlm_protocol_event(event)? {
+        lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step) => Some(step),
         _ => None,
     }
 }
@@ -47,12 +47,12 @@ mod tests {
     use lash_core::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
     use std::path::PathBuf;
 
-    fn prompt_snapshot(mode_iteration: u64, text: &str) -> LlmPromptSnapshot {
+    fn prompt_snapshot(protocol_iteration: u64, text: &str) -> LlmPromptSnapshot {
         LlmPromptSnapshot {
             session_id: Some("root".to_string()),
             turn_index: Some(1),
-            mode_iteration: Some(mode_iteration),
-            llm_call_id: Some(format!("root:1:{mode_iteration}:0")),
+            protocol_iteration: Some(protocol_iteration),
+            llm_call_id: Some(format!("root:1:{protocol_iteration}:0")),
             originating_tool_call_id: None,
             timestamp: None,
             model: Some("gpt-test".to_string()),
@@ -93,10 +93,10 @@ mod tests {
         }
     }
 
-    fn rlm_step(mode_iteration: usize, id: &str) -> RlmTrajectoryEntry {
+    fn rlm_step(protocol_iteration: usize, id: &str) -> RlmTrajectoryEntry {
         RlmTrajectoryEntry {
             id: id.to_string(),
-            mode_iteration,
+            protocol_iteration,
             reasoning: "thinking".to_string(),
             code: "x = 1".to_string(),
             output: vec!["1".to_string()],
@@ -108,8 +108,8 @@ mod tests {
     }
 
     fn rlm_payload(step: RlmTrajectoryEntry) -> ChronologicalPayload {
-        ChronologicalPayload::ModeEvent(lash_mode_rlm::rlm_mode_event(
-            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(step),
+        ChronologicalPayload::ProtocolEvent(lash_protocol_rlm::rlm_protocol_event(
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step),
         ))
     }
 
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_rlm_trace_mode_iterations_are_anchored_in_prompt_order() {
+    fn repeated_rlm_trace_protocol_iterations_are_anchored_in_prompt_order() {
         let chronological = vec![
             ChronologicalEntry {
                 index: 0,

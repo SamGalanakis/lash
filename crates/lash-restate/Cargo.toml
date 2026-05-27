@@ -26,6 +26,6 @@ bytes = { workspace = true }
 http = "1"
 http-body-util = "0.1"
 lashlang = { path = "../lashlang", version = "=0.1.0-alpha.9" }
-lash-mode-standard = { path = "../lash-mode-standard", version = "=0.1.0-alpha.9" }
+lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.9" }
 lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.9" }
 tempfile = { workspace = true }

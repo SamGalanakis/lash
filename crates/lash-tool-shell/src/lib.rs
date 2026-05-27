@@ -22,7 +22,7 @@ use lash_core::plugin::{
 };
 use lash_core::{
     ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolCall, ToolContract,
-    ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
+    ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 
 use lash_tool_support::{object_schema, require_str};
@@ -1316,11 +1316,11 @@ impl StandardShell {
                 output_schema.clone(),
             )
             .with_examples(vec![
-                r#"exec_command(cmd="cargo test -p lash-mode-rlm", timeout_ms=600000)"#.into(),
+                r#"exec_command(cmd="cargo test -p lash-protocol-rlm", timeout_ms=600000)"#.into(),
                 r#"exec_command(cmd="test -f Cargo.lock", allow_nonzero_exit=true)"#.into(),
             ])
             .with_discovery(lash_tool_support::discovery_metadata("shell", &["shell", "bash"]))
-            .with_execution_mode(ToolExecutionMode::Serial),
+            .with_scheduling(ToolScheduling::Serial),
             ToolDefinition::raw(
                 "tool:start_command",
                 "start_command",
@@ -1344,7 +1344,7 @@ impl StandardShell {
                 "shell",
                 &["long_running_command", "pty"],
             ))
-            .with_execution_mode(ToolExecutionMode::Serial),
+            .with_scheduling(ToolScheduling::Serial),
             ToolDefinition::raw(
                 "tool:write_stdin",
                 "write_stdin",
@@ -1394,7 +1394,7 @@ impl StandardShell {
                 "shell",
                 &["send_stdin", "poll_command"],
             ))
-            .with_execution_mode(ToolExecutionMode::Serial),
+            .with_scheduling(ToolScheduling::Serial),
         ]
     }
 

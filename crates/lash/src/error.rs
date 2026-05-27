@@ -24,8 +24,8 @@ pub enum EmbedError {
     Runtime(#[from] lash_core::RuntimeError),
     #[error("runtime plugin/control error: {0}")]
     Plugin(#[from] lash_core::PluginError),
-    #[error("failed to encode mode turn options: {0}")]
-    ModeTurnOptions(#[from] serde_json::Error),
+    #[error("failed to encode protocol turn options: {0}")]
+    ProtocolTurnOptions(#[from] serde_json::Error),
     #[error("runtime control unavailable: {0}")]
     Control(#[from] lash_core::PluginActionInvokeError),
     #[error("queued image `{id}` is missing its image blob")]

@@ -5,7 +5,7 @@ use lash_core::plugin::{PluginError, PluginFactory, PluginSessionContext};
 use lash_core::{
     DirectJsonSchema, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
     PluginSpec, PluginSpecFactory, ToolCall, ToolContext, ToolContract, ToolDefinition,
-    ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
+    ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 use serde_json::{Value, json};
 
@@ -37,23 +37,14 @@ impl PluginFactory for LlmToolsPluginFactory {
         &self,
         ctx: &PluginSessionContext,
     ) -> Result<Arc<dyn lash_core::SessionPlugin>, PluginError> {
-        let is_rlm = ctx.execution_mode == lash_core::ExecutionMode::new("rlm");
-        let provider: Option<Arc<dyn ToolProvider>> = is_rlm.then(|| {
-            Arc::new(LlmToolsProvider {
-                model: self.model.clone(),
-                model_variant: self.model_variant.clone(),
-            }) as Arc<dyn ToolProvider>
+        let provider: Arc<dyn ToolProvider> = Arc::new(LlmToolsProvider {
+            model: self.model.clone(),
+            model_variant: self.model_variant.clone(),
         });
 
         PluginSpecFactory::new(
             "llm_tools",
-            Arc::new(move |_ctx| {
-                let mut spec = PluginSpec::new();
-                if let Some(provider) = provider.as_ref() {
-                    spec = spec.with_tool_provider(Arc::clone(provider));
-                }
-                Ok(spec)
-            }),
+            Arc::new(move |_ctx| Ok(PluginSpec::new().with_tool_provider(Arc::clone(&provider)))),
         )
         .build(ctx)
     }
@@ -147,7 +138,7 @@ pub fn llm_query_tool_definition() -> ToolDefinition {
             r#"summary = await TOOL.default.llm_query({ task: "Summarize the supplied notes in three bullets", inputs: { notes: notes } })?"#.into(),
             r#"claims = await TOOL.default.llm_query({ task: "Extract the key claim from each supplied chunk", inputs: { chunks: chunks }, output: { claims: "list[str]" } })?"#.into(),
         ],
-        ToolExecutionMode::Parallel,
+        ToolScheduling::Parallel,
     )
     .with_output_from_input_schema("output", Some(json!({ "type": "string" })))
 }
@@ -297,7 +288,7 @@ fn tool_definition(
     description: impl Into<String>,
     input_schema: Value,
     examples: Vec<String>,
-    execution_mode: ToolExecutionMode,
+    execution_mode: ToolScheduling,
 ) -> ToolDefinition {
     ToolDefinition::raw(
         format!("tool:{name}"),
@@ -307,7 +298,7 @@ fn tool_definition(
         json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(examples)
-    .with_execution_mode(execution_mode)
+    .with_scheduling(execution_mode)
 }
 
 fn required_string(args: &Value, key: &str) -> Result<String, String> {
@@ -451,12 +442,16 @@ mod tests {
             model: None,
             model_variant: None,
         };
-        let names = provider
-            .tool_manifests()
-            .into_iter()
-            .map(|tool| tool.name)
+        let manifests = provider.tool_manifests();
+        let names = manifests
+            .iter()
+            .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["llm_query"]);
+        assert_eq!(
+            manifests[0].effective_availability(),
+            lash_core::ToolAvailability::Showcased
+        );
     }
 
     #[test]
@@ -519,7 +514,6 @@ mod tests {
             snapshot: RuntimeSessionState {
                 policy: lash_core::SessionPolicy {
                     model: model_spec("root-model", Some("fast")),
-                    execution_mode: lash_core::ExecutionMode::new("rlm"),
                     ..lash_core::SessionPolicy::default()
                 },
                 ..RuntimeSessionState::default()
@@ -586,7 +580,6 @@ mod tests {
             snapshot: RuntimeSessionState {
                 policy: lash_core::SessionPolicy {
                     model: model_spec("root-model", Some("medium")),
-                    execution_mode: lash_core::ExecutionMode::new("rlm"),
                     ..lash_core::SessionPolicy::default()
                 },
                 ..RuntimeSessionState::default()
@@ -623,10 +616,7 @@ mod tests {
     async fn llm_query_error_result_fails_tool_call() {
         let manager = Arc::new(DirectCompletionManager {
             snapshot: RuntimeSessionState {
-                policy: lash_core::SessionPolicy {
-                    execution_mode: lash_core::ExecutionMode::new("rlm"),
-                    ..lash_core::SessionPolicy::default()
-                },
+                policy: lash_core::SessionPolicy::default(),
                 ..RuntimeSessionState::default()
             },
             requests: Mutex::new(Vec::new()),

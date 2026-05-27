@@ -85,7 +85,7 @@ Start with:
 3. Inspect `$LASH_HOME/sessions` for the active session database and any `.trace.jsonl` debug logs.
 4. Check `$LASH_HOME/config.json` for provider configuration.
 
-If a task asks Lash to modify its own installed behavior, first identify whether the behavior belongs to the CLI host, core runtime, sans-io state machine, provider crate, mode plugin, or user-home data. Do not paper over a core/runtime problem in the CLI unless the behavior is genuinely host-specific.
+If a task asks Lash to modify its own installed behavior, first identify whether the behavior belongs to the CLI host, core runtime, sans-io state machine, provider crate, protocol plugin, or user-home data. Do not paper over a core/runtime problem in the CLI unless the behavior is genuinely host-specific.
 "#;
 
 const MANAGED_DOCS: &[(&str, &str)] = &[
@@ -234,12 +234,10 @@ mod tests {
         let docs_dir = PathBuf::from("/tmp/lash-home/docs/lash-cli");
         let plugin_host = lash_core::PluginHost::new(vec![
             Arc::new(lash_plugin_process_controls::ProcessControlsPluginFactory::new()),
-            Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory),
+            Arc::new(lash_protocol_standard::StandardProtocolPluginFactory),
             Arc::new(HostDocsPluginFactory::new(docs_dir.clone())),
         ]);
-        let session = plugin_host
-            .build_standard_session("root", None)
-            .expect("session");
+        let session = plugin_host.build_session("root", None).expect("session");
 
         let contributions = session
             .collect_prompt_contributions(lash_core::PromptHookContext {
@@ -248,7 +246,7 @@ mod tests {
                 state: lash_core::SessionReadView::from_exported_state(
                     &lash_core::SessionStateEnvelope::default(),
                 ),
-                mode_turn_options: lash_core::ModeTurnOptions::default(),
+                protocol_turn_options: lash_core::ProtocolTurnOptions::default(),
                 turn_context: lash_core::TurnContext::default(),
             })
             .await

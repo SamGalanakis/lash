@@ -1,7 +1,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use crate::{ExecutionMode, PromptContribution, PromptTemplate};
+use crate::{PromptContribution, PromptTemplate};
 
 /// Process-local cache identity for prompt inputs.
 ///
@@ -64,7 +64,6 @@ impl Default for PromptContributionSet {
 
 #[derive(Clone, Debug)]
 pub struct PromptBuildInput {
-    pub mode: ExecutionMode,
     pub template: PromptTemplate,
     pub template_fingerprint: PromptFingerprint,
     pub execution_prompt: Arc<str>,
@@ -77,7 +76,6 @@ pub struct PromptBuildInput {
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct PromptContext {
-    pub mode: ExecutionMode,
     #[serde(default)]
     pub execution_prompt: Arc<str>,
     pub tool_names: Arc<Vec<String>>,
@@ -99,7 +97,7 @@ pub struct PreparedPrompt {
 
 /// Single-slot memo for the rendered system prompt, keyed by a hash of
 /// the inputs. Most consecutive turns in a session pass identical
-/// inputs (template, mode-preamble-derived `execution_prompt` /
+/// inputs (template, turn-driver-preamble-derived `execution_prompt` /
 /// `tool_names`, plus context contributions), so a one-slot cache hits
 /// repeatedly and avoids the section-by-section `Vec<String>::join`
 /// work in `PromptTemplate::render`.
@@ -126,7 +124,6 @@ pub fn build_prompt(input: PromptBuildInput) -> PreparedPrompt {
 
 pub fn build_prompt_cached(input: PromptBuildInput, cache: Option<&PromptCache>) -> PreparedPrompt {
     let context = PromptContext {
-        mode: input.mode.clone(),
         execution_prompt: Arc::clone(&input.execution_prompt),
         tool_names: Arc::clone(&input.tool_names),
         omitted_tool_count: input.omitted_tool_count,
@@ -173,7 +170,6 @@ pub fn prompt_tool_names_fingerprint(tool_names: &[String]) -> PromptFingerprint
 fn hash_prompt_inputs(input: &PromptBuildInput, context: &PromptContext) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     input.template_fingerprint.write(&mut hasher);
-    context.mode.hash(&mut hasher);
     input.execution_prompt_fingerprint.write(&mut hasher);
     input.tool_names_fingerprint.write(&mut hasher);
     context.omitted_tool_count.hash(&mut hasher);
@@ -260,7 +256,6 @@ mod tests {
         let execution_prompt: Arc<str> = Arc::from(execution_prompt);
         let tool_names = Arc::new(tool_names);
         PromptBuildInput {
-            mode: crate::ExecutionMode::standard(),
             template_fingerprint: prompt_template_fingerprint(&template),
             template,
             execution_prompt_fingerprint: prompt_text_fingerprint(&execution_prompt),
@@ -357,7 +352,6 @@ mod tests {
         let resolved = resolve_prompt_layers([&core, &session]);
 
         let rendered = resolved.template.render(&PromptContext {
-            mode: crate::ExecutionMode::standard(),
             execution_prompt: Arc::from("execute"),
             ..PromptContext::default()
         });

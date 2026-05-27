@@ -194,7 +194,7 @@ pub(crate) enum TraceSessionEvent {
         kind: String,
     },
     LlmRequest {
-        mode_iteration: usize,
+        protocol_iteration: usize,
         message_count: usize,
         tool_list: String,
     },
@@ -231,8 +231,8 @@ impl TraceSessionEvent {
                 text: code.clone(),
                 kind: "lashlang_code".to_string(),
             }),
-            TurnEvent::ModelRequestStarted { mode_iteration } => Some(Self::LlmRequest {
-                mode_iteration: *mode_iteration,
+            TurnEvent::ModelRequestStarted { protocol_iteration } => Some(Self::LlmRequest {
+                protocol_iteration: *protocol_iteration,
                 message_count: 0,
                 tool_list: String::new(),
             }),

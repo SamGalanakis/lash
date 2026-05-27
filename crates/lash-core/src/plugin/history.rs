@@ -71,7 +71,7 @@ struct SessionReadMeta {
     turn_index: usize,
     token_usage: crate::TokenUsage,
     last_prompt_usage: Option<crate::runtime::PromptUsage>,
-    mode_turn_options: crate::ModeTurnOptions,
+    protocol_turn_options: crate::ProtocolTurnOptions,
 }
 
 impl SessionReadMeta {
@@ -82,7 +82,7 @@ impl SessionReadMeta {
             turn_index: state.turn_index,
             token_usage: state.token_usage.clone(),
             last_prompt_usage: state.last_prompt_usage.clone(),
-            mode_turn_options: state.mode_turn_options.clone(),
+            protocol_turn_options: state.protocol_turn_options.clone(),
         }
     }
 
@@ -93,7 +93,7 @@ impl SessionReadMeta {
             turn_index: state.turn_index,
             token_usage: state.token_usage.clone(),
             last_prompt_usage: state.last_prompt_usage.clone(),
-            mode_turn_options: state.mode_turn_options.clone(),
+            protocol_turn_options: state.protocol_turn_options.clone(),
         }
     }
 
@@ -107,8 +107,11 @@ impl SessionReadMeta {
         self
     }
 
-    fn with_mode_turn_options(mut self, mode_turn_options: crate::ModeTurnOptions) -> Self {
-        self.mode_turn_options = mode_turn_options;
+    fn with_protocol_turn_options(
+        mut self,
+        protocol_turn_options: crate::ProtocolTurnOptions,
+    ) -> Self {
+        self.protocol_turn_options = protocol_turn_options;
         self
     }
 
@@ -120,7 +123,7 @@ impl SessionReadMeta {
             turn_index: self.turn_index,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
-            mode_turn_options: self.mode_turn_options.clone(),
+            protocol_turn_options: self.protocol_turn_options.clone(),
         }
     }
 }
@@ -183,14 +186,14 @@ impl SessionReadView {
     pub(crate) fn from_runtime_state(
         state: &RuntimeSessionState,
         policy: SessionPolicy,
-        mode_turn_options: crate::ModeTurnOptions,
+        protocol_turn_options: crate::ProtocolTurnOptions,
     ) -> Self {
         let graph = state.session_graph.clone();
         let read_model = graph.read_model();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_persisted_ref(state)
                 .with_policy(policy)
-                .with_mode_turn_options(mode_turn_options),
+                .with_protocol_turn_options(protocol_turn_options),
             graph: SessionReadGraph::Owned(graph),
             read_model,
             chronological_projection: OnceLock::new(),
@@ -201,7 +204,7 @@ impl SessionReadView {
         state: &RuntimeSessionState,
         policy: SessionPolicy,
         turn_index: usize,
-        mode_turn_options: crate::ModeTurnOptions,
+        protocol_turn_options: crate::ProtocolTurnOptions,
         base_graph: Arc<crate::SessionGraph>,
         messages: crate::MessageSequence,
         tool_calls: Arc<Vec<crate::ToolCallRecord>>,
@@ -210,7 +213,7 @@ impl SessionReadView {
             SessionReadMeta::from_persisted_ref(state)
                 .with_policy(policy)
                 .with_turn_index(turn_index)
-                .with_mode_turn_options(mode_turn_options),
+                .with_protocol_turn_options(protocol_turn_options),
             base_graph,
             messages,
             tool_calls,
@@ -283,8 +286,8 @@ impl SessionReadView {
         self.0.meta.last_prompt_usage.as_ref()
     }
 
-    pub fn mode_turn_options(&self) -> &crate::ModeTurnOptions {
-        &self.0.meta.mode_turn_options
+    pub fn protocol_turn_options(&self) -> &crate::ProtocolTurnOptions {
+        &self.0.meta.protocol_turn_options
     }
 
     pub fn to_owned_state(&self) -> SessionStateEnvelope {

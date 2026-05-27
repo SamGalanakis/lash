@@ -156,8 +156,8 @@ fn find_progress(effects: &[Effect]) -> Option<(&MessageSequence, usize)> {
         Effect::Progress {
             messages,
             event_delta: _,
-            mode_iteration,
-        } => Some((messages, *mode_iteration)),
+            protocol_iteration,
+        } => Some((messages, *protocol_iteration)),
         _ => None,
     })
 }
@@ -167,8 +167,8 @@ fn find_done(effects: &[Effect]) -> Option<(&MessageSequence, usize)> {
         Effect::Done {
             messages,
             event_delta: _,
-            mode_iteration,
-        } => Some((messages, *mode_iteration)),
+            protocol_iteration,
+        } => Some((messages, *protocol_iteration)),
         _ => None,
     })
 }
@@ -240,7 +240,7 @@ fn completed_tool(
 struct ProseDriver;
 
 impl ProtocolDriverHandle for ProseDriver {
-    fn prepare_mode_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
+    fn prepare_protocol_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
             request: ctx.project_llm_request(false),
             driver_state: None,
@@ -287,10 +287,10 @@ impl ProtocolDriverHandle for ProseDriver {
 struct ExecDriver;
 
 impl ProtocolDriverHandle for ExecDriver {
-    fn prepare_mode_iteration(&self, _ctx: DriverContextView<'_>) -> Vec<DriverAction> {
+    fn prepare_protocol_iteration(&self, _ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartExec {
             code: "print 1".to_string(),
-            driver_state: driver_state("exec-state".to_string()),
+            driver_state: serde_json::json!("exec-state"),
         }]
     }
 
@@ -319,8 +319,10 @@ impl ProtocolDriverHandle for ExecDriver {
         _result: Result<crate::ExecResponse, String>,
     ) -> Vec<DriverAction> {
         let state = waiting
-            .into_driver_state::<String>()
-            .expect("exec driver state");
+            .into_driver_state()
+            .as_str()
+            .expect("exec driver state")
+            .to_string();
         vec![
             DriverAction::AppendEvents(vec![conversation_event(text_message(
                 MessageRole::User,
@@ -337,7 +339,7 @@ impl ProtocolDriverHandle for ExecDriver {
 struct SyncThenAdvanceDriver;
 
 impl ProtocolDriverHandle for SyncThenAdvanceDriver {
-    fn prepare_mode_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
+    fn prepare_protocol_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
             request: ctx.project_llm_request(true),
             driver_state: None,
@@ -351,9 +353,9 @@ impl ProtocolDriverHandle for SyncThenAdvanceDriver {
         _llm_response: LlmResponse,
         _text_streamed: bool,
     ) -> Vec<DriverAction> {
-        if ctx.mode_iteration() == ctx.mode_run_offset() {
+        if ctx.protocol_iteration() == ctx.protocol_run_offset() {
             vec![
-                DriverAction::AdvanceModeIteration,
+                DriverAction::AdvanceProtocolIteration,
                 DriverAction::StartCheckpoint {
                     checkpoint: CheckpointKind::BeforeCompletion,
                     on_empty: CheckpointResumeAction::PrepareIteration,
@@ -385,7 +387,7 @@ impl ProtocolDriverHandle for SyncThenAdvanceDriver {
 struct ToolBatchDriver;
 
 impl ProtocolDriverHandle for ToolBatchDriver {
-    fn prepare_mode_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
+    fn prepare_protocol_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
             request: ctx.project_llm_request(true),
             driver_state: None,
@@ -763,7 +765,7 @@ fn context_overflow_response_stops_as_provider_error() {
 }
 
 #[test]
-fn checkpoint_messages_resume_prepare_mode_iteration() {
+fn checkpoint_messages_resume_prepare_protocol_iteration() {
     let config = test_config(Arc::new(ProseDriver));
     let msgs = vec![user_message("hello")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -1177,7 +1179,7 @@ fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
 
     let effects = drain_effects(&mut machine);
     let (sync_id, update_machine_config) =
-        find_execution_surface_sync(&effects).expect("mode_iteration execution surface sync");
+        find_execution_surface_sync(&effects).expect("protocol_iteration execution surface sync");
     assert!(update_machine_config);
 
     machine.handle_response(Response::ExecutionSurfaceSynced {

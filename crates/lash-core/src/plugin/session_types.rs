@@ -32,10 +32,10 @@ pub struct PluginOwned<T> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionPluginMode {
-    Fresh,
+pub enum SessionPluginSource {
+    CurrentHostFresh,
     #[default]
-    InheritCurrent,
+    CurrentSessionFork,
 }
 
 #[derive(Clone)]
@@ -110,7 +110,7 @@ pub struct SessionCreateRequest {
     #[serde(default)]
     pub policy: Option<SessionPolicy>,
     #[serde(default)]
-    pub plugin_mode: SessionPluginMode,
+    pub plugin_source: SessionPluginSource,
     #[serde(default)]
     pub initial_nodes: Vec<SessionAppendNode>,
     /// Optional seed message dispatched as the new session's first turn
@@ -125,11 +125,10 @@ pub struct SessionCreateRequest {
     pub subagent: Option<SubagentSessionContext>,
     #[serde(skip)]
     pub context_surface: SessionContextSurface,
-    /// Per-execution-mode "extras" that configure mode-specific
-    /// behavior at session-creation time. The base request stays
-    /// mode-agnostic; each `ExecutionMode` defines its own struct.
+    /// Plugin-owned options that configure plugin behavior at session
+    /// creation time. Each plugin decodes only the entry keyed by its id.
     #[serde(default)]
-    pub mode_extras: ModeExtras,
+    pub plugin_options: PluginOptions,
     /// Label for the token-cost ledger. When this session's turns
     /// complete, their token usage is accumulated under this label on
     /// the parent session's `token_ledger`. Examples: `"subagent"`,
@@ -139,11 +138,101 @@ pub struct SessionCreateRequest {
 }
 
 impl SessionCreateRequest {
+    pub fn root(start: SessionStartPoint, plugin_options: PluginOptions) -> Self {
+        Self {
+            session_id: Some(uuid::Uuid::new_v4().to_string()),
+            relation: SessionRelation::Root,
+            start,
+            policy: None,
+            plugin_source: SessionPluginSource::CurrentHostFresh,
+            initial_nodes: Vec::new(),
+            first_turn_input: None,
+            tool_access: SessionToolAccess::default(),
+            subagent: None,
+            context_surface: SessionContextSurface::default(),
+            plugin_options,
+            usage_source: None,
+        }
+    }
+
+    pub fn root_with_policy(
+        start: SessionStartPoint,
+        policy: SessionPolicy,
+        plugin_options: PluginOptions,
+    ) -> Self {
+        Self {
+            policy: Some(policy),
+            ..Self::root(start, plugin_options)
+        }
+    }
+
+    pub fn child_session(
+        parent_session_id: impl Into<String>,
+        start: SessionStartPoint,
+        plugin_options: PluginOptions,
+    ) -> Self {
+        Self {
+            session_id: Some(uuid::Uuid::new_v4().to_string()),
+            relation: SessionRelation::Child {
+                parent_session_id: parent_session_id.into(),
+                originating_tool_call_id: None,
+            },
+            start,
+            policy: None,
+            plugin_source: SessionPluginSource::CurrentHostFresh,
+            initial_nodes: Vec::new(),
+            first_turn_input: None,
+            tool_access: SessionToolAccess::default(),
+            subagent: None,
+            context_surface: SessionContextSurface::default(),
+            plugin_options,
+            usage_source: None,
+        }
+    }
+
+    pub fn child_session_with_policy(
+        parent_session_id: impl Into<String>,
+        start: SessionStartPoint,
+        policy: SessionPolicy,
+        plugin_options: PluginOptions,
+    ) -> Self {
+        Self {
+            policy: Some(policy),
+            ..Self::child_session(parent_session_id, start, plugin_options)
+        }
+    }
+
+    pub fn handoff_session(
+        parent_session_id: impl Into<String>,
+        reason: impl Into<String>,
+        metadata: serde_json::Map<String, serde_json::Value>,
+        plugin_options: PluginOptions,
+    ) -> Self {
+        Self {
+            session_id: Some(uuid::Uuid::new_v4().to_string()),
+            relation: SessionRelation::Handoff {
+                parent_session_id: parent_session_id.into(),
+                reason: reason.into(),
+                metadata,
+            },
+            start: SessionStartPoint::Empty,
+            policy: None,
+            plugin_source: SessionPluginSource::CurrentHostFresh,
+            initial_nodes: Vec::new(),
+            first_turn_input: None,
+            tool_access: SessionToolAccess::default(),
+            subagent: None,
+            context_surface: SessionContextSurface::default(),
+            plugin_options,
+            usage_source: None,
+        }
+    }
+
     pub fn child(
         parent_session_id: impl Into<String>,
         start: SessionStartPoint,
         policy: SessionPolicy,
-        mode_extras: ModeExtras,
+        plugin_options: PluginOptions,
         usage_source: impl Into<String>,
     ) -> Self {
         Self::related(
@@ -153,7 +242,7 @@ impl SessionCreateRequest {
             },
             start,
             Some(policy),
-            mode_extras,
+            plugin_options,
             usage_source,
         )
     }
@@ -161,7 +250,7 @@ impl SessionCreateRequest {
     pub fn child_inheriting_policy(
         parent_session_id: impl Into<String>,
         start: SessionStartPoint,
-        mode_extras: ModeExtras,
+        plugin_options: PluginOptions,
         usage_source: impl Into<String>,
     ) -> Self {
         Self::related(
@@ -171,7 +260,7 @@ impl SessionCreateRequest {
             },
             start,
             None,
-            mode_extras,
+            plugin_options,
             usage_source,
         )
     }
@@ -179,7 +268,7 @@ impl SessionCreateRequest {
     pub fn handoff(
         parent_session_id: impl Into<String>,
         policy: SessionPolicy,
-        mode_extras: ModeExtras,
+        plugin_options: PluginOptions,
         reason: impl Into<String>,
         metadata: serde_json::Map<String, serde_json::Value>,
         usage_source: impl Into<String>,
@@ -192,7 +281,7 @@ impl SessionCreateRequest {
             },
             SessionStartPoint::Empty,
             Some(policy),
-            mode_extras,
+            plugin_options,
             usage_source,
         )
     }
@@ -201,27 +290,27 @@ impl SessionCreateRequest {
         relation: SessionRelation,
         start: SessionStartPoint,
         policy: Option<SessionPolicy>,
-        mode_extras: ModeExtras,
+        plugin_options: PluginOptions,
         usage_source: impl Into<String>,
     ) -> Self {
         Self {
             session_id: Some(uuid::Uuid::new_v4().to_string()),
             relation,
             start,
-            policy: policy.map(SessionPolicy::normalized_for_execution_mode),
-            plugin_mode: SessionPluginMode::Fresh,
+            policy,
+            plugin_source: SessionPluginSource::CurrentHostFresh,
             initial_nodes: Vec::new(),
             first_turn_input: None,
             tool_access: SessionToolAccess::default(),
             subagent: None,
             context_surface: SessionContextSurface::default(),
-            mode_extras,
+            plugin_options,
             usage_source: Some(usage_source.into()),
         }
     }
 
-    pub fn with_plugin_mode(mut self, plugin_mode: SessionPluginMode) -> Self {
-        self.plugin_mode = plugin_mode;
+    pub fn with_plugin_source(mut self, plugin_source: SessionPluginSource) -> Self {
+        self.plugin_source = plugin_source;
         self
     }
 
@@ -265,6 +354,11 @@ impl SessionCreateRequest {
         self.context_surface = context_surface;
         self
     }
+
+    pub fn with_usage_source(mut self, usage_source: impl Into<String>) -> Self {
+        self.usage_source = Some(usage_source.into());
+        self
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -289,7 +383,7 @@ pub struct SubagentSessionContext {
     pub max_depth: u8,
 }
 
-/// Per-execution-mode configuration carried on a `SessionCreateRequest`.
+/// Plugin-owned payloads carried on a `SessionCreateRequest`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
@@ -297,8 +391,8 @@ pub enum SessionAppendNode {
     Message {
         message: PluginMessage,
     },
-    ModeEvent {
-        event: crate::ModeEvent,
+    ProtocolEvent {
+        event: crate::ProtocolEvent,
     },
     Plugin {
         plugin_type: String,
@@ -319,7 +413,7 @@ impl SessionAppendNode {
         }
     }
 
-    pub fn mode_event(event: crate::ModeEvent) -> Self {
-        Self::ModeEvent { event }
+    pub fn protocol_event(event: crate::ProtocolEvent) -> Self {
+        Self::ProtocolEvent { event }
     }
 }

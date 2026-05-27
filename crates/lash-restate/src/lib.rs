@@ -776,7 +776,7 @@ mod tests {
             origin: lash_core::EffectOrigin::Turn,
             turn_id: Some("turn".to_string()),
             turn_index: Some(1),
-            mode_iteration: Some(2),
+            protocol_iteration: Some(2),
             effect_id: "effect".to_string(),
             effect_kind: RuntimeEffectKind::ToolCall,
             idempotency_key: "session:turn:1:2:tool_call:effect".to_string(),
@@ -1131,7 +1131,7 @@ mod tests {
             origin: lash_core::EffectOrigin::Turn,
             turn_id: Some("turn".to_string()),
             turn_index: Some(1),
-            mode_iteration: Some(0),
+            protocol_iteration: Some(0),
             effect_id: effect_id.to_string(),
             effect_kind: kind,
             idempotency_key: format!("session:turn:1:0:{}:{effect_id}", kind.as_str()),
@@ -1725,7 +1725,7 @@ mod tests {
     ) -> DurableProcessWorker {
         let tools: Arc<dyn lash_core::ToolProvider> = Arc::new(RecoveryProcessTool);
         let plugin_host = lash_core::PluginHost::new(vec![
-            Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory::new())
+            Arc::new(lash_protocol_standard::StandardProtocolPluginFactory::new())
                 as Arc<dyn lash_core::PluginFactory>,
             Arc::new(lash_core::plugin::StaticPluginFactory::new(
                 "recovery-tool",
@@ -1740,7 +1740,6 @@ mod tests {
                 registry,
             )
             .with_session_policy(lash_core::SessionPolicy {
-                execution_mode: lash_core::ExecutionMode::standard(),
                 provider: lash_core::ProviderHandle::default(),
                 model: lash_core::ModelSpec::from_token_limits(
                     "mock-model",

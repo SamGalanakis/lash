@@ -66,7 +66,7 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
     let mut last_final_output: Option<String> = None;
     for entry in session.chronological.iter() {
         match &entry.payload {
-            ChronologicalPayload::ModeEvent(event) => {
+            ChronologicalPayload::ProtocolEvent(event) => {
                 last_final_output = chronological_rlm_step(event)
                     .and_then(|step| step.final_output.map(|value| submit_value_text(&value)));
             }
@@ -91,14 +91,14 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
                 .call_id
                 .as_ref()
                 .map(|call_id| (call_id.clone(), record)),
-            ChronologicalPayload::Message(_) | ChronologicalPayload::ModeEvent(_) => None,
+            ChronologicalPayload::Message(_) | ChronologicalPayload::ProtocolEvent(_) => None,
         })
         .collect::<HashMap<_, _>>();
     let rlm_owned_tool_call_ids = session
         .chronological
         .iter()
         .filter_map(|entry| match &entry.payload {
-            ChronologicalPayload::ModeEvent(event) => chronological_rlm_step(event),
+            ChronologicalPayload::ProtocolEvent(event) => chronological_rlm_step(event),
             ChronologicalPayload::Message(_) | ChronologicalPayload::ToolCall(_) => None,
         })
         .flat_map(|step| step.tool_call_ids)
@@ -127,7 +127,7 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
                     Some(PromptAnchor {
                         entry_id: String::new(),
                         iter_label: anchor_prompt
-                            .mode_iteration
+                            .protocol_iteration
                             .map(|i| format!("iter {i}"))
                             .unwrap_or_else(|| "first call".to_string()),
                     })
@@ -168,7 +168,7 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
                     .or_insert(PromptAnchor {
                         entry_id: id,
                         iter_label: prompt
-                            .mode_iteration
+                            .protocol_iteration
                             .map(|i| format!("iter {i}"))
                             .unwrap_or_else(|| "first call".to_string()),
                     });
@@ -219,7 +219,7 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
                     );
                 }
             }
-            ChronologicalPayload::ModeEvent(event) => {
+            ChronologicalPayload::ProtocolEvent(event) => {
                 let Some(step) = chronological_rlm_step(event) else {
                     continue;
                 };
@@ -336,7 +336,7 @@ fn render_tool_fanout(
             .or_insert(PromptAnchor {
                 entry_id: child_id,
                 iter_label: prompt
-                    .mode_iteration
+                    .protocol_iteration
                     .map(|i| format!("iter {i}"))
                     .unwrap_or_else(|| "fan-out".to_string()),
             });
@@ -1017,7 +1017,7 @@ pub(crate) fn render_rlm_step(
     let _ = writeln!(
         out,
         "          <span class=\"entry-tag entry-tag--rlm\">RLM step {}</span>",
-        step.mode_iteration
+        step.protocol_iteration
     );
     if has_reasoning_body {
         // Reasoning renders below as its own block — keep the layout
@@ -1078,7 +1078,7 @@ pub(crate) fn render_rlm_step(
     let _ = writeln!(
         spine,
         "    <a class=\"spine-tick spine-tick--rlm\" href=\"#{id}\" data-spine=\"rlm\" data-status=\"{status_key}\" title=\"RLM step {it}{nested}\"></a>",
-        it = step.mode_iteration,
+        it = step.protocol_iteration,
         nested = if nested_calls > 0 {
             format!(" · {nested_calls} calls")
         } else {

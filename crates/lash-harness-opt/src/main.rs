@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
-use lash::advanced::ModeTurnOptions;
+use lash::advanced::ProtocolTurnOptions;
 use lash::{LashCore, TurnActivity, TurnEvent};
 use lash_cli::config::LashConfig;
 use lash_core::TurnInput;
@@ -436,13 +436,10 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
         let turn = session
             .turn(TurnInput::text(prompt))
             .cancel(cancellation)
-            .mode_turn_options(
-                ModeTurnOptions::typed(
-                    lash_core::ExecutionMode::new("rlm"),
-                    RlmTermination::SubmitRequired {
-                        schema: Some(request.output_schema.clone()),
-                    },
-                )
+            .protocol_turn_options(
+                ProtocolTurnOptions::typed(RlmTermination::SubmitRequired {
+                    schema: Some(request.output_schema.clone()),
+                })
                 .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?,
             )
             .run()

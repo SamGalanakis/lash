@@ -26,8 +26,8 @@ use lash_core::plugin::{
     SessionPlugin,
 };
 use lash_core::{
-    PromptContribution, ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest,
-    ToolProvider, ToolResult,
+    PromptContribution, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
+    ToolResult, ToolScheduling,
 };
 
 const PLUGIN_ID: &str = "update_plan";
@@ -142,7 +142,7 @@ fn update_plan_tool_definition() -> ToolDefinition {
                 "{\"explanation\":\"I found the main renderer.\",\"plan\":[{\"step\":\"Inspect renderer\",\"status\":\"completed\"},{\"step\":\"Patch layout\",\"status\":\"in_progress\"},{\"step\":\"Run tests\",\"status\":\"pending\"}]}"
                     .into(),
             ])
-            .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_scheduling(ToolScheduling::Parallel)
 }
 
 fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) -> ToolResult {
@@ -311,10 +311,9 @@ impl SessionPlugin for UpdatePlanPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::testing::{MockSessionManager, test_mode_factories};
+    use lash_core::testing::{MockSessionManager, test_standard_protocol_factories};
     use lash_core::{
-        ExecutionMode, PluginHost, PromptHookContext, PromptSlot, SessionReadView,
-        SessionStateEnvelope,
+        PluginHost, PromptHookContext, PromptSlot, SessionReadView, SessionStateEnvelope,
     };
 
     #[tokio::test]
@@ -403,8 +402,6 @@ mod tests {
         let factory = UpdatePlanPluginFactory::new();
         let root_ctx = PluginSessionContext {
             session_id: "root".into(),
-            execution_mode: lash_core::ExecutionMode::standard(),
-            standard_context_approach: Some(lash_core::StandardContextApproach::default()),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             lashlang_abilities: Default::default(),
@@ -412,8 +409,6 @@ mod tests {
         };
         let child_ctx = PluginSessionContext {
             session_id: "child".into(),
-            execution_mode: lash_core::ExecutionMode::standard(),
-            standard_context_approach: Some(lash_core::StandardContextApproach::default()),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             lashlang_abilities: Default::default(),
@@ -427,19 +422,17 @@ mod tests {
 
     #[tokio::test]
     async fn root_session_contributes_planning_guidance() {
-        let mut factories = test_mode_factories();
+        let mut factories = test_standard_protocol_factories();
         factories.push(Arc::new(UpdatePlanPluginFactory::new()));
         let plugin_host = PluginHost::new(factories);
-        let session = plugin_host
-            .build_standard_session("root", None)
-            .expect("session");
+        let session = plugin_host.build_session("root", None).expect("session");
 
         let contributions = session
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
-                mode_turn_options: lash_core::ModeTurnOptions::default(),
+                protocol_turn_options: lash_core::ProtocolTurnOptions::default(),
                 turn_context: lash_core::TurnContext::default(),
             })
             .await
@@ -455,15 +448,13 @@ mod tests {
 
     #[tokio::test]
     async fn child_session_does_not_contribute_planning_guidance() {
-        let mut factories = test_mode_factories();
+        let mut factories = test_standard_protocol_factories();
         factories.push(Arc::new(UpdatePlanPluginFactory::new()));
         let plugin_host = PluginHost::new(factories);
         let session = plugin_host
             .build_session_with_parent(
                 "child",
                 Some("root".to_string()),
-                ExecutionMode::standard(),
-                Some(lash_core::StandardContextApproach::default()),
                 None,
                 lash_core::plugin::SessionAuthorityContext::default(),
             )
@@ -474,7 +465,7 @@ mod tests {
                 session_id: "child".to_string(),
                 host: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
-                mode_turn_options: lash_core::ModeTurnOptions::default(),
+                protocol_turn_options: lash_core::ProtocolTurnOptions::default(),
                 turn_context: lash_core::TurnContext::default(),
             })
             .await

@@ -30,10 +30,7 @@ impl LashRuntime {
     ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {
         self.session
             .as_ref()
-            .map(|session| {
-                session
-                    .shared_tool_catalog(&self.state.session_id, self.policy.execution_mode.clone())
-            })
+            .map(|session| session.shared_tool_catalog(&self.state.session_id))
             .unwrap_or_else(|| Ok(Arc::new(Vec::new())))
     }
 
@@ -45,10 +42,10 @@ impl LashRuntime {
         };
         Ok(session.plugins().tool_registry().export_state())
     }
-    /// Override mode-owned turn options for this session.
-    pub fn set_mode_turn_options(&mut self, options: crate::ModeTurnOptions) {
-        self.state.mode_turn_options = options.clone();
-        self.mode_turn_options = options;
+    /// Override protocol-owned turn options for this session.
+    pub fn set_protocol_turn_options(&mut self, options: crate::ProtocolTurnOptions) {
+        self.state.protocol_turn_options = options.clone();
+        self.protocol_turn_options = options;
     }
 
     /// Export current session state for inspection/UI purposes.
@@ -62,7 +59,7 @@ impl LashRuntime {
         crate::SessionReadView::from_runtime_state(
             &self.state,
             self.policy.clone(),
-            self.mode_turn_options.clone(),
+            self.protocol_turn_options.clone(),
         )
     }
 
@@ -83,7 +80,7 @@ impl LashRuntime {
     /// refreshed from the live session.
     pub fn export_persisted_state(&self) -> RuntimeSessionState {
         let mut state = self.state.clone();
-        state.mode_turn_options = self.mode_turn_options.clone();
+        state.protocol_turn_options = self.protocol_turn_options.clone();
         if let Some(session) = self.session.as_ref() {
             let snapshot = session.plugins().tool_registry().export_state();
             state.tool_state_generation = Some(snapshot.generation());

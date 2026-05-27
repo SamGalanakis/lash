@@ -60,11 +60,10 @@ where
                     turn_index: state.turn_index,
                     token_usage: state.token_usage,
                     last_prompt_usage: state.last_prompt_usage,
-                    mode_turn_options: state.mode_turn_options,
+                    protocol_turn_options: state.protocol_turn_options,
                 };
                 lash::TurnResult {
                     execution: ExecutionSummary {
-                        mode: state.policy.execution_mode.clone(),
                         had_tool_calls: false,
                         had_code_execution: false,
                     },
@@ -98,12 +97,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::{advanced::ExecutionMode, usage::TokenLedgerEntry};
+    use lash::usage::TokenLedgerEntry;
     use lash_core::session_model::fresh_message_id;
     use lash_core::{
         HydratedSessionCheckpoint, Message, MessageRole, Part, PartKind, PersistedSessionConfig,
-        PersistedTurnState, PruneState, RollingHistoryConfig, SessionGraph, SessionHead,
-        StandardContextApproach, refresh_persisted_session_state,
+        PersistedTurnState, PruneState, SessionGraph, SessionHead, refresh_persisted_session_state,
     };
 
     #[tokio::test]
@@ -149,7 +147,7 @@ mod tests {
                         reasoning_tokens: 6,
                     },
                     last_prompt_usage: None,
-                    mode_turn_options: Default::default(),
+                    protocol_turn_options: Default::default(),
                 },
                 tool_state_ref: None,
                 tool_state: None,
@@ -175,10 +173,6 @@ mod tests {
                     None,
                 )
                 .expect("valid model spec"),
-                execution_mode: ExecutionMode::new("rlm"),
-                standard_context_approach: Some(StandardContextApproach::RollingHistory(
-                    RollingHistoryConfig,
-                )),
             },
             checkpoint_ref: Some(checkpoint_ref),
             token_ledger: ledger,

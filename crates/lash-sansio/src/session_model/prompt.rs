@@ -390,22 +390,21 @@ fn render_contribution(contribution: &PromptContribution) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn prompt(mode: crate::ExecutionMode) -> PromptContext {
+    fn prompt() -> PromptContext {
         PromptContext {
-            mode,
-            execution_prompt: std::sync::Arc::from("mode execution"),
+            execution_prompt: std::sync::Arc::from("protocol execution"),
             ..PromptContext::default()
         }
     }
 
     #[test]
     fn default_template_renders_builtin_sections() {
-        let mut ctx = prompt(crate::ExecutionMode::new("test_mode"));
+        let mut ctx = prompt();
         ctx.tool_names = std::sync::Arc::new(vec!["ask".to_string()]);
         let text = default_prompt_template().render(&ctx);
         assert!(text.contains(MAIN_AGENT_INTRO));
         assert!(text.contains("## Execution"));
-        assert!(text.contains("mode execution"));
+        assert!(text.contains("protocol execution"));
         assert!(text.contains("## Guidance"));
         // Interactive context: the "ask when blocked" guidance is in play.
         assert!(text.contains("Ask only when progress is blocked"));
@@ -417,7 +416,7 @@ mod tests {
         // `ask` tool, so the guidance line telling the model "Ask
         // only when progress is blocked" would contradict the
         // run-time constraint. `render_core_guidance` must drop it.
-        let ctx = prompt(crate::ExecutionMode::new("test_mode"));
+        let ctx = prompt();
         assert!(!ctx.has_tool("ask"));
         let rendered = render_core_guidance(&ctx);
         assert!(rendered.contains("Be concise"));
@@ -427,7 +426,7 @@ mod tests {
 
     #[test]
     fn core_guidance_keeps_ask_line_when_ask_tool_present() {
-        let mut ctx = prompt(crate::ExecutionMode::new("test_mode"));
+        let mut ctx = prompt();
         ctx.tool_names = std::sync::Arc::new(vec!["ask".to_string()]);
         let rendered = render_core_guidance(&ctx);
         assert!(rendered.contains("Ask only when progress is blocked"));
@@ -435,7 +434,7 @@ mod tests {
 
     #[test]
     fn template_renders_slot_contributions_in_order() {
-        let mut prompt = prompt(crate::ExecutionMode::new("test_mode"));
+        let mut prompt = prompt();
         prompt.contributions = vec![
             PromptContribution::guidance("Second Guide", "Second details.").with_priority(10),
             PromptContribution::guidance("First Guide", "First details.").with_priority(0),
@@ -453,7 +452,7 @@ mod tests {
             "Guidance",
             vec![PromptTemplateEntry::slot(PromptSlot::Guidance)],
         )]);
-        let mut prompt = prompt(crate::ExecutionMode::new("test_mode"));
+        let mut prompt = prompt();
         prompt.contributions =
             vec![PromptContribution::guidance("Custom", "More guidance.")].into();
         let text = template.render(&prompt);
@@ -476,7 +475,7 @@ mod tests {
                 vec![PromptTemplateEntry::slot(PromptSlot::Guidance)],
             ),
         ]);
-        let mut prompt = prompt(crate::ExecutionMode::new("test_mode"));
+        let mut prompt = prompt();
         prompt.contributions = vec![
             PromptContribution::project_instructions("Repo rules"),
             PromptContribution::guidance("Shell", "Use exec_command."),
@@ -495,7 +494,7 @@ mod tests {
             "Environment",
             vec![PromptTemplateEntry::slot(PromptSlot::Environment)],
         )]);
-        let text = template.render(&prompt(crate::ExecutionMode::new("test_mode")));
+        let text = template.render(&prompt());
         assert!(text.is_empty());
     }
 }

@@ -26,7 +26,7 @@
 <div class="section" id="rlm-execution-path">
           <div class="section-header">
             <h2>RLM Execution Path</h2>
-            <p>The model emits code, the runtime executes it locally with the host's <code>ProjectedBindings</code> and resource handles in scope, and the resulting trajectory is persisted as mode events. A block that invokes <code>continue_as</code> through an explicit receiver finishes the turn as <code>TurnOutcome::Handoff</code> instead of looping back to the model.</p>
+            <p>The model emits code, the runtime executes it locally with the host's <code>ProjectedBindings</code> and resource handles in scope, and the resulting trajectory is persisted as protocol events. A block that invokes <code>continue_as</code> through an explicit receiver finishes the turn as <code>TurnOutcome::Handoff</code> instead of looping back to the model.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">RLM and Lashlang execution</div>
@@ -36,7 +36,7 @@ sequenceDiagram
   participant Driver as RlmDriver
   participant Runtime as RuntimeTurnDriver
   participant Executor as RlmExecutionState
-  participant Host as HostBridge / ModeExecutionContext
+  participant Host as HostBridge / CodeExecutionContext
   participant Commit as TurnCommitPipeline
 
   Model-->>Driver: prose + ```lashlang fence
@@ -162,7 +162,7 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
                 <tr><td><code>crates/lashlang/src/runtime/mod.rs</code></td><td>Cross-cutting runtime types (<code>RuntimeError</code>, <code>RuntimeFailure</code>, <code>ExecutionScratch</code>, <code>ExecutionOutcome</code>, <code>CompiledProgram</code>, <code>ProfileReport</code>, <code>CompileStats</code>) and the <code>pub use</code> wiring that re-exports each focused submodule.</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/compiler.rs</code></td><td>AST → bytecode <code>Chunk</code> lowering, type-literal const-folding, loop cleanup, effect lowering, and builtin specialization.</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/instruction.rs</code></td><td><code>Instruction</code> opcode enum and supporting types (profile tags, loop ops, receiver operations, and named process starts).</td></tr>
-                <tr><td><code>crates/lashlang/src/runtime/vm/</code></td><td>Bytecode executor split across <code>mod.rs</code> (instruction dispatch), <code>effects.rs</code> (the <code>VmEffect</code> seam that calls <code>ExecutionHost::perform</code>, including the terminator ops <code>Submit</code>/<code>Finish</code>/<code>Fail</code>), <code>control.rs</code> (run loop, mode-aware entry points, <code>VmStep</code>/<code>VmOutcome</code>), and <code>lowered_loop.rs</code> (optimizer loop IR).</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/vm/</code></td><td>Bytecode executor split across <code>mod.rs</code> (instruction dispatch), <code>effects.rs</code> (the <code>VmEffect</code> seam that calls <code>ExecutionHost::perform</code>, including the terminator ops <code>Submit</code>/<code>Finish</code>/<code>Fail</code>), <code>control.rs</code> (run loop, protocol-aware entry points, <code>VmStep</code>/<code>VmOutcome</code>), and <code>lowered_loop.rs</code> (optimizer loop IR).</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/value.rs</code></td><td><code>Value</code>, <code>ListValue</code>, <code>ImageValue</code>, <code>LASH_TYPE_KEY</code>, and the <code>ProjectedBindings</code> / <code>ProjectedValue</code> / <code>ProjectedHostValue</code> / <code>ProjectedRead*</code> seam, including optional projection-ref metadata.</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/state.rs</code></td><td><code>State</code> globals, mutation rules, and <code>Snapshot</code>/restore. Ref-backed projected snapshots restore as unresolved projected placeholders for RLM to rehydrate before execution.</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/host.rs</code></td><td><code>ExecutionHost</code>, <code>AbilityOp</code>, <code>AbilityResult</code>, process event types, and <code>ExecutionEnvironment</code> configuration for projected bindings, scratch reuse, tracing, profiling, and process mode.</td></tr>
@@ -174,11 +174,11 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
                 <tr><td><code>crates/lashlang/src/runtime/format.rs</code></td><td><code>format(...)</code> template engine and compiled-format fast paths.</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/json.rs</code></td><td><code>json_parse</code>, JSON serialization, and round-trip helpers shared by snapshots and tool args.</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/entry_points.rs</code></td><td>Top-level <code>compile</code> / <code>execute</code> / <code>prewarm</code> entry points re-exported from the crate root.</td></tr>
-                <tr><td><code>crates/lash-mode-rlm/src/protocol.rs</code></td><td>Shared RLM execution prompt, <code>RlmPromptFeatures</code>, language reference shown to the model, and the <code>first_lashlang_fence_span</code> / <code>extract_first_lashlang_fence</code> extractors.</td></tr>
-                <tr><td><code>crates/lash-mode-rlm/src/executor.rs</code></td><td>RLM execution orchestration: snapshot/restore, program compilation, protected global pruning, and assembling <code>ExecResponse</code>.</td></tr>
-                <tr><td><code>crates/lash-mode-rlm/src/executor/host_bridge.rs</code></td><td>Lashlang <code>ExecutionHost</code> bridge: receiver resource operations, print observations, collected operation output, process effects, and image attachment conversion.</td></tr>
-                <tr><td><code>crates/lash-mode-rlm/src/executor/projections.rs</code></td><td>Built-in <code>history</code> binding, session/turn projected binding assembly, projection-ref rehydration, and projected-name pruning.</td></tr>
-                <tr><td><code>crates/lash-mode-rlm/src/projection.rs</code>, <code>projection_transport.rs</code></td><td><code>projection.rs</code> assembles session/turn projected bindings (including the live <code>history</code> projection) and the projection registry shape RLM hands the executor. <code>projection_transport.rs</code> is the shared wire codec for projected JSON normalization, seed-field preservation, Lashlang value JSON conversion, output formatting, and projection-ref extraction.</td></tr>
+                <tr><td><code>crates/lash-protocol-rlm/src/protocol.rs</code></td><td>Shared RLM execution prompt, <code>RlmPromptFeatures</code>, language reference shown to the model, and the <code>first_lashlang_fence_span</code> / <code>extract_first_lashlang_fence</code> extractors.</td></tr>
+                <tr><td><code>crates/lash-protocol-rlm/src/executor.rs</code></td><td>RLM execution orchestration: snapshot/restore, program compilation, protected global pruning, and assembling <code>ExecResponse</code>.</td></tr>
+                <tr><td><code>crates/lash-protocol-rlm/src/executor/host_bridge.rs</code></td><td>Lashlang <code>ExecutionHost</code> bridge: receiver resource operations, print observations, collected operation output, process effects, and image attachment conversion.</td></tr>
+                <tr><td><code>crates/lash-protocol-rlm/src/executor/projections.rs</code></td><td>Built-in <code>history</code> binding, session/turn projected binding assembly, projection-ref rehydration, and projected-name pruning.</td></tr>
+                <tr><td><code>crates/lash-protocol-rlm/src/projection.rs</code>, <code>projection_transport.rs</code></td><td><code>projection.rs</code> assembles session/turn projected bindings (including the live <code>history</code> projection) and the projection registry shape RLM hands the executor. <code>projection_transport.rs</code> is the shared wire codec for projected JSON normalization, seed-field preservation, Lashlang value JSON conversion, output formatting, and projection-ref extraction.</td></tr>
                 <tr><td><code>crates/lashlang/tests/rlm_prompt_claims.rs</code></td><td>Tests that prompt claims about language behavior remain true.</td></tr>
                 <tr><td><code>crates/lashlang/examples/perf.rs</code>, <code>profile.rs</code></td><td>Whole-language profiling entrypoints.</td></tr>
               </tbody>

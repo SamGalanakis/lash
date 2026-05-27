@@ -58,10 +58,10 @@ impl RuntimeSessionManager {
         let dispatch = crate::tool_dispatch::ToolDispatchContext {
             plugins: Arc::clone(&self.current.plugins),
             tools: self.current.plugins.tools(),
-            surface: self.current.plugins.tool_surface(
-                &self.current.session_id,
-                self.current.policy.execution_mode.clone(),
-            )?,
+            surface: self
+                .current
+                .plugins
+                .tool_surface(&self.current.session_id)?,
             host: Arc::clone(&host),
             processes: Arc::new(self.clone()),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
@@ -78,10 +78,13 @@ impl RuntimeSessionManager {
         let tool_context = crate::ToolContext::new(
             self.current.session_id.clone(),
             host,
+            Arc::new(self.clone()),
+            dispatch.effect_controller.clone(),
             Arc::clone(&self.current.host.core.attachment_store),
             direct_completions,
             Some(call.call_id.clone()),
         )
+        .with_runtime_dispatch(Arc::new(dispatch.clone()))
         .with_async_process(registration.id.clone(), cancellation)
         .with_process_events(registration.id.clone(), registry, wake_target_scope_key)
         .with_tool_effect_metadata(tool_effect_metadata);

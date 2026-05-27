@@ -1,65 +1,38 @@
-//! Mode-agnostic runtime-control tools (`list_process_handles`,
+//! Protocol-stack runtime-control tools (`list_process_handles`,
 //! `cancel_process`).
 //!
-//! Dedicated plugins register these tools into the native-tools surface,
-//! so mode crates do not own or duplicate runtime control behavior. RLM
-//! hides process-control tools when a mode exposes the same control through
-//! native process handles.
+//! Dedicated plugins register these tools into the normal tool-provider
+//! surface, so protocol crates do not own or duplicate runtime control behavior.
 
 use std::sync::Arc;
 
 use serde_json::Value;
 
 use lash_core::plugin::{
-    ModeNativeToolsPlugin, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
-    SessionPlugin,
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
-use lash_core::tool_dispatch::ToolDispatchContext;
 use lash_core::{
-    ProgressSender, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolResult,
+    ToolAvailabilityConfig, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
+    ToolResult, ToolScheduling,
 };
 
-/// Exposure policy for mode-agnostic process-control tools.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProcessControlsConfig {
-    pub expose_list: bool,
-    pub expose_cancel: bool,
-    pub include_rlm: bool,
-}
-
-impl Default for ProcessControlsConfig {
-    fn default() -> Self {
-        Self {
-            expose_list: true,
-            expose_cancel: true,
-            include_rlm: false,
-        }
-    }
-}
-
-/// Plugin factory for mode-agnostic process-control tools.
+/// Plugin factory for process-control tools.
 #[derive(Clone, Copy, Debug)]
 pub struct ProcessControlsPluginFactory {
-    config: ProcessControlsConfig,
+    include_cancel_process: bool,
 }
 
 impl ProcessControlsPluginFactory {
     pub fn new() -> Self {
         Self {
-            config: ProcessControlsConfig::default(),
+            include_cancel_process: true,
         }
     }
 
-    pub fn with_config(config: ProcessControlsConfig) -> Self {
-        Self { config }
-    }
-
-    pub fn list_only_for_rlm() -> Self {
-        Self::with_config(ProcessControlsConfig {
-            expose_list: true,
-            expose_cancel: false,
-            include_rlm: true,
-        })
+    pub fn without_cancel_process() -> Self {
+        Self {
+            include_cancel_process: false,
+        }
     }
 }
 
@@ -74,18 +47,15 @@ impl PluginFactory for ProcessControlsPluginFactory {
         "process_controls"
     }
 
-    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(ProcessControlsPlugin {
-            config: self.config,
-            enabled: self.config.include_rlm
-                || ctx.execution_mode != lash_core::ExecutionMode::new("rlm"),
+            include_cancel_process: self.include_cancel_process,
         }))
     }
 }
 
 struct ProcessControlsPlugin {
-    config: ProcessControlsConfig,
-    enabled: bool,
+    include_cancel_process: bool,
 }
 
 impl SessionPlugin for ProcessControlsPlugin {
@@ -94,51 +64,38 @@ impl SessionPlugin for ProcessControlsPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        if self.enabled {
-            reg.mode()
-                .native_tools(Arc::new(ProcessControlsNativeTools {
-                    config: self.config,
-                }))?;
-        }
+        reg.tools().provider(Arc::new(ProcessControlsTools {
+            include_cancel_process: self.include_cancel_process,
+        }))?;
         Ok(())
     }
 }
 
-struct ProcessControlsNativeTools {
-    config: ProcessControlsConfig,
+struct ProcessControlsTools {
+    include_cancel_process: bool,
 }
 
 #[async_trait::async_trait]
-impl ModeNativeToolsPlugin for ProcessControlsNativeTools {
+impl ToolProvider for ProcessControlsTools {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
-        process_control_tool_definitions(self.config)
+        process_control_tool_definitions(self.include_cancel_process)
             .into_iter()
             .map(|tool| tool.manifest())
             .collect()
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        process_control_tool_definitions(self.config)
-            .into_iter()
-            .find(|tool| tool.name == name)
+        process_control_tool_definition(name, self.include_cancel_process)
             .map(|tool| Arc::new(tool.contract()))
     }
 
-    async fn execute(
-        &self,
-        context: &ToolDispatchContext<'_>,
-        name: &str,
-        args: &Value,
-        _progress: Option<&ProgressSender>,
-    ) -> Option<ToolResult> {
-        match name {
-            "list_process_handles" if self.config.expose_list => {
-                Some(execute_process_list_tool_call(context).await)
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        match call.name {
+            "list_process_handles" => execute_process_list_tool_call(call.context).await,
+            "cancel_process" if self.include_cancel_process => {
+                execute_process_cancel_tool_call(call.context, call.args).await
             }
-            "cancel_process" if self.config.expose_cancel => {
-                Some(execute_process_cancel_tool_call(context, args).await)
-            }
-            _ => None,
+            _ => ToolResult::err_fmt(format_args!("Unknown tool: {}", call.name)),
         }
     }
 }
@@ -171,18 +128,27 @@ pub fn process_list_tool_definition() -> ToolDefinition {
         }),
     )
     .with_examples(vec!["list_process_handles()".into()])
-    .with_execution_mode(ToolExecutionMode::Parallel)
+    .with_availability(ToolAvailabilityConfig::callable())
+    .with_scheduling(ToolScheduling::Parallel)
 }
 
-fn process_control_tool_definitions(config: ProcessControlsConfig) -> Vec<ToolDefinition> {
-    let mut tools = Vec::new();
-    if config.expose_list {
-        tools.push(process_list_tool_definition());
+fn process_control_tool_definitions(include_cancel_process: bool) -> Vec<ToolDefinition> {
+    let mut definitions = vec![process_list_tool_definition()];
+    if include_cancel_process {
+        definitions.push(process_cancel_tool_definition());
     }
-    if config.expose_cancel {
-        tools.push(process_cancel_tool_definition());
+    definitions
+}
+
+fn process_control_tool_definition(
+    name: &str,
+    include_cancel_process: bool,
+) -> Option<ToolDefinition> {
+    match name {
+        "list_process_handles" => Some(process_list_tool_definition()),
+        "cancel_process" if include_cancel_process => Some(process_cancel_tool_definition()),
+        _ => None,
     }
-    tools
 }
 
 pub fn process_cancel_tool_definition() -> ToolDefinition {
@@ -215,15 +181,12 @@ pub fn process_cancel_tool_definition() -> ToolDefinition {
         r#"cancel_process(process_id="tool:call-01JZK7G4QP9Q4J7W3Q2E1H6M9C")"#.into(),
         r#"cancel_process(process_id="subagent:session-01JZK7G4QP9Q4J7W3Q2E1H6M9C")"#.into(),
     ])
-    .with_execution_mode(ToolExecutionMode::Parallel)
+    .with_availability(ToolAvailabilityConfig::callable())
+    .with_scheduling(ToolScheduling::Parallel)
 }
 
-pub async fn execute_process_list_tool_call(context: &ToolDispatchContext<'_>) -> ToolResult {
-    match context
-        .processes
-        .list_visible(&context.session_id, context.process_scope())
-        .await
-    {
+pub async fn execute_process_list_tool_call(context: &lash_core::ToolContext<'_>) -> ToolResult {
+    match context.list_process_handles().await {
         Ok(entries) => {
             let entries: Vec<Value> = entries
                 .into_iter()
@@ -242,7 +205,7 @@ pub async fn execute_process_list_tool_call(context: &ToolDispatchContext<'_>) -
 }
 
 pub async fn execute_process_cancel_tool_call(
-    context: &ToolDispatchContext<'_>,
+    context: &lash_core::ToolContext<'_>,
     args: &Value,
 ) -> ToolResult {
     let Some(id) = args
@@ -253,18 +216,10 @@ pub async fn execute_process_cancel_tool_call(
     else {
         return ToolResult::err_fmt("cancel_process requires `process_id`");
     };
-    if let Err(err) = context
-        .processes
-        .validate_visible(&context.session_id, &[id.to_string()])
-        .await
-    {
+    if let Err(err) = context.validate_process_handles(&[id.to_string()]).await {
         return ToolResult::err_fmt(err.to_string());
     }
-    match context
-        .processes
-        .cancel(&context.session_id, id, context.process_scope())
-        .await
-    {
+    match context.cancel_process(id).await {
         Ok(status) => ToolResult::ok(serde_json::json!({
             "process_id": status.id,
             "terminal": terminal_label(status.terminal.as_ref()),
@@ -288,7 +243,7 @@ mod tests {
 
     #[test]
     fn tool_definitions_expose_process_control_tools() {
-        let names = process_control_tool_definitions(ProcessControlsConfig::default())
+        let names = process_control_tool_definitions(true)
             .into_iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
@@ -297,48 +252,44 @@ mod tests {
     }
 
     #[test]
-    fn list_only_for_rlm_exposes_only_canonical_list_tool() {
-        let names = process_control_tool_definitions(
-            ProcessControlsPluginFactory::list_only_for_rlm().config,
-        )
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect::<Vec<_>>();
-
-        assert_eq!(names, vec!["list_process_handles"]);
+    fn cancel_process_definition_is_callable_when_registered() {
+        assert_eq!(
+            process_cancel_tool_definition().effective_availability(),
+            lash_core::ToolAvailability::Callable
+        );
     }
 
     #[test]
-    fn plugin_registers_controls_for_standard_mode_only() {
+    fn plugin_registers_cancel_when_configured_and_omits_it_otherwise() {
         let standard_session =
             lash_core::PluginHost::new(
                 std::iter::once(
                     Arc::new(ProcessControlsPluginFactory::new()) as Arc<dyn PluginFactory>
                 )
-                .chain(lash_core::testing::test_mode_factories())
+                .chain(lash_core::testing::test_standard_protocol_factories())
                 .collect(),
             )
-            .build_standard_session("standard", None)
+            .build_session("standard", None)
             .expect("standard session");
         let standard_names = standard_session
-            .tool_surface("standard", lash_core::ExecutionMode::standard())
+            .tool_surface("standard")
             .expect("standard surface")
             .tool_names()
             .as_ref()
             .clone();
 
-        let rlm_session =
-            lash_core::PluginHost::new(
-                std::iter::once(
-                    Arc::new(ProcessControlsPluginFactory::new()) as Arc<dyn PluginFactory>
-                )
-                .chain(lash_core::testing::test_mode_factories())
-                .collect(),
+        let rlm_session = lash_core::PluginHost::new(
+            std::iter::once(
+                Arc::new(ProcessControlsPluginFactory::without_cancel_process())
+                    as Arc<dyn PluginFactory>,
             )
-            .build_session("rlm", lash_core::ExecutionMode::new("rlm"), None, None)
-            .expect("rlm session");
+            .chain(lash_core::testing::test_rlm_protocol_factories())
+            .collect(),
+        )
+        .build_session("rlm", None)
+        .expect("rlm session");
         let rlm_names = rlm_session
-            .tool_surface("rlm", lash_core::ExecutionMode::new("rlm"))
+            .tool_surface("rlm")
             .expect("rlm surface")
             .tool_names()
             .as_ref()
@@ -346,27 +297,6 @@ mod tests {
 
         assert!(standard_names.contains(&"list_process_handles".to_string()));
         assert!(standard_names.contains(&"cancel_process".to_string()));
-        assert!(!rlm_names.contains(&"list_process_handles".to_string()));
-        assert!(!rlm_names.contains(&"cancel_process".to_string()));
-    }
-
-    #[test]
-    fn list_only_for_rlm_registers_list_without_cancel_in_rlm() {
-        let rlm_session = lash_core::PluginHost::new(
-            std::iter::once(Arc::new(ProcessControlsPluginFactory::list_only_for_rlm())
-                as Arc<dyn PluginFactory>)
-            .chain(lash_core::testing::test_mode_factories())
-            .collect(),
-        )
-        .build_session("rlm", lash_core::ExecutionMode::new("rlm"), None, None)
-        .expect("rlm session");
-        let rlm_names = rlm_session
-            .tool_surface("rlm", lash_core::ExecutionMode::new("rlm"))
-            .expect("rlm surface")
-            .tool_names()
-            .as_ref()
-            .clone();
-
         assert!(rlm_names.contains(&"list_process_handles".to_string()));
         assert!(!rlm_names.contains(&"cancel_process".to_string()));
     }

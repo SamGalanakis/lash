@@ -28,7 +28,7 @@ pub struct SessionStateEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_usage: Option<PromptUsage>,
     #[serde(default)]
-    pub mode_turn_options: crate::ModeTurnOptions,
+    pub protocol_turn_options: crate::ProtocolTurnOptions,
 }
 
 impl SessionStateEnvelope {
@@ -72,7 +72,7 @@ impl Default for SessionStateEnvelope {
             turn_index: 0,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
-            mode_turn_options: crate::ModeTurnOptions::default(),
+            protocol_turn_options: crate::ProtocolTurnOptions::default(),
         }
     }
 }
@@ -96,7 +96,7 @@ pub struct PersistedSessionSnapshot {
     pub token_usage: TokenUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_usage: Option<PromptUsage>,
-    pub mode_turn_options: crate::ModeTurnOptions,
+    pub protocol_turn_options: crate::ProtocolTurnOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_state_ref: Option<crate::store::BlobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,7 +135,7 @@ pub struct RuntimeSessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_usage: Option<PromptUsage>,
     #[serde(default)]
-    pub mode_turn_options: crate::ModeTurnOptions,
+    pub protocol_turn_options: crate::ProtocolTurnOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_state_ref: Option<crate::store::BlobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,7 +181,7 @@ impl RuntimeSessionState {
             turn_index: state.turn_index,
             token_usage: state.token_usage,
             last_prompt_usage: state.last_prompt_usage,
-            mode_turn_options: state.mode_turn_options,
+            protocol_turn_options: state.protocol_turn_options,
             tool_state_ref: None,
             tool_state_generation: None,
             tool_state_snapshot: None,
@@ -210,7 +210,7 @@ impl RuntimeSessionState {
             turn_index: self.turn_index,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
-            mode_turn_options: self.mode_turn_options.clone(),
+            protocol_turn_options: self.protocol_turn_options.clone(),
             tool_state_ref: self.tool_state_ref.clone(),
             tool_state_generation: self.tool_state_generation,
             plugin_snapshot_ref: self.plugin_snapshot_ref.clone(),
@@ -229,7 +229,7 @@ impl RuntimeSessionState {
             turn_index: self.turn_index,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
-            mode_turn_options: self.mode_turn_options.clone(),
+            protocol_turn_options: self.protocol_turn_options.clone(),
         }
     }
 
@@ -240,7 +240,7 @@ impl RuntimeSessionState {
         self.turn_index = state.turn_index;
         self.token_usage = state.token_usage.clone();
         self.last_prompt_usage = state.last_prompt_usage.clone();
-        self.mode_turn_options = state.mode_turn_options.clone();
+        self.protocol_turn_options = state.protocol_turn_options.clone();
     }
 
     pub fn stamp_runtime_state(
@@ -307,7 +307,7 @@ impl RuntimeSessionState {
             turn_index: self.turn_index,
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
-            mode_turn_options: self.mode_turn_options.clone(),
+            protocol_turn_options: self.protocol_turn_options.clone(),
         }
     }
 
@@ -376,7 +376,7 @@ impl Default for RuntimeSessionState {
             turn_index: 0,
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
-            mode_turn_options: crate::ModeTurnOptions::default(),
+            protocol_turn_options: crate::ProtocolTurnOptions::default(),
             tool_state_ref: None,
             tool_state_generation: None,
             tool_state_snapshot: None,
@@ -398,8 +398,6 @@ pub(super) fn apply_persisted_session_config(
     config: &crate::PersistedSessionConfig,
 ) {
     policy.model = config.model.clone();
-    policy.execution_mode = config.execution_mode.clone();
-    policy.standard_context_approach = config.standard_context_approach.clone();
 }
 
 pub(super) fn apply_session_checkpoint(
@@ -420,7 +418,7 @@ pub(super) fn apply_session_checkpoint(
     state.turn_index = checkpoint.turn_state.turn_index;
     state.token_usage = checkpoint.turn_state.token_usage;
     state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
-    state.mode_turn_options = checkpoint.turn_state.mode_turn_options;
+    state.protocol_turn_options = checkpoint.turn_state.protocol_turn_options;
     state.tool_state_ref = checkpoint.tool_state_ref.clone();
     state.tool_state_generation = checkpoint
         .tool_state
@@ -465,8 +463,8 @@ pub(super) fn append_session_nodes_to_state(
                 let message = plugin_message_to_message(message);
                 node_ids.push(state.session_graph.append_message(message));
             }
-            crate::SessionAppendNode::ModeEvent { event } => {
-                node_ids.push(state.session_graph.append_mode_event(event.clone()));
+            crate::SessionAppendNode::ProtocolEvent { event } => {
+                node_ids.push(state.session_graph.append_protocol_event(event.clone()));
             }
             crate::SessionAppendNode::Plugin { plugin_type, body } => {
                 node_ids.push(

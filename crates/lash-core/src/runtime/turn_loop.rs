@@ -405,12 +405,11 @@ impl LashRuntime {
                 RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
             })?;
         let mut turn_policy = self.policy.clone();
-        turn_policy.execution_mode = checkpoint_record.machine_config.execution_mode.clone();
         turn_policy.model = checkpoint_record.model.clone();
         turn_policy.max_turns = checkpoint_record.machine_config.max_turns;
-        self.mode_turn_options = checkpoint_record.mode_turn_options.clone();
+        self.protocol_turn_options = checkpoint_record.protocol_turn_options.clone();
         let resume_turn_index = checkpoint_record.turn_index;
-        let resume_mode_iteration = checkpoint_record.mode_iteration;
+        let resume_protocol_iteration = checkpoint_record.protocol_iteration;
 
         let cancel_state = cancel.clone();
         let session = self
@@ -429,8 +428,8 @@ impl LashRuntime {
             llm_stream_summaries: HashMap::new(),
             next_llm_ordinal: 0,
             session_manager: manager,
-            mode_turn_options: checkpoint_record.mode_turn_options.clone(),
-            mode_extension: None,
+            protocol_turn_options: checkpoint_record.protocol_turn_options.clone(),
+            protocol_extension: None,
             turn_context: {
                 let mut context = crate::TurnContext::default();
                 context.set_prompt_layer(checkpoint_record.turn_prompt_layer.clone());
@@ -457,8 +456,12 @@ impl LashRuntime {
         let mut assembler = TurnAssembler::new();
         self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
         let run_result = {
-            let run_future =
-                driver.run_restored(restored_machine, event_tx, cancel, resume_mode_iteration);
+            let run_future = driver.run_restored(
+                restored_machine,
+                event_tx,
+                cancel,
+                resume_protocol_iteration,
+            );
             tokio::pin!(run_future);
             loop {
                 tokio::select! {
@@ -480,7 +483,7 @@ impl LashRuntime {
                 }
             }
         };
-        let (new_messages, _new_mode_iteration) = match run_result {
+        let (new_messages, _new_protocol_iteration) = match run_result {
             Ok(result) => result,
             Err(err) => {
                 self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
@@ -678,7 +681,7 @@ impl LashRuntime {
                 ),
             ));
         }
-        let follow_mode_turn_options = input.mode_turn_options.clone();
+        let follow_protocol_turn_options = input.protocol_turn_options.clone();
         let follow_turn_context = input.turn_context.clone();
         let follow_trace_turn_id = effect_scope.turn_id().to_string();
         input.trace_turn_id = Some(follow_trace_turn_id.clone());
@@ -717,7 +720,7 @@ impl LashRuntime {
                     )
                 })?;
             input = turn_input_from_plugin_message(seed);
-            input.mode_turn_options = follow_mode_turn_options.clone();
+            input.protocol_turn_options = follow_protocol_turn_options.clone();
             input.trace_turn_id = Some(follow_trace_turn_id.clone());
             input.turn_context = follow_turn_context.clone();
             if let Some(successor_handle) = {
@@ -750,15 +753,15 @@ impl LashRuntime {
         {
             ensure_durable_turn_input(&input)?;
         }
-        if let Some(extension) = &input.mode_extension
+        if let Some(extension) = &input.protocol_extension
             && let Some(session) = self.session.as_ref()
         {
-            let mode_session = std::sync::Arc::clone(session.plugins().mode_session());
-            mode_session
+            let protocol_session = std::sync::Arc::clone(session.plugins().protocol_session());
+            protocol_session
                 .validate_turn_extension(extension)
                 .await
                 .map_err(|err| {
-                    RuntimeError::new(RuntimeErrorCode::ModeTurnExtension, err.to_string())
+                    RuntimeError::new(RuntimeErrorCode::ProtocolTurnExtension, err.to_string())
                 })?;
         }
         let previous_prompt_usage = self.state.last_prompt_usage.clone();
@@ -953,8 +956,8 @@ impl LashRuntime {
         self.stream_prepared_turn(
             messages,
             previous_prompt_usage,
-            input.mode_turn_options.clone(),
-            input.mode_extension.clone(),
+            input.protocol_turn_options.clone(),
+            input.protocol_extension.clone(),
             input.turn_context.clone(),
             trace_turn_id,
             turn_index,
@@ -981,8 +984,8 @@ impl LashRuntime {
         &mut self,
         messages: crate::MessageSequence,
         _previous_prompt_usage: Option<PromptUsage>,
-        mode_turn_options: Option<crate::ModeTurnOptions>,
-        mode_extension: Option<crate::ModeTurnExtensionHandle>,
+        protocol_turn_options: Option<crate::ProtocolTurnOptions>,
+        protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
         turn_context: crate::TurnContext,
         trace_turn_id: String,
         turn_index: usize,
@@ -1000,9 +1003,9 @@ impl LashRuntime {
         if let Some(model) = turn_context.model_spec() {
             turn_policy.model = model.clone();
         }
-        let effective_mode_turn_options = mode_turn_options
+        let effective_protocol_turn_options = protocol_turn_options
             .clone()
-            .unwrap_or_else(|| self.mode_turn_options.clone());
+            .unwrap_or_else(|| self.protocol_turn_options.clone());
         let manager = self
             .runtime_session_manager_for_turn(Some(child_usage_event_relay.clone()))
             .map_err(|err| {
@@ -1028,7 +1031,7 @@ impl LashRuntime {
                 state: crate::SessionReadView::from_runtime_state(
                     &self.state,
                     turn_policy.clone(),
-                    effective_mode_turn_options.clone(),
+                    effective_protocol_turn_options.clone(),
                 ),
                 messages,
                 host: manager.clone(),
@@ -1168,17 +1171,17 @@ impl LashRuntime {
             llm_stream_summaries: HashMap::new(),
             next_llm_ordinal: 0,
             session_manager: manager,
-            mode_turn_options: effective_mode_turn_options,
-            mode_extension,
+            protocol_turn_options: effective_protocol_turn_options,
+            protocol_extension,
             turn_context,
             turn_lease: turn_lease.clone(),
             machine_config_snapshot: None,
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
-        let mode_run_offset = 0;
+        let protocol_run_offset = 0;
         self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
         let run_result = {
-            let run_future = driver.run(prepared.messages, event_tx, cancel, mode_run_offset);
+            let run_future = driver.run(prepared.messages, event_tx, cancel, protocol_run_offset);
             tokio::pin!(run_future);
             loop {
                 tokio::select! {
@@ -1200,7 +1203,7 @@ impl LashRuntime {
                 }
             }
         };
-        let (new_messages, _new_mode_iteration) = match run_result {
+        let (new_messages, _new_protocol_iteration) = match run_result {
             Ok(result) => result,
             Err(err) => {
                 self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
@@ -1279,24 +1282,24 @@ fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
     TurnInput {
         items,
         image_blobs,
-        mode_turn_options: None,
+        protocol_turn_options: None,
         trace_turn_id: None,
-        mode_extension: None,
+        protocol_extension: None,
         turn_context: crate::TurnContext::default(),
     }
 }
 
 fn ensure_durable_turn_input(input: &TurnInput) -> Result<(), RuntimeError> {
-    if input.mode_extension.is_some() {
+    if input.protocol_extension.is_some() {
         return Err(RuntimeError::new(
-            RuntimeErrorCode::DurableTurnLiveModeExtension,
-            "durable turn resume does not support live mode_extension inputs; encode resumable data in mode_turn_options or persisted plugin state",
+            RuntimeErrorCode::DurableTurnLiveProtocolExtension,
+            "durable turn resume does not support live protocol_extension inputs; encode resumable data in protocol_turn_options or persisted plugin state",
         ));
     }
     if input.turn_context.has_plugin_inputs() {
         return Err(RuntimeError::new(
             RuntimeErrorCode::DurableTurnLivePluginInput,
-            "durable turn resume does not support live TurnContext plugin inputs; encode resumable data in mode_turn_options or persisted plugin state",
+            "durable turn resume does not support live TurnContext plugin inputs; encode resumable data in protocol_turn_options or persisted plugin state",
         ));
     }
     Ok(())

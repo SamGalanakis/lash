@@ -16,9 +16,9 @@ use crate::provider::{
 };
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
-    AssembledTurn, AssistantOutput, ExecutionMode, ExecutionSummary, ModelSpec, OutputState,
-    ProcessRegistry, ProviderOptions, RuntimeSessionState, SessionPolicy, SessionStateEnvelope,
-    TokenUsage, TurnFinish, TurnInput, TurnOutcome, TurnStop, UnavailableProcessService,
+    AssembledTurn, AssistantOutput, ExecutionSummary, ModelSpec, OutputState, ProcessRegistry,
+    ProviderOptions, RuntimeSessionState, SessionPolicy, SessionStateEnvelope, TokenUsage,
+    TurnFinish, TurnInput, TurnOutcome, TurnStop, UnavailableProcessService,
 };
 
 type CompletionFuture =
@@ -214,7 +214,6 @@ pub fn mock_session_policy() -> SessionPolicy {
             .into_handle(),
         model: ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
             .expect("valid mock model spec"),
-        execution_mode: ExecutionMode::standard(),
         ..Default::default()
     }
 }
@@ -248,6 +247,7 @@ pub fn mock_tool_context_with_host_and_direct_completions(
     crate::tool_provider::ToolContext::__for_testing(
         "test-session".to_string(),
         host,
+        Arc::new(crate::UnavailableProcessService),
         Arc::new(crate::InMemoryAttachmentStore::new()),
         direct_completions,
         None,
@@ -273,10 +273,10 @@ where
     .await
 }
 
-struct EmptyModeExecutionTools;
+struct EmptyCodeExecutionTools;
 
 #[async_trait::async_trait]
-impl crate::ToolProvider for EmptyModeExecutionTools {
+impl crate::ToolProvider for EmptyCodeExecutionTools {
     fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
         Vec::new()
     }
@@ -286,27 +286,25 @@ impl crate::ToolProvider for EmptyModeExecutionTools {
     }
 
     async fn execute(&self, _call: crate::ToolCall<'_>) -> crate::ToolResult {
-        crate::ToolResult::err_fmt("test mode execution context has no tools")
+        crate::ToolResult::err_fmt("test code execution context has no tools")
     }
 }
 
-pub fn mode_execution_context_with_lashlang_abilities(
+pub fn code_execution_context_with_lashlang_abilities(
     abilities: lashlang::LashlangAbilities,
-) -> crate::ModeExecutionContext<'static> {
+) -> crate::RuntimeExecutionContext<'static> {
     let session_id = "test-session".to_string();
-    let execution_mode = ExecutionMode::new("rlm");
-    let plugins = crate::PluginHost::new(test_mode_factories())
+    let plugins = crate::PluginHost::new(test_rlm_protocol_factories())
         .with_lashlang_abilities(abilities)
-        .build_session(session_id.clone(), execution_mode.clone(), None, None)
+        .build_session(session_id.clone(), None)
         .expect("test plugin session");
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
     let attachment_store = Arc::new(crate::InMemoryAttachmentStore::new());
     let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
         plugins,
-        tools: Arc::new(EmptyModeExecutionTools),
+        tools: Arc::new(EmptyCodeExecutionTools),
         surface: Arc::new(crate::ToolSurface::from_tools(
             Vec::new(),
-            execution_mode.clone(),
             std::collections::BTreeMap::new(),
         )),
         host: Arc::new(MockSessionManager::default()),
@@ -325,9 +323,8 @@ pub fn mode_execution_context_with_lashlang_abilities(
         turn_context: crate::TurnContext::default(),
     });
 
-    crate::ModeExecutionContext::new(
+    crate::RuntimeExecutionContext::new(
         session_id,
-        execution_mode,
         dispatch,
         abilities,
         attachment_store,
@@ -342,10 +339,7 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
     AssembledTurn {
         state: SessionStateEnvelope {
             session_id: session_id.to_string(),
-            policy: SessionPolicy {
-                execution_mode: ExecutionMode::standard(),
-                ..Default::default()
-            },
+            policy: SessionPolicy::default(),
             ..Default::default()
         },
         outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
@@ -357,7 +351,6 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
             state: OutputState::Usable,
         },
         execution: ExecutionSummary {
-            mode: ExecutionMode::standard(),
             had_tool_calls: false,
             had_code_execution: false,
         },
@@ -649,182 +642,149 @@ impl crate::ProcessService for MockSessionManager {
     }
 }
 // ─────────────────────────────────────────────────────────────────────
-// Minimal in-tree plugin fake advertising support for a given
-// `StandardContextApproachKind`. Lash tests use this instead of pulling in
-// `lash-plugin-rolling-history` / `lash-plugin-observational-memory`
-// as dev-deps, which would create a dev-dep cycle.
-// ─────────────────────────────────────────────────────────────────────
-
-use crate::plugin::{PluginFactory, PluginSessionContext, PluginSpec, SessionPlugin};
-use crate::standard_context_approach::StandardContextApproachKind;
-
-pub struct FakeStandardContextApproachPluginFactory {
-    id: &'static str,
-    approaches: &'static [StandardContextApproachKind],
-}
-
-impl FakeStandardContextApproachPluginFactory {
-    pub fn rolling_history() -> Self {
-        Self {
-            id: "fake_rolling_history",
-            approaches: &[StandardContextApproachKind::RollingHistory],
-        }
-    }
-
-    pub fn observational_memory() -> Self {
-        Self {
-            id: "fake_observational_memory",
-            approaches: &[StandardContextApproachKind::ObservationalMemory],
-        }
-    }
-}
-
-impl PluginFactory for FakeStandardContextApproachPluginFactory {
-    fn id(&self) -> &'static str {
-        self.id
-    }
-
-    fn supported_standard_context_approaches(&self) -> &'static [StandardContextApproachKind] {
-        self.approaches
-    }
-
-    fn build(
-        &self,
-        ctx: &PluginSessionContext,
-    ) -> Result<Arc<dyn SessionPlugin>, crate::plugin::PluginError> {
-        crate::plugin::StaticPluginFactory::new(self.id, PluginSpec::new()).build(ctx)
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Test mode plugin fakes.
+// Test protocol plugin fakes.
 //
 // Exposed publicly under the `testing` feature so downstream plugin
-// crates (e.g. `lash-plugin-plan-mode`) can wire minimal fake mode
-// plugins into their integration tests without depending on the real
-// `lash-mode-standard` / `lash-mode-rlm` crates (which would create a
-// dev-dep cycle through the plugin crates those modes already
-// include).
+// crates can wire a minimal fake protocol plugin into integration tests
+// without depending on the real standard / RLM protocol crates
+// crates.
 // ─────────────────────────────────────────────────────────────────────
-pub use test_mode_fakes::test_mode_factories;
+pub use test_protocol_fakes::{test_rlm_protocol_factories, test_standard_protocol_factories};
 
-mod test_mode_fakes {
+mod test_protocol_fakes {
     use std::sync::Arc;
 
     use async_trait::async_trait;
 
     use super::*;
     use crate::plugin::{
-        ModeProtocolDriverPlugin, ModeRuntimeContext, ModeSessionContext, ModeSessionPlugin,
-        PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+        PluginFactory, PluginRegistrar, PluginSessionContext, ProtocolDriverPlugin,
+        ProtocolRuntimeContext, ProtocolSessionContext, ProtocolSessionPlugin, SessionPlugin,
     };
     use crate::sansio::{
         CompletedToolCall, ProtocolDriverHandle, WaitingExecState, WaitingLlmState,
     };
     use crate::{
-        DriverAction, DriverContextView, ExecResponse, ModeBuildInput, ModeConfig, ModePreamble,
+        DriverAction, DriverContextView, ExecResponse, ProtocolBuildInput, TurnDriverConfig,
+        TurnDriverPreamble,
     };
     use lash_sansio::llm::types::LlmResponse;
 
-    /// Factories that register minimal fake mode plugins for lash's own
-    /// unit tests and downstream plugin crate integration tests.
-    /// Production callers embed the real `lash-mode-standard` /
-    /// `lash-mode-rlm` crates instead.
-    pub fn test_mode_factories() -> Vec<Arc<dyn PluginFactory>> {
-        vec![
-            Arc::new(TestModeFactory {
-                id: "mode_standard",
-                mode: ExecutionMode::standard(),
-            }),
-            Arc::new(TestModeFactory {
-                id: "mode_rlm",
-                mode: ExecutionMode::new("rlm"),
-            }),
-        ]
+    pub fn test_standard_protocol_factories() -> Vec<Arc<dyn PluginFactory>> {
+        vec![Arc::new(TestProtocolFactory {
+            id: "protocol_standard",
+            include_batch: true,
+            decode_rlm_create_options: false,
+        })]
     }
 
-    struct TestModeFactory {
+    pub fn test_rlm_protocol_factories() -> Vec<Arc<dyn PluginFactory>> {
+        vec![Arc::new(TestProtocolFactory {
+            id: "protocol_rlm",
+            include_batch: false,
+            decode_rlm_create_options: true,
+        })]
+    }
+
+    struct TestProtocolFactory {
         id: &'static str,
-        mode: ExecutionMode,
+        include_batch: bool,
+        decode_rlm_create_options: bool,
     }
 
-    impl PluginFactory for TestModeFactory {
+    impl PluginFactory for TestProtocolFactory {
         fn id(&self) -> &'static str {
             self.id
         }
 
-        fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-            Ok(Arc::new(TestModePlugin {
+        fn build(
+            &self,
+            _ctx: &PluginSessionContext,
+        ) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+            Ok(Arc::new(TestProtocolPlugin {
                 id: self.id,
-                active: ctx.execution_mode == self.mode,
-                mode: self.mode.clone(),
+                include_batch: self.include_batch,
+                decode_rlm_create_options: self.decode_rlm_create_options,
             }))
         }
     }
 
-    struct TestModePlugin {
+    struct TestProtocolPlugin {
         id: &'static str,
-        active: bool,
-        mode: ExecutionMode,
+        include_batch: bool,
+        decode_rlm_create_options: bool,
     }
 
-    impl SessionPlugin for TestModePlugin {
+    impl SessionPlugin for TestProtocolPlugin {
         fn id(&self) -> &'static str {
             self.id
         }
 
         fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-            if !self.active {
-                return Ok(());
-            }
-            reg.mode().session(Arc::new(TestModeSession {
-                mode: self.mode.clone(),
+            reg.protocol().session(Arc::new(TestProtocolSession {
+                decode_rlm_create_options: self.decode_rlm_create_options,
             }))?;
-            if self.mode == ExecutionMode::standard() {
-                reg.mode().native_tools(Arc::new(TestModeNativeTools))?;
+            if self.include_batch {
+                reg.tools().provider(Arc::new(TestProtocolTools))?;
             }
-            reg.mode().protocol_driver(Arc::new(TestProtocolDriver {
-                mode: self.mode.clone(),
-            }))?;
+            reg.protocol()
+                .protocol_driver(Arc::new(TestProtocolDriver))?;
             Ok(())
         }
     }
 
-    struct TestModeSession {
-        mode: ExecutionMode,
+    struct TestProtocolSession {
+        decode_rlm_create_options: bool,
     }
 
     #[async_trait]
-    impl ModeSessionPlugin for TestModeSession {
+    impl ProtocolSessionPlugin for TestProtocolSession {
         async fn initialize_session(
             &self,
-            _ctx: ModeSessionContext<'_>,
+            _ctx: ProtocolSessionContext<'_>,
         ) -> Result<(), crate::SessionError> {
             Ok(())
         }
 
         fn configure_runtime_from_request(
             &self,
-            mut ctx: ModeRuntimeContext<'_>,
+            mut ctx: ProtocolRuntimeContext<'_>,
             request: &crate::SessionCreateRequest,
-        ) {
-            if self.mode == ExecutionMode::new("rlm")
-                && let Ok(Some(termination)) = request
-                    .mode_extras
-                    .decode::<serde_json::Value>(&ExecutionMode::new("rlm"))
-                && let Some(termination) = termination.get("termination").cloned()
-                && let Ok(options) =
-                    crate::ModeTurnOptions::typed(ExecutionMode::new("rlm"), termination)
-            {
-                ctx.set_mode_turn_options(options);
+        ) -> Result<(), crate::SessionError> {
+            if !self.decode_rlm_create_options {
+                return Ok(());
             }
+            if let Some(extras) = request
+                .plugin_options
+                .decode::<TestRlmCreateExtras>("rlm_protocol")
+                .map_err(|err| {
+                    crate::SessionError::Protocol(format!("invalid test RLM create options: {err}"))
+                })?
+            {
+                let options = crate::ProtocolTurnOptions::typed(extras.termination)?;
+                ctx.set_protocol_turn_options(options);
+            }
+            Ok(())
         }
     }
 
-    struct TestModeNativeTools;
+    #[derive(serde::Deserialize)]
+    struct TestRlmCreateExtras {
+        #[serde(default = "default_test_rlm_termination")]
+        termination: serde_json::Value,
+    }
+
+    fn default_test_rlm_termination() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "submit_required",
+            "schema": null,
+        })
+    }
+
+    struct TestProtocolTools;
 
     #[async_trait]
-    impl crate::plugin::ModeNativeToolsPlugin for TestModeNativeTools {
+    impl crate::ToolProvider for TestProtocolTools {
         fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
             vec![test_batch_tool_definition().manifest()]
         }
@@ -833,24 +793,17 @@ mod test_mode_fakes {
             (name == "batch").then(|| Arc::new(test_batch_tool_definition().contract()))
         }
 
-        async fn execute(
-            &self,
-            context: &crate::tool_dispatch::ToolDispatchContext<'_>,
-            name: &str,
-            args: &serde_json::Value,
-            progress: Option<&crate::ProgressSender>,
-        ) -> Option<crate::ToolResult> {
-            match name {
-                "batch" => Some(execute_test_batch(context, args, progress).await),
-                _ => None,
+        async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+            match call.name {
+                "batch" => execute_test_batch(call.context, call.args).await,
+                _ => crate::ToolResult::err_fmt(format_args!("Unknown tool: {}", call.name)),
             }
         }
     }
 
-    /// Minimal `batch` tool definition used by lash's own tests. Mirrors
-    /// the schema from `lash_mode_standard::batch::batch_tool_definition`,
-    /// but lives here so lash's tests don't need a dev-dep on
-    /// `lash-mode-standard`.
+    /// Minimal `batch` tool definition used by lash's own tests. Mirrors the
+    /// standard protocol plugin's batch schema, but lives here so lash's tests
+    /// don't need a dev-dep on that plugin crate.
     fn test_batch_tool_definition() -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
             "tool:batch",
@@ -883,18 +836,15 @@ mod test_mode_fakes {
             namespace: Some("runtime".to_string()),
             aliases: vec!["parallel_tools".to_string()],
         })
-        .with_execution_mode(crate::ToolExecutionMode::Parallel)
+        .with_scheduling(crate::ToolScheduling::Parallel)
     }
 
     /// Minimal batch executor used by lash's own tests (mirrors the
-    /// behavior of `lash-mode-standard`'s `execute_batch_tool_call`).
+    /// behavior of `lash-protocol-standard`'s `execute_batch_tool_call`).
     async fn execute_test_batch(
-        context: &crate::tool_dispatch::ToolDispatchContext<'_>,
+        context: &crate::ToolContext<'_>,
         args: &serde_json::Value,
-        progress: Option<&crate::ProgressSender>,
     ) -> crate::ToolResult {
-        use crate::tool_dispatch::{ParallelToolCallSpec, dispatch_parallel_tool_calls};
-
         const MAX: usize = 25;
         let Some(raw_calls) = args.get("tool_calls").and_then(|v| v.as_array()) else {
             return crate::ToolResult::err_fmt("Missing required parameter: tool_calls");
@@ -935,35 +885,51 @@ mod test_mode_fakes {
                 .get("parameters")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            parallel_specs.push(ParallelToolCallSpec {
+            parallel_specs.push((
                 index,
-                tool_name: tool.to_string(),
-                args: parameters,
-            });
+                crate::ToolInvocation {
+                    id: format!("test-batch:{index}"),
+                    name: tool.to_string(),
+                    args: parameters,
+                },
+            ));
         }
 
-        let outcomes =
-            dispatch_parallel_tool_calls(Arc::new(context.clone()), parallel_specs, progress).await;
-        for outcome in outcomes {
+        let outcomes = context
+            .dispatch_tool_batch(
+                parallel_specs
+                    .iter()
+                    .map(|(_, invocation)| invocation.clone())
+                    .collect(),
+            )
+            .await;
+        for ((index, invocation), outcome) in parallel_specs.into_iter().zip(outcomes) {
+            let tool_record = outcome.record.unwrap_or_else(|| crate::ToolCallRecord {
+                call_id: Some(invocation.id),
+                tool: invocation.name,
+                args: invocation.args,
+                output: outcome.output,
+                duration_ms: 0,
+            });
             let mut record = serde_json::Map::new();
-            record.insert("index".to_string(), serde_json::json!(outcome.index));
-            record.insert("tool".to_string(), serde_json::json!(outcome.record.tool));
+            record.insert("index".to_string(), serde_json::json!(index));
+            record.insert("tool".to_string(), serde_json::json!(tool_record.tool));
             record.insert(
                 "success".to_string(),
-                serde_json::json!(outcome.record.output.is_success()),
+                serde_json::json!(tool_record.output.is_success()),
             );
             record.insert(
                 "duration_ms".to_string(),
-                serde_json::json!(outcome.record.duration_ms),
+                serde_json::json!(tool_record.duration_ms),
             );
             record.insert(
-                if outcome.record.output.is_success() {
+                if tool_record.output.is_success() {
                     "result"
                 } else {
                     "error"
                 }
                 .to_string(),
-                outcome.record.output.value_for_projection(),
+                tool_record.output.value_for_projection(),
             );
             results.push(serde_json::Value::Object(record));
         }
@@ -990,20 +956,14 @@ mod test_mode_fakes {
         crate::ToolResult::ok(serde_json::json!({ "results": results }))
     }
 
-    struct TestProtocolDriver {
-        mode: ExecutionMode,
-    }
+    struct TestProtocolDriver;
 
-    impl ModeProtocolDriverPlugin for TestProtocolDriver {
-        fn mode_id(&self) -> &str {
-            self.mode.plugin_id()
-        }
-
-        fn build_preamble(&self, input: ModeBuildInput) -> ModePreamble {
+    impl ProtocolDriverPlugin for TestProtocolDriver {
+        fn build_preamble(&self, input: ProtocolBuildInput) -> TurnDriverPreamble {
             let tool_names = input.tool_surface.tool_names();
             let tool_names_fingerprint = input.tool_surface.tool_names_fingerprint();
-            ModePreamble {
-                config: ModeConfig::chat(
+            TurnDriverPreamble {
+                config: TurnDriverConfig::chat(
                     Arc::new(TestDriver),
                     false,
                     Arc::new(test_turn_limit_final_message),
@@ -1039,7 +999,7 @@ mod test_mode_fakes {
     }
 
     /// Minimal Standard-style driver used by lash's own test suite. Mirrors
-    /// the parts of the real `lash-mode-standard::StandardDriver` that
+    /// the parts of the real `lash-protocol-standard::StandardDriver` that
     /// production tests depend on: extract tool calls + assistant text from
     /// the LLM response, append the assistant message, dispatch tools, and
     /// finish-checkpoint when there are no tools. Reasoning parts are
@@ -1047,8 +1007,8 @@ mod test_mode_fakes {
     /// no test asserts that ordering.
     struct TestDriver;
 
-    impl ProtocolDriverHandle<crate::HostModeProtocol> for TestDriver {
-        fn prepare_mode_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
+    impl ProtocolDriverHandle<crate::HostTurnProtocol> for TestDriver {
+        fn prepare_protocol_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
             vec![DriverAction::StartLlm {
                 request: ctx.project_llm_request(true),
                 driver_state: None,
@@ -1058,7 +1018,7 @@ mod test_mode_fakes {
         fn handle_llm_success(
             &self,
             ctx: DriverContextView<'_>,
-            _waiting: WaitingLlmState<crate::HostModeProtocol>,
+            _waiting: WaitingLlmState<crate::HostTurnProtocol>,
             llm_response: LlmResponse,
             text_streamed: bool,
         ) -> Vec<DriverAction> {
@@ -1106,7 +1066,7 @@ mod test_mode_fakes {
             }
 
             actions.push(DriverAction::Emit(SessionEvent::LlmResponse {
-                mode_iteration: ctx.mode_iteration(),
+                protocol_iteration: ctx.protocol_iteration(),
                 content: assistant_text.clone(),
                 duration_ms: 0,
             }));
@@ -1301,10 +1261,10 @@ mod test_mode_fakes {
                 actions.push(DriverAction::Finish(outcome));
                 return actions;
             }
-            actions.push(DriverAction::AdvanceModeIteration);
-            let next_mode_iteration = ctx.mode_iteration() + 1;
+            actions.push(DriverAction::AdvanceProtocolIteration);
+            let next_protocol_iteration = ctx.protocol_iteration() + 1;
             if let Some(max_turns) = ctx.max_turns()
-                && next_mode_iteration >= ctx.mode_run_offset() + max_turns
+                && next_protocol_iteration >= ctx.protocol_run_offset() + max_turns
             {
                 let message_id = fresh_message_id();
                 actions.push(DriverAction::AppendEvents(vec![
@@ -1328,10 +1288,10 @@ mod test_mode_fakes {
         fn handle_exec_result(
             &self,
             _ctx: DriverContextView<'_>,
-            _waiting: WaitingExecState<crate::HostModeProtocol>,
+            _waiting: WaitingExecState<crate::HostTurnProtocol>,
             _result: Result<ExecResponse, String>,
         ) -> Vec<DriverAction> {
             Vec::new()
         }
     }
-} // mod test_mode_fakes
+} // mod test_protocol_fakes

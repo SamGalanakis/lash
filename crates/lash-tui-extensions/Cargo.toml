@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-lash-runtime = { path = "../lash", version = "=0.1.0-alpha.9" }
+lash = { package = "lash-runtime", path = "../lash", version = "=0.1.0-alpha.9" }
 lash-plugin-plan-mode = { path = "../lash-plugin-plan-mode", version = "=0.1.0-alpha.9" }
 lash-tui = { path = "../lash-tui", version = "=0.1.0-alpha.9" }
 async-trait = { workspace = true }

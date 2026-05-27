@@ -52,7 +52,7 @@ pub struct TraceContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode_iteration: Option<usize>,
+    pub protocol_iteration: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,8 +83,8 @@ impl TraceContext {
         self
     }
 
-    pub fn for_mode_iteration(mut self, mode_iteration: usize) -> Self {
-        self.mode_iteration = Some(mode_iteration);
+    pub fn for_protocol_iteration(mut self, protocol_iteration: usize) -> Self {
+        self.protocol_iteration = Some(protocol_iteration);
         self
     }
 
@@ -181,8 +181,8 @@ pub enum TraceEvent {
         output: TraceToolCallOutput,
         duration_ms: u64,
     },
-    ModeStep {
-        mode: String,
+    ProtocolStep {
+        plugin_id: String,
         payload: Value,
     },
     TokenUsage {

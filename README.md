@@ -41,9 +41,9 @@ JSONL by default with a self-contained HTML viewer; optional OpenTelemetry expor
 ## Workspace layout
 
 - `lash-sansio` — pure turn machine, prompt model, messages, effects, responses, checkpoints, tool contracts, and canonical tool-call output; no Lashlang dependency.
-- `lash-core` — async runtime internals, plugin host, mode build input, providers, persistence, session graph, child-session orchestration, built-in tools, and Lashlang host-surface construction.
+- `lash-core` — async runtime internals, plugin host, protocol build input, providers, persistence, session graph, child-session orchestration, built-in tools, and Lashlang host-surface construction.
 - `lash` — app-facing facade for runtime construction, sessions, turn streaming, provider / mode / plugin wiring, host integrations.
-- `lash-mode-standard` / `lash-mode-rlm` — execution-mode plugins.
+- `lash-protocol-standard` / `lash-protocol-rlm` — protocol plugins.
 - `lash-standard-plugins`, `lash-subagents`, `lash-plugin-*`, `lash-provider-*` — first-party tool, plugin, and provider crates.
 - `lashlang` — the RLM execution language: parser, VM, projection.
 - `lash-cli` — first-party terminal frontend on top of the library.
@@ -106,7 +106,7 @@ See [`docs/quickstart.html`](https://lash.run/quickstart.html) for the full walk
 
 ## Run the example
 
-`examples/agent-service` is a localhost SQLite-backed chat app that exercises the `lash` facade end-to-end: RLM mode, typed session plugin activation, app-owned board tools, semantic streaming, per-chat model selection, SQLite runtime persistence, and optional Restate turn durability.
+`examples/agent-service` is a localhost SQLite-backed chat app that exercises the `lash` facade end-to-end: RLM protocol, typed session plugin activation, app-owned board tools, semantic streaming, per-chat model selection, SQLite runtime persistence, and optional Restate turn durability.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... cargo run -p agent-service

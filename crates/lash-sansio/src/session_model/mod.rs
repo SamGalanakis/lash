@@ -21,10 +21,10 @@ use crate::{MessageOrigin, ToolCallRecord};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
-pub enum SessionEventRecord<ME = ()> {
+pub enum SessionEventRecord<PE = ()> {
     Conversation(ConversationRecord),
     Tool(ToolEvent),
-    Mode(ME),
+    Protocol(PE),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -138,19 +138,19 @@ pub enum SessionEvent {
     Message { text: String, kind: String },
     #[serde(rename = "llm_request")]
     LlmRequest {
-        mode_iteration: usize,
+        protocol_iteration: usize,
         message_count: usize,
         tool_list: String,
     },
     #[serde(rename = "llm_response")]
     LlmResponse {
-        mode_iteration: usize,
+        protocol_iteration: usize,
         content: String,
         duration_ms: u64,
     },
     #[serde(rename = "token_usage")]
     TokenUsage {
-        mode_iteration: usize,
+        protocol_iteration: usize,
         usage: TokenUsage,
         cumulative: TokenUsage,
     },
@@ -159,7 +159,7 @@ pub enum SessionEvent {
         session_id: String,
         source: String,
         model: String,
-        mode_iteration: usize,
+        protocol_iteration: usize,
         usage: TokenUsage,
         cumulative: TokenUsage,
     },
@@ -268,15 +268,15 @@ impl TurnTerminationPolicyState {
 
     pub fn turn_limit_final_to_schedule(
         &self,
-        mode_iteration: usize,
-        mode_run_offset: usize,
+        protocol_iteration: usize,
+        protocol_run_offset: usize,
         max_turns: Option<usize>,
     ) -> Option<usize> {
         if self.turn_limit_final_scheduled {
             return None;
         }
         let max = max_turns?;
-        if mode_iteration < mode_run_offset + max {
+        if protocol_iteration < protocol_run_offset + max {
             return None;
         }
         Some(max)

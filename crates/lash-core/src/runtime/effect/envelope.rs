@@ -65,7 +65,7 @@ pub struct EffectInvocationMetadata {
     pub origin: EffectOrigin,
     pub turn_id: Option<String>,
     pub turn_index: Option<usize>,
-    pub mode_iteration: Option<usize>,
+    pub protocol_iteration: Option<usize>,
     pub effect_id: String,
     pub effect_kind: RuntimeEffectKind,
     pub idempotency_key: String,

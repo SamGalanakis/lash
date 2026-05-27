@@ -15,7 +15,7 @@ pub(crate) struct RegisteredExclusiveHook<T> {
     pub(crate) hook: T,
 }
 
-pub(crate) fn current_plugin_id(registering_plugin_id: &Option<String>) -> String {
+pub(crate) fn current_registration_owner(registering_plugin_id: &Option<String>) -> String {
     registering_plugin_id
         .clone()
         .unwrap_or_else(|| "__unknown__".to_string())
@@ -27,7 +27,7 @@ fn push_registered_hook<T>(
     hook: T,
 ) {
     hooks.push(RegisteredHook {
-        plugin_id: current_plugin_id(registering_plugin_id),
+        plugin_id: current_registration_owner(registering_plugin_id),
         hook,
     });
 }
@@ -86,10 +86,11 @@ pub(crate) struct PluginContributions {
     pub(crate) plugin_actions: BTreeMap<String, RegisteredPluginAction>,
     pub(crate) turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
     pub(crate) history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
-    pub(crate) mode_session: Option<RegisteredExclusiveHook<Arc<dyn ModeSessionPlugin>>>,
-    pub(crate) mode_native_tools: Vec<Arc<dyn ModeNativeToolsPlugin>>,
-    pub(crate) mode_protocol_driver:
-        Option<RegisteredExclusiveHook<Arc<dyn ModeProtocolDriverPlugin>>>,
+    pub(crate) protocol_session: Option<RegisteredExclusiveHook<Arc<dyn ProtocolSessionPlugin>>>,
+    pub(crate) protocol_driver: Option<RegisteredExclusiveHook<Arc<dyn ProtocolDriverPlugin>>>,
+    pub(crate) code_executor: Option<RegisteredExclusiveHook<Arc<dyn CodeExecutorPlugin>>>,
+    pub(crate) assistant_prose_projector:
+        Option<RegisteredExclusiveHook<Arc<dyn AssistantProseProjectorPlugin>>>,
 }
 
 pub struct PluginRegistrar {
@@ -181,6 +182,13 @@ impl OutputRegistrations<'_> {
 
     pub fn response(self, hook: AssistantResponseHook) {
         self.reg.add_assistant_response_hook(hook);
+    }
+
+    pub fn assistant_prose_projector(
+        self,
+        provider: Arc<dyn AssistantProseProjectorPlugin>,
+    ) -> Result<(), PluginError> {
+        self.reg.add_assistant_prose_projector(provider)
     }
 }
 
@@ -277,28 +285,33 @@ impl HistoryRegistrations<'_> {
     }
 }
 
-pub struct ModeRegistrations<'a> {
+pub struct ProtocolRegistrations<'a> {
     reg: &'a mut PluginRegistrar,
 }
 
-impl ModeRegistrations<'_> {
-    pub fn session(self, provider: Arc<dyn ModeSessionPlugin>) -> Result<(), PluginError> {
-        self.reg.add_mode_session(provider)
-    }
-
-    pub fn native_tools(self, provider: Arc<dyn ModeNativeToolsPlugin>) -> Result<(), PluginError> {
-        self.reg.add_mode_native_tools(provider)
+impl ProtocolRegistrations<'_> {
+    pub fn session(self, provider: Arc<dyn ProtocolSessionPlugin>) -> Result<(), PluginError> {
+        self.reg.add_protocol_session(provider)
     }
 
     /// Claim the session-wide singleton protocol-driver slot. The
-    /// plugin provides a `ProtocolDriverHandle` via `build_preamble`
-    /// and identifies itself with a `mode_id` that the session's
-    /// `ExecutionMode` must match for the driver to be selected.
+    /// plugin provides a `ProtocolDriverHandle` via `build_preamble`.
+    /// The active plugin stack must install exactly one protocol driver.
     pub fn protocol_driver(
         self,
-        provider: Arc<dyn ModeProtocolDriverPlugin>,
+        provider: Arc<dyn ProtocolDriverPlugin>,
     ) -> Result<(), PluginError> {
-        self.reg.add_mode_protocol_driver(provider)
+        self.reg.add_protocol_driver(provider)
+    }
+}
+
+pub struct ExecutionRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl ExecutionRegistrations<'_> {
+    pub fn code_executor(self, provider: Arc<dyn CodeExecutorPlugin>) -> Result<(), PluginError> {
+        self.reg.add_code_executor(provider)
     }
 }
 
@@ -355,8 +368,12 @@ impl PluginRegistrar {
         HistoryRegistrations { reg: self }
     }
 
-    pub fn mode(&mut self) -> ModeRegistrations<'_> {
-        ModeRegistrations { reg: self }
+    pub fn protocol(&mut self) -> ProtocolRegistrations<'_> {
+        ProtocolRegistrations { reg: self }
+    }
+
+    pub fn execution(&mut self) -> ExecutionRegistrations<'_> {
+        ExecutionRegistrations { reg: self }
     }
 
     fn add_tool_provider(&mut self, provider: Arc<dyn ToolProvider>) -> Result<(), PluginError> {
@@ -452,6 +469,19 @@ impl PluginRegistrar {
         );
     }
 
+    fn add_assistant_prose_projector(
+        &mut self,
+        provider: Arc<dyn AssistantProseProjectorPlugin>,
+    ) -> Result<(), PluginError> {
+        register_singleton_hook(
+            &mut self.contributions.assistant_prose_projector,
+            &self.registering_plugin_id,
+            "assistant prose projector",
+            "assistant_prose_projector",
+            provider,
+        )
+    }
+
     fn add_tool_result_projector(&mut self, hook: ToolResultProjector) -> Result<(), PluginError> {
         register_singleton_hook(
             &mut self.contributions.tool_result_projector,
@@ -479,36 +509,41 @@ impl PluginRegistrar {
         Ok(())
     }
 
-    fn add_mode_session(
+    fn add_protocol_session(
         &mut self,
-        provider: Arc<dyn ModeSessionPlugin>,
+        provider: Arc<dyn ProtocolSessionPlugin>,
     ) -> Result<(), PluginError> {
         register_singleton_hook(
-            &mut self.contributions.mode_session,
+            &mut self.contributions.protocol_session,
             &self.registering_plugin_id,
-            "mode session capability",
-            "mode_session",
+            "protocol session capability",
+            "protocol_session",
             provider,
         )
     }
 
-    fn add_mode_native_tools(
+    fn add_code_executor(
         &mut self,
-        provider: Arc<dyn ModeNativeToolsPlugin>,
-    ) -> Result<(), PluginError> {
-        self.contributions.mode_native_tools.push(provider);
-        Ok(())
-    }
-
-    fn add_mode_protocol_driver(
-        &mut self,
-        provider: Arc<dyn ModeProtocolDriverPlugin>,
+        provider: Arc<dyn CodeExecutorPlugin>,
     ) -> Result<(), PluginError> {
         register_singleton_hook(
-            &mut self.contributions.mode_protocol_driver,
+            &mut self.contributions.code_executor,
             &self.registering_plugin_id,
-            "mode protocol driver capability",
-            "mode_protocol_driver",
+            "code executor capability",
+            "code_executor",
+            provider,
+        )
+    }
+
+    fn add_protocol_driver(
+        &mut self,
+        provider: Arc<dyn ProtocolDriverPlugin>,
+    ) -> Result<(), PluginError> {
+        register_singleton_hook(
+            &mut self.contributions.protocol_driver,
+            &self.registering_plugin_id,
+            "protocol driver capability",
+            "protocol_driver",
             provider,
         )
     }

@@ -1,4 +1,4 @@
-use super::execution_context::ModeExecutionContext;
+use super::execution_context::RuntimeExecutionContext;
 use crate::tool_dispatch::{
     ToolDispatchOutcome, ToolPreparationOutcome,
     dispatch_prepared_tool_call_with_execution_context, prepare_tool_call_with_context,
@@ -10,19 +10,19 @@ use crate::{
 };
 
 #[derive(Clone, Debug)]
-pub struct ModeToolBatchItem {
+pub struct ToolInvocation {
     pub id: String,
     pub name: String,
     pub args: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]
-pub struct ModeToolReply {
+pub struct ToolInvocationReply {
     pub output: ToolCallOutput,
     pub record: Option<ToolCallRecord>,
 }
 
-impl ModeToolReply {
+impl ToolInvocationReply {
     pub fn success(value: serde_json::Value) -> Self {
         Self {
             output: ToolCallOutput::success(value),
@@ -66,7 +66,7 @@ impl ModeToolReply {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CompletedModeToolCall {
+pub(crate) struct CompletedProtocolToolCall {
     pub index: usize,
     pub completed: crate::sansio::CompletedToolCall,
     pub record: ToolCallRecord,
@@ -80,7 +80,7 @@ pub(crate) struct PreparedToolRun {
     pub activity_id: TurnActivityId,
 }
 
-impl ModeExecutionContext<'_> {
+impl RuntimeExecutionContext<'_> {
     fn prepared_tool_run(
         &self,
         prepared: crate::PreparedToolCall,
@@ -104,7 +104,7 @@ impl ModeExecutionContext<'_> {
         index: usize,
         replay: Option<crate::llm::types::ProviderReplayMeta>,
         effect_metadata: Option<crate::EffectInvocationMetadata>,
-    ) -> CompletedModeToolCall {
+    ) -> CompletedProtocolToolCall {
         let _ = self
             .dispatch
             .event_tx
@@ -140,10 +140,13 @@ impl ModeExecutionContext<'_> {
                     let tool_context = crate::ToolContext::new(
                         self.session_id.clone(),
                         std::sync::Arc::clone(&dispatch.host),
+                        std::sync::Arc::clone(&dispatch.processes),
+                        dispatch.effect_controller.clone(),
                         std::sync::Arc::clone(&dispatch.attachment_store),
                         dispatch.direct_completions.clone(),
                         Some(call_id.clone()),
                     )
+                    .with_runtime_dispatch(std::sync::Arc::new(dispatch.clone()))
                     .with_cancellation_token(self.cancellation_token.clone())
                     .with_tool_effect_metadata(effect_metadata.clone());
                     dispatch_prepared_tool_call_with_execution_context(
@@ -175,7 +178,7 @@ impl ModeExecutionContext<'_> {
         prepared: crate::PreparedToolCall,
         index: usize,
         effect_metadata: Option<crate::EffectInvocationMetadata>,
-    ) -> CompletedModeToolCall {
+    ) -> CompletedProtocolToolCall {
         self.execute_prepared_tool_call_inner(prepared, index, effect_metadata)
             .await
     }
@@ -185,7 +188,7 @@ impl ModeExecutionContext<'_> {
         prepared: crate::PreparedToolCall,
         index: usize,
         effect_metadata: Option<crate::EffectInvocationMetadata>,
-    ) -> CompletedModeToolCall {
+    ) -> CompletedProtocolToolCall {
         let call_id = prepared.call_id.clone();
         let name = prepared.tool_name.clone();
         let args = prepared.args.clone();
@@ -216,10 +219,13 @@ impl ModeExecutionContext<'_> {
         let tool_context = crate::ToolContext::new(
             self.session_id.clone(),
             std::sync::Arc::clone(&self.dispatch.host),
+            std::sync::Arc::clone(&self.dispatch.processes),
+            self.dispatch.effect_controller.clone(),
             std::sync::Arc::clone(&self.dispatch.attachment_store),
             self.dispatch.direct_completions.clone(),
             Some(call_id.clone()),
         )
+        .with_runtime_dispatch(std::sync::Arc::clone(&self.dispatch))
         .with_cancellation_token(self.cancellation_token.clone())
         .with_tool_effect_metadata(run.effect_metadata.clone());
         let mut outcome = dispatch_prepared_tool_call_with_execution_context(
@@ -275,7 +281,7 @@ impl ModeExecutionContext<'_> {
         replay: Option<crate::llm::types::ProviderReplayMeta>,
         outcome: ToolDispatchOutcome,
         tool_correlation_id: TurnActivityId,
-    ) -> CompletedModeToolCall {
+    ) -> CompletedProtocolToolCall {
         let output = outcome.record.output.clone();
         let projection_output = output.clone();
         let projection_tool_name = outcome.record.tool.clone();
@@ -320,7 +326,7 @@ impl ModeExecutionContext<'_> {
             output: output.clone(),
             duration_ms: outcome.record.duration_ms,
         };
-        CompletedModeToolCall {
+        CompletedProtocolToolCall {
             index,
             completed: crate::sansio::CompletedToolCall {
                 call_id,
@@ -341,20 +347,20 @@ impl ModeExecutionContext<'_> {
         name: String,
         args: serde_json::Value,
         index: usize,
-    ) -> ModeToolReply {
+    ) -> ToolInvocationReply {
         let executed = self
             .execute_tool_call(call_id, name, args, index, None, None)
             .await;
-        let reply = ModeToolReply::from_output(executed.completed.output);
+        let reply = ToolInvocationReply::from_output(executed.completed.output);
         reply.with_record(executed.record)
     }
 
-    pub async fn call_tool_batch(&self, calls: Vec<ModeToolBatchItem>) -> Vec<ModeToolReply> {
+    pub async fn call_tool_batch(&self, calls: Vec<ToolInvocation>) -> Vec<ToolInvocationReply> {
         let indexed_calls = calls.into_iter().enumerate().collect::<Vec<_>>();
         schedule_tool_batch(
             indexed_calls,
             |(index, _)| *index,
-            |(_, call)| self.tool_execution_mode(&call.name),
+            |(_, call)| self.tool_scheduling(&call.name),
             |(index, call)| {
                 let ctx = self.clone();
                 async move { ctx.call_tool(call.id, call.name, call.args, index).await }
@@ -368,7 +374,7 @@ impl ModeExecutionContext<'_> {
         call_id: String,
         name: String,
         args: serde_json::Value,
-    ) -> ModeToolReply {
+    ) -> ToolInvocationReply {
         self.start_tool_process(call_id, name, args).await
     }
 
@@ -376,7 +382,7 @@ impl ModeExecutionContext<'_> {
         &self,
         call_id: String,
         handle: serde_json::Value,
-    ) -> ModeToolReply {
+    ) -> ToolInvocationReply {
         self.await_process_handle(call_id, handle).await
     }
 
@@ -384,7 +390,7 @@ impl ModeExecutionContext<'_> {
         &self,
         call_id: String,
         handle: serde_json::Value,
-    ) -> ModeToolReply {
+    ) -> ToolInvocationReply {
         self.cancel_process_handle(call_id, handle).await
     }
 }

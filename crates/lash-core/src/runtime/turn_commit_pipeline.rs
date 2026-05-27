@@ -13,7 +13,7 @@ use super::{
 };
 
 pub(super) struct ProgressBoundaryCommit {
-    pub(super) mode_events: Vec<crate::ModeEvent>,
+    pub(super) protocol_events: Vec<crate::ProtocolEvent>,
     pub(super) persisted: bool,
 }
 
@@ -101,11 +101,11 @@ impl TurnCommitPipeline {
         &self,
         policy: crate::SessionPolicy,
         turn_index: usize,
-        mode_turn_options: crate::ModeTurnOptions,
+        protocol_turn_options: crate::ProtocolTurnOptions,
         messages: MessageSequence,
     ) -> SessionReadView {
         self.draft_ref()
-            .read_view(policy, turn_index, mode_turn_options, messages)
+            .read_view(policy, turn_index, protocol_turn_options, messages)
     }
 
     pub(super) fn active_events(&self) -> Arc<Vec<SessionEventRecord>> {
@@ -167,7 +167,7 @@ impl TurnCommitPipeline {
     ) -> ProgressBoundaryCommit {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return ProgressBoundaryCommit {
-                mode_events: Vec::new(),
+                protocol_events: Vec::new(),
                 persisted: false,
             };
         }
@@ -202,12 +202,12 @@ impl TurnCommitPipeline {
         } = snapshot;
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return ProgressBoundaryCommit {
-                mode_events: Vec::new(),
+                protocol_events: Vec::new(),
                 persisted: false,
             };
         }
 
-        let mode_events = self.apply_event_delta(event_delta);
+        let protocol_events = self.apply_event_delta(event_delta);
         {
             let draft = self.draft_mut();
             draft.apply_prepared_messages(&messages);
@@ -224,19 +224,19 @@ impl TurnCommitPipeline {
 
         let Some(store) = store else {
             return ProgressBoundaryCommit {
-                mode_events,
+                protocol_events,
                 persisted: false,
             };
         };
         match self.commit_progress_graph(store, &[]).await {
             Ok(()) => ProgressBoundaryCommit {
-                mode_events,
+                protocol_events,
                 persisted: true,
             },
             Err(err) => {
                 tracing::warn!("failed to persist runtime progress boundary: {err}");
                 ProgressBoundaryCommit {
-                    mode_events,
+                    protocol_events,
                     persisted: false,
                 }
             }
@@ -250,17 +250,17 @@ impl TurnCommitPipeline {
     pub(super) fn apply_event_delta(
         &mut self,
         event_delta: Vec<SessionEventRecord>,
-    ) -> Vec<crate::ModeEvent> {
-        let mode_events = event_delta
+    ) -> Vec<crate::ProtocolEvent> {
+        let protocol_events = event_delta
             .into_iter()
             .filter_map(|event| match event {
-                SessionEventRecord::Mode(event) => Some(event),
+                SessionEventRecord::Protocol(event) => Some(event),
                 SessionEventRecord::Conversation(_) | SessionEventRecord::Tool(_) => None,
             })
             .collect::<Vec<_>>();
         self.draft_mut()
-            .append_mode_events(mode_events.iter().cloned());
-        mode_events
+            .append_protocol_events(protocol_events.iter().cloned());
+        protocol_events
     }
 
     pub(super) async fn final_commit(
@@ -437,13 +437,18 @@ impl TurnCommitPipeline {
     }
 
     async fn snapshot_dirty_execution_state(session: &mut Session) -> Option<Option<Vec<u8>>> {
-        let mode_session = std::sync::Arc::clone(session.plugins().mode_session());
-        if !mode_session.execution_state_dirty() {
+        let Some(code_executor) = session.plugins().code_executor() else {
+            return None;
+        };
+        if !code_executor.execution_state_dirty() {
             return None;
         }
         let session_id = session.session_id().to_string();
-        match mode_session
-            .snapshot_execution_state(crate::plugin::ModeSessionContext::new(session, &session_id))
+        match code_executor
+            .snapshot_execution_state(crate::plugin::ProtocolSessionContext::new(
+                session,
+                &session_id,
+            ))
             .await
         {
             Ok(snapshot) => Some(snapshot),
@@ -674,7 +679,7 @@ mod tests {
             .await;
 
         assert!(boundary.persisted);
-        assert!(boundary.mode_events.is_empty());
+        assert!(boundary.protocol_events.is_empty());
 
         let stored_graph = store.session_graph.lock().expect("lock graph").clone();
         let conversation_nodes = stored_graph
@@ -711,12 +716,10 @@ mod tests {
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user), &[]);
         let mut pipeline = TurnCommitPipeline::from_state(state_with_graph(graph));
-        let mode_event = crate::ModeEvent::typed(
-            crate::ExecutionMode::new("rlm"),
-            serde_json::json!({"step": "started"}),
-        )
-        .expect("mode event serializes");
-        let event_delta = vec![crate::SessionEventRecord::Mode(mode_event)];
+        let protocol_event =
+            crate::ProtocolEvent::typed("test_protocol", serde_json::json!({"step": "started"}))
+                .expect("protocol event serializes");
+        let event_delta = vec![crate::SessionEventRecord::Protocol(protocol_event)];
         let store = RecordingStore::default();
         store
             .save_session_head_meta(crate::SessionHeadMeta {
@@ -738,7 +741,7 @@ mod tests {
             .await;
 
         assert!(!boundary.persisted);
-        assert_eq!(boundary.mode_events.len(), 1);
+        assert_eq!(boundary.protocol_events.len(), 1);
         assert_eq!(
             *store
                 .runtime_commit_count

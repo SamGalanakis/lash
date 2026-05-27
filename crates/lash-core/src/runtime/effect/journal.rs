@@ -26,12 +26,12 @@ pub(crate) fn turn_idempotency_key(
     session_id: &str,
     turn_id: &str,
     turn_index: usize,
-    mode_iteration: usize,
+    protocol_iteration: usize,
     kind: RuntimeEffectKind,
     effect_id: EffectId,
 ) -> String {
     format!(
-        "{session_id}:{turn_id}:{turn_index}:{mode_iteration}:{}:{}",
+        "{session_id}:{turn_id}:{turn_index}:{protocol_iteration}:{}:{}",
         kind.as_str(),
         effect_id.0
     )
@@ -68,7 +68,7 @@ pub(crate) fn direct_effect_metadata(
         origin,
         turn_id: turn_id.map(str::to_string),
         turn_index: None,
-        mode_iteration: None,
+        protocol_iteration: None,
         effect_id: idempotency_discriminator,
         effect_kind,
         idempotency_key,
@@ -91,7 +91,7 @@ pub(crate) fn tool_retry_sleep_metadata(
         origin: parent.origin.clone(),
         turn_id: parent.turn_id.clone(),
         turn_index: parent.turn_index,
-        mode_iteration: parent.mode_iteration,
+        protocol_iteration: parent.protocol_iteration,
         effect_id,
         effect_kind: RuntimeEffectKind::Sleep,
         idempotency_key,

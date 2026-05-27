@@ -12,9 +12,9 @@ use crate::plugin::{
 use crate::tool_schema::validate_tool_input;
 use crate::{
     PreparedToolCall, ProgressSender, SessionEvent, ToolCall, ToolCallOutcome, ToolCallRecord,
-    ToolContext, ToolExecutionMode, ToolFailure, ToolFailureClass, ToolManifest, ToolPrepareCall,
-    ToolPrepareContext, ToolProvider, ToolResult, ToolRetryDisposition, ToolRetryPolicy,
-    ToolSurface, TurnInjectionBridge,
+    ToolContext, ToolFailure, ToolFailureClass, ToolManifest, ToolPrepareCall, ToolPrepareContext,
+    ToolProvider, ToolResult, ToolRetryDisposition, ToolRetryPolicy, ToolScheduling, ToolSurface,
+    TurnInjectionBridge,
 };
 
 #[derive(Clone)]
@@ -78,10 +78,13 @@ pub(crate) async fn dispatch_tool_call(
     let tool_context = ToolContext::new(
         context.session_id.clone(),
         Arc::clone(&context.host),
+        Arc::clone(&context.processes),
+        context.effect_controller.clone(),
         Arc::clone(&context.attachment_store),
         context.direct_completions.clone(),
         None,
-    );
+    )
+    .with_runtime_dispatch(Arc::new(context.clone()));
     dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
         .await
 }
@@ -230,12 +233,7 @@ pub(crate) async fn prepare_tool_call_with_context(
         return completed_preparation(outcome(tool_name, args, result, 0));
     }
 
-    let contract = context
-        .plugins
-        .mode_native_tools()
-        .iter()
-        .find_map(|provider| provider.resolve_contract(&tool_name))
-        .or_else(|| context.tools.resolve_contract(&tool_name));
+    let contract = context.tools.resolve_contract(&tool_name);
     let Some(contract) = contract else {
         return completed_preparation(outcome(
             tool_name,
@@ -258,14 +256,6 @@ pub(crate) async fn prepare_tool_call_with_context(
     }
 
     pending.args = args.clone();
-    let is_mode_native = context
-        .plugins
-        .mode_native_tools()
-        .iter()
-        .any(|provider| provider.resolve_manifest(&tool_name).is_some());
-    if is_mode_native {
-        return ToolPreparationOutcome::Prepared(PreparedToolCall::identity(pending));
-    }
     let prepare_context = ToolPrepareContext::new(
         context.session_id.clone(),
         Arc::clone(&context.host),
@@ -421,25 +411,15 @@ pub(crate) fn resolve_callable_manifest(
             .then(|| entry.manifest.clone());
     }
 
-    let mode = context.plugins.execution_mode();
     let visible_and_callable = |manifest: ToolManifest| {
         if context.plugins.tool_access().hides(&manifest.name) {
             return None;
         }
         manifest
-            .effective_availability(&mode)
+            .effective_availability()
             .is_callable()
             .then_some(manifest)
     };
-
-    for provider in context.plugins.mode_native_tools() {
-        if let Some(manifest) = provider
-            .resolve_manifest(tool_name)
-            .and_then(&visible_and_callable)
-        {
-            return Some(manifest);
-        }
-    }
 
     context
         .tools
@@ -463,27 +443,15 @@ pub(crate) fn resolve_callable_manifest_by_id(
             .then(|| entry.manifest.clone());
     }
 
-    let mode = context.plugins.execution_mode();
     let visible_and_callable = |manifest: ToolManifest| {
         if context.plugins.tool_access().hides(&manifest.name) {
             return None;
         }
         manifest
-            .effective_availability(&mode)
+            .effective_availability()
             .is_callable()
             .then_some(manifest)
     };
-
-    for provider in context.plugins.mode_native_tools() {
-        if let Some(manifest) = provider
-            .tool_manifests()
-            .into_iter()
-            .find(|manifest| manifest.id == *tool_id)
-            .and_then(visible_and_callable)
-        {
-            return Some(manifest);
-        }
-    }
 
     context
         .tools
@@ -505,19 +473,19 @@ pub(crate) async fn dispatch_parallel_tool_call(
     }
 }
 
-/// Resolve the [`ToolExecutionMode`] declared on a tool's definition. Unknown
-/// tool names default to [`ToolExecutionMode::Parallel`] — the dispatcher
+/// Resolve the [`ToolScheduling`] declared on a tool's definition. Unknown
+/// tool names default to [`ToolScheduling::Parallel`] — the dispatcher
 /// will still surface an "unknown tool" error via the normal path.
-pub(crate) fn resolve_tool_execution_mode(
+pub(crate) fn resolve_tool_scheduling(
     context: &ToolDispatchContext<'_>,
     tool_name: &str,
-) -> ToolExecutionMode {
+) -> ToolScheduling {
     context
         .surface
         .tools
         .iter()
         .find(|def| def.manifest.name == tool_name)
-        .map(|def| def.manifest.execution_mode)
+        .map(|def| def.manifest.scheduling)
         .unwrap_or_default()
 }
 
@@ -539,17 +507,17 @@ pub(crate) fn resolve_tool_argument_projection_policy(
 /// Parallel-safe tools run concurrently first, then serial tools run
 /// one-at-a-time in original index order. Returned outputs are sorted by the
 /// same original index so callers keep their source/model ordering.
-pub(crate) async fn schedule_tool_batch<T, O, IndexOf, ModeOf, Run, Fut>(
+pub(crate) async fn schedule_tool_batch<T, O, IndexOf, SchedulingOf, Run, Fut>(
     items: Vec<T>,
     index_of: IndexOf,
-    mode_of: ModeOf,
+    scheduling_of: SchedulingOf,
     run: Run,
 ) -> Vec<O>
 where
     T: Send + 'static,
     O: Send + 'static,
     IndexOf: Fn(&T) -> usize,
-    ModeOf: Fn(&T) -> ToolExecutionMode,
+    SchedulingOf: Fn(&T) -> ToolScheduling,
     Run: Fn(T) -> Fut,
     Fut: Future<Output = O> + Send,
 {
@@ -557,9 +525,9 @@ where
     let mut serial_items = Vec::new();
     for item in items {
         let index = index_of(&item);
-        match mode_of(&item) {
-            ToolExecutionMode::Parallel => parallel_items.push((index, item)),
-            ToolExecutionMode::Serial => serial_items.push((index, item)),
+        match scheduling_of(&item) {
+            ToolScheduling::Parallel => parallel_items.push((index, item)),
+            ToolScheduling::Serial => serial_items.push((index, item)),
         }
     }
 
@@ -595,7 +563,7 @@ pub async fn dispatch_parallel_tool_calls(
         |spec| spec.index,
         {
             let context = Arc::clone(&context);
-            move |spec| resolve_tool_execution_mode(&context, &spec.tool_name)
+            move |spec| resolve_tool_scheduling(&context, &spec.tool_name)
         },
         move |spec| dispatch_parallel_tool_call(Arc::clone(&context), spec, progress.clone()),
     )
@@ -690,13 +658,6 @@ async fn execute_once<'run>(
 ) -> ToolResult {
     let tool_name = prepared.tool_name.as_str();
     let args = &prepared.args;
-    let native_tools = context.plugins.mode_native_tools().to_vec();
-    for provider in native_tools {
-        if let Some(result) = provider.execute(context, tool_name, args, progress).await {
-            return result;
-        }
-    }
-
     context
         .tools
         .execute(ToolCall {
@@ -736,7 +697,7 @@ async fn sleep_before_retry(
             origin: crate::EffectOrigin::Turn,
             turn_id: None,
             turn_index: None,
-            mode_iteration: None,
+            protocol_iteration: None,
             effect_id: effect_id.clone(),
             effect_kind: crate::RuntimeEffectKind::Sleep,
             idempotency_key: effect_id,
@@ -804,10 +765,7 @@ mod tests {
     use super::*;
     use crate::plugin::{PluginHost, StaticPluginFactory};
     use crate::runtime::RuntimeEffectControllerHandle;
-    use crate::{
-        ExecutionMode, ToolCall, ToolCallOutcome, ToolProvider, ToolRetryDisposition,
-        ToolRetryPolicy,
-    };
+    use crate::{ToolCall, ToolCallOutcome, ToolProvider, ToolRetryDisposition, ToolRetryPolicy};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -819,7 +777,7 @@ mod tests {
     type AttemptObservation = (u32, u32, Option<String>);
     type SharedAttemptObservations = Arc<std::sync::Mutex<Vec<AttemptObservation>>>;
 
-    fn test_tool(name: &str, execution_mode: ToolExecutionMode) -> crate::ToolDefinition {
+    fn test_tool(name: &str, scheduling: ToolScheduling) -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
             format!("tool:{name}"),
             name,
@@ -827,7 +785,7 @@ mod tests {
             crate::ToolDefinition::default_input_schema(),
             json!({ "type": "string" }),
         )
-        .with_execution_mode(execution_mode)
+        .with_scheduling(scheduling)
     }
 
     fn beta_tool() -> crate::ToolDefinition {
@@ -845,7 +803,7 @@ mod tests {
             }),
             json!({ "type": "string" }),
         )
-        .with_execution_mode(ToolExecutionMode::Parallel)
+        .with_scheduling(ToolScheduling::Parallel)
     }
 
     fn named_beta_tool(name: &str) -> crate::ToolDefinition {
@@ -863,7 +821,7 @@ mod tests {
             }),
             json!({ "type": "string" }),
         )
-        .with_execution_mode(ToolExecutionMode::Parallel)
+        .with_scheduling(ToolScheduling::Parallel)
     }
 
     fn manifests(definitions: Vec<crate::ToolDefinition>) -> Vec<crate::ToolManifest> {
@@ -887,7 +845,7 @@ mod tests {
     struct ScheduledProbe {
         index: usize,
         name: &'static str,
-        mode: ToolExecutionMode,
+        scheduling: ToolScheduling,
         delay: Duration,
     }
 
@@ -898,24 +856,24 @@ mod tests {
             ScheduledProbe {
                 index: 0,
                 name: "parallel_slow",
-                mode: ToolExecutionMode::Parallel,
+                scheduling: ToolScheduling::Parallel,
                 delay: Duration::from_millis(40),
             },
             ScheduledProbe {
                 index: 1,
                 name: "serial",
-                mode: ToolExecutionMode::Serial,
+                scheduling: ToolScheduling::Serial,
                 delay: Duration::from_millis(10),
             },
             ScheduledProbe {
                 index: 2,
                 name: "parallel_fast",
-                mode: ToolExecutionMode::Parallel,
+                scheduling: ToolScheduling::Parallel,
                 delay: Duration::from_millis(5),
             },
         ];
 
-        let outputs = schedule_tool_batch(probes, |probe| probe.index, |probe| probe.mode, {
+        let outputs = schedule_tool_batch(probes, |probe| probe.index, |probe| probe.scheduling, {
             let windows = Arc::clone(&windows);
             move |probe| {
                 let windows = Arc::clone(&windows);
@@ -965,14 +923,14 @@ mod tests {
     impl ToolProvider for MockTools {
         fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
             manifests(vec![
-                test_tool("alpha", ToolExecutionMode::Parallel),
+                test_tool("alpha", ToolScheduling::Parallel),
                 beta_tool(),
             ])
         }
 
         fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
             contract_from(
-                vec![test_tool("alpha", ToolExecutionMode::Parallel), beta_tool()],
+                vec![test_tool("alpha", ToolScheduling::Parallel), beta_tool()],
                 name,
             )
         }
@@ -1003,16 +961,16 @@ mod tests {
     impl ToolProvider for ParallelProbeTools {
         fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
             manifests(vec![
-                test_tool("probe_a", ToolExecutionMode::Parallel),
-                test_tool("probe_b", ToolExecutionMode::Parallel),
+                test_tool("probe_a", ToolScheduling::Parallel),
+                test_tool("probe_b", ToolScheduling::Parallel),
             ])
         }
 
         fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
             contract_from(
                 vec![
-                    test_tool("probe_a", ToolExecutionMode::Parallel),
-                    test_tool("probe_b", ToolExecutionMode::Parallel),
+                    test_tool("probe_a", ToolScheduling::Parallel),
+                    test_tool("probe_b", ToolScheduling::Parallel),
                 ],
                 name,
             )
@@ -1101,9 +1059,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(StrictMcpTools { executed }));
         let tools = plugins.tools();
-        let surface = plugins
-            .tool_surface("session", ExecutionMode::standard())
-            .expect("tool surface");
+        let surface = plugins.tool_surface("session").expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
@@ -1130,7 +1086,7 @@ mod tests {
             "test_tools",
             crate::PluginSpec::new().with_tool_provider(Arc::clone(&provider)),
         ))])
-        .build_standard_session("root", None)
+        .build_session("root", None)
         .expect("plugin session")
     }
 
@@ -1140,9 +1096,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(MockTools));
         let tools = plugins.tools();
-        let surface = plugins
-            .tool_surface("session", ExecutionMode::standard())
-            .expect("tool surface");
+        let surface = plugins.tool_surface("session").expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
@@ -1184,12 +1138,10 @@ mod tests {
                 .with_tool_provider(Arc::clone(&provider))
                 .with_before_tool_call(hook),
         ))])
-        .build_standard_session("root", None)
+        .build_session("root", None)
         .expect("plugin session");
         let tools = plugins.tools();
-        let surface = plugins
-            .tool_surface("session", ExecutionMode::standard())
-            .expect("tool surface");
+        let surface = plugins.tool_surface("session").expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
@@ -1338,7 +1290,6 @@ mod tests {
         let tools = Arc::clone(&provider);
         let surface = Arc::new(crate::ToolSurface::from_tools(
             provider.tool_manifests(),
-            ExecutionMode::standard(),
             BTreeMap::new(),
         ));
         ToolDispatchContext {
@@ -1366,9 +1317,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::clone(&provider));
         let tools = plugins.tools();
-        let surface = plugins
-            .tool_surface("session", ExecutionMode::standard())
-            .expect("tool surface");
+        let surface = plugins.tool_surface("session").expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
@@ -1392,7 +1341,7 @@ mod tests {
 
     fn retry_tool(name: &str, retry_policy: ToolRetryPolicy) -> crate::ToolDefinition {
         named_beta_tool(name)
-            .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(retry_policy)
     }
 
@@ -1420,9 +1369,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(ParallelProbeTools { barrier, started }));
         let tools = plugins.tools();
-        let surface = plugins
-            .tool_surface("session", ExecutionMode::standard())
-            .expect("tool surface");
+        let surface = plugins.tool_surface("session").expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
@@ -1694,10 +1641,13 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
+            Arc::clone(&context.processes),
+            context.effect_controller.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
             Some("call-1".to_string()),
-        );
+        )
+        .with_runtime_dispatch(Arc::new(context.clone()));
 
         let outcome = dispatch_tool_call_with_execution_context(
             &context,
@@ -1735,10 +1685,13 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
+            Arc::clone(&context.processes),
+            context.effect_controller.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
             Some("call-1".to_string()),
-        );
+        )
+        .with_runtime_dispatch(Arc::new(context.clone()));
 
         let outcome = dispatch_tool_call_with_execution_context(
             &context,
@@ -1825,10 +1778,13 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
+            Arc::clone(&context.processes),
+            context.effect_controller.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
             Some("call-1".to_string()),
-        );
+        )
+        .with_runtime_dispatch(Arc::new(context.clone()));
         let outcome = dispatch_tool_call_with_execution_context(
             &context,
             "retry_probe".to_string(),
@@ -2007,7 +1963,7 @@ mod tests {
         );
     }
 
-    /// A tool provider whose tools are marked [`ToolExecutionMode::Serial`]
+    /// A tool provider whose tools are marked [`ToolScheduling::Serial`]
     /// and log (start, end) instants around a sleep into a shared `Mutex`.
     struct SerialProbeTools {
         /// (tool_name, start_instant, end_instant)
@@ -2018,16 +1974,16 @@ mod tests {
     impl ToolProvider for SerialProbeTools {
         fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
             manifests(vec![
-                test_tool("serial_a", ToolExecutionMode::Serial),
-                test_tool("serial_b", ToolExecutionMode::Serial),
+                test_tool("serial_a", ToolScheduling::Serial),
+                test_tool("serial_b", ToolScheduling::Serial),
             ])
         }
 
         fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
             contract_from(
                 vec![
-                    test_tool("serial_a", ToolExecutionMode::Serial),
-                    test_tool("serial_b", ToolExecutionMode::Serial),
+                    test_tool("serial_a", ToolScheduling::Serial),
+                    test_tool("serial_b", ToolScheduling::Serial),
                 ],
                 name,
             )
@@ -2054,9 +2010,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(SerialProbeTools { log }));
         let tools = plugins.tools();
-        let surface = plugins
-            .tool_surface("session", ExecutionMode::standard())
-            .expect("tool surface");
+        let surface = plugins.tool_surface("session").expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
@@ -2141,9 +2095,9 @@ mod tests {
     impl ToolProvider for SerialRetryProbeTools {
         fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
             manifests(vec![
-                test_tool("serial_retry_a", ToolExecutionMode::Serial)
+                test_tool("serial_retry_a", ToolScheduling::Serial)
                     .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
-                test_tool("serial_retry_b", ToolExecutionMode::Serial)
+                test_tool("serial_retry_b", ToolScheduling::Serial)
                     .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
             ])
         }
@@ -2151,9 +2105,9 @@ mod tests {
         fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
             contract_from(
                 vec![
-                    test_tool("serial_retry_a", ToolExecutionMode::Serial)
+                    test_tool("serial_retry_a", ToolScheduling::Serial)
                         .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
-                    test_tool("serial_retry_b", ToolExecutionMode::Serial)
+                    test_tool("serial_retry_b", ToolScheduling::Serial)
                         .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
                 ],
                 name,
@@ -2200,9 +2154,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(provider);
         let tools = plugins.tools();
-        let surface = plugins
-            .tool_surface("session", ExecutionMode::standard())
-            .expect("tool surface");
+        let surface = plugins.tool_surface("session").expect("tool surface");
         let context = Arc::new(ToolDispatchContext {
             plugins,
             tools,
@@ -2278,18 +2230,18 @@ mod tests {
         impl ToolProvider for MixedTools {
             fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
                 manifests(vec![
-                    test_tool("par_a", ToolExecutionMode::Parallel),
-                    test_tool("par_b", ToolExecutionMode::Parallel),
-                    test_tool("ser", ToolExecutionMode::Serial),
+                    test_tool("par_a", ToolScheduling::Parallel),
+                    test_tool("par_b", ToolScheduling::Parallel),
+                    test_tool("ser", ToolScheduling::Serial),
                 ])
             }
 
             fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
                 contract_from(
                     vec![
-                        test_tool("par_a", ToolExecutionMode::Parallel),
-                        test_tool("par_b", ToolExecutionMode::Parallel),
-                        test_tool("ser", ToolExecutionMode::Serial),
+                        test_tool("par_a", ToolScheduling::Parallel),
+                        test_tool("par_b", ToolScheduling::Parallel),
+                        test_tool("ser", ToolScheduling::Serial),
                     ],
                     name,
                 )
@@ -2332,9 +2284,7 @@ mod tests {
         });
         let plugins = test_plugins(provider);
         let tools = plugins.tools();
-        let surface = plugins
-            .tool_surface("session", ExecutionMode::standard())
-            .expect("tool surface");
+        let surface = plugins.tool_surface("session").expect("tool surface");
         let context = Arc::new(ToolDispatchContext {
             plugins,
             tools,

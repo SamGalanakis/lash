@@ -1,5 +1,5 @@
 //! Tests that pin down every behavioural claim made in the RLM execution
-//! section of the system prompt (`crates/lash-mode-rlm/src/driver.rs::RLM_EXECUTION_SECTION`).
+//! section of the system prompt (`crates/lash-protocol-rlm/src/driver.rs::RLM_EXECUTION_SECTION`).
 //!
 //! Each test here is wired to a specific bullet or example so the prompt and
 //! the runtime can never drift again without a test failing. If you change
@@ -1120,7 +1120,7 @@ if check.exit_code != 0 {
 
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_mentions_every_builtin_we_document() {
-    // Source: `crates/lash-sansio/src/mode.rs::RLM_EXECUTION_SECTION`. We don't
+    // Source: `crates/lash-protocol-rlm/src/protocol.rs::RLM_EXECUTION_SECTION`. We don't
     // pull the const directly (cross-crate visibility) — instead keep the
     // expected list here. If you add a builtin, update both places.
     const DOCUMENTED: &[&str] = &[

@@ -15,8 +15,8 @@ use fff_search::{
 use serde_json::json;
 
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolFailureClass, ToolManifest,
-    ToolProvider, ToolResult, ToolRetryPolicy,
+    ToolCall, ToolContract, ToolDefinition, ToolFailureClass, ToolManifest, ToolProvider,
+    ToolResult, ToolRetryPolicy, ToolScheduling,
 };
 
 use lash_tool_support::{object_schema, require_str};
@@ -329,7 +329,7 @@ fn grep_tool_definition() -> ToolDefinition {
                 "filesystem",
                 &["search_files", "ripgrep"],
             ))
-            .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 50, 150))
 }
 

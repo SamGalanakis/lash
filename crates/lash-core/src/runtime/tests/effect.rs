@@ -1,6 +1,6 @@
 use super::*;
 use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
-use crate::plugin::{ModeProtocolDriverPlugin, ModeSessionPlugin};
+use crate::plugin::{ProtocolDriverPlugin, ProtocolSessionPlugin};
 use crate::store::RuntimePersistence;
 use std::time::Duration;
 
@@ -347,10 +347,6 @@ fn host_with_effect_recorder(recorder: RecordingEffectController) -> EmbeddedRun
     )
 }
 
-fn effect_test_mode() -> ExecutionMode {
-    ExecutionMode::new("effect_controller_test")
-}
-
 #[tokio::test]
 async fn standard_turn_llm_and_checkpoint_effects_cross_controller_once() {
     let recorder = RecordingEffectController::default();
@@ -386,9 +382,9 @@ async fn standard_turn_llm_and_checkpoint_effects_cross_controller_once() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -657,7 +653,7 @@ async fn effect_journal_replays_without_reinvoking_controller_and_rejects_hash_m
         origin: EffectOrigin::Turn,
         turn_id: Some("turn-1".to_string()),
         turn_index: Some(1),
-        mode_iteration: Some(0),
+        protocol_iteration: Some(0),
         effect_id: "sleep".to_string(),
         effect_kind: RuntimeEffectKind::Sleep,
         idempotency_key: "root:turn-1:1:0:sleep:1".to_string(),
@@ -712,7 +708,7 @@ async fn journaled_turn_effect_requires_lease_before_controller_execution() {
         origin: EffectOrigin::Turn,
         turn_id: Some("turn-1".to_string()),
         turn_index: Some(1),
-        mode_iteration: Some(0),
+        protocol_iteration: Some(0),
         effect_id: "sleep".to_string(),
         effect_kind: RuntimeEffectKind::Sleep,
         idempotency_key: "root:turn-1:1:0:sleep:1".to_string(),
@@ -746,7 +742,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         origin: EffectOrigin::Turn,
         turn_id: Some("turn-process".to_string()),
         turn_index: Some(1),
-        mode_iteration: Some(0),
+        protocol_iteration: Some(0),
         effect_id: "process:list:scope-a".to_string(),
         effect_kind: RuntimeEffectKind::Process,
         idempotency_key: "root:turn-process:1:0:process:list".to_string(),
@@ -826,7 +822,7 @@ async fn journaled_effect_renews_lease_while_pending() {
         origin: EffectOrigin::Turn,
         turn_id: Some("turn-long-effect".to_string()),
         turn_index: Some(1),
-        mode_iteration: Some(0),
+        protocol_iteration: Some(0),
         effect_id: "long-sleep".to_string(),
         effect_kind: RuntimeEffectKind::Sleep,
         idempotency_key: "root:turn-long-effect:1:0:sleep:long".to_string(),
@@ -861,7 +857,7 @@ async fn journaled_effect_does_not_save_outcome_when_pending_lease_renewal_fails
         origin: EffectOrigin::Turn,
         turn_id: Some("turn-expiring-effect".to_string()),
         turn_index: Some(1),
-        mode_iteration: Some(0),
+        protocol_iteration: Some(0),
         effect_id: "expiring-sleep".to_string(),
         effect_kind: RuntimeEffectKind::Sleep,
         idempotency_key: "root:turn-expiring-effect:1:0:sleep:expiring".to_string(),
@@ -1362,9 +1358,9 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
                     text: "use the tool".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -1392,16 +1388,17 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
 #[tokio::test]
 async fn exec_and_execution_surface_effects_cross_controller_once() {
     let recorder = RecordingEffectController::default();
-    let mode = effect_test_mode();
     let policy = SessionPolicy {
-        execution_mode: mode.clone(),
         provider: mock_provider(Vec::new()).into_handle(),
         model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
             .expect("valid model spec"),
         ..SessionPolicy::default()
     };
-    let plugin_session = crate::PluginHost::new(vec![Arc::new(EffectControllerTestModeFactory)])
-        .build_session("root", mode, None, None)
+    let plugin_session =
+        crate::PluginHost::new(vec![Arc::new(EffectControllerTestProtocolFactory {
+            install_code_executor: true,
+        })])
+        .build_session("root", None)
         .expect("plugins");
     let mut runtime = LashRuntime::from_embedded_state(
         policy,
@@ -1419,9 +1416,9 @@ async fn exec_and_execution_surface_effects_cross_controller_once() {
                     text: "run code".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -1435,6 +1432,57 @@ async fn exec_and_execution_surface_effects_cross_controller_once() {
         1
     );
     assert_eq!(recorder.count_kind(RuntimeEffectKind::ExecCode), 1);
+}
+
+#[tokio::test]
+async fn start_exec_without_code_executor_stops_as_runtime_error() {
+    let policy = SessionPolicy {
+        provider: mock_provider(Vec::new()).into_handle(),
+        model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+            .expect("valid model spec"),
+        ..SessionPolicy::default()
+    };
+    let plugin_session =
+        crate::PluginHost::new(vec![Arc::new(EffectControllerTestProtocolFactory {
+            install_code_executor: false,
+        })])
+        .build_session("root", None)
+        .expect("plugins");
+    let mut runtime = LashRuntime::from_embedded_state(
+        policy,
+        EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
+        RuntimeServices::new(plugin_session),
+        RuntimeSessionState::default(),
+    )
+    .await
+    .expect("runtime");
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "run code".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    assert!(matches!(
+        turn.outcome,
+        TurnOutcome::Stopped(TurnStop::RuntimeError)
+    ));
+    assert!(turn.errors.iter().any(|issue| {
+        issue
+            .message
+            .contains("code execution is not available in this session")
+    }));
 }
 
 #[tokio::test]
@@ -1767,52 +1815,62 @@ fn unique_trace_path(prefix: &str) -> PathBuf {
     ))
 }
 
-struct EffectControllerTestModeFactory;
+struct EffectControllerTestProtocolFactory {
+    install_code_executor: bool,
+}
 
-impl crate::PluginFactory for EffectControllerTestModeFactory {
+impl crate::PluginFactory for EffectControllerTestProtocolFactory {
     fn id(&self) -> &'static str {
-        "effect_controller_test_mode"
+        "protocol_standard"
     }
 
     fn build(
         &self,
-        ctx: &crate::PluginSessionContext,
+        _ctx: &crate::PluginSessionContext,
     ) -> Result<Arc<dyn crate::SessionPlugin>, crate::PluginError> {
-        Ok(Arc::new(EffectControllerTestModePlugin {
-            active: ctx.execution_mode == effect_test_mode(),
+        Ok(Arc::new(EffectControllerTestProtocolPlugin {
+            install_code_executor: self.install_code_executor,
         }))
     }
 }
 
-struct EffectControllerTestModePlugin {
-    active: bool,
+struct EffectControllerTestProtocolPlugin {
+    install_code_executor: bool,
 }
 
-impl crate::SessionPlugin for EffectControllerTestModePlugin {
+impl crate::SessionPlugin for EffectControllerTestProtocolPlugin {
     fn id(&self) -> &'static str {
-        "effect_controller_test_mode"
+        "effect_controller_test_protocol"
     }
 
     fn register(&self, registrar: &mut crate::PluginRegistrar) -> Result<(), crate::PluginError> {
-        if self.active {
+        registrar
+            .protocol()
+            .session(Arc::new(EffectControllerTestProtocolSession))?;
+        if self.install_code_executor {
             registrar
-                .mode()
-                .session(Arc::new(EffectControllerTestModeSession))?;
-            registrar
-                .mode()
-                .protocol_driver(Arc::new(EffectControllerTestProtocolDriver))?;
+                .execution()
+                .code_executor(Arc::new(EffectControllerTestCodeExecutor))?;
         }
+        registrar
+            .protocol()
+            .protocol_driver(Arc::new(EffectControllerTestProtocolDriver))?;
         Ok(())
     }
 }
 
-struct EffectControllerTestModeSession;
+struct EffectControllerTestProtocolSession;
 
 #[async_trait::async_trait]
-impl ModeSessionPlugin for EffectControllerTestModeSession {
+impl ProtocolSessionPlugin for EffectControllerTestProtocolSession {}
+
+struct EffectControllerTestCodeExecutor;
+
+#[async_trait::async_trait]
+impl crate::plugin::CodeExecutorPlugin for EffectControllerTestCodeExecutor {
     async fn execute_code(
         &self,
-        _ctx: crate::ModeExecutionContext<'_>,
+        _ctx: crate::RuntimeExecutionContext<'_>,
         _request: crate::ExecRequest,
     ) -> Result<crate::ExecResponse, crate::SessionError> {
         Ok(crate::ExecResponse {
@@ -1831,14 +1889,10 @@ impl ModeSessionPlugin for EffectControllerTestModeSession {
 
 struct EffectControllerTestProtocolDriver;
 
-impl ModeProtocolDriverPlugin for EffectControllerTestProtocolDriver {
-    fn mode_id(&self) -> &str {
-        "effect_controller_test"
-    }
-
-    fn build_preamble(&self, input: crate::ModeBuildInput) -> crate::ModePreamble {
-        crate::ModePreamble {
-            config: crate::ModeConfig::chat(
+impl ProtocolDriverPlugin for EffectControllerTestProtocolDriver {
+    fn build_preamble(&self, input: crate::ProtocolBuildInput) -> crate::TurnDriverPreamble {
+        crate::TurnDriverPreamble {
+            config: crate::TurnDriverConfig::chat(
                 Arc::new(EffectControllerTestDriver),
                 true,
                 Arc::new(effect_controller_turn_limit_final_message),
@@ -1878,21 +1932,24 @@ fn effect_controller_turn_limit_final_message(
 
 struct EffectControllerTestDriver;
 
-impl lash_sansio::ProtocolDriverHandle<crate::HostModeProtocol> for EffectControllerTestDriver {
-    fn prepare_mode_iteration(
+impl lash_sansio::ProtocolDriverHandle<crate::HostTurnProtocol> for EffectControllerTestDriver {
+    fn prepare_protocol_iteration(
         &self,
         _ctx: crate::DriverContextView<'_>,
     ) -> Vec<crate::DriverAction> {
         vec![crate::DriverAction::StartExec {
             code: "print('effect controller')".to_string(),
-            driver_state: serde_json::Value::Null,
+            driver_state: crate::ProtocolDriverState::new(
+                "effect_controller_test_protocol",
+                serde_json::Value::Null,
+            ),
         }]
     }
 
     fn handle_llm_success(
         &self,
         _ctx: crate::DriverContextView<'_>,
-        _waiting: lash_sansio::WaitingLlmState<crate::HostModeProtocol>,
+        _waiting: lash_sansio::WaitingLlmState<crate::HostTurnProtocol>,
         _llm_response: LlmResponse,
         _text_streamed: bool,
     ) -> Vec<crate::DriverAction> {
@@ -1910,7 +1967,7 @@ impl lash_sansio::ProtocolDriverHandle<crate::HostModeProtocol> for EffectContro
     fn handle_exec_result(
         &self,
         _ctx: crate::DriverContextView<'_>,
-        _waiting: lash_sansio::WaitingExecState<crate::HostModeProtocol>,
+        _waiting: lash_sansio::WaitingExecState<crate::HostTurnProtocol>,
         result: Result<crate::ExecResponse, String>,
     ) -> Vec<crate::DriverAction> {
         match result {
@@ -1919,9 +1976,13 @@ impl lash_sansio::ProtocolDriverHandle<crate::HostModeProtocol> for EffectContro
                     value: serde_json::json!(response.output),
                 },
             ))],
-            Err(_error) => vec![crate::DriverAction::Finish(TurnOutcome::Stopped(
-                TurnStop::RuntimeError,
-            ))],
+            Err(error) => vec![
+                crate::DriverAction::Emit(crate::SessionEvent::Error {
+                    message: error,
+                    envelope: None,
+                }),
+                crate::DriverAction::Finish(TurnOutcome::Stopped(TurnStop::RuntimeError)),
+            ],
         }
     }
 }

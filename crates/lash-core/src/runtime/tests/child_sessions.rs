@@ -5,27 +5,22 @@ async fn session_manager_create_session_accepts_custom_context_surface() {
     let runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     let manager = runtime.session_manager().expect("session manager");
     let handle = manager
-        .create_session(crate::SessionCreateRequest {
-            session_id: Some("memory-child".to_string()),
-            relation: crate::SessionRelation::Root,
-            start: crate::SessionStartPoint::Empty,
-            policy: None,
-            plugin_mode: crate::SessionPluginMode::Fresh,
-            initial_nodes: Vec::new(),
-            first_turn_input: None,
-            tool_access: crate::SessionToolAccess::default(),
-            subagent: None,
-            context_surface: crate::SessionContextSurface {
+        .create_session(
+            crate::SessionCreateRequest::root(
+                crate::SessionStartPoint::Empty,
+                crate::PluginOptions::default(),
+            )
+            .with_session_id("memory-child")
+            .with_plugin_source(crate::SessionPluginSource::CurrentHostFresh)
+            .with_context_surface(crate::SessionContextSurface {
                 include_base_tools: false,
                 tool_providers: vec![Arc::new(MemoryProbeTool)],
                 prompt_contributions: vec![crate::PromptContribution::guidance(
                     "Memory Context",
                     "memory child",
                 )],
-            },
-            mode_extras: crate::ModeExtras::default(),
-            usage_source: None,
-        })
+            }),
+        )
         .await
         .expect("child session");
 
@@ -46,9 +41,7 @@ async fn inherited_child_session_carries_parent_tool_state() {
         "memory_probe",
         crate::PluginSpec::new().with_tool_provider(Arc::new(MemoryProbeTool)),
     ))]);
-    let plugin_session = plugin_host
-        .build_standard_session("root", None)
-        .expect("plugins");
+    let plugin_session = plugin_host.build_session("root", None).expect("plugins");
     let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         test_host_config(),
@@ -67,23 +60,15 @@ async fn inherited_child_session_carries_parent_tool_state() {
         .expect("apply dynamic state");
 
     let handle = manager
-        .create_session(crate::SessionCreateRequest {
-            session_id: Some("dynamic-child".to_string()),
-            relation: crate::SessionRelation::Child {
-                parent_session_id: "root".to_string(),
-                originating_tool_call_id: None,
-            },
-            start: crate::SessionStartPoint::Empty,
-            policy: None,
-            plugin_mode: crate::SessionPluginMode::InheritCurrent,
-            initial_nodes: Vec::new(),
-            first_turn_input: None,
-            tool_access: crate::SessionToolAccess::default(),
-            subagent: None,
-            context_surface: crate::SessionContextSurface::default(),
-            mode_extras: crate::ModeExtras::default(),
-            usage_source: None,
-        })
+        .create_session(
+            crate::SessionCreateRequest::child_session(
+                "root",
+                crate::SessionStartPoint::Empty,
+                crate::PluginOptions::default(),
+            )
+            .with_session_id("dynamic-child")
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
+        )
         .await
         .expect("child session");
 
@@ -161,9 +146,9 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                     text: "run child".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             TurnOptions::new(CancellationToken::new())
@@ -309,9 +294,9 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                     text: "run child".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             TurnOptions::new(CancellationToken::new()).with_events(&sink),

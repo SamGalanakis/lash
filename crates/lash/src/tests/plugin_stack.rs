@@ -153,7 +153,6 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
             model: mock_model_spec(),
-            execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
         tool_state_snapshot: Some(persisted_tool_state),

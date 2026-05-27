@@ -42,7 +42,7 @@ pub enum TurnFinish {
 }</code></pre>
           </div>
           <p><code>Finished</code>: clean terminal value. <code>AssistantMessage</code> is the prose default for both modes; the runtime commit materializes the transcript message exactly once — there is no second "final message" stream event after <code>AssistantProseDelta</code>. <code>SubmittedValue</code> / <code>ToolValue</code> come from RLM <code>submit</code> or a tool-authored terminal; both arrive on the stream too.</p>
-          <p><code>Handoff</code>: a mode plugin or tool returned control to a fresh session (usually compaction or continue-as). The new session is persisted before return; resume against <code>session_id</code>.</p>
+          <p><code>Handoff</code>: a protocol plugin or tool returned control to a fresh session (usually compaction or continue-as). The new session is persisted before return; resume against <code>session_id</code>.</p>
           <p><code>Stopped</code>: turn aborted before a terminal value. Ten <code>TurnStop</code> variants:</p>
           <div class="table">
             <table>
@@ -52,12 +52,12 @@ pub enum TurnFinish {
                 <tr><td><code>InvalidInput</code></td><td>Host-driven</td><td>Input normalization rejected the <code>TurnInput</code> (e.g. missing attachment, malformed image ref).</td></tr>
                 <tr><td><code>Incomplete</code></td><td>Provider</td><td>The LLM hit its output limit mid-message without finishing.</td></tr>
                 <tr><td><code>ProviderError</code></td><td>Provider</td><td>The provider returned an error, a content-filter refusal, or a context-overflow terminal reason.</td></tr>
-                <tr><td><code>MaxTurns</code></td><td>Runtime</td><td>The mode loop hit <code>session_spec.max_turns</code> and the final forced-reply turn finished without a terminal.</td></tr>
+                <tr><td><code>MaxTurns</code></td><td>Runtime</td><td>The protocol turn loop hit <code>session_spec.max_turns</code> and the final forced-reply turn finished without a terminal.</td></tr>
                 <tr><td><code>ToolFailure</code></td><td>Runtime</td><td>A tool returned <code>ToolResult::err(...)</code> and turn assembly flagged the turn as failed.</td></tr>
                 <tr><td><code>PluginAbort</code></td><td>Runtime</td><td>A plugin's turn-preparation or checkpoint hook returned an abort directive.</td></tr>
                 <tr><td><code>RuntimeError</code></td><td>Fatal</td><td>Internal runtime failure or a strict-termination policy with no <code>Done</code> event. Treat as a bug or environmental fault.</td></tr>
                 <tr><td><code>SubmittedError { value }</code></td><td>RLM</td><td>An RLM program ended with <code>submit_error(...)</code>; <code>value</code> is the model-authored payload.</td></tr>
-                <tr><td><code>ToolError { tool_name, value }</code></td><td>RLM</td><td>A mode plugin signalled a tool-authored error terminal; <code>value</code> is the payload.</td></tr>
+                <tr><td><code>ToolError { tool_name, value }</code></td><td>RLM</td><td>The RLM protocol signalled a tool-authored error terminal; <code>value</code> is the payload.</td></tr>
               </tbody>
             </table>
           </div>
@@ -222,7 +222,7 @@ impl TurnActivitySink for ChannelSink {
         <div class="section" id="rlm-and-submit">
           <div class="section-header">
             <h2>RLM And Submit</h2>
-            <p>Two RLM modes: <code>SubmitRequired</code> validates <code>submit</code> against the configured schema and finishes as <code>TurnFinish::SubmittedValue</code> (also emitted on the stream). <code>ProseOrSubmit</code> allows a no-code prose answer that finishes as <code>TurnFinish::AssistantMessage</code> with no terminal stream event.</p>
+            <p>Two RLM termination policies: <code>SubmitRequired</code> validates <code>submit</code> against the configured schema and finishes as <code>TurnFinish::SubmittedValue</code> (also emitted on the stream). <code>ProseOrSubmit</code> allows a no-code prose answer that finishes as <code>TurnFinish::AssistantMessage</code> with no terminal stream event.</p>
           </div>
           <div class="two-col">
             <article class="panel">

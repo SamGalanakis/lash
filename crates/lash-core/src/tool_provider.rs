@@ -8,8 +8,8 @@ use crate::plugin::{
     DirectCompletion, PluginError, RuntimeSessionHost, SessionHandle, SessionSnapshot,
 };
 use crate::{
-    AttachmentCreateMeta, AttachmentRef, AttachmentStore, AttachmentStoreError, ToolContract,
-    ToolManifest, ToolResult,
+    AttachmentCreateMeta, AttachmentRef, AttachmentStore, AttachmentStoreError, ProcessRecord,
+    ToolContract, ToolInvocation, ToolInvocationReply, ToolManifest, ToolResult,
 };
 
 /// A message sent from the sandbox to the host during execution.
@@ -29,6 +29,9 @@ pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 pub struct ToolContext<'run> {
     pub(crate) session_id: String,
     pub(crate) host: Arc<dyn RuntimeSessionHost>,
+    pub(crate) processes: Arc<dyn crate::ProcessService>,
+    pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
+    pub(crate) runtime_dispatch: Option<Arc<crate::tool_dispatch::ToolDispatchContext<'run>>>,
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) async_process_id: Option<String>,
     pub(crate) process_events: Option<ToolProcessEventContext>,
@@ -111,6 +114,8 @@ impl<'run> ToolContext<'run> {
     pub(crate) fn new(
         session_id: String,
         host: Arc<dyn RuntimeSessionHost>,
+        processes: Arc<dyn crate::ProcessService>,
+        effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         attachment_store: Arc<dyn AttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'run>,
         tool_call_id: Option<String>,
@@ -118,6 +123,9 @@ impl<'run> ToolContext<'run> {
         Self {
             session_id,
             host,
+            processes,
+            effect_controller,
+            runtime_dispatch: None,
             cancellation_token: None,
             async_process_id: None,
             process_events: None,
@@ -159,6 +167,17 @@ impl<'run> ToolContext<'run> {
         self.host.snapshot_session(session_id.as_ref()).await
     }
 
+    pub async fn create_session(
+        &self,
+        request: crate::SessionCreateRequest,
+    ) -> Result<SessionHandle, PluginError> {
+        self.host.create_session(request).await
+    }
+
+    pub async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
+        self.host.close_session(session_id).await
+    }
+
     pub async fn tool_catalog(&self) -> Result<Vec<serde_json::Value>, PluginError> {
         self.host.tool_catalog(&self.session_id).await
     }
@@ -177,6 +196,109 @@ impl<'run> ToolContext<'run> {
         ToolSessionControl {
             host: Arc::clone(&self.host),
         }
+    }
+
+    pub async fn dispatch_tool_batch(
+        &self,
+        calls: Vec<ToolInvocation>,
+    ) -> Vec<ToolInvocationReply> {
+        let Some(dispatch) = self.runtime_dispatch.clone() else {
+            return calls
+                .into_iter()
+                .map(|_| {
+                    ToolInvocationReply::error(serde_json::json!(
+                        "tool batch dispatch is unavailable outside runtime tool execution"
+                    ))
+                })
+                .collect();
+        };
+        let indexed_calls = calls.into_iter().enumerate().collect::<Vec<_>>();
+        crate::tool_dispatch::schedule_tool_batch(
+            indexed_calls,
+            |(index, _)| *index,
+            {
+                let dispatch = Arc::clone(&dispatch);
+                move |(_, call)| {
+                    crate::tool_dispatch::resolve_tool_scheduling(&dispatch, &call.name)
+                }
+            },
+            |(_, call)| {
+                let dispatch = Arc::clone(&dispatch);
+                let mut child_context = self.clone();
+                async move {
+                    child_context.tool_call_id = Some(call.id.clone());
+                    child_context.prepared_payload = serde_json::Value::Null;
+                    let outcome = crate::tool_dispatch::dispatch_tool_call_with_execution_context(
+                        dispatch.as_ref(),
+                        call.name,
+                        call.args,
+                        None,
+                        child_context,
+                    )
+                    .await;
+                    let mut record = outcome.record;
+                    record.call_id = Some(call.id);
+                    ToolInvocationReply::from_output(record.output.clone()).with_record(record)
+                }
+            },
+        )
+        .await
+    }
+
+    fn process_scope(&self) -> crate::ProcessOpScope<'_> {
+        crate::ProcessOpScope::new()
+            .with_effect_metadata(self.tool_effect_metadata.clone())
+            .with_effect_controller(self.effect_controller.as_controller())
+    }
+
+    pub async fn list_process_handles(
+        &self,
+    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
+        self.processes
+            .list_visible(&self.session_id, self.process_scope())
+            .await
+    }
+
+    pub async fn validate_process_handles(&self, handle_ids: &[String]) -> Result<(), PluginError> {
+        self.processes
+            .validate_visible(&self.session_id, handle_ids)
+            .await
+    }
+
+    pub async fn cancel_process(&self, process_id: &str) -> Result<ProcessRecord, PluginError> {
+        self.processes
+            .cancel(&self.session_id, process_id, self.process_scope())
+            .await
+    }
+
+    pub async fn cancel_all_processes(&self) -> Result<Vec<ProcessRecord>, PluginError> {
+        self.processes
+            .cancel_all(&self.session_id, self.process_scope())
+            .await
+    }
+
+    pub async fn transfer_process_handles(
+        &self,
+        to_session_id: &str,
+        process_ids: Vec<String>,
+    ) -> Result<(), PluginError> {
+        self.processes
+            .transfer(
+                &self.session_id,
+                to_session_id,
+                process_ids,
+                self.process_scope(),
+            )
+            .await
+    }
+
+    pub async fn cancel_unreferenced_process_handles(
+        &self,
+        keep_process_ids: Vec<String>,
+    ) -> Result<Vec<ProcessRecord>, PluginError> {
+        self.processes
+            .cancel_unreferenced(&self.session_id, keep_process_ids, self.process_scope())
+            .await
     }
 
     pub async fn direct_completion(
@@ -283,6 +405,14 @@ impl<'run> ToolContext<'run> {
         self
     }
 
+    pub(crate) fn with_runtime_dispatch(
+        mut self,
+        dispatch: Arc<crate::tool_dispatch::ToolDispatchContext<'run>>,
+    ) -> Self {
+        self.runtime_dispatch = Some(dispatch);
+        self
+    }
+
     pub(crate) fn with_process_events(
         mut self,
         process_id: impl Into<String>,
@@ -332,6 +462,7 @@ impl<'run> ToolContext<'run> {
     pub fn __for_testing(
         session_id: String,
         host: Arc<dyn RuntimeSessionHost>,
+        processes: Arc<dyn crate::ProcessService>,
         attachment_store: Arc<dyn AttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'static>,
         tool_call_id: Option<String>,
@@ -339,6 +470,10 @@ impl<'run> ToolContext<'run> {
         ToolContext::new(
             session_id,
             host,
+            processes,
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
             attachment_store,
             direct_completions,
             tool_call_id,

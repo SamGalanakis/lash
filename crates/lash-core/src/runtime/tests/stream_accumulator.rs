@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn stream_accumulator_merges_adjacent_display_reasoning_chunks() {
-    let mut accumulator = StandardStreamAccumulator::default();
+    let mut accumulator = LlmStreamAccumulator::default();
     accumulator.push_reasoning("I'll".to_string(), None, Vec::new(), None);
     accumulator.push_reasoning(" check".to_string(), None, Vec::new(), None);
     accumulator.push_reasoning(" the time.".to_string(), None, Vec::new(), None);
@@ -16,7 +16,7 @@ fn stream_accumulator_merges_adjacent_display_reasoning_chunks() {
 
 #[test]
 fn stream_accumulator_enriches_reasoning_delta_with_later_roundtrip_payload() {
-    let mut accumulator = StandardStreamAccumulator::default();
+    let mut accumulator = LlmStreamAccumulator::default();
     accumulator.push_reasoning("I'll check the time.".to_string(), None, Vec::new(), None);
     accumulator.push_reasoning(
         "I'll check the time.".to_string(),
@@ -40,7 +40,7 @@ fn stream_accumulator_enriches_reasoning_delta_with_later_roundtrip_payload() {
 
 #[test]
 fn stream_accumulator_preserves_reasoning_when_final_response_has_tool_call() {
-    let mut accumulator = StandardStreamAccumulator::default();
+    let mut accumulator = LlmStreamAccumulator::default();
     accumulator.push_reasoning("I'll check the time.".to_string(), None, Vec::new(), None);
     accumulator.push_tool_call(
         "call_1".to_string(),
@@ -81,7 +81,7 @@ fn stream_accumulator_preserves_reasoning_when_final_response_has_tool_call() {
 
 #[test]
 fn stream_accumulator_does_not_duplicate_complete_final_response() {
-    let mut accumulator = StandardStreamAccumulator::default();
+    let mut accumulator = LlmStreamAccumulator::default();
     accumulator.push_reasoning("I'll answer.".to_string(), None, Vec::new(), None);
     accumulator.push_text("Done.");
 

@@ -325,12 +325,12 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
         let runner = *self;
         match envelope.command {
             RuntimeEffectCommand::LlmCall { request } => {
-                let mode_iteration = runner.machine.mode_iteration();
+                let protocol_iteration = runner.machine.protocol_iteration();
                 let (result, text_streamed) = runner
                     .driver
-                    .run_standard_llm_call(
+                    .run_llm_call(
                         Arc::new((*request).into_request(None, None)),
-                        mode_iteration,
+                        protocol_iteration,
                         &runner.event_tx,
                         &runner.cancellation,
                     )
@@ -359,7 +359,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                 Ok(RuntimeEffectOutcome::ToolCall { result })
             }
             RuntimeEffectCommand::ExecCode { code } => {
-                let mode_iteration = runner.machine.mode_iteration();
+                let protocol_iteration = runner.machine.protocol_iteration();
                 let messages = runner.machine.message_sequence();
                 Ok(RuntimeEffectOutcome::ExecCode {
                     result: runner
@@ -367,7 +367,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                         .run_exec_code(
                             &code,
                             messages,
-                            mode_iteration,
+                            protocol_iteration,
                             envelope.metadata,
                             &runner.event_tx,
                         )

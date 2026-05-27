@@ -48,10 +48,9 @@ use crate::session_model::{
     fresh_message_id, make_error_event, reassign_part_ids, shared_parts, transport_stream_events,
 };
 use crate::{
-    CheckpointKind, ExecutionMode, PersistentRuntimeServices, PluginActionInvokeError,
-    PromptHookContext, RuntimeServices, SandboxMessage, Session, SessionCreateRequest,
-    SessionError, SessionHandle, SessionSnapshot, SessionStartPoint, ToolCallRecord, TurnFinish,
-    TurnOutcome, TurnStop,
+    CheckpointKind, PersistentRuntimeServices, PluginActionInvokeError, PromptHookContext,
+    RuntimeServices, SandboxMessage, Session, SessionCreateRequest, SessionError, SessionHandle,
+    SessionSnapshot, SessionStartPoint, ToolCallRecord, TurnFinish, TurnOutcome, TurnStop,
 };
 use crate::{Effect, TurnMachine};
 
@@ -67,8 +66,8 @@ pub(crate) const RUNTIME_TURN_LEASE_TTL_MS: u64 = 15 * 60 * 1000;
 pub use lash_sansio::PromptUsage;
 
 use assembly::{
-    LlmDebugText, LlmDebugToolCall, LlmStreamDebugState, LlmStreamEventLog, LlmStreamSummary,
-    StandardStreamAccumulator, StandardStreamState, TurnAssembler,
+    LlmDebugText, LlmDebugToolCall, LlmStreamAccumulator, LlmStreamDebugState, LlmStreamEventLog,
+    LlmStreamState, LlmStreamSummary, TurnAssembler,
 };
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -154,15 +153,15 @@ pub struct TurnInput {
     pub items: Vec<InputItem>,
     #[serde(default)]
     pub image_blobs: HashMap<String, Vec<u8>>,
-    /// Per-turn override for mode-owned turn options.
+    /// Per-turn override for protocol-owned turn options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode_turn_options: Option<crate::ModeTurnOptions>,
+    pub protocol_turn_options: Option<crate::ProtocolTurnOptions>,
     /// Optional externally-stable trace turn id. Normal runtime callers leave
     /// this empty and the runtime generates one per outer turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_turn_id: Option<String>,
     #[serde(skip)]
-    pub mode_extension: Option<ModeTurnExtensionHandle>,
+    pub protocol_extension: Option<ProtocolTurnExtensionHandle>,
     #[serde(skip)]
     pub turn_context: TurnContext,
 }
@@ -180,9 +179,9 @@ impl TurnInput {
         Self {
             items: items.into_iter().collect(),
             image_blobs: HashMap::new(),
-            mode_turn_options: None,
+            protocol_turn_options: None,
             trace_turn_id: None,
-            mode_extension: None,
+            protocol_extension: None,
             turn_context: TurnContext::default(),
         }
     }
@@ -212,8 +211,8 @@ impl TurnInput {
         self
     }
 
-    pub fn with_mode_turn_options(mut self, options: crate::ModeTurnOptions) -> Self {
-        self.mode_turn_options = Some(options);
+    pub fn with_protocol_turn_options(mut self, options: crate::ProtocolTurnOptions) -> Self {
+        self.protocol_turn_options = Some(options);
         self
     }
 
@@ -320,10 +319,10 @@ impl fmt::Debug for TurnContext {
 }
 
 #[derive(Clone)]
-pub struct ModeTurnExtensionHandle(Arc<dyn ModeTurnExtension>);
+pub struct ProtocolTurnExtensionHandle(Arc<dyn ProtocolTurnExtension>);
 
-impl ModeTurnExtensionHandle {
-    pub fn new(extension: impl ModeTurnExtension + 'static) -> Self {
+impl ProtocolTurnExtensionHandle {
+    pub fn new(extension: impl ProtocolTurnExtension + 'static) -> Self {
         Self(Arc::new(extension))
     }
 
@@ -336,13 +335,13 @@ impl ModeTurnExtensionHandle {
     }
 }
 
-impl fmt::Debug for ModeTurnExtensionHandle {
+impl fmt::Debug for ProtocolTurnExtensionHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ModeTurnExtensionHandle(..)")
+        f.write_str("ProtocolTurnExtensionHandle(..)")
     }
 }
 
-pub trait ModeTurnExtension: Send + Sync {
+pub trait ProtocolTurnExtension: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 
     fn prompt_contributions(&self) -> Vec<crate::PromptContribution> {
@@ -351,10 +350,10 @@ pub trait ModeTurnExtension: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct ModeSessionExtensionHandle(Arc<dyn ModeSessionExtension>);
+pub struct ProtocolSessionExtensionHandle(Arc<dyn ProtocolSessionExtension>);
 
-impl ModeSessionExtensionHandle {
-    pub fn new(extension: impl ModeSessionExtension + 'static) -> Self {
+impl ProtocolSessionExtensionHandle {
+    pub fn new(extension: impl ProtocolSessionExtension + 'static) -> Self {
         Self(Arc::new(extension))
     }
 
@@ -363,13 +362,13 @@ impl ModeSessionExtensionHandle {
     }
 }
 
-impl fmt::Debug for ModeSessionExtensionHandle {
+impl fmt::Debug for ProtocolSessionExtensionHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ModeSessionExtensionHandle(..)")
+        f.write_str("ProtocolSessionExtensionHandle(..)")
     }
 }
 
-pub trait ModeSessionExtension: Send + Sync {
+pub trait ProtocolSessionExtension: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -405,10 +404,9 @@ pub struct CodeOutputRecord {
     pub error: Option<String>,
 }
 
-/// High-level execution summary shared across execution modes.
+/// High-level execution summary for a completed turn.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionSummary {
-    pub mode: ExecutionMode,
     #[serde(default)]
     pub had_tool_calls: bool,
     #[serde(default)]
@@ -492,7 +490,7 @@ impl Default for TerminationPolicy {
 }
 
 /// Host event sink for low-level streaming runtime events.
-/// `SessionEvent` is intentionally mode-specific and should be treated as preview/progress data.
+/// `SessionEvent` is protocol-specific preview/progress data.
 #[async_trait::async_trait]
 pub trait EventSink: Send + Sync {
     fn is_noop(&self) -> bool {
@@ -570,7 +568,7 @@ impl TurnActivity {
 #[allow(clippy::large_enum_variant)]
 pub enum TurnEvent {
     ModelRequestStarted {
-        mode_iteration: usize,
+        protocol_iteration: usize,
     },
     AssistantProseDelta {
         text: String,
@@ -610,7 +608,7 @@ pub enum TurnEvent {
         value: serde_json::Value,
     },
     Usage {
-        mode_iteration: usize,
+        protocol_iteration: usize,
         usage: TokenUsage,
         cumulative: TokenUsage,
     },
@@ -618,7 +616,7 @@ pub enum TurnEvent {
         session_id: String,
         source: String,
         model: String,
-        mode_iteration: usize,
+        protocol_iteration: usize,
         usage: TokenUsage,
         cumulative: TokenUsage,
     },
@@ -765,8 +763,8 @@ pub struct LashRuntime {
     pub(in crate::runtime) managed_sessions: Arc<Mutex<HashMap<String, RuntimeHandle>>>,
     pub(in crate::runtime) active_handoff_continuations: Arc<Mutex<HashMap<String, String>>>,
     pub(in crate::runtime) managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
-    /// Mode-owned turn options for this session.
-    pub(in crate::runtime) mode_turn_options: crate::ModeTurnOptions,
+    /// Protocol-owned turn options for this session.
+    pub(in crate::runtime) protocol_turn_options: crate::ProtocolTurnOptions,
     /// Session-scoped token cost ledger. Shared by ALL
     /// `RuntimeSessionManager` instances created from this runtime
     /// (both per-turn and async maintenance). Entries accumulate here

@@ -5,11 +5,8 @@ use std::sync::{Arc, OnceLock};
 use chrono::Utc;
 use sha2::Digest;
 
-use crate::session_model::{ConversationRecord, ModeEvent, SessionEventRecord, ToolEvent};
-use crate::{
-    BaseRenderCache, ExecutionMode, Message, MessageRole, PromptUsage, StandardContextApproach,
-    TokenUsage, ToolCallRecord,
-};
+use crate::session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord, ToolEvent};
+use crate::{BaseRenderCache, Message, MessageRole, PromptUsage, TokenUsage, ToolCallRecord};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionGraphData {
@@ -138,9 +135,6 @@ pub enum SessionNodePayload {
 pub struct PersistedSessionConfig {
     pub provider_id: String,
     pub model: crate::ModelSpec,
-    pub execution_mode: ExecutionMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub standard_context_approach: Option<StandardContextApproach>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -151,7 +145,7 @@ pub struct PersistedTurnState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_usage: Option<PromptUsage>,
     #[serde(default)]
-    pub mode_turn_options: crate::ModeTurnOptions,
+    pub protocol_turn_options: crate::ProtocolTurnOptions,
 }
 
 #[derive(Clone, Debug)]
@@ -267,13 +261,13 @@ impl SessionGraphAppendBuilder {
         nodes
     }
 
-    pub(crate) fn append_mode_events<I>(&mut self, events: I) -> Vec<SessionNodeRecord>
+    pub(crate) fn append_protocol_events<I>(&mut self, events: I) -> Vec<SessionNodeRecord>
     where
-        I: IntoIterator<Item = ModeEvent>,
+        I: IntoIterator<Item = ProtocolEvent>,
     {
         let mut nodes = Vec::new();
         for event in events {
-            let node_id = fresh_semantic_node_id("mode", &self.existing_ids);
+            let node_id = fresh_semantic_node_id("protocol", &self.existing_ids);
             self.existing_ids.insert(node_id.clone());
             let parent_node_id = self.leaf_node_id.clone();
             self.leaf_node_id = Some(node_id.clone());
@@ -282,7 +276,7 @@ impl SessionGraphAppendBuilder {
                 parent_node_id,
                 timestamp: Utc::now().to_rfc3339(),
                 payload: SessionNodePayload::Event {
-                    event: SessionEventRecord::Mode(event),
+                    event: SessionEventRecord::Protocol(event),
                 },
             });
         }
@@ -754,12 +748,12 @@ impl SessionGraph {
         self.replace_active_read_state(messages.as_slice(), tool_calls);
     }
 
-    pub fn append_mode_event(&mut self, event: ModeEvent) -> String {
+    pub fn append_protocol_event(&mut self, event: ProtocolEvent) -> String {
         let mut builder = self.append_builder();
-        let nodes = builder.append_mode_events([event]);
+        let nodes = builder.append_protocol_events([event]);
         let node_id = nodes
             .first()
-            .expect("mode event append must create one node")
+            .expect("protocol event append must create one node")
             .node_id
             .clone();
         self.append_prebuilt_nodes(nodes);
@@ -1302,7 +1296,7 @@ fn first_message_search_text(message: &Message) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExecutionMode, Part, PartKind, PruneState, ToolCallOutput, shared_parts};
+    use crate::{Part, PartKind, PruneState, ToolCallOutput, shared_parts};
 
     fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
         Message {
@@ -1334,12 +1328,9 @@ mod tests {
         }
     }
 
-    fn mode_event() -> ModeEvent {
-        ModeEvent::typed(
-            ExecutionMode::new("rlm"),
-            serde_json::json!({"step": "started"}),
-        )
-        .expect("mode event serializes")
+    fn protocol_event() -> ProtocolEvent {
+        ProtocolEvent::typed("test_protocol", serde_json::json!({"step": "started"}))
+            .expect("protocol event serializes")
     }
 
     #[test]
@@ -1348,11 +1339,11 @@ mod tests {
 
         let message_id = graph.append_message(text_message("m1", MessageRole::User, "hello"));
         graph.append_active_read_delta(&[], &[tool_record("call-1")]);
-        let mode_id = graph.append_mode_event(mode_event());
+        let protocol_id = graph.append_protocol_event(protocol_event());
         let plugin_id = graph.append_plugin("example", serde_json::json!({"ok": true}));
 
         assert_eq!(message_id, "m1");
-        assert!(mode_id.starts_with("mode:"));
+        assert!(protocol_id.starts_with("protocol:"));
         assert!(plugin_id.starts_with("plugin:"));
 
         let tool_node = graph
@@ -1382,7 +1373,7 @@ mod tests {
         let mut graph = SessionGraph::default();
         graph.append_message(text_message("m1", MessageRole::User, "hello"));
         graph.append_active_read_delta(&[], &[tool_record("call-1")]);
-        graph.append_mode_event(mode_event());
+        graph.append_protocol_event(protocol_event());
         graph.append_plugin("example", serde_json::json!({"ok": true}));
 
         for node in &graph.nodes {
@@ -1390,8 +1381,8 @@ mod tests {
                 Some(SessionEventRecord::Conversation(_) | SessionEventRecord::Tool(_)) => {
                     assert!(!node.node_id.starts_with("plugin:"), "{:?}", node);
                 }
-                Some(SessionEventRecord::Mode(_)) => {
-                    assert!(node.node_id.starts_with("mode:"), "{:?}", node);
+                Some(SessionEventRecord::Protocol(_)) => {
+                    assert!(node.node_id.starts_with("protocol:"), "{:?}", node);
                 }
                 None => {
                     assert!(node.node_id.starts_with("plugin:"), "{:?}", node);

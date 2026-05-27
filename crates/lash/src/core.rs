@@ -34,6 +34,7 @@ impl LashCore {
             core: self.clone(),
             session_id: session_id.into(),
             spec: SessionSpec::inherit(),
+            mode: None,
             parent_session_id: None,
             store: None,
             active_plugins: Vec::new(),
@@ -107,7 +108,7 @@ impl LashCoreBuilder {
     }
 
     pub fn mode(mut self, mode: ModeId) -> Self {
-        self.session_spec = self.session_spec.mode(mode.execution_mode());
+        self.default_mode = Some(mode);
         self
     }
 
@@ -236,11 +237,8 @@ impl LashCoreBuilder {
             return Err(EmbedError::NoModesInstalled);
         }
         let default_mode = self
-            .session_spec
-            .execution_mode
-            .as_ref()
-            .map(|mode| ModeId::new(mode.plugin_id()))
-            .or_else(|| self.default_mode.clone())
+            .default_mode
+            .clone()
             .ok_or(EmbedError::NoModesInstalled)?;
         if !self.modes.contains_key(&default_mode) {
             return Err(EmbedError::DefaultModeNotInstalled { mode: default_mode });
@@ -252,16 +250,10 @@ impl LashCoreBuilder {
             .clone()
             .ok_or(EmbedError::MissingModelSpec)?;
 
-        let default_preset = self
-            .modes
-            .get(&default_mode)
-            .expect("default mode was validated");
         let base_policy = SessionPolicy {
             provider,
             model,
             max_turns: self.session_spec.max_turns.flatten(),
-            execution_mode: default_mode.execution_mode(),
-            standard_context_approach: default_preset.standard_context_approach.clone(),
             ..SessionPolicy::default()
         };
         let policy = self.session_spec.resolve_against(&base_policy);
@@ -270,11 +262,6 @@ impl LashCoreBuilder {
             plugin_host.factories().to_vec()
         } else {
             let mut factories = Vec::new();
-            factories.extend(
-                self.modes
-                    .values()
-                    .map(|preset| Arc::clone(&preset.factory)),
-            );
             if !self.tool_providers.is_empty() {
                 let spec = self
                     .tool_providers
@@ -284,12 +271,18 @@ impl LashCoreBuilder {
                     as Arc<dyn PluginFactory>);
             }
             factories.extend(self.plugin_stack.into_factories());
-            PluginHost::new(factories).factories().to_vec()
+            factories
         };
-        let plugin_host = PluginHost::new(plugin_factories.clone());
+        let default_plugin_host = build_plugin_host_for_mode(
+            &self.modes,
+            &default_mode,
+            &plugin_factories,
+            Vec::new(),
+            self.process_registry.is_some(),
+        )?;
 
         let mut env_builder = RuntimeEnvironment::builder()
-            .with_plugin_host(Arc::new(plugin_host))
+            .with_plugin_host(Arc::new(default_plugin_host))
             .with_runtime_core_config(self.core);
         if let Some(process_registry) = self.process_registry {
             env_builder = env_builder.with_process_registry(process_registry);
@@ -323,6 +316,31 @@ impl LashCoreBuilder {
         self.process_registry = Some(process_registry);
         self
     }
+}
+
+pub(crate) fn build_plugin_host_for_mode(
+    modes: &BTreeMap<ModeId, ModePreset>,
+    mode: &ModeId,
+    common_factories: &[Arc<dyn PluginFactory>],
+    extra_factories: Vec<Arc<dyn PluginFactory>>,
+    process_lifecycle: bool,
+) -> Result<PluginHost> {
+    let preset = modes
+        .get(mode)
+        .ok_or_else(|| EmbedError::ModeNotInstalled { mode: mode.clone() })?;
+    let mut factories = Vec::with_capacity(1 + common_factories.len() + extra_factories.len());
+    factories.push(Arc::clone(&preset.factory));
+    factories.extend(common_factories.iter().cloned());
+    factories.extend(extra_factories);
+    let mut plugin_host = PluginHost::new(factories);
+    if process_lifecycle {
+        let abilities = plugin_host
+            .lashlang_abilities()
+            .with_processes()
+            .with_process_lifecycle();
+        plugin_host = plugin_host.with_lashlang_abilities(abilities);
+    }
+    Ok(plugin_host)
 }
 
 pub struct AdvancedLashCoreBuilder {

@@ -2290,12 +2290,12 @@ dependencies = [
  "lash-export",
  "lash-file-index",
  "lash-llm-tools",
- "lash-mode-rlm",
- "lash-mode-standard",
  "lash-plugin-mcp",
  "lash-plugin-observational-memory",
  "lash-plugin-plan-mode",
  "lash-plugin-process-controls",
+ "lash-protocol-rlm",
+ "lash-protocol-standard",
  "lash-provider-anthropic",
  "lash-provider-auth",
  "lash-provider-codex",
@@ -2357,7 +2357,7 @@ dependencies = [
  "anyhow",
  "clap",
  "lash-core",
- "lash-mode-rlm",
+ "lash-protocol-rlm",
  "lash-rlm-types",
  "lash-sqlite-store",
  "pulldown-cmark",
@@ -2433,39 +2433,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-mode-rlm"
-version = "0.1.0-alpha.9"
-dependencies = [
- "async-trait",
- "insta",
- "jsonschema",
- "lash-core",
- "lash-mode-standard",
- "lash-plugin-tool-output-budget",
- "lash-rlm-types",
- "lash-sansio",
- "lashlang",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "lash-mode-standard"
-version = "0.1.0-alpha.9"
-dependencies = [
- "async-trait",
- "lash-core",
- "lash-plugin-process-controls",
- "lash-sqlite-store",
- "lash-tool-shell",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "lash-openai-schema"
 version = "0.1.0-alpha.9"
 dependencies = [
@@ -2533,6 +2500,7 @@ dependencies = [
  "async-trait",
  "lash-core",
  "lash-plugin-tool-output-budget",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -2560,6 +2528,39 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "lash-protocol-rlm"
+version = "0.1.0-alpha.9"
+dependencies = [
+ "async-trait",
+ "insta",
+ "jsonschema",
+ "lash-core",
+ "lash-plugin-tool-output-budget",
+ "lash-protocol-standard",
+ "lash-rlm-types",
+ "lash-sansio",
+ "lashlang",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "lash-protocol-standard"
+version = "0.1.0-alpha.9"
+dependencies = [
+ "async-trait",
+ "lash-core",
+ "lash-plugin-process-controls",
+ "lash-sqlite-store",
+ "lash-tool-shell",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2656,7 +2657,7 @@ dependencies = [
  "http",
  "http-body-util",
  "lash-core",
- "lash-mode-standard",
+ "lash-protocol-standard",
  "lash-sqlite-store",
  "lashlang",
  "restate-sdk",
@@ -2685,9 +2686,9 @@ dependencies = [
  "async-trait",
  "lash-core",
  "lash-local-store",
- "lash-mode-rlm",
- "lash-mode-standard",
  "lash-plugin-tool-output-budget",
+ "lash-protocol-rlm",
+ "lash-protocol-standard",
  "lash-rlm-types",
  "lash-trace",
  "serde",
@@ -2740,6 +2741,7 @@ dependencies = [
  "lash-tool-search",
  "lash-tool-shell",
  "lash-tool-web",
+ "serde",
 ]
 
 [[package]]
@@ -2750,7 +2752,7 @@ dependencies = [
  "jsonschema",
  "lash-core",
  "lash-llm-tools",
- "lash-mode-rlm",
+ "lash-protocol-rlm",
  "lash-rlm-types",
  "serde",
  "serde_json",

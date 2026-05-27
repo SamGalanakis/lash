@@ -1,9 +1,7 @@
 use lash_core::plugin::PluginError;
-use lash_core::{
-    DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
-    ObservationalMemoryConfig,
-};
+use lash_core::{DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole};
 
+use crate::ObservationalMemoryConfig;
 use crate::host::OmRuntimeHost;
 use crate::model::{ActiveMemoryState, ObservedMessageNode, ParsedMemoryOutput};
 use crate::prompts::{

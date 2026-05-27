@@ -54,12 +54,7 @@ impl LashRuntime {
             host.core = host.core.with_attachment_store(scoped);
         }
         let services = services.with_attachment_store(Arc::clone(&host.core.attachment_store));
-        let mut session = Session::new(
-            services.clone(),
-            &state.session_id,
-            state.policy.execution_mode.clone(),
-        )
-        .await?;
+        let mut session = Session::new(services.clone(), &state.session_id).await?;
         if let Some(tool_state) = state.tool_state_snapshot.clone()
             && let Err(err) = session.plugins().tool_registry().apply_state(tool_state)
         {
@@ -71,11 +66,11 @@ impl LashRuntime {
                 .restore(&snapshot)
                 .map_err(|err| SessionError::Protocol(err.to_string()))?;
         }
-        let mode_session = Arc::clone(session.plugins().mode_session());
+        let protocol_session = Arc::clone(session.plugins().protocol_session());
         let session_id = state.session_id.clone();
-        mode_session
+        protocol_session
             .restore_session(
-                crate::plugin::ModeSessionContext::new(&mut session, &session_id),
+                crate::plugin::ProtocolSessionContext::new(&mut session, &session_id),
                 &state,
             )
             .await?;
@@ -86,7 +81,7 @@ impl LashRuntime {
                 crate::SessionReadView::from_persisted_state(&state),
             ))
             .await;
-        let mode_turn_options = state.mode_turn_options.clone();
+        let protocol_turn_options = state.protocol_turn_options.clone();
         Ok(Self {
             session: Some(session),
             policy,
@@ -97,7 +92,7 @@ impl LashRuntime {
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
             active_handoff_continuations: Arc::new(Mutex::new(HashMap::new())),
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
-            mode_turn_options,
+            protocol_turn_options,
             shared_token_ledger: Arc::new(std::sync::Mutex::new(Vec::new())),
             process_sync_needed: Arc::new(AtomicBool::new(false)),
             pending_first_turn_inputs: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -156,7 +151,7 @@ impl LashRuntime {
     /// O(full-infrastructure-init).
     ///
     /// * `env` — the shared environment. `env.plugin_host` must be set.
-    /// * `policy` — per-session policy (model, provider, execution mode).
+    /// * `policy` — per-session policy (model, provider, autonomy, turn limits).
     /// * `state` — persisted session state (empty for a fresh session).
     /// * `store` — per-session store. `None` builds an embedded runtime
     ///   with no persistence; `Some` builds a persistent
@@ -194,12 +189,7 @@ impl LashRuntime {
             ),
         );
         let plugin_session = plugin_host
-            .build_session(
-                state.session_id.as_str(),
-                policy.execution_mode.clone(),
-                policy.standard_context_approach.clone(),
-                state.plugin_snapshot.as_ref(),
-            )
+            .build_session(state.session_id.as_str(), state.plugin_snapshot.as_ref())
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
         let mut embedded = EmbeddedRuntimeHost::new(env.core.clone());
         if let Some(factory) = env.session_store_factory.as_ref() {

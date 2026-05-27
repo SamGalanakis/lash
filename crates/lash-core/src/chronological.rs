@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::session_model::{ConversationRecord, ModeEvent, SessionEventRecord, ToolEvent};
+use crate::session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord, ToolEvent};
 use crate::{Message, MessageOrigin, MessageRole, MessageSequence, Part, ToolCallRecord};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -22,7 +22,7 @@ pub struct ChronologicalEntry {
 pub enum ChronologicalPayload {
     Message(Message),
     ToolCall(ToolCallRecord),
-    ModeEvent(crate::session_model::ModeEvent),
+    ProtocolEvent(crate::session_model::ProtocolEvent),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -35,7 +35,7 @@ pub struct BorrowedChronologicalEntry<'a> {
 pub enum BorrowedChronologicalPayload<'a> {
     Message(BorrowedChronologicalMessage<'a>),
     ToolCall(&'a ToolCallRecord),
-    ModeEvent(&'a ModeEvent),
+    ProtocolEvent(&'a ProtocolEvent),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -122,8 +122,8 @@ impl ChronologicalProjection {
                 BorrowedChronologicalPayload::ToolCall(record) => {
                     ChronologicalPayload::ToolCall(record.clone())
                 }
-                BorrowedChronologicalPayload::ModeEvent(event) => {
-                    ChronologicalPayload::ModeEvent(event.clone())
+                BorrowedChronologicalPayload::ProtocolEvent(event) => {
+                    ChronologicalPayload::ProtocolEvent(event.clone())
                 }
             });
         });
@@ -157,7 +157,7 @@ impl ChronologicalProjection {
             .and_then(|idx| self.entries.get(*idx))
             .and_then(|entry| match &entry.payload {
                 ChronologicalPayload::ToolCall(record) => Some(record),
-                ChronologicalPayload::Message(_) | ChronologicalPayload::ModeEvent(_) => None,
+                ChronologicalPayload::Message(_) | ChronologicalPayload::ProtocolEvent(_) => None,
             })
     }
 }
@@ -207,10 +207,10 @@ fn visit_active_read<'a>(
                     index += 1;
                 }
             }
-            SessionEventRecord::Mode(event) => {
+            SessionEventRecord::Protocol(event) => {
                 visit(BorrowedChronologicalEntry {
                     index,
-                    payload: BorrowedChronologicalPayload::ModeEvent(event),
+                    payload: BorrowedChronologicalPayload::ProtocolEvent(event),
                 });
                 index += 1;
             }
@@ -303,7 +303,7 @@ fn tool_call_record_key(record: &ToolCallRecord) -> String {
 mod tests {
     use super::*;
     use crate::session_model::ConversationRecord;
-    use crate::{ExecutionMode, PartKind, PruneState, shared_parts};
+    use crate::{PartKind, PruneState, shared_parts};
 
     fn text_message(id: &str, role: MessageRole, text: &str) -> Message {
         Message {
@@ -350,9 +350,9 @@ mod tests {
         }
     }
 
-    fn mode_event(value: &str) -> ModeEvent {
-        ModeEvent {
-            mode_id: ExecutionMode::new("rlm"),
+    fn protocol_event(value: &str) -> ProtocolEvent {
+        ProtocolEvent {
+            plugin_id: "test_protocol".to_string(),
             payload: serde_json::json!({ "value": value }),
         }
     }
@@ -368,8 +368,8 @@ mod tests {
                 ChronologicalPayload::ToolCall(record) => {
                     format!("{}:tool:{}", entry.index, tool_call_record_key(record))
                 }
-                ChronologicalPayload::ModeEvent(event) => {
-                    format!("{}:mode:{}", entry.index, event.payload)
+                ChronologicalPayload::ProtocolEvent(event) => {
+                    format!("{}:protocol:{}", entry.index, event.payload)
                 }
             })
             .collect()
@@ -389,8 +389,8 @@ mod tests {
                 BorrowedChronologicalPayload::ToolCall(record) => {
                     format!("{}:tool:{}", entry.index, tool_call_record_key(record))
                 }
-                BorrowedChronologicalPayload::ModeEvent(event) => {
-                    format!("{}:mode:{}", entry.index, event.payload)
+                BorrowedChronologicalPayload::ProtocolEvent(event) => {
+                    format!("{}:protocol:{}", entry.index, event.payload)
                 }
             });
         });
@@ -409,7 +409,7 @@ mod tests {
                 stable_key: "tool-1".to_string(),
                 record: t1.clone(),
             }),
-            SessionEventRecord::Mode(mode_event("step")),
+            SessionEventRecord::Protocol(protocol_event("step")),
             SessionEventRecord::Conversation(ConversationRecord::from_message(m1.clone())),
             SessionEventRecord::Tool(ToolEvent::Invocation {
                 stable_key: "tool-1-duplicate".to_string(),

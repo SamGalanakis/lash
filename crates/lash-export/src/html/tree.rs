@@ -437,7 +437,7 @@ fn render_node_entries(
     let mut last_final_output: Option<String> = None;
     for entry in session.chronological.iter() {
         match &entry.payload {
-            ChronologicalPayload::ModeEvent(event) => {
+            ChronologicalPayload::ProtocolEvent(event) => {
                 last_final_output = chronological_rlm_step(event)
                     .and_then(|step| step.final_output.map(|value| submit_value_text(&value)));
             }
@@ -461,14 +461,14 @@ fn render_node_entries(
                 .call_id
                 .as_ref()
                 .map(|call_id| (call_id.clone(), record)),
-            ChronologicalPayload::Message(_) | ChronologicalPayload::ModeEvent(_) => None,
+            ChronologicalPayload::Message(_) | ChronologicalPayload::ProtocolEvent(_) => None,
         })
         .collect::<HashMap<_, _>>();
     let rlm_owned_tool_call_ids = session
         .chronological
         .iter()
         .filter_map(|entry| match &entry.payload {
-            ChronologicalPayload::ModeEvent(event) => chronological_rlm_step(event),
+            ChronologicalPayload::ProtocolEvent(event) => chronological_rlm_step(event),
             ChronologicalPayload::Message(_) | ChronologicalPayload::ToolCall(_) => None,
         })
         .flat_map(|step| step.tool_call_ids)
@@ -519,7 +519,7 @@ fn render_node_entries(
                     render_tool_call_entry(out, spine, ctx, record, None);
                 }
             },
-            ChronologicalPayload::ModeEvent(event) => {
+            ChronologicalPayload::ProtocolEvent(event) => {
                 let Some(step) = chronological_rlm_step(event) else {
                     continue;
                 };
@@ -571,7 +571,7 @@ fn emit_prompt_inline(
         .or_insert(PromptAnchor {
             entry_id: id,
             iter_label: prompt
-                .mode_iteration
+                .protocol_iteration
                 .map(|i| format!("iter {i}"))
                 .unwrap_or_else(|| "first call".to_string()),
         });
@@ -791,7 +791,7 @@ fn render_handoff_divider(
             .filter(|e| {
                 matches!(
                     &e.payload,
-                    ChronologicalPayload::ModeEvent(event) if chronological_rlm_step(event).is_some()
+                    ChronologicalPayload::ProtocolEvent(event) if chronological_rlm_step(event).is_some()
                 )
             })
             .count();

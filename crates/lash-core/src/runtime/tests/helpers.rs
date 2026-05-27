@@ -6,7 +6,7 @@ pub(crate) fn default_state() -> RuntimeSessionState {
 
 #[test]
 pub(crate) fn stream_accumulator_merges_adjacent_display_reasoning_chunks() {
-    let mut accumulator = StandardStreamAccumulator::default();
+    let mut accumulator = LlmStreamAccumulator::default();
     accumulator.push_reasoning("I'll".to_string(), None, Vec::new(), None);
     accumulator.push_reasoning(" check".to_string(), None, Vec::new(), None);
     accumulator.push_reasoning(" the time.".to_string(), None, Vec::new(), None);
@@ -20,7 +20,7 @@ pub(crate) fn stream_accumulator_merges_adjacent_display_reasoning_chunks() {
 
 #[test]
 pub(crate) fn stream_accumulator_enriches_reasoning_delta_with_later_roundtrip_payload() {
-    let mut accumulator = StandardStreamAccumulator::default();
+    let mut accumulator = LlmStreamAccumulator::default();
     accumulator.push_reasoning("I'll check the time.".to_string(), None, Vec::new(), None);
     accumulator.push_reasoning(
         "I'll check the time.".to_string(),
@@ -44,7 +44,7 @@ pub(crate) fn stream_accumulator_enriches_reasoning_delta_with_later_roundtrip_p
 
 #[test]
 pub(crate) fn stream_accumulator_preserves_reasoning_when_final_response_has_tool_call() {
-    let mut accumulator = StandardStreamAccumulator::default();
+    let mut accumulator = LlmStreamAccumulator::default();
     accumulator.push_reasoning("I'll check the time.".to_string(), None, Vec::new(), None);
     accumulator.push_tool_call(
         "call_1".to_string(),
@@ -85,7 +85,7 @@ pub(crate) fn stream_accumulator_preserves_reasoning_when_final_response_has_too
 
 #[test]
 pub(crate) fn stream_accumulator_does_not_duplicate_complete_final_response() {
-    let mut accumulator = StandardStreamAccumulator::default();
+    let mut accumulator = LlmStreamAccumulator::default();
     accumulator.push_reasoning("I'll answer.".to_string(), None, Vec::new(), None);
     accumulator.push_text("Done.");
 
@@ -663,7 +663,6 @@ pub(crate) fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
 
 pub(crate) fn standard_test_policy() -> SessionPolicy {
     SessionPolicy {
-        execution_mode: ExecutionMode::standard(),
         provider: mock_provider(Vec::new()).into_handle(),
         model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
             .expect("valid model spec"),
@@ -727,21 +726,16 @@ impl SessionStoreFactory for RecordingSessionStoreFactory {
 
 pub(crate) fn plugin_session_with_tools(
     session_id: &str,
-    mode: ExecutionMode,
     tools: Arc<dyn crate::ToolProvider>,
 ) -> Arc<crate::PluginSession> {
     let tool_factory = StaticPluginFactory::new(
         "test_tools",
         crate::PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
     );
-    crate::PluginHost::new(vec![Arc::new(tool_factory)])
-        .build_session(
-            session_id,
-            mode.clone(),
-            (mode == crate::ExecutionMode::standard())
-                .then(crate::StandardContextApproach::default),
-            None,
-        )
+    let mut factories = crate::testing::test_standard_protocol_factories();
+    factories.push(Arc::new(tool_factory));
+    crate::PluginHost::new(factories)
+        .build_session(session_id, None)
         .expect("plugins")
 }
 
@@ -767,11 +761,7 @@ pub(crate) async fn standard_runtime_with_transport(transport: TestProvider) -> 
     let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         test_host_config(),
-        crate::RuntimeServices::new(plugin_session_with_tools(
-            "root",
-            ExecutionMode::standard(),
-            tools,
-        )),
+        crate::RuntimeServices::new(plugin_session_with_tools("root", tools)),
         RuntimeSessionState::default(),
     )
     .await
@@ -870,9 +860,7 @@ pub(crate) async fn runtime_with_plugins_and_tools_and_host(
         crate::PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
     )));
     let plugin_host = crate::PluginHost::new(factories);
-    let plugin_session = plugin_host
-        .build_standard_session("root", None)
-        .expect("plugins");
+    let plugin_session = plugin_host.build_session("root", None).expect("plugins");
     let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         host,
@@ -900,9 +888,7 @@ pub(crate) async fn runtime_with_plugins_and_tools_and_host_and_store(
         crate::PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
     )));
     let plugin_host = crate::PluginHost::new(factories);
-    let plugin_session = plugin_host
-        .build_standard_session("root", None)
-        .expect("plugins");
+    let plugin_session = plugin_host.build_session("root", None).expect("plugins");
     let services =
         crate::PersistentRuntimeServices::new(plugin_session, store).into_runtime_services();
     let mut runtime = LashRuntime::from_embedded_state(
@@ -1092,23 +1078,16 @@ impl crate::ToolProvider for ChildSessionTool {
         let context = call.context;
         let child = match context
             .sessions()
-            .create_session(crate::SessionCreateRequest {
-                session_id: Some("subagent-child".to_string()),
-                relation: crate::SessionRelation::Child {
-                    parent_session_id: context.session_id().to_string(),
-                    originating_tool_call_id: None,
-                },
-                start: crate::SessionStartPoint::Empty,
-                policy: None,
-                plugin_mode: crate::SessionPluginMode::InheritCurrent,
-                initial_nodes: Vec::new(),
-                first_turn_input: None,
-                tool_access: crate::SessionToolAccess::default(),
-                subagent: None,
-                context_surface: crate::SessionContextSurface::default(),
-                mode_extras: crate::ModeExtras::default(),
-                usage_source: Some("subagent".to_string()),
-            })
+            .create_session(
+                crate::SessionCreateRequest::child_session(
+                    context.session_id(),
+                    crate::SessionStartPoint::Empty,
+                    crate::PluginOptions::default(),
+                )
+                .with_session_id("subagent-child")
+                .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork)
+                .with_usage_source("subagent"),
+            )
             .await
         {
             Ok(child) => child,
@@ -1124,9 +1103,9 @@ impl crate::ToolProvider for ChildSessionTool {
                         text: "child turn".to_string(),
                     }],
                     image_blobs: HashMap::new(),
-                    mode_turn_options: None,
+                    protocol_turn_options: None,
                     trace_turn_id: None,
-                    mode_extension: None,
+                    protocol_extension: None,
                     turn_context: crate::TurnContext::default(),
                 },
             )
@@ -1160,11 +1139,7 @@ pub(crate) async fn standard_runtime_with_transport_and_host(
     let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
         host,
-        crate::RuntimeServices::new(plugin_session_with_tools(
-            "root",
-            ExecutionMode::standard(),
-            tools,
-        )),
+        crate::RuntimeServices::new(plugin_session_with_tools("root", tools)),
         RuntimeSessionState::default(),
     )
     .await
@@ -1182,7 +1157,7 @@ pub(crate) async fn standard_runtime_with_bridge(
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new_with_bridges(
-            plugin_session_with_tools("root", ExecutionMode::standard(), tools),
+            plugin_session_with_tools("root", tools),
             turn_injection_bridge,
             crate::TurnInputInjectionBridge::new(),
         ),
@@ -1203,7 +1178,7 @@ pub(crate) async fn standard_runtime_with_input_bridge(
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new_with_bridges(
-            plugin_session_with_tools("root", ExecutionMode::standard(), tools),
+            plugin_session_with_tools("root", tools),
             crate::TurnInjectionBridge::new(),
             turn_input_injection_bridge,
         ),

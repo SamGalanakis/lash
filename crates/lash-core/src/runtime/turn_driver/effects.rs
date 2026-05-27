@@ -42,8 +42,10 @@ impl RuntimeTurnDriver<'_> {
             .apply_checkpoint(CheckpointHookContext {
                 session_id: self.session_id.clone(),
                 checkpoint,
-                state: self
-                    .checkpoint_state_view(machine.message_sequence(), machine.mode_iteration()),
+                state: self.checkpoint_state_view(
+                    machine.message_sequence(),
+                    machine.protocol_iteration(),
+                ),
                 host: self.session_manager.clone(),
             })
             .await
@@ -122,7 +124,7 @@ impl RuntimeTurnDriver<'_> {
         &mut self,
         code: &str,
         messages: crate::MessageSequence,
-        mode_iteration: usize,
+        protocol_iteration: usize,
         effect_metadata: crate::EffectInvocationMetadata,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<crate::ExecResponse, String> {
@@ -170,8 +172,8 @@ impl RuntimeTurnDriver<'_> {
             }
         });
         let manager = self.session_manager.clone();
-        let mode_session = Arc::clone(self.session.plugins().mode_session());
-        let read_view = self.checkpoint_state_view(messages, mode_iteration);
+        let code_executor = self.session.plugins().code_executor();
+        let read_view = self.checkpoint_state_view(messages, protocol_iteration);
         let chronological_projection = read_view.shared_chronological_projection();
         let effect_controller =
             crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
@@ -182,7 +184,7 @@ impl RuntimeTurnDriver<'_> {
         );
         let context = self
             .session
-            .mode_execution_context(
+            .code_execution_context(
                 &self.session_id,
                 manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
                 manager.clone() as Arc<dyn crate::ProcessService>,
@@ -190,23 +192,29 @@ impl RuntimeTurnDriver<'_> {
                 direct_completions,
                 session_event_tx.clone(),
                 chronological_projection,
-                self.mode_extension.clone(),
+                self.protocol_extension.clone(),
                 self.turn_context.clone(),
             )
             .map_err(|err| err.to_string())?
             .with_turn_event_sender(turn_event_tx.clone());
         let context = context.with_effect_metadata(effect_metadata);
         let context = context.with_turn_lease(self.turn_lease.clone());
-        let result = mode_session
-            .execute_code(
-                context,
-                crate::ExecRequest {
-                    code: code.to_string(),
-                    accept_finish: true,
-                },
-            )
-            .await
-            .map_err(|e| e.to_string());
+        let result = match code_executor {
+            Some(code_executor) => code_executor
+                .execute_code(
+                    context,
+                    crate::ExecRequest {
+                        code: code.to_string(),
+                        accept_finish: true,
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string()),
+            None => {
+                drop(context);
+                Err(crate::SessionError::CodeExecutionUnavailable.to_string())
+            }
+        };
         drop(session_event_tx);
         drop(turn_event_tx);
         self.session.clear_message_sender();

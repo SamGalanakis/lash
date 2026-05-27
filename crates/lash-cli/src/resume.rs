@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use lash::LashSession;
+use lash::advanced::ExecutionMode;
 use lash::control::SessionConfigPatch;
 use lash_core::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, fresh_message_id,
 };
 use lash_core::{
-    ExecutionMode, PersistedSessionConfig, PersistedTurnState, PromptUsage, ProviderHandle,
-    TokenUsage, ToolState,
+    PersistedSessionConfig, PersistedTurnState, PromptUsage, ProviderHandle, TokenUsage, ToolState,
 };
 use lash_sqlite_store::Store;
 
@@ -201,21 +201,7 @@ async fn apply_graph_resume_state(
         });
     app.set_model_variant(current_model_variant.clone());
 
-    let requested_execution_mode = config.as_ref().map(|state| state.execution_mode.clone());
-    let restored_execution_mode = requested_execution_mode
-        .clone()
-        .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
-        .unwrap_or_else(lash_core::default_execution_mode);
-    *execution_mode = restored_execution_mode.clone();
-
-    if let Some(requested_execution_mode) = requested_execution_mode.as_ref()
-        && !lash_core::execution_mode_supported(&restored_execution_mode)
-    {
-        app.timeline.push(UiTimelineItem::SystemMessage(format!(
-            "This build does not support `{}` mode; resuming in `standard`.",
-            crate::execution_mode_label(requested_execution_mode)
-        )));
-    }
+    let _ = execution_mode;
 
     let execution_state_snapshot = checkpoint
         .as_ref()
@@ -379,8 +365,6 @@ mod tests {
                 provider_id: "openai_generic".to_string(),
                 model: lash_core::ModelSpec::from_token_limits("gpt-5", None, 200_000, None, None)
                     .expect("valid model spec"),
-                execution_mode: ExecutionMode::standard(),
-                standard_context_approach: Some(lash_core::StandardContextApproach::default()),
             },
             checkpoint_ref: Some(checkpoint_ref),
             token_ledger: Vec::new(),
@@ -403,7 +387,7 @@ mod tests {
                     turn_index: iteration,
                     token_usage,
                     last_prompt_usage,
-                    mode_turn_options: Default::default(),
+                    protocol_turn_options: Default::default(),
                 },
                 tool_state_ref: None,
                 tool_state: Some(ToolState::default()),

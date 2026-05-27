@@ -5,6 +5,7 @@ use lash::advanced::ExecutionMode;
 use lash::provider::ProviderHandle;
 #[cfg(test)]
 use lash_sqlite_store::Store;
+use lash_standard_plugins::{StandardContextApproach, StandardContextApproachKind};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiHostEffect};
 use sha2::{Digest, Sha256};
 
@@ -241,7 +242,7 @@ fn parse_variant_input(input: &str) -> Result<String, String> {
 pub(crate) fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "" => Err("Execution mode cannot be empty.".to_string()),
-        "rlm" => Ok(ExecutionMode::new("rlm")),
+        "rlm" => Ok(ExecutionMode::rlm()),
         "standard" | "tools" => Ok(ExecutionMode::standard()),
         other => Err(format!(
             "Unknown execution mode `{other}`. Expected `rlm` or `standard`."
@@ -251,14 +252,14 @@ pub(crate) fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String>
 
 pub(crate) fn parse_standard_context_approach(
     input: &str,
-) -> Result<lash_core::StandardContextApproach, String> {
+) -> Result<StandardContextApproach, String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "" => Err("Context approach cannot be empty.".to_string()),
-        "rolling" | "rolling-history" | "rolling_history" => Ok(
-            lash_core::StandardContextApproach::RollingHistory(Default::default()),
-        ),
+        "rolling" | "rolling-history" | "rolling_history" => {
+            Ok(StandardContextApproach::RollingHistory(Default::default()))
+        }
         "om" | "observational" | "observational-memory" | "observational_memory" => Ok(
-            lash_core::StandardContextApproach::ObservationalMemory(Default::default()),
+            StandardContextApproach::ObservationalMemory(Default::default()),
         ),
         other => Err(format!(
             "Unknown context approach `{other}`. Expected `rolling_history` or `observational_memory`."
@@ -268,7 +269,7 @@ pub(crate) fn parse_standard_context_approach(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_standard_context_approach_overrides(
-    mut approach: lash_core::StandardContextApproach,
+    mut approach: StandardContextApproach,
     om_observation_message_tokens: Option<usize>,
     om_observation_buffer_tokens: Option<usize>,
     om_observation_block_after_tokens: Option<usize>,
@@ -277,7 +278,7 @@ pub(crate) fn apply_standard_context_approach_overrides(
     om_reflection_observation_tokens: Option<usize>,
     om_reflection_buffer_activation_percent: Option<u16>,
     om_reflection_block_after_tokens: Option<usize>,
-) -> Result<lash_core::StandardContextApproach, String> {
+) -> Result<StandardContextApproach, String> {
     let has_om_overrides = om_observation_message_tokens.is_some()
         || om_observation_buffer_tokens.is_some()
         || om_observation_block_after_tokens.is_some()
@@ -290,7 +291,7 @@ pub(crate) fn apply_standard_context_approach_overrides(
         return Ok(approach);
     }
 
-    let lash_core::StandardContextApproach::ObservationalMemory(config) = &mut approach else {
+    let StandardContextApproach::ObservationalMemory(config) = &mut approach else {
         return Err(
             "OM tuning flags require `--context-approach observational_memory`.".to_string(),
         );
@@ -368,37 +369,23 @@ pub(crate) fn apply_standard_context_approach_overrides(
 }
 
 pub(crate) fn execution_mode_usage() -> &'static str {
-    if lash_core::execution_mode_supported(&ExecutionMode::new("rlm")) {
-        "<rlm|standard>"
-    } else {
-        "<standard>"
-    }
+    "<rlm|standard>"
 }
 
 pub(crate) fn ensure_supported_execution_mode(
     mode: ExecutionMode,
 ) -> Result<ExecutionMode, String> {
-    if lash_core::execution_mode_supported(&mode) {
-        Ok(mode)
-    } else {
-        Err(if mode == ExecutionMode::new("rlm") {
-            "RLM mode is not available in this build.".to_string()
-        } else {
-            "Execution mode is not available.".to_string()
-        })
-    }
+    Ok(mode)
 }
 
 pub(crate) fn execution_mode_label(mode: &ExecutionMode) -> &str {
-    mode.plugin_id()
+    mode.as_str()
 }
 
-pub(crate) fn standard_context_approach_label(
-    approach: &lash_core::StandardContextApproach,
-) -> &'static str {
+pub(crate) fn standard_context_approach_label(approach: &StandardContextApproach) -> &'static str {
     match approach.kind() {
-        lash_core::StandardContextApproachKind::RollingHistory => "rolling_history",
-        lash_core::StandardContextApproachKind::ObservationalMemory => "observational_memory",
+        StandardContextApproachKind::RollingHistory => "rolling_history",
+        StandardContextApproachKind::ObservationalMemory => "observational_memory",
     }
 }
 
@@ -563,7 +550,7 @@ pub(crate) fn info_text(
     configured_model: &str,
     model_variant: Option<&str>,
     execution_mode: &ExecutionMode,
-    standard_context_approach: Option<&lash_core::StandardContextApproach>,
+    standard_context_approach: Option<&StandardContextApproach>,
     context_window: Option<u64>,
     tool_summary: Option<(usize, &str)>,
     cwd: &str,
@@ -921,7 +908,7 @@ mod tests {
     #[test]
     fn observational_memory_overrides_apply_to_standard_context_approach() {
         let approach = apply_standard_context_approach_overrides(
-            lash_core::StandardContextApproach::ObservationalMemory(Default::default()),
+            StandardContextApproach::ObservationalMemory(Default::default()),
             Some(45_000),
             Some(8_000),
             None,
@@ -932,7 +919,7 @@ mod tests {
             None,
         )
         .expect("overrides");
-        let lash_core::StandardContextApproach::ObservationalMemory(config) = approach else {
+        let StandardContextApproach::ObservationalMemory(config) = approach else {
             panic!("expected observational_memory");
         };
         assert_eq!(config.observation_message_tokens, 45_000);
@@ -945,7 +932,7 @@ mod tests {
     #[test]
     fn observational_memory_overrides_require_om_standard_context_approach() {
         let err = apply_standard_context_approach_overrides(
-            lash_core::StandardContextApproach::RollingHistory(Default::default()),
+            StandardContextApproach::RollingHistory(Default::default()),
             Some(45_000),
             None,
             None,
@@ -972,7 +959,7 @@ mod tests {
             &provider,
             "google/gemini-3-flash-preview",
             None,
-            &ExecutionMode::new("rlm"),
+            &ExecutionMode::rlm(),
             None,
             Some(123_000),
             Some((7, "abcd1234")),

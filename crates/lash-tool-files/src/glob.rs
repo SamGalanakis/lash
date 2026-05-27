@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
-    ToolResult, ToolRetryPolicy,
+    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
+    ToolRetryPolicy, ToolScheduling,
 };
 
 use lash_tool_support::{
@@ -171,7 +171,7 @@ fn glob_tool_definition() -> ToolDefinition {
                 r#"glob(pattern="**/Cargo.toml", path=".")"#.into(),
             ])
             .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["find_files"]))
-            .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
 

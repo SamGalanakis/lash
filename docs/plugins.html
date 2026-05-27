@@ -202,12 +202,12 @@ fn update_plan_definition() -&gt; ToolDefinition {
                 <tr><td><code>reg.discovery()</code></td><td>Hints for the tool-discovery ranker (lexical, embedding, schema indexing).</td></tr>
                 <tr><td><code>reg.turn()</code></td><td>Before-turn / after-turn / checkpoint hooks.</td></tr>
                 <tr><td><code>reg.tool_calls()</code></td><td>Before-tool / after-tool hooks. Useful for emitting UI events or mutating session state in response to specific tools.</td></tr>
-                <tr><td><code>reg.output()</code></td><td>Hooks on assistant streaming output and final responses.</td></tr>
+                <tr><td><code>reg.output()</code></td><td>Hooks on assistant streaming output, final responses, and visible-prose projection.</td></tr>
                 <tr><td><code>reg.tool_results()</code></td><td>Tool-output budgeting and projection. <strong>Exclusive</strong> — only one plugin can register a projector per session.</td></tr>
                 <tr><td><code>reg.session()</code></td><td>Runtime-event observers and config mutators.</td></tr>
                 <tr><td><code>reg.actions()</code></td><td>Typed or raw RPC-shaped entry points the host can invoke directly, without going through tool calls.</td></tr>
                 <tr><td><code>reg.history()</code></td><td>History transforms and rewrites that run as part of compaction / rolling history.</td></tr>
-                <tr><td><code>reg.mode()</code></td><td>Mode-plugin capabilities. Most users don't touch this; modes are built into <code>lash-mode-standard</code> and <code>lash-mode-rlm</code>.</td></tr>
+                <tr><td><code>reg.protocol()</code> / <code>reg.execution()</code> / <code>reg.tools().native(...)</code></td><td>Protocol driver/session, optional code execution, and native runtime tools. Most users install the built-in <code>lash-protocol-standard</code> or <code>lash-protocol-rlm</code> presets.</td></tr>
               </tbody>
             </table>
           </div>

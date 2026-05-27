@@ -1,7 +1,5 @@
 pub mod attachment;
-pub mod execution_mode;
 pub mod llm;
-pub mod mode;
 pub mod plugin;
 pub mod prompt;
 pub mod sansio;
@@ -11,18 +9,14 @@ pub mod tool_contract;
 pub mod tool_output;
 pub mod tool_surface;
 pub mod turn;
+pub mod turn_driver;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use attachment::{
     AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef, ImageMediaType, MediaType,
 };
-pub use execution_mode::{ExecutionMode, default_execution_mode, execution_mode_supported};
 pub use llm::types::LlmTerminalReason;
-pub use mode::{
-    ModeConfig, ModePreamble, TurnLimitFinalMessage, append_assistant_text_part,
-    normalized_response_parts, reasoning_part,
-};
 pub use plugin::{
     CheckpointKind, PluginMessage, PluginRuntimeEvent, PromptContribution, PromptContributionGate,
 };
@@ -33,9 +27,9 @@ pub use prompt::{
 };
 pub use sansio::{
     ChatContextProjector, CheckpointResumeAction, CompletedToolCall, ContextProjector,
-    DriverAction, DriverContextView, Effect, EffectId, LlmCallError, ModeProtocol, PendingToolCall,
+    DriverAction, DriverContextView, Effect, EffectId, LlmCallError, PendingToolCall,
     ProjectorContext, ProtocolDriverHandle, Response, TurnCheckpoint, TurnMachine,
-    TurnMachineConfig, UnitModeProtocol, WaitingExecState, WaitingLlmState, driver_state,
+    TurnMachineConfig, TurnProtocol, UnitTurnProtocol, WaitingExecState, WaitingLlmState,
 };
 pub use session::{
     CompletedTurn, ExecImage, ExecResponse, PromptUsage, SansIoSessionState,
@@ -53,8 +47,8 @@ pub use session_model::{
 pub use tool_contract::{
     CompactToolContract, ModelTool, SchemaProjectionOverride, ToolActivation,
     ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolContract,
-    ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolId, ToolManifest,
-    ToolOutputContract, ToolRetryPolicy, schema_for,
+    ToolDefinition, ToolDiscoveryMetadata, ToolId, ToolManifest, ToolOutputContract,
+    ToolRetryPolicy, ToolScheduling, schema_for,
 };
 pub use tool_output::{
     ModelToolReturn, ModelToolReturnPart, ToolCallOutcome, ToolCallOutput, ToolCallRecord,
@@ -67,6 +61,10 @@ pub use tool_surface::{
     ToolSurfaceEntry, ToolSurfaceOverride, build_tool_surface,
 };
 pub use turn::{PreparedTurnMachine, SansIoTurnInput, build_turn};
+pub use turn_driver::{
+    TurnDriverConfig, TurnDriverPreamble, TurnLimitFinalMessage, append_assistant_text_part,
+    normalized_response_parts, reasoning_part,
+};
 
 pub fn head_tail_truncate(value: &str, max_chars: usize) -> (String, usize) {
     let raw_len = value.chars().count();

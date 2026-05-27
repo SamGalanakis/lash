@@ -19,7 +19,6 @@ mod assembler;
 mod child_sessions;
 mod effect;
 mod persistence;
-mod plugins;
 mod projection;
 mod stream_accumulator;
 mod tracing;

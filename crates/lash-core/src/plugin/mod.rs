@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::runtime::{AssembledTurn, RuntimeSessionState};
 use crate::{
-    ExecutionMode, MessageRole, ModeTurnOptions, SessionPolicy, ToolAvailability, ToolDefinition,
+    MessageRole, ProtocolTurnOptions, SessionPolicy, ToolAvailability, ToolDefinition,
     ToolManifest, ToolProvider, ToolResult, TurnInput,
 };
 
@@ -16,7 +16,7 @@ mod actions;
 mod error;
 mod history;
 mod hooks;
-mod mode;
+mod protocol;
 mod registrar;
 mod registry;
 pub mod runtime_host;
@@ -49,15 +49,16 @@ pub use hooks::{
     ToolResultProjector, ToolSurfaceContributor, TurnHookContext, TurnResultHookContext,
     TurnResultSummary,
 };
-pub use mode::{
-    ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction, ModeNativeToolsPlugin,
-    ModeProtocolDriverPlugin, ModeRuntimeContext, ModeSessionContext, ModeSessionPlugin,
-    StandardCreateExtras,
+pub use protocol::{
+    AssistantProseProjectorPlugin, CodeExecutorPlugin, PluginOptions, ProtocolBeforeLlmCallContext,
+    ProtocolDriverPlugin, ProtocolLlmCallAction, ProtocolRuntimeContext, ProtocolSessionContext,
+    ProtocolSessionPlugin,
 };
 pub use registrar::{
-    HistoryRegistrations, ModeRegistrations, OutputRegistrations, PluginActionRegistrations,
-    PluginRegistrar, PromptRegistrations, SessionRegistrations, SurfaceRegistrations,
-    ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations, TurnRegistrations,
+    ExecutionRegistrations, HistoryRegistrations, OutputRegistrations, PluginActionRegistrations,
+    PluginRegistrar, PromptRegistrations, ProtocolRegistrations, SessionRegistrations,
+    SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations,
+    TurnRegistrations,
 };
 pub(crate) use registrar::{PluginContributions, RegisteredHook};
 pub use registry::{
@@ -74,7 +75,7 @@ pub use services::{PersistentRuntimeServices, PluginActionInvokeError, RuntimeSe
 pub use session_obj::PluginSession;
 pub use session_types::{
     PluginOwned, SessionAppendNode, SessionContextSurface, SessionCreateRequest, SessionHandle,
-    SessionPluginMode, SessionRelation, SessionSnapshot, SessionStartPoint, SessionToolAccess,
+    SessionPluginSource, SessionRelation, SessionSnapshot, SessionStartPoint, SessionToolAccess,
     SubagentSessionContext,
 };
 pub(crate) use snapshot::{InMemorySnapshotReader, InMemorySnapshotWriter};
@@ -89,10 +90,9 @@ pub use surface::{
 };
 pub(crate) use surface::{emit_plugin_runtime_events, plugin_runtime_session_events};
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
-    // Mode plugins (`lash-mode-standard`, `lash-mode-rlm`) must be
-    // registered by the embedder before calling `PluginHost::build_session`.
-    // lash's own test suite uses an in-tree fake (`testing::test_mode_factories()`)
-    // to avoid a dev-dep cycle through the mode crates.
+    // Protocol plugins must be registered by the embedder before calling
+    // `PluginHost::build_session`. Unit tests use an in-tree fake to avoid
+    // a dev-dep cycle through the protocol crates.
     let factories: Vec<Arc<dyn PluginFactory>> = Vec::new();
     #[cfg(not(test))]
     return factories;
@@ -101,7 +101,7 @@ pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     {
         factories
             .into_iter()
-            .chain(crate::testing::test_mode_factories())
+            .chain(crate::testing::test_standard_protocol_factories())
             .collect()
     }
 }
@@ -113,7 +113,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{ExecutionMode, SessionStateEnvelope, ToolDefinition};
+    use crate::{SessionStateEnvelope, ToolDefinition};
 
     struct MockToolProvider;
 
@@ -263,14 +263,21 @@ mod tests {
     #[tokio::test]
     async fn session_collects_tools_and_prompts() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
-        let session = host.build_standard_session("root", None).expect("session");
-        assert_eq!(session.tools().tool_manifests().len(), 1);
+        let session = host.build_session("root", None).expect("session");
+        let tool_names = session
+            .tools()
+            .tool_manifests()
+            .into_iter()
+            .map(|manifest| manifest.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(tool_names.contains("mock_tool"));
+        assert!(tool_names.contains("batch"));
         let contributions = session
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
-                mode_turn_options: ModeTurnOptions::default(),
+                protocol_turn_options: ProtocolTurnOptions::default(),
                 turn_context: crate::TurnContext::default(),
             })
             .await
@@ -287,7 +294,7 @@ mod tests {
     #[tokio::test]
     async fn external_invoke_defaults_to_current_session_when_requested() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
-        let session = host.build_standard_session("root", None).expect("session");
+        let session = host.build_session("root", None).expect("session");
         let result = session
             .invoke_plugin_action(
                 "mock.echo",
@@ -312,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn plugin_action_generates_schema_and_invokes_typed_output() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
-        let session = host.build_standard_session("root", None).expect("session");
+        let session = host.build_session("root", None).expect("session");
 
         let def = session
             .plugin_actions()
@@ -385,12 +392,11 @@ mod tests {
             }
         }
 
-        let err = match PluginHost::new(vec![Arc::new(DuplicateFactory)])
-            .build_standard_session("root", None)
-        {
-            Ok(_) => panic!("duplicate typed plugin action should fail"),
-            Err(err) => err,
-        };
+        let err =
+            match PluginHost::new(vec![Arc::new(DuplicateFactory)]).build_session("root", None) {
+                Ok(_) => panic!("duplicate typed plugin action should fail"),
+                Err(err) => err,
+            };
         assert!(err.to_string().contains("duplicate plugin action name"));
     }
 
@@ -407,7 +413,7 @@ mod tests {
         }
 
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
-        let session = host.build_standard_session("root", None).expect("session");
+        let session = host.build_session("root", None).expect("session");
         let err = session
             .call_plugin_action::<BadOp>(
                 TypedEchoArgs {
@@ -426,7 +432,7 @@ mod tests {
     #[tokio::test]
     async fn plugin_host_can_invoke_plugin_action_for_registered_session() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
-        let _session = host.build_standard_session("root", None).expect("session");
+        let _session = host.build_session("root", None).expect("session");
 
         let result = host
             .invoke_plugin_action_for_session(
@@ -458,14 +464,8 @@ mod tests {
     #[tokio::test]
     async fn plugin_host_can_invoke_plugin_action_for_forked_session() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
-        let root = host.build_standard_session("root", None).expect("root");
-        let child = root
-            .fork_for_session(
-                "child",
-                ExecutionMode::standard(),
-                Some(crate::StandardContextApproach::default()),
-            )
-            .expect("child");
+        let root = host.build_session("root", None).expect("root");
+        let child = root.fork_for_session("child").expect("child");
 
         let result = host
             .invoke_plugin_action_for_session(
@@ -499,7 +499,7 @@ mod tests {
     #[test]
     fn plugin_host_unregisters_sessions() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
-        let _session = host.build_standard_session("root", None).expect("session");
+        let _session = host.build_session("root", None).expect("session");
         assert!(host.session("root").is_ok());
         host.unregister_session("root").expect("unregister");
         match host.session("root") {
@@ -512,11 +512,11 @@ mod tests {
     #[test]
     fn snapshot_round_trip_preserves_plugin_entries() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
-        let session = host.build_standard_session("root", None).expect("session");
+        let session = host.build_session("root", None).expect("session");
         let snapshot = session.snapshot().expect("snapshot");
         assert!(snapshot.plugins.contains_key("mock"));
         let restored = host
-            .build_standard_session("child", Some(&snapshot))
+            .build_session("child", Some(&snapshot))
             .expect("restored");
         let restored_snapshot = restored.snapshot().expect("snapshot");
         assert!(restored_snapshot.plugins.contains_key("mock"));
@@ -529,8 +529,7 @@ mod tests {
             PluginSpec::new()
                 .with_tool_provider(Arc::new(MockToolProvider) as Arc<dyn ToolProvider>),
         ))]);
-        let services =
-            RuntimeServices::new(host.build_standard_session("root", None).expect("session"));
+        let services = RuntimeServices::new(host.build_session("root", None).expect("session"));
         assert_eq!(services.plugins.session_id(), "root");
         assert!(
             services
@@ -593,7 +592,7 @@ mod tests {
                 plugin_id: "projector-b",
             }),
         ]);
-        let err = match host.build_standard_session("root", None) {
+        let err = match host.build_session("root", None) {
             Ok(_) => panic!("duplicate projector"),
             Err(err) => err,
         };

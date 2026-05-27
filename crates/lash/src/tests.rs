@@ -41,8 +41,6 @@ impl SnapshotStore {
         let config = lash_core::PersistedSessionConfig {
             provider_id: state.policy.provider.kind().to_string(),
             model: state.policy.model.clone(),
-            execution_mode: state.policy.execution_mode.clone(),
-            standard_context_approach: state.policy.standard_context_approach.clone(),
         };
         Self {
             read: std::sync::Mutex::new(Some(lash_core::PersistedSessionRead {

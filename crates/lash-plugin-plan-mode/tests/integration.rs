@@ -8,14 +8,14 @@ use lash_plugin_plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
 
 use lash_core::plugin::runtime_host::RuntimeSessionHost;
 use lash_core::plugin::{
-    PluginDirective, PluginError, SessionPluginMode, SessionStartPoint, ToolCallHookContext,
+    PluginDirective, PluginError, SessionPluginSource, SessionStartPoint, ToolCallHookContext,
     ToolResultHookContext, ToolSurfaceContext,
 };
 use lash_core::{
-    AssembledTurn, ExecutionMode, MessageRole, PluginHost, RuntimeSessionState,
-    SessionCreateRequest, SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot,
-    SessionStateEnvelope, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolRegistry,
-    ToolResult, TurnHookContext, TurnResultHookContext,
+    AssembledTurn, MessageRole, PluginHost, RuntimeSessionState, SessionCreateRequest,
+    SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot, SessionStateEnvelope,
+    ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolRegistry, ToolResult,
+    TurnHookContext, TurnResultHookContext,
 };
 
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
@@ -115,7 +115,6 @@ fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
     RuntimeSessionState::from_state(SessionStateEnvelope {
         session_id: "root".to_string(),
         policy: SessionPolicy {
-            execution_mode: ExecutionMode::standard(),
             session_id: Some(run_session_id.to_string()),
             ..Default::default()
         },
@@ -132,7 +131,7 @@ fn test_tool(
     name: &str,
     description: &str,
     availability: lash_core::ToolAvailabilityConfig,
-    execution_mode: lash_core::ToolExecutionMode,
+    execution_mode: lash_core::ToolScheduling,
 ) -> ToolDefinition {
     ToolDefinition::raw(
         format!("tool:{name}"),
@@ -142,7 +141,7 @@ fn test_tool(
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
     .with_availability(availability)
-    .with_execution_mode(execution_mode)
+    .with_scheduling(execution_mode)
 }
 
 struct PlanModeTestTools;
@@ -167,7 +166,7 @@ fn plan_mode_test_tool_definition() -> ToolDefinition {
         "plan_exit",
         "Ask whether to exit plan mode.",
         lash_core::ToolAvailabilityConfig::off(),
-        lash_core::ToolExecutionMode::Parallel,
+        lash_core::ToolScheduling::Parallel,
     )
     .with_examples(vec!["plan_exit()".to_string()])
 }
@@ -240,7 +239,7 @@ fn empty_turn(session_id: &str) -> AssembledTurn {
 }
 
 fn plan_mode_host(plan_factory: PlanModePluginFactory) -> PluginHost {
-    let mut factories = lash_core::testing::test_mode_factories();
+    let mut factories = lash_core::testing::test_standard_protocol_factories();
     factories.push(Arc::new(plan_factory));
     PluginHost::new(factories)
 }
@@ -251,7 +250,7 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
-    let session = host.build_standard_session("root", None).expect("session");
+    let session = host.build_session("root", None).expect("session");
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     let enabled = session
@@ -281,7 +280,7 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
 
     let snapshot = session.snapshot().expect("snapshot");
     let restored = host
-        .build_standard_session("restored", Some(&snapshot))
+        .build_session("restored", Some(&snapshot))
         .expect("restored");
     let restored_toggle = restored
         .invoke_plugin_action(
@@ -329,7 +328,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
-    let session = host.build_standard_session("root", None).expect("session");
+    let session = host.build_session("root", None).expect("session");
     let manager = Arc::new(mock_session_manager("run-session"));
     let manager_host: Arc<dyn RuntimeSessionHost> = manager.clone();
 
@@ -338,9 +337,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .await
         .expect("initial tool state");
     assert!(initial.get("plan_exit").is_some_and(|tool| {
-        tool.manifest()
-            .effective_availability(&lash_core::ExecutionMode::standard())
-            == lash_core::ToolAvailability::Off
+        tool.manifest().effective_availability() == lash_core::ToolAvailability::Off
     }));
 
     session
@@ -360,9 +357,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .await
         .expect("enabled tool state");
     assert!(enabled.get("plan_exit").is_some_and(|tool| {
-        tool.manifest()
-            .effective_availability(&lash_core::ExecutionMode::standard())
-            == lash_core::ToolAvailability::Showcased
+        tool.manifest().effective_availability() == lash_core::ToolAvailability::Showcased
     }));
 
     session
@@ -382,9 +377,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .await
         .expect("disabled tool state");
     assert!(disabled.get("plan_exit").is_some_and(|tool| {
-        tool.manifest()
-            .effective_availability(&lash_core::ExecutionMode::standard())
-            == lash_core::ToolAvailability::Off
+        tool.manifest().effective_availability() == lash_core::ToolAvailability::Off
     }));
 }
 
@@ -394,7 +387,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
-    let session = host.build_standard_session("root", None).expect("session");
+    let session = host.build_session("root", None).expect("session");
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
@@ -476,31 +469,31 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             "search_tools",
             "Discover tools",
             lash_core::ToolAvailabilityConfig::callable(),
-            lash_core::ToolExecutionMode::Parallel,
+            lash_core::ToolScheduling::Parallel,
         ),
         test_tool(
             "read_file",
             "Read files",
             lash_core::ToolAvailabilityConfig::showcased(),
-            lash_core::ToolExecutionMode::Parallel,
+            lash_core::ToolScheduling::Parallel,
         ),
         test_tool(
             "search_web",
             "Search the web",
             lash_core::ToolAvailabilityConfig::showcased(),
-            lash_core::ToolExecutionMode::Parallel,
+            lash_core::ToolScheduling::Parallel,
         ),
         test_tool(
             "apply_patch",
             "Apply patches",
             lash_core::ToolAvailabilityConfig::showcased(),
-            lash_core::ToolExecutionMode::Serial,
+            lash_core::ToolScheduling::Serial,
         ),
         test_tool(
             "plan_exit",
             "Exit plan mode",
             lash_core::ToolAvailabilityConfig::off(),
-            lash_core::ToolExecutionMode::Parallel,
+            lash_core::ToolScheduling::Parallel,
         ),
     ];
     let contracts = tools
@@ -511,7 +504,6 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let surface = session
         .resolve_tool_surface(ToolSurfaceContext {
             session_id: "root".to_string(),
-            mode: ExecutionMode::standard(),
             tools: manifests,
             resolve_contract: Some(Arc::new(move |name| contracts.get(name).cloned())),
             tool_access: lash_core::SessionToolAccess::default(),
@@ -658,7 +650,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
-    let session = host.build_standard_session("root", None).expect("session");
+    let session = host.build_session("root", None).expect("session");
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
@@ -719,7 +711,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
     let host = plan_mode_host(PlanModePluginFactory::new(
         PlanModePluginConfig::default().with_allowed_tools(["apply_patch", "read_file"]),
     ));
-    let session = host.build_standard_session("root", None).expect("session");
+    let session = host.build_session("root", None).expect("session");
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
@@ -841,7 +833,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     let host = plan_mode_host(
         PlanModePluginFactory::new(PlanModePluginConfig::default()).with_prompt(manager.clone()),
     );
-    let session = host.build_standard_session("root", None).expect("session");
+    let session = host.build_session("root", None).expect("session");
 
     session
         .invoke_plugin_action(
@@ -900,9 +892,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             .await
             .expect("tool state");
     assert!(dynamic.get("plan_exit").is_some_and(|tool| {
-        tool.manifest()
-            .effective_availability(&lash_core::ExecutionMode::standard())
-            == lash_core::ToolAvailability::Off
+        tool.manifest().effective_availability() == lash_core::ToolAvailability::Off
     }));
 }
 
@@ -967,7 +957,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let manager = Arc::new(PromptingSessionManager);
     let host = plan_mode_host(PlanModePluginFactory::default().with_prompt(manager.clone()));
-    let session = host.build_standard_session("root", None).expect("session");
+    let session = host.build_session("root", None).expect("session");
     let manager: Arc<dyn RuntimeSessionHost> = manager;
 
     session
@@ -1073,7 +1063,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let manager = Arc::new(PromptingSessionManager);
     let host = plan_mode_host(PlanModePluginFactory::default().with_prompt(manager.clone()));
-    let session = host.build_standard_session("root", None).expect("session");
+    let session = host.build_session("root", None).expect("session");
     let manager: Arc<dyn RuntimeSessionHost> = manager;
 
     session
@@ -1175,7 +1165,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
-    let session = host.build_standard_session("root", None).expect("session");
+    let session = host.build_session("root", None).expect("session");
     let manager = Arc::new(CapturingSessionManager::default());
 
     session
@@ -1216,7 +1206,10 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
         .expect("create session directive");
     assert_eq!(manager.created.lock().expect("created").len(), 0);
     assert!(matches!(create_request.start, SessionStartPoint::Empty));
-    assert_eq!(create_request.plugin_mode, SessionPluginMode::Fresh);
+    assert_eq!(
+        create_request.plugin_source,
+        SessionPluginSource::CurrentHostFresh
+    );
     assert!(
         create_request.initial_nodes.is_empty(),
         "fresh-context execution should let the host drive the seed prompt as the first user turn"
@@ -1248,7 +1241,7 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
-    let session = host.build_standard_session("root", None).expect("session");
+    let session = host.build_session("root", None).expect("session");
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session

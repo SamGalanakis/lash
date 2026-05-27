@@ -2,8 +2,9 @@ use async_trait::async_trait;
 
 use lash_core::PreparedContext;
 use lash_core::plugin::{HistoryError, TurnContextTransform, TurnTransformContext};
-use lash_core::{Message, MessageOrigin, MessageRole, ObservationalMemoryConfig, Part, PartKind};
+use lash_core::{Message, MessageOrigin, MessageRole, Part, PartKind};
 
+use crate::ObservationalMemoryConfig;
 use crate::constants::{
     OBSERVATION_CONTEXT_INSTRUCTIONS, OBSERVATION_CONTEXT_PROMPT, OBSERVATION_CONTINUATION_HINT,
     OBSERVATIONAL_MEMORY_PLUGIN_ID,

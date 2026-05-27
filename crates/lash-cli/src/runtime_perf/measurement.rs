@@ -13,11 +13,11 @@ use lash_core::sansio::{
 };
 use lash_core::{
     DriverAction, DriverContextView, Effect, ExecResponse, InputItem, Message, MessageRole,
-    ModeTurnOptions, ModelToolReturn, Part, PartKind, PruneState, Response, TokenUsage,
+    ModelToolReturn, Part, PartKind, ProtocolTurnOptions, PruneState, Response, TokenUsage,
     ToolCallOutput, ToolCancellation, ToolFailure, ToolFailureClass, TurnFinish, TurnInput,
     TurnMachine, TurnMachineConfig, TurnOutcome, shared_parts,
 };
-use lash_mode_rlm::RlmTurnInputExt;
+use lash_protocol_rlm::RlmTurnInputExt;
 use serde::Serialize;
 use stats_alloc::Stats;
 use tokio_util::sync::CancellationToken;
@@ -392,9 +392,9 @@ pub(crate) async fn run_once(
                 text: benchmark_prompt(scenario, turn_index),
             }],
             image_blobs: Default::default(),
-            mode_turn_options: None,
+            protocol_turn_options: None,
             trace_turn_id: None,
-            mode_extension: None,
+            protocol_extension: None,
             turn_context: lash_core::TurnContext::default(),
         };
         if matches!(scenario, RuntimePerfScenario::RlmGlobals) {
@@ -679,9 +679,9 @@ async fn run_once_turn_checkpoint(chat_turns: usize) -> anyhow::Result<RuntimePe
 }
 
 struct CheckpointConfigs {
-    llm: Arc<dyn ProtocolDriverHandle<lash_core::HostModeProtocol>>,
-    tools: Arc<dyn ProtocolDriverHandle<lash_core::HostModeProtocol>>,
-    exec: Arc<dyn ProtocolDriverHandle<lash_core::HostModeProtocol>>,
+    llm: Arc<dyn ProtocolDriverHandle<lash_core::HostTurnProtocol>>,
+    tools: Arc<dyn ProtocolDriverHandle<lash_core::HostTurnProtocol>>,
+    exec: Arc<dyn ProtocolDriverHandle<lash_core::HostTurnProtocol>>,
 }
 
 impl CheckpointConfigs {
@@ -713,26 +713,29 @@ enum CheckpointDriver {
     Exec,
 }
 
-impl ProtocolDriverHandle<lash_core::HostModeProtocol> for CheckpointDriver {
-    fn prepare_mode_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
+impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for CheckpointDriver {
+    fn prepare_protocol_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         match self {
             Self::Llm => vec![DriverAction::StartLlm {
                 request: ctx.project_llm_request(false),
                 driver_state: None,
             }],
             Self::Tools => vec![DriverAction::StartTools {
-                calls: checkpoint_tool_calls(ctx.mode_iteration()),
+                calls: checkpoint_tool_calls(ctx.protocol_iteration()),
             }],
             Self::Exec => vec![DriverAction::StartExec {
-                code: checkpoint_exec_code(ctx.mode_iteration()),
-                driver_state: serde_json::json!({
-                    "phase": "exec_code",
-                    "ip": ctx.mode_iteration(),
-                    "stack": (0..64).map(|index| serde_json::json!({
-                        "slot": index,
-                        "value": format!("checkpoint-stack-value-{index}")
-                    })).collect::<Vec<_>>(),
-                }),
+                code: checkpoint_exec_code(ctx.protocol_iteration()),
+                driver_state: lash_core::ProtocolDriverState::new(
+                    "runtime_perf_checkpoint",
+                    serde_json::json!({
+                        "phase": "exec_code",
+                        "ip": ctx.protocol_iteration(),
+                        "stack": (0..64).map(|index| serde_json::json!({
+                            "slot": index,
+                            "value": format!("checkpoint-stack-value-{index}")
+                        })).collect::<Vec<_>>(),
+                    }),
+                ),
             }],
         }
     }
@@ -740,7 +743,7 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for CheckpointDriver {
     fn handle_llm_success(
         &self,
         _ctx: DriverContextView<'_>,
-        _waiting: WaitingLlmState<lash_core::HostModeProtocol>,
+        _waiting: WaitingLlmState<lash_core::HostTurnProtocol>,
         _llm_response: LlmResponse,
         _text_streamed: bool,
     ) -> Vec<DriverAction> {
@@ -766,7 +769,7 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for CheckpointDriver {
     fn handle_exec_result(
         &self,
         _ctx: DriverContextView<'_>,
-        _waiting: WaitingExecState<lash_core::HostModeProtocol>,
+        _waiting: WaitingExecState<lash_core::HostTurnProtocol>,
         _result: Result<ExecResponse, String>,
     ) -> Vec<DriverAction> {
         vec![DriverAction::Finish(TurnOutcome::Finished(
@@ -778,7 +781,7 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for CheckpointDriver {
 }
 
 fn checkpoint_config(
-    protocol_driver: Arc<dyn ProtocolDriverHandle<lash_core::HostModeProtocol>>,
+    protocol_driver: Arc<dyn ProtocolDriverHandle<lash_core::HostTurnProtocol>>,
 ) -> TurnMachineConfig {
     TurnMachineConfig {
         protocol_driver,
@@ -796,7 +799,7 @@ fn checkpoint_config(
         ),
         session_id: "runtime-perf-turn-checkpoint".to_string(),
         emit_llm_trace: false,
-        termination: ModeTurnOptions::default(),
+        termination: ProtocolTurnOptions::default(),
         turn_limit_final_message: Arc::new(runtime_perf_turn_limit_final_message),
     }
 }
@@ -992,14 +995,14 @@ fn checkpoint_machine(
     TurnMachine::new(config, messages, Arc::new(Vec::new()), turn_index)
 }
 
-fn checkpoint_tool_calls(mode_iteration: usize) -> Vec<PendingToolCall> {
+fn checkpoint_tool_calls(protocol_iteration: usize) -> Vec<PendingToolCall> {
     (0..24)
         .map(|index| PendingToolCall {
-            call_id: format!("checkpoint-call-{mode_iteration}-{index}"),
+            call_id: format!("checkpoint-call-{protocol_iteration}-{index}"),
             tool_name: format!("checkpoint_parallel_tool_{}", index % 6),
             args: serde_json::json!({
                 "index": index,
-                "mode_iteration": mode_iteration,
+                "protocol_iteration": protocol_iteration,
                 "payload": format!("synthetic parallel durability payload {index}")
             }),
             replay: None,
@@ -1044,14 +1047,14 @@ fn completed_checkpoint_tool(index: usize, call: PendingToolCall) -> CompletedTo
     }
 }
 
-fn checkpoint_exec_code(mode_iteration: usize) -> String {
+fn checkpoint_exec_code(protocol_iteration: usize) -> String {
     format!(
         r#"process benchmark_echo_process(tool: TOOL, value: str, ordinal: int) {{
   result = await tool.benchmark_echo({{ value: value, ordinal: ordinal }})?
   finish result
 }}
 
-print("checkpoint turn {mode_iteration}")
+print("checkpoint turn {protocol_iteration}")
 first = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 1)
 second = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 2)
 third = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 3)
@@ -1133,7 +1136,7 @@ pub(crate) async fn run_once_embed(
     let core = build_embed_core(scenario, Arc::clone(&store))?;
     let session = core
         .session(format!("runtime-perf-{}", scenario.name()))
-        .mode(lash::ModeId::new(scenario.execution_mode().plugin_id()))
+        .mode(lash::ModeId::new(scenario.execution_mode().as_str()))
         .open()
         .await
         .with_context(|| format!("open embed session for {}", scenario.name()))?;

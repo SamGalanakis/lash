@@ -3,10 +3,10 @@ pub mod chronological;
 pub mod direct;
 pub mod lashlang_bridge;
 pub mod llm;
-mod mode;
 mod model;
 pub mod plugin;
 mod plugin_stack;
+mod protocol_build;
 pub mod provider;
 pub mod runtime;
 pub mod search;
@@ -14,7 +14,6 @@ pub mod session;
 pub mod session_graph;
 pub mod session_model;
 mod stable_hash;
-pub mod standard_context_approach;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -49,96 +48,111 @@ pub use lash_sansio::llm::types::{
 pub use lash_sansio::{
     AcceptedInjectedTurnInput, AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef,
     BaseRenderCache, CheckpointKind, CompactToolContract, EffectId, ErrorEnvelope, ExecImage,
-    ExecResponse, ExecutionMode, ImageMediaType, LlmCallError, MediaType, Message, MessageOrigin,
-    MessageRole, MessageSequence, ModelToolReturn, ModelToolReturnPart, Part, PartKind,
-    PluginMessage, PluginRuntimeEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin,
-    PromptContext, PromptContribution, PromptContributionGate, PromptContributionSet,
-    PromptFingerprint, PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer,
-    Response, SchemaProjectionOverride, SessionEvent, TextProjectionMetadata, TokenUsage,
-    ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig,
-    ToolCallOutcome, ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation,
-    ToolContract, ToolControl, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode,
-    ToolFailure, ToolFailureClass, ToolFailureSource, ToolId, ToolManifest, ToolOutputContract,
-    ToolRetryDisposition, ToolRetryPolicy, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry,
-    ToolSurfaceOverride, ToolValue, TurnFinish, TurnLimitFinalMessage, TurnOutcome, TurnStop,
+    ExecResponse, ImageMediaType, LlmCallError, MediaType, Message, MessageOrigin, MessageRole,
+    MessageSequence, ModelToolReturn, ModelToolReturnPart, Part, PartKind, PluginMessage,
+    PluginRuntimeEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin, PromptContext,
+    PromptContribution, PromptContributionGate, PromptContributionSet, PromptFingerprint,
+    PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer, Response,
+    SchemaProjectionOverride, SessionEvent, TextProjectionMetadata, TokenUsage, ToolActivation,
+    ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolCallOutcome,
+    ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation, ToolContract, ToolControl,
+    ToolDefinition, ToolDiscoveryMetadata, ToolFailure, ToolFailureClass, ToolFailureSource,
+    ToolId, ToolManifest, ToolOutputContract, ToolRetryDisposition, ToolRetryPolicy,
+    ToolScheduling, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride,
+    ToolValue, TurnFinish, TurnLimitFinalMessage, TurnOutcome, TurnStop,
     append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
-    default_execution_mode, default_prompt_template, execution_mode_supported, head_tail_truncate,
-    messages_are_prompt_resume_safe, normalized_response_parts, prompt_template_fingerprint,
-    prompt_text_fingerprint, prompt_tool_names_fingerprint, reasoning_part, resolve_prompt_layers,
-    shared_parts,
+    default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
+    normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
+    prompt_tool_names_fingerprint, reasoning_part, resolve_prompt_layers, shared_parts,
 };
-pub use mode::ModeBuildInput;
-pub use standard_context_approach::{
-    ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
-    StandardContextApproachKind,
-};
+pub use protocol_build::ProtocolBuildInput;
 pub use tool_registry::{
     ReconfigureError, ToolRegistry, ToolSourceHandle, ToolState, ToolStateEntry,
 };
 pub use tool_result::ToolResult;
 pub use tool_schema::LashSchema;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ModeTurnOptions {
-    pub mode_id: ExecutionMode,
-    #[serde(default)]
+pub struct ProtocolTurnOptions {
+    #[serde(default = "empty_protocol_turn_payload")]
     pub payload: serde_json::Value,
 }
 
-impl Default for ModeTurnOptions {
+fn empty_protocol_turn_payload() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+impl Default for ProtocolTurnOptions {
     fn default() -> Self {
-        Self::empty(ExecutionMode::standard())
+        Self::empty()
     }
 }
 
-impl ModeTurnOptions {
-    pub fn empty(mode_id: ExecutionMode) -> Self {
+impl ProtocolTurnOptions {
+    pub fn empty() -> Self {
         Self {
-            mode_id,
             payload: serde_json::Value::Object(serde_json::Map::new()),
         }
     }
 
-    pub fn typed<T>(mode_id: ExecutionMode, value: T) -> Result<Self, serde_json::Error>
+    pub fn is_empty(&self) -> bool {
+        match &self.payload {
+            serde_json::Value::Object(map) => map.is_empty(),
+            _ => false,
+        }
+    }
+
+    pub fn typed<T>(value: T) -> Result<Self, serde_json::Error>
     where
         T: serde::Serialize,
     {
         Ok(Self {
-            mode_id,
             payload: serde_json::to_value(value)?,
         })
     }
 
-    pub fn decode<T>(&self, expected_mode: &ExecutionMode) -> Result<Option<T>, serde_json::Error>
+    pub fn decode<T>(&self) -> Result<T, serde_json::Error>
     where
         T: serde::de::DeserializeOwned,
     {
-        if &self.mode_id != expected_mode {
-            return Ok(None);
+        serde_json::from_value(self.payload.clone())
+    }
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProtocolDriverState {
+    pub plugin_id: String,
+    pub payload: serde_json::Value,
+}
+
+impl ProtocolDriverState {
+    pub fn new(plugin_id: impl Into<String>, payload: serde_json::Value) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            payload,
         }
-        serde_json::from_value(self.payload.clone()).map(Some)
     }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct HostModeProtocol;
+pub struct HostTurnProtocol;
 
-impl lash_sansio::ModeProtocol for HostModeProtocol {
-    type Event = crate::session_model::ModeEvent;
-    type Termination = ModeTurnOptions;
-    type DriverState = serde_json::Value;
+impl lash_sansio::TurnProtocol for HostTurnProtocol {
+    type Event = crate::session_model::ProtocolEvent;
+    type Termination = ProtocolTurnOptions;
+    type DriverState = ProtocolDriverState;
 }
 
-pub type Effect = lash_sansio::Effect<HostModeProtocol>;
-pub type DriverAction = lash_sansio::DriverAction<HostModeProtocol>;
-pub type DriverContextView<'a> = lash_sansio::DriverContextView<'a, HostModeProtocol>;
-pub type ModeConfig = lash_sansio::ModeConfig<HostModeProtocol>;
-pub type ModePreamble = lash_sansio::ModePreamble<HostModeProtocol>;
-pub type ProjectorContext<'a> = lash_sansio::ProjectorContext<'a, HostModeProtocol>;
-pub type PreparedTurnMachine = lash_sansio::PreparedTurnMachine<HostModeProtocol>;
-pub type SansIoTurnInput = lash_sansio::SansIoTurnInput<HostModeProtocol>;
-pub type TurnMachine = lash_sansio::TurnMachine<HostModeProtocol>;
-pub type TurnMachineConfig = lash_sansio::TurnMachineConfig<HostModeProtocol>;
+pub type Effect = lash_sansio::Effect<HostTurnProtocol>;
+pub type DriverAction = lash_sansio::DriverAction<HostTurnProtocol>;
+pub type DriverContextView<'a> = lash_sansio::DriverContextView<'a, HostTurnProtocol>;
+pub type TurnDriverConfig = lash_sansio::TurnDriverConfig<HostTurnProtocol>;
+pub type TurnDriverPreamble = lash_sansio::TurnDriverPreamble<HostTurnProtocol>;
+pub type ProjectorContext<'a> = lash_sansio::ProjectorContext<'a, HostTurnProtocol>;
+pub type PreparedTurnMachine = lash_sansio::PreparedTurnMachine<HostTurnProtocol>;
+pub type SansIoTurnInput = lash_sansio::SansIoTurnInput<HostTurnProtocol>;
+pub type TurnMachine = lash_sansio::TurnMachine<HostTurnProtocol>;
+pub type TurnMachineConfig = lash_sansio::TurnMachineConfig<HostTurnProtocol>;
 #[cfg(feature = "otel-trace")]
 pub use lash_trace::otel::{OtelTraceOptions, OtelTraceSink};
 pub use lash_trace::{
@@ -154,21 +168,20 @@ pub use plugin::{
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
     CheckpointHookContext, DirectCompletion, DirectLlmCompletion, HistoryError,
     HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState,
-    ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction, PersistentRuntimeServices,
-    PluginAction, PluginActionContext, PluginActionDef, PluginActionFailure,
-    PluginActionInvokeError, PluginActionKind, PluginDirective, PluginError, PluginFactory,
-    PluginHost, PluginLifecycleEvent, PluginLifecycleEventHook, PluginOwned, PluginRegistrar,
-    PluginSession, PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact,
-    PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
-    RewriteContext, RewriteTrigger, RuntimeServices, SessionAppendNode,
-    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionHandle,
-    SessionParam, SessionPlugin, SessionPluginMode, SessionReadView, SessionRelation,
-    SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionToolAccess,
-    SnapshotReader, SnapshotWriter, StandardCreateExtras, SubagentSessionContext,
-    ToolDiscoveryContext, ToolDiscoveryContribution, ToolDiscoveryContributor,
-    ToolDiscoveryToolContribution, ToolResultProjectionContext, ToolResultProjector,
-    ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
-    TurnResultSummary, TurnTransformContext, plugin_action_def,
+    PersistentRuntimeServices, PluginAction, PluginActionContext, PluginActionDef,
+    PluginActionFailure, PluginActionInvokeError, PluginActionKind, PluginDirective, PluginError,
+    PluginFactory, PluginHost, PluginLifecycleEvent, PluginLifecycleEventHook, PluginOptions,
+    PluginOwned, PluginRegistrar, PluginSession, PluginSessionContext, PluginSessionSnapshot,
+    PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory,
+    PromptHookContext, ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RewriteContext,
+    RewriteTrigger, RuntimeServices, SessionAppendNode, SessionConfigChangedContext,
+    SessionContextSurface, SessionCreateRequest, SessionHandle, SessionParam, SessionPlugin,
+    SessionPluginSource, SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
+    SessionStateChangedContext, SessionToolAccess, SnapshotReader, SnapshotWriter,
+    SubagentSessionContext, ToolDiscoveryContext, ToolDiscoveryContribution,
+    ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolResultProjectionContext,
+    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
+    TurnResultHookContext, TurnResultSummary, TurnTransformContext, plugin_action_def,
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{
@@ -184,7 +197,6 @@ pub use runtime::{
     DurableProcessWorker, DurableProcessWorkerConfig, EffectInvocationMetadata, EffectOrigin,
     EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary, FollowedTurn,
     InlineRuntimeEffectController, InputItem, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
-    ModeSessionExtension, ModeSessionExtensionHandle, ModeTurnExtension, ModeTurnExtensionHandle,
     NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionSnapshot,
     ProcessAwaitOutput, ProcessCommand, ProcessCreatorScope, ProcessEffectOutcome, ProcessEvent,
     ProcessEventAppendRequest, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
@@ -193,13 +205,14 @@ pub use runtime::{
     ProcessRegistration, ProcessRegistry, ProcessRuntimeHost, ProcessService, ProcessStartGrant,
     ProcessStartOptions, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
     ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
-    PromptUsage, Residency, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
-    RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeObservation,
-    RuntimeSessionState, SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory,
-    SessionUsageReport, TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId,
-    TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions,
+    PromptUsage, ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
+    ProtocolTurnExtensionHandle, Residency, RuntimeCoreConfig, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
+    RuntimeObservation, RuntimeSessionState, SessionStateEnvelope, SessionStoreCreateRequest,
+    SessionStoreFactory, SessionUsageReport, TerminationPolicy, TokenLedgerEntry, TurnActivity,
+    TurnActivityId, TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions,
     UnavailableProcessService, UsageReportRow, UsageTotals, current_epoch_ms, diff_token_ledger,
     diff_usage_reports, epoch_ms_from_system_time, lashlang_process_event_types,
     materialize_process_event_semantics, prepare_process_registration, process_event_payload_hash,
@@ -207,15 +220,15 @@ pub use runtime::{
 };
 pub use schemars::JsonSchema;
 pub use session::{
-    ExecRequest, InjectedTurnInput, ModeExecutionContext, ModeToolBatchItem, ModeToolReply,
-    Session, SessionError, TurnInjectionBridge, TurnInputInjectionBridge,
+    ExecRequest, InjectedTurnInput, RuntimeExecutionContext, Session, SessionError, ToolInvocation,
+    ToolInvocationReply, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 pub use session_graph::{
     PersistedSessionConfig, PersistedTurnState, SessionGraph, SessionMessageTreeNode,
     SessionNodePayload, SessionNodeRecord,
 };
 pub use session_model::context::PreparedContext;
-pub use session_model::{ConversationRecord, ModeEvent, SessionEventRecord, ToolEvent};
+pub use session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord, ToolEvent};
 pub use session_model::{SessionPolicy, SessionSpec};
 pub use store::{
     AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
@@ -233,3 +246,27 @@ pub use tool_provider::{
     PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolPrepareCall,
     ToolPrepareContext, ToolProvider, ToolSessionControl, ToolSessionModel,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_turn_options_missing_payload_deserializes_to_empty_object() {
+        let options: ProtocolTurnOptions =
+            serde_json::from_value(serde_json::json!({})).expect("deserialize options");
+
+        assert!(options.is_empty());
+        assert_eq!(options.payload, serde_json::json!({}));
+    }
+
+    #[test]
+    fn protocol_turn_options_explicit_null_is_not_empty() {
+        let options: ProtocolTurnOptions =
+            serde_json::from_value(serde_json::json!({ "payload": null }))
+                .expect("deserialize options");
+
+        assert!(!options.is_empty());
+        assert_eq!(options.payload, serde_json::Value::Null);
+    }
+}

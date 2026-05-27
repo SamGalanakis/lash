@@ -176,8 +176,6 @@ fn persisted_session_config_from_state(
     crate::PersistedSessionConfig {
         provider_id: state.policy.provider.kind().to_string(),
         model: state.policy.model.clone(),
-        execution_mode: state.policy.execution_mode.clone(),
-        standard_context_approach: state.policy.standard_context_approach.clone(),
     }
 }
 
@@ -405,7 +403,6 @@ pub fn ensure_supported_schema_version(
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeTurnMachineConfigSnapshot {
-    pub execution_mode: crate::ExecutionMode,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_session_id: Option<String>,
@@ -418,7 +415,7 @@ pub struct RuntimeTurnMachineConfigSnapshot {
     pub sync_execution_surface: bool,
     pub tool_specs: Vec<crate::llm::types::LlmToolSpec>,
     pub system_prompt: String,
-    pub termination: crate::ModeTurnOptions,
+    pub termination: crate::ProtocolTurnOptions,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -427,11 +424,11 @@ pub struct RuntimeTurnCheckpoint {
     pub session_id: String,
     pub turn_id: String,
     pub turn_index: usize,
-    pub mode_iteration: usize,
+    pub protocol_iteration: usize,
     pub checkpoint_hash: String,
     pub machine_config: RuntimeTurnMachineConfigSnapshot,
-    pub checkpoint: lash_sansio::TurnCheckpoint<crate::HostModeProtocol>,
-    pub mode_turn_options: crate::ModeTurnOptions,
+    pub checkpoint: lash_sansio::TurnCheckpoint<crate::HostTurnProtocol>,
+    pub protocol_turn_options: crate::ProtocolTurnOptions,
     pub turn_prompt_layer: crate::PromptLayer,
     pub provider_id: String,
     pub model: crate::ModelSpec,
@@ -494,7 +491,7 @@ pub struct RuntimeEffectJournalRecord {
 }
 
 pub fn runtime_turn_checkpoint_hash(
-    checkpoint: &lash_sansio::TurnCheckpoint<crate::HostModeProtocol>,
+    checkpoint: &lash_sansio::TurnCheckpoint<crate::HostTurnProtocol>,
 ) -> Result<String, StoreError> {
     crate::stable_hash::stable_json_sha256_hex(checkpoint)
         .map_err(|err| StoreError::Backend(format!("failed to serialize turn checkpoint: {err}")))
@@ -505,7 +502,7 @@ fn build_persisted_turn_state(state: &crate::RuntimeSessionState) -> crate::Pers
         turn_index: state.turn_index,
         token_usage: state.token_usage.clone(),
         last_prompt_usage: state.last_prompt_usage.clone(),
-        mode_turn_options: state.mode_turn_options.clone(),
+        protocol_turn_options: state.protocol_turn_options.clone(),
     }
 }
 
@@ -589,7 +586,7 @@ fn persisted_session_state_from_head(
         turn_index: 0,
         token_usage: crate::TokenUsage::default(),
         last_prompt_usage: None,
-        mode_turn_options: crate::ModeTurnOptions::default(),
+        protocol_turn_options: crate::ProtocolTurnOptions::default(),
         tool_state_ref: None,
         tool_state_generation: None,
         tool_state_snapshot: None,
@@ -604,13 +601,11 @@ fn persisted_session_state_from_head(
         graph_replace_required: false,
     };
     state.policy.model = head.config.model.clone();
-    state.policy.execution_mode = head.config.execution_mode;
-    state.policy.standard_context_approach = head.config.standard_context_approach.clone();
     if let Some(checkpoint) = checkpoint {
         state.turn_index = checkpoint.turn_state.turn_index;
         state.token_usage = checkpoint.turn_state.token_usage;
         state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
-        state.mode_turn_options = checkpoint.turn_state.mode_turn_options;
+        state.protocol_turn_options = checkpoint.turn_state.protocol_turn_options;
         state.tool_state_ref = checkpoint.tool_state_ref.clone();
         state.tool_state_generation = checkpoint
             .tool_state

@@ -8,11 +8,11 @@ use crate::rlm_support::{
 };
 use lash_core::llm::types::{LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole};
 use lash_core::{
-    ExecutionMode, LashRuntime, PluginFactory, PluginHost, ProcessRuntimeHost, RuntimeCoreConfig,
-    RuntimeServices, RuntimeSessionState, SessionPolicy, TestLocalProcessRegistry,
+    LashRuntime, PluginFactory, PluginHost, ProcessRuntimeHost, RuntimeCoreConfig, RuntimeServices,
+    RuntimeSessionState, SessionPolicy, TestLocalProcessRegistry,
 };
 use lash_core::{ToolArgumentProjectionPolicy, ToolDefinition, ToolOutputContract, TurnInput};
-use lash_mode_rlm::RlmTurnInputExt;
+use lash_protocol_rlm::RlmTurnInputExt;
 use serde_json::json;
 
 fn model_spec(
@@ -74,19 +74,15 @@ fn ensure_seed_probe_provider_factory() {
 fn static_capability_policy_fields_distinguish_inherit_set_and_clear() {
     let current = SessionPolicy {
         model: model_spec("parent-model", Some("parent-variant".to_string()), 200_000),
-        execution_mode: lash_core::ExecutionMode::standard(),
         ..SessionPolicy::default()
     };
-    let spec = SessionSpec::inherit()
-        .model(model_spec("child-model", None, 100_000))
-        .mode(lash_core::ExecutionMode::new("rlm"));
+    let spec = SessionSpec::inherit().model(model_spec("child-model", None, 100_000));
     let registry = CapabilityRegistry::new().with(Arc::new(StaticCapability::new("child", spec)));
 
     let policy = build_session_policy(&registry, &current, "child").expect("policy");
 
     assert_eq!(policy.model.id, "child-model");
     assert_eq!(policy.model.variant, None);
-    assert_eq!(policy.execution_mode, lash_core::ExecutionMode::new("rlm"));
 }
 
 #[test]
@@ -107,6 +103,10 @@ fn rlm_definitions_expose_spawn_without_mini_api() {
         .iter()
         .find(|tool| tool.name == "spawn_agent")
         .expect("rlm spawn_agent");
+    assert_eq!(
+        rlm_spawn.effective_availability(),
+        lash_core::ToolAvailability::Showcased
+    );
     assert_eq!(
         rlm_spawn.output_contract,
         ToolOutputContract::from_input_schema("output", None)
@@ -205,7 +205,7 @@ fn subagents_source_does_not_reintroduce_retired_lifecycle_surface() {
 fn single_capability_spawn_can_omit_capability_field() {
     let registry = CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
         "explore",
-        lash_core::SessionSpec::inherit().mode(ExecutionMode::new("rlm")),
+        lash_core::SessionSpec::inherit(),
     )));
     let rlm_spawn = rlm::spawn_agent_tool_definition(&registry.names());
 
@@ -248,12 +248,10 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
     let stale_policy = SessionPolicy {
         provider: tiered_provider("stale").into_handle(),
         model: model_spec("stale-parent", None, 200_000),
-        execution_mode: lash_core::ExecutionMode::standard(),
         ..SessionPolicy::default()
     };
     let live_policy = SessionPolicy {
         provider: tiered_provider("live").into_handle(),
-        execution_mode: lash_core::ExecutionMode::standard(),
         model: model_spec("live-parent", None, 1234),
         ..SessionPolicy::default()
     };
@@ -314,12 +312,20 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
     })
     .await
     .expect("structured spawn request");
-    let structured_policy = structured_request.policy.expect("structured child policy");
-    assert_eq!(
-        structured_policy.execution_mode,
-        lash_core::ExecutionMode::new("rlm"),
-        "explore runs in RLM so typed output uses native submit"
-    );
+    let structured_policy = structured_request
+        .policy
+        .as_ref()
+        .expect("structured child policy");
+    assert_eq!(structured_policy.model.id, "live-parent");
+    let extras = structured_request
+        .plugin_options
+        .decode::<lash_rlm_types::RlmCreateExtras>(lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID)
+        .expect("decode rlm extras")
+        .expect("rlm extras");
+    assert!(matches!(
+        extras.termination,
+        lash_rlm_types::RlmTermination::SubmitRequired { .. }
+    ));
     assert!(structured_request.tool_access.tools.is_empty());
 }
 
@@ -415,7 +421,7 @@ submit result
 async fn rlm_spawn_seed_derived_from_projected_binding_is_visible_to_child_prompt() {
     let input = TurnInput::text("spawn a child with a chunk from projected input")
             .rlm_project(
-                lash_mode_rlm::RlmProjectedBindings::new()
+                lash_protocol_rlm::RlmProjectedBindings::new()
                     .bind_json(
                         "input",
                         json!({
@@ -522,11 +528,11 @@ async fn run_seed_probe(
     let provider = seed_probe_provider(provider_id.clone(), state);
 
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
-        Arc::new(lash_mode_rlm::BuiltinRlmModePluginFactory::default()),
+        Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::default()),
         Arc::new(SubagentsPluginFactory::new(Arc::new(
             CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
                 "default",
-                lash_core::SessionSpec::inherit().mode(ExecutionMode::new("rlm")),
+                lash_core::SessionSpec::inherit(),
             ))),
         ))),
     ];
@@ -537,7 +543,7 @@ async fn run_seed_probe(
         .with_process_lifecycle();
     let plugins = host
         .with_lashlang_abilities(process_abilities)
-        .build_session("root", ExecutionMode::new("rlm"), None, None)
+        .build_session("root", None)
         .expect("plugin session");
     let host = ProcessRuntimeHost::new(
         lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
@@ -546,7 +552,6 @@ async fn run_seed_probe(
     let policy = SessionPolicy {
         provider: provider.into_handle(),
         model: model_spec("seed-probe-model", None, 64_000),
-        execution_mode: ExecutionMode::new("rlm"),
         max_turns: Some(4),
         ..SessionPolicy::default()
     };
@@ -605,12 +610,10 @@ fn request_text(request: &LlmRequest) -> String {
 }
 
 #[tokio::test]
-async fn standard_provider_does_not_expose_subagent_tools() {
+async fn subagents_plugin_builds_without_mode_context() {
     let factory = SubagentsPluginFactory::new(Arc::new(default_registry(&BTreeMap::new())));
     let ctx = PluginSessionContext {
         session_id: "parent".to_string(),
-        execution_mode: lash_core::ExecutionMode::standard(),
-        standard_context_approach: None,
         tool_access: lash_core::SessionToolAccess::default(),
         subagent: None,
         lashlang_abilities: Default::default(),
@@ -625,8 +628,6 @@ async fn rlm_provider_does_not_require_process_support() {
     let factory = SubagentsPluginFactory::new(Arc::new(default_registry(&BTreeMap::new())));
     let ctx = PluginSessionContext {
         session_id: "parent".to_string(),
-        execution_mode: lash_core::ExecutionMode::new("rlm"),
-        standard_context_approach: None,
         tool_access: lash_core::SessionToolAccess::default(),
         subagent: None,
         lashlang_abilities: Default::default(),
@@ -666,7 +667,6 @@ fn subagent_surface_reports_authority_notes() {
         .collect::<std::collections::BTreeMap<_, _>>();
     let ctx = ToolSurfaceContext {
         session_id: "child".to_string(),
-        mode: lash_core::ExecutionMode::standard(),
         tools: tools.into_iter().map(|tool| tool.manifest()).collect(),
         resolve_contract: Some(std::sync::Arc::new(move |name| {
             contracts.get(name).cloned()

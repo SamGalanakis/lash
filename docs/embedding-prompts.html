@@ -38,16 +38,21 @@
               <p>Older turns collapse into rolling runtime-authored observations. Configurable: <code>observation_message_tokens</code> (default 30 000), <code>observation_buffer_tokens</code> (6 000), reflection thresholds.</p>
             </article>
           </div>
-          <pre><code>use lash_core::{ObservationalMemoryConfig, StandardContextApproach};
+          <pre><code>use lash::LashCore;
+use lash_standard_plugins::{
+    standard_tool_stack, ObservationalMemoryConfig, StandardContextApproach,
+    StandardToolStackOptions,
+};
 
-let session = core
-    .session("long-running-thread")
-    .standard_context_approach(StandardContextApproach::ObservationalMemory(
-        ObservationalMemoryConfig::default(),
-    ))
-    .open()
-    .await?;</code></pre>
-          <p>RLM mode exposes the same knob and shares the enum, so a core with both modes can default one and override per session.</p>
+let core = LashCore::standard()
+    .plugins(standard_tool_stack(StandardToolStackOptions {
+        standard_context_approach: Some(StandardContextApproach::ObservationalMemory(
+            ObservationalMemoryConfig::default(),
+        )),
+        ..Default::default()
+    }))
+    .build()?;</code></pre>
+          <p>The CLI applies this only to the standard preset; RLM uses its protocol projection state and locked-down runtime stack instead.</p>
         </div>
 
         <div class="section" id="projected-bindings">
@@ -67,7 +72,7 @@ let session = core
             </article>
           </div>
           <pre><code>use lash::TurnInput;
-use lash_mode_rlm::{RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension};
+use lash_protocol_rlm::{RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension};
 
 // Session-wide: applies to every turn the session runs.
 session
@@ -102,7 +107,7 @@ submit({ "move": move_idx, "tenant": tenant_id })
           <p>Lazy bindings no longer accept a raw <code>Arc&lt;dyn ProjectedHostValue&gt;</code> through the public RLM API. Keep the object behind a resolver so snapshots, handoffs, and child seeds carry an opaque <code>ProjectionRef</code> instead of accidentally materializing the large value.</p>
           <pre><code>use std::sync::Arc;
 use lash::{LashCore, ModeId, ModePreset, PluginStack, TurnInput};
-use lash_mode_rlm::{
+use lash_protocol_rlm::{
     ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt,
 };
 

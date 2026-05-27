@@ -71,8 +71,8 @@ impl AutonomousRenderer {
                     eprintln!("[tool] {name} · {status}");
                 }
             }
-            TurnEvent::ModelRequestStarted { mode_iteration } => {
-                eprintln!("[thinking] step {}", mode_iteration + 1);
+            TurnEvent::ModelRequestStarted { protocol_iteration } => {
+                eprintln!("[thinking] step {}", protocol_iteration + 1);
             }
             TurnEvent::RetryStatus {
                 wait_seconds,
@@ -241,13 +241,13 @@ pub(crate) async fn run_autonomous(
     prompt: String,
     skills: SkillCatalog,
     persistence: AutonomousPersistenceContext,
-    rlm_projected_bindings: Option<lash_mode_rlm::RlmProjectedBindings>,
+    rlm_projected_bindings: Option<lash_protocol_rlm::RlmProjectedBindings>,
 ) -> anyhow::Result<()> {
     let before_usage = session.usage_report();
     let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
     let mut turn_input = make_turn_input(&prepared);
     if let Some(bindings) = rlm_projected_bindings {
-        turn_input = lash_mode_rlm::RlmTurnInputExt::rlm_project(turn_input, bindings)?;
+        turn_input = lash_protocol_rlm::RlmTurnInputExt::rlm_project(turn_input, bindings)?;
     }
     let mut renderer = AutonomousRenderer::new();
     let mut stream_id = 1;
@@ -278,7 +278,7 @@ pub(crate) async fn run_autonomous(
             turn_index: state.turn_index,
             token_usage: state.token_usage,
             last_prompt_usage: state.last_prompt_usage,
-            mode_turn_options: state.mode_turn_options,
+            protocol_turn_options: state.protocol_turn_options,
         };
     }
     let cumulative_usage = session.usage_report();

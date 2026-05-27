@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use lash::{LashCore, LashSession, ModeId, ModePreset, PluginStack};
+use lash::{LashCore, LashSession, ModeId, ModePreset, PluginStack, advanced::ExecutionMode};
 use lash_core::{
     AttachmentStore, PersistedSessionConfig, ProcessRegistry, RuntimePersistence,
     RuntimeSessionState, SessionGraph, SessionHead, SessionPolicy,
 };
 use lash_sqlite_store::Store;
+use lash_standard_plugins::StandardContextApproach;
 
 use crate::session_log::{self, SessionLogger, SessionStart};
 
@@ -25,6 +26,25 @@ pub(crate) struct SessionBootstrap {
     resume_start: Option<SessionStart>,
     resume_head: Option<SessionHead>,
     session_name: String,
+    host_config: Option<CliSessionHostConfig>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CliSessionHostConfig {
+    pub(crate) execution_mode: ExecutionMode,
+    pub(crate) standard_context_approach: Option<StandardContextApproach>,
+}
+
+impl CliSessionHostConfig {
+    pub(crate) fn new(
+        execution_mode: ExecutionMode,
+        standard_context_approach: Option<StandardContextApproach>,
+    ) -> Self {
+        Self {
+            execution_mode,
+            standard_context_approach,
+        }
+    }
 }
 
 pub(crate) struct OpenedCliLashSession {
@@ -50,11 +70,32 @@ fn policy_with_persisted_config(
 ) -> SessionPolicy {
     if let Some(config) = config {
         policy.model = config.model.clone();
-        policy.execution_mode = config.execution_mode.clone();
-        policy.standard_context_approach = config.standard_context_approach.clone();
     }
     policy.session_id = Some(session_id);
     policy
+}
+
+fn host_config_path(sessions_dir: &Path, filename: &str) -> PathBuf {
+    sessions_dir.join(format!("{filename}.host.json"))
+}
+
+fn load_host_config(sessions_dir: &Path, filename: &str) -> Option<CliSessionHostConfig> {
+    let path = host_config_path(sessions_dir, filename);
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+fn save_host_config(
+    sessions_dir: &Path,
+    filename: &str,
+    config: &CliSessionHostConfig,
+) -> Result<()> {
+    std::fs::write(
+        host_config_path(sessions_dir, filename),
+        serde_json::to_vec_pretty(config)?,
+    )?;
+    Ok(())
 }
 
 impl SessionBootstrapSource {
@@ -100,6 +141,7 @@ impl SessionBootstrap {
         } else {
             None
         };
+        let host_config = load_host_config(&sessions_dir, &filename);
         Ok(Self {
             source,
             sessions_dir,
@@ -108,6 +150,7 @@ impl SessionBootstrap {
             resume_start,
             resume_head,
             session_name,
+            host_config,
         })
     }
 
@@ -132,6 +175,14 @@ impl SessionBootstrap {
 
     pub(crate) fn persisted_config(&self) -> Option<PersistedSessionConfig> {
         self.resume_head.as_ref().map(|head| head.config.clone())
+    }
+
+    pub(crate) fn persisted_host_config(&self) -> Option<CliSessionHostConfig> {
+        self.host_config.clone()
+    }
+
+    pub(crate) fn save_host_config(&self, config: &CliSessionHostConfig) -> Result<()> {
+        save_host_config(&self.sessions_dir, &self.filename, config)
     }
 
     pub(crate) fn initial_graph(&self) -> SessionGraph {
@@ -203,6 +254,8 @@ impl CliSessionOpener {
         &self,
         source: SessionBootstrapSource,
         fallback_policy: SessionPolicy,
+        fallback_execution_mode: ExecutionMode,
+        fallback_standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
         let bootstrap = SessionBootstrap::open(source)?;
         let session_id = bootstrap
@@ -213,6 +266,10 @@ impl CliSessionOpener {
             session_id.clone(),
             bootstrap.persisted_config().as_ref(),
         );
+        let host_config = bootstrap.persisted_host_config().unwrap_or_else(|| {
+            CliSessionHostConfig::new(fallback_execution_mode, fallback_standard_context_approach)
+        });
+        bootstrap.save_host_config(&host_config)?;
         let logger = bootstrap.logger(&policy.model.id, Some(session_id.clone()))?;
         let state = RuntimeSessionState {
             session_id: session_id.clone(),
@@ -224,7 +281,7 @@ impl CliSessionOpener {
         let core_builder = LashCore::builder()
             .install_mode(ModePreset::standard())
             .install_mode(ModePreset::rlm())
-            .default_mode(ModeId::new(policy.execution_mode.plugin_id().to_string()))
+            .default_mode(ModeId::new(host_config.execution_mode.as_str().to_string()))
             .provider(policy.provider.clone())
             .model(policy.model.clone())
             .child_store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
@@ -239,7 +296,7 @@ impl CliSessionOpener {
         let core = core_builder.build()?;
         let session = core
             .session(session_id)
-            .mode(ModeId::new(policy.execution_mode.plugin_id().to_string()))
+            .mode(ModeId::new(host_config.execution_mode.as_str().to_string()))
             .store(store)
             .open_with_state(state)
             .await?;
@@ -253,19 +310,30 @@ impl CliSessionOpener {
     pub(crate) async fn fresh(
         &self,
         fallback_policy: SessionPolicy,
+        execution_mode: ExecutionMode,
+        standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
-        self.open(SessionBootstrapSource::Fresh, fallback_policy)
-            .await
+        self.open(
+            SessionBootstrapSource::Fresh,
+            fallback_policy,
+            execution_mode,
+            standard_context_approach,
+        )
+        .await
     }
 
     pub(crate) async fn resume(
         &self,
         identifier: &str,
         fallback_policy: SessionPolicy,
+        execution_mode: ExecutionMode,
+        standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
         self.open(
             SessionBootstrapSource::from_resume_arg(Some(identifier.to_string())),
             fallback_policy,
+            execution_mode,
+            standard_context_approach,
         )
         .await
     }

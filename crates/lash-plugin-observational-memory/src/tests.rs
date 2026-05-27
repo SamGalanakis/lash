@@ -4,11 +4,11 @@ use async_trait::async_trait;
 use lash_core::plugin::{PluginError, PluginLifecycleEvent, RuntimeSessionHost};
 use lash_core::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectCompletion, DirectCompletionClient,
-    DirectRequest, Message, MessageRole, ObservationalMemoryConfig, Part, PartKind,
-    SessionAppendNode, SessionGraph, SessionReadView, SessionStateChangedContext,
-    SessionStateEnvelope,
+    DirectRequest, Message, MessageRole, Part, PartKind, SessionAppendNode, SessionGraph,
+    SessionReadView, SessionStateChangedContext, SessionStateEnvelope,
 };
 
+use crate::ObservationalMemoryConfig;
 use crate::constants::{ACTIVE_STATE_PLUGIN_TYPE, BUFFERED_OBSERVATION_PLUGIN_TYPE};
 use crate::graph_state::{
     build_graph_state, prefix_len_covering_tokens, retained_message_tokens_by_message_id,

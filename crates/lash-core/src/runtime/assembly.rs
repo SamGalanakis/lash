@@ -25,7 +25,7 @@ use super::{
 };
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct StandardStreamAccumulator {
+pub(super) struct LlmStreamAccumulator {
     pub(super) parts: Vec<LlmOutputPart>,
 }
 
@@ -51,7 +51,7 @@ pub(super) struct LlmDebugToolCall<'a> {
 
 #[derive(Clone, Copy)]
 pub(super) struct LlmStreamEventLog<'a> {
-    pub(super) mode_iteration: usize,
+    pub(super) protocol_iteration: usize,
     pub(super) event_type: &'a str,
     pub(super) text: LlmDebugText<'a>,
     pub(super) item_id: Option<&'a str>,
@@ -59,15 +59,15 @@ pub(super) struct LlmStreamEventLog<'a> {
     pub(super) tool_call: Option<LlmDebugToolCall<'a>>,
 }
 
-pub(super) struct StandardStreamState<'a> {
+pub(super) struct LlmStreamState<'a> {
     pub(super) text_streamed: &'a mut bool,
     pub(super) streamed_usage: &'a mut LlmUsage,
-    pub(super) stream_accumulator: &'a mut StandardStreamAccumulator,
+    pub(super) stream_accumulator: &'a mut LlmStreamAccumulator,
     pub(super) debug: &'a mut LlmStreamDebugState,
-    pub(super) mode_iteration: usize,
+    pub(super) protocol_iteration: usize,
     pub(super) assistant_prose_correlation: &'a mut Option<crate::TurnActivityId>,
     pub(super) reasoning_correlation: &'a mut Option<crate::TurnActivityId>,
-    /// Set to `true` by `forward_standard_stream_event` when a plugin
+    /// Set to `true` by `forward_provider_stream_event` when a plugin
     /// stream hook has raised `AssistantStreamTransform.abort_stream`.
     /// The LLM runner checks this after each stream event and
     /// short-circuits the select loop, synthesizing a response from the
@@ -153,7 +153,7 @@ impl LlmStreamSummary {
     }
 }
 
-impl StandardStreamAccumulator {
+impl LlmStreamAccumulator {
     pub(super) fn push_text(&mut self, piece: &str) {
         if piece.is_empty() {
             return;
@@ -682,7 +682,6 @@ impl TurnAssembler {
 
         AssembledTurn {
             execution: ExecutionSummary {
-                mode: state.policy.execution_mode.clone(),
                 had_tool_calls: !self.tool_calls.is_empty(),
                 had_code_execution: false,
             },

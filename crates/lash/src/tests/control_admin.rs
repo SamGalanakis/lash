@@ -18,19 +18,26 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
             .await?
             .is_empty()
     );
-    assert!(
-        session
-            .control()
-            .state()
-            .snapshot_execution()
-            .await?
-            .is_none()
-    );
-    session
+    let err = session
+        .control()
+        .state()
+        .snapshot_execution()
+        .await
+        .expect_err("standard protocol has no code executor to snapshot");
+    assert!(matches!(
+        err,
+        EmbedError::Session(SessionError::CodeExecutionUnavailable)
+    ));
+    let err = session
         .control()
         .state()
         .restore_execution(&[1, 2, 3])
-        .await?;
+        .await
+        .expect_err("standard protocol has no code executor to restore");
+    assert!(matches!(
+        err,
+        EmbedError::Session(SessionError::CodeExecutionUnavailable)
+    ));
     Ok(())
 }
 
@@ -144,13 +151,13 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
             },
             start: lash_core::SessionStartPoint::Empty,
             policy: None,
-            plugin_mode: lash_core::SessionPluginMode::InheritCurrent,
+            plugin_source: lash_core::SessionPluginSource::CurrentSessionFork,
             initial_nodes: Vec::new(),
             first_turn_input: None,
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             context_surface: lash_core::SessionContextSurface::default(),
-            mode_extras: lash_core::ModeExtras::default(),
+            plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })
         .await?;
@@ -191,13 +198,13 @@ async fn session_control_manages_child_session_turns() -> Result<()> {
             },
             start: lash_core::SessionStartPoint::Empty,
             policy: None,
-            plugin_mode: lash_core::SessionPluginMode::InheritCurrent,
+            plugin_source: lash_core::SessionPluginSource::CurrentSessionFork,
             initial_nodes: Vec::new(),
             first_turn_input: None,
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             context_surface: lash_core::SessionContextSurface::default(),
-            mode_extras: lash_core::ModeExtras::default(),
+            plugin_options: lash_core::PluginOptions::default(),
             usage_source: None,
         })
         .await?;

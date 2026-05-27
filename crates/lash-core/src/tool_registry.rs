@@ -912,7 +912,7 @@ mod tests {
                 .get("enabled_tool")
                 .unwrap()
                 .manifest()
-                .effective_availability(&crate::ExecutionMode::standard()),
+                .effective_availability(),
             crate::ToolAvailability::Callable
         );
         assert_eq!(
@@ -920,7 +920,7 @@ mod tests {
                 .get("disabled_tool")
                 .unwrap()
                 .manifest()
-                .effective_availability(&crate::ExecutionMode::standard()),
+                .effective_availability(),
             crate::ToolAvailability::Off
         );
     }
@@ -1001,6 +1001,10 @@ mod tests {
         let context = crate::ToolContext::new(
             "registry-test".to_string(),
             Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::UnavailableProcessService),
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
@@ -1042,6 +1046,10 @@ mod tests {
         let context = crate::ToolContext::new(
             "registry-test".to_string(),
             Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::UnavailableProcessService),
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
@@ -1088,7 +1096,7 @@ mod tests {
                 .get("mcp__demo__search")
                 .unwrap()
                 .manifest()
-                .effective_availability(&crate::ExecutionMode::standard()),
+                .effective_availability(),
             crate::ToolAvailability::Off
         );
     }

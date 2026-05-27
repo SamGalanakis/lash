@@ -11,7 +11,7 @@ async fn run_one_tool_call(
     index: usize,
     prepared_tool: crate::PreparedToolCall,
     effect_metadata: crate::EffectInvocationMetadata,
-    context: crate::ModeExecutionContext<'_>,
+    context: crate::RuntimeExecutionContext<'_>,
 ) -> crate::sansio::CompletedToolCall {
     let executed = context
         .execute_prepared_tool_call(prepared_tool, index, Some(effect_metadata))
@@ -74,7 +74,7 @@ impl RuntimeTurnDriver<'_> {
             Some(self.turn_id.clone()),
             self.turn_lease.clone(),
         );
-        let context = match self.session.mode_execution_context(
+        let context = match self.session.code_execution_context(
             &self.session_id,
             manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
             manager.clone() as Arc<dyn crate::ProcessService>,
@@ -82,7 +82,7 @@ impl RuntimeTurnDriver<'_> {
             direct_completions,
             tool_event_tx.clone(),
             Arc::new(crate::ChronologicalProjection::default()),
-            self.mode_extension.clone(),
+            self.protocol_extension.clone(),
             self.turn_context.clone(),
         ) {
             Ok(context) => context.with_turn_event_sender(turn_event_tx),
@@ -103,7 +103,7 @@ impl RuntimeTurnDriver<'_> {
         let outcomes = schedule_tool_batch(
             indexed_tools,
             |(index, _)| *index,
-            |(_, (pending_tool, _))| context.tool_execution_mode(&pending_tool.tool_name),
+            |(_, (pending_tool, _))| context.tool_scheduling(&pending_tool.tool_name),
             {
                 let context = context.clone();
                 let cancel = cancel.clone();

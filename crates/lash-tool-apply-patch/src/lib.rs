@@ -2,8 +2,7 @@ use serde_json::json;
 use std::path::{Component, Path, PathBuf};
 
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
-    ToolResult,
+    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 
 use lash_tool_support::{compact_diff, object_schema, require_str, run_blocking};
@@ -163,7 +162,7 @@ fn apply_patch_tool_definition() -> ToolDefinition {
                     .into(),
             ])
             .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["patch", "edit_file"]))
-            .with_execution_mode(ToolExecutionMode::Serial)
+            .with_scheduling(ToolScheduling::Serial)
 }
 
 #[cfg(test)]

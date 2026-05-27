@@ -382,7 +382,7 @@ mod tests {
                     "root",
                     crate::SessionStartPoint::Empty,
                     child_policy,
-                    crate::ModeExtras::default(),
+                    crate::PluginOptions::default(),
                     "worker-test",
                 )),
                 turn_input: Box::new(crate::TurnInput::text("run child")),
@@ -419,20 +419,12 @@ mod tests {
             .create_session(
                 &manager.current,
                 &manager.usage,
-                crate::SessionCreateRequest {
-                    session_id: Some("wake-target".to_string()),
-                    relation: crate::SessionRelation::Root,
-                    start: crate::SessionStartPoint::Empty,
-                    policy: None,
-                    plugin_mode: crate::SessionPluginMode::InheritCurrent,
-                    initial_nodes: Vec::new(),
-                    first_turn_input: None,
-                    tool_access: crate::SessionToolAccess::default(),
-                    subagent: None,
-                    context_surface: crate::SessionContextSurface::default(),
-                    mode_extras: crate::ModeExtras::default(),
-                    usage_source: None,
-                },
+                crate::SessionCreateRequest::root(
+                    crate::SessionStartPoint::Empty,
+                    crate::PluginOptions::default(),
+                )
+                .with_session_id("wake-target")
+                .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
             )
             .await
             .expect("wake target session");
@@ -909,7 +901,7 @@ mod tests {
             origin: crate::EffectOrigin::Turn,
             turn_id: Some("turn-process-scope".to_string()),
             turn_index: Some(1),
-            mode_iteration: Some(0),
+            protocol_iteration: Some(0),
             effect_id: "parent-process-control".to_string(),
             effect_kind: crate::RuntimeEffectKind::Process,
             idempotency_key: "root:turn-process-scope:process-control".to_string(),

@@ -4,10 +4,7 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginLifecycleEvent, PluginRegistrar, PluginSessionContext,
     SessionPlugin,
 };
-use lash_core::{
-    ObservationalMemoryConfig, SessionAppendNode, SessionStateChangedContext,
-    StandardContextApproach,
-};
+use lash_core::{SessionAppendNode, SessionStateChangedContext};
 
 mod constants;
 mod context_transform;
@@ -29,6 +26,54 @@ use transitions::{
     maybe_buffer_observations, maybe_buffer_reflection, should_run_async_maintenance,
 };
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ObservationalMemoryConfig {
+    pub observation_message_tokens: usize,
+    pub observation_buffer_tokens: usize,
+    pub observation_block_after_tokens: usize,
+    pub observation_max_tokens_per_batch: usize,
+    pub previous_observer_tokens: usize,
+    pub reflection_observation_tokens: usize,
+    #[serde(default = "default_reflection_buffer_activation_bps")]
+    pub reflection_buffer_activation_bps: u16,
+    pub reflection_block_after_tokens: usize,
+}
+
+impl Default for ObservationalMemoryConfig {
+    fn default() -> Self {
+        Self {
+            observation_message_tokens: 30_000,
+            observation_buffer_tokens: 6_000,
+            observation_block_after_tokens: 36_000,
+            observation_max_tokens_per_batch: 10_000,
+            previous_observer_tokens: 2_000,
+            reflection_observation_tokens: 40_000,
+            reflection_buffer_activation_bps: default_reflection_buffer_activation_bps(),
+            reflection_block_after_tokens: 48_000,
+        }
+    }
+}
+
+impl ObservationalMemoryConfig {
+    pub fn observation_buffer_interval_tokens(&self) -> usize {
+        self.observation_buffer_tokens
+    }
+
+    pub fn observation_retention_tokens(&self) -> usize {
+        self.observation_buffer_tokens
+    }
+
+    pub fn reflection_buffer_activation_tokens(&self) -> usize {
+        self.reflection_observation_tokens
+            .saturating_mul(self.reflection_buffer_activation_bps as usize)
+            / 10_000
+    }
+}
+
+const fn default_reflection_buffer_activation_bps() -> u16 {
+    5_000
+}
+
 pub fn active_memory_state_node(
     body: impl serde::Serialize,
 ) -> Result<SessionAppendNode, serde_json::Error> {
@@ -38,44 +83,32 @@ pub fn active_memory_state_node(
     ))
 }
 
-#[derive(Default)]
-pub struct ObservationalMemoryPluginFactory;
+#[derive(Clone, Debug)]
+pub struct ObservationalMemoryPluginFactory {
+    config: ObservationalMemoryConfig,
+}
+
+impl ObservationalMemoryPluginFactory {
+    pub fn new(config: ObservationalMemoryConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl Default for ObservationalMemoryPluginFactory {
+    fn default() -> Self {
+        Self::new(ObservationalMemoryConfig::default())
+    }
+}
 
 impl PluginFactory for ObservationalMemoryPluginFactory {
     fn id(&self) -> &'static str {
         OBSERVATIONAL_MEMORY_PLUGIN_ID
     }
 
-    fn supported_standard_context_approaches(
-        &self,
-    ) -> &'static [lash_core::StandardContextApproachKind] {
-        &[lash_core::StandardContextApproachKind::ObservationalMemory]
-    }
-
-    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        if ctx.execution_mode != lash_core::ExecutionMode::standard() {
-            return Ok(Arc::new(DisabledObservationalMemoryPlugin));
-        }
-        let Some(StandardContextApproach::ObservationalMemory(config)) =
-            &ctx.standard_context_approach
-        else {
-            return Ok(Arc::new(DisabledObservationalMemoryPlugin));
-        };
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(ObservationalMemoryPlugin {
-            config: config.clone(),
+            config: self.config.clone(),
         }))
-    }
-}
-
-struct DisabledObservationalMemoryPlugin;
-
-impl SessionPlugin for DisabledObservationalMemoryPlugin {
-    fn id(&self) -> &'static str {
-        OBSERVATIONAL_MEMORY_PLUGIN_ID
-    }
-
-    fn register(&self, _reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        Ok(())
     }
 }
 

@@ -93,9 +93,9 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -143,9 +143,9 @@ async fn normal_turn_stores_effective_user_text_in_state() {
                     text: "/yolopush\n\n<skill>\nbody\n</skill>".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -210,9 +210,9 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -275,9 +275,9 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -387,9 +387,9 @@ async fn bridge_checkpoint_injection_preserves_images() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -468,9 +468,9 @@ async fn checkpoint_hook_can_inject_messages() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -527,9 +527,9 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             TurnOptions::new(CancellationToken::new()).with_events(&sink),
@@ -593,25 +593,22 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                             Box::pin(async move {
                                 let handle = ctx
                                     .host
-                                    .create_session(crate::SessionCreateRequest {
-                                        session_id: Some("branched".to_string()),
-                                        relation: crate::SessionRelation::Root,
-                                        start: crate::SessionStartPoint::CurrentSession,
-                                        policy: None,
-                                        plugin_mode: crate::SessionPluginMode::InheritCurrent,
-                                        initial_nodes: vec![crate::SessionAppendNode::message(
+                                    .create_session(
+                                        crate::SessionCreateRequest::root(
+                                            crate::SessionStartPoint::CurrentSession,
+                                            crate::PluginOptions::default(),
+                                        )
+                                        .with_session_id("branched")
+                                        .with_plugin_source(
+                                            crate::SessionPluginSource::CurrentSessionFork,
+                                        )
+                                        .with_initial_nodes(vec![crate::SessionAppendNode::message(
                                             crate::PluginMessage::text(
                                                 crate::MessageRole::User,
                                                 "branch seed",
                                             ),
-                                        )],
-                                        first_turn_input: None,
-                                        tool_access: crate::SessionToolAccess::default(),
-            subagent: None,
-            context_surface: crate::SessionContextSurface::default(),
-                                        mode_extras: crate::ModeExtras::default(),
-                                        usage_source: None,
-                                    })
+                                        )]),
+                                    )
                                     .await
                                     .map_err(|err| crate::ToolResult::err_fmt(err.to_string()));
                                 match handle {
@@ -714,20 +711,14 @@ async fn session_manager_can_run_child_session_turn() {
     let runtime = runtime_with_plugins(Vec::new(), transport).await;
     let manager = runtime.session_manager().expect("session manager");
     let handle = manager
-        .create_session(crate::SessionCreateRequest {
-            session_id: Some("child".to_string()),
-            relation: crate::SessionRelation::Root,
-            start: crate::SessionStartPoint::Empty,
-            policy: None,
-            plugin_mode: crate::SessionPluginMode::InheritCurrent,
-            initial_nodes: Vec::new(),
-            first_turn_input: None,
-            tool_access: crate::SessionToolAccess::default(),
-            subagent: None,
-            context_surface: crate::SessionContextSurface::default(),
-            mode_extras: crate::ModeExtras::default(),
-            usage_source: None,
-        })
+        .create_session(
+            crate::SessionCreateRequest::root(
+                crate::SessionStartPoint::Empty,
+                crate::PluginOptions::default(),
+            )
+            .with_session_id("child")
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
+        )
         .await
         .expect("child session");
     let assembled = manager
@@ -738,9 +729,9 @@ async fn session_manager_can_run_child_session_turn() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
         )
@@ -787,23 +778,15 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
 
     let manager = runtime.session_manager().expect("session manager");
     let handle = manager
-        .create_session(crate::SessionCreateRequest {
-            session_id: Some("child-store".to_string()),
-            relation: crate::SessionRelation::Child {
-                parent_session_id: "root".to_string(),
-                originating_tool_call_id: None,
-            },
-            start: crate::SessionStartPoint::CurrentSession,
-            policy: None,
-            plugin_mode: crate::SessionPluginMode::InheritCurrent,
-            initial_nodes: Vec::new(),
-            first_turn_input: None,
-            tool_access: crate::SessionToolAccess::default(),
-            subagent: None,
-            context_surface: crate::SessionContextSurface::default(),
-            mode_extras: crate::ModeExtras::default(),
-            usage_source: None,
-        })
+        .create_session(
+            crate::SessionCreateRequest::child_session(
+                "root",
+                crate::SessionStartPoint::CurrentSession,
+                crate::PluginOptions::default(),
+            )
+            .with_session_id("child-store")
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
+        )
         .await
         .expect("child session");
 
@@ -838,23 +821,15 @@ async fn child_relation_does_not_replace_active_session() {
     let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     let manager = runtime.session_manager().expect("session manager");
     manager
-        .create_session(crate::SessionCreateRequest {
-            session_id: Some("ordinary-child".to_string()),
-            relation: crate::SessionRelation::Child {
-                parent_session_id: runtime.session_id().to_string(),
-                originating_tool_call_id: None,
-            },
-            start: crate::SessionStartPoint::Empty,
-            policy: None,
-            plugin_mode: crate::SessionPluginMode::InheritCurrent,
-            initial_nodes: Vec::new(),
-            first_turn_input: None,
-            tool_access: crate::SessionToolAccess::default(),
-            subagent: None,
-            context_surface: crate::SessionContextSurface::default(),
-            mode_extras: crate::ModeExtras::default(),
-            usage_source: None,
-        })
+        .create_session(
+            crate::SessionCreateRequest::child_session(
+                runtime.session_id(),
+                crate::SessionStartPoint::Empty,
+                crate::PluginOptions::default(),
+            )
+            .with_session_id("ordinary-child")
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
+        )
         .await
         .expect("child session");
 
@@ -866,9 +841,9 @@ async fn child_relation_does_not_replace_active_session() {
                     text: "parent turn".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -897,24 +872,16 @@ async fn handoff_relation_routes_original_session_to_successor() {
     runtime.state.turn_index = 31;
     let manager = runtime.session_manager().expect("session manager");
     manager
-        .create_session(crate::SessionCreateRequest {
-            session_id: Some("handoff-child".to_string()),
-            relation: crate::SessionRelation::Handoff {
-                parent_session_id: runtime.session_id().to_string(),
-                reason: "test".to_string(),
-                metadata: serde_json::Map::new(),
-            },
-            start: crate::SessionStartPoint::Empty,
-            policy: None,
-            plugin_mode: crate::SessionPluginMode::InheritCurrent,
-            initial_nodes: Vec::new(),
-            first_turn_input: None,
-            tool_access: crate::SessionToolAccess::default(),
-            subagent: None,
-            context_surface: crate::SessionContextSurface::default(),
-            mode_extras: crate::ModeExtras::default(),
-            usage_source: None,
-        })
+        .create_session(
+            crate::SessionCreateRequest::handoff_session(
+                runtime.session_id(),
+                "test",
+                serde_json::Map::new(),
+                crate::PluginOptions::default(),
+            )
+            .with_session_id("handoff-child")
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
+        )
         .await
         .expect("handoff session");
 
@@ -925,9 +892,9 @@ async fn handoff_relation_routes_original_session_to_successor() {
                     text: "next external turn".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                mode_turn_options: None,
+                protocol_turn_options: None,
                 trace_turn_id: None,
-                mode_extension: None,
+                protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
@@ -950,38 +917,26 @@ async fn session_manager_rejects_duplicate_child_session_ids() {
     let runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     let manager = runtime.session_manager().expect("session manager");
     manager
-        .create_session(crate::SessionCreateRequest {
-            session_id: Some("child".to_string()),
-            relation: crate::SessionRelation::Root,
-            start: crate::SessionStartPoint::Empty,
-            policy: None,
-            plugin_mode: crate::SessionPluginMode::InheritCurrent,
-            initial_nodes: Vec::new(),
-            first_turn_input: None,
-            tool_access: crate::SessionToolAccess::default(),
-            subagent: None,
-            context_surface: crate::SessionContextSurface::default(),
-            mode_extras: crate::ModeExtras::default(),
-            usage_source: None,
-        })
+        .create_session(
+            crate::SessionCreateRequest::root(
+                crate::SessionStartPoint::Empty,
+                crate::PluginOptions::default(),
+            )
+            .with_session_id("child")
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
+        )
         .await
         .expect("first child session");
 
     let err = manager
-        .create_session(crate::SessionCreateRequest {
-            session_id: Some("child".to_string()),
-            relation: crate::SessionRelation::Root,
-            start: crate::SessionStartPoint::Empty,
-            policy: None,
-            plugin_mode: crate::SessionPluginMode::InheritCurrent,
-            initial_nodes: Vec::new(),
-            first_turn_input: None,
-            tool_access: crate::SessionToolAccess::default(),
-            subagent: None,
-            context_surface: crate::SessionContextSurface::default(),
-            mode_extras: crate::ModeExtras::default(),
-            usage_source: None,
-        })
+        .create_session(
+            crate::SessionCreateRequest::root(
+                crate::SessionStartPoint::Empty,
+                crate::PluginOptions::default(),
+            )
+            .with_session_id("child")
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
+        )
         .await
         .expect_err("duplicate child session should fail");
     assert!(err.to_string().contains("already exists"));
@@ -992,26 +947,21 @@ async fn runtime_can_activate_managed_child_session() {
     let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     let manager = runtime.session_manager().expect("session manager");
     manager
-        .create_session(crate::SessionCreateRequest {
-            session_id: Some("child".to_string()),
-            relation: crate::SessionRelation::Child {
-                parent_session_id: runtime.session_id().to_string(),
-                originating_tool_call_id: None,
-            },
-            start: crate::SessionStartPoint::Empty,
-            policy: None,
-            plugin_mode: crate::SessionPluginMode::InheritCurrent,
-            initial_nodes: Vec::new(),
-            first_turn_input: Some(crate::PluginMessage::text(
+        .create_session(
+            crate::SessionCreateRequest::child(
+                runtime.session_id(),
+                crate::SessionStartPoint::Empty,
+                runtime.policy.clone(),
+                crate::PluginOptions::default(),
+                "test",
+            )
+            .with_session_id("child")
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork)
+            .with_first_turn_input(crate::PluginMessage::text(
                 crate::MessageRole::User,
                 "run child",
             )),
-            tool_access: crate::SessionToolAccess::default(),
-            subagent: None,
-            context_surface: crate::SessionContextSurface::default(),
-            mode_extras: crate::ModeExtras::default(),
-            usage_source: Some("test".to_string()),
-        })
+        )
         .await
         .expect("child session");
 
@@ -1036,9 +986,9 @@ async fn runtime_can_activate_managed_child_session() {
                         text: "old manager should not own activated child".to_string(),
                     }],
                     image_blobs: HashMap::new(),
-                    mode_turn_options: None,
+                    protocol_turn_options: None,
                     trace_turn_id: None,
-                    mode_extension: None,
+                    protocol_extension: None,
                     turn_context: crate::TurnContext::default(),
                 },
             )

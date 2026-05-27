@@ -132,11 +132,11 @@ fn build_projection_read_view(turn_count: usize) -> SessionReadView {
                 ToolCallOutput::success(json!({ "output": "time\n", "exit_code": 0 })),
                 5,
             ));
-            graph.append_mode_event(lash_mode_rlm::rlm_mode_event(
-                lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(
+            graph.append_protocol_event(lash_protocol_rlm::rlm_protocol_event(
+                lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(
                     lash_rlm_types::RlmTrajectoryEntry {
                         id: format!("rlm_step_{turn}"),
-                        mode_iteration: turn,
+                        protocol_iteration: turn,
                         reasoning: format!(
                             "Check runtime state {turn}.\n\n```lashlang\nsubmit \"ok\"\n```"
                         ),
@@ -164,7 +164,7 @@ fn build_projection_read_view(turn_count: usize) -> SessionReadView {
 fn live_activity_event(index: usize) -> TurnEvent {
     match index % 14 {
         0 => TurnEvent::ModelRequestStarted {
-            mode_iteration: index / 14,
+            protocol_iteration: index / 14,
         },
         1 => TurnEvent::ReasoningDelta {
             text: format!("reasoning chunk {index}\n"),

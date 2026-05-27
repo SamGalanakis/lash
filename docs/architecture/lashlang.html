@@ -19,7 +19,7 @@
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">lashlang<span class="slash">/</span>language</h1>
-    <p class="opener__lede">The agent-facing execution language for RLM mode: program form, syntax, values, expressions, mutation, and control flow. Companion pages cover effects and the runtime path.</p>
+    <p class="opener__lede">The agent-facing execution language for the RLM protocol: program form, syntax, values, expressions, mutation, and control flow. Companion pages cover effects and the runtime path.</p>
   </section>
 
   <main class="body" id="content">
@@ -43,7 +43,7 @@
         <div class="section" id="program-form">
           <div class="section-header">
             <h2>Program Form</h2>
-            <p>RLM mode extracts the first closed <code>```lashlang</code> fence from model output. Only the <code>lashlang</code> language tag is recognised — <code>rlm</code> and other labels are treated as plain prose by <code>first_lashlang_fence_span</code>. Opening fences may be three or more backticks (CommonMark variable-length), the closer must match the opener length, and anything after the first closed block is ignored by the driver — so the block must contain the next action or final <code>submit</code>.</p>
+            <p>The RLM protocol extracts the first closed <code>```lashlang</code> fence from model output. Only the <code>lashlang</code> language tag is recognised — <code>rlm</code> and other labels are treated as plain prose by <code>first_lashlang_fence_span</code>. Opening fences may be three or more backticks (CommonMark variable-length), the closer must match the opener length, and anything after the first closed block is ignored by the driver — so the block must contain the next action or final <code>submit</code>.</p>
           </div>
           <dl class="def-list">
             <dt>REPL state</dt>

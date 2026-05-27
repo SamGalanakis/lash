@@ -1,8 +1,7 @@
 use serde_json::json;
 
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
-    ToolResult,
+    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 
 use lash_tool_support::{object_schema, require_str};
@@ -121,7 +120,7 @@ fn fetch_url_tool_definition() -> ToolDefinition {
                 "web",
                 &["fetch", "open_url"],
             ))
-            .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_scheduling(ToolScheduling::Parallel)
 }
 
 #[cfg(test)]
@@ -146,7 +145,7 @@ mod tests {
         );
         assert_eq!(definition.activation, lash_core::ToolActivation::Always);
         assert_eq!(
-            definition.availability.standard,
+            definition.availability.base,
             lash_core::ToolAvailability::Showcased
         );
     }

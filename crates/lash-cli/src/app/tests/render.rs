@@ -105,7 +105,7 @@ fn text_delta_stays_in_live_assistant_until_committed() {
 fn text_delta_updates_live_token_estimate() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        mode_iteration: 0,
+        protocol_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -123,7 +123,7 @@ fn text_delta_updates_live_token_estimate() {
 fn first_text_delta_switches_thinking_to_responding() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        mode_iteration: 0,
+        protocol_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -146,7 +146,7 @@ fn first_text_delta_switches_thinking_to_responding() {
 fn llm_request_sets_plain_thinking_status() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
-        mode_iteration: 0,
+        protocol_iteration: 0,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -176,7 +176,7 @@ fn llm_request_flushes_intermediate_stream_text() {
         duration_ms: 1,
     });
     app.handle_session_event(SessionEvent::LlmRequest {
-        mode_iteration: 1,
+        protocol_iteration: 1,
         message_count: 0,
         tool_list: String::new(),
     });
@@ -223,7 +223,7 @@ fn token_usage_resets_live_token_estimate() {
     });
     assert!(app.live_output_tokens_estimate > 0);
     app.handle_session_event(SessionEvent::TokenUsage {
-        mode_iteration: 0,
+        protocol_iteration: 0,
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
@@ -251,7 +251,7 @@ fn input_only_streamed_usage_keeps_live_output_estimate() {
     let live_estimate = app.live_output_tokens_estimate;
     assert!(live_estimate > 0);
     app.handle_session_event(SessionEvent::TokenUsage {
-        mode_iteration: 0,
+        protocol_iteration: 0,
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 0,
@@ -434,7 +434,7 @@ fn rlm_budget_warning_uses_status_not_user_message() {
     app.timeline = vec![UiTimelineItem::AssistantText("working".into())].into();
 
     app.handle_session_event(SessionEvent::PluginEvent {
-        plugin_id: "mode_rlm".into(),
+        plugin_id: "rlm_protocol".into(),
         event: lash_core::PluginRuntimeEvent::Status {
             key: "rlm_context_budget_warning".into(),
             label: "context budget".into(),
@@ -458,7 +458,7 @@ fn rlm_budget_warning_uses_status_not_user_message() {
 }
 
 #[test]
-fn plan_mode_state_events_upsert_and_clear_blocks() {
+fn plan_protocol_state_events_upsert_and_clear_blocks() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::PluginEvent {

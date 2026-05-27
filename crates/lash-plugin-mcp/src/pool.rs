@@ -21,9 +21,9 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use lash_core::{
-    AttachmentCreateMeta, MediaType, ToolCallOutput, ToolContext, ToolDefinition,
-    ToolExecutionMode, ToolFailure, ToolFailureClass, ToolFailureSource, ToolResult,
-    ToolRetryDisposition, ToolValue,
+    AttachmentCreateMeta, MediaType, ToolCallOutput, ToolContext, ToolDefinition, ToolFailure,
+    ToolFailureClass, ToolFailureSource, ToolResult, ToolRetryDisposition, ToolScheduling,
+    ToolValue,
 };
 
 use crate::config::McpServerConfig;
@@ -345,7 +345,7 @@ fn import_tools(
                     output_schema,
                 )
                 .with_discovery(discovery)
-                .with_execution_mode(ToolExecutionMode::Parallel),
+                .with_scheduling(ToolScheduling::Parallel),
             },
         );
     }

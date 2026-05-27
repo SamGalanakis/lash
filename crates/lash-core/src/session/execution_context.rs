@@ -31,14 +31,13 @@ pub(crate) fn lashlang_resources_from_tool_surface(
 }
 
 #[derive(Clone)]
-pub struct ModeExecutionContext<'run> {
+pub struct RuntimeExecutionContext<'run> {
     pub(super) session_id: String,
-    pub(super) execution_mode: crate::ExecutionMode,
     pub(super) dispatch: Arc<ToolDispatchContext<'run>>,
     lashlang_abilities: lashlang::LashlangAbilities,
     attachment_store: Arc<dyn crate::AttachmentStore>,
     chronological_projection: Arc<crate::ChronologicalProjection>,
-    mode_extension: Option<crate::ModeTurnExtensionHandle>,
+    protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
     turn_context: crate::TurnContext,
     pub(super) effect_metadata: Option<crate::EffectInvocationMetadata>,
     pub(super) turn_lease: Option<crate::RuntimeTurnLease>,
@@ -46,7 +45,7 @@ pub struct ModeExecutionContext<'run> {
     pub(super) cancellation_token: Option<CancellationToken>,
 }
 
-impl<'run> ModeExecutionContext<'run> {
+impl<'run> RuntimeExecutionContext<'run> {
     pub(super) fn process_scope(
         &self,
         effect_metadata: Option<crate::EffectInvocationMetadata>,
@@ -59,26 +58,24 @@ impl<'run> ModeExecutionContext<'run> {
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "mode execution bridge carries explicit per-turn runtime dependencies"
+        reason = "code execution bridge carries explicit per-turn runtime dependencies"
     )]
     pub(crate) fn new(
         session_id: String,
-        execution_mode: crate::ExecutionMode,
         dispatch: Arc<ToolDispatchContext<'run>>,
         lashlang_abilities: lashlang::LashlangAbilities,
         attachment_store: Arc<dyn crate::AttachmentStore>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
-        mode_extension: Option<crate::ModeTurnExtensionHandle>,
+        protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
         turn_context: crate::TurnContext,
     ) -> Self {
         Self {
             session_id,
-            execution_mode,
             dispatch,
             lashlang_abilities,
             attachment_store,
             chronological_projection,
-            mode_extension,
+            protocol_extension,
             turn_context,
             effect_metadata: None,
             turn_lease: None,
@@ -91,10 +88,6 @@ impl<'run> ModeExecutionContext<'run> {
         &self.session_id
     }
 
-    pub fn execution_mode(&self) -> &crate::ExecutionMode {
-        &self.execution_mode
-    }
-
     pub fn attachment_store(&self) -> Arc<dyn crate::AttachmentStore> {
         Arc::clone(&self.attachment_store)
     }
@@ -103,8 +96,8 @@ impl<'run> ModeExecutionContext<'run> {
         Arc::clone(&self.chronological_projection)
     }
 
-    pub fn mode_extension<T: 'static>(&self) -> Option<&T> {
-        self.mode_extension
+    pub fn protocol_extension<T: 'static>(&self) -> Option<&T> {
+        self.protocol_extension
             .as_ref()
             .and_then(|extension| extension.as_any().downcast_ref::<T>())
     }
@@ -146,8 +139,8 @@ impl<'run> ModeExecutionContext<'run> {
         self
     }
 
-    pub(crate) fn tool_execution_mode(&self, name: &str) -> crate::ToolExecutionMode {
-        crate::tool_dispatch::resolve_tool_execution_mode(&self.dispatch, name)
+    pub(crate) fn tool_scheduling(&self, name: &str) -> crate::ToolScheduling {
+        crate::tool_dispatch::resolve_tool_scheduling(&self.dispatch, name)
     }
 
     pub fn callable_tool_manifest(&self, name: &str) -> Option<crate::ToolManifest> {
@@ -215,7 +208,7 @@ impl<'run> ModeExecutionContext<'run> {
         &self,
         registration: crate::ProcessRegistration,
         label: Option<String>,
-    ) -> crate::ModeToolReply {
+    ) -> crate::ToolInvocationReply {
         let process_id = registration.id.clone();
         match self
             .dispatch
@@ -230,10 +223,10 @@ impl<'run> ModeExecutionContext<'run> {
             )
             .await
         {
-            Ok(_) => crate::ModeToolReply::success(crate::lashlang_bridge::process_handle_json(
-                &process_id,
-            )),
-            Err(err) => crate::ModeToolReply::error(serde_json::json!(err.to_string())),
+            Ok(_) => crate::ToolInvocationReply::success(
+                crate::lashlang_bridge::process_handle_json(&process_id),
+            ),
+            Err(err) => crate::ToolInvocationReply::error(serde_json::json!(err.to_string())),
         }
     }
 
@@ -253,7 +246,7 @@ impl<'run> ModeExecutionContext<'run> {
                 origin: parent.origin.clone(),
                 turn_id: parent.turn_id.clone(),
                 turn_index: parent.turn_index,
-                mode_iteration: parent.mode_iteration,
+                protocol_iteration: parent.protocol_iteration,
                 effect_id: format!("{}:process:{process_id}:sleep:{sequence}", parent.effect_id),
                 effect_kind: crate::RuntimeEffectKind::Sleep,
                 idempotency_key: format!(
@@ -269,7 +262,7 @@ impl<'run> ModeExecutionContext<'run> {
                 origin: crate::EffectOrigin::Turn,
                 turn_id: None,
                 turn_index: None,
-                mode_iteration: None,
+                protocol_iteration: None,
                 effect_id: effect_id.clone(),
                 effect_kind: crate::RuntimeEffectKind::Sleep,
                 idempotency_key: effect_id,
@@ -302,7 +295,7 @@ impl<'run> ModeExecutionContext<'run> {
 mod tests {
     use super::*;
     use crate::tool_dispatch::ToolDispatchContext;
-    use crate::{ExecutionMode, ToolCall, ToolProvider, ToolResult};
+    use crate::{ToolCall, ToolProvider, ToolResult};
 
     struct NoopTools;
 
@@ -334,7 +327,7 @@ mod tests {
             crate::ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"),
         );
         let plugins = crate::plugin::PluginHost::empty()
-            .build_standard_session("session", None)
+            .build_session("session", None)
             .expect("plugin session");
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
         let dispatch = Arc::new(ToolDispatchContext {
@@ -342,7 +335,6 @@ mod tests {
             tools: Arc::new(NoopTools),
             surface: Arc::new(crate::ToolSurface::from_tools(
                 vec![tool.manifest()],
-                ExecutionMode::standard(),
                 std::collections::BTreeMap::new(),
             )),
             host: Arc::new(crate::testing::MockSessionManager::default()),
@@ -360,9 +352,8 @@ mod tests {
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
-        let ctx = ModeExecutionContext::new(
+        let ctx = RuntimeExecutionContext::new(
             "session".to_string(),
-            ExecutionMode::standard(),
             dispatch,
             Default::default(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -391,7 +382,7 @@ mod tests {
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         );
         let plugins = crate::plugin::PluginHost::empty()
-            .build_standard_session("session", None)
+            .build_session("session", None)
             .expect("plugin session");
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
         let dispatch = Arc::new(ToolDispatchContext {
@@ -399,7 +390,6 @@ mod tests {
             tools: Arc::new(NoopTools),
             surface: Arc::new(crate::ToolSurface::from_tools(
                 vec![tool.manifest()],
-                ExecutionMode::standard(),
                 std::collections::BTreeMap::new(),
             )),
             host: Arc::new(crate::testing::MockSessionManager::default()),
@@ -417,9 +407,8 @@ mod tests {
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
-        let ctx = ModeExecutionContext::new(
+        let ctx = RuntimeExecutionContext::new(
             "session".to_string(),
-            ExecutionMode::standard(),
             dispatch,
             lashlang::LashlangAbilities::default().with_processes(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -466,7 +455,7 @@ mod tests {
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         );
         let plugins = crate::plugin::PluginHost::empty()
-            .build_standard_session("session", None)
+            .build_session("session", None)
             .expect("plugin session");
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
         let dispatch = Arc::new(ToolDispatchContext {
@@ -474,7 +463,6 @@ mod tests {
             tools: Arc::new(NoopTools),
             surface: Arc::new(crate::ToolSurface::from_tools(
                 vec![tool.manifest()],
-                ExecutionMode::standard(),
                 std::collections::BTreeMap::new(),
             )),
             host: Arc::new(crate::testing::MockSessionManager::default()),
@@ -492,9 +480,8 @@ mod tests {
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
-        let ctx = ModeExecutionContext::new(
+        let ctx = RuntimeExecutionContext::new(
             "session".to_string(),
-            ExecutionMode::standard(),
             dispatch,
             lashlang::LashlangAbilities::default()
                 .with_processes()

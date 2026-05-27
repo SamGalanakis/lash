@@ -16,7 +16,7 @@ clap = { workspace = true, features = ["derive"] }
 dirs = "6"
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9", default-features = false }
 lash-cli = { path = "../lash-cli", version = "=0.1.0-alpha.9" }
-lash-runtime = { path = "../lash", version = "=0.1.0-alpha.9" }
+lash = { package = "lash-runtime", path = "../lash", version = "=0.1.0-alpha.9" }
 lash-providers-builtin = { path = "../lash-providers-builtin", version = "=0.1.0-alpha.9" }
 lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.9" }
 lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.9" }

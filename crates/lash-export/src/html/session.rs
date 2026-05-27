@@ -260,7 +260,7 @@ fn write_usage_overview(out: &mut String, session: &LoadedSession) {
     out.push_str("  <div class=\"usage-overview-bars\">\n");
     for (idx, prompt) in session.llm_prompts.iter().enumerate() {
         let id = prompt
-            .mode_iteration
+            .protocol_iteration
             .map(|i| format!("iter {i}"))
             .unwrap_or_else(|| format!("call {idx}"));
         let Some(usage) = prompt.usage.as_ref() else {

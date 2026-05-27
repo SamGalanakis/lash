@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use lash_core::plugin::StaticPluginFactory;
 use lash_core::{
     PluginError, PluginFactory, PluginSpec, ToolCall, ToolContract, ToolDefinition,
-    ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
+    ToolDiscoveryMetadata, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 use serde_json::json;
 
@@ -168,7 +168,7 @@ fn ask_tool_definition() -> ToolDefinition {
                 namespace: Some("user".to_string()),
                 aliases: vec!["prompt_user".to_string(), "request_input".to_string()],
             })
-            .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_scheduling(ToolScheduling::Parallel)
 }
 
 pub(crate) fn cli_ask_plugin_factory(prompt: CliPromptBridge) -> Arc<dyn PluginFactory> {

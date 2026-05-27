@@ -28,16 +28,16 @@ use crate::{
 
 // ─── Public types ───
 
-pub trait ModeProtocol: Send + Sync + 'static {
+pub trait TurnProtocol: Send + Sync + 'static {
     type Event: Clone + Serialize + DeserializeOwned + Debug + Send + Sync + 'static;
     type Termination: Clone + Default + Debug + Send + Sync + 'static;
     type DriverState: Clone + Default + Serialize + DeserializeOwned + Debug + Send + Sync + 'static;
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
-pub struct UnitModeProtocol;
+pub struct UnitTurnProtocol;
 
-impl ModeProtocol for UnitModeProtocol {
+impl TurnProtocol for UnitTurnProtocol {
     type Event = ();
     type Termination = ();
     type DriverState = serde_json::Value;
@@ -72,7 +72,7 @@ pub struct CompletedToolCall {
 pub enum LogEvent {
     LlmDebug {
         session_id: String,
-        mode_iteration: usize,
+        protocol_iteration: usize,
         usage: TokenUsage,
         provider_usage: Option<Value>,
         request_body: Option<String>,
@@ -81,7 +81,7 @@ pub enum LogEvent {
     },
     LlmError {
         session_id: String,
-        mode_iteration: usize,
+        protocol_iteration: usize,
         request_body: Option<String>,
         message: String,
         retryable: bool,
@@ -94,13 +94,13 @@ pub enum LogEvent {
 /// An effect the host must fulfil.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
-pub enum Effect<M: ModeProtocol = UnitModeProtocol> {
+pub enum Effect<M: TurnProtocol = UnitTurnProtocol> {
     /// Sync the live execution surface before the turn proceeds.
     ///
     /// `update_machine_config` is only needed after the turn has
     /// already advanced at least once and the host may need to swap in
     /// a refreshed system prompt or tool schema for the next
-    /// mode iteration. Initial syncs are host-only because the machine was
+    /// protocol iteration. Initial syncs are host-only because the machine was
     /// already constructed from a fresh execution surface.
     SyncExecutionSurface {
         id: EffectId,
@@ -113,12 +113,12 @@ pub enum Effect<M: ModeProtocol = UnitModeProtocol> {
     },
     /// Cancel an in-progress LLM stream.
     CancelLlm { id: EffectId },
-    /// Execute one or more standard-mode tool calls.
+    /// Execute one or more driver-scheduled tool calls.
     ToolCalls {
         id: EffectId,
         calls: Vec<PendingToolCall>,
     },
-    /// Execute a mode-owned code block.
+    /// Execute a protocol-owned code block.
     ExecCode { id: EffectId, code: String },
     /// Run a host/plugin checkpoint before the machine continues or completes.
     Checkpoint {
@@ -133,21 +133,21 @@ pub enum Effect<M: ModeProtocol = UnitModeProtocol> {
     ///
     /// This is separate from [`SessionEvent`]: UI stream events can be partial,
     /// duplicated, or display-only, while `Progress` is emitted only after the
-    /// state machine has applied semantic message or mode-step changes.
+    /// state machine has applied semantic message or protocol-step changes.
     Progress {
         messages: MessageSequence,
         event_delta: Vec<SessionEventRecord<M::Event>>,
-        mode_iteration: usize,
+        protocol_iteration: usize,
     },
     /// Turn is done.
     Done {
         messages: MessageSequence,
         event_delta: Vec<SessionEventRecord<M::Event>>,
-        mode_iteration: usize,
+        protocol_iteration: usize,
     },
 }
 
-impl<M: ModeProtocol> Effect<M> {
+impl<M: TurnProtocol> Effect<M> {
     fn id(&self) -> Option<EffectId> {
         match self {
             Self::SyncExecutionSurface { id, .. }
@@ -164,7 +164,7 @@ impl<M: ModeProtocol> Effect<M> {
 /// Error details from a failed LLM call.
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
-pub enum CheckpointEffect<M: ModeProtocol = UnitModeProtocol> {
+pub enum CheckpointEffect<M: TurnProtocol = UnitTurnProtocol> {
     SyncExecutionSurface {
         id: EffectId,
         update_machine_config: bool,
@@ -195,12 +195,12 @@ pub enum CheckpointEffect<M: ModeProtocol = UnitModeProtocol> {
     Progress {
         messages: Vec<Message>,
         event_delta: Vec<SessionEventRecord<M::Event>>,
-        mode_iteration: usize,
+        protocol_iteration: usize,
     },
     Done {
         messages: Vec<Message>,
         event_delta: Vec<SessionEventRecord<M::Event>>,
-        mode_iteration: usize,
+        protocol_iteration: usize,
     },
 }
 
@@ -253,42 +253,24 @@ pub struct ExecutionSurfaceSync {
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
 }
 
-pub fn driver_state<T>(state: T) -> serde_json::Value
-where
-    T: Serialize,
-{
-    serde_json::to_value(state).expect("driver state must serialize")
-}
-
-pub struct WaitingLlmState<M: ModeProtocol = UnitModeProtocol> {
+pub struct WaitingLlmState<M: TurnProtocol = UnitTurnProtocol> {
     pub request: Arc<LlmRequest>,
     driver_state: Option<M::DriverState>,
 }
 
-impl<M: ModeProtocol> WaitingLlmState<M> {
-    pub fn take_driver_state<T>(&mut self) -> Option<T>
-    where
-        T: DeserializeOwned,
-    {
-        self.driver_state
-            .take()
-            .and_then(|state| serde_json::to_value(state).ok())
-            .and_then(|state| serde_json::from_value(state).ok())
+impl<M: TurnProtocol> WaitingLlmState<M> {
+    pub fn take_driver_state(&mut self) -> Option<M::DriverState> {
+        self.driver_state.take()
     }
 }
 
-pub struct WaitingExecState<M: ModeProtocol = UnitModeProtocol> {
+pub struct WaitingExecState<M: TurnProtocol = UnitTurnProtocol> {
     driver_state: M::DriverState,
 }
 
-impl<M: ModeProtocol> WaitingExecState<M> {
-    pub fn into_driver_state<T>(self) -> Option<T>
-    where
-        T: DeserializeOwned,
-    {
-        serde_json::to_value(self.driver_state)
-            .ok()
-            .and_then(|state| serde_json::from_value(state).ok())
+impl<M: TurnProtocol> WaitingExecState<M> {
+    pub fn into_driver_state(self) -> M::DriverState {
+        self.driver_state
     }
 }
 
@@ -299,7 +281,7 @@ pub enum CheckpointResumeAction {
 }
 
 #[allow(clippy::large_enum_variant)]
-pub enum DriverAction<M: ModeProtocol = UnitModeProtocol> {
+pub enum DriverAction<M: TurnProtocol = UnitTurnProtocol> {
     Emit(SessionEvent),
     AppendEvents(Vec<SessionEventRecord<M::Event>>),
     StartLlm {
@@ -317,39 +299,39 @@ pub enum DriverAction<M: ModeProtocol = UnitModeProtocol> {
         checkpoint: CheckpointKind,
         on_empty: CheckpointResumeAction,
     },
-    AdvanceModeIteration,
+    AdvanceProtocolIteration,
     ScheduleTurnLimitFinal {
         message: Message,
     },
     Finish(TurnOutcome),
 }
 
-pub struct DriverContextView<'a, M: ModeProtocol = UnitModeProtocol> {
+pub struct DriverContextView<'a, M: TurnProtocol = UnitTurnProtocol> {
     config: &'a TurnMachineConfig<M>,
     messages: &'a MessageSequence,
     events: &'a [SessionEventRecord<M::Event>],
-    mode_iteration: usize,
-    mode_run_offset: usize,
+    protocol_iteration: usize,
+    protocol_run_offset: usize,
     termination: &'a TurnTerminationPolicyState,
 }
 
-impl<'a, M: ModeProtocol> DriverContextView<'a, M> {
+impl<'a, M: TurnProtocol> DriverContextView<'a, M> {
     pub fn project_llm_request(&self, use_tools: bool) -> Arc<LlmRequest> {
         self.config.projector.project(ProjectorContext {
             config: self.config,
             messages: self.messages,
             events: self.events,
-            mode_iteration: self.mode_iteration,
+            protocol_iteration: self.protocol_iteration,
             use_tools,
         })
     }
 
-    pub fn mode_iteration(&self) -> usize {
-        self.mode_iteration
+    pub fn protocol_iteration(&self) -> usize {
+        self.protocol_iteration
     }
 
-    pub fn mode_run_offset(&self) -> usize {
-        self.mode_run_offset
+    pub fn protocol_run_offset(&self) -> usize {
+        self.protocol_run_offset
     }
 
     pub fn max_turns(&self) -> Option<usize> {
@@ -370,8 +352,8 @@ impl<'a, M: ModeProtocol> DriverContextView<'a, M> {
 
     pub fn turn_limit_final_to_schedule(&self) -> Option<usize> {
         self.termination.turn_limit_final_to_schedule(
-            self.mode_iteration,
-            self.mode_run_offset,
+            self.protocol_iteration,
+            self.protocol_run_offset,
             self.config.max_turns,
         )
     }
@@ -385,22 +367,22 @@ impl<'a, M: ModeProtocol> DriverContextView<'a, M> {
     }
 }
 
-pub struct ProjectorContext<'a, M: ModeProtocol = UnitModeProtocol> {
+pub struct ProjectorContext<'a, M: TurnProtocol = UnitTurnProtocol> {
     pub config: &'a TurnMachineConfig<M>,
     pub messages: &'a MessageSequence,
     pub events: &'a [SessionEventRecord<M::Event>],
-    pub mode_iteration: usize,
+    pub protocol_iteration: usize,
     pub use_tools: bool,
 }
 
-pub trait ContextProjector<M: ModeProtocol = UnitModeProtocol>: Send + Sync {
+pub trait ContextProjector<M: TurnProtocol = UnitTurnProtocol>: Send + Sync {
     fn project(&self, ctx: ProjectorContext<'_, M>) -> Arc<LlmRequest>;
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ChatContextProjector;
 
-impl<M: ModeProtocol> ContextProjector<M> for ChatContextProjector {
+impl<M: TurnProtocol> ContextProjector<M> for ChatContextProjector {
     fn project(&self, ctx: ProjectorContext<'_, M>) -> Arc<LlmRequest> {
         let rendered_prompt = ctx.messages.render_prompt();
         let attachments: Vec<LlmAttachment> = rendered_prompt.attachments;
@@ -439,8 +421,8 @@ impl<M: ModeProtocol> ContextProjector<M> for ChatContextProjector {
     }
 }
 
-pub trait ProtocolDriverHandle<M: ModeProtocol = UnitModeProtocol>: Send + Sync {
-    fn prepare_mode_iteration(&self, ctx: DriverContextView<'_, M>) -> Vec<DriverAction<M>>;
+pub trait ProtocolDriverHandle<M: TurnProtocol = UnitTurnProtocol>: Send + Sync {
+    fn prepare_protocol_iteration(&self, ctx: DriverContextView<'_, M>) -> Vec<DriverAction<M>>;
     fn handle_llm_success(
         &self,
         ctx: DriverContextView<'_, M>,
@@ -462,7 +444,7 @@ pub trait ProtocolDriverHandle<M: ModeProtocol = UnitModeProtocol>: Send + Sync 
 }
 
 /// Configuration for a `TurnMachine` instance.
-pub struct TurnMachineConfig<M: ModeProtocol = UnitModeProtocol> {
+pub struct TurnMachineConfig<M: TurnProtocol = UnitTurnProtocol> {
     pub protocol_driver: Arc<dyn ProtocolDriverHandle<M>>,
     pub projector: Arc<dyn ContextProjector<M>>,
     pub sync_execution_surface: bool,
@@ -483,8 +465,8 @@ pub struct TurnMachineConfig<M: ModeProtocol = UnitModeProtocol> {
 // ─── Internal state ───
 
 #[derive(Debug, Serialize, serde::Deserialize)]
-enum MachineState<M: ModeProtocol = UnitModeProtocol> {
-    PreparingMode,
+enum MachineState<M: TurnProtocol = UnitTurnProtocol> {
+    PreparingProtocol,
     WaitingExecutionSurface {
         effect_id: EffectId,
         update_machine_config: bool,
@@ -513,7 +495,7 @@ enum MachineState<M: ModeProtocol = UnitModeProtocol> {
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
-pub struct TurnCheckpoint<M: ModeProtocol = UnitModeProtocol> {
+pub struct TurnCheckpoint<M: TurnProtocol = UnitTurnProtocol> {
     state: MachineState<M>,
     pending_effects: Vec<CheckpointEffect<M>>,
     next_effect_id: u64,
@@ -523,17 +505,17 @@ pub struct TurnCheckpoint<M: ModeProtocol = UnitModeProtocol> {
     events: Vec<SessionEventRecord<M::Event>>,
     #[serde(default)]
     progress_event_cursor: usize,
-    mode_iteration: usize,
-    mode_run_offset: usize,
+    protocol_iteration: usize,
+    protocol_run_offset: usize,
     cumulative_usage: TokenUsage,
     termination: TurnTerminationPolicyState,
-    synced_mode_iteration: Option<usize>,
+    synced_protocol_iteration: Option<usize>,
 }
 
-impl<M: ModeProtocol> Clone for MachineState<M> {
+impl<M: TurnProtocol> Clone for MachineState<M> {
     fn clone(&self) -> Self {
         match self {
-            Self::PreparingMode => Self::PreparingMode,
+            Self::PreparingProtocol => Self::PreparingProtocol,
             Self::WaitingExecutionSurface {
                 effect_id,
                 update_machine_config,
@@ -578,7 +560,7 @@ impl<M: ModeProtocol> Clone for MachineState<M> {
     }
 }
 
-impl<M: ModeProtocol> CheckpointEffect<M> {
+impl<M: TurnProtocol> CheckpointEffect<M> {
     fn from_effect(effect: &Effect<M>) -> Self {
         match effect {
             Effect::SyncExecutionSurface {
@@ -612,20 +594,20 @@ impl<M: ModeProtocol> CheckpointEffect<M> {
             Effect::Progress {
                 messages,
                 event_delta,
-                mode_iteration,
+                protocol_iteration,
             } => Self::Progress {
                 messages: messages.iter().cloned().collect(),
                 event_delta: event_delta.clone(),
-                mode_iteration: *mode_iteration,
+                protocol_iteration: *protocol_iteration,
             },
             Effect::Done {
                 messages,
                 event_delta,
-                mode_iteration,
+                protocol_iteration,
             } => Self::Done {
                 messages: messages.iter().cloned().collect(),
                 event_delta: event_delta.clone(),
-                mode_iteration: *mode_iteration,
+                protocol_iteration: *protocol_iteration,
             },
         }
     }
@@ -649,26 +631,26 @@ impl<M: ModeProtocol> CheckpointEffect<M> {
             Self::Progress {
                 messages,
                 event_delta,
-                mode_iteration,
+                protocol_iteration,
             } => Effect::Progress {
                 messages: MessageSequence::from_owned(messages),
                 event_delta,
-                mode_iteration,
+                protocol_iteration,
             },
             Self::Done {
                 messages,
                 event_delta,
-                mode_iteration,
+                protocol_iteration,
             } => Effect::Done {
                 messages: MessageSequence::from_owned(messages),
                 event_delta,
-                mode_iteration,
+                protocol_iteration,
             },
         }
     }
 }
 
-impl<M: ModeProtocol> MachineState<M> {
+impl<M: TurnProtocol> MachineState<M> {
     fn outstanding_effect_id(&self) -> Option<EffectId> {
         match self {
             Self::WaitingExecutionSurface { effect_id, .. }
@@ -676,7 +658,7 @@ impl<M: ModeProtocol> MachineState<M> {
             | Self::WaitingTools { effect_id, .. }
             | Self::WaitingExec { effect_id, .. }
             | Self::WaitingCheckpoint { effect_id, .. } => Some(*effect_id),
-            Self::PreparingMode | Self::PrepareIteration | Self::Finished => None,
+            Self::PreparingProtocol | Self::PrepareIteration | Self::Finished => None,
         }
     }
 
@@ -713,13 +695,13 @@ impl<M: ModeProtocol> MachineState<M> {
                 id: *effect_id,
                 checkpoint: *checkpoint,
             }),
-            Self::PreparingMode | Self::PrepareIteration | Self::Finished => None,
+            Self::PreparingProtocol | Self::PrepareIteration | Self::Finished => None,
         }
     }
 }
 
 /// Sans-IO state machine for a single session run (multi-turn).
-pub struct TurnMachine<M: ModeProtocol = UnitModeProtocol> {
+pub struct TurnMachine<M: TurnProtocol = UnitTurnProtocol> {
     config: TurnMachineConfig<M>,
     state: MachineState<M>,
     pending_effects: VecDeque<Effect<M>>,
@@ -729,26 +711,26 @@ pub struct TurnMachine<M: ModeProtocol = UnitModeProtocol> {
     messages: MessageSequence,
     events: Arc<Vec<SessionEventRecord<M::Event>>>,
     progress_event_cursor: usize,
-    mode_iteration: usize,
-    mode_run_offset: usize,
+    protocol_iteration: usize,
+    protocol_run_offset: usize,
     cumulative_usage: TokenUsage,
     termination: TurnTerminationPolicyState,
-    synced_mode_iteration: Option<usize>,
+    synced_protocol_iteration: Option<usize>,
 }
 
-impl<M: ModeProtocol> TurnMachine<M> {
+impl<M: TurnProtocol> TurnMachine<M> {
     /// Create a new machine in `PrepareIteration` state.
     pub fn new(
         config: TurnMachineConfig<M>,
         messages: Vec<Message>,
         events: Arc<Vec<SessionEventRecord<M::Event>>>,
-        mode_run_offset: usize,
+        protocol_run_offset: usize,
     ) -> Self {
         Self::new_shared(
             config,
             MessageSequence::from_owned(messages),
             events,
-            mode_run_offset,
+            protocol_run_offset,
         )
     }
 
@@ -756,12 +738,12 @@ impl<M: ModeProtocol> TurnMachine<M> {
         config: TurnMachineConfig<M>,
         messages: MessageSequence,
         events: Arc<Vec<SessionEventRecord<M::Event>>>,
-        mode_run_offset: usize,
+        protocol_run_offset: usize,
     ) -> Self {
         let next_synthetic_message_id = messages.len() as u64;
         Self {
             config,
-            state: MachineState::PreparingMode,
+            state: MachineState::PreparingProtocol,
             pending_effects: VecDeque::new(),
             active_effect_redelivery: false,
             next_effect_id: 1,
@@ -769,11 +751,11 @@ impl<M: ModeProtocol> TurnMachine<M> {
             messages,
             progress_event_cursor: events.len(),
             events,
-            mode_iteration: mode_run_offset,
-            mode_run_offset,
+            protocol_iteration: protocol_run_offset,
+            protocol_run_offset,
             cumulative_usage: TokenUsage::default(),
             termination: TurnTerminationPolicyState::new(),
-            synced_mode_iteration: None,
+            synced_protocol_iteration: None,
         }
     }
 
@@ -794,8 +776,8 @@ impl<M: ModeProtocol> TurnMachine<M> {
         self.messages.clone()
     }
 
-    pub fn mode_iteration(&self) -> usize {
-        self.mode_iteration
+    pub fn protocol_iteration(&self) -> usize {
+        self.protocol_iteration
     }
 
     pub fn checkpoint(&self) -> TurnCheckpoint<M> {
@@ -814,11 +796,11 @@ impl<M: ModeProtocol> TurnMachine<M> {
             messages: self.messages.iter().cloned().collect(),
             events: self.events.as_ref().clone(),
             progress_event_cursor: self.progress_event_cursor,
-            mode_iteration: self.mode_iteration,
-            mode_run_offset: self.mode_run_offset,
+            protocol_iteration: self.protocol_iteration,
+            protocol_run_offset: self.protocol_run_offset,
             cumulative_usage: self.cumulative_usage.clone(),
             termination: self.termination.clone(),
-            synced_mode_iteration: self.synced_mode_iteration,
+            synced_protocol_iteration: self.synced_protocol_iteration,
         }
     }
 
@@ -846,11 +828,11 @@ impl<M: ModeProtocol> TurnMachine<M> {
             messages: MessageSequence::from_owned(checkpoint.messages),
             events: Arc::new(checkpoint.events),
             progress_event_cursor: checkpoint.progress_event_cursor,
-            mode_iteration: checkpoint.mode_iteration,
-            mode_run_offset: checkpoint.mode_run_offset,
+            protocol_iteration: checkpoint.protocol_iteration,
+            protocol_run_offset: checkpoint.protocol_run_offset,
             cumulative_usage: checkpoint.cumulative_usage,
             termination: checkpoint.termination,
-            synced_mode_iteration: checkpoint.synced_mode_iteration,
+            synced_protocol_iteration: checkpoint.synced_protocol_iteration,
         }
     }
 
@@ -859,8 +841,8 @@ impl<M: ModeProtocol> TurnMachine<M> {
             config: &self.config,
             messages: &self.messages,
             events: self.events.as_slice(),
-            mode_iteration: self.mode_iteration,
-            mode_run_offset: self.mode_run_offset,
+            protocol_iteration: self.protocol_iteration,
+            protocol_run_offset: self.protocol_run_offset,
             termination: &self.termination,
         }
     }
@@ -874,7 +856,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
     fn next_synthetic_message_id(&mut self, scope: &str) -> String {
         let id = format!(
             "m_sansio_{}_{}_{}",
-            self.mode_run_offset, scope, self.next_synthetic_message_id
+            self.protocol_run_offset, scope, self.next_synthetic_message_id
         );
         self.next_synthetic_message_id += 1;
         id
@@ -889,7 +871,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
         self.pending_effects.push_back(Effect::Progress {
             messages: self.messages.clone(),
             event_delta,
-            mode_iteration: self.mode_iteration,
+            protocol_iteration: self.protocol_iteration,
         });
     }
 
@@ -907,12 +889,12 @@ impl<M: ModeProtocol> TurnMachine<M> {
         self.emit(SessionEvent::Done);
         let msgs = std::mem::take(&mut self.messages);
         let event_delta = self.next_event_delta();
-        let mode_iteration = self.mode_iteration;
+        let protocol_iteration = self.protocol_iteration;
         self.state = MachineState::Finished;
         self.pending_effects.push_back(Effect::Done {
             messages: msgs,
             event_delta,
-            mode_iteration,
+            protocol_iteration,
         });
     }
 
@@ -940,12 +922,12 @@ impl<M: ModeProtocol> TurnMachine<M> {
         }
 
         match &self.state {
-            MachineState::PreparingMode => {
-                self.prepare_mode();
+            MachineState::PreparingProtocol => {
+                self.prepare_protocol();
                 self.pending_effects.pop_front()
             }
             MachineState::PrepareIteration => {
-                self.prepare_mode_iteration();
+                self.prepare_protocol_iteration();
                 self.pending_effects.pop_front()
             }
             _ => None,
@@ -954,7 +936,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
 
     // ─── State transitions ───
 
-    fn prepare_mode(&mut self) {
+    fn prepare_protocol(&mut self) {
         if self.config.sync_execution_surface {
             let id = self.next_id();
             self.state = MachineState::WaitingExecutionSurface {
@@ -969,12 +951,12 @@ impl<M: ModeProtocol> TurnMachine<M> {
             return;
         }
 
-        self.prepare_mode_iteration();
+        self.prepare_protocol_iteration();
     }
 
-    fn prepare_mode_iteration(&mut self) {
+    fn prepare_protocol_iteration(&mut self) {
         if self.config.sync_execution_surface
-            && self.synced_mode_iteration != Some(self.mode_iteration)
+            && self.synced_protocol_iteration != Some(self.protocol_iteration)
         {
             let id = self.next_id();
             self.state = MachineState::WaitingExecutionSurface {
@@ -991,7 +973,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
         let actions = {
             let driver = Arc::clone(&self.config.protocol_driver);
             let ctx = self.driver_context();
-            driver.prepare_mode_iteration(ctx)
+            driver.prepare_protocol_iteration(ctx)
         };
         self.apply_actions(actions);
     }
@@ -1009,7 +991,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
             .collect::<Vec<_>>()
             .join(", ");
         self.emit(SessionEvent::LlmRequest {
-            mode_iteration: self.mode_iteration,
+            protocol_iteration: self.protocol_iteration,
             message_count: self.messages.len(),
             tool_list,
         });
@@ -1051,8 +1033,8 @@ impl<M: ModeProtocol> TurnMachine<M> {
 
     fn schedule_turn_limit_final(&mut self, message: Message) -> bool {
         let Some(_max_turns) = self.termination.turn_limit_final_to_schedule(
-            self.mode_iteration,
-            self.mode_run_offset,
+            self.protocol_iteration,
+            self.protocol_run_offset,
             self.config.max_turns,
         ) else {
             return false;
@@ -1064,8 +1046,8 @@ impl<M: ModeProtocol> TurnMachine<M> {
 
     fn schedule_configured_turn_limit_final(&mut self) -> bool {
         let Some(max_turns) = self.termination.turn_limit_final_to_schedule(
-            self.mode_iteration,
-            self.mode_run_offset,
+            self.protocol_iteration,
+            self.protocol_run_offset,
             self.config.max_turns,
         ) else {
             return false;
@@ -1089,8 +1071,8 @@ impl<M: ModeProtocol> TurnMachine<M> {
                     ToolEvent::Invocation { stable_key, record },
                 ));
             }
-            SessionEventRecord::Mode(mode_event) => {
-                Arc::make_mut(&mut self.events).push(SessionEventRecord::Mode(mode_event));
+            SessionEventRecord::Protocol(protocol_event) => {
+                Arc::make_mut(&mut self.events).push(SessionEventRecord::Protocol(protocol_event));
             }
         }
     }
@@ -1120,9 +1102,9 @@ impl<M: ModeProtocol> TurnMachine<M> {
                     checkpoint,
                     on_empty,
                 } => self.request_checkpoint(checkpoint, on_empty),
-                DriverAction::AdvanceModeIteration => {
-                    self.mode_iteration += 1;
-                    self.synced_mode_iteration = None;
+                DriverAction::AdvanceProtocolIteration => {
+                    self.protocol_iteration += 1;
+                    self.synced_protocol_iteration = None;
                     progress_dirty = true;
                 }
                 DriverAction::ScheduleTurnLimitFinal { message } => {
@@ -1208,7 +1190,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
                     self.config.system_prompt = update.system_prompt;
                     self.config.tool_specs = update.tool_specs;
                 }
-                self.synced_mode_iteration = Some(self.mode_iteration);
+                self.synced_protocol_iteration = Some(self.protocol_iteration);
                 self.state = MachineState::PrepareIteration;
             }
             Err(error) => {
@@ -1292,7 +1274,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
             self.append_checkpoint_messages(&messages, false);
             self.append_checkpoint_messages(&transient_messages, true);
             if matches!(checkpoint, CheckpointKind::BeforeCompletion) {
-                self.mode_iteration += 1;
+                self.protocol_iteration += 1;
                 if self.termination.should_force_exit_after_grace_turn() {
                     self.emit_progress();
                     self.finish(TurnOutcome::Stopped(TurnStop::MaxTurns));
@@ -1380,7 +1362,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
             });
         }
         self.emit(SessionEvent::LlmResponse {
-            mode_iteration: self.mode_iteration,
+            protocol_iteration: self.protocol_iteration,
             content: llm_response.full_text.clone(),
             duration_ms: 0,
         });
@@ -1450,7 +1432,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
         let usage = token_usage_from_llm_usage(&llm_response.usage);
         self.cumulative_usage.add(&usage);
         self.emit(SessionEvent::TokenUsage {
-            mode_iteration: self.mode_iteration,
+            protocol_iteration: self.protocol_iteration,
             usage: usage.clone(),
             cumulative: self.cumulative_usage.clone(),
         });
@@ -1459,7 +1441,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
             self.pending_effects.push_back(Effect::Log {
                 event: LogEvent::LlmDebug {
                     session_id: self.config.session_id.clone(),
-                    mode_iteration: self.mode_iteration,
+                    protocol_iteration: self.protocol_iteration,
                     usage,
                     provider_usage: llm_response.provider_usage.clone(),
                     request_body: llm_response.request_body.clone(),
@@ -1475,7 +1457,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
             self.pending_effects.push_back(Effect::Log {
                 event: LogEvent::LlmError {
                     session_id: self.config.session_id.clone(),
-                    mode_iteration: self.mode_iteration,
+                    protocol_iteration: self.protocol_iteration,
                     request_body: error.request_body.clone(),
                     message: error.message.clone(),
                     retryable: error.retryable,

@@ -1,4 +1,4 @@
-use lash_core::{ToolActivation, ToolAvailabilityConfig, ToolDefinition, ToolExecutionMode};
+use lash_core::{ToolActivation, ToolAvailabilityConfig, ToolDefinition, ToolScheduling};
 use serde_json::{Value, json};
 
 pub(crate) fn search_tools_definition() -> ToolDefinition {
@@ -51,7 +51,7 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
             namespace: Some("runtime".to_string()),
             aliases: vec!["tool_search".to_string()],
         })
-        .with_execution_mode(ToolExecutionMode::Serial)
+        .with_scheduling(ToolScheduling::Serial)
 }
 
 fn schema_for<T>() -> Value

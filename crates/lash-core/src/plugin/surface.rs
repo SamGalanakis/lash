@@ -7,7 +7,6 @@ use super::*;
 #[derive(Clone)]
 pub struct ToolSurfaceContext {
     pub session_id: String,
-    pub mode: ExecutionMode,
     pub tools: Vec<ToolManifest>,
     pub resolve_contract: Option<lash_sansio::ToolContractResolver>,
     pub tool_access: SessionToolAccess,
@@ -18,7 +17,6 @@ pub struct ToolSurfaceContext {
 #[derive(Clone, Debug)]
 pub struct ToolDiscoveryContext {
     pub session_id: String,
-    pub mode: ExecutionMode,
     pub catalog: Vec<serde_json::Value>,
 }
 

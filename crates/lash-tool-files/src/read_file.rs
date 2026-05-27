@@ -7,8 +7,8 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
-    ToolResult, ToolRetryPolicy,
+    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
+    ToolRetryPolicy, ToolScheduling,
 };
 
 use lash_tool_support::{object_schema, parse_optional_usize_arg, require_str, run_blocking_value};
@@ -160,7 +160,7 @@ fn read_file_tool_definition() -> ToolDefinition {
                 r#"read_file(path="src/main.rs", offset=1, limit=120)"#.into(),
             ])
             .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["cat", "view_file"]))
-            .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
 
@@ -783,6 +783,7 @@ mod tests {
         let context = lash_core::ToolContext::__for_testing(
             "test-session".into(),
             Arc::new(lash_core::testing::MockSessionManager::default()),
+            Arc::new(lash_core::UnavailableProcessService),
             store.clone(),
             lash_core::DirectCompletionClient::from_fn(|_, _| {
                 Err(lash_core::PluginError::Session(

@@ -24,7 +24,7 @@ pub struct LlmPromptSnapshot {
     /// file can span root + handoff successors + spawned subagents.
     pub session_id: Option<String>,
     pub turn_index: Option<u64>,
-    pub mode_iteration: Option<u64>,
+    pub protocol_iteration: Option<u64>,
     pub llm_call_id: Option<String>,
     /// When this LLM call was issued from inside a tool's
     /// `direct_completion`, carries the originating tool's call id.
@@ -127,8 +127,8 @@ fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
         turn_index: context
             .and_then(|c| c.get("turn_index"))
             .and_then(Value::as_u64),
-        mode_iteration: context
-            .and_then(|c| c.get("mode_iteration"))
+        protocol_iteration: context
+            .and_then(|c| c.get("protocol_iteration"))
             .and_then(Value::as_u64),
         llm_call_id: context
             .and_then(|c| c.get("llm_call_id"))
@@ -302,12 +302,12 @@ mod tests {
         .unwrap();
         writeln!(
             tmp,
-            r#"{{"type":"llm_call_started","timestamp":"2026-05-04T00:00:00Z","context":{{"turn_index":1,"mode_iteration":0,"turn_id":"turn-1","llm_call_id":"abc:1:0:0"}},"request":{{"model":"gpt-5.5","model_variant":"high","messages":[{{"role":"system","blocks":[{{"kind":"text","text":"You are lash."}}]}},{{"role":"user","blocks":[{{"kind":"text","text":"hi"}}]}}]}}}}"#
+            r#"{{"type":"llm_call_started","timestamp":"2026-05-04T00:00:00Z","context":{{"turn_index":1,"protocol_iteration":0,"turn_id":"turn-1","llm_call_id":"abc:1:0:0"}},"request":{{"model":"gpt-5.5","model_variant":"high","messages":[{{"role":"system","blocks":[{{"kind":"text","text":"You are lash."}}]}},{{"role":"user","blocks":[{{"kind":"text","text":"hi"}}]}}]}}}}"#
         )
         .unwrap();
         writeln!(
             tmp,
-            r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"mode_iteration":0,"turn_id":"turn-1","llm_call_id":"abc:1:0:0"}},"response":{{"text":"ok","duration_ms":1234}},"usage":{{"input_tokens":100,"output_tokens":12,"cached_input_tokens":80,"reasoning_tokens":4}}}}"#
+            r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"protocol_iteration":0,"turn_id":"turn-1","llm_call_id":"abc:1:0:0"}},"response":{{"text":"ok","duration_ms":1234}},"usage":{{"input_tokens":100,"output_tokens":12,"cached_input_tokens":80,"reasoning_tokens":4}}}}"#
         )
         .unwrap();
         tmp.flush().unwrap();
@@ -316,7 +316,7 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         let p = &prompts[0];
         assert_eq!(p.turn_index, Some(1));
-        assert_eq!(p.mode_iteration, Some(0));
+        assert_eq!(p.protocol_iteration, Some(0));
         assert_eq!(p.llm_call_id.as_deref(), Some("abc:1:0:0"));
         assert_eq!(p.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(p.model_variant.as_deref(), Some("high"));
@@ -368,12 +368,12 @@ mod tests {
         for input in [11, 22] {
             writeln!(
                 tmp,
-                r#"{{"type":"llm_call_started","context":{{"turn_index":1,"mode_iteration":0,"llm_call_id":"root:1:0:{input}"}},"request":{{"messages":[{{"role":"system","blocks":[{{"text":"sys {input}"}}]}},{{"role":"user","blocks":[{{"text":"hi"}}]}}]}}}}"#
+                r#"{{"type":"llm_call_started","context":{{"turn_index":1,"protocol_iteration":0,"llm_call_id":"root:1:0:{input}"}},"request":{{"messages":[{{"role":"system","blocks":[{{"text":"sys {input}"}}]}},{{"role":"user","blocks":[{{"text":"hi"}}]}}]}}}}"#
             )
             .unwrap();
             writeln!(
                 tmp,
-                r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"mode_iteration":0,"llm_call_id":"root:1:0:{input}"}},"response":{{"duration_ms":1,"text":"ok"}},"usage":{{"input_tokens":{input},"output_tokens":1,"cached_input_tokens":0,"reasoning_tokens":0}}}}"#
+                r#"{{"type":"llm_call_completed","context":{{"turn_index":1,"protocol_iteration":0,"llm_call_id":"root:1:0:{input}"}},"response":{{"duration_ms":1,"text":"ok"}},"usage":{{"input_tokens":{input},"output_tokens":1,"cached_input_tokens":0,"reasoning_tokens":0}}}}"#
             )
             .unwrap();
         }

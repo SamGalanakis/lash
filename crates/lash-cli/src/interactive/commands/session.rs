@@ -1,6 +1,7 @@
 use lash::{LashSession, advanced::ExecutionMode, provider::ProviderHandle};
 use lash_core::session_model::Message;
 use lash_core::{SessionPolicy, ToolState};
+use lash_standard_plugins::StandardContextApproach;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
@@ -69,7 +70,7 @@ fn fallback_policy_for_session_switch(
     provider: &ProviderHandle,
     app: &App,
     current_model_variant: &mut Option<String>,
-    current_execution_mode: &mut ExecutionMode,
+    _current_execution_mode: &mut ExecutionMode,
 ) -> SessionPolicy {
     let model = lash_core::ModelSpec::from_token_limits(
         app.model.clone(),
@@ -82,9 +83,14 @@ fn fallback_policy_for_session_switch(
     SessionPolicy {
         provider: provider.clone(),
         model,
-        execution_mode: current_execution_mode.clone(),
         ..SessionPolicy::default()
     }
+}
+
+fn fallback_standard_context_approach(
+    current_execution_mode: &ExecutionMode,
+) -> Option<StandardContextApproach> {
+    (current_execution_mode == &ExecutionMode::standard()).then(StandardContextApproach::default)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -115,7 +121,13 @@ pub(super) async fn handle_clear(
         current_model_variant,
         current_execution_mode,
     );
-    let opened = runtime_factory.fresh(policy).await?;
+    let opened = runtime_factory
+        .fresh(
+            policy,
+            current_execution_mode.clone(),
+            fallback_standard_context_approach(current_execution_mode),
+        )
+        .await?;
     *runtime = Some(opened.session);
     *logger = opened.logger;
     let Some(session) = runtime.as_ref() else {
@@ -128,10 +140,8 @@ pub(super) async fn handle_clear(
             .await
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         let session_id = rt.session_id();
-        let policy = rt.policy_snapshot();
         app.session_id = session_id;
-        *current_execution_mode = policy.execution_mode;
-        *current_model_variant = policy.model.variant;
+        *current_model_variant = rt.policy_snapshot().model.variant;
     }
     app.session_name = opened.bootstrap.session_name();
     *desired_tool_state = session.control().tools().state().await?;
@@ -329,7 +339,14 @@ pub(crate) async fn switch_to_session_identifier(
         current_model_variant,
         current_execution_mode,
     );
-    let opened = runtime_factory.resume(identifier, policy).await?;
+    let opened = runtime_factory
+        .resume(
+            identifier,
+            policy,
+            current_execution_mode.clone(),
+            fallback_standard_context_approach(current_execution_mode),
+        )
+        .await?;
     activate_opened_session(
         opened,
         app,

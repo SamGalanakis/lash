@@ -35,8 +35,8 @@ fn timeline_items_from_test_read_view(
             }) => {
                 graph.append_active_read_delta(&[], std::slice::from_ref(record));
             }
-            lash_core::SessionEventRecord::Mode(event) => {
-                graph.append_mode_event(event.clone());
+            lash_core::SessionEventRecord::Protocol(event) => {
+                graph.append_protocol_event(event.clone());
             }
         }
     }

@@ -17,7 +17,7 @@ use super::{
     SessionToolAccess, SnapshotReader, SnapshotWriter, SubagentSessionContext,
     ToolDiscoveryContributor, ToolResultProjector, ToolSurfaceContributor, TurnContextTransform,
 };
-use crate::{ExecutionMode, StandardContextApproachKind, ToolProvider};
+use crate::ToolProvider;
 
 #[derive(Clone, Default)]
 pub struct PluginSpec {
@@ -207,8 +207,6 @@ impl PluginSpec {
 #[derive(Clone, Debug)]
 pub struct PluginSessionContext {
     pub session_id: String,
-    pub execution_mode: ExecutionMode,
-    pub standard_context_approach: Option<crate::StandardContextApproach>,
     pub tool_access: SessionToolAccess,
     pub subagent: Option<SubagentSessionContext>,
     pub lashlang_abilities: lashlang::LashlangAbilities,
@@ -231,8 +229,6 @@ impl PluginSessionContext {
 #[derive(Clone)]
 pub struct SessionReadyContext {
     pub session_id: String,
-    pub execution_mode: ExecutionMode,
-    pub standard_context_approach: Option<crate::StandardContextApproach>,
     pub host: PluginHost,
 }
 
@@ -324,9 +320,6 @@ pub trait SessionPlugin: Send + Sync {
 /// ```
 pub trait PluginFactory: Send + Sync {
     fn id(&self) -> &'static str;
-    fn supported_standard_context_approaches(&self) -> &'static [StandardContextApproachKind] {
-        &[]
-    }
     /// Produce a session-scoped plugin. **Must be cheap** — see the
     /// trait-level docs for the full contract.
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError>;

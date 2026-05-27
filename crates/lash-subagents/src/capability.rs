@@ -1,7 +1,7 @@
 //! Pluggable capability model for subagents.
 //!
 //! A `Capability` describes how to translate a `spawn_agent { capability: "name" }`
-//! call into the model, execution mode, tool surface, and recursion authority
+//! call into the model, plugin source, tool surface, and recursion authority
 //! of the spawned session. Built-in `explore` / `peer` tiers are tiny
 //! `TierCapability` instances; downstream code can register arbitrary
 //! additional impls (different model lookup, dynamic inheritance,
@@ -10,12 +10,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use lash_core::{ExecutionMode, ModelSpec, SessionPolicy, SessionSpec};
+use lash_core::{ModelSpec, SessionPluginSource, SessionPolicy, SessionSpec};
 
-pub const DEFAULT_EXPLORE_EXECUTION_MODE: &str = "rlm";
-
-pub fn default_explore_execution_mode() -> ExecutionMode {
-    ExecutionMode::new(DEFAULT_EXPLORE_EXECUTION_MODE)
+pub fn default_explore_plugin_source() -> TierPluginSource {
+    TierPluginSource::CurrentHostFresh
 }
 
 /// State the registry exposes to a `Capability` while it resolves a spawn.
@@ -25,22 +23,49 @@ pub struct CapabilityContext<'a> {
 
 pub trait Capability: Send + Sync {
     fn name(&self) -> &str;
-    fn resolve(&self, ctx: &CapabilityContext<'_>) -> SessionSpec;
+    fn resolve(&self, ctx: &CapabilityContext<'_>) -> CapabilityResolution;
+}
+
+#[derive(Clone, Debug)]
+pub struct CapabilityResolution {
+    pub spec: SessionSpec,
+    pub plugin_source: SessionPluginSource,
+}
+
+impl CapabilityResolution {
+    pub fn current_host_fresh(spec: SessionSpec) -> Self {
+        Self {
+            spec,
+            plugin_source: SessionPluginSource::CurrentHostFresh,
+        }
+    }
+
+    pub fn current_session_fork(spec: SessionSpec) -> Self {
+        Self {
+            spec,
+            plugin_source: SessionPluginSource::CurrentSessionFork,
+        }
+    }
 }
 
 /// Fixed capability for callers that already know the exact child authority
 /// they want and do not need provider-tier lookup.
 pub struct StaticCapability {
     name: String,
-    spec: SessionSpec,
+    resolution: CapabilityResolution,
 }
 
 impl StaticCapability {
     pub fn new(name: impl Into<String>, spec: SessionSpec) -> Self {
         Self {
             name: name.into(),
-            spec,
+            resolution: CapabilityResolution::current_host_fresh(spec),
         }
+    }
+
+    pub fn with_plugin_source(mut self, plugin_source: SessionPluginSource) -> Self {
+        self.resolution.plugin_source = plugin_source;
+        self
     }
 }
 
@@ -49,38 +74,38 @@ impl Capability for StaticCapability {
         &self.name
     }
 
-    fn resolve(&self, _ctx: &CapabilityContext<'_>) -> SessionSpec {
-        self.spec.clone()
+    fn resolve(&self, _ctx: &CapabilityContext<'_>) -> CapabilityResolution {
+        self.resolution.clone()
     }
 }
 
-/// How a tier picks its execution mode relative to the parent session.
+/// How a tier picks plugin instances relative to the parent session.
 #[derive(Clone, Debug)]
-pub enum TierExecutionMode {
-    Inherit,
-    Explicit(ExecutionMode),
+pub enum TierPluginSource {
+    CurrentHostFresh,
+    CurrentSessionFork,
 }
 
 /// Built-in capability that maps a tier name to: an optional explicit
-/// model, execution mode policy, and the conventional `explore` / `peer`
+/// model, plugin-source policy, and the conventional `explore` / `peer`
 /// authority split. Reproduces the historic tiered model behaviour when
 /// registered through [`default_registry`].
 pub struct TierCapability {
     name: String,
     model: Option<ModelSpec>,
-    execution_mode: TierExecutionMode,
+    plugin_source: TierPluginSource,
 }
 
 impl TierCapability {
     pub fn new(
         name: impl Into<String>,
         model: Option<ModelSpec>,
-        execution_mode: TierExecutionMode,
+        plugin_source: TierPluginSource,
     ) -> Self {
         Self {
             name: name.into(),
             model,
-            execution_mode,
+            plugin_source,
         }
     }
 }
@@ -90,13 +115,15 @@ impl Capability for TierCapability {
         &self.name
     }
 
-    fn resolve(&self, ctx: &CapabilityContext<'_>) -> SessionSpec {
+    fn resolve(&self, ctx: &CapabilityContext<'_>) -> CapabilityResolution {
         let model = pick_tier_model(self, ctx.parent_policy);
-        let mut spec = SessionSpec::inherit().model(model);
-        if let TierExecutionMode::Explicit(mode) = &self.execution_mode {
-            spec = spec.mode(mode.clone());
-        };
-        spec
+        let spec = SessionSpec::inherit().model(model);
+        match self.plugin_source {
+            TierPluginSource::CurrentHostFresh => CapabilityResolution::current_host_fresh(spec),
+            TierPluginSource::CurrentSessionFork => {
+                CapabilityResolution::current_session_fork(spec)
+            }
+        }
     }
 }
 
@@ -161,7 +188,8 @@ impl CapabilityRegistry {
 /// optional explicit model overrides keyed by tier name; absent tiers fall
 /// back to the provider's default agent model and then to the parent
 /// session's model. The built-in `explore` tier uses
-/// [`default_explore_execution_mode`] while `peer` inherits the parent mode.
+/// [`default_explore_plugin_source`] while `peer` forks the current session's
+/// plugin instances.
 ///
 /// The `explore` tier is read-only and cannot recurse: investigative
 /// subagents that scan, summarise, or verify without mutating state. The
@@ -175,12 +203,12 @@ pub fn default_registry(tier_models: &BTreeMap<String, ModelSpec>) -> Capability
     registry.add(Arc::new(TierCapability::new(
         "explore",
         model_for("explore"),
-        TierExecutionMode::Explicit(default_explore_execution_mode()),
+        default_explore_plugin_source(),
     )));
     registry.add(Arc::new(TierCapability::new(
         "peer",
         model_for("peer"),
-        TierExecutionMode::Inherit,
+        TierPluginSource::CurrentSessionFork,
     )));
     registry
 }

@@ -106,7 +106,7 @@ fn clear_panel(blocks: &mut UiTimeline, plugin_id: &str, key: &str) -> bool {
     blocks.len() != original_len
 }
 
-fn apply_plan_mode_state(
+fn apply_plan_protocol_state(
     blocks: &mut UiTimeline,
     indicators: &mut BTreeMap<String, String>,
     payload: serde_json::Value,
@@ -175,7 +175,7 @@ pub fn apply_surface_event(
                 return PluginRuntimeMutation::plan_dock_update(Some(next));
             }
             if plugin_id == "plan_mode" && name == "plan_mode.state" {
-                return apply_plan_mode_state(blocks, indicators, payload);
+                return apply_plan_protocol_state(blocks, indicators, payload);
             }
             PluginRuntimeMutation::blocks_changed(false)
         }
@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_mode_state_updates_indicator_and_panel_without_touching_dock() {
+    fn plan_protocol_state_updates_indicator_and_panel_without_touching_dock() {
         let mut blocks = UiTimeline::default();
         let mut indicators = BTreeMap::new();
         let dock = Some(PlanDockState {

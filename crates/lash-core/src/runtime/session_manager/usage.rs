@@ -49,7 +49,7 @@ impl ChildUsageEventRelay {
             session_id,
             source,
             model,
-            mode_iteration,
+            protocol_iteration,
             usage,
             cumulative,
         } = &event
@@ -60,7 +60,7 @@ impl ChildUsageEventRelay {
                     session_id: session_id.clone(),
                     source: source.clone(),
                     model: model.clone(),
-                    mode_iteration: *mode_iteration,
+                    protocol_iteration: *protocol_iteration,
                     usage: usage.clone(),
                     cumulative: cumulative.clone(),
                 },
@@ -182,7 +182,7 @@ pub(in crate::runtime::session_manager) fn subtract_usage(
 impl LiveChildUsageForwarder {
     async fn relay_token_usage(
         &self,
-        mode_iteration: usize,
+        protocol_iteration: usize,
         _usage: &TokenUsage,
         cumulative_usage: &TokenUsage,
     ) {
@@ -205,7 +205,7 @@ impl LiveChildUsageForwarder {
                     session_id: self.session_id.clone(),
                     source: self.source.clone(),
                     model: self.model.clone(),
-                    mode_iteration,
+                    protocol_iteration,
                     usage: delta,
                     cumulative,
                 })
@@ -218,14 +218,14 @@ impl LiveChildUsageForwarder {
 impl EventSink for ChannelEventSink {
     async fn emit(&self, event: SessionEvent) {
         if let SessionEvent::TokenUsage {
-            mode_iteration,
+            protocol_iteration,
             usage,
             cumulative,
         } = &event
             && let Some(live_usage) = &self.live_usage
         {
             live_usage
-                .relay_token_usage(*mode_iteration, usage, cumulative)
+                .relay_token_usage(*protocol_iteration, usage, cumulative)
                 .await;
         }
         if !self.tx.is_closed() {
