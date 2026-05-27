@@ -175,9 +175,17 @@ def update_workspace_dependency_versions(version: str) -> None:
         for line in text.splitlines():
             stripped = line.lstrip()
             name_match = re.match(r"([A-Za-z0-9_-]+)\s*=", stripped)
+            package_match = re.search(r'package\s*=\s*"([^"]+)"', stripped)
+            package_name = (
+                package_match.group(1)
+                if package_match is not None
+                else name_match.group(1)
+                if name_match is not None
+                else None
+            )
             if (
                 name_match
-                and name_match.group(1) in workspace_packages
+                and package_name in workspace_packages
                 and "path =" in line
                 and "version =" in line
             ):
