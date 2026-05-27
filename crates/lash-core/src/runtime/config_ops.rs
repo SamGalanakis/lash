@@ -117,6 +117,7 @@ impl LashRuntime {
             .tool_registry()
             .apply_state(snapshot)
             .map_err(|err| SessionError::Protocol(format!("tool reconfigure failed: {err}")))?;
+        session.refresh_tool_surface().await?;
         self.stamp_live_plugin_state();
         Ok(generation)
     }

@@ -896,7 +896,8 @@ mod test_protocol_fakes {
         }
 
         let outcomes = context
-            .dispatch_tool_batch(
+            .dispatch()
+            .batch(
                 parallel_specs
                     .iter()
                     .map(|(_, invocation)| invocation.clone())

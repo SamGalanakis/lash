@@ -213,6 +213,120 @@ impl ToolProviderSource {
     }
 }
 
+struct ToolProviderGroupSource {
+    id: String,
+    tools: RwLock<BTreeMap<String, (ToolManifest, usize)>>,
+    providers: Vec<(Arc<dyn ToolProvider>, Vec<String>)>,
+}
+
+impl ToolProviderGroupSource {
+    fn new(id: impl Into<String>, providers: Vec<Arc<dyn ToolProvider>>) -> Self {
+        let mut tools = BTreeMap::new();
+        let mut entries = Vec::new();
+        for provider in providers {
+            let tool_names = provider
+                .tool_manifests()
+                .into_iter()
+                .map(|manifest| {
+                    let name = manifest.name.clone();
+                    tools.insert(name.clone(), (manifest, entries.len()));
+                    name
+                })
+                .collect::<Vec<_>>();
+            entries.push((provider, tool_names));
+        }
+        Self {
+            id: id.into(),
+            tools: RwLock::new(tools),
+            providers: entries,
+        }
+    }
+
+    fn provider_index_for(&self, name: &str) -> Option<usize> {
+        self.resolve_manifest(name).and_then(|_| {
+            self.tools
+                .read()
+                .expect("tool provider group lock poisoned")
+                .get(name)
+                .map(|(_, provider_idx)| *provider_idx)
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolSourceExecutor for ToolProviderGroupSource {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn advertised_tools(&self) -> Vec<ToolManifest> {
+        self.tools
+            .read()
+            .expect("tool provider group lock poisoned")
+            .values()
+            .map(|(manifest, _)| manifest.clone())
+            .collect()
+    }
+
+    fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+        if let Some((manifest, _)) = self
+            .tools
+            .read()
+            .expect("tool provider group lock poisoned")
+            .get(name)
+        {
+            return Some(manifest.clone());
+        }
+        for (provider_idx, (provider, _)) in self.providers.iter().enumerate() {
+            if let Some(manifest) = provider.resolve_manifest(name) {
+                self.tools
+                    .write()
+                    .expect("tool provider group lock poisoned")
+                    .insert(name.to_string(), (manifest.clone(), provider_idx));
+                return Some(manifest);
+            }
+        }
+        None
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        let provider_idx = self.provider_index_for(name)?;
+        self.providers[provider_idx].0.resolve_contract(name)
+    }
+
+    async fn prepare_tool_call(
+        &self,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        let name = call.pending.tool_name.clone();
+        let Some(provider_idx) = self.provider_index_for(&name) else {
+            return Err(ToolResult::err_fmt(format_args!("Unknown tool: {name}")));
+        };
+        self.providers[provider_idx].0.prepare_tool_call(call).await
+    }
+
+    async fn execute(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+        context: &ToolContext<'_>,
+        progress: Option<&ProgressSender>,
+    ) -> ToolResult {
+        let Some(provider_idx) = self.provider_index_for(tool) else {
+            return ToolResult::err_fmt(format_args!("Unknown tool: {tool}"));
+        };
+        self.providers[provider_idx]
+            .0
+            .execute(ToolCall {
+                name: tool,
+                args,
+                context,
+                progress,
+            })
+            .await
+    }
+}
+
 #[async_trait::async_trait]
 impl ToolSourceExecutor for ToolProviderSource {
     fn id(&self) -> &str {
@@ -285,6 +399,17 @@ impl ToolRegistry {
         registry.upsert_source(Arc::new(ToolProviderSource::new(
             PLUGIN_SOURCE_ID,
             provider,
+        )))?;
+        Ok(registry)
+    }
+
+    pub(crate) fn from_tool_providers(
+        providers: Vec<Arc<dyn ToolProvider>>,
+    ) -> Result<Self, ReconfigureError> {
+        let registry = Self::empty();
+        registry.upsert_source(Arc::new(ToolProviderGroupSource::new(
+            PLUGIN_SOURCE_ID,
+            providers,
         )))?;
         Ok(registry)
     }
@@ -374,6 +499,23 @@ impl ToolRegistry {
         Ok(ToolSourceHandle::new(source_id))
     }
 
+    pub(crate) fn compose_session_surface(
+        &self,
+        include_base_tools: bool,
+        context_providers: Vec<Arc<dyn ToolProvider>>,
+    ) -> Result<Self, ReconfigureError> {
+        let registry = if include_base_tools {
+            self.fork_with_state(self.export_state())?
+        } else {
+            Self::empty()
+        };
+        registry.upsert_overlay_source(Arc::new(ToolProviderGroupSource::new(
+            "context",
+            context_providers,
+        )))?;
+        Ok(registry)
+    }
+
     pub(crate) fn upsert_source(
         &self,
         source: Arc<dyn ToolSourceExecutor>,
@@ -440,6 +582,63 @@ impl ToolRegistry {
             );
         }
 
+        self.sources
+            .write()
+            .expect("tool source lock poisoned")
+            .insert(source_id, source);
+        state.generation += 1;
+        Ok(state.generation)
+    }
+
+    fn upsert_overlay_source(
+        &self,
+        source: Arc<dyn ToolSourceExecutor>,
+    ) -> Result<u64, ReconfigureError> {
+        let source_id = source.id().to_string();
+        let advertised_tools = source
+            .advertised_tools()
+            .into_iter()
+            .map(|manifest| manifest_with_compact_contract(source.as_ref(), manifest))
+            .collect::<Vec<_>>();
+        validate_unique_manifests(&advertised_tools)?;
+
+        let advertised_names = advertised_tools
+            .iter()
+            .map(|manifest| manifest.name.clone())
+            .collect::<BTreeSet<_>>();
+        let advertised_ids = advertised_tools
+            .iter()
+            .map(|manifest| manifest.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut state = self
+            .state
+            .write()
+            .expect("tool registry state lock poisoned");
+        let previous_overrides = state
+            .tools
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.manifest.availability_override))
+            .collect::<BTreeMap<_, _>>();
+        state.tools.retain(|name, entry| {
+            entry.source_id != source_id
+                && !advertised_names.contains(name)
+                && !advertised_ids.contains(&entry.manifest.id)
+        });
+        for mut manifest in advertised_tools {
+            let name = manifest.name.clone();
+            manifest.availability_override = previous_overrides
+                .get(&name)
+                .copied()
+                .flatten()
+                .or(manifest.availability_override);
+            state.tools.insert(
+                name,
+                ToolStateEntry {
+                    manifest,
+                    source_id: source_id.clone(),
+                },
+            );
+        }
         self.sources
             .write()
             .expect("tool source lock poisoned")

@@ -142,6 +142,7 @@ pub struct Session {
     include_base_tools: bool,
     context_surface_revision: u64,
     context_tools: Vec<Arc<dyn ToolProvider>>,
+    tool_registry: Arc<crate::ToolRegistry>,
     context_prompt_contributions: Vec<PromptContribution>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
     tool_surface_cache: std::sync::Mutex<Vec<(ToolSurfaceCacheKey, ToolSurfaceHandle)>>,
@@ -154,12 +155,14 @@ pub struct Session {
 
 impl Session {
     pub async fn new(services: RuntimeServices, session_id: &str) -> Result<Self, SessionError> {
+        let tool_registry = services.plugins.tool_registry();
         let mut session = Self {
             session_id: session_id.to_string(),
             services,
             include_base_tools: true,
             context_surface_revision: 0,
             context_tools: Vec::new(),
+            tool_registry,
             context_prompt_contributions: Vec::new(),
             message_tx: None,
             tool_surface_cache: std::sync::Mutex::new(Vec::new()),
@@ -189,18 +192,11 @@ impl Session {
     }
 
     pub fn tools(&self) -> Arc<dyn ToolProvider> {
-        if self.include_base_tools && self.context_tools.is_empty() {
-            return self.services.plugins.tools();
-        }
+        Arc::clone(&self.tool_registry) as Arc<dyn ToolProvider>
+    }
 
-        let mut providers = Vec::new();
-        if self.include_base_tools {
-            providers.push(self.services.plugins.tools());
-        }
-        providers.extend(self.context_tools.iter().cloned());
-        Arc::new(crate::tool_provider::CompositeToolProvider::from_providers(
-            providers,
-        ))
+    pub(crate) fn tool_registry(&self) -> Arc<crate::ToolRegistry> {
+        Arc::clone(&self.tool_registry)
     }
 
     pub fn plugins(&self) -> &Arc<crate::PluginSession> {
@@ -212,7 +208,7 @@ impl Session {
         tool_providers: Vec<Arc<dyn ToolProvider>>,
         prompt_contributions: Vec<PromptContribution>,
         include_base_tools: bool,
-    ) {
+    ) -> Result<(), crate::PluginError> {
         let tool_providers_unchanged = self.context_tools.len() == tool_providers.len()
             && self
                 .context_tools
@@ -223,16 +219,27 @@ impl Session {
             && self.context_prompt_contributions == prompt_contributions
             && tool_providers_unchanged
         {
-            return;
+            return Ok(());
         }
+        let registry = self
+            .services
+            .plugins
+            .tool_registry()
+            .compose_session_surface(include_base_tools, tool_providers.clone())
+            .map(Arc::new)
+            .map_err(|err| {
+                crate::PluginError::Session(format!("failed to build session tool registry: {err}"))
+            })?;
         self.include_base_tools = include_base_tools;
         self.context_surface_revision = self.context_surface_revision.wrapping_add(1);
         self.context_tools = tool_providers;
+        self.tool_registry = registry;
         self.context_prompt_contributions = prompt_contributions;
         self.tool_surface_cache
             .lock()
             .expect("tool surface cache lock")
             .clear();
+        Ok(())
     }
 
     pub fn prompt_cache(&self) -> Arc<lash_sansio::PromptCache> {
@@ -251,7 +258,7 @@ impl Session {
         ToolSurfaceCacheKey {
             include_base_tools: self.include_base_tools,
             context_surface_revision: self.context_surface_revision,
-            tool_generation: self.plugins().tool_registry().generation(),
+            tool_generation: self.tool_registry.generation(),
             plugin_revision: self.plugins().snapshot_revision_fingerprint(),
         }
     }
@@ -406,6 +413,13 @@ impl Session {
     }
 
     pub async fn refresh_tool_surface(&mut self) -> Result<(), SessionError> {
+        self.tool_registry = self
+            .services
+            .plugins
+            .tool_registry()
+            .compose_session_surface(self.include_base_tools, self.context_tools.clone())
+            .map(Arc::new)
+            .map_err(|err| SessionError::Protocol(format!("tool reconfigure failed: {err}")))?;
         self.tool_surface_cache
             .lock()
             .expect("tool surface cache lock")

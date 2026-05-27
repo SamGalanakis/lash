@@ -1,6 +1,76 @@
 use super::*;
 
 impl RuntimeTurnDriver<'_> {
+    pub(super) async fn invoke_turn_checkpoint_effect(
+        &mut self,
+        machine: &mut TurnMachine,
+        id: crate::sansio::EffectId,
+        checkpoint: CheckpointKind,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<(Vec<PluginMessage>, Vec<PluginMessage>), RuntimeError> {
+        let metadata = self
+            .turn_effect_metadata(machine, id, RuntimeEffectKind::Checkpoint)
+            .map_err(RuntimeEffectControllerError::into_runtime_error)?;
+        self.execute_typed_turn_effect(
+            machine,
+            event_tx,
+            cancel,
+            RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::Checkpoint { checkpoint }),
+            RuntimeEffectOutcome::into_checkpoint,
+        )
+        .await
+        .and_then(|result| result)
+        .map_err(RuntimeEffectControllerError::into_runtime_error)
+    }
+
+    pub(super) async fn invoke_turn_execution_surface_sync_effect(
+        &mut self,
+        machine: &mut TurnMachine,
+        id: crate::sansio::EffectId,
+        update_machine_config: bool,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<
+        Result<Option<crate::sansio::ExecutionSurfaceSync>, String>,
+        RuntimeEffectControllerError,
+    > {
+        let metadata =
+            self.turn_effect_metadata(machine, id, RuntimeEffectKind::SyncExecutionSurface)?;
+        self.execute_typed_turn_effect(
+            machine,
+            event_tx,
+            cancel,
+            RuntimeEffectEnvelope::new(
+                metadata,
+                RuntimeEffectCommand::SyncExecutionSurface {
+                    update_machine_config,
+                },
+            ),
+            RuntimeEffectOutcome::into_sync_execution_surface,
+        )
+        .await
+    }
+
+    pub(super) async fn invoke_turn_exec_effect(
+        &mut self,
+        machine: &mut TurnMachine,
+        id: crate::sansio::EffectId,
+        code: String,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Result<crate::ExecResponse, String>, RuntimeEffectControllerError> {
+        let metadata = self.turn_effect_metadata(machine, id, RuntimeEffectKind::ExecCode)?;
+        self.execute_typed_turn_effect(
+            machine,
+            event_tx,
+            cancel,
+            RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::ExecCode { code }),
+            RuntimeEffectOutcome::into_exec_code,
+        )
+        .await
+    }
+
     pub(in crate::runtime) async fn run_checkpoint(
         &mut self,
         machine: &mut TurnMachine,
@@ -171,30 +241,11 @@ impl RuntimeTurnDriver<'_> {
                 }
             }
         });
-        let manager = self.session_manager.clone();
         let code_executor = self.session.plugins().code_executor();
         let read_view = self.checkpoint_state_view(messages, protocol_iteration);
         let chronological_projection = read_view.shared_chronological_projection();
-        let effect_controller =
-            crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
-        let direct_completions = manager.direct_completion_client(
-            effect_controller.clone_scoped(),
-            Some(self.turn_id.clone()),
-            self.turn_lease.clone(),
-        );
         let context = self
-            .session
-            .code_execution_context(
-                &self.session_id,
-                manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
-                manager.clone() as Arc<dyn crate::ProcessService>,
-                effect_controller,
-                direct_completions,
-                session_event_tx.clone(),
-                chronological_projection,
-                self.protocol_extension.clone(),
-                self.turn_context.clone(),
-            )
+            .execution_context(session_event_tx.clone(), chronological_projection)
             .map_err(|err| err.to_string())?
             .with_turn_event_sender(turn_event_tx.clone());
         let context = context.with_effect_metadata(effect_metadata);

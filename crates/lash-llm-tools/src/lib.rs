@@ -61,7 +61,8 @@ impl LlmToolsProvider {
         let inputs = args.get("inputs").cloned().unwrap_or(Value::Null);
         let output_schema = parse_output_schema(args.get("output"))?;
         let session_model = context
-            .session_model()
+            .sessions()
+            .model()
             .await
             .map_err(|err| format!("failed to read current session model: {err}"))?;
         let model = self.model.clone().unwrap_or(session_model.model);
@@ -76,7 +77,8 @@ impl LlmToolsProvider {
         });
 
         let completion = context
-            .direct_completion(
+            .direct_completions()
+            .complete(
                 DirectRequest {
                     model,
                     model_variant,

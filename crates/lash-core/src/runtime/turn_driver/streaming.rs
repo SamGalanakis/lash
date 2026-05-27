@@ -81,6 +81,33 @@ fn validate_generation_options(
 }
 
 impl RuntimeTurnDriver<'_> {
+    pub(super) async fn invoke_turn_llm_effect(
+        &mut self,
+        machine: &mut TurnMachine,
+        id: crate::sansio::EffectId,
+        request: Arc<LlmRequest>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<(Result<LlmResponse, LlmCallError>, bool), RuntimeEffectControllerError> {
+        let metadata = self.turn_effect_metadata(machine, id, RuntimeEffectKind::LlmCall)?;
+        self.execute_typed_turn_effect(
+            machine,
+            event_tx,
+            cancel,
+            RuntimeEffectEnvelope::new(
+                metadata,
+                RuntimeEffectCommand::LlmCall {
+                    request: Box::new(LlmRequestSpec::from_request(
+                        &request,
+                        self.host.core.attachment_store.as_ref(),
+                    )?),
+                },
+            ),
+            RuntimeEffectOutcome::into_llm_call,
+        )
+        .await
+    }
+
     async fn transform_assistant_stream_chunk(
         &mut self,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,

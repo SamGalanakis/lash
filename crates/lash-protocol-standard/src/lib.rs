@@ -213,7 +213,8 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
 
     let mut parallel_outcomes = call
         .context
-        .dispatch_tool_batch(
+        .dispatch()
+        .batch(
             parallel_specs
                 .iter()
                 .map(|(_, invocation)| invocation.clone())

@@ -334,7 +334,7 @@ fn store_image_attachment(
     context: &lash_core::ToolContext<'_>,
     image: ImageAttachmentData,
 ) -> ToolResult {
-    let reference = match context.put_attachment(
+    let reference = match context.attachments().put(
         image.data,
         lash_core::AttachmentCreateMeta::new(
             image.media_type,

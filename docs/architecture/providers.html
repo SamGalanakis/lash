@@ -129,7 +129,7 @@
             <article class="panel"><h3>Model policy</h3><p>Maps user-facing model + variant names to provider-native ids, declares structured-output / tool-call / thinking capabilities per model.</p></article>
             <article class="panel"><h3>Factory</h3><p>Registers with the global provider registry at process start; <code>ProviderHandle::new(components)</code> assembles the five pieces into a handle the runtime can use.</p></article>
           </div>
-          <p>See <code>crates/lash-provider-openai/src/lib.rs</code> as the most general template — it handles both the direct Responses path and the generic Chat Completions path in one crate.</p>
+          <p>See <code>lash-provider-openai</code> as the most general template — it handles both the direct Responses path and the generic Chat Completions path in one crate.</p>
         </div>
   </main>
 

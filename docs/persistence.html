@@ -15,7 +15,7 @@
 <script src="./docs.js" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
-<body class="docs-page" data-cover-source="<code>crates/lash-core/src/store.rs</code>, <code>crates/lash-core/src/runtime/mod.rs</code>, <code>crates/lash/src/core.rs</code>, <code>crates/lash/src/session.rs</code>, <code>crates/lash-sqlite-store/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>, <code>examples/agent-service/src/state.rs</code>, <code>examples/agent-service/src/db.rs</code>.">
+<body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash</code>, <code>crates/lash-sqlite-store</code>, <code>examples/agent-service</code>.">
 <section class="opener">
     <h1 class="opener__title">session<span class="slash">/</span>persistence</h1>
     <p class="opener__lede">Runtime state is persisted through <code>RuntimePersistence</code>. The default impl is <code>lash-sqlite-store</code>. Install a <code>SessionStoreFactory</code> on the core, or pass a store per session.</p>
@@ -208,7 +208,7 @@ let core = LashCore::builder()
 
 // Per request: open a session keyed by the app's chat id.
 let session = core.session(chat_id).rlm().open().await?;</code></pre>
-          <p>Full source: <code>examples/agent-service/src/main.rs</code> for process bootstrap, <code>examples/agent-service/src/state.rs</code> for session opening, and <code>examples/agent-service/src/db.rs</code> for product persistence.</p>
+          <p>Full source: the <code>examples/agent-service</code> example (process bootstrap, session opening, and product persistence).</p>
         </div>
   </main>
 

@@ -12,7 +12,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
 <link rel="stylesheet" href="../styles.css">
 <script src="../theme.js"></script>
-<script src="./mermaid.js" defer></script>
+<script src="../mermaid.js" defer></script>
 <script src="../docs.js" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
@@ -122,7 +122,7 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Graph To UI Projection</h2>
-            <p>Chronological rendering is a projection policy, not a storage policy. The graph remains durable and branchable; UI and exports choose readable order. <code>lash-export</code> walks an entire session tree: <code>load_tree_from_paths</code> assembles a <code>LoadedSessionTree</code> from the SQLite store and trace JSONL, and <code>render_tree</code> emits a multi-view HTML (<code>crates/lash-export/src/tree.rs</code>, <code>html.rs</code>).</p>
+            <p>Chronological rendering is a projection policy, not a storage policy. The graph remains durable and branchable; UI and exports choose readable order. <code>lash-export</code> walks an entire session tree: <code>load_tree_from_paths</code> assembles a <code>LoadedSessionTree</code> from the SQLite store and trace JSONL, and <code>render_tree</code> emits a multi-view HTML.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Read projection path</div>
