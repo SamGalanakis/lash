@@ -60,6 +60,7 @@ impl LashRuntime {
         {
             tracing::warn!("failed to restore tool state from checkpoint: {err}");
         }
+        session.refresh_tool_surface().await?;
         if let Some(snapshot) = state.plugin_snapshot.clone() {
             session
                 .plugins()

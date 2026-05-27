@@ -15,7 +15,7 @@
 <script src="./docs.js" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
-<body class="docs-page" data-cover-source="<code>crates/lash-core/src/plugin/registry.rs</code>, <code>crates/lash-core/src/plugin/registrar.rs</code>, <code>crates/lash-plugin-plan-mode/src/update_plan.rs</code>, <code>crates/lash/src/lib.rs</code>.">
+<body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash-plugin-plan-mode</code>, <code>crates/lash</code>.">
 <section class="opener">
     <h1 class="opener__title">writing<span class="slash">/</span>plugins</h1>
     <p class="opener__lede">The three traits you implement (<code>PluginFactory</code>, <code>SessionPlugin</code>, <code>ToolProvider</code>), the default stack, a minimal worked example, and the registrar hook namespaces. Companion pages cover the tool surface and the runtime contract.</p>
@@ -109,7 +109,7 @@ let core = LashCore::builder()
         <div class="section" id="worked-example">
           <div class="section-header">
             <h2>A Worked Example</h2>
-            <p>The plan-mode plugin (<code>crates/lash-plugin-plan-mode/src/update_plan.rs</code>) is a good single-file model. It exposes one tool (<code>update_plan</code>), keeps a session-local state shared between the tool and an after-tool hook, gates itself off in non-root sessions, and emits a TUI surface event when the plan changes. The skeleton:</p>
+            <p>The plan-mode plugin (<code>lash-plugin-plan-mode</code>) is a good single-file model. It exposes one tool (<code>update_plan</code>), keeps a session-local state shared between the tool and an after-tool hook, gates itself off in non-root sessions, and emits a TUI surface event when the plan changes. The skeleton:</p>
           </div>
           <pre><code>use std::sync::{Arc, Mutex};
 use lash::plugins::{
@@ -184,7 +184,7 @@ fn update_plan_definition() -&gt; ToolDefinition {
             serde_json::json!({}),
     )
 }</code></pre>
-          <p>Real plugins typically register multiple hooks in the same <code>register()</code> call (e.g. a tool plus an after-tool hook that emits a UI event, plus a prompt contribution describing the tool). See <code>crates/lash-plugin-plan-mode/src/update_plan.rs:280-330</code> for the full version.</p>
+          <p>Real plugins typically register multiple hooks in the same <code>register()</code> call (e.g. a tool plus an after-tool hook that emits a UI event, plus a prompt contribution describing the tool). See <code>lash-plugin-plan-mode</code> for the full version.</p>
         </div>
 
         <div class="section" id="what-you-can-register">

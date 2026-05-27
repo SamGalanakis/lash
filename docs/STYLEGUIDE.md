@@ -253,9 +253,13 @@ flowchart TD
 </div>
 ```
 
-Add `<script src="./mermaid.js" defer></script>` to the `<head>`. The loader
-only fetches the Mermaid library when `.mermaid` blocks exist — diagram-free
-pages pay no JS cost.
+Add the loader script to the `<head>`, with a path relative to the page's
+location — `mermaid.js` lives at the docs root. Root-level pages use
+`<script src="./mermaid.js" defer></script>`; subpages (e.g. under
+`architecture/`) must use `../mermaid.js`, matching how they reference
+`styles.css`, `docs.js`, etc. A wrong path 404s the loader silently and the
+diagram renders as raw text. The loader only fetches the Mermaid library when
+`.mermaid` blocks exist — diagram-free pages pay no JS cost.
 
 ### Tables
 

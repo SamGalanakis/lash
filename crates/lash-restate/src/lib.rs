@@ -1712,7 +1712,7 @@ mod tests {
                 serde_json::json!({ "message": line, "wake_input": line }),
             )
             .with_idempotency_key(format!("process.wake:{line}"));
-            if let Err(err) = call.context.emit_process_event_request(event).await {
+            if let Err(err) = call.context.process_events().emit_request(event).await {
                 return lash_core::ToolResult::err_fmt(err);
             }
             lash_core::ToolResult::ok(serde_json::json!({ "echo": line }))

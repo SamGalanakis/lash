@@ -1,9 +1,10 @@
 use async_trait::async_trait;
-use lash_core::plugin::{PluginError, runtime_host::RuntimeSessionHost};
+use lash_core::plugin::runtime_host::RuntimeSessionHost;
 use lash_core::{
     MessageRole, PluginMessage, PluginOptions, SessionCreateRequest, SessionPluginSource,
-    SessionSnapshot, ToolArgumentProjectionPolicy, ToolAvailabilityConfig, ToolCall, ToolContract,
-    ToolControl, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
+    SessionSnapshot, ToolArgumentProjectionPolicy, ToolAvailabilityConfig, ToolCall, ToolContext,
+    ToolContract, ToolControl, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
+    ToolScheduling,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -13,89 +14,6 @@ use crate::plugin::RLM_PROTOCOL_PLUGIN_ID;
 use crate::projection::RlmSeed;
 
 pub(crate) struct RlmControlToolsProvider;
-
-impl RlmControlToolsProvider {
-    async fn continue_as(
-        &self,
-        args: &Value,
-        context: &lash_core::ToolContext<'_>,
-    ) -> Result<ContinueAsResult, String> {
-        let task = required_string(args, "task")?;
-        let seed = RlmSeed::from_tool_args(args).map_err(|err| format!("continue_as {err}"))?;
-        let referenced_handles = collect_seed_process_handle_ids(args.get("seed"));
-        let referenced_handles_vec = referenced_handles.into_iter().collect::<Vec<_>>();
-        context
-            .validate_process_handles(&referenced_handles_vec)
-            .await
-            .map_err(|err| format!("continue_as process handle validation failed: {err}"))?;
-
-        let current_snapshot = context
-            .snapshot_current_session()
-            .await
-            .map_err(|err| format!("failed to snapshot current session: {err}"))?;
-        let sessions = context.sessions();
-        let successor_session_id = create_continue_as_successor(
-            &sessions,
-            context.session_id(),
-            current_snapshot,
-            task.clone(),
-            seed,
-            ContinueAsHandoff {
-                relation_reason: "continue_as".to_string(),
-                usage_source: "continue_as".to_string(),
-                metadata: serde_json::Map::new(),
-            },
-        )
-        .await?;
-        if let Err(err) = context
-            .transfer_process_handles(&successor_session_id, referenced_handles_vec.clone())
-            .await
-        {
-            let _ = context.close_session(&successor_session_id).await;
-            return Err(format!("continue_as process handle transfer failed: {err}"));
-        }
-        if let Err(err) = context
-            .cancel_unreferenced_process_handles(referenced_handles_vec.clone())
-            .await
-        {
-            if referenced_handles_vec.is_empty() && process_support_unavailable(&err) {
-                return Ok(ContinueAsResult {
-                    value: json!({
-                        "ok": true,
-                        "session_id": successor_session_id.clone(),
-                        "task": task,
-                    }),
-                    control: ToolControl::Handoff {
-                        session_id: successor_session_id,
-                    },
-                });
-            }
-            let _ = context.close_session(&successor_session_id).await;
-            return Err(format!(
-                "continue_as process handle cleanup failed after successor creation: {err}"
-            ));
-        }
-
-        Ok(ContinueAsResult {
-            value: json!({
-                "ok": true,
-                "session_id": successor_session_id.clone(),
-                "task": task,
-            }),
-            control: ToolControl::Handoff {
-                session_id: successor_session_id,
-            },
-        })
-    }
-}
-
-fn process_support_unavailable(err: &PluginError) -> bool {
-    matches!(
-        err,
-        PluginError::Session(message)
-            if message.contains("process") && message.contains("unavailable")
-    )
-}
 
 #[async_trait]
 impl ToolProvider for RlmControlToolsProvider {
@@ -109,7 +27,7 @@ impl ToolProvider for RlmControlToolsProvider {
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let result = match call.name {
-            "continue_as" => self.continue_as(call.args, call.context).await,
+            "continue_as" => continue_as_handoff(call.args, call.context).await,
             _ => return ToolResult::err_fmt(format_args!("Unknown tool: {}", call.name)),
         };
         finalise_tool_result(result)
@@ -188,19 +106,68 @@ pub fn continue_as_input_schema() -> Value {
     })
 }
 
-pub(crate) struct ContinueAsHandoff {
-    pub relation_reason: String,
-    pub usage_source: String,
-    pub metadata: serde_json::Map<String, Value>,
+async fn continue_as_handoff(
+    args: &Value,
+    context: &ToolContext<'_>,
+) -> Result<ContinueAsResult, String> {
+    let task = required_string(args, "task")?;
+    let seed = RlmSeed::from_tool_args(args).map_err(|err| format!("continue_as {err}"))?;
+    let referenced_handles = collect_seed_process_handle_ids(args.get("seed"));
+    let referenced_handles_vec = referenced_handles.into_iter().collect::<Vec<_>>();
+    let processes = context.processes();
+    processes
+        .validate_handles(&referenced_handles_vec)
+        .await
+        .map_err(|err| format!("continue_as process handle validation failed: {err}"))?;
+
+    let sessions = context.sessions();
+    let current_snapshot = sessions
+        .snapshot_current()
+        .await
+        .map_err(|err| format!("failed to snapshot current session: {err}"))?;
+    let successor_session_id = create_continue_as_successor(
+        &sessions,
+        context.session_id(),
+        current_snapshot,
+        task.clone(),
+        seed,
+    )
+    .await?;
+    if let Err(err) = processes
+        .transfer_handles(&successor_session_id, referenced_handles_vec.clone())
+        .await
+    {
+        let _ = sessions.close_session(&successor_session_id).await;
+        return Err(format!("continue_as process handle transfer failed: {err}"));
+    }
+    if let Err(err) = processes
+        .cancel_unreferenced_handles(referenced_handles_vec.clone())
+        .await
+    {
+        let _ = sessions.close_session(&successor_session_id).await;
+        return Err(format!(
+            "continue_as process handle cleanup failed after successor creation: {err}"
+        ));
+    }
+
+    Ok(ContinueAsResult {
+        value: json!({
+            "ok": true,
+            "session_id": successor_session_id.clone(),
+            "task": task,
+        }),
+        control: ToolControl::Handoff {
+            session_id: successor_session_id,
+        },
+    })
 }
 
-pub(crate) async fn create_continue_as_successor(
+async fn create_continue_as_successor(
     sessions: &dyn RuntimeSessionHost,
     parent_session_id: &str,
     current_snapshot: SessionSnapshot,
     task: String,
     seed: RlmSeed,
-    handoff: ContinueAsHandoff,
 ) -> Result<String, String> {
     let termination = current_snapshot
         .protocol_turn_options
@@ -217,9 +184,9 @@ pub(crate) async fn create_continue_as_successor(
         parent_session_id,
         current_snapshot.policy.clone(),
         plugin_options,
-        handoff.relation_reason,
-        handoff.metadata,
-        handoff.usage_source,
+        "continue_as".to_string(),
+        serde_json::Map::new(),
+        "continue_as".to_string(),
     )
     .with_plugin_source(SessionPluginSource::CurrentSessionFork)
     .with_initial_nodes(crate::rlm_seed_initial_nodes(seed))

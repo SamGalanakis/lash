@@ -944,11 +944,18 @@ impl LashRuntime {
         drop(turn_ctx);
         let messages = prepared_context.messages;
         if let Some(session) = self.session.as_mut() {
-            session.set_context_surface(
-                prepared_context.tool_providers,
-                prepared_context.prompt_contributions,
-                prepared_context.include_base_tools,
-            );
+            session
+                .set_context_surface(
+                    prepared_context.tool_providers,
+                    prepared_context.prompt_contributions,
+                    prepared_context.include_base_tools,
+                )
+                .map_err(|err| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::Other("session_tool_registry".to_string()),
+                        err.to_string(),
+                    )
+                })?;
         }
 
         self.state.last_prompt_usage = None;

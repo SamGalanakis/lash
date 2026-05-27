@@ -186,13 +186,9 @@ impl PluginHost {
         contributions
             .history_rewriters
             .sort_by_key(|entry| std::cmp::Reverse(entry.0));
-        let base_tools: Arc<dyn ToolProvider> =
-            Arc::new(crate::tool_provider::CompositeToolProvider::from_providers(
-                contributions.tool_providers.clone(),
-            ));
         let registry = match tool_snapshot {
             Some(snapshot) => Arc::new(
-                crate::ToolRegistry::from_tool_provider(base_tools)
+                crate::ToolRegistry::from_tool_providers(contributions.tool_providers.clone())
                     .map_err(|err| {
                         PluginError::Registration(format!("failed to build tool registry: {err}"))
                     })?
@@ -203,9 +199,12 @@ impl PluginHost {
                         ))
                     })?,
             ),
-            None => Arc::new(crate::ToolRegistry::from_tool_provider(base_tools).map_err(
-                |err| PluginError::Registration(format!("failed to build tool registry: {err}")),
-            )?),
+            None => Arc::new(
+                crate::ToolRegistry::from_tool_providers(contributions.tool_providers.clone())
+                    .map_err(|err| {
+                        PluginError::Registration(format!("failed to build tool registry: {err}"))
+                    })?,
+            ),
         };
         let tools = Arc::clone(&registry) as Arc<dyn ToolProvider>;
 

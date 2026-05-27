@@ -15,7 +15,7 @@
 <script src="./docs.js" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
-<body class="docs-page" data-cover-source="<code>crates/lash-cli/src/main.rs</code>, <code>crates/lash-cli/src/command.rs</code>, <code>crates/lash-cli/src/config.rs</code>, <code>crates/lash-cli/src/setup.rs</code>, <code>crates/lash-cli/src/paths.rs</code>, <code>crates/lash-cli/src/interactive/input_handling.rs</code>.">
+<body class="docs-page" data-cover-source="<code>crates/lash-cli</code>.">
 <section class="opener">
     <h1 class="opener__title">using<span class="slash">/</span>cli</h1>
     <p class="opener__lede">The <code>lash</code> binary is shipped by the <code>lash-cli</code> crate. It runs an interactive terminal UI by default, an autonomous single-shot mode under <code>--print</code>, and a handful of administrative flows like <code>--export</code> and <code>--reset</code>. This page enumerates the user-visible surface: flags, slash commands, key bindings, the setup wizard, the config file, and the environment variables it reads.</p>
@@ -188,7 +188,7 @@ $ lash --print "Investigate the latest test failure." \
         <div class="section" id="config-file">
           <div class="section-header">
             <h2>Config File</h2>
-            <p>Configuration lives at <code>~/.lash/config.json</code> (overridable via the <code>LASH_HOME</code> environment variable). The schema is defined by <code>LashConfig</code> in <code>crates/lash-cli/src/config.rs</code> and uses <code>serde(deny_unknown_fields)</code> — unknown top-level fields are rejected to catch typos.</p>
+            <p>Configuration lives at <code>~/.lash/config.json</code> (overridable via the <code>LASH_HOME</code> environment variable). The schema is defined by <code>LashConfig</code> in <code>lash-cli</code> and uses <code>serde(deny_unknown_fields)</code> — unknown top-level fields are rejected to catch typos.</p>
           </div>
           <pre><code>{
   "active_provider": "openai",

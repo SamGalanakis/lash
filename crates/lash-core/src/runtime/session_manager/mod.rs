@@ -2,10 +2,12 @@ use super::*;
 use std::sync::atomic::AtomicBool;
 
 mod api;
+mod create_plan;
 mod current;
 mod direct;
 mod graph;
 mod managed;
+mod materialize;
 mod process_runners;
 mod turns;
 mod usage;

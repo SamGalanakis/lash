@@ -68,7 +68,11 @@ impl ToolDiscoveryToolsProvider {
         }
 
         let request = llm_rerank_request(args, &candidates, limit);
-        let completion = match context.direct_completion(request, "search_tools").await {
+        let completion = match context
+            .direct_completions()
+            .complete(request, "search_tools")
+            .await
+        {
             Ok(completion) => completion,
             Err(err) => return ToolResult::err_fmt(format_args!("search_tools failed: {err}")),
         };
@@ -102,7 +106,7 @@ impl ToolProvider for ToolDiscoveryToolsProvider {
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
-            "search_tools" => match call.context.tool_catalog().await {
+            "search_tools" => match call.context.sessions().tool_catalog().await {
                 Ok(catalog) => self.search_tools(call.args, catalog, call.context).await,
                 Err(err) => ToolResult::err_fmt(err.to_string()),
             },

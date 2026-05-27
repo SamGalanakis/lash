@@ -473,7 +473,7 @@ async fn ensure_plan_report_for_tool_context(
     context: &ToolContext<'_>,
     seed_if_missing: bool,
 ) -> Result<PlanReport, PluginError> {
-    let snapshot = context.session_snapshot().await?;
+    let snapshot = context.sessions().snapshot_current().await?;
     let path = ensure_plan_path_from_snapshot(state, &snapshot)?;
     if seed_if_missing {
         seed_plan_template(&path).map_err(PluginError::Session)?;
@@ -576,7 +576,10 @@ async fn set_plan_mode_enabled_state_for_tool_context(
         Some(lash_core::ToolAvailability::Off)
     };
     let names = vec!["plan_exit".to_string()];
-    if let Err(err) = context.set_tools_availability(&names, availability).await
+    if let Err(err) = context
+        .sessions()
+        .set_tools_availability(&names, availability)
+        .await
         && !tool_state_unavailable(&err)
     {
         if previous != enabled {

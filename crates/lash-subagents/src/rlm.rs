@@ -103,11 +103,17 @@ async fn run_child_session(
     create_request: lash_core::SessionCreateRequest,
     turn_input: lash_core::TurnInput,
 ) -> Result<Value, String> {
-    if context.tool_catalog().await.ok().is_some_and(|catalog| {
-        catalog
-            .iter()
-            .all(|tool| tool.get("name").and_then(serde_json::Value::as_str) != Some("spawn_agent"))
-    }) {
+    if context
+        .sessions()
+        .tool_catalog()
+        .await
+        .ok()
+        .is_some_and(|catalog| {
+            catalog.iter().all(|tool| {
+                tool.get("name").and_then(serde_json::Value::as_str) != Some("spawn_agent")
+            })
+        })
+    {
         return Err("subagent spawning is unavailable in this session".to_string());
     }
 

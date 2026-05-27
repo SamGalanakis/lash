@@ -1115,7 +1115,8 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
         async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
             let completion = call
                 .context
-                .direct_completion(
+                .direct_completions()
+                .complete(
                     crate::DirectRequest::text("mock-model", "nested"),
                     "tool-direct",
                 )

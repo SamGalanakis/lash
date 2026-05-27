@@ -23,9 +23,6 @@ impl RlmRuntimeState {
         config: RlmProtocolPluginConfig,
         projection_resolver: Arc<dyn ProjectionResolver>,
     ) -> Result<Self, SessionError> {
-        config
-            .validate()
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
         Ok(Self {
             execution: tokio::sync::Mutex::new(Some(RlmExecutionState::new(
                 config.observe_projection.clone(),

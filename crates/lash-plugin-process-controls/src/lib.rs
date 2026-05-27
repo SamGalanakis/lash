@@ -186,7 +186,7 @@ pub fn process_cancel_tool_definition() -> ToolDefinition {
 }
 
 pub async fn execute_process_list_tool_call(context: &lash_core::ToolContext<'_>) -> ToolResult {
-    match context.list_process_handles().await {
+    match context.processes().list_handles().await {
         Ok(entries) => {
             let entries: Vec<Value> = entries
                 .into_iter()
@@ -216,10 +216,11 @@ pub async fn execute_process_cancel_tool_call(
     else {
         return ToolResult::err_fmt("cancel_process requires `process_id`");
     };
-    if let Err(err) = context.validate_process_handles(&[id.to_string()]).await {
+    let processes = context.processes();
+    if let Err(err) = processes.validate_handles(&[id.to_string()]).await {
         return ToolResult::err_fmt(err.to_string());
     }
-    match context.cancel_process(id).await {
+    match processes.cancel(id).await {
         Ok(status) => ToolResult::ok(serde_json::json!({
             "process_id": status.id,
             "terminal": terminal_label(status.terminal.as_ref()),

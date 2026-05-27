@@ -12,7 +12,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
 <link rel="stylesheet" href="../styles.css">
 <script src="../theme.js"></script>
-<script src="./mermaid.js" defer></script>
+<script src="../mermaid.js" defer></script>
 <script src="../docs.js" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
@@ -130,7 +130,7 @@ flowchart LR
   Child --> Parent["usage relay + final result"]
             </div>
           </div>
-          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. Generic process controls expose <code>list_process_handles</code> and <code>cancel_process</code>, while <code>start &lt;tool&gt;</code> is the single way to run any ordinary tool as a durable process. A child can fail terminally with <code>await TOOL.default.submit_error({ reason: reason })?</code> (defined in <code>crates/lash-subagents/src/shared.rs</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
+          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. Generic process controls expose <code>list_process_handles</code> and <code>cancel_process</code>, while <code>start &lt;tool&gt;</code> is the single way to run any ordinary tool as a durable process. A child can fail terminally with <code>await TOOL.default.submit_error({ reason: reason })?</code> (defined in <code>lash-subagents</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
         </div>
 
         <div class="section">

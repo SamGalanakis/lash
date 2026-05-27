@@ -239,8 +239,7 @@ impl LashRuntime {
             self.state
                 .replace_active_read_state(&outcome.messages, &outcome.tool_calls);
             if let Some(session) = self.session.as_ref() {
-                self.state.tool_state_snapshot =
-                    Some(session.plugins().tool_registry().export_state());
+                self.state.tool_state_snapshot = Some(session.tool_registry().export_state());
                 self.state.plugin_snapshot = session.plugins().snapshot().ok();
                 self.state.plugin_snapshot_revision =
                     Some(session.plugins().snapshot_revision_fingerprint());

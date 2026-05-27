@@ -381,7 +381,7 @@ fn tool_result_from_rmcp(
                         image.mime_type
                     ));
                 };
-                let reference = match context.put_attachment(
+                let reference = match context.attachments().put(
                     data,
                     AttachmentCreateMeta::new(media_type, None, None, Some("MCP image".into())),
                 ) {
