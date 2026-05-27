@@ -31,3 +31,6 @@ lash-tool-search = { path = "../lash-tool-search", version = "=0.1.0-alpha.9" }
 lash-tool-shell = { path = "../lash-tool-shell", version = "=0.1.0-alpha.9" }
 lash-tool-web = { path = "../lash-tool-web", version = "=0.1.0-alpha.9" }
 serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9", default-features = false, features = ["testing"] }
