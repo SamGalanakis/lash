@@ -1,3 +1,4 @@
+mod artifact;
 mod ast;
 mod graph;
 mod lexer;
@@ -5,28 +6,39 @@ mod linker;
 mod parser;
 mod runtime;
 
+pub use artifact::{
+    ArtifactStoreError, ContentHash, InMemoryLashlangArtifactStore, LASHLANG_COMPILER_VERSION,
+    LASHLANG_SEMANTIC_HASH_VERSION, LASHLANG_VM_ABI_VERSION, LashlangArtifactStore, ModuleArtifact,
+    ModuleArtifactError, ModuleExports, ModuleRef, ProcessRef, RequiredSurfaceRef,
+    SurfaceRequirements, canonical_program_ir, global_in_memory_lashlang_artifact_store,
+    surface_requirements_for_program,
+};
 pub use ast::{
     AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ProcessDecl, ProcessParam,
-    ProcessStartExpr, Program, ResourceRefExpr, ScheduleCadence, ScheduleDecl, TriggerDecl,
-    TriggerSource, TypeDecl, TypeExpr, TypeField, UnaryOp,
+    ProcessStartExpr, Program, ResourceRefExpr, ScheduleCadence, ScheduleDecl, TriggerArg,
+    TriggerDecl, TriggerSource, TypeDecl, TypeExpr, TypeField, UnaryOp, format_type_expr,
 };
-pub use graph::{linked_static_graph_json, static_graph_json};
+pub use graph::{
+    ProcessMap, ProcessMapEdge, ProcessMapNode, ProcessMapOptions, linked_static_graph_json,
+    map_process, static_graph_json,
+};
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{
     LashlangAbilities, LashlangScheduleAbilities, LashlangSurface, LinkError, LinkedModule,
-    ResourceCatalog, ResourceOperationBinding, ResourceTypeCatalog,
+    ResourceCatalog, ResourceOperationBinding, ResourceTypeCatalog, TriggerEventBinding,
 };
 pub use parser::{ParseError, parse};
 pub use runtime::{
-    AbilityOp, AbilityResult, CompileStats, CompiledProgram, CompiledProgramCache,
-    CompiledProgramCacheStats, ExecutableProgram, ExecutionEnvironment, ExecutionHost,
-    ExecutionHostError, ExecutionMode, ExecutionOutcome, ExecutionScratch, ImageValue,
-    LASH_TYPE_KEY, ListValue, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessSleep,
-    ProcessSleepKind, ProcessStart, ProfileReport, ProfileStat, ProjectedBindingError,
-    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
-    ProjectedReadResponse, ProjectedValue, Record, ResourceHandle, ResourceOperation, RuntimeError,
-    RuntimeFailure, Snapshot, State, Value, compile, compile_linked, compile_linked_process,
-    compile_process, execute, from_json, prewarm, unwrap_type_value,
+    AbilityOp, AbilityResult, CompileStats, CompiledProcessCache, CompiledProcessCacheKey,
+    CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats, ExecutableProgram,
+    ExecutionEnvironment, ExecutionHost, ExecutionHostError, ExecutionMode, ExecutionOutcome,
+    ExecutionScratch, ImageValue, LASH_TYPE_KEY, ListValue, ProcessEvent, ProcessEventKind,
+    ProcessSignal, ProcessSleep, ProcessSleepKind, ProcessStart, ProfileReport, ProfileStat,
+    ProjectedBindingError, ProjectedBindings, ProjectedFuture, ProjectedHostValue,
+    ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record, ResourceHandle,
+    ResourceOperation, RuntimeError, RuntimeFailure, Snapshot, State, Value, compile,
+    compile_linked, compile_linked_process, compile_module_artifact_process, compile_process,
+    execute, from_json, prewarm, unwrap_type_value,
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {
@@ -91,6 +103,9 @@ fn parse_hint(error: &ParseError) -> Option<&'static str> {
         } => Some("use bounded `for` loops over ranges or lists"),
         ParseError::Expected { expected, .. } if expected.contains("type literals must start") => {
             Some("write nested object types as `Type { field: type }`")
+        }
+        ParseError::TriggerBodyNotAllowed { .. } => {
+            Some("bind every target process parameter in `-> process_name(param: event)`")
         }
         _ => None,
     }

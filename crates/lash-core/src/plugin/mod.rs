@@ -26,6 +26,7 @@ mod session_obj;
 mod session_types;
 mod snapshot;
 mod surface;
+mod trigger_registry;
 
 pub(crate) use actions::RegisteredPluginAction;
 pub use actions::{
@@ -55,10 +56,10 @@ pub use protocol::{
     ProtocolSessionPlugin,
 };
 pub use registrar::{
-    ExecutionRegistrations, HistoryRegistrations, OutputRegistrations, PluginActionRegistrations,
-    PluginRegistrar, PromptRegistrations, ProtocolRegistrations, SessionRegistrations,
-    SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations,
-    TurnRegistrations,
+    ExecutionRegistrations, HistoryRegistrations, HostEventRegistrations, OutputRegistrations,
+    PluginActionRegistrations, PluginRegistrar, PromptRegistrations, ProtocolRegistrations,
+    SessionRegistrations, SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations,
+    ToolResultRegistrations, TurnRegistrations,
 };
 pub(crate) use registrar::{PluginContributions, RegisteredHook};
 pub use registry::{
@@ -89,11 +90,13 @@ pub use surface::{
     TurnPreparation,
 };
 pub(crate) use surface::{emit_plugin_runtime_events, plugin_runtime_session_events};
+pub(crate) use trigger_registry::{InstalledSessionTrigger, SessionTriggerRegistry};
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     // Protocol plugins must be registered by the embedder before calling
     // `PluginHost::build_session`. Unit tests use an in-tree fake to avoid
     // a dev-dep cycle through the protocol crates.
-    let factories: Vec<Arc<dyn PluginFactory>> = Vec::new();
+    let factories: Vec<Arc<dyn PluginFactory>> =
+        vec![Arc::new(trigger_registry::SessionTriggerPluginFactory)];
     #[cfg(not(test))]
     return factories;
 
@@ -194,6 +197,40 @@ mod tests {
         }
     }
 
+    struct TriggerResourcePluginFactory;
+
+    impl PluginFactory for TriggerResourcePluginFactory {
+        fn id(&self) -> &'static str {
+            "trigger_resource"
+        }
+
+        fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
+            let mut resources = lashlang::ResourceCatalog::new();
+            resources.add_alias("TRIGGER", "button");
+            resources.add_trigger_event("TRIGGER", "pressed", lashlang::TypeExpr::Any);
+            resources
+        }
+
+        fn build(
+            &self,
+            _ctx: &PluginSessionContext,
+        ) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+            Ok(Arc::new(TriggerResourcePlugin))
+        }
+    }
+
+    struct TriggerResourcePlugin;
+
+    impl SessionPlugin for TriggerResourcePlugin {
+        fn id(&self) -> &'static str {
+            "trigger_resource"
+        }
+
+        fn register(&self, _reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+
     struct MockPlugin {
         session_id: String,
     }
@@ -258,6 +295,78 @@ mod tests {
                 state: Some(json!({"session_id": self.session_id})),
             })
         }
+    }
+
+    #[test]
+    fn plugin_host_collects_factory_lashlang_resources() {
+        let host = PluginHost::new(vec![Arc::new(TriggerResourcePluginFactory)]);
+
+        assert!(
+            host.lashlang_resources()
+                .trigger_event("TRIGGER", "pressed")
+                .is_some()
+        );
+        let session = host.build_session("root", None).expect("session");
+        assert!(
+            session
+                .lashlang_resources()
+                .trigger_event("TRIGGER", "pressed")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn declared_host_events_do_not_automatically_enter_lashlang_resources() {
+        struct HostEventOnlyFactory;
+
+        impl PluginFactory for HostEventOnlyFactory {
+            fn id(&self) -> &'static str {
+                "host_event_only"
+            }
+
+            fn build(
+                &self,
+                _ctx: &PluginSessionContext,
+            ) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+                Ok(Arc::new(HostEventOnlyPlugin))
+            }
+        }
+
+        struct HostEventOnlyPlugin;
+
+        impl SessionPlugin for HostEventOnlyPlugin {
+            fn id(&self) -> &'static str {
+                "host_event_only"
+            }
+
+            fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+                reg.host_events().declare(
+                    crate::HostEvent::new("TRIGGER", "button", "pressed")
+                        .payload(lashlang::TypeExpr::Str),
+                )
+            }
+        }
+
+        let host = PluginHost::new(vec![Arc::new(HostEventOnlyFactory)]);
+
+        assert!(
+            host.lashlang_resources()
+                .trigger_event("TRIGGER", "pressed")
+                .is_none()
+        );
+        let session = host.build_session("root", None).expect("session");
+        assert!(
+            session
+                .host_events()
+                .get("TRIGGER", "button", "pressed")
+                .is_some()
+        );
+        assert!(
+            session
+                .lashlang_resources()
+                .trigger_event("TRIGGER", "pressed")
+                .is_none()
+        );
     }
 
     #[tokio::test]

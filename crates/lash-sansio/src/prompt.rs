@@ -110,6 +110,12 @@ impl PromptCache {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn clear(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            *guard = None;
+        }
+    }
 }
 
 impl std::fmt::Debug for PromptCache {

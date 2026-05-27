@@ -1,0 +1,1317 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+use crate::ast::{
+    AssignPathStep, BinaryOp, Declaration, Expr, ProcessDecl, Program, ResourceRefExpr,
+    ScheduleCadence, TriggerArg, TriggerSource, TypeExpr, UnaryOp,
+};
+use crate::linker::{LashlangAbilities, ResourceCatalog};
+
+pub const LASHLANG_SEMANTIC_HASH_VERSION: &str = "lashlang-semantic-v1";
+pub const LASHLANG_COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const LASHLANG_VM_ABI_VERSION: &str = "lashlang-vm-abi-v1";
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ContentHash(String);
+
+impl ContentHash {
+    pub fn new(hex: impl Into<String>) -> Self {
+        Self(hex.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ContentHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ModuleRef(String);
+
+impl ModuleRef {
+    pub fn new(hash: &ContentHash) -> Self {
+        Self(format!("lashlang:v1:sha256:{hash}"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn hash_hex(&self) -> Option<&str> {
+        self.0.strip_prefix("lashlang:v1:sha256:")
+    }
+}
+
+impl std::fmt::Display for ModuleRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ProcessRef {
+    pub component: ContentHash,
+    pub pos: u32,
+}
+
+impl ProcessRef {
+    pub fn new(component: ContentHash, pos: u32) -> Self {
+        Self { component, pos }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RequiredSurfaceRef(String);
+
+impl RequiredSurfaceRef {
+    pub fn new(hash: &ContentHash) -> Self {
+        Self(format!("lashlang-surface:v1:sha256:{hash}"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RequiredSurfaceRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceRequirements {
+    #[serde(default)]
+    pub resources: ResourceCatalog,
+    #[serde(default)]
+    pub abilities: LashlangAbilities,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleExports {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub processes: BTreeMap<String, ProcessRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModuleArtifact {
+    pub module_ref: ModuleRef,
+    pub required_surface_ref: RequiredSurfaceRef,
+    pub required_surface: SurfaceRequirements,
+    pub exports: ModuleExports,
+    pub canonical_ir: Program,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<ModuleRef>,
+}
+
+impl ModuleArtifact {
+    pub fn from_program(program: Program) -> Result<Self, ModuleArtifactError> {
+        let canonical_ir = canonical_program_ir(program);
+        let requirements = surface_requirements_for_program(&canonical_ir);
+        Self::from_canonical_ir_and_requirements(canonical_ir, requirements)
+    }
+
+    pub(crate) fn from_program_with_requirements(
+        program: Program,
+        requirements: SurfaceRequirements,
+    ) -> Result<Self, ModuleArtifactError> {
+        let canonical_ir = canonical_program_ir(program);
+        Self::from_canonical_ir_and_requirements(canonical_ir, requirements)
+    }
+
+    fn from_canonical_ir_and_requirements(
+        canonical_ir: Program,
+        requirements: SurfaceRequirements,
+    ) -> Result<Self, ModuleArtifactError> {
+        let required_surface_ref = required_surface_ref(&requirements);
+        let exports = module_exports(&canonical_ir);
+        let module_ref = module_ref(&canonical_ir, &required_surface_ref, &exports);
+        Ok(Self {
+            module_ref,
+            required_surface_ref,
+            required_surface: requirements,
+            exports,
+            canonical_ir,
+            dependencies: Vec::new(),
+        })
+    }
+
+    pub fn process_ref(&self, process_name: &str) -> Option<&ProcessRef> {
+        self.exports.processes.get(process_name)
+    }
+
+    pub fn process_name_for_ref(&self, process_ref: &ProcessRef) -> Option<&str> {
+        self.exports
+            .processes
+            .iter()
+            .find_map(|(name, candidate)| (candidate == process_ref).then_some(name.as_str()))
+    }
+
+    pub fn verify(&self) -> Result<(), ModuleArtifactError> {
+        let rebuilt = Self::from_program_with_requirements(
+            self.canonical_ir.clone(),
+            self.required_surface.clone(),
+        )?;
+        if rebuilt.module_ref != self.module_ref {
+            return Err(ModuleArtifactError::HashMismatch {
+                field: "module_ref",
+                expected: rebuilt.module_ref.to_string(),
+                actual: self.module_ref.to_string(),
+            });
+        }
+        if rebuilt.required_surface_ref != self.required_surface_ref {
+            return Err(ModuleArtifactError::HashMismatch {
+                field: "required_surface_ref",
+                expected: rebuilt.required_surface_ref.to_string(),
+                actual: self.required_surface_ref.to_string(),
+            });
+        }
+        if rebuilt.exports != self.exports {
+            return Err(ModuleArtifactError::HashMismatch {
+                field: "exports",
+                expected: "canonical exports".to_string(),
+                actual: "artifact exports".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn to_store_bytes(&self) -> Result<Vec<u8>, ModuleArtifactError> {
+        self.verify()?;
+        serde_json::to_vec(self).map_err(|err| ModuleArtifactError::Codec(err.to_string()))
+    }
+
+    pub fn from_store_bytes(bytes: &[u8]) -> Result<Self, ModuleArtifactError> {
+        let artifact: Self = serde_json::from_slice(bytes)
+            .map_err(|err| ModuleArtifactError::Codec(err.to_string()))?;
+        artifact.verify()?;
+        Ok(artifact)
+    }
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum ModuleArtifactError {
+    #[error("failed to encode module artifact: {0}")]
+    Codec(String),
+    #[error("module artifact {field} mismatch: expected {expected}, got {actual}")]
+    HashMismatch {
+        field: &'static str,
+        expected: String,
+        actual: String,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum ArtifactStoreError {
+    #[error("failed to encode lashlang artifact: {0}")]
+    Encode(String),
+    #[error("failed to decode lashlang artifact: {0}")]
+    Decode(String),
+    #[error("artifact store backend error: {0}")]
+    Backend(String),
+}
+
+impl From<ModuleArtifactError> for ArtifactStoreError {
+    fn from(value: ModuleArtifactError) -> Self {
+        match value {
+            ModuleArtifactError::Codec(message) => Self::Decode(message),
+            ModuleArtifactError::HashMismatch { .. } => Self::Decode(value.to_string()),
+        }
+    }
+}
+
+pub trait LashlangArtifactStore: Send + Sync {
+    fn put_module_artifact(&self, artifact: &ModuleArtifact) -> Result<(), ArtifactStoreError>;
+
+    fn get_module_artifact(
+        &self,
+        module_ref: &ModuleRef,
+    ) -> Result<Option<ModuleArtifact>, ArtifactStoreError>;
+}
+
+#[derive(Clone, Default)]
+pub struct InMemoryLashlangArtifactStore {
+    modules: Arc<Mutex<BTreeMap<ModuleRef, Vec<u8>>>>,
+}
+
+impl InMemoryLashlangArtifactStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn put_raw_module_artifact_bytes(&self, module_ref: ModuleRef, bytes: Vec<u8>) {
+        if let Ok(mut modules) = self.modules.lock() {
+            modules.insert(module_ref, bytes);
+        }
+    }
+}
+
+pub fn global_in_memory_lashlang_artifact_store() -> Arc<InMemoryLashlangArtifactStore> {
+    static STORE: OnceLock<Arc<InMemoryLashlangArtifactStore>> = OnceLock::new();
+    STORE
+        .get_or_init(|| Arc::new(InMemoryLashlangArtifactStore::new()))
+        .clone()
+}
+
+impl LashlangArtifactStore for InMemoryLashlangArtifactStore {
+    fn put_module_artifact(&self, artifact: &ModuleArtifact) -> Result<(), ArtifactStoreError> {
+        let bytes = artifact
+            .to_store_bytes()
+            .map_err(|err| ArtifactStoreError::Encode(err.to_string()))?;
+        let mut modules = self
+            .modules
+            .lock()
+            .map_err(|_| ArtifactStoreError::Backend("artifact store lock poisoned".to_string()))?;
+        modules.insert(artifact.module_ref.clone(), bytes);
+        Ok(())
+    }
+
+    fn get_module_artifact(
+        &self,
+        module_ref: &ModuleRef,
+    ) -> Result<Option<ModuleArtifact>, ArtifactStoreError> {
+        let modules = self
+            .modules
+            .lock()
+            .map_err(|_| ArtifactStoreError::Backend("artifact store lock poisoned".to_string()))?;
+        modules
+            .get(module_ref)
+            .map(|bytes| ModuleArtifact::from_store_bytes(bytes).map_err(ArtifactStoreError::from))
+            .transpose()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledModuleContext {
+    pub(crate) module_ref: ModuleRef,
+    pub(crate) required_surface_ref: RequiredSurfaceRef,
+    pub(crate) process_refs: BTreeMap<String, ProcessRef>,
+}
+
+impl From<&ModuleArtifact> for CompiledModuleContext {
+    fn from(value: &ModuleArtifact) -> Self {
+        Self {
+            module_ref: value.module_ref.clone(),
+            required_surface_ref: value.required_surface_ref.clone(),
+            process_refs: value.exports.processes.clone(),
+        }
+    }
+}
+
+pub fn canonical_program_ir(mut program: Program) -> Program {
+    program.declaration_spans.clear();
+    program.expression_spans.clear();
+    program
+}
+
+pub fn surface_requirements_for_program(program: &Program) -> SurfaceRequirements {
+    RequirementsCollector::new(program).collect()
+}
+
+pub(crate) fn surface_requirements_for_program_with_catalog(
+    program: &Program,
+    catalog: &ResourceCatalog,
+) -> SurfaceRequirements {
+    RequirementsCollector::new(program)
+        .with_resource_catalog(catalog)
+        .collect()
+}
+
+fn module_exports(program: &Program) -> ModuleExports {
+    let mut exports = ModuleExports::default();
+    let mut process_pos = 0u32;
+    for declaration in &program.declarations {
+        if let Declaration::Process(process) = declaration {
+            exports.processes.insert(
+                process.name.to_string(),
+                ProcessRef::new(process_component_hash(process), process_pos),
+            );
+            process_pos += 1;
+        }
+    }
+    exports
+}
+
+fn module_ref(
+    program: &Program,
+    required_surface_ref: &RequiredSurfaceRef,
+    exports: &ModuleExports,
+) -> ModuleRef {
+    let mut writer = HashWriter::new();
+    writer.atom(LASHLANG_SEMANTIC_HASH_VERSION);
+    writer.atom("module");
+    writer.atom(required_surface_ref.as_str());
+    write_exports(&mut writer, exports);
+    write_program(&mut writer, program);
+    ModuleRef::new(&writer.finish())
+}
+
+fn required_surface_ref(requirements: &SurfaceRequirements) -> RequiredSurfaceRef {
+    let mut writer = HashWriter::new();
+    writer.atom(LASHLANG_SEMANTIC_HASH_VERSION);
+    writer.atom("required-surface");
+    write_surface_requirements(&mut writer, requirements);
+    RequiredSurfaceRef::new(&writer.finish())
+}
+
+fn process_component_hash(process: &ProcessDecl) -> ContentHash {
+    let mut writer = HashWriter::new();
+    writer.atom(LASHLANG_SEMANTIC_HASH_VERSION);
+    writer.atom("process");
+    write_process(&mut writer, process);
+    writer.finish()
+}
+
+fn write_exports(writer: &mut HashWriter, exports: &ModuleExports) {
+    writer.atom("exports");
+    writer.usize(exports.processes.len());
+    for (name, process_ref) in &exports.processes {
+        writer.atom("process-export");
+        writer.atom(name);
+        writer.atom(process_ref.component.as_str());
+        writer.u32(process_ref.pos);
+    }
+}
+
+fn write_surface_requirements(writer: &mut HashWriter, requirements: &SurfaceRequirements) {
+    writer.atom("abilities");
+    writer.bool(requirements.abilities.processes);
+    writer.bool(requirements.abilities.process_sleep);
+    writer.bool(requirements.abilities.process_signals);
+    writer.bool(requirements.abilities.triggers);
+    writer.bool(requirements.abilities.schedules.cron);
+    writer.atom("resources");
+    writer.usize(requirements.resources.resource_types.len());
+    for (resource_type, catalog) in &requirements.resources.resource_types {
+        writer.atom(resource_type);
+        writer.atom("aliases");
+        writer.usize(catalog.aliases.len());
+        for alias in &catalog.aliases {
+            writer.atom(alias);
+        }
+        writer.atom("operations");
+        writer.usize(catalog.operations.len());
+        for (operation, binding) in &catalog.operations {
+            writer.atom(operation);
+            writer.atom(&binding.host_operation);
+        }
+        writer.atom("trigger-events");
+        writer.usize(catalog.trigger_events.len());
+        for (event, binding) in &catalog.trigger_events {
+            writer.atom(event);
+            write_type(writer, &binding.payload_ty);
+        }
+    }
+}
+
+fn write_program(writer: &mut HashWriter, program: &Program) {
+    writer.atom("program");
+    writer.usize(program.declarations.len());
+    for declaration in &program.declarations {
+        write_declaration(writer, declaration);
+    }
+    let mut normalizer = NameNormalizer::default();
+    normalizer.collect_expr(&program.main);
+    write_expr(writer, &program.main, &normalizer);
+}
+
+fn write_declaration(writer: &mut HashWriter, declaration: &Declaration) {
+    match declaration {
+        Declaration::Type(type_decl) => {
+            writer.atom("type-decl");
+            writer.atom(type_decl.name.as_str());
+            write_type(writer, &type_decl.ty);
+        }
+        Declaration::Process(process) => write_process(writer, process),
+        Declaration::Trigger(trigger) => {
+            writer.atom("trigger-decl");
+            writer.atom(trigger.name.as_str());
+            match &trigger.source {
+                TriggerSource::Binding { resource, event } => {
+                    writer.atom("trigger-binding");
+                    write_resource_ref(writer, resource);
+                    writer.atom(event.as_str());
+                }
+                TriggerSource::Each {
+                    resource_type,
+                    event,
+                    resource_binding,
+                } => {
+                    writer.atom("trigger-each");
+                    writer.atom(resource_type.as_str());
+                    writer.atom(event.as_str());
+                    writer.atom(resource_binding.as_str());
+                }
+            }
+            writer.atom(trigger.event_binding.as_str());
+            writer.atom(trigger.process_name.as_str());
+            writer.usize(trigger.args.len());
+            for (name, arg) in &trigger.args {
+                writer.atom(name.as_str());
+                write_trigger_arg(writer, arg);
+            }
+        }
+        Declaration::Schedule(schedule) => {
+            writer.atom("schedule-decl");
+            writer.atom(schedule.name.as_str());
+            match &schedule.cadence {
+                ScheduleCadence::Cron {
+                    expression,
+                    options,
+                } => {
+                    writer.atom("cron");
+                    let mut normalizer = NameNormalizer::default();
+                    normalizer.bind_abi(schedule.tick_binding.as_str());
+                    normalizer.collect_expr(expression);
+                    for (_, option) in options {
+                        normalizer.collect_expr(option);
+                    }
+                    normalizer.collect_expr(&schedule.body);
+                    write_expr(writer, expression, &normalizer);
+                    writer.usize(options.len());
+                    for (key, value) in options {
+                        writer.atom(key.as_str());
+                        write_expr(writer, value, &normalizer);
+                    }
+                    writer.atom(schedule.tick_binding.as_str());
+                    write_expr(writer, &schedule.body, &normalizer);
+                }
+            }
+        }
+    }
+}
+
+fn write_process(writer: &mut HashWriter, process: &ProcessDecl) {
+    writer.atom("process-decl");
+    writer.atom(process.name.as_str());
+    writer.usize(process.params.len());
+    for param in &process.params {
+        writer.atom(param.name.as_str());
+        write_type(writer, &param.ty);
+    }
+    match &process.return_ty {
+        Some(ty) => {
+            writer.atom("return");
+            write_type(writer, ty);
+        }
+        None => writer.atom("no-return"),
+    }
+    let mut normalizer = NameNormalizer::default();
+    for param in &process.params {
+        normalizer.bind_abi(param.name.as_str());
+    }
+    normalizer.bind_abi("input");
+    normalizer.bind_abi("inputs");
+    normalizer.collect_expr(&process.body);
+    write_expr(writer, &process.body, &normalizer);
+}
+
+fn write_type(writer: &mut HashWriter, ty: &TypeExpr) {
+    match ty {
+        TypeExpr::Any => writer.atom("type:any"),
+        TypeExpr::Str => writer.atom("type:str"),
+        TypeExpr::Int => writer.atom("type:int"),
+        TypeExpr::Float => writer.atom("type:float"),
+        TypeExpr::Bool => writer.atom("type:bool"),
+        TypeExpr::Dict => writer.atom("type:dict"),
+        TypeExpr::Null => writer.atom("type:null"),
+        TypeExpr::Enum(values) => {
+            writer.atom("type:enum");
+            writer.usize(values.len());
+            for value in values {
+                writer.atom(value.as_str());
+            }
+        }
+        TypeExpr::List(item) => {
+            writer.atom("type:list");
+            write_type(writer, item);
+        }
+        TypeExpr::Object(fields) => {
+            writer.atom("type:object");
+            writer.usize(fields.len());
+            for field in fields {
+                writer.atom(field.name.as_str());
+                writer.bool(field.optional);
+                write_type(writer, &field.ty);
+            }
+        }
+        TypeExpr::Ref(name) => {
+            writer.atom("type:ref");
+            writer.atom(name.as_str());
+        }
+        TypeExpr::Union(items) => {
+            writer.atom("type:union");
+            writer.usize(items.len());
+            for item in items {
+                write_type(writer, item);
+            }
+        }
+    }
+}
+
+fn write_expr(writer: &mut HashWriter, expr: &Expr, normalizer: &NameNormalizer) {
+    match expr {
+        Expr::Block(expressions) => {
+            writer.atom("block");
+            writer.usize(expressions.len());
+            for expression in expressions {
+                write_expr(writer, expression, normalizer);
+            }
+        }
+        Expr::Null => writer.atom("null"),
+        Expr::Bool(value) => {
+            writer.atom("bool");
+            writer.bool(*value);
+        }
+        Expr::Number(value) => {
+            writer.atom("number");
+            writer.u64(if *value == 0.0 { 0 } else { value.to_bits() });
+        }
+        Expr::String(value) => {
+            writer.atom("string");
+            writer.atom(value.as_str());
+        }
+        Expr::Variable(name) => {
+            writer.atom("variable");
+            writer.atom(&normalizer.name_token(name.as_str()));
+        }
+        Expr::List(items) => {
+            writer.atom("list");
+            writer.usize(items.len());
+            for item in items {
+                write_expr(writer, item, normalizer);
+            }
+        }
+        Expr::Record(entries) => {
+            writer.atom("record");
+            writer.usize(entries.len());
+            for (key, value) in entries {
+                writer.atom(key.as_str());
+                write_expr(writer, value, normalizer);
+            }
+        }
+        Expr::Assign { target, expr } => {
+            writer.atom("assign");
+            writer.atom(&normalizer.name_token(target.root.as_str()));
+            writer.usize(target.steps.len());
+            for step in &target.steps {
+                match step {
+                    AssignPathStep::Field(field) => {
+                        writer.atom("field");
+                        writer.atom(field.as_str());
+                    }
+                    AssignPathStep::Index(index) => {
+                        writer.atom("index");
+                        write_expr(writer, index, normalizer);
+                    }
+                }
+            }
+            write_expr(writer, expr, normalizer);
+        }
+        Expr::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            writer.atom("if");
+            write_expr(writer, condition, normalizer);
+            write_expr(writer, then_block, normalizer);
+            write_expr(writer, else_block, normalizer);
+        }
+        Expr::For {
+            binding,
+            iterable,
+            body,
+        } => {
+            writer.atom("for");
+            writer.atom(&normalizer.name_token(binding.as_str()));
+            write_expr(writer, iterable, normalizer);
+            write_expr(writer, body, normalizer);
+        }
+        Expr::Break => writer.atom("break"),
+        Expr::Continue => writer.atom("continue"),
+        Expr::StartProcess(start) => {
+            writer.atom("start-process");
+            writer.atom(start.process.as_str());
+            writer.usize(start.args.len());
+            for (key, value) in &start.args {
+                writer.atom(key.as_str());
+                write_expr(writer, value, normalizer);
+            }
+        }
+        Expr::ResourceRef(resource) => {
+            writer.atom("resource-ref");
+            write_resource_ref(writer, resource);
+        }
+        Expr::ReceiverCall {
+            receiver,
+            operation,
+            args,
+        } => {
+            writer.atom("receiver-call");
+            write_expr(writer, receiver, normalizer);
+            writer.atom(operation.as_str());
+            writer.usize(args.len());
+            for arg in args {
+                write_expr(writer, arg, normalizer);
+            }
+        }
+        Expr::Await(expr) => write_unary_expr(writer, "await", expr, normalizer),
+        Expr::SleepFor(expr) => write_unary_expr(writer, "sleep-for", expr, normalizer),
+        Expr::SleepUntil(expr) => write_unary_expr(writer, "sleep-until", expr, normalizer),
+        Expr::WaitSignal => writer.atom("wait-signal"),
+        Expr::SignalRun { run, payload } => {
+            writer.atom("signal-run");
+            write_expr(writer, run, normalizer);
+            write_expr(writer, payload, normalizer);
+        }
+        Expr::ResultUnwrap(expr) => write_unary_expr(writer, "unwrap", expr, normalizer),
+        Expr::Cancel(expr) => write_unary_expr(writer, "cancel", expr, normalizer),
+        Expr::Print(expr) => write_unary_expr(writer, "print", expr, normalizer),
+        Expr::Submit(expr) => write_optional_expr(writer, "submit", expr, normalizer),
+        Expr::Yield(expr) => write_unary_expr(writer, "yield", expr, normalizer),
+        Expr::Wake(expr) => write_unary_expr(writer, "wake", expr, normalizer),
+        Expr::Finish(expr) => write_optional_expr(writer, "finish", expr, normalizer),
+        Expr::Fail(expr) => write_unary_expr(writer, "fail", expr, normalizer),
+        Expr::BuiltinCall { name, args } => {
+            writer.atom("builtin-call");
+            writer.atom(name.as_str());
+            writer.usize(args.len());
+            for arg in args {
+                write_expr(writer, arg, normalizer);
+            }
+        }
+        Expr::Field { target, field } => {
+            writer.atom("field-access");
+            write_expr(writer, target, normalizer);
+            writer.atom(field.as_str());
+        }
+        Expr::Index { target, index } => {
+            writer.atom("index-access");
+            write_expr(writer, target, normalizer);
+            write_expr(writer, index, normalizer);
+        }
+        Expr::Unary { op, expr } => {
+            writer.atom("unary");
+            write_unary_op(writer, *op);
+            write_expr(writer, expr, normalizer);
+        }
+        Expr::Binary { left, op, right } => {
+            writer.atom("binary");
+            write_binary_op(writer, *op);
+            write_expr(writer, left, normalizer);
+            write_expr(writer, right, normalizer);
+        }
+        Expr::TypeLiteral(ty) => {
+            writer.atom("type-literal");
+            write_type(writer, ty);
+        }
+    }
+}
+
+fn write_unary_expr(
+    writer: &mut HashWriter,
+    tag: &'static str,
+    expr: &Expr,
+    normalizer: &NameNormalizer,
+) {
+    writer.atom(tag);
+    write_expr(writer, expr, normalizer);
+}
+
+fn write_optional_expr(
+    writer: &mut HashWriter,
+    tag: &'static str,
+    expr: &Option<Box<Expr>>,
+    normalizer: &NameNormalizer,
+) {
+    writer.atom(tag);
+    match expr {
+        Some(expr) => {
+            writer.atom("some");
+            write_expr(writer, expr, normalizer);
+        }
+        None => writer.atom("none"),
+    }
+}
+
+fn write_resource_ref(writer: &mut HashWriter, resource: &ResourceRefExpr) {
+    writer.atom(resource.resource_type.as_str());
+    writer.atom(resource.alias.as_str());
+}
+
+fn write_trigger_arg(writer: &mut HashWriter, arg: &TriggerArg) {
+    match arg {
+        TriggerArg::EventBinding(name) => {
+            writer.atom("event-binding");
+            writer.atom(name.as_str());
+        }
+        TriggerArg::ResourceBinding(name) => {
+            writer.atom("resource-binding");
+            writer.atom(name.as_str());
+        }
+        TriggerArg::ResourceRef(resource) => {
+            writer.atom("resource-ref");
+            write_resource_ref(writer, resource);
+        }
+    }
+}
+
+fn write_unary_op(writer: &mut HashWriter, op: UnaryOp) {
+    writer.atom(match op {
+        UnaryOp::Negate => "negate",
+        UnaryOp::Not => "not",
+    });
+}
+
+fn write_binary_op(writer: &mut HashWriter, op: BinaryOp) {
+    writer.atom(match op {
+        BinaryOp::Add => "add",
+        BinaryOp::Subtract => "subtract",
+        BinaryOp::Multiply => "multiply",
+        BinaryOp::Divide => "divide",
+        BinaryOp::Modulo => "modulo",
+        BinaryOp::Equal => "equal",
+        BinaryOp::NotEqual => "not-equal",
+        BinaryOp::Less => "less",
+        BinaryOp::LessEqual => "less-equal",
+        BinaryOp::Greater => "greater",
+        BinaryOp::GreaterEqual => "greater-equal",
+        BinaryOp::And => "and",
+        BinaryOp::Or => "or",
+    });
+}
+
+#[derive(Default)]
+struct NameNormalizer {
+    names: BTreeMap<String, String>,
+    abi_names: BTreeSet<String>,
+    next_local: u32,
+}
+
+impl NameNormalizer {
+    fn bind_abi(&mut self, name: &str) {
+        self.abi_names.insert(name.to_string());
+        self.names.insert(name.to_string(), format!("abi:{name}"));
+    }
+
+    fn bind_local(&mut self, name: &str) {
+        if self.abi_names.contains(name) || self.names.contains_key(name) {
+            return;
+        }
+        let token = format!("local:{}", self.next_local);
+        self.next_local += 1;
+        self.names.insert(name.to_string(), token);
+    }
+
+    fn name_token(&self, name: &str) -> String {
+        self.names
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| format!("global:{name}"))
+    }
+
+    fn collect_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Block(expressions) => {
+                for expression in expressions {
+                    self.collect_expr(expression);
+                }
+            }
+            Expr::Assign { target, expr } => {
+                self.bind_local(target.root.as_str());
+                for step in &target.steps {
+                    if let AssignPathStep::Index(index) = step {
+                        self.collect_expr(index);
+                    }
+                }
+                self.collect_expr(expr);
+            }
+            Expr::For {
+                binding,
+                iterable,
+                body,
+            } => {
+                self.collect_expr(iterable);
+                self.bind_local(binding.as_str());
+                self.collect_expr(body);
+            }
+            Expr::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                self.collect_expr(condition);
+                self.collect_expr(then_block);
+                self.collect_expr(else_block);
+            }
+            Expr::List(items) => {
+                for item in items {
+                    self.collect_expr(item);
+                }
+            }
+            Expr::Record(entries) => {
+                for (_, value) in entries {
+                    self.collect_expr(value);
+                }
+            }
+            Expr::StartProcess(start) => {
+                for (_, value) in &start.args {
+                    self.collect_expr(value);
+                }
+            }
+            Expr::ReceiverCall { receiver, args, .. } => {
+                self.collect_expr(receiver);
+                for arg in args {
+                    self.collect_expr(arg);
+                }
+            }
+            Expr::Await(expr)
+            | Expr::SleepFor(expr)
+            | Expr::SleepUntil(expr)
+            | Expr::ResultUnwrap(expr)
+            | Expr::Cancel(expr)
+            | Expr::Print(expr)
+            | Expr::Yield(expr)
+            | Expr::Wake(expr)
+            | Expr::Fail(expr)
+            | Expr::Unary { expr, .. } => self.collect_expr(expr),
+            Expr::SignalRun { run, payload } => {
+                self.collect_expr(run);
+                self.collect_expr(payload);
+            }
+            Expr::Submit(expr) | Expr::Finish(expr) => {
+                if let Some(expr) = expr {
+                    self.collect_expr(expr);
+                }
+            }
+            Expr::BuiltinCall { args, .. } => {
+                for arg in args {
+                    self.collect_expr(arg);
+                }
+            }
+            Expr::Field { target, .. } => self.collect_expr(target),
+            Expr::Index { target, index } => {
+                self.collect_expr(target);
+                self.collect_expr(index);
+            }
+            Expr::Binary { left, right, .. } => {
+                self.collect_expr(left);
+                self.collect_expr(right);
+            }
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Number(_)
+            | Expr::String(_)
+            | Expr::Variable(_)
+            | Expr::Break
+            | Expr::Continue
+            | Expr::ResourceRef(_)
+            | Expr::WaitSignal
+            | Expr::TypeLiteral(_) => {}
+        }
+    }
+}
+
+#[derive(Default)]
+struct HashWriter {
+    bytes: Vec<u8>,
+}
+
+impl HashWriter {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn atom(&mut self, value: &str) {
+        self.bytes
+            .extend_from_slice(value.len().to_string().as_bytes());
+        self.bytes.push(b':');
+        self.bytes.extend_from_slice(value.as_bytes());
+        self.bytes.push(b';');
+    }
+
+    fn bool(&mut self, value: bool) {
+        self.atom(if value { "true" } else { "false" });
+    }
+
+    fn usize(&mut self, value: usize) {
+        self.atom(&value.to_string());
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.atom(&value.to_string());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.atom(&value.to_string());
+    }
+
+    fn finish(self) -> ContentHash {
+        ContentHash::new(hex_digest(&Sha256::digest(self.bytes)))
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+#[derive(Clone, Debug)]
+enum RequirementBinding {
+    Value,
+    Resource { resource_type: String },
+}
+
+struct RequirementsCollector<'program> {
+    program: &'program Program,
+    resource_catalog: Option<&'program ResourceCatalog>,
+    type_names: BTreeSet<String>,
+    requirements: SurfaceRequirements,
+}
+
+impl<'program> RequirementsCollector<'program> {
+    fn new(program: &'program Program) -> Self {
+        let type_names = program
+            .declarations
+            .iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::Type(type_decl) => Some(type_decl.name.to_string()),
+                _ => None,
+            })
+            .collect();
+        Self {
+            program,
+            resource_catalog: None,
+            type_names,
+            requirements: SurfaceRequirements::default(),
+        }
+    }
+
+    fn with_resource_catalog(mut self, catalog: &'program ResourceCatalog) -> Self {
+        self.resource_catalog = Some(catalog);
+        self
+    }
+
+    fn collect(mut self) -> SurfaceRequirements {
+        for declaration in &self.program.declarations {
+            match declaration {
+                Declaration::Type(type_decl) => self.collect_type(&type_decl.ty),
+                Declaration::Process(process) => {
+                    self.requirements.abilities.processes = true;
+                    let mut scope = BTreeMap::new();
+                    for param in &process.params {
+                        self.collect_type(&param.ty);
+                        if let TypeExpr::Ref(name) = &param.ty
+                            && !self.type_names.contains(name.as_str())
+                        {
+                            self.requirements
+                                .resources
+                                .ensure_resource_type(name.to_string());
+                            scope.insert(
+                                param.name.to_string(),
+                                RequirementBinding::Resource {
+                                    resource_type: name.to_string(),
+                                },
+                            );
+                        } else {
+                            scope.insert(param.name.to_string(), RequirementBinding::Value);
+                        }
+                    }
+                    if let Some(return_ty) = &process.return_ty {
+                        self.collect_type(return_ty);
+                    }
+                    scope.insert("input".to_string(), RequirementBinding::Value);
+                    scope.insert("inputs".to_string(), RequirementBinding::Value);
+                    self.collect_expr(&process.body, &mut scope);
+                }
+                Declaration::Trigger(trigger) => {
+                    self.requirements.abilities.triggers = true;
+                    self.requirements.abilities.processes = true;
+                    match &trigger.source {
+                        TriggerSource::Binding { resource, event } => {
+                            self.require_resource_ref(resource);
+                            let payload_ty =
+                                self.trigger_payload_ty(resource.resource_type.as_str(), event);
+                            self.requirements.resources.add_trigger_event(
+                                resource.resource_type.to_string(),
+                                event.to_string(),
+                                payload_ty,
+                            );
+                        }
+                        TriggerSource::Each {
+                            resource_type,
+                            event,
+                            ..
+                        } => {
+                            self.requirements
+                                .resources
+                                .ensure_resource_type(resource_type.to_string());
+                            let payload_ty = self.trigger_payload_ty(resource_type, event);
+                            self.requirements.resources.add_trigger_event(
+                                resource_type.to_string(),
+                                event.to_string(),
+                                payload_ty,
+                            );
+                        }
+                    }
+                    for (_, arg) in &trigger.args {
+                        match arg {
+                            TriggerArg::ResourceRef(resource) => {
+                                self.require_resource_ref(resource)
+                            }
+                            TriggerArg::ResourceBinding(_) | TriggerArg::EventBinding(_) => {}
+                        }
+                    }
+                }
+                Declaration::Schedule(schedule) => {
+                    let mut scope = BTreeMap::new();
+                    scope.insert(schedule.tick_binding.to_string(), RequirementBinding::Value);
+                    match &schedule.cadence {
+                        ScheduleCadence::Cron {
+                            expression,
+                            options,
+                        } => {
+                            self.requirements.abilities.schedules.cron = true;
+                            self.collect_expr(expression, &mut scope);
+                            for (_, option) in options {
+                                self.collect_expr(option, &mut scope);
+                            }
+                        }
+                    }
+                    self.collect_expr(&schedule.body, &mut scope);
+                }
+            }
+        }
+        let mut top_level = BTreeMap::new();
+        self.collect_expr(&self.program.main, &mut top_level);
+        self.requirements
+    }
+
+    fn trigger_payload_ty(&self, resource_type: &str, event: &str) -> TypeExpr {
+        self.resource_catalog
+            .and_then(|catalog| catalog.trigger_event(resource_type, event))
+            .map(|binding| binding.payload_ty.clone())
+            .unwrap_or(TypeExpr::Any)
+    }
+
+    fn collect_type(&mut self, ty: &TypeExpr) {
+        match ty {
+            TypeExpr::List(item) => self.collect_type(item),
+            TypeExpr::Object(fields) => {
+                for field in fields {
+                    self.collect_type(&field.ty);
+                }
+            }
+            TypeExpr::Union(items) => {
+                for item in items {
+                    self.collect_type(item);
+                }
+            }
+            TypeExpr::Ref(name) if !self.type_names.contains(name.as_str()) => {
+                self.requirements
+                    .resources
+                    .ensure_resource_type(name.to_string());
+            }
+            TypeExpr::Any
+            | TypeExpr::Str
+            | TypeExpr::Int
+            | TypeExpr::Float
+            | TypeExpr::Bool
+            | TypeExpr::Dict
+            | TypeExpr::Null
+            | TypeExpr::Enum(_)
+            | TypeExpr::Ref(_) => {}
+        }
+    }
+
+    fn collect_expr(
+        &mut self,
+        expr: &Expr,
+        scope: &mut BTreeMap<String, RequirementBinding>,
+    ) -> Option<RequirementBinding> {
+        match expr {
+            Expr::Block(expressions) => {
+                let mut last = None;
+                for expression in expressions {
+                    last = self.collect_expr(expression, scope);
+                }
+                last
+            }
+            Expr::Variable(name) => scope.get(name.as_str()).cloned(),
+            Expr::List(items) => {
+                for item in items {
+                    self.collect_expr(item, scope);
+                }
+                Some(RequirementBinding::Value)
+            }
+            Expr::Record(entries) => {
+                for (_, value) in entries {
+                    self.collect_expr(value, scope);
+                }
+                Some(RequirementBinding::Value)
+            }
+            Expr::Assign { target, expr } => {
+                for step in &target.steps {
+                    if let AssignPathStep::Index(index) = step {
+                        self.collect_expr(index, scope);
+                    }
+                }
+                let binding = self
+                    .collect_expr(expr, scope)
+                    .unwrap_or(RequirementBinding::Value);
+                if target.steps.is_empty() {
+                    scope.insert(target.root.to_string(), binding);
+                }
+                Some(RequirementBinding::Value)
+            }
+            Expr::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                self.collect_expr(condition, scope);
+                let mut then_scope = scope.clone();
+                self.collect_expr(then_block, &mut then_scope);
+                let mut else_scope = scope.clone();
+                self.collect_expr(else_block, &mut else_scope);
+                for (name, binding) in then_scope.into_iter().chain(else_scope) {
+                    scope.entry(name).or_insert(binding);
+                }
+                Some(RequirementBinding::Value)
+            }
+            Expr::For {
+                binding,
+                iterable,
+                body,
+            } => {
+                self.collect_expr(iterable, scope);
+                let previous = scope.insert(binding.to_string(), RequirementBinding::Value);
+                self.collect_expr(body, scope);
+                if let Some(previous) = previous {
+                    scope.insert(binding.to_string(), previous);
+                } else {
+                    scope.remove(binding.as_str());
+                }
+                Some(RequirementBinding::Value)
+            }
+            Expr::StartProcess(start) => {
+                self.requirements.abilities.processes = true;
+                for (_, value) in &start.args {
+                    self.collect_expr(value, scope);
+                }
+                Some(RequirementBinding::Value)
+            }
+            Expr::ResourceRef(resource) => {
+                self.require_resource_ref(resource);
+                Some(RequirementBinding::Resource {
+                    resource_type: resource.resource_type.to_string(),
+                })
+            }
+            Expr::ReceiverCall {
+                receiver,
+                operation,
+                args,
+            } => {
+                let receiver = self.collect_expr(receiver, scope);
+                if let Some(RequirementBinding::Resource { resource_type }) = receiver {
+                    self.requirements.resources.add_operation(
+                        resource_type,
+                        operation.to_string(),
+                        operation.to_string(),
+                    );
+                }
+                for arg in args {
+                    self.collect_expr(arg, scope);
+                }
+                Some(RequirementBinding::Value)
+            }
+            Expr::SleepFor(expr) | Expr::SleepUntil(expr) => {
+                self.requirements.abilities.process_sleep = true;
+                self.collect_expr(expr, scope);
+                Some(RequirementBinding::Value)
+            }
+            Expr::WaitSignal => {
+                self.requirements.abilities.process_signals = true;
+                Some(RequirementBinding::Value)
+            }
+            Expr::SignalRun { run, payload } => {
+                self.requirements.abilities.process_signals = true;
+                self.collect_expr(run, scope);
+                self.collect_expr(payload, scope);
+                Some(RequirementBinding::Value)
+            }
+            Expr::Await(expr)
+            | Expr::ResultUnwrap(expr)
+            | Expr::Cancel(expr)
+            | Expr::Print(expr)
+            | Expr::Yield(expr)
+            | Expr::Wake(expr)
+            | Expr::Fail(expr)
+            | Expr::Unary { expr, .. } => {
+                self.collect_expr(expr, scope);
+                Some(RequirementBinding::Value)
+            }
+            Expr::Submit(expr) | Expr::Finish(expr) => {
+                if let Some(expr) = expr {
+                    self.collect_expr(expr, scope);
+                }
+                Some(RequirementBinding::Value)
+            }
+            Expr::BuiltinCall { args, .. } => {
+                for arg in args {
+                    self.collect_expr(arg, scope);
+                }
+                Some(RequirementBinding::Value)
+            }
+            Expr::Field { target, .. } => {
+                self.collect_expr(target, scope);
+                Some(RequirementBinding::Value)
+            }
+            Expr::Index { target, index } => {
+                self.collect_expr(target, scope);
+                self.collect_expr(index, scope);
+                Some(RequirementBinding::Value)
+            }
+            Expr::Binary { left, right, .. } => {
+                self.collect_expr(left, scope);
+                self.collect_expr(right, scope);
+                Some(RequirementBinding::Value)
+            }
+            Expr::TypeLiteral(ty) => {
+                self.collect_type(ty);
+                Some(RequirementBinding::Value)
+            }
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Number(_)
+            | Expr::String(_)
+            | Expr::Break
+            | Expr::Continue => Some(RequirementBinding::Value),
+        }
+    }
+
+    fn require_resource_ref(&mut self, resource: &ResourceRefExpr) {
+        self.requirements.resources.add_alias(
+            resource.resource_type.to_string(),
+            resource.alias.to_string(),
+        );
+    }
+}

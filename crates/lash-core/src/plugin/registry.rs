@@ -22,6 +22,7 @@ use crate::ToolProvider;
 #[derive(Clone, Default)]
 pub struct PluginSpec {
     pub tool_providers: Vec<Arc<dyn ToolProvider>>,
+    pub host_events: Vec<crate::HostEvent>,
     pub prompt_contributors: Vec<PromptContributor>,
     pub tool_surface_contributors: Vec<ToolSurfaceContributor>,
     pub tool_discovery_contributors: Vec<ToolDiscoveryContributor>,
@@ -47,6 +48,11 @@ impl PluginSpec {
 
     pub fn with_tool_provider(mut self, provider: Arc<dyn ToolProvider>) -> Self {
         self.tool_providers.push(provider);
+        self
+    }
+
+    pub fn with_host_event(mut self, event: crate::HostEvent) -> Self {
+        self.host_events.push(event);
         self
     }
 
@@ -320,6 +326,20 @@ pub trait SessionPlugin: Send + Sync {
 /// ```
 pub trait PluginFactory: Send + Sync {
     fn id(&self) -> &'static str;
+
+    fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
+        lashlang::LashlangAbilities::default()
+    }
+
+    /// Host-owned Lashlang catalog entries that code may link against.
+    ///
+    /// This only affects the execution surface. It is intentionally not
+    /// rendered into prompts automatically; hosts remain responsible for
+    /// describing their resources through prompt contributions.
+    fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
+        lashlang::ResourceCatalog::new()
+    }
+
     /// Produce a session-scoped plugin. **Must be cheap** — see the
     /// trait-level docs for the full contract.
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError>;
@@ -389,6 +409,9 @@ impl SessionPlugin for SpecPlugin {
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         for provider in &self.spec.tool_providers {
             reg.tools().provider(Arc::clone(provider))?;
+        }
+        for event in &self.spec.host_events {
+            reg.host_events().declare(event.clone())?;
         }
         for contributor in &self.spec.prompt_contributors {
             reg.prompt().contribute(Arc::clone(contributor));

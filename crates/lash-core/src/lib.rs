@@ -1,6 +1,7 @@
 pub mod attachments;
 pub mod chronological;
 pub mod direct;
+pub mod host_events;
 pub mod lashlang_bridge;
 pub mod llm;
 mod model;
@@ -41,6 +42,9 @@ pub use chronological::{
 pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
+};
+pub use host_events::{
+    HostEvent, HostEventCatalog, HostEventEmitReport, HostEventKey, SessionTriggerInstallReport,
 };
 pub use lash_sansio::llm::types::{
     GenerationOptions, LlmOutputPart, LlmRequest, LlmResponse, LlmTerminalReason,
@@ -168,15 +172,16 @@ pub use plugin::{
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
     CheckpointHookContext, DirectCompletion, DirectLlmCompletion, HistoryError,
     HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState,
-    PersistentRuntimeServices, PluginAction, PluginActionContext, PluginActionDef,
-    PluginActionFailure, PluginActionInvokeError, PluginActionKind, PluginDirective, PluginError,
-    PluginFactory, PluginHost, PluginLifecycleEvent, PluginLifecycleEventHook, PluginOptions,
-    PluginOwned, PluginRegistrar, PluginSession, PluginSessionContext, PluginSessionSnapshot,
-    PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory,
-    PromptHookContext, ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RewriteContext,
-    RewriteTrigger, RuntimeServices, SessionAppendNode, SessionConfigChangedContext,
-    SessionContextSurface, SessionCreateRequest, SessionHandle, SessionParam, SessionPlugin,
-    SessionPluginSource, SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
+    HostEventRegistrations, PersistentRuntimeServices, PluginAction, PluginActionContext,
+    PluginActionDef, PluginActionFailure, PluginActionInvokeError, PluginActionKind,
+    PluginDirective, PluginError, PluginFactory, PluginHost, PluginLifecycleEvent,
+    PluginLifecycleEventHook, PluginOptions, PluginOwned, PluginRegistrar, PluginSession,
+    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
+    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
+    ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RewriteContext, RewriteTrigger,
+    RuntimeServices, SessionAppendNode, SessionConfigChangedContext, SessionContextSurface,
+    SessionCreateRequest, SessionHandle, SessionParam, SessionPlugin, SessionPluginSource,
+    SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
     SessionStateChangedContext, SessionToolAccess, SnapshotReader, SnapshotWriter,
     SubagentSessionContext, ToolDiscoveryContext, ToolDiscoveryContribution,
     ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolResultProjectionContext,
@@ -198,14 +203,15 @@ pub use runtime::{
     EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary, FollowedTurn,
     InlineRuntimeEffectController, InputItem, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
     NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionSnapshot,
-    ProcessAwaitOutput, ProcessCommand, ProcessCreatorScope, ProcessEffectOutcome, ProcessEvent,
+    ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome, ProcessEvent,
     ProcessEventAppendRequest, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
     ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
     ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessOpScope, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, ProcessRuntimeHost, ProcessService, ProcessStartGrant,
-    ProcessStartOptions, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
-    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
-    PromptUsage, ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
+    ProcessRegistration, ProcessRegistry, ProcessRuntimeHost, ProcessScope, ProcessScopeId,
+    ProcessService, ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions,
+    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
+    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, PromptUsage,
+    ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
     ProtocolTurnExtensionHandle, Residency, RuntimeCoreConfig, RuntimeEffectCommand,
     RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,

@@ -31,10 +31,13 @@ impl ToolSourceHandle {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolStateEntry {
     manifest: ToolManifest,
-    source_id: String,
 }
 
 impl ToolStateEntry {
+    pub(crate) fn new(manifest: ToolManifest) -> Self {
+        Self { manifest }
+    }
+
     pub fn manifest(&self) -> &ToolManifest {
         &self.manifest
     }
@@ -126,13 +129,6 @@ impl ToolState {
 
     pub(crate) fn entries(&self) -> &BTreeMap<String, ToolStateEntry> {
         self.tools.as_ref()
-    }
-
-    pub(crate) fn into_entries(self) -> BTreeMap<String, ToolStateEntry> {
-        match Arc::try_unwrap(self.tools) {
-            Ok(tools) => tools,
-            Err(tools) => tools.as_ref().clone(),
-        }
     }
 }
 
@@ -371,9 +367,28 @@ impl ToolSourceExecutor for ToolProviderSource {
 }
 
 #[derive(Clone)]
+struct ToolRegistryEntry {
+    manifest: ToolManifest,
+    source_id: String,
+}
+
+impl ToolRegistryEntry {
+    fn new(manifest: ToolManifest, source_id: impl Into<String>) -> Self {
+        Self {
+            manifest,
+            source_id: source_id.into(),
+        }
+    }
+
+    fn export(&self) -> ToolStateEntry {
+        ToolStateEntry::new(self.manifest.clone())
+    }
+}
+
+#[derive(Clone)]
 struct ToolRegistryState {
     generation: u64,
-    tools: BTreeMap<String, ToolStateEntry>,
+    tools: BTreeMap<String, ToolRegistryEntry>,
     next_live_source_id: u64,
 }
 
@@ -437,7 +452,7 @@ impl ToolRegistry {
             .state
             .read()
             .expect("tool registry state lock poisoned");
-        ToolState::new(state.generation, state.tools.clone())
+        ToolState::new(state.generation, export_tool_state_entries(&state.tools))
     }
 
     pub fn apply_state(&self, next: ToolState) -> Result<u64, ReconfigureError> {
@@ -449,21 +464,11 @@ impl ToolRegistry {
             });
         }
 
-        {
+        validate_unique_manifest_entries(next.entries().values())?;
+        let rebound_tools = {
             let sources = self.sources.read().expect("tool source lock poisoned");
-            for entry in next.entries().values() {
-                let Some(source) = sources.get(&entry.source_id) else {
-                    return Err(ReconfigureError::UnknownSource(entry.source_id.clone()));
-                };
-                if source.resolve_manifest(&entry.manifest.name).is_none() {
-                    return Err(ReconfigureError::Validation(format!(
-                        "tool source `{}` does not resolve tool `{}`",
-                        entry.source_id, entry.manifest.name
-                    )));
-                }
-            }
-            validate_unique_manifest_entries(next.entries().values())?;
-        }
+            rebind_tool_state_entries(next.entries(), &sources)?
+        };
 
         let mut state = self
             .state
@@ -475,7 +480,7 @@ impl ToolRegistry {
                 actual: state.generation,
             });
         }
-        state.tools = next.into_entries();
+        state.tools = rebound_tools;
         state.generation += 1;
         Ok(state.generation)
     }
@@ -573,13 +578,9 @@ impl ToolRegistry {
                 .copied()
                 .flatten()
                 .or(manifest.availability_override);
-            state.tools.insert(
-                name,
-                ToolStateEntry {
-                    manifest,
-                    source_id: source_id.clone(),
-                },
-            );
+            state
+                .tools
+                .insert(name, ToolRegistryEntry::new(manifest, source_id.clone()));
         }
 
         self.sources
@@ -631,13 +632,9 @@ impl ToolRegistry {
                 .copied()
                 .flatten()
                 .or(manifest.availability_override);
-            state.tools.insert(
-                name,
-                ToolStateEntry {
-                    manifest,
-                    source_id: source_id.clone(),
-                },
-            );
+            state
+                .tools
+                .insert(name, ToolRegistryEntry::new(manifest, source_id.clone()));
         }
         self.sources
             .write()
@@ -674,13 +671,15 @@ impl ToolRegistry {
             .expect("tool source lock poisoned")
             .iter()
             .map(|(k, v)| (k.clone(), Arc::clone(v)))
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+        validate_unique_manifest_entries(snapshot.entries().values())?;
+        let tools = rebind_tool_state_entries(snapshot.entries(), &sources)?;
         let generation = snapshot.generation.max(1);
         Ok(Self {
             sources: Arc::new(RwLock::new(sources)),
             state: Arc::new(RwLock::new(ToolRegistryState {
                 generation,
-                tools: snapshot.into_entries(),
+                tools,
                 next_live_source_id: 0,
             })),
         })
@@ -751,10 +750,7 @@ impl ToolProvider for ToolRegistry {
             }
             state.tools.insert(
                 manifest.name.clone(),
-                ToolStateEntry {
-                    manifest: manifest.clone(),
-                    source_id,
-                },
+                ToolRegistryEntry::new(manifest.clone(), source_id),
             );
             state.generation += 1;
             return Some(manifest);
@@ -877,6 +873,76 @@ fn manifest_with_compact_contract(
     manifest
 }
 
+fn export_tool_state_entries(
+    entries: &BTreeMap<String, ToolRegistryEntry>,
+) -> BTreeMap<String, ToolStateEntry> {
+    entries
+        .iter()
+        .map(|(name, entry)| (name.clone(), entry.export()))
+        .collect()
+}
+
+fn rebind_tool_state_entries(
+    entries: &BTreeMap<String, ToolStateEntry>,
+    sources: &BTreeMap<String, Arc<dyn ToolSourceExecutor>>,
+) -> Result<BTreeMap<String, ToolRegistryEntry>, ReconfigureError> {
+    let mut rebound = BTreeMap::new();
+    for (name, entry) in entries {
+        if name != &entry.manifest.name {
+            return Err(ReconfigureError::Validation(format!(
+                "tool state key `{}` does not match manifest name `{}`",
+                name, entry.manifest.name
+            )));
+        }
+
+        let mut name_matches = Vec::new();
+        for (source_id, source) in sources {
+            let Some(manifest) = source.resolve_manifest(name) else {
+                continue;
+            };
+            name_matches.push((
+                source_id.clone(),
+                manifest_with_compact_contract(source.as_ref(), manifest),
+            ));
+        }
+
+        if name_matches.is_empty() {
+            return Err(ReconfigureError::Validation(format!(
+                "no registered tool source resolves tool `{name}`"
+            )));
+        }
+
+        let matching_id = name_matches
+            .iter()
+            .filter(|(_, manifest)| manifest.id == entry.manifest.id)
+            .collect::<Vec<_>>();
+
+        if matching_id.len() == 1 {
+            let source_id = matching_id[0].0.clone();
+            rebound.insert(
+                name.clone(),
+                ToolRegistryEntry::new(entry.manifest.clone(), source_id),
+            );
+        } else if matching_id.is_empty() {
+            let resolved_ids = name_matches
+                .iter()
+                .map(|(_, manifest)| manifest.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ReconfigureError::Validation(format!(
+                "tool `{name}` resolved with id(s) `{resolved_ids}`, expected `{}`",
+                entry.manifest.id
+            )));
+        } else {
+            return Err(ReconfigureError::Validation(format!(
+                "tool `{name}` with id `{}` is resolved by multiple registered sources",
+                entry.manifest.id
+            )));
+        }
+    }
+    Ok(rebound)
+}
+
 fn validate_unique_manifest_entries<'a>(
     entries: impl IntoIterator<Item = &'a ToolStateEntry>,
 ) -> Result<(), ReconfigureError> {
@@ -901,6 +967,9 @@ mod tests {
         manifest_resolutions: Arc<AtomicUsize>,
         contract_resolutions: Arc<AtomicUsize>,
         executions: Arc<AtomicUsize>,
+    }
+    struct NamedExactSource {
+        id: &'static str,
     }
 
     fn test_tool(
@@ -930,6 +999,22 @@ mod tests {
             .into_iter()
             .find(|tool| tool.name == name)
             .map(|tool| Arc::new(tool.contract()))
+    }
+
+    fn test_tool_context() -> crate::ToolContext<'static> {
+        crate::ToolContext::builder(
+            "registry-test".to_string(),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::UnavailableProcessService),
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            Arc::new(crate::InMemoryAttachmentStore::new()),
+            crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
+        )
+        .build()
     }
 
     #[async_trait::async_trait]
@@ -1101,6 +1186,42 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl ToolSourceExecutor for NamedExactSource {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn advertised_tools(&self) -> Vec<ToolManifest> {
+            Vec::new()
+        }
+
+        fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+            (name == "host_only").then(|| {
+                test_tool(
+                    "host_only",
+                    "host-only",
+                    crate::ToolAvailabilityConfig::callable(),
+                )
+                .manifest()
+            })
+        }
+
+        fn resolve_contract(&self, _name: &str) -> Option<Arc<ToolContract>> {
+            None
+        }
+
+        async fn execute(
+            &self,
+            tool: &str,
+            _args: &serde_json::Value,
+            _context: &ToolContext<'_>,
+            _progress: Option<&ProgressSender>,
+        ) -> ToolResult {
+            ToolResult::ok(json!(tool))
+        }
+    }
+
     #[test]
     fn registry_preserves_initial_availability_state() {
         let registry =
@@ -1125,28 +1246,106 @@ mod tests {
     }
 
     #[test]
+    fn exported_tool_state_is_source_free() {
+        let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
+        registry
+            .add_tool_provider(Arc::new(MixedEnabledTool))
+            .expect("live provider registered");
+
+        let value = serde_json::to_value(registry.export_state()).expect("serialized tool state");
+        let serialized = value.to_string();
+
+        assert!(!serialized.contains("source_id"));
+        assert!(!serialized.contains(PLUGIN_SOURCE_ID));
+        assert!(!serialized.contains("live:"));
+    }
+
+    #[test]
+    fn apply_state_rebinds_source_free_snapshot_to_current_sources() {
+        let source_registry =
+            ToolRegistry::from_tool_provider(Arc::new(MixedEnabledTool)).expect("source registry");
+        let snapshot = source_registry.export_state();
+
+        let target_registry =
+            ToolRegistry::from_tool_provider(Arc::new(MixedEnabledTool)).expect("target registry");
+        let next_generation = target_registry
+            .apply_state(snapshot.with_generation(target_registry.generation()))
+            .expect("state rebound");
+
+        assert_eq!(next_generation, target_registry.generation());
+        assert!(target_registry.resolve_contract("enabled_tool").is_some());
+    }
+
+    #[test]
     fn apply_state_rejects_tools_not_advertised_by_source() {
         let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
         let snapshot = registry.export_state();
         let generation = snapshot.generation();
-        let mut tools = snapshot.into_entries();
+        let mut tools = snapshot.entries().clone();
         tools.insert(
             "missing".to_string(),
-            ToolStateEntry {
-                manifest: test_tool(
+            ToolStateEntry::new(
+                test_tool(
                     "missing",
                     "missing",
                     crate::ToolAvailabilityConfig::callable(),
                 )
                 .manifest(),
-                source_id: PLUGIN_SOURCE_ID.to_string(),
-            },
+            ),
         );
         let snapshot = ToolState::new(generation, tools);
         assert!(matches!(
             registry.apply_state(snapshot),
             Err(ReconfigureError::Validation(_))
         ));
+    }
+
+    #[test]
+    fn apply_state_rejects_snapshot_when_provider_is_absent() {
+        let source_registry =
+            ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("source registry");
+        source_registry
+            .upsert_source(Arc::new(ExternalMockSource))
+            .expect("source registered");
+        let snapshot = source_registry.export_state();
+
+        let target_registry =
+            ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target registry");
+        let err = target_registry
+            .apply_state(snapshot.with_generation(target_registry.generation()))
+            .expect_err("missing provider should fail");
+
+        assert!(matches!(err, ReconfigureError::Validation(_)));
+    }
+
+    #[test]
+    fn apply_state_rejects_ambiguous_current_source_binding() {
+        let registry = ToolRegistry::empty();
+        registry
+            .upsert_source(Arc::new(NamedExactSource { id: "exact-a" }))
+            .expect("source a registered");
+        registry
+            .upsert_source(Arc::new(NamedExactSource { id: "exact-b" }))
+            .expect("source b registered");
+
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "host_only".to_string(),
+            ToolStateEntry::new(
+                test_tool(
+                    "host_only",
+                    "host-only",
+                    crate::ToolAvailabilityConfig::callable(),
+                )
+                .manifest(),
+            ),
+        );
+
+        let err = registry
+            .apply_state(ToolState::new(registry.generation(), tools))
+            .expect_err("ambiguous source binding should fail");
+
+        assert!(matches!(err, ReconfigureError::Validation(_)));
     }
 
     #[test]
@@ -1197,19 +1396,7 @@ mod tests {
         assert_eq!(manifest_resolutions.load(Ordering::SeqCst), 1);
         assert_eq!(contract_resolutions.load(Ordering::SeqCst), 1);
 
-        let context = crate::ToolContext::new(
-            "registry-test".to_string(),
-            Arc::new(crate::testing::MockSessionManager::default()),
-            Arc::new(crate::UnavailableProcessService),
-            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController::default(),
-            )),
-            Arc::new(crate::InMemoryAttachmentStore::new()),
-            crate::DirectCompletionClient::unavailable(
-                "direct completions are unavailable in this test context",
-            ),
-            None,
-        );
+        let context = test_tool_context();
         let args = json!({});
         let result = registry
             .execute(crate::ToolCall {
@@ -1242,19 +1429,7 @@ mod tests {
         let defs = registry.tool_manifests();
         assert!(defs.iter().any(|def| def.name == "mcp__demo__search"));
 
-        let context = crate::ToolContext::new(
-            "registry-test".to_string(),
-            Arc::new(crate::testing::MockSessionManager::default()),
-            Arc::new(crate::UnavailableProcessService),
-            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController::default(),
-            )),
-            Arc::new(crate::InMemoryAttachmentStore::new()),
-            crate::DirectCompletionClient::unavailable(
-                "direct completions are unavailable in this test context",
-            ),
-            None,
-        );
+        let context = test_tool_context();
         let args = json!({ "query": "hello" });
         let result = registry
             .execute(crate::ToolCall {

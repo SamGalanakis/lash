@@ -109,11 +109,23 @@ fn compile_program(program: &Program) -> CompiledProgram {
     super::entry_points::compile_program_internal(program)
 }
 
+fn runtime_test_surface() -> crate::LashlangSurface {
+    let mut resources = crate::ResourceCatalog::new();
+    resources.add_alias("TOOL", "default");
+    resources.add_operation("TOOL", "echo", "echo");
+    resources.add_operation("TOOL", "err", "err");
+    crate::LashlangSurface::new(resources, crate::LashlangAbilities::all())
+}
+
 async fn execute_program<H: ExecutionHost>(
     program: &Program,
     state: &mut State,
     host: &H,
 ) -> Result<ExecutionOutcome, RuntimeError> {
+    if let Ok(linked) = crate::LinkedModule::link(program.clone(), runtime_test_surface()) {
+        let compiled = crate::compile_linked(&linked);
+        return super::execute(&compiled, state, host).await;
+    }
     super::execute(program, state, host).await
 }
 
@@ -3080,7 +3092,10 @@ async fn await_record_process_starts_and_joins_handles() {
                     self.calls.fetch_add(1, Ordering::Relaxed);
                     let mut handle = Record::new();
                     handle.insert("__handle__".to_string(), Value::String("process".into()));
-                    handle.insert("process".to_string(), Value::String(start.process.into()));
+                    handle.insert(
+                        "process".to_string(),
+                        Value::String(start.process_name.into()),
+                    );
                     handle.insert(
                         "value".to_string(),
                         start.args.get("value").cloned().unwrap_or(Value::Null),
@@ -3156,7 +3171,10 @@ impl ExecutionHost for AsyncHost {
             AbilityOp::StartProcess(start) => {
                 let mut record = Record::default();
                 record.insert("__handle__".to_string(), Value::String("process".into()));
-                record.insert("process".to_string(), Value::String(start.process.into()));
+                record.insert(
+                    "process".to_string(),
+                    Value::String(start.process_name.into()),
+                );
                 record.insert(
                     "value".to_string(),
                     start.args.get("value").cloned().unwrap_or(Value::Null),
@@ -3179,6 +3197,55 @@ impl ExecutionHost for AsyncHost {
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
+}
+
+#[test]
+fn linked_trigger_declaration_records_process_binding() {
+    let mut resources = crate::ResourceCatalog::new();
+    resources.add_alias("TOOL", "default");
+    resources.add_operation("TOOL", "echo", "echo");
+    resources.add_trigger_event(
+        "TOOL",
+        "changed",
+        crate::TypeExpr::Object(vec![crate::TypeField {
+            name: "path".into(),
+            ty: crate::TypeExpr::Str,
+            optional: false,
+        }]),
+    );
+    let surface = crate::LashlangSurface::new(resources, crate::LashlangAbilities::all());
+    let program = crate::parse(
+        r#"
+        type Changed = { path: str }
+        process scan(tool: TOOL, event: Changed) {
+          finish event.path
+        }
+
+        trigger changed on TOOL.default.changed as event
+          -> scan(tool: TOOL.default, event: event)
+        "#,
+    )
+    .expect("program should parse");
+    let linked = crate::LinkedModule::link(program, surface).expect("program should link");
+    let trigger = linked
+        .artifact
+        .canonical_ir
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            crate::Declaration::Trigger(trigger) => Some(trigger),
+            _ => None,
+        })
+        .expect("trigger declaration");
+    assert_eq!(trigger.process_name, "scan");
+    assert!(matches!(
+        trigger.args[0].1,
+        crate::TriggerArg::ResourceRef(_)
+    ));
+    assert!(matches!(
+        trigger.args[1].1,
+        crate::TriggerArg::EventBinding(ref name) if name == "event"
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -3234,9 +3301,54 @@ async fn start_process_returns_raw_handle_and_passes_explicit_input() {
     let starts = host.starts.lock().expect("starts lock");
     assert_eq!(starts.len(), 1);
     let start = &starts[0];
-    assert_eq!(start.process, "scan");
+    assert_eq!(start.process_name, "scan");
     assert_eq!(start.args["root"], Value::String(".".into()));
-    assert!(start.module.process("scan").is_some());
+    assert!(start.module_ref.as_str().starts_with("lashlang:v1:sha256:"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unlinked_compiled_program_rejects_process_starts() {
+    let program = crate::parse(
+        r#"
+        process scan() { finish 1 }
+        submit start scan()
+        "#,
+    )
+    .expect("program should parse");
+    let compiled = compile_program(&program);
+    let mut state = State::new();
+
+    let err = execute_compiled(&compiled, &mut state, &RecordingProcessHost::default())
+        .await
+        .expect_err("unlinked start should fail");
+
+    assert!(err.to_string().contains("linked lashlang module artifact"));
+}
+
+#[test]
+fn compiled_process_cache_reuses_process_ref_and_surface_ref() {
+    let linked = crate::LinkedModule::link(
+        crate::parse("process scan() { finish 1 }").expect("parse module"),
+        runtime_test_surface(),
+    )
+    .expect("link module");
+    let process_ref = linked
+        .artifact
+        .process_ref("scan")
+        .expect("scan process ref")
+        .clone();
+    let mut cache = CompiledProcessCache::with_capacity(2);
+
+    let first = cache
+        .get_or_compile(&linked.artifact, &process_ref, &linked.required_surface_ref)
+        .expect("compile first");
+    let second = cache
+        .get_or_compile(&linked.artifact, &process_ref, &linked.required_surface_ref)
+        .expect("compile second");
+
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(cache.stats().hits, 1);
+    assert_eq!(cache.stats().misses, 1);
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -269,6 +269,36 @@ async fn sqlite_factory_is_explicitly_usable_as_session_store_factory() {
 }
 
 #[tokio::test]
+async fn sqlite_factory_delete_session_removes_database_and_sidecars_idempotently() {
+    let root = unique_temp_dir("delete-session");
+    let factory = SqliteSessionStoreFactory::new(&root);
+    let request = SessionStoreCreateRequest {
+        session_id: "delete/me".to_string(),
+        relation: lash_core::SessionRelation::Root,
+        policy: SessionPolicy {
+            model: model_spec("model"),
+            ..SessionPolicy::default()
+        },
+    };
+    let store = factory.create_store(&request).expect("create store");
+    drop(store);
+    let db_path = factory.path_for_session("delete/me");
+    let wal_path = sidecar_path(&db_path, "-wal");
+    let shm_path = sidecar_path(&db_path, "-shm");
+    std::fs::write(&wal_path, b"wal").expect("write wal sidecar");
+    std::fs::write(&shm_path, b"shm").expect("write shm sidecar");
+
+    factory.delete_session("delete/me").expect("delete session");
+    factory
+        .delete_session("delete/me")
+        .expect("delete session again");
+
+    assert!(!db_path.exists());
+    assert!(!wal_path.exists());
+    assert!(!shm_path.exists());
+}
+
+#[tokio::test]
 async fn runtime_effect_journal_replays_by_idempotency_key_and_clears_on_final_commit() {
     let store = Store::memory().expect("store");
     let lease = store
@@ -789,4 +819,10 @@ fn unique_temp_dir(name: &str) -> std::path::PathBuf {
     ));
     std::fs::create_dir_all(&dir).expect("temp dir");
     dir
+}
+
+fn sidecar_path(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    std::path::PathBuf::from(sidecar)
 }

@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use crate::LinkedModule;
+use crate::artifact::CompiledModuleContext;
 use crate::ast::{
     AssignPathStep, AssignTarget, BinaryOp, Expr, ProcessStartExpr, Program, TypeExpr, UnaryOp,
 };
@@ -33,8 +33,7 @@ use super::{
 };
 
 pub(crate) struct Compiler {
-    module: Program,
-    linked_module: Option<LinkedModule>,
+    module_context: Option<CompiledModuleContext>,
     code: Vec<Instruction>,
     spans: Vec<Option<Span>>,
     constants: Vec<Value>,
@@ -243,7 +242,6 @@ impl Compiler {
     pub(crate) fn compile_program(program: &Program) -> (Chunk, CompileStats) {
         let stats = Rc::new(RefCell::new(CompileStats::default()));
         let mut compiler = Self::with_slots_and_stats(
-            program.clone(),
             None,
             Rc::new(RefCell::new(SlotTable::default())),
             stats.clone(),
@@ -256,12 +254,11 @@ impl Compiler {
 
     pub(crate) fn compile_linked_program(
         program: &Program,
-        linked_module: &LinkedModule,
+        module_context: CompiledModuleContext,
     ) -> (Chunk, CompileStats) {
         let stats = Rc::new(RefCell::new(CompileStats::default()));
         let mut compiler = Self::with_slots_and_stats(
-            program.clone(),
-            Some(linked_module.clone()),
+            Some(module_context),
             Rc::new(RefCell::new(SlotTable::default())),
             stats.clone(),
         );
@@ -272,14 +269,12 @@ impl Compiler {
     }
 
     fn with_slots_and_stats(
-        module: Program,
-        linked_module: Option<LinkedModule>,
+        module_context: Option<CompiledModuleContext>,
         slots: Rc<RefCell<SlotTable>>,
         compile_stats: Rc<RefCell<CompileStats>>,
     ) -> Self {
         Self {
-            module,
-            linked_module,
+            module_context,
             code: Vec::new(),
             spans: Vec::new(),
             constants: Vec::new(),
@@ -302,8 +297,7 @@ impl Compiler {
         let mut spans = self.spans;
         spans.resize(self.code.len(), None);
         Chunk {
-            module: self.module,
-            linked_module: self.linked_module,
+            module_context: self.module_context,
             code: self.code,
             spans,
             constants: self.constants,

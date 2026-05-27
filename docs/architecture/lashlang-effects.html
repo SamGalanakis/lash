@@ -51,7 +51,7 @@
         <div class="section" id="tool-calls-and-async-handles">
           <div class="section-header">
             <h2>Resource Operations And Process Handles</h2>
-            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, triggers, and cron schedules are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. Trigger and cron schedule activation is not wired yet; those declarations currently stop at parse/link/compile validation.</p>
+            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, triggers, and cron schedules are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. Trigger declarations are typed bindings to process starts; cron schedules still compile bodies. Runtime activation for resource events and cron ticks is not wired yet.</p>
           </div>
           <dl class="def-list">
             <dt><code>await RESOURCE.alias.operation({ ... })</code></dt>
@@ -84,7 +84,7 @@ for path in await TOOL.default.glob({ pattern: "src/**/*.rs" })? {
   items = push(items, { path: path, chars: len(hit.value) })
 }
 submit { line_count: len(lines), notes: notes, items: items }</code></pre>
-          <p>When process support is enabled, background work uses named processes; results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to receiver operations. A Lashlang process stores its linked module with the durable process input; nested <code>start</code> calls compile against that stored snapshot instead of relinking against whatever abilities the current plugin session exposes later.</p>
+          <p>When process support is enabled, background work uses named processes; results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to receiver operations. Linking writes a content-addressed <code>ModuleArtifact</code> to the host/profile artifact store; the durable process input stores only <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, display name, and JSON args. Nested <code>start</code> calls compile from the same artifact while the runner still checks that the current host surface satisfies the recorded requirements.</p>
           <pre><code>process audit(tool: TOOL, task: str) {
   result = await tool.spawn_agent({
     task: task,
@@ -111,23 +111,28 @@ submit {
         <div class="section" id="triggers-and-schedules">
           <div class="section-header">
             <h2>Triggers And Schedules</h2>
-            <p>A module can also declare background entry points that activate without a foreground block. A <code>trigger</code> fires its body in response to a host resource event, bound as <code>on RESOURCE.event as name</code>; the bound name carries the event payload. A <code>schedule</code> runs its body on a cron cadence declared with <code>cron("…")</code> (with an optional <code>tz:</code>), and its bound name carries the tick payload. Both bodies typically <code>start</code> a process so the work itself is durable. As with every ability, triggers and schedules are advertised only when the linked <code>LashlangSurface</code> enables them. Trigger and cron-schedule <em>activation</em> is not wired yet — these declarations currently stop at parse/link/compile validation, so they are useful today for shaping and validating a workflow's static graph.</p>
+            <p>A module can also declare background entry points that activate without a foreground block. A <code>trigger</code> has no executable body: it names a host resource event, binds the whole event payload, and explicitly binds every target process parameter in <code>-> process(...)</code>. Trigger arguments may only be the event payload, a concrete catalog resource alias, or the resource handle produced by <code>on each</code>; any derived fields are computed inside the process. A <code>schedule</code> runs its body on a cron cadence declared with <code>cron("…")</code> (with an optional <code>tz:</code>), and its bound name carries the tick payload. As with every ability, triggers and schedules are advertised only when the linked <code>LashlangSurface</code> enables them.</p>
           </div>
-          <pre><code>type EmailInput = { source: "gmail" | "manual", message_id: string? }
+          <pre><code>type NewMessage = { message_id: str, subject: str }
 
-process triage(gmail: GMAIL, input: EmailInput) -> null {
-  msg = await gmail.get_message(input.message_id)?
-  finish msg
+process triage(gmail: GMAIL, calendar: GCAL, event: NewMessage) {
+  msg = await gmail.get_message({ id: event.message_id })?
+  slots = await calendar.find_open_slots({ days: 3 })?
+  finish { message: msg, slots: slots }
 }
 
-// Fire whenever the host emits a new-message event on the bound resource.
-trigger personal_mail on GMAIL.personal.new_message as event {
-  start triage(gmail: GMAIL.personal, input: { source: "gmail", message_id: event.message_id })
-}
+trigger personal_mail on GMAIL.personal.new_message as event
+  -> triage(gmail: GMAIL.personal, calendar: GCAL.primary, event: event)
 
-// Or run on a cron cadence; the bound `tick` carries the activation payload.
+trigger any_mail on each GMAIL.new_message as mailbox, event
+  -> triage(gmail: mailbox, calendar: GCAL.primary, event: event)
+
 schedule daily every cron("0 8 * * *", tz: "UTC") as tick {
-  start triage(gmail: GMAIL.personal, input: { source: "manual", message_id: tick.id })
+  start triage(
+    gmail: GMAIL.personal,
+    calendar: GCAL.primary,
+    event: { message_id: tick.message_id, subject: tick.subject }
+  )
 }</code></pre>
         </div>
 

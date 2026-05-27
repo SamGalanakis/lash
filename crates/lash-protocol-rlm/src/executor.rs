@@ -1,115 +1,26 @@
+mod files;
 mod host_bridge;
+mod snapshot;
+mod state;
 
-use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+#[cfg(test)]
+use snapshot::restore_runtime;
+pub use state::RlmExecutionState;
+
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lash_core::{ExecRequest, ExecResponse, RuntimeExecutionContext, SessionError};
+#[cfg(test)]
 use lash_plugin_tool_output_budget::ToolOutputBudgetConfig;
-use lashlang::{ExecutionOutcome, ExecutionScratch, State as FlowState};
-use serde_json::json;
+use lashlang::{ExecutionOutcome, State as FlowState};
 
 use self::host_bridge::HostBridge;
 use crate::projection::{
     ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
     flow_to_json_value, json_to_flow_value, projected_bindings, prune_projected_binding_names,
-    prune_protected_bindings, prune_reserved_projected_bindings, rehydrate_projected_globals,
+    rehydrate_projected_globals,
 };
-
-const RLM_SNAPSHOT_VERSION: u32 = 3;
-
-pub struct RlmExecutionState {
-    rlm: FlowState,
-    scratch: ExecutionScratch,
-    scratch_dir: tempfile::TempDir,
-    observe_projection: ToolOutputBudgetConfig,
-    dirty: bool,
-}
-
-impl RlmExecutionState {
-    pub fn new(config: ToolOutputBudgetConfig) -> Result<Self, SessionError> {
-        Ok(Self {
-            rlm: FlowState::new(),
-            scratch: ExecutionScratch::new(),
-            scratch_dir: tempfile::TempDir::new()?,
-            observe_projection: config,
-            dirty: true,
-        })
-    }
-
-    pub fn execution_state_dirty(&self) -> bool {
-        self.dirty
-    }
-
-    pub fn snapshot_execution_state(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
-        let vars = snapshot_runtime(&self.rlm).map_err(SessionError::Protocol)?;
-        let files = collect_files(self.scratch_dir.path()).unwrap_or_default();
-        let combined = json!({
-            "version": RLM_SNAPSHOT_VERSION,
-            "engine": "lashlang",
-            "vars": vars,
-            "files": files,
-        });
-        self.dirty = false;
-        Ok(Some(serde_json::to_vec(&combined)?))
-    }
-
-    pub fn restore_execution_state(&mut self, data: &[u8]) -> Result<(), SessionError> {
-        let parsed: serde_json::Value = serde_json::from_slice(data).unwrap_or(json!({}));
-
-        if parsed.get("version").is_none() || parsed.get("engine").is_none() {
-            return Err(SessionError::Protocol(
-                "unsupported RLM snapshot format".to_string(),
-            ));
-        }
-        if parsed.get("version").and_then(|v| v.as_u64()) != Some(RLM_SNAPSHOT_VERSION as u64) {
-            return Err(SessionError::Protocol(
-                "unsupported RLM snapshot version".to_string(),
-            ));
-        }
-        if parsed.get("engine").and_then(|v| v.as_str()) != Some("lashlang") {
-            return Err(SessionError::Protocol(
-                "unsupported RLM snapshot engine".to_string(),
-            ));
-        }
-
-        let vars_str = parsed
-            .get("vars")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        self.rlm = restore_runtime(&vars_str)
-            .map_err(|err| SessionError::Protocol(format!("executor restore failed: {err}")))?;
-        prune_reserved_projected_bindings(&mut self.rlm);
-
-        if let Some(files_val) = parsed.get("files")
-            && let Ok(files) = serde_json::from_value::<HashMap<String, String>>(files_val.clone())
-        {
-            clear_dir(self.scratch_dir.path());
-            let _ = restore_files(self.scratch_dir.path(), &files);
-        }
-        self.dirty = true;
-        Ok(())
-    }
-
-    pub fn prune_protected_globals(&mut self, protected_names: &BTreeSet<String>) {
-        prune_protected_bindings(&mut self.rlm, protected_names);
-    }
-
-    pub fn patch_globals(
-        &mut self,
-        patch: &lash_rlm_types::RlmGlobalsPatchPluginBody,
-        protected_names: &BTreeSet<String>,
-    ) -> Result<(), SessionError> {
-        if patch.is_empty() {
-            return Ok(());
-        }
-        apply_global_defaults(&mut self.rlm, patch, protected_names)
-            .map_err(SessionError::Protocol)?;
-        self.dirty = true;
-        Ok(())
-    }
-}
 
 pub async fn execute_code(
     mut state: RlmExecutionState,
@@ -187,6 +98,48 @@ async fn execute_code_inner(
             };
         }
     };
+    if declares_triggers(&linked.artifact.canonical_ir) {
+        return match ctx.install_lashlang_trigger_source(code) {
+            Ok(report) => ExecResponse {
+                output: String::new(),
+                observations: vec![format!(
+                    "installed trigger declarations: {}",
+                    report.trigger_names().join(", ")
+                )],
+                observation_truncation: Vec::new(),
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                printed_images: Vec::new(),
+                error: None,
+                duration_ms: start.elapsed().as_millis() as u64,
+                terminal_finish: None,
+            },
+            Err(err) => ExecResponse {
+                output: String::new(),
+                observations: Vec::new(),
+                observation_truncation: Vec::new(),
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                printed_images: Vec::new(),
+                error: Some(err),
+                duration_ms: start.elapsed().as_millis() as u64,
+                terminal_finish: None,
+            },
+        };
+    }
+    if let Err(err) = ctx.put_lashlang_module_artifact(&linked.artifact) {
+        return ExecResponse {
+            output: String::new(),
+            observations: Vec::new(),
+            observation_truncation: Vec::new(),
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            printed_images: Vec::new(),
+            error: Some(format!("failed to store lashlang module artifact: {err}")),
+            duration_ms: start.elapsed().as_millis() as u64,
+            terminal_finish: None,
+        };
+    }
     let compiled = Arc::new(lashlang::compile_linked(&linked));
 
     if let Err(err) =
@@ -289,21 +242,18 @@ async fn execute_code_inner(
     }
 }
 
+fn declares_triggers(program: &lashlang::Program) -> bool {
+    program
+        .declarations
+        .iter()
+        .any(|declaration| matches!(declaration, lashlang::Declaration::Trigger(_)))
+}
+
 fn tool_result_projectors(ctx: &RuntimeExecutionContext<'_>) -> Vec<crate::RlmToolResultProjector> {
     ctx.turn_context()
         .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
         .map(|extension| extension.tool_result_projectors.clone())
         .unwrap_or_default()
-}
-
-fn snapshot_runtime(rlm: &FlowState) -> Result<String, String> {
-    serde_json::to_string(&rlm.snapshot()).map_err(|err| format!("failed to snapshot RLM: {err}"))
-}
-
-fn restore_runtime(data: &str) -> Result<FlowState, String> {
-    let snapshot: lashlang::Snapshot =
-        serde_json::from_str(data).map_err(|err| format!("failed to restore RLM: {err}"))?;
-    Ok(FlowState::from_snapshot(snapshot))
 }
 
 fn apply_global_defaults(
@@ -333,55 +283,6 @@ fn apply_global_defaults(
 
 fn is_reserved_global_name(key: &str) -> bool {
     key == "history"
-}
-
-fn collect_files(root: &Path) -> std::io::Result<HashMap<String, String>> {
-    let mut files = HashMap::new();
-    walk_dir(root, root, &mut files)?;
-    Ok(files)
-}
-
-fn walk_dir(root: &Path, dir: &Path, files: &mut HashMap<String, String>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            walk_dir(root, &path, files)?;
-        } else {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
-            let contents = std::fs::read_to_string(&path).unwrap_or_default();
-            files.insert(rel, contents);
-        }
-    }
-    Ok(())
-}
-
-fn restore_files(root: &Path, files: &HashMap<String, String>) -> std::io::Result<()> {
-    for (rel, contents) in files {
-        let path = root.join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, contents)?;
-    }
-    Ok(())
-}
-
-fn clear_dir(root: &Path) {
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let _ = std::fs::remove_dir_all(&path);
-            } else {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -575,9 +476,8 @@ mod tests {
             DisabledCase {
                 name: "trigger",
                 code: r#"
-                    trigger changed on TOOL.default.changed as event {
-                      print event
-                    }
+                    trigger changed on TOOL.default.changed as event
+                      -> worker(event: event)
                 "#,
                 abilities: lashlang::LashlangAbilities::default().with_cron_schedules(),
                 feature: "triggers",

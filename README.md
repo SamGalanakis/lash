@@ -24,7 +24,7 @@ Every completed turn lands as one lease-fenced `RuntimeCommit` against a `Sessio
 
 ### Lashlang
 
-A small typed DSL the model can emit and the runtime can execute deterministically. Receiver-first resource operations and named background `process` declarations are host-provided abilities: unavailable abilities still parse, but fail during linking and are omitted from the RLM prompt. Linked process modules are stored with the process input so nested starts survive later host ability drift. Trigger and cron schedule declarations are parsed and gated by the same host surface, but runtime activation for resource events and cron ticks remains a follow-up.
+A small typed DSL the model can emit and the runtime can execute deterministically. Receiver-first resource operations and named background `process` declarations are host-provided abilities: unavailable abilities still parse, but fail during linking and are omitted from the RLM prompt. Linked modules are content-addressed as `ModuleRef`/`RequiredSurfaceRef` artifacts; durable Lashlang process rows store only module/process refs plus JSON args, and workers reload the artifact from the host/profile artifact store for nested starts. Trigger declarations are declaration-only typed bindings from resource events to named process starts, and cron schedule declarations are parsed and gated by the same host surface; runtime activation for resource events and cron ticks remains a follow-up.
 
 ### Plugin architecture
 
@@ -147,6 +147,12 @@ That default matrix covers standard mode, RLM, RLM tool batches, large tool surf
 
 ```bash
 python3 scripts/profile_runtime.py --profile full --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/full.json
+```
+
+For focused runtime regressions, the guard runner combines the normal runtime profile, stack-sensitivity matrix, and optional DHAT heap attribution:
+
+```bash
+python3 scripts/profile_runtime_guard.py --profile quick --release --cargo-feature fff-zlob --out .benchmarks/runtime-guard/guard.json
 ```
 
 It also runs the full UI profile and the Lashlang scenario sweep:

@@ -58,12 +58,13 @@ use lash_core::{
     GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead, ProcessAwaitOutput,
     ProcessEvent, ProcessEventAppendRequest, ProcessExternalRef, ProcessHandleDescriptor,
     ProcessHandleGrant, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistration,
-    ProcessRegistry, ProcessWakeDelivery, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
-    RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
-    RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
-    RuntimeTurnLease, SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta,
-    SessionPickerInfo, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
-    StoreError, VacuumReport, ensure_supported_schema_version, materialize_process_event_semantics,
+    ProcessRegistry, ProcessScope, ProcessScopeId, ProcessWakeDelivery,
+    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
+    RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
+    RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnLease,
+    SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo,
+    SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory, StoreError, VacuumReport,
+    ensure_supported_schema_version, materialize_process_event_semantics,
     prepare_process_registration, process_event_payload_hash, process_wake_delivery,
     require_event_idempotency, system_time_from_epoch_ms,
 };
@@ -204,6 +205,11 @@ CREATE TABLE IF NOT EXISTS attachment_manifest (
     committed_at_ms  INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS artifact_refs (
+    artifact_ref TEXT PRIMARY KEY,
+    blob_ref     TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_attachment_manifest_session
     ON attachment_manifest(session_id, committed_at_ms);
 CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
@@ -223,7 +229,7 @@ const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (
     process_id            TEXT PRIMARY KEY,
     registration_hash     TEXT NOT NULL,
-    created_by_scope_key  TEXT NOT NULL,
+    created_by_scope_id  TEXT,
     host_profile_id       TEXT NOT NULL,
     created_at_ms         INTEGER NOT NULL,
     updated_at_ms         INTEGER NOT NULL,
@@ -248,33 +254,41 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_process_events_key
 
 CREATE TABLE IF NOT EXISTS process_handle_grants (
     session_id       TEXT NOT NULL,
+    scope_id        TEXT NOT NULL,
     process_id       TEXT NOT NULL,
     descriptor_json  TEXT NOT NULL,
-    PRIMARY KEY (session_id, process_id),
+    PRIMARY KEY (scope_id, process_id),
     FOREIGN KEY (process_id) REFERENCES processes(process_id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_process_handle_grants_session
+    ON process_handle_grants(session_id);
 
 CREATE INDEX IF NOT EXISTS idx_process_handle_grants_process
     ON process_handle_grants(process_id);
 
 CREATE TABLE IF NOT EXISTS process_wake_inbox (
     wake_id           TEXT PRIMARY KEY,
-    target_scope_key  TEXT NOT NULL,
+    target_session_id TEXT NOT NULL,
+    target_scope_id  TEXT NOT NULL,
     process_id        TEXT NOT NULL,
     sequence          INTEGER NOT NULL,
     dedupe_key        TEXT NOT NULL,
     input             TEXT NOT NULL,
     created_at_ms     INTEGER NOT NULL,
     acknowledged_at_ms INTEGER,
-    UNIQUE (target_scope_key, dedupe_key),
+    UNIQUE (target_scope_id, dedupe_key),
     FOREIGN KEY (process_id) REFERENCES processes(process_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_process_wake_inbox_target
-    ON process_wake_inbox(target_scope_key, acknowledged_at_ms, created_at_ms);
+    ON process_wake_inbox(target_scope_id, acknowledged_at_ms, created_at_ms);
+
+CREATE INDEX IF NOT EXISTS idx_process_wake_inbox_session
+    ON process_wake_inbox(target_session_id);
 ";
 
-const PROCESS_SCHEMA_VERSION: i32 = 1;
+const PROCESS_SCHEMA_VERSION: i32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StoreBacking {
@@ -305,6 +319,7 @@ pub enum PersistedArtifactKind {
     ToolState,
     PluginSessionSnapshot,
     ExecutionStateSnapshot,
+    LashlangModule,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -359,6 +374,13 @@ impl BlobArtifactDescriptor {
     pub fn execution_state_snapshot() -> Self {
         Self::new(
             PersistedArtifactKind::ExecutionStateSnapshot,
+            vec![BlobStorageHint::Compressible, BlobStorageHint::LargePayload],
+        )
+    }
+
+    pub fn lashlang_module() -> Self {
+        Self::new(
+            PersistedArtifactKind::LashlangModule,
             vec![BlobStorageHint::Compressible, BlobStorageHint::LargePayload],
         )
     }
@@ -456,6 +478,24 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
         }
         Ok(store as Arc<dyn RuntimePersistence>)
     }
+
+    fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        let db_path = self.path_for_session(session_id);
+        for path in [
+            db_path.clone(),
+            sqlite_sidecar_path(&db_path, "-wal"),
+            sqlite_sidecar_path(&db_path, "-shm"),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(format!("remove session store {}: {err}", path.display()));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn safe_session_db_file_name(session_id: &str) -> String {
@@ -473,6 +513,12 @@ fn safe_session_db_file_name(session_id: &str) -> String {
     safe.truncate(80);
     let hash = format!("{:x}", Sha256::digest(session_id.as_bytes()));
     format!("{safe}-{}.db", &hash[..16])
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
 }
 
 fn current_timestamp_string() -> String {
@@ -823,12 +869,14 @@ impl SqliteProcessRegistry {
     ) -> Result<(), lash_core::PluginError> {
         conn.execute(
             "INSERT OR IGNORE INTO process_wake_inbox (
-                wake_id, target_scope_key, process_id, sequence, dedupe_key, input, created_at_ms
+                wake_id, target_session_id, target_scope_id, process_id, sequence, dedupe_key,
+                input, created_at_ms
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 delivery.wake_id,
-                delivery.target_scope_key,
+                delivery.target_session_id,
+                delivery.target_scope_id.as_str(),
                 delivery.process_id,
                 delivery.sequence as i64,
                 delivery.dedupe_key,
@@ -862,16 +910,17 @@ impl ProcessRegistry for SqliteProcessRegistry {
         let now = current_epoch_ms();
         let record =
             ProcessRecord::from_prepared_registration(registration, registration_hash, now);
+        let created_by_scope_id = record.created_by_scope_id();
         tx.execute(
             "INSERT INTO processes (
-                process_id, registration_hash, created_by_scope_key, host_profile_id,
+                process_id, registration_hash, created_by_scope_id, host_profile_id,
                 created_at_ms, updated_at_ms, record_json
              )
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 &record.id,
                 &record.registration_hash,
-                &record.created_by_scope_key,
+                created_by_scope_id.as_ref().map(ProcessScopeId::as_str),
                 &record.host_profile_id,
                 record.created_at_ms as i64,
                 record.updated_at_ms as i64,
@@ -902,7 +951,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
 
     async fn grant_handle(
         &self,
-        session_id: &str,
+        owner_scope: &ProcessScope,
         process_id: &str,
         descriptor: ProcessHandleDescriptor,
     ) -> Result<ProcessHandleGrant, lash_core::PluginError> {
@@ -912,16 +961,23 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 "unknown process `{process_id}`"
             )));
         }
+        let owner_scope_id = owner_scope.id();
         conn.execute(
-            "INSERT INTO process_handle_grants (session_id, process_id, descriptor_json)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(session_id, process_id) DO UPDATE SET
+            "INSERT INTO process_handle_grants (session_id, scope_id, process_id, descriptor_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope_id, process_id) DO UPDATE SET
+                session_id = excluded.session_id,
                 descriptor_json = excluded.descriptor_json",
-            params![session_id, process_id, process_encode_json(&descriptor)?],
+            params![
+                &owner_scope.session_id,
+                owner_scope_id.as_str(),
+                process_id,
+                process_encode_json(&descriptor)?
+            ],
         )
         .map_err(process_sqlite_error)?;
         Ok(ProcessHandleGrant {
-            session_id: session_id.to_string(),
+            session_id: owner_scope.session_id.clone(),
             process_id: process_id.to_string(),
             descriptor,
         })
@@ -929,13 +985,14 @@ impl ProcessRegistry for SqliteProcessRegistry {
 
     async fn revoke_handle(
         &self,
-        session_id: &str,
+        owner_scope: &ProcessScope,
         process_id: &str,
     ) -> Result<(), lash_core::PluginError> {
         let conn = self.conn.lock().unwrap();
+        let owner_scope_id = owner_scope.id();
         conn.execute(
-            "DELETE FROM process_handle_grants WHERE session_id = ?1 AND process_id = ?2",
-            params![session_id, process_id],
+            "DELETE FROM process_handle_grants WHERE scope_id = ?1 AND process_id = ?2",
+            params![owner_scope_id.as_str(), process_id],
         )
         .map_err(process_sqlite_error)?;
         Ok(())
@@ -943,40 +1000,49 @@ impl ProcessRegistry for SqliteProcessRegistry {
 
     async fn transfer_handle_grants(
         &self,
-        from_session_id: &str,
-        to_session_id: &str,
+        from_scope: &ProcessScope,
+        to_scope: &ProcessScope,
         process_ids: &[String],
     ) -> Result<(), lash_core::PluginError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(process_sqlite_error)?;
+        let from_scope_id = from_scope.id();
+        let to_scope_id = to_scope.id();
         for process_id in process_ids {
             let descriptor_json: Option<String> = tx
                 .query_row(
                     "SELECT descriptor_json
                      FROM process_handle_grants
-                     WHERE session_id = ?1 AND process_id = ?2",
-                    params![from_session_id, process_id],
+                     WHERE scope_id = ?1 AND process_id = ?2",
+                    params![from_scope_id.as_str(), process_id],
                     |row| row.get(0),
                 )
                 .optional()
                 .map_err(process_sqlite_error)?;
             let Some(descriptor_json) = descriptor_json else {
                 return Err(lash_core::PluginError::Session(format!(
-                    "process handle `{process_id}` is not granted to session `{from_session_id}`"
+                    "process handle `{process_id}` is not granted to session `{}`",
+                    from_scope.session_id
                 )));
             };
             tx.execute(
                 "DELETE FROM process_handle_grants
-                 WHERE session_id = ?1 AND process_id = ?2",
-                params![from_session_id, process_id],
+                 WHERE scope_id = ?1 AND process_id = ?2",
+                params![from_scope_id.as_str(), process_id],
             )
             .map_err(process_sqlite_error)?;
             tx.execute(
-                "INSERT INTO process_handle_grants (session_id, process_id, descriptor_json)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(session_id, process_id) DO UPDATE SET
+                "INSERT INTO process_handle_grants (session_id, scope_id, process_id, descriptor_json)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(scope_id, process_id) DO UPDATE SET
+                    session_id = excluded.session_id,
                     descriptor_json = excluded.descriptor_json",
-                params![to_session_id, process_id, descriptor_json],
+                params![
+                    &to_scope.session_id,
+                    to_scope_id.as_str(),
+                    process_id,
+                    descriptor_json
+                ],
             )
             .map_err(process_sqlite_error)?;
         }
@@ -986,20 +1052,21 @@ impl ProcessRegistry for SqliteProcessRegistry {
 
     async fn list_handle_grants(
         &self,
-        session_id: &str,
+        owner_scope: &ProcessScope,
     ) -> Result<Vec<ProcessHandleGrantEntry>, lash_core::PluginError> {
         let conn = self.conn.lock().unwrap();
+        let owner_scope_id = owner_scope.id();
         let mut stmt = conn
             .prepare(
                 "SELECT g.process_id, g.descriptor_json, p.record_json
                  FROM process_handle_grants g
                  JOIN processes p ON p.process_id = g.process_id
-                 WHERE g.session_id = ?1
+                 WHERE g.scope_id = ?1
                  ORDER BY g.process_id ASC",
             )
             .map_err(process_sqlite_error)?;
         let rows = stmt
-            .query_map(params![session_id], |row| {
+            .query_map(params![owner_scope_id.as_str()], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -1016,7 +1083,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 serde_json::from_str(&record_json).map_err(process_decode_error)?;
             entries.push((
                 ProcessHandleGrant {
-                    session_id: session_id.to_string(),
+                    session_id: owner_scope.session_id.clone(),
                     process_id,
                     descriptor,
                 },
@@ -1041,7 +1108,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 "SELECT session_id, descriptor_json
                  FROM process_handle_grants
                  WHERE process_id = ?1
-                 ORDER BY session_id ASC",
+                 ORDER BY session_id ASC, scope_id ASC",
             )
             .map_err(process_sqlite_error)?;
         let rows = stmt
@@ -1061,6 +1128,81 @@ impl ProcessRegistry for SqliteProcessRegistry {
             });
         }
         Ok(grants)
+    }
+
+    async fn delete_session_process_state(
+        &self,
+        session_id: &str,
+    ) -> Result<lash_core::ProcessSessionDeleteReport, lash_core::PluginError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(process_sqlite_error)?;
+        let mut stmt = tx
+            .prepare(
+                "SELECT g.process_id, p.record_json
+                 FROM process_handle_grants g
+                 JOIN processes p ON p.process_id = g.process_id
+                 WHERE g.session_id = ?1
+                 ORDER BY g.process_id ASC",
+            )
+            .map_err(process_sqlite_error)?;
+        let rows = stmt
+            .query_map(params![session_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(process_sqlite_error)?;
+        let mut removed = Vec::new();
+        for row in rows {
+            let (process_id, record_json) = row.map_err(process_sqlite_error)?;
+            let record: ProcessRecord =
+                serde_json::from_str(&record_json).map_err(process_decode_error)?;
+            removed.push((process_id, record));
+        }
+        drop(stmt);
+
+        let revoked_handle_count = tx
+            .execute(
+                "DELETE FROM process_handle_grants WHERE session_id = ?1",
+                params![session_id],
+            )
+            .map_err(process_sqlite_error)?;
+        let deleted_wake_count = tx
+            .execute(
+                "DELETE FROM process_wake_inbox WHERE target_session_id = ?1",
+                params![session_id],
+            )
+            .map_err(process_sqlite_error)?;
+
+        let mut cancel_process_ids = Vec::new();
+        let mut preserved_process_ids = Vec::new();
+        for (process_id, record) in removed {
+            if record.is_terminal() {
+                continue;
+            }
+            let remaining_grants: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM process_handle_grants WHERE process_id = ?1",
+                    params![process_id],
+                    |row| row.get(0),
+                )
+                .map_err(process_sqlite_error)?;
+            if remaining_grants == 0 {
+                cancel_process_ids.push(process_id);
+            } else {
+                preserved_process_ids.push(process_id);
+            }
+        }
+        tx.commit().map_err(process_sqlite_error)?;
+        cancel_process_ids.sort();
+        cancel_process_ids.dedup();
+        preserved_process_ids.sort();
+        preserved_process_ids.dedup();
+        Ok(lash_core::ProcessSessionDeleteReport {
+            session_id: session_id.to_string(),
+            revoked_handle_count,
+            deleted_wake_count,
+            cancel_process_ids,
+            preserved_process_ids,
+        })
     }
 
     async fn append_event(
@@ -1156,10 +1298,10 @@ impl ProcessRegistry for SqliteProcessRegistry {
         record.updated_at_ms = occurred_at_ms;
         Self::save_process_conn(&tx, &record)?;
         if let Some(wake) = semantics.wake
-            && let Some(target_scope_key) = request.wake_target_scope_key
+            && let Some(target_scope) = request.wake_target_scope
         {
             let delivery = process_wake_delivery(
-                target_scope_key,
+                target_scope,
                 process_id.to_string(),
                 sequence,
                 wake,
@@ -1285,7 +1427,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
 
     async fn drain_wake_inputs(
         &self,
-        target_scope_key: &str,
+        target_scope_id: &ProcessScopeId,
         limit: usize,
     ) -> Result<Vec<ProcessWakeDelivery>, lash_core::PluginError> {
         if limit == 0 {
@@ -1294,23 +1436,26 @@ impl ProcessRegistry for SqliteProcessRegistry {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT wake_id, target_scope_key, process_id, sequence, dedupe_key, input, created_at_ms
+                "SELECT wake_id, target_session_id, target_scope_id, process_id, sequence,
+                        dedupe_key, input, created_at_ms
                  FROM process_wake_inbox
-                 WHERE target_scope_key = ?1 AND acknowledged_at_ms IS NULL
+                 WHERE target_scope_id = ?1 AND acknowledged_at_ms IS NULL
                  ORDER BY created_at_ms ASC, wake_id ASC
                  LIMIT ?2",
             )
             .map_err(process_sqlite_error)?;
         let rows = stmt
-            .query_map(params![target_scope_key, limit as i64], |row| {
+            .query_map(params![target_scope_id.as_str(), limit as i64], |row| {
+                let target_scope_id = row.get::<_, String>(2)?;
                 Ok(ProcessWakeDelivery {
                     wake_id: row.get(0)?,
-                    target_scope_key: row.get(1)?,
-                    process_id: row.get(2)?,
-                    sequence: row.get::<_, i64>(3)? as u64,
-                    dedupe_key: row.get(4)?,
-                    input: row.get(5)?,
-                    created_at_ms: row.get::<_, i64>(6)? as u64,
+                    target_session_id: row.get(1)?,
+                    target_scope_id: ProcessScopeId::from(target_scope_id),
+                    process_id: row.get(3)?,
+                    sequence: row.get::<_, i64>(4)? as u64,
+                    dedupe_key: row.get(5)?,
+                    input: row.get(6)?,
+                    created_at_ms: row.get::<_, i64>(7)? as u64,
                 })
             })
             .map_err(process_sqlite_error)?;
@@ -1916,6 +2061,17 @@ impl Store {
                 blob_ref: checkpoint_ref,
                 kind: PersistedArtifactKind::CheckpointManifest,
             });
+        }
+        if let Ok(mut stmt) = tx.prepare("SELECT blob_ref FROM artifact_refs ORDER BY artifact_ref")
+            && let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0))
+        {
+            roots.extend(
+                rows.filter_map(Result::ok)
+                    .map(|blob_ref| RetainedArtifactRef {
+                        blob_ref: BlobRef(blob_ref),
+                        kind: PersistedArtifactKind::LashlangModule,
+                    }),
+            );
         }
         let mut retained = std::collections::BTreeMap::<String, PersistedArtifactKind>::new();
         let mut stack = roots.clone();
@@ -2616,6 +2772,67 @@ impl RuntimePersistence for Store {
     }
 }
 
+impl lashlang::LashlangArtifactStore for Store {
+    fn put_module_artifact(
+        &self,
+        artifact: &lashlang::ModuleArtifact,
+    ) -> Result<(), lashlang::ArtifactStoreError> {
+        let bytes = artifact
+            .to_store_bytes()
+            .map_err(|err| lashlang::ArtifactStoreError::Encode(err.to_string()))?;
+        let mut conn = self.conn.lock().map_err(|_| {
+            lashlang::ArtifactStoreError::Backend("sqlite store lock poisoned".to_string())
+        })?;
+        let tx = conn
+            .transaction()
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        let blob_ref = Self::insert_artifact_blob_conn(
+            &tx,
+            BlobArtifactDescriptor::lashlang_module(),
+            &bytes,
+            self.options.blob_profile,
+        )
+        .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO artifact_refs (artifact_ref, blob_ref) VALUES (?1, ?2)",
+            params![artifact.module_ref.as_str(), blob_ref.as_str()],
+        )
+        .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        tx.commit()
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        Ok(())
+    }
+
+    fn get_module_artifact(
+        &self,
+        module_ref: &lashlang::ModuleRef,
+    ) -> Result<Option<lashlang::ModuleArtifact>, lashlang::ArtifactStoreError> {
+        let conn = self.conn.lock().map_err(|_| {
+            lashlang::ArtifactStoreError::Backend("sqlite store lock poisoned".to_string())
+        })?;
+        let blob_ref = conn
+            .query_row(
+                "SELECT blob_ref FROM artifact_refs WHERE artifact_ref = ?1",
+                params![module_ref.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        let Some(blob_ref) = blob_ref else {
+            return Ok(None);
+        };
+        let bytes = Self::get_blob_conn(&conn, &BlobRef(blob_ref)).ok_or_else(|| {
+            lashlang::ArtifactStoreError::Backend(format!(
+                "lashlang module artifact `{}` points at a missing blob",
+                module_ref
+            ))
+        })?;
+        lashlang::ModuleArtifact::from_store_bytes(&bytes)
+            .map(Some)
+            .map_err(lashlang::ArtifactStoreError::from)
+    }
+}
+
 impl AttachmentManifest for Store {
     fn record_intent(&self, intent: AttachmentIntent) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
@@ -2764,6 +2981,7 @@ mod tests {
         ProcessEventSemanticsSpec, ProcessInput, ProcessTerminalState, ProcessValueSelector,
         ProcessWakeDedupeKey, ProcessWakeSpec,
     };
+    use lashlang::LashlangArtifactStore;
 
     fn registration(id: &str) -> ProcessRegistration {
         ProcessRegistration::new(
@@ -2773,7 +2991,7 @@ mod tests {
             },
         )
         .with_provenance(
-            lash_core::ProcessCreatorScope::new("runtime", "session"),
+            lash_core::ProcessScope::new("runtime", "session"),
             "test-host",
         )
     }
@@ -2804,19 +3022,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sqlite_lashlang_artifact_store_round_trips_verified_module_artifacts() {
+        let store = Store::memory().expect("memory store");
+        let module =
+            lashlang::parse("process scan(root: str) { finish root }").expect("parse module");
+        let linked = lashlang::LinkedModule::link(
+            module,
+            lashlang::LashlangSurface::new(
+                lashlang::ResourceCatalog::new(),
+                lashlang::LashlangAbilities::all(),
+            ),
+        )
+        .expect("link module");
+
+        store
+            .put_module_artifact(&linked.artifact)
+            .expect("put artifact");
+        let restored = store
+            .get_module_artifact(&linked.module_ref)
+            .expect("get artifact")
+            .expect("artifact exists");
+
+        assert_eq!(restored.module_ref, linked.module_ref);
+        assert_eq!(
+            restored.process_ref("scan"),
+            linked.artifact.process_ref("scan")
+        );
+    }
+
     #[tokio::test]
     async fn sqlite_process_registry_persists_rows_after_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("processes.db");
         {
             let registry = SqliteProcessRegistry::open(&path).expect("open registry");
+            let owner_scope = lash_core::ProcessScope::new("runtime", "session");
             registry
                 .register_process(registration("proc-persist"))
                 .await
                 .expect("register");
             registry
                 .grant_handle(
-                    "runtime:session",
+                    &owner_scope,
                     "proc-persist",
                     ProcessHandleDescriptor::new(Some("tool"), Some("demo")),
                 )
@@ -2835,12 +3083,13 @@ mod tests {
         }
 
         let registry = SqliteProcessRegistry::open(&path).expect("reopen registry");
+        let owner_scope = lash_core::ProcessScope::new("runtime", "session");
         let record = registry
             .get_process("proc-persist")
             .await
             .expect("persisted process");
 
-        assert_eq!(record.created_by_scope_key, "runtime:session");
+        assert_eq!(record.created_by_scope_id(), Some(owner_scope.id()));
         assert_eq!(
             record
                 .created_by_scope
@@ -2860,7 +3109,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .list_handle_grants("runtime:session")
+                .list_handle_grants(&owner_scope)
                 .await
                 .expect("grants")
                 .len(),
@@ -2895,6 +3144,8 @@ mod tests {
     #[tokio::test]
     async fn sqlite_process_keyed_events_and_wake_inbox_are_durable() {
         let registry = SqliteProcessRegistry::memory().expect("registry");
+        let target_scope = lash_core::ProcessScope::new("runtime", "session");
+        let target_scope_id = target_scope.id();
         registry
             .register_process(
                 registration("proc-wake").with_extra_event_types([process_wake_event_type()]),
@@ -2909,7 +3160,7 @@ mod tests {
             }),
         )
         .with_idempotency_key("wake:deploy failed")
-        .with_wake_target_scope_key("runtime:session");
+        .with_wake_target_scope(target_scope);
 
         let first = registry
             .append_event("proc-wake", request.clone())
@@ -2939,7 +3190,7 @@ mod tests {
         );
 
         let wakes = registry
-            .drain_wake_inputs("runtime:session", 10)
+            .drain_wake_inputs(&target_scope_id, 10)
             .await
             .expect("drain wakes");
         assert_eq!(wakes.len(), 1);
@@ -2950,7 +3201,7 @@ mod tests {
             .expect("ack wake");
         assert!(
             registry
-                .drain_wake_inputs("runtime:session", 10)
+                .drain_wake_inputs(&target_scope_id, 10)
                 .await
                 .expect("drain after ack")
                 .is_empty()

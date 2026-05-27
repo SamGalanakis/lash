@@ -22,6 +22,7 @@ pub struct RuntimeServices {
     pub turn_injection_bridge: crate::session::TurnInjectionBridge,
     pub turn_input_injection_bridge: crate::session::TurnInputInjectionBridge,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
+    pub lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     pub(crate) store: Option<Arc<dyn crate::store::RuntimePersistence>>,
 }
 
@@ -58,6 +59,7 @@ impl RuntimeServices {
             turn_injection_bridge,
             turn_input_injection_bridge,
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            lashlang_artifact_store: lashlang::global_in_memory_lashlang_artifact_store(),
             store: None,
         }
     }
@@ -67,6 +69,14 @@ impl RuntimeServices {
         attachment_store: Arc<dyn crate::AttachmentStore>,
     ) -> Self {
         self.attachment_store = attachment_store;
+        self
+    }
+
+    pub(crate) fn with_lashlang_artifact_store(
+        mut self,
+        artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    ) -> Self {
+        self.lashlang_artifact_store = artifact_store;
         self
     }
 }
@@ -95,6 +105,7 @@ impl PersistentRuntimeServices {
             turn_injection_bridge,
             turn_input_injection_bridge,
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            lashlang_artifact_store: lashlang::global_in_memory_lashlang_artifact_store(),
             store: Some(store),
         })
     }

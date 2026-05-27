@@ -18,9 +18,10 @@ pub mod turn;
 pub mod usage;
 
 pub use crate::control::{
-    AdvancedToolsControl, Handoffs, PluginActions, ProcessControl, ToolsControl,
+    AdvancedToolsControl, Handoffs, HostEventsControl, PluginActions, ProcessControl, ToolsControl,
+    TriggersControl,
 };
-pub use crate::core::{AdvancedLashCoreBuilder, LashCore, LashCoreBuilder};
+pub use crate::core::{AdvancedLashCoreBuilder, LashCore, LashCoreBuilder, SessionDeleteReport};
 pub use crate::error::{EmbedError, Result};
 pub use crate::mode::{ModeId, ModePreset};
 pub use crate::plugin_binding::PluginBinding;
@@ -32,17 +33,19 @@ pub use crate::turn::{
     TurnStream, message_role, message_text,
 };
 pub use lash_core::{
-    InputItem, ModelLimits, ModelSpec, PluginStack, SessionSpec, TurnActivity, TurnActivityId,
-    TurnActivitySink, TurnEvent, TurnInput,
+    HostEvent, HostEventEmitReport, InputItem, ModelLimits, ModelSpec, PluginStack, SessionSpec,
+    SessionTriggerInstallReport, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent,
+    TurnInput,
 };
 
 pub mod prelude {
     pub use crate::{
         AdvancedLashCoreBuilder, AdvancedToolsControl, EmbedError, FollowedTurnResult, Handoffs,
-        InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ModelSpec,
-        ObservableSession, PluginActions, PluginBinding, PluginStack, ProcessControl, Result,
-        ResumeTurnBuilder, SessionBuilder, SessionSpec, ToolsControl, TurnActivity, TurnBuilder,
-        TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
+        HostEvent, HostEventEmitReport, HostEventsControl, InputItem, LashCore, LashCoreBuilder,
+        LashSession, ModeId, ModePreset, ModelSpec, ObservableSession, PluginActions,
+        PluginBinding, PluginStack, ProcessControl, Result, ResumeTurnBuilder, SessionBuilder,
+        SessionSpec, SessionTriggerInstallReport, ToolsControl, TriggersControl, TurnActivity,
+        TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
     };
     pub use lash_core::TurnActivitySink;
 }
@@ -97,10 +100,10 @@ pub mod plugins {
         ToolResultHookContext,
     };
     pub use lash_core::{
-        PluginError, PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginRuntimeEvent,
-        PluginSession, PluginSessionContext, PluginSpec, PluginSpecFactory, PromptHookContext,
-        SessionPlugin, ToolSurfaceContribution, ToolSurfaceOverride, TurnHookContext,
-        TurnResultHookContext,
+        HostEvent, PluginError, PluginFactory, PluginHost, PluginMessage, PluginRegistrar,
+        PluginRuntimeEvent, PluginSession, PluginSessionContext, PluginSpec, PluginSpecFactory,
+        PromptHookContext, SessionPlugin, ToolSurfaceContribution, ToolSurfaceOverride,
+        TurnHookContext, TurnResultHookContext,
     };
     pub use lash_plugin_tool_output_budget::{
         ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
@@ -109,6 +112,11 @@ pub mod plugins {
 }
 
 pub mod modes {
+    pub use lash_protocol_rlm::{
+        LashlangAbilities, LashlangSurface, ResourceCatalog, RlmProtocolPluginConfig, TypeExpr,
+        TypeField, format_type_expr,
+    };
+
     pub use crate::mode::{ModeId, ModePreset};
 }
 
@@ -128,15 +136,17 @@ pub mod advanced {
         DurableProcessWorkerConfig, EffectInvocationMetadata, EffectOrigin, EmbeddedRuntimeHost,
         EventSink, InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
         NoopEventSink, NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage,
-        ProcessCreatorScope, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-        ProcessRecord, ProcessRegistry, ProtocolSessionExtensionHandle, ProtocolTurnOptions,
-        Residency, RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand,
-        RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
-        RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-        RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode,
-        RuntimeHandle, RuntimeObservation, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionEvent,
-        SessionHandle, SessionPolicy, SessionStateEnvelope, TerminationPolicy, TurnContext,
-        TurnFinish, TurnOutcome, TurnStop,
+        ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessInput,
+        ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
+        ProcessScopeId, ProcessService, ProcessSessionDeleteReport, ProcessStartOptions,
+        ProtocolSessionExtensionHandle, ProtocolTurnOptions, Residency, RewriteTrigger,
+        RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
+        RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
+        RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
+        RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
+        RuntimeObservation, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionEvent, SessionHandle,
+        SessionPolicy, SessionStateEnvelope, TerminationPolicy, TurnContext, TurnFinish,
+        TurnOutcome, TurnStop, lashlang_process_event_types,
     };
 }
 

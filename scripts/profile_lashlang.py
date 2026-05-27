@@ -12,46 +12,44 @@ from pathlib import Path
 from typing import Any
 
 
-SCENARIOS = [
-    "baseline",
-    "language_surface",
-    "async_await",
-    "direct_unwrap",
-    "general_parallel",
-    "loop_control",
-    "indexed_assignment",
-    "projected_values",
-    "large_data",
-    "cache_pressure",
-    "projected_operations",
-    "type_system_stress",
-    "wrapped_error_paths",
-    "tool_control_surface",
-    "snapshot_projected_state",
-    "continue_as_seed_surface",
-    "syntax_text_surface",
-    "integer_range_surface",
-    "parallel_statement_surface",
-    "image_surface",
-]
-
 PERF_MODES = [
     "one_shot",
     "prewarmed_one_shot",
+    "link_artifact",
     "compiled_execute",
     "snapshot",
+    "artifact_roundtrip",
+    "compiled_process_cache",
 ]
 
-DEFAULT_PERF_MODES = ["one_shot", "prewarmed_one_shot", "compiled_execute", "snapshot"]
+DEFAULT_PERF_MODES = [
+    "one_shot",
+    "prewarmed_one_shot",
+    "link_artifact",
+    "compiled_execute",
+    "snapshot",
+    "artifact_roundtrip",
+    "compiled_process_cache",
+]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", action="append", default=[], help="Scenario to run; defaults to all.")
+    parser.add_argument(
+        "--scenario",
+        action="append",
+        default=[],
+        help="Scenario to run; defaults to all. Known names are loaded from the benchmark binary.",
+    )
     parser.add_argument("--mode", action="append", default=[], help="Perf mode to run; defaults to the standard sweep.")
     parser.add_argument("--iterations", type=int, default=10_000)
     parser.add_argument("--profile-iterations", type=int, default=10_000)
-    parser.add_argument("--profile-scenario", action="append", default=[], help="Profile scenario; defaults to aggregate all.")
+    parser.add_argument(
+        "--profile-scenario",
+        action="append",
+        default=[],
+        help="Profile scenario; defaults to aggregate all. Known names are loaded from the benchmark binary.",
+    )
     parser.add_argument("--skip-perf", action="store_true")
     parser.add_argument("--skip-profile", action="store_true")
     parser.add_argument("--debug", action="store_true")
@@ -87,12 +85,12 @@ def resolve_requested(values: list[str], known: list[str], default: list[str]) -
     return resolved
 
 
-def resolve_profile_scenarios(values: list[str]) -> list[str]:
+def resolve_profile_scenarios(values: list[str], known: list[str]) -> list[str]:
     requested = values or ["all"]
     resolved: list[str] = []
     for value in requested:
-        if value != "all" and value not in SCENARIOS:
-            expected = ", ".join([*SCENARIOS, "all"])
+        if value != "all" and value not in known:
+            expected = ", ".join([*known, "all"])
             raise SystemExit(f"error: unknown profile scenario `{value}`; expected one of: {expected}")
         if value not in resolved:
             resolved.append(value)
@@ -122,6 +120,14 @@ def run_command(root: Path, cmd: list[str]) -> str:
             print(proc.stderr, file=sys.stderr, end="")
         raise SystemExit(proc.returncode)
     return proc.stdout
+
+
+def load_scenarios(root: Path, binary: Path) -> list[str]:
+    output = run_command(root, [str(binary), "--list-scenarios"])
+    scenarios = [line.strip() for line in output.splitlines() if line.strip()]
+    if not scenarios:
+        raise SystemExit(f"error: benchmark binary did not report scenarios: {binary}")
+    return scenarios
 
 
 def parse_scalar(value: str) -> str | int | float:
@@ -190,13 +196,20 @@ def git_info(root: Path) -> dict[str, Any]:
 def main() -> int:
     args = parse_args()
     root = repo_root()
-    scenarios = resolve_requested(args.scenario, SCENARIOS, SCENARIOS)
     modes = resolve_requested(args.mode, PERF_MODES, DEFAULT_PERF_MODES)
-    profile_scenarios = resolve_profile_scenarios(args.profile_scenario)
 
     maybe_build(root, args.debug, args.build)
     perf_bin = example_path(root, args.debug, "perf")
     profile_bin = example_path(root, args.debug, "profile")
+
+    scenario_binary = perf_bin if perf_bin.exists() else profile_bin
+    if not scenario_binary.exists():
+        raise SystemExit(
+            f"error: no Lashlang profiling example found; expected {perf_bin} or {profile_bin}"
+        )
+    known_scenarios = load_scenarios(root, scenario_binary)
+    scenarios = resolve_requested(args.scenario, known_scenarios, known_scenarios)
+    profile_scenarios = resolve_profile_scenarios(args.profile_scenario, known_scenarios)
 
     perf_results = []
     if not args.skip_perf:

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
@@ -12,6 +13,8 @@ use super::{
 pub struct RuntimeCoreConfig {
     pub host_profile_id: String,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
+    pub lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    pub lashlang_process_cache: Arc<Mutex<lashlang::CompiledProcessCache>>,
     pub prompt: crate::PromptLayer,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
@@ -25,6 +28,8 @@ impl Default for RuntimeCoreConfig {
         Self {
             host_profile_id: "default".to_string(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            lashlang_artifact_store: lashlang::global_in_memory_lashlang_artifact_store(),
+            lashlang_process_cache: Arc::new(Mutex::new(lashlang::CompiledProcessCache::new())),
             prompt: crate::PromptLayer::new(),
             trace_sink: None,
             trace_level: TraceLevel::Standard,
@@ -41,6 +46,22 @@ impl RuntimeCoreConfig {
         attachment_store: Arc<dyn crate::AttachmentStore>,
     ) -> Self {
         self.attachment_store = attachment_store;
+        self
+    }
+
+    pub fn with_lashlang_artifact_store(
+        mut self,
+        artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    ) -> Self {
+        self.lashlang_artifact_store = artifact_store;
+        self
+    }
+
+    pub fn with_lashlang_process_cache(
+        mut self,
+        process_cache: Arc<Mutex<lashlang::CompiledProcessCache>>,
+    ) -> Self {
+        self.lashlang_process_cache = process_cache;
         self
     }
 

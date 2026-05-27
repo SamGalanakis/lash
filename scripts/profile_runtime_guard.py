@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_SCENARIOS = ["rlm_large_tool_surface", "turn_checkpoint"]
+DEFAULT_SCENARIOS = ["rlm_large_tool_surface", "rlm_process_handles", "turn_checkpoint"]
 DEFAULT_STACKS = ["64k", "128k", "256k", "320k", "512k", "1m", "8m"]
 
 
@@ -36,12 +36,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmups", type=int, help="Warmups for each runtime lane.")
     parser.add_argument("--turns", type=int, help="Turns for each runtime lane.")
     parser.add_argument(
+        "--cargo-feature",
+        action="append",
+        default=[],
+        help="Additional Cargo feature to enable when building lash-cli.",
+    )
+    parser.add_argument(
         "--scenario",
         action="append",
         default=[],
         help=(
-            "Scenario to track. Defaults to rlm_large_tool_surface and "
-            "turn_checkpoint. May be repeated."
+            "Scenario to track. Defaults to rlm_large_tool_surface, "
+            "rlm_process_handles, and turn_checkpoint. May be repeated."
         ),
     )
     parser.add_argument(
@@ -151,6 +157,8 @@ def runtime_common_args(args: argparse.Namespace) -> list[str]:
         values.append(f"--turns={args.turns}")
     for scenario in args.scenario or DEFAULT_SCENARIOS:
         values.extend(["--scenario", scenario])
+    for feature in args.cargo_feature:
+        values.extend(["--cargo-feature", feature])
     return values
 
 
@@ -289,6 +297,8 @@ def main() -> int:
         stack_cmd.extend(["--scenario", scenario])
     for stack in args.stack_bytes or DEFAULT_STACKS:
         stack_cmd.extend(["--stack-bytes", stack])
+    for feature in args.cargo_feature:
+        stack_cmd.extend(["--cargo-feature", feature])
     print("Running stack sensitivity lane", file=sys.stderr)
     stack_rc, stack_report, _ = run_json(stack_cmd, root, allow_failure=True)
 

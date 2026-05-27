@@ -236,6 +236,50 @@ async fn rlm_core_opens_rlm_session_and_rejects_standard_session() -> Result<()>
 }
 
 #[tokio::test]
+async fn rlm_mode_config_lashlang_abilities_drive_prompt_surface() -> Result<()> {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = lash_core::testing::TestProvider::builder()
+        .kind("rlm-abilities-prompt-test")
+        .complete({
+            let seen = Arc::clone(&seen);
+            move |request| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.lock()
+                        .expect("seen prompts")
+                        .push(system_text(&request));
+                    Ok(text_response("```lashlang\nsubmit \"ok\"\n```"))
+                }
+            }
+        })
+        .build()
+        .into_handle();
+    let config: crate::modes::RlmProtocolPluginConfig = serde_json::from_value(serde_json::json!({
+        "lashlang_abilities": { "processes": true, "triggers": true }
+    }))
+    .expect("rlm config");
+    let core = LashCore::builder()
+        .install_mode(ModePreset::rlm_with_config(config))
+        .default_mode(ModeId::rlm())
+        .provider(provider)
+        .model(mock_model_spec())
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build()?;
+    let session = core.session("rlm-abilities-prompt").open().await?;
+
+    session
+        .turn(TurnInput::text("hello"))
+        .require_submit()?
+        .run()
+        .await?;
+
+    let prompts = seen.lock().expect("seen prompts");
+    assert!(prompts[0].contains("Triggers: declaration-only resource-event activation"));
+    assert!(!prompts[0].contains("TRIGGER.button.pressed"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn malformed_rlm_create_extras_fail_child_session_creation() -> Result<()> {
     let core = LashCore::rlm()
         .provider(mock_provider())
@@ -373,6 +417,27 @@ async fn store_factory_reopens_persisted_session_state() -> Result<()> {
     let messages = reopened.read_view().messages().to_vec();
     assert_eq!(messages.len(), 1);
     assert_eq!(message_text(&messages[0]), "already stored");
+    Ok(())
+}
+
+#[tokio::test]
+async fn core_delete_session_removes_factory_backed_session_state() -> Result<()> {
+    let factory = Arc::new(DeletingStoreFactory::default());
+    let core = LashCore::standard()
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(factory)
+        .build()?;
+    let session = core.session("delete-session").open().await?;
+    session.run(TurnInput::text("stored before delete")).await?;
+    assert!(!session.read_view().messages().is_empty());
+    drop(session);
+
+    let report = core.delete_session("delete-session").await?;
+    let reopened = core.session("delete-session").open().await?;
+
+    assert_eq!(report.session_id, "delete-session");
+    assert!(reopened.read_view().messages().is_empty());
     Ok(())
 }
 

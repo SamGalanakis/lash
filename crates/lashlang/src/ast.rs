@@ -1,5 +1,6 @@
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::lexer::Span;
 
@@ -90,7 +91,8 @@ pub struct TriggerDecl {
     pub name: AstString,
     pub source: TriggerSource,
     pub event_binding: AstString,
-    pub body: Expr,
+    pub process_name: AstString,
+    pub args: Vec<(AstString, TriggerArg)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -104,6 +106,13 @@ pub enum TriggerSource {
         event: AstString,
         resource_binding: AstString,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TriggerArg {
+    EventBinding(AstString),
+    ResourceBinding(AstString),
+    ResourceRef(ResourceRefExpr),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -222,7 +231,7 @@ pub enum Expr {
     TypeLiteral(Box<TypeExpr>),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypeExpr {
     Any,
     Str,
@@ -243,7 +252,56 @@ pub enum TypeExpr {
     Union(Vec<TypeExpr>),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub fn format_type_expr(ty: &TypeExpr) -> String {
+    match ty {
+        TypeExpr::Any => "any".to_string(),
+        TypeExpr::Str => "str".to_string(),
+        TypeExpr::Int => "int".to_string(),
+        TypeExpr::Float => "float".to_string(),
+        TypeExpr::Bool => "bool".to_string(),
+        TypeExpr::Dict => "dict".to_string(),
+        TypeExpr::Null => "null".to_string(),
+        TypeExpr::Enum(values) => format!(
+            "enum[{}]",
+            values
+                .iter()
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TypeExpr::List(item) => format!("list[{}]", format_type_expr(item)),
+        TypeExpr::Object(fields) => {
+            let fields = fields
+                .iter()
+                .map(|field| {
+                    let optional = if field.optional { "?" } else { "" };
+                    format!(
+                        "{}: {}{}",
+                        field.name,
+                        format_type_expr(&field.ty),
+                        optional
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ {fields} }}")
+        }
+        TypeExpr::Ref(name) => name.to_string(),
+        TypeExpr::Union(items) => items
+            .iter()
+            .map(format_type_expr)
+            .collect::<Vec<_>>()
+            .join(" | "),
+    }
+}
+
+impl fmt::Display for TypeExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&format_type_expr(self))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeField {
     pub name: AstString,
     pub ty: TypeExpr,
@@ -283,4 +341,41 @@ pub enum BinaryOp {
     GreaterEqual,
     And,
     Or,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_expr_formatting_covers_nested_shapes() {
+        let ty = TypeExpr::Object(vec![
+            TypeField {
+                name: "status".into(),
+                ty: TypeExpr::Enum(vec!["ok".into(), "err".into()]),
+                optional: false,
+            },
+            TypeField {
+                name: "tags".into(),
+                ty: TypeExpr::List(Box::new(TypeExpr::Str)),
+                optional: true,
+            },
+            TypeField {
+                name: "owner".into(),
+                ty: TypeExpr::Ref("User".into()),
+                optional: false,
+            },
+            TypeField {
+                name: "value".into(),
+                ty: TypeExpr::Union(vec![TypeExpr::Int, TypeExpr::Null]),
+                optional: false,
+            },
+        ]);
+
+        assert_eq!(
+            format_type_expr(&ty),
+            r#"{ status: enum["ok", "err"], tags: list[str]?, owner: User, value: int | null }"#
+        );
+        assert_eq!(ty.to_string(), format_type_expr(&ty));
+    }
 }

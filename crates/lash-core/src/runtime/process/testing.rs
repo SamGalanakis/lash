@@ -1,0 +1,555 @@
+#![cfg(any(test, feature = "testing"))]
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::SystemTime;
+
+use tokio::sync::Mutex;
+
+use crate::plugin::PluginError;
+
+use super::events::{
+    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessTerminalState,
+    ProcessWakeDelivery,
+};
+use super::materialization::materialize_event_semantics;
+use super::model::{
+    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
+    ProcessRecord, ProcessRegistration, ProcessScope, ProcessScopeId, ProcessSessionDeleteReport,
+};
+use super::registry::ProcessRegistry;
+use super::time::current_epoch_ms;
+use super::validation::{
+    ensure_core_event_types, process_event_payload_hash, process_registration_hash,
+    require_event_idempotency, validate_process_registration,
+};
+use super::wake::process_wake_delivery;
+
+/// In-memory process registry for core tests.
+pub struct TestLocalProcessRegistry {
+    managed: Arc<Mutex<ManagedProcessMap>>,
+    grants: Arc<Mutex<ManagedGrantMap>>,
+    wake_inbox: Arc<Mutex<ManagedWakeInbox>>,
+}
+
+impl Default for TestLocalProcessRegistry {
+    fn default() -> Self {
+        Self {
+            managed: Arc::new(Mutex::new(HashMap::new())),
+            grants: Arc::new(Mutex::new(HashMap::new())),
+            wake_inbox: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+type ManagedProcessMap = HashMap<String, ManagedProcessRecord>;
+type ManagedGrantMap = HashMap<ProcessScopeId, HashMap<String, ProcessHandleGrant>>;
+type ManagedWakeInbox = HashMap<String, ManagedWakeDelivery>;
+
+struct ManagedWakeDelivery {
+    delivery: ProcessWakeDelivery,
+    acked: bool,
+}
+
+struct ManagedProcessRecord {
+    record: ProcessRecord,
+    events: Vec<ProcessEvent>,
+    keyed_events: HashMap<String, (String, ProcessEvent)>,
+    acked_wakes: HashSet<u64>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl TestLocalProcessRegistry {
+    async fn insert_process(
+        &self,
+        mut registration: ProcessRegistration,
+    ) -> Result<ProcessRecord, PluginError> {
+        ensure_core_event_types(&mut registration);
+        validate_process_registration(&registration)?;
+        let registration_hash = process_registration_hash(&registration)?;
+        let mut managed = self.managed.lock().await;
+        if let Some(existing) = managed.get(&registration.id) {
+            if existing.record.registration_hash == registration_hash {
+                return Ok(existing.record.clone());
+            }
+            return Err(PluginError::Session(format!(
+                "process `{}` registration hash conflict: existing {}, new {}",
+                registration.id, existing.record.registration_hash, registration_hash
+            )));
+        }
+        let id = registration.id.clone();
+        let record = ProcessRecord::from_prepared_registration(
+            registration,
+            registration_hash,
+            current_epoch_ms(),
+        );
+        managed.insert(
+            id.clone(),
+            ManagedProcessRecord {
+                record: record.clone(),
+                events: Vec::new(),
+                keyed_events: HashMap::new(),
+                acked_wakes: HashSet::new(),
+                notify: Arc::new(tokio::sync::Notify::new()),
+            },
+        );
+        Ok(record)
+    }
+}
+
+#[async_trait::async_trait]
+impl ProcessRegistry for TestLocalProcessRegistry {
+    async fn register_process(
+        &self,
+        registration: ProcessRegistration,
+    ) -> Result<ProcessRecord, PluginError> {
+        self.insert_process(registration).await
+    }
+
+    async fn set_external_ref(
+        &self,
+        process_id: &str,
+        external_ref: ProcessExternalRef,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        record.record.external_ref = Some(external_ref);
+        record.record.updated_at_ms = current_epoch_ms();
+        Ok(record.record.clone())
+    }
+
+    async fn grant_handle(
+        &self,
+        owner_scope: &ProcessScope,
+        process_id: &str,
+        descriptor: ProcessHandleDescriptor,
+    ) -> Result<ProcessHandleGrant, PluginError> {
+        if self.get_process(process_id).await.is_none() {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        let grant = ProcessHandleGrant {
+            session_id: owner_scope.session_id.clone(),
+            process_id: process_id.to_string(),
+            descriptor,
+        };
+        self.grants
+            .lock()
+            .await
+            .entry(owner_scope.id())
+            .or_default()
+            .insert(process_id.to_string(), grant.clone());
+        Ok(grant)
+    }
+
+    async fn revoke_handle(
+        &self,
+        owner_scope: &ProcessScope,
+        process_id: &str,
+    ) -> Result<(), PluginError> {
+        if let Some(session_grants) = self.grants.lock().await.get_mut(&owner_scope.id()) {
+            session_grants.remove(process_id);
+        }
+        Ok(())
+    }
+
+    async fn transfer_handle_grants(
+        &self,
+        from_scope: &ProcessScope,
+        to_scope: &ProcessScope,
+        process_ids: &[String],
+    ) -> Result<(), PluginError> {
+        let mut grants = self.grants.lock().await;
+        let from_scope_id = from_scope.id();
+        let to_scope_id = to_scope.id();
+        for process_id in process_ids {
+            let grant = grants
+                .get_mut(&from_scope_id)
+                .and_then(|session_grants| session_grants.remove(process_id))
+                .ok_or_else(|| {
+                    PluginError::Session(format!(
+                        "process handle `{process_id}` is not granted to session `{}`",
+                        from_scope.session_id
+                    ))
+                })?;
+            grants.entry(to_scope_id.clone()).or_default().insert(
+                process_id.clone(),
+                ProcessHandleGrant {
+                    session_id: to_scope.session_id.clone(),
+                    process_id: process_id.clone(),
+                    descriptor: grant.descriptor,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    async fn list_handle_grants(
+        &self,
+        owner_scope: &ProcessScope,
+    ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
+        let grants = self
+            .grants
+            .lock()
+            .await
+            .get(&owner_scope.id())
+            .cloned()
+            .unwrap_or_default();
+        let managed = self.managed.lock().await;
+        let mut entries = grants
+            .into_values()
+            .filter_map(|grant| {
+                managed
+                    .get(&grant.process_id)
+                    .map(|record| (grant, record.record.clone()))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|(left, _), (right, _)| left.process_id.cmp(&right.process_id));
+        Ok(entries)
+    }
+
+    async fn handle_grants_for_process(
+        &self,
+        process_id: &str,
+    ) -> Result<Vec<ProcessHandleGrant>, PluginError> {
+        if self.get_process(process_id).await.is_none() {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        let grants = self.grants.lock().await;
+        let mut entries = grants
+            .values()
+            .filter_map(|session_grants| session_grants.get(process_id).cloned())
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        Ok(entries)
+    }
+
+    async fn delete_session_process_state(
+        &self,
+        session_id: &str,
+    ) -> Result<ProcessSessionDeleteReport, PluginError> {
+        let removed = {
+            let mut grants = self.grants.lock().await;
+            let mut removed = Vec::new();
+            grants.retain(|_, session_grants| {
+                if session_grants
+                    .values()
+                    .next()
+                    .is_some_and(|grant| grant.session_id == session_id)
+                {
+                    removed.extend(session_grants.drain().map(|(_, grant)| grant));
+                    false
+                } else {
+                    true
+                }
+            });
+            removed
+        };
+        let deleted_wake_count = {
+            let mut wake_inbox = self.wake_inbox.lock().await;
+            let before = wake_inbox.len();
+            wake_inbox.retain(|_, entry| entry.delivery.target_session_id != session_id);
+            before.saturating_sub(wake_inbox.len())
+        };
+        let managed = self.managed.lock().await;
+        let grants = self.grants.lock().await;
+        let mut cancel_process_ids = Vec::new();
+        let mut preserved_process_ids = Vec::new();
+        for grant in &removed {
+            let Some(record) = managed.get(&grant.process_id) else {
+                continue;
+            };
+            if record.record.is_terminal() {
+                continue;
+            }
+            let still_granted = grants
+                .values()
+                .any(|session_grants| session_grants.contains_key(&grant.process_id));
+            if still_granted {
+                preserved_process_ids.push(grant.process_id.clone());
+            } else {
+                cancel_process_ids.push(grant.process_id.clone());
+            }
+        }
+        cancel_process_ids.sort();
+        cancel_process_ids.dedup();
+        preserved_process_ids.sort();
+        preserved_process_ids.dedup();
+        Ok(ProcessSessionDeleteReport {
+            session_id: session_id.to_string(),
+            revoked_handle_count: removed.len(),
+            deleted_wake_count,
+            cancel_process_ids,
+            preserved_process_ids,
+        })
+    }
+
+    async fn append_event(
+        &self,
+        process_id: &str,
+        request: ProcessEventAppendRequest,
+    ) -> Result<ProcessEvent, PluginError> {
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        let payload_hash = process_event_payload_hash(&request.event_type, &request.payload)?;
+        if let Some(idempotency_key) = request.idempotency_key.as_deref()
+            && let Some((existing_hash, existing)) = record.keyed_events.get(idempotency_key)
+        {
+            if existing_hash == &payload_hash {
+                return Ok(existing.clone());
+            }
+            return Err(PluginError::Session(format!(
+                "process `{process_id}` event idempotency key `{idempotency_key}` conflicts with an existing event"
+            )));
+        }
+        let declared = record
+            .record
+            .event_types
+            .iter()
+            .find(|declared| declared.name == request.event_type)
+            .ok_or_else(|| {
+                PluginError::Session(format!(
+                    "process `{process_id}` emitted undeclared event type `{}`",
+                    request.event_type
+                ))
+            })?;
+        require_event_idempotency(process_id, &request, &declared.semantics)?;
+        declared
+            .payload_schema
+            .validate(&request.payload)
+            .map_err(|err| {
+                PluginError::Session(format!("invalid `{}` payload: {err}", request.event_type))
+            })?;
+        let sequence = record.events.len() as u64 + 1;
+        let semantics = materialize_event_semantics(
+            process_id,
+            sequence,
+            &request.payload,
+            &declared.semantics,
+        )?;
+        if semantics.terminal.is_some() && record.record.terminal.is_some() {
+            return Err(PluginError::Session(format!(
+                "process `{process_id}` is already terminal"
+            )));
+        }
+        let event = ProcessEvent {
+            process_id: process_id.to_string(),
+            sequence,
+            event_type: request.event_type,
+            payload: request.payload,
+            idempotency_key: request.idempotency_key.clone(),
+            semantics: semantics.clone(),
+            occurred_at: SystemTime::now(),
+        };
+        if let Some(terminal) = event.semantics.terminal.clone() {
+            record.record.terminal = Some(terminal);
+        }
+        record.record.updated_at_ms = current_epoch_ms();
+        record.events.push(event.clone());
+        if let Some(idempotency_key) = request.idempotency_key {
+            record
+                .keyed_events
+                .insert(idempotency_key, (payload_hash, event.clone()));
+        }
+        if let Some(wake) = semantics.wake
+            && let Some(target_scope) = request.wake_target_scope
+        {
+            let delivery = process_wake_delivery(
+                target_scope,
+                process_id.to_string(),
+                sequence,
+                wake,
+                event.occurred_at,
+            )?;
+            self.wake_inbox
+                .lock()
+                .await
+                .entry(delivery.wake_id.clone())
+                .or_insert(ManagedWakeDelivery {
+                    delivery,
+                    acked: false,
+                });
+        }
+        record.notify.notify_waiters();
+        Ok(event)
+    }
+
+    async fn events_after(
+        &self,
+        process_id: &str,
+        after_sequence: u64,
+    ) -> Result<Vec<ProcessEvent>, PluginError> {
+        let managed = self.managed.lock().await;
+        let Some(record) = managed.get(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        Ok(record
+            .events
+            .iter()
+            .filter(|event| event.sequence > after_sequence)
+            .cloned()
+            .collect())
+    }
+
+    async fn wake_events_after(
+        &self,
+        process_id: &str,
+        after_sequence: u64,
+    ) -> Result<Vec<ProcessEvent>, PluginError> {
+        let managed = self.managed.lock().await;
+        let Some(record) = managed.get(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        Ok(record
+            .events
+            .iter()
+            .filter(|event| event.sequence > after_sequence)
+            .filter(|event| event.semantics.wake.is_some())
+            .filter(|event| !record.acked_wakes.contains(&event.sequence))
+            .cloned()
+            .collect())
+    }
+
+    async fn wait_event_after(
+        &self,
+        process_id: &str,
+        event_type: &str,
+        after_sequence: u64,
+    ) -> Result<ProcessEvent, PluginError> {
+        loop {
+            let notify = {
+                let managed = self.managed.lock().await;
+                let Some(record) = managed.get(process_id) else {
+                    return Err(PluginError::Session(format!(
+                        "unknown process `{process_id}`"
+                    )));
+                };
+                if let Some(event) = record
+                    .events
+                    .iter()
+                    .find(|event| event.sequence > after_sequence && event.event_type == event_type)
+                    .cloned()
+                {
+                    return Ok(event);
+                }
+                Arc::clone(&record.notify)
+            };
+            notify.notified().await;
+        }
+    }
+
+    async fn await_process(&self, process_id: &str) -> Result<ProcessAwaitOutput, PluginError> {
+        loop {
+            let notify = {
+                let managed = self.managed.lock().await;
+                let Some(record) = managed.get(process_id) else {
+                    return Err(PluginError::Session(format!(
+                        "unknown process `{process_id}`"
+                    )));
+                };
+                if let Some(terminal) = record
+                    .events
+                    .iter()
+                    .find_map(|event| event.semantics.terminal.clone())
+                {
+                    return Ok(terminal.await_output);
+                }
+                Arc::clone(&record.notify)
+            };
+            notify.notified().await;
+        }
+    }
+
+    async fn complete_process(
+        &self,
+        process_id: &str,
+        await_output: ProcessAwaitOutput,
+    ) -> Result<ProcessRecord, PluginError> {
+        let event_type = match await_output.terminal_state() {
+            ProcessTerminalState::Completed => "process.completed",
+            ProcessTerminalState::Failed => "process.failed",
+            ProcessTerminalState::Cancelled => "process.cancelled",
+        };
+        self.append_event(
+            process_id,
+            ProcessEventAppendRequest::new(
+                event_type,
+                serde_json::json!({ "await_output": await_output }),
+            )
+            .with_idempotency_key(format!("process:{process_id}:terminal:{event_type}")),
+        )
+        .await?;
+        self.get_process(process_id).await.ok_or_else(|| {
+            PluginError::Session(format!(
+                "unknown process `{process_id}` after terminal event"
+            ))
+        })
+    }
+
+    async fn get_process(&self, process_id: &str) -> Option<ProcessRecord> {
+        let managed = self.managed.lock().await;
+        managed.get(process_id).map(|record| record.record.clone())
+    }
+
+    async fn drain_wake_inputs(
+        &self,
+        target_scope_id: &ProcessScopeId,
+        limit: usize,
+    ) -> Result<Vec<ProcessWakeDelivery>, PluginError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let wake_inbox = self.wake_inbox.lock().await;
+        let mut entries = wake_inbox
+            .values()
+            .filter(|entry| !entry.acked && &entry.delivery.target_scope_id == target_scope_id)
+            .map(|entry| entry.delivery.clone())
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.created_at_ms
+                .cmp(&right.created_at_ms)
+                .then_with(|| left.wake_id.cmp(&right.wake_id))
+        });
+        entries.truncate(limit);
+        Ok(entries)
+    }
+
+    async fn ack_wake_input(&self, wake_id: &str) -> Result<(), PluginError> {
+        if let Some(entry) = self.wake_inbox.lock().await.get_mut(wake_id) {
+            entry.acked = true;
+        }
+        Ok(())
+    }
+
+    async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError> {
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        record.acked_wakes.insert(sequence);
+        let mut wake_inbox = self.wake_inbox.lock().await;
+        for entry in wake_inbox.values_mut() {
+            if entry.delivery.process_id == process_id && entry.delivery.sequence == sequence {
+                entry.acked = true;
+            }
+        }
+        Ok(())
+    }
+}

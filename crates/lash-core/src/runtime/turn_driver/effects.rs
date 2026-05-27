@@ -88,9 +88,9 @@ impl RuntimeTurnDriver<'_> {
             .drain()
             .map_err(|err| RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err))?;
         let durable_wakes = if let Some(registry) = self.session_manager.process_registry() {
-            let scope_key = self.session_manager.process_scope_key(&self.session_id);
+            let scope_id = self.session_manager.process_scope_id(&self.session_id);
             registry
-                .drain_wake_inputs(&scope_key, 256)
+                .drain_wake_inputs(&scope_id, 256)
                 .await
                 .map_err(|err| {
                     RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err.to_string())
@@ -170,24 +170,6 @@ impl RuntimeTurnDriver<'_> {
         }
 
         Ok((committed, injected_messages))
-    }
-
-    pub(super) async fn prepare_provider(
-        &mut self,
-        policy: &mut SessionPolicy,
-    ) -> Result<String, SessionEvent> {
-        let model = policy.model.id.clone();
-        if let Some(variant) = policy.model.variant.as_deref()
-            && let Err(message) = policy.provider.validate_variant(&model, variant)
-        {
-            return Err(make_error_event(
-                "llm_provider",
-                Some("invalid_model_variant"),
-                message.clone(),
-                Some(message),
-            ));
-        }
-        Ok(model)
     }
 
     pub(in crate::runtime) async fn run_exec_code(

@@ -618,19 +618,43 @@ where
             .await?;
             Ok(ProcessEffectOutcome::Start { record })
         }
-        ProcessCommand::List { session_id } => {
-            let entries = registry.list_handle_grants(&session_id).await?;
+        ProcessCommand::List { owner_scope } => {
+            let entries = registry.list_handle_grants(&owner_scope).await?;
             Ok(ProcessEffectOutcome::List { entries })
         }
         ProcessCommand::Transfer {
-            from_session_id,
-            to_session_id,
+            from_scope,
+            to_scope,
             process_ids,
         } => {
             registry
-                .transfer_handle_grants(&from_session_id, &to_session_id, &process_ids)
+                .transfer_handle_grants(&from_scope, &to_scope, &process_ids)
                 .await?;
             Ok(ProcessEffectOutcome::Transfer)
+        }
+        ProcessCommand::DeleteSession { session_id } => {
+            let report = registry.delete_session_process_state(&session_id).await?;
+            for process_id in &report.cancel_process_ids {
+                registry
+                    .append_event(
+                        process_id,
+                        lash_core::ProcessEventAppendRequest::cancel_requested(
+                            process_id,
+                            Some("session deleted".to_string()),
+                        ),
+                    )
+                    .await?;
+                context
+                    .request_process_workflow_cancel(RestateProcessCancelRequest {
+                        process_id: process_id.clone(),
+                        reason: Some("session deleted".to_string()),
+                    })
+                    .await
+                    .map_err(|err| {
+                        RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
+                    })?;
+            }
+            Ok(ProcessEffectOutcome::DeleteSession { report })
         }
         ProcessCommand::Await { process_id } => {
             let output = registry.await_process(&process_id).await?;
@@ -675,7 +699,7 @@ where
     let record = registry.register_process(registration.clone()).await?;
     if let Some(grant) = grant {
         registry
-            .grant_handle(&grant.session_id, &process_id, grant.descriptor)
+            .grant_handle(&grant.owner_scope, &process_id, grant.descriptor)
             .await?;
     }
     if record.external_ref.is_some() {
@@ -1201,7 +1225,7 @@ mod tests {
                         command: ProcessCommand::Start {
                             registration,
                             grant: Some(lash_core::ProcessStartGrant {
-                                session_id: "session".to_string(),
+                                owner_scope: lash_core::ProcessScope::new("runtime", "session"),
                                 descriptor: lash_core::ProcessHandleDescriptor::new(
                                     Some("tool"),
                                     Some("task"),
@@ -1239,9 +1263,10 @@ mod tests {
                 .map(|external| external.id.as_str()),
             Some("LashProcessWorkflow/task-1")
         );
+        let owner_scope = lash_core::ProcessScope::new("runtime", "session");
         assert_eq!(
             registry
-                .list_handle_grants("session")
+                .list_handle_grants(&owner_scope)
                 .await
                 .expect("grants")
                 .into_iter()
@@ -1287,14 +1312,19 @@ mod tests {
             lashlang::LashlangSurface::new(catalog, lashlang::LashlangAbilities::all()),
         )
         .expect("link lashlang module");
-        let module_version = linked_module.module_version.clone();
+        let process_ref = linked_module
+            .artifact
+            .process_ref("scan")
+            .expect("scan process ref")
+            .clone();
         let mut args = serde_json::Map::new();
         args.insert("root".to_string(), serde_json::json!("."));
         let registration = ProcessRegistration::new(
             "process-1",
             ProcessInput::LashlangProcess {
-                module_version,
-                linked_module: linked_module.clone(),
+                module_ref: linked_module.module_ref.clone(),
+                process_ref: process_ref.clone(),
+                required_surface_ref: linked_module.required_surface_ref.clone(),
                 process_name: "scan".to_string(),
                 args: args.clone(),
             },
@@ -1310,7 +1340,9 @@ mod tests {
                             registration,
                             grant: None,
                             execution_context: Box::new(
-                                ProcessExecutionContext::default().with_wake_session_id("session"),
+                                ProcessExecutionContext::default().with_wake_target_scope(
+                                    lash_core::ProcessScope::new("runtime", "session"),
+                                ),
                             ),
                         },
                     },
@@ -1346,7 +1378,9 @@ mod tests {
         let started = context.started.lock().expect("started lock");
         assert_eq!(started.len(), 1);
         let ProcessInput::LashlangProcess {
-            linked_module: sent_module,
+            module_ref,
+            process_ref: sent_process_ref,
+            required_surface_ref,
             process_name,
             args: sent_args,
             ..
@@ -1354,7 +1388,9 @@ mod tests {
         else {
             panic!("expected lashlang process input");
         };
-        assert_eq!(sent_module, &linked_module);
+        assert_eq!(module_ref, &linked_module.module_ref);
+        assert_eq!(sent_process_ref, &process_ref);
+        assert_eq!(required_surface_ref, &linked_module.required_surface_ref);
         assert_eq!(process_name, "scan");
         assert_eq!(sent_args, &args);
         assert_eq!(
@@ -1363,7 +1399,12 @@ mod tests {
                 .lock()
                 .expect("started execution contexts lock")
                 .iter()
-                .map(|context| context.wake_session_id.as_deref())
+                .map(|context| {
+                    context
+                        .wake_target_scope
+                        .as_ref()
+                        .map(|scope| scope.session_id.as_str())
+                })
                 .collect::<Vec<_>>(),
             vec![Some("session")]
         );
@@ -1374,13 +1415,15 @@ mod tests {
         let context = Arc::new(RecordingContext::default());
         let host = RestateRuntimeEffectController::new(context.clone());
         let registry = process_registry();
+        let s1 = lash_core::ProcessScope::new("runtime", "s1");
+        let s2 = lash_core::ProcessScope::new("runtime", "s2");
         registry
             .register_process(external_registration("task-list"))
             .await
             .expect("register");
         registry
             .grant_handle(
-                "s1",
+                &s1,
                 "task-list",
                 lash_core::ProcessHandleDescriptor::new(Some("tool"), Some("task")),
             )
@@ -1393,7 +1436,7 @@ mod tests {
                     effect_metadata(RuntimeEffectKind::Process, "process-list-s1"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::List {
-                            session_id: "s1".to_string(),
+                            owner_scope: s1.clone(),
                         },
                     },
                 ),
@@ -1416,8 +1459,8 @@ mod tests {
                     effect_metadata(RuntimeEffectKind::Process, "process-transfer"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::Transfer {
-                            from_session_id: "s1".to_string(),
-                            to_session_id: "s2".to_string(),
+                            from_scope: s1.clone(),
+                            to_scope: s2.clone(),
                             process_ids: vec!["task-list".to_string()],
                         },
                     },
@@ -1433,12 +1476,12 @@ mod tests {
             }
         ));
 
-        let entries = registry.list_handle_grants("s2").await.expect("s2 grants");
+        let entries = registry.list_handle_grants(&s2).await.expect("s2 grants");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0.process_id, "task-list");
         assert!(
             registry
-                .list_handle_grants("s1")
+                .list_handle_grants(&s1)
                 .await
                 .expect("s1")
                 .is_empty()
@@ -1492,7 +1535,7 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     struct RecordedProcessRun {
         process_id: String,
-        wake_session_id: Option<String>,
+        wake_target_session_id: Option<String>,
         tool_effect_id: Option<String>,
     }
 
@@ -1514,7 +1557,9 @@ mod tests {
                 .expect("runner ran lock")
                 .push(RecordedProcessRun {
                     process_id: registration.id,
-                    wake_session_id: execution_context.wake_session_id,
+                    wake_target_session_id: execution_context
+                        .wake_target_scope
+                        .map(|scope| scope.session_id),
                     tool_effect_id: execution_context
                         .tool_effect_metadata
                         .map(|metadata| metadata.effect_id),
@@ -1548,7 +1593,7 @@ mod tests {
         let host = RestateRuntimeEffectController::new(context.clone());
         let registration = external_registration("task-smoke");
         let execution_context = ProcessExecutionContext::default()
-            .with_wake_session_id("wake-smoke")
+            .with_wake_target_scope(lash_core::ProcessScope::new("runtime", "wake-smoke"))
             .with_tool_effect_metadata(Some(effect_metadata(
                 RuntimeEffectKind::ToolCall,
                 "tool-smoke",
@@ -1562,7 +1607,7 @@ mod tests {
                         command: ProcessCommand::Start {
                             registration,
                             grant: Some(lash_core::ProcessStartGrant {
-                                session_id: "session".to_string(),
+                                owner_scope: lash_core::ProcessScope::new("runtime", "session"),
                                 descriptor: lash_core::ProcessHandleDescriptor::new(
                                     Some("tool"),
                                     Some("task-smoke"),
@@ -1594,8 +1639,9 @@ mod tests {
             Some(&serde_json::json!("invocation-task-smoke"))
         );
 
+        let owner_scope = lash_core::ProcessScope::new("runtime", "session");
         let grants = registry
-            .list_handle_grants("session")
+            .list_handle_grants(&owner_scope)
             .await
             .expect("session grants");
         assert_eq!(grants.len(), 1);
@@ -1620,7 +1666,12 @@ mod tests {
                 .lock()
                 .expect("started execution contexts lock")
                 .iter()
-                .map(|context| context.wake_session_id.as_deref())
+                .map(|context| {
+                    context
+                        .wake_target_scope
+                        .as_ref()
+                        .map(|scope| scope.session_id.as_str())
+                })
                 .collect::<Vec<_>>(),
             vec![Some("wake-smoke")]
         );
@@ -1628,7 +1679,7 @@ mod tests {
             runner.ran.lock().expect("runner ran lock").as_slice(),
             &[RecordedProcessRun {
                 process_id: "task-smoke".to_string(),
-                wake_session_id: Some("wake-smoke".to_string()),
+                wake_target_session_id: Some("wake-smoke".to_string()),
                 tool_effect_id: Some("tool-smoke".to_string()),
             }]
         );
@@ -1795,8 +1846,8 @@ mod tests {
             .build();
         let context_a = Arc::new(RecordingContext::with_endpoint(endpoint_a));
         let host_a = RestateRuntimeEffectController::new(context_a);
-        let creator_scope = lash_core::ProcessCreatorScope::new("recovery-runtime", "root");
-        let scope_key = creator_scope.scope_key();
+        let creator_scope = lash_core::ProcessScope::new("recovery-runtime", "root");
+        let scope_id = creator_scope.id();
         let registration = ProcessRegistration::new(
             "recover-tool",
             ProcessInput::ToolCall {
@@ -1809,7 +1860,7 @@ mod tests {
                 },
             },
         )
-        .with_provenance(creator_scope, "recovery-host")
+        .with_provenance(creator_scope.clone(), "recovery-host")
         .with_extra_event_types([process_wake_event_type()]);
 
         host_a
@@ -1820,7 +1871,7 @@ mod tests {
                         command: ProcessCommand::Start {
                             registration,
                             grant: Some(lash_core::ProcessStartGrant {
-                                session_id: scope_key.clone(),
+                                owner_scope: creator_scope.clone(),
                                 descriptor: lash_core::ProcessHandleDescriptor::new(
                                     Some("tool"),
                                     Some("recover-tool"),
@@ -1828,8 +1879,7 @@ mod tests {
                             }),
                             execution_context: Box::new(
                                 ProcessExecutionContext::default()
-                                    .with_wake_session_id("root")
-                                    .with_wake_target_scope_key(scope_key.clone()),
+                                    .with_wake_target_scope(creator_scope.clone()),
                             ),
                         },
                     },
@@ -1845,7 +1895,7 @@ mod tests {
             lash_sqlite_store::SqliteProcessRegistry::open(&process_db).expect("reopen registry"),
         ) as Arc<dyn ProcessRegistry>;
         let grants = registry_b
-            .list_handle_grants(&scope_key)
+            .list_handle_grants(&creator_scope)
             .await
             .expect("list reopened grants");
         assert_eq!(grants.len(), 1);
@@ -1861,7 +1911,7 @@ mod tests {
             }
         );
         let wakes = registry_b
-            .drain_wake_inputs(&scope_key, 10)
+            .drain_wake_inputs(&scope_id, 10)
             .await
             .expect("drain reopened wakes");
         assert_eq!(wakes.len(), 1);
@@ -1872,7 +1922,7 @@ mod tests {
             .expect("ack wake");
         assert!(
             registry_b
-                .drain_wake_inputs(&scope_key, 10)
+                .drain_wake_inputs(&scope_id, 10)
                 .await
                 .expect("drain after ack")
                 .is_empty()
@@ -2007,7 +2057,7 @@ mod tests {
             .await
             .expect("register workflow process");
         let execution_context = ProcessExecutionContext::default()
-            .with_wake_session_id("wake-session")
+            .with_wake_target_scope(lash_core::ProcessScope::new("runtime", "wake-session"))
             .with_tool_effect_metadata(Some(effect_metadata(
                 RuntimeEffectKind::ToolCall,
                 "tool-effect",
@@ -2030,7 +2080,7 @@ mod tests {
             runner.ran.lock().expect("runner ran lock").as_slice(),
             &[RecordedProcessRun {
                 process_id: "task-workflow".to_string(),
-                wake_session_id: Some("wake-session".to_string()),
+                wake_target_session_id: Some("wake-session".to_string()),
                 tool_effect_id: Some("tool-effect".to_string()),
             }]
         );

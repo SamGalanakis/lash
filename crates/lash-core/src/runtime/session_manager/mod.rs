@@ -200,8 +200,8 @@ impl UsageCapability {
 }
 
 impl RuntimeSessionManager {
-    pub(in crate::runtime) fn process_scope_key(&self, session_id: &str) -> String {
-        self.processes.process_scope_key(session_id)
+    pub(in crate::runtime) fn process_scope_id(&self, session_id: &str) -> crate::ProcessScopeId {
+        self.processes.process_scope_id(session_id)
     }
 
     pub(in crate::runtime) fn process_registry(&self) -> Option<Arc<dyn crate::ProcessRegistry>> {

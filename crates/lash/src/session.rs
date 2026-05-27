@@ -357,6 +357,14 @@ impl LashSession {
         ToolsControl::new(self.control())
     }
 
+    pub fn triggers(&self) -> TriggersControl {
+        self.control().triggers()
+    }
+
+    pub fn host_events(&self) -> HostEventsControl {
+        self.control().host_events()
+    }
+
     pub fn process_control(&self) -> ProcessControl {
         ProcessControl::new(self.control())
     }
@@ -438,6 +446,10 @@ impl ObservableSession {
 
     pub async fn list_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
         self.snapshot().list_process_handles().await
+    }
+
+    pub fn process_scope(&self) -> ProcessScope {
+        self.snapshot().process_scope()
     }
 }
 pub struct QueueInputBuilder<'a> {

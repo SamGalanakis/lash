@@ -70,6 +70,8 @@ fn register_singleton_hook<H>(
 #[derive(Clone, Default)]
 pub(crate) struct PluginContributions {
     pub(crate) tool_providers: Vec<Arc<dyn ToolProvider>>,
+    pub(crate) host_events: Vec<crate::HostEvent>,
+    pub(crate) trigger_registry: Option<Arc<SessionTriggerRegistry>>,
     pub(crate) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
     pub(crate) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
     pub(crate) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
@@ -106,6 +108,32 @@ pub struct ToolRegistrations<'a> {
 impl ToolRegistrations<'_> {
     pub fn provider(self, provider: Arc<dyn ToolProvider>) -> Result<(), PluginError> {
         self.reg.add_tool_provider(provider)
+    }
+}
+
+pub struct HostEventRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl HostEventRegistrations<'_> {
+    pub fn declare(self, event: crate::HostEvent) -> Result<(), PluginError> {
+        self.reg.add_host_event(event)
+    }
+}
+
+pub struct TriggerRegistrations<'a> {
+    reg: &'a mut PluginRegistrar,
+}
+
+impl TriggerRegistrations<'_> {
+    pub(crate) fn registry(self, registry: Arc<SessionTriggerRegistry>) -> Result<(), PluginError> {
+        if self.reg.contributions.trigger_registry.is_some() {
+            return Err(PluginError::Registration(
+                "duplicate session trigger registry".to_string(),
+            ));
+        }
+        self.reg.contributions.trigger_registry = Some(registry);
+        Ok(())
     }
 }
 
@@ -328,6 +356,14 @@ impl PluginRegistrar {
         ToolRegistrations { reg: self }
     }
 
+    pub fn host_events(&mut self) -> HostEventRegistrations<'_> {
+        HostEventRegistrations { reg: self }
+    }
+
+    pub(crate) fn triggers(&mut self) -> TriggerRegistrations<'_> {
+        TriggerRegistrations { reg: self }
+    }
+
     pub fn prompt(&mut self) -> PromptRegistrations<'_> {
         PromptRegistrations { reg: self }
     }
@@ -386,6 +422,22 @@ impl PluginRegistrar {
             }
         }
         self.contributions.tool_providers.push(provider);
+        Ok(())
+    }
+
+    fn add_host_event(&mut self, event: crate::HostEvent) -> Result<(), PluginError> {
+        if self
+            .contributions
+            .host_events
+            .iter()
+            .any(|existing| existing.key() == event.key())
+        {
+            return Err(PluginError::Registration(format!(
+                "duplicate host event `{}.{}.{}`",
+                event.resource_type, event.alias, event.event
+            )));
+        }
+        self.contributions.host_events.push(event);
         Ok(())
     }
 

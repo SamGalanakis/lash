@@ -1,8 +1,12 @@
 mod bench_support;
 
-use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state_for};
+use bench_support::{
+    BenchHost, Scenario, benchmark_program, linked_benchmark_program, projected_bindings,
+    seeded_state_for,
+};
 use lashlang::{
-    ExecutionEnvironment, ExecutionOutcome, ExecutionScratch, ProjectedBindings, State, compile,
+    CompiledProcessCache, ExecutionEnvironment, ExecutionOutcome, ExecutionScratch,
+    InMemoryLashlangArtifactStore, LashlangArtifactStore, ProjectedBindings, State, compile_linked,
     execute, prewarm,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -80,11 +84,21 @@ fn record_dealloc(bytes: u64) {
 enum Mode {
     OneShot,
     PrewarmedOneShot,
+    LinkArtifact,
     CompiledExecute,
     Snapshot,
+    ArtifactRoundtrip,
+    CompiledProcessCache,
 }
 
 fn main() {
+    let mut args = env::args().skip(1);
+    if matches!(args.next().as_deref(), Some("--list-scenarios")) {
+        for scenario in Scenario::ALL {
+            println!("{scenario}");
+        }
+        return;
+    }
     let mut args = env::args().skip(1);
     let mode = args
         .next()
@@ -97,7 +111,9 @@ fn main() {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(match mode {
             Mode::OneShot | Mode::PrewarmedOneShot => 25_000,
-            Mode::CompiledExecute | Mode::Snapshot => 100_000,
+            Mode::CompiledExecute | Mode::Snapshot | Mode::CompiledProcessCache => 100_000,
+            Mode::LinkArtifact => 25_000,
+            Mode::ArtifactRoundtrip => 10_000,
         });
 
     let scenarios = parse_scenarios(scenario_arg.as_deref());
@@ -118,6 +134,8 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
     let projected = projected_bindings(scenario);
     let host = BenchHost;
     let mut scratch = ExecutionScratch::new();
+    let mut process_cache_stats = None;
+    let mut artifact_bytes = None;
 
     reset_alloc_counters();
     let mut started = Instant::now();
@@ -126,8 +144,8 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             for _ in 0..iterations {
                 let mut state = seeded_state_for(scenario);
                 let mut scratch = ExecutionScratch::new();
-                let compiled =
-                    compile(std::hint::black_box(source)).expect("compile should succeed");
+                let linked = linked_benchmark_program(std::hint::black_box(source.as_str()));
+                let compiled = compile_linked(&linked);
                 let outcome =
                     execute_benchmark(rt, &compiled, &mut state, &host, &mut scratch, &projected);
                 expect_finished(outcome);
@@ -140,15 +158,22 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             for _ in 0..iterations {
                 let mut state = seeded_state_for(scenario);
                 let mut scratch = ExecutionScratch::new();
-                let compiled =
-                    compile(std::hint::black_box(source)).expect("compile should succeed");
+                let linked = linked_benchmark_program(std::hint::black_box(source.as_str()));
+                let compiled = compile_linked(&linked);
                 let outcome =
                     execute_benchmark(rt, &compiled, &mut state, &host, &mut scratch, &projected);
                 expect_finished(outcome);
             }
         }
+        Mode::LinkArtifact => {
+            for _ in 0..iterations {
+                let linked = linked_benchmark_program(std::hint::black_box(source.as_str()));
+                std::hint::black_box((&linked.module_ref, &linked.required_surface_ref));
+            }
+        }
         Mode::CompiledExecute => {
-            let compiled = compile(source).expect("benchmark program should compile");
+            let linked = linked_benchmark_program(source.as_str());
+            let compiled = compile_linked(&linked);
             for _ in 0..iterations {
                 let mut state = seeded_state_for(scenario);
                 let outcome =
@@ -157,7 +182,8 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             }
         }
         Mode::Snapshot => {
-            let compiled = compile(source).expect("benchmark program should compile");
+            let linked = linked_benchmark_program(source.as_str());
+            let compiled = compile_linked(&linked);
             for _ in 0..iterations {
                 let mut state = seeded_state_for(scenario);
                 let snapshot = state.snapshot();
@@ -169,6 +195,43 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
                 expect_finished(outcome);
             }
         }
+        Mode::ArtifactRoundtrip => {
+            let linked = linked_benchmark_program(source.as_str());
+            artifact_bytes = Some(
+                linked
+                    .artifact
+                    .to_store_bytes()
+                    .expect("artifact should encode")
+                    .len(),
+            );
+            let store = InMemoryLashlangArtifactStore::new();
+            for _ in 0..iterations {
+                store
+                    .put_module_artifact(&linked.artifact)
+                    .expect("artifact store put should succeed");
+                let artifact = store
+                    .get_module_artifact(&linked.module_ref)
+                    .expect("artifact store get should succeed")
+                    .expect("artifact should exist");
+                std::hint::black_box(artifact);
+            }
+        }
+        Mode::CompiledProcessCache => {
+            let linked = linked_benchmark_program(source.as_str());
+            let process_ref = linked
+                .artifact
+                .process_ref("echo")
+                .expect("benchmark module should export echo process")
+                .clone();
+            let mut cache = CompiledProcessCache::new();
+            for _ in 0..iterations {
+                let compiled = cache
+                    .get_or_compile(&linked.artifact, &process_ref, &linked.required_surface_ref)
+                    .expect("process cache compile should succeed");
+                std::hint::black_box(compiled.compile_stats());
+            }
+            process_cache_stats = Some(cache.stats());
+        }
     }
     let elapsed = started.elapsed();
     let allocs = alloc_snapshot();
@@ -178,6 +241,9 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
     println!("scenario: {scenario}");
     println!("iterations: {iterations}");
     println!("program_bytes: {}", source.len());
+    if let Some(bytes) = artifact_bytes {
+        println!("artifact_bytes: {bytes}");
+    }
     println!("elapsed_ms: {:.3}", elapsed.as_secs_f64() * 1_000.0);
     println!(
         "ns_per_iter: {:.1}",
@@ -195,6 +261,12 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
         allocs.allocated_bytes as f64 / iterations as f64
     );
     println!("peak_live_bytes: {}", allocs.peak_live_bytes);
+    if let Some(stats) = process_cache_stats {
+        println!("process_cache_hits: {}", stats.hits);
+        println!("process_cache_misses: {}", stats.misses);
+        println!("process_cache_evictions: {}", stats.evictions);
+        println!("process_cache_entries: {}", stats.entries);
+    }
 }
 
 fn execute_benchmark(
@@ -232,10 +304,13 @@ fn parse_mode(value: &str) -> Mode {
     match value {
         "one_shot" => Mode::OneShot,
         "prewarmed_one_shot" => Mode::PrewarmedOneShot,
+        "link_artifact" => Mode::LinkArtifact,
         "compiled_execute" => Mode::CompiledExecute,
         "snapshot" => Mode::Snapshot,
+        "artifact_roundtrip" => Mode::ArtifactRoundtrip,
+        "compiled_process_cache" => Mode::CompiledProcessCache,
         other => panic!(
-            "unknown mode `{other}`; expected one_shot, prewarmed_one_shot, compiled_execute, or snapshot"
+            "unknown mode `{other}`; expected one_shot, prewarmed_one_shot, link_artifact, compiled_execute, snapshot, artifact_roundtrip, or compiled_process_cache"
         ),
     }
 }

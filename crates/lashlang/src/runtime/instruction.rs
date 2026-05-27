@@ -9,8 +9,8 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::LinkedModule;
-use crate::ast::{BinaryOp, Program, UnaryOp};
+use crate::artifact::CompiledModuleContext;
+use crate::ast::{BinaryOp, UnaryOp};
 use crate::lexer::Span;
 
 use super::record::{Symbol, intern_symbol, symbol_name};
@@ -19,8 +19,7 @@ use super::{CompileStats, LoweredLoop, ProfileReport, ProfileStat, Value};
 
 #[derive(Clone)]
 pub(crate) struct Chunk {
-    pub(crate) module: Program,
-    pub(crate) linked_module: Option<LinkedModule>,
+    pub(crate) module_context: Option<CompiledModuleContext>,
     pub(crate) code: Vec<Instruction>,
     pub(crate) spans: Vec<Option<Span>>,
     pub(crate) constants: Vec<Value>,

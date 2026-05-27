@@ -57,16 +57,21 @@ impl RuntimeObservation {
         &self.session_id
     }
 
-    pub fn process_scope_key(&self) -> String {
-        format!("{}:{}", self.runtime_scope_id, self.session_id)
+    pub fn process_scope(&self) -> crate::ProcessScope {
+        crate::ProcessScope::new(self.runtime_scope_id.as_ref(), self.session_id.as_ref())
+    }
+
+    pub fn process_scope_id(&self) -> crate::ProcessScopeId {
+        self.process_scope().id()
     }
 
     pub async fn list_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
         let Some(executor) = self.process_registry.as_ref() else {
             return Vec::new();
         };
+        let owner_scope = self.process_scope();
         executor
-            .list_handle_grants(&self.process_scope_key())
+            .list_handle_grants(&owner_scope)
             .await
             .unwrap_or_default()
     }

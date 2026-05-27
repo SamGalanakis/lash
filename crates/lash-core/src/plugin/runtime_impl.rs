@@ -8,6 +8,7 @@ use super::*;
 pub struct PluginHost {
     factories: Arc<Vec<Arc<dyn PluginFactory>>>,
     lashlang_abilities: lashlang::LashlangAbilities,
+    lashlang_resources: lashlang::ResourceCatalog,
     sessions: Arc<StdMutex<BTreeMap<String, Weak<PluginSession>>>>,
 }
 
@@ -39,9 +40,21 @@ impl PluginHost {
             all_factories.retain(|factory| !override_ids.contains(factory.id()));
         }
         all_factories.extend(factories);
+        let lashlang_abilities = all_factories.iter().fold(
+            lashlang::LashlangAbilities::default(),
+            |abilities, factory| abilities.union(factory.lashlang_abilities()),
+        );
+        let lashlang_resources = all_factories.iter().fold(
+            lashlang::ResourceCatalog::new(),
+            |mut resources, factory| {
+                resources.extend(factory.lashlang_resources());
+                resources
+            },
+        );
         Self {
             factories: Arc::new(all_factories),
-            lashlang_abilities: lashlang::LashlangAbilities::default(),
+            lashlang_abilities,
+            lashlang_resources,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
@@ -51,16 +64,26 @@ impl PluginHost {
         self
     }
 
+    pub fn with_lashlang_resources(mut self, resources: lashlang::ResourceCatalog) -> Self {
+        self.lashlang_resources = resources;
+        self
+    }
+
     pub fn isolated_registry(&self) -> Self {
         Self {
             factories: Arc::clone(&self.factories),
             lashlang_abilities: self.lashlang_abilities,
+            lashlang_resources: self.lashlang_resources.clone(),
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
 
     pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
         self.lashlang_abilities
+    }
+
+    pub fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
+        self.lashlang_resources.clone()
     }
 
     pub fn factories(&self) -> &[Arc<dyn PluginFactory>] {
@@ -186,6 +209,14 @@ impl PluginHost {
         contributions
             .history_rewriters
             .sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        let host_events = crate::HostEventCatalog::from_events(contributions.host_events.clone())
+            .map_err(|message| {
+            PluginError::Registration(format!("invalid host event catalog: {message}"))
+        })?;
+        let lashlang_resources = self.lashlang_resources.clone();
+        let trigger_registry = contributions.trigger_registry.clone().ok_or_else(|| {
+            PluginError::Registration("missing session trigger registry".to_string())
+        })?;
         let registry = match tool_snapshot {
             Some(snapshot) => Arc::new(
                 crate::ToolRegistry::from_tool_providers(contributions.tool_providers.clone())
@@ -218,6 +249,9 @@ impl PluginHost {
             tool_access: authority.tool_access,
             subagent: authority.subagent,
             lashlang_abilities: self.lashlang_abilities,
+            lashlang_resources,
+            host_events,
+            trigger_registry,
             contributions,
         });
         self.register_session(&session_id, &session)?;

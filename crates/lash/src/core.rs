@@ -10,6 +10,12 @@ pub struct LashCore {
     pub(crate) plugin_factories: Arc<Vec<Arc<dyn PluginFactory>>>,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SessionDeleteReport {
+    pub session_id: String,
+    pub process: Option<lash_core::ProcessSessionDeleteReport>,
+}
+
 impl LashCore {
     pub fn builder() -> LashCoreBuilder {
         LashCoreBuilder::default()
@@ -40,6 +46,74 @@ impl LashCore {
             active_plugins: Vec::new(),
             plugin_factories: Vec::new(),
         }
+    }
+
+    pub async fn delete_session(&self, session_id: impl AsRef<str>) -> Result<SessionDeleteReport> {
+        let session_id = session_id.as_ref().to_string();
+        let Some(store_factory) = self.store_factory.as_ref() else {
+            return Err(EmbedError::MissingSessionStoreFactory);
+        };
+        let process = if let Some(process_registry) = self.env.process_registry.as_ref() {
+            let metadata = lash_core::EffectInvocationMetadata {
+                session_id: session_id.clone(),
+                origin: lash_core::EffectOrigin::Turn,
+                turn_id: None,
+                turn_index: None,
+                protocol_iteration: None,
+                effect_id: format!("process:delete-session:{session_id}"),
+                effect_kind: lash_core::RuntimeEffectKind::Process,
+                idempotency_key: format!("{session_id}:delete-session"),
+                turn_checkpoint_hash: None,
+            };
+            let outcome = self
+                .env
+                .core
+                .effect_controller
+                .execute_effect(
+                    lash_core::RuntimeEffectEnvelope::new(
+                        metadata,
+                        lash_core::RuntimeEffectCommand::Process {
+                            command: lash_core::ProcessCommand::DeleteSession {
+                                session_id: session_id.clone(),
+                            },
+                        },
+                    ),
+                    lash_core::RuntimeEffectLocalExecutor::process_control(Arc::clone(
+                        process_registry,
+                    )),
+                )
+                .await
+                .map_err(|err| EmbedError::SessionDeleteProcess {
+                    session_id: session_id.clone(),
+                    message: err.to_string(),
+                })?;
+            match outcome {
+                lash_core::RuntimeEffectOutcome::Process {
+                    result: lash_core::ProcessEffectOutcome::DeleteSession { report },
+                } => Some(report),
+                other => {
+                    return Err(EmbedError::SessionDeleteProcess {
+                        session_id,
+                        message: format!(
+                            "process delete returned the wrong outcome: {}",
+                            other.kind().as_str()
+                        ),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        store_factory
+            .delete_session(&session_id)
+            .map_err(|message| EmbedError::StoreFactory {
+                session_id: session_id.clone(),
+                message,
+            })?;
+        Ok(SessionDeleteReport {
+            session_id,
+            process,
+        })
     }
 
     pub fn installed_modes(&self) -> impl Iterator<Item = &ModeId> {

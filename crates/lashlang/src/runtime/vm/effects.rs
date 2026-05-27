@@ -72,12 +72,32 @@ impl<H: ExecutionHost> Vm<'_, H> {
             }
             VmEffect::StartProcess { process, keys } => {
                 let args = self.drain_record_from_stack(keys)?;
+                let process_name = self.chunk.names[process].text.to_string();
+                let module_context =
+                    self.chunk
+                        .module_context
+                        .as_ref()
+                        .ok_or_else(|| RuntimeError::ValueError {
+                            message: "`start` requires a linked lashlang module artifact"
+                                .to_string(),
+                        })?;
+                let process_ref = module_context
+                    .process_refs
+                    .get(&process_name)
+                    .cloned()
+                    .ok_or_else(|| RuntimeError::ValueError {
+                        message: format!(
+                            "linked lashlang module `{}` does not export process `{process_name}`",
+                            module_context.module_ref
+                        ),
+                    })?;
                 let value = self
                     .host
                     .perform(AbilityOp::StartProcess(ProcessStart {
-                        module: self.chunk.module.clone(),
-                        linked_module: self.chunk.linked_module.clone(),
-                        process: self.chunk.names[process].text.to_string(),
+                        module_ref: module_context.module_ref.clone(),
+                        process_ref,
+                        required_surface_ref: module_context.required_surface_ref.clone(),
+                        process_name,
                         args,
                     }))
                     .await

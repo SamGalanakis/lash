@@ -250,25 +250,29 @@ impl DirectCompletionCapability {
                 usage_source: usage_source.clone(),
             },
         );
-        let outcome = crate::runtime::effect::execute_effect_with_journal(
-            current.store.as_ref().map(|store| store.as_ref()),
-            context.turn_lease,
-            context.effect_controller,
-            envelope,
-            crate::RuntimeEffectLocalExecutor::direct(
-                provider,
-                Arc::clone(&current.host.core.attachment_store),
+        crate::runtime::effect::invoke_journaled_effect(
+            crate::runtime::effect::JournaledEffectInvocation::new(
+                current.store.as_ref().map(|store| store.as_ref()),
+                context.turn_lease,
+                context.effect_controller,
+                envelope,
+                crate::RuntimeEffectLocalExecutor::direct(
+                    provider,
+                    Arc::clone(&current.host.core.attachment_store),
+                ),
             ),
-        )
-        .await?;
-        crate::runtime::effect::apply_direct_completion_outcome(
-            current,
-            context.usage_capability,
-            &request,
-            &llm_request,
-            &model,
-            &usage_source,
-            outcome,
+            |outcome| async move {
+                crate::runtime::effect::apply_direct_completion_outcome(
+                    current,
+                    context.usage_capability,
+                    &request,
+                    &llm_request,
+                    &model,
+                    &usage_source,
+                    outcome,
+                )
+                .await
+            },
         )
         .await
     }
@@ -302,23 +306,27 @@ impl DirectCompletionCapability {
                 usage_source: usage_source.clone(),
             },
         );
-        let outcome = crate::runtime::effect::execute_effect_with_journal(
-            current.store.as_ref().map(|store| store.as_ref()),
-            context.turn_lease,
-            context.effect_controller,
-            envelope,
-            crate::RuntimeEffectLocalExecutor::direct(
-                provider,
-                Arc::clone(&current.host.core.attachment_store),
+        crate::runtime::effect::invoke_journaled_effect(
+            crate::runtime::effect::JournaledEffectInvocation::new(
+                current.store.as_ref().map(|store| store.as_ref()),
+                context.turn_lease,
+                context.effect_controller,
+                envelope,
+                crate::RuntimeEffectLocalExecutor::direct(
+                    provider,
+                    Arc::clone(&current.host.core.attachment_store),
+                ),
             ),
-        )
-        .await?;
-        crate::runtime::effect::apply_direct_llm_completion_outcome(
-            current,
-            context.usage_capability,
-            &request,
-            &usage_source,
-            outcome,
+            |outcome| async move {
+                crate::runtime::effect::apply_direct_llm_completion_outcome(
+                    current,
+                    context.usage_capability,
+                    &request,
+                    &usage_source,
+                    outcome,
+                )
+                .await
+            },
         )
         .await
     }

@@ -481,7 +481,6 @@ pub(crate) async fn run_app(
                         app.recycle_unaccepted_process_wakes();
                         if let Some(rt) = runtime.as_mut() {
                             let preserved_policy = rt.policy_snapshot();
-                            let _ = rt.control().state().reset().await;
                             rt.control()
                                 .state()
                                 .set_persisted(lash_core::RuntimeSessionState::from_state(

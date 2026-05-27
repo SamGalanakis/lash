@@ -240,6 +240,14 @@ impl RuntimeEffectController for ProcessJournalController {
                 ProcessCommand::Transfer { .. } => Ok(RuntimeEffectOutcome::Process {
                     result: ProcessEffectOutcome::Transfer,
                 }),
+                ProcessCommand::DeleteSession { session_id } => Ok(RuntimeEffectOutcome::Process {
+                    result: ProcessEffectOutcome::DeleteSession {
+                        report: crate::ProcessSessionDeleteReport {
+                            session_id,
+                            ..Default::default()
+                        },
+                    },
+                }),
                 ProcessCommand::Start { registration, .. } => Ok(RuntimeEffectOutcome::Process {
                     result: ProcessEffectOutcome::Start {
                         record: ProcessRecord::from_registration(registration),
@@ -752,7 +760,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         metadata.clone(),
         RuntimeEffectCommand::Process {
             command: ProcessCommand::List {
-                session_id: "scope-a".to_string(),
+                owner_scope: ProcessScope::new("runtime", "scope-a"),
             },
         },
     );
@@ -798,7 +806,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
             metadata,
             RuntimeEffectCommand::Process {
                 command: ProcessCommand::List {
-                    session_id: "scope-b".to_string(),
+                    owner_scope: ProcessScope::new("runtime", "scope-b"),
                 },
             },
         ),

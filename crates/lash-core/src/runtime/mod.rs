@@ -88,16 +88,17 @@ pub use observation::{RuntimeHandle, RuntimeObservation};
 #[cfg(any(test, feature = "testing"))]
 pub use process::TestLocalProcessRegistry;
 pub use process::{
-    ProcessAwaitOutput, ProcessCreatorScope, ProcessEvent, ProcessEventAppendRequest,
-    ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessId, ProcessInput, ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry,
-    ProcessService, ProcessStartGrant, ProcessStartOptions, ProcessTerminalSemantics,
-    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
-    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, UnavailableProcessService,
-    current_epoch_ms, epoch_ms_from_system_time, lashlang_process_event_types,
-    materialize_process_event_semantics, prepare_process_registration, process_event_payload_hash,
-    process_wake_delivery, require_event_idempotency, system_time_from_epoch_ms,
+    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventSemantics,
+    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
+    ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
+    ProcessScopeId, ProcessService, ProcessSessionDeleteReport, ProcessStartGrant,
+    ProcessStartOptions, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
+    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
+    UnavailableProcessService, current_epoch_ms, epoch_ms_from_system_time,
+    lashlang_process_event_types, materialize_process_event_semantics,
+    prepare_process_registration, process_event_payload_hash, process_wake_delivery,
+    require_event_idempotency, system_time_from_epoch_ms,
 };
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
 pub use session_manager::DirectCompletionClient;
@@ -750,6 +751,8 @@ pub trait SessionStoreFactory: Send + Sync {
         &self,
         request: &SessionStoreCreateRequest,
     ) -> Result<Arc<dyn crate::store::RuntimePersistence>, String>;
+
+    fn delete_session(&self, session_id: &str) -> Result<(), String>;
 }
 
 /// Generic runtime for CLI or programmatic embedding.

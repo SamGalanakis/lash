@@ -8,7 +8,7 @@ impl RuntimeSessionManager {
         registry: Arc<dyn crate::ProcessRegistry>,
         call: crate::PreparedToolCall,
         tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
-        wake_target_scope_key: Option<String>,
+        wake_target_scope: Option<crate::ProcessScope>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
         let result = self
@@ -17,7 +17,7 @@ impl RuntimeSessionManager {
                 registry,
                 call,
                 tool_effect_metadata,
-                wake_target_scope_key,
+                wake_target_scope,
                 cancellation,
             )
             .await;
@@ -39,7 +39,7 @@ impl RuntimeSessionManager {
         registry: Arc<dyn crate::ProcessRegistry>,
         call: crate::PreparedToolCall,
         tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
-        wake_target_scope_key: Option<String>,
+        wake_target_scope: Option<crate::ProcessScope>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<crate::ToolCallOutput, crate::PluginError> {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionEvent>(64);
@@ -55,7 +55,7 @@ impl RuntimeSessionManager {
                 .and_then(|metadata: &crate::EffectInvocationMetadata| metadata.turn_id.clone()),
             self.current.turn_lease.clone(),
         );
-        let dispatch = crate::tool_dispatch::ToolDispatchContext {
+        let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
             plugins: Arc::clone(&self.current.plugins),
             tools: self.current.plugins.tools(),
             surface: self
@@ -68,28 +68,20 @@ impl RuntimeSessionManager {
                 &self.current.host.core.effect_controller,
             )),
             direct_completions: direct_completions.clone(),
-            tool_effect_metadata: None,
+            tool_effect_metadata: tool_effect_metadata.clone(),
             session_id: self.current.session_id.clone(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
             attachment_store: Arc::clone(&self.current.host.core.attachment_store),
             turn_context: crate::TurnContext::default(),
-        };
-        let tool_context = crate::ToolContext::new(
-            self.current.session_id.clone(),
-            host,
-            Arc::new(self.clone()),
-            dispatch.effect_controller.clone(),
-            Arc::clone(&self.current.host.core.attachment_store),
-            direct_completions,
-            Some(call.call_id.clone()),
-        )
-        .with_runtime_dispatch(Arc::new(dispatch.clone()))
-        .with_async_process(registration.id.clone(), cancellation)
-        .with_process_events(registration.id.clone(), registry, wake_target_scope_key)
-        .with_tool_effect_metadata(tool_effect_metadata);
+        });
+        let tool_context = crate::ToolContext::from_dispatch(Arc::clone(&dispatch))
+            .prepared_call(&call)
+            .async_process(registration.id.clone(), cancellation)
+            .process_events(registration.id.clone(), registry, wake_target_scope)
+            .build();
         let outcome = crate::tool_dispatch::dispatch_prepared_tool_call_with_execution_context(
-            &dispatch,
+            dispatch.as_ref(),
             call,
             None,
             tool_context,

@@ -27,12 +27,14 @@ mod state;
 mod value;
 mod vm;
 
-pub use cache::{CompiledProgramCache, CompiledProgramCacheStats};
+pub use cache::{
+    CompiledProcessCache, CompiledProcessCacheKey, CompiledProgramCache, CompiledProgramCacheStats,
+};
 #[allow(unused_imports)]
 pub(crate) use compiler::*;
 pub use entry_points::{
-    ExecutableProgram, compile, compile_linked, compile_linked_process, compile_process, execute,
-    prewarm,
+    ExecutableProgram, compile, compile_linked, compile_linked_process,
+    compile_module_artifact_process, compile_process, execute, prewarm,
 };
 pub use host::{
     AbilityOp, AbilityResult, ExecutionEnvironment, ExecutionHost, ExecutionHostError,
@@ -131,11 +133,14 @@ impl CompiledProgram {
         &self.compile_stats
     }
 
-    pub fn static_graph_json(&self, module_version: impl Into<String>) -> serde_json::Value {
-        if let Some(linked) = &self.chunk.linked_module {
-            crate::linked_static_graph_json(linked)
+    pub fn static_graph_json(&self, module_ref: impl Into<String>) -> serde_json::Value {
+        if let Some(context) = &self.chunk.module_context {
+            crate::graph::static_graph_json_for_module_ref(
+                context.module_ref.clone(),
+                &context.process_refs,
+            )
         } else {
-            crate::static_graph_json(&self.chunk.module, module_version)
+            crate::graph::static_graph_json_without_ir(module_ref)
         }
     }
 }

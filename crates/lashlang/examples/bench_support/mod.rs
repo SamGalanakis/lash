@@ -1,8 +1,9 @@
 use compact_str::ToCompactString;
 use lashlang::{
-    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ImageValue, ListValue,
-    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
-    ProjectedReadResponse, ProjectedValue, Record, State, Value, from_json,
+    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ImageValue, LashlangAbilities,
+    LashlangSurface, LinkedModule, ListValue, ProjectedBindings, ProjectedFuture,
+    ProjectedHostValue, ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record,
+    ResourceCatalog, State, Value, from_json,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -160,8 +161,22 @@ pub fn seeded_state_for(scenario: Scenario) -> State {
     State::from_snapshot(lashlang::Snapshot { globals })
 }
 
-pub fn benchmark_program(scenario: Scenario) -> &'static str {
-    match scenario {
+const BENCH_PROCESS_DECLS: &str = r#"
+process echo(value: any) {
+  finish value
+}
+
+process spawn_agent(task: str, capability: str) {
+  finish { claim: format("done:{0}", task) }
+}
+
+process llm_query(prompt: str, model: str) {
+  finish { text: "benchmark summary", tokens: 42 }
+}
+"#;
+
+pub fn benchmark_program(scenario: Scenario) -> String {
+    let main = match scenario {
         Scenario::Baseline => {
             r#"
 items = [
@@ -744,7 +759,32 @@ submit {
 }
 "#
         }
-    }
+    };
+    format!("{BENCH_PROCESS_DECLS}\n{main}")
+}
+
+pub fn benchmark_surface() -> LashlangSurface {
+    LashlangSurface::new(
+        ResourceCatalog::tool_default([
+            "echo",
+            "boom",
+            "exec_command",
+            "llm_query",
+            "spawn_agent",
+            "list_process_handles",
+            "continue_as",
+            "missing_tool",
+        ]),
+        LashlangAbilities::all(),
+    )
+}
+
+pub fn linked_benchmark_program(source: &str) -> LinkedModule {
+    LinkedModule::link(
+        lashlang::parse(source).expect("benchmark program should parse"),
+        benchmark_surface(),
+    )
+    .expect("benchmark program should link")
 }
 
 pub fn projected_bindings(scenario: Scenario) -> ProjectedBindings {
@@ -1227,7 +1267,7 @@ impl ExecutionHost for BenchHost {
                 bench_call(&operation.operation, args).map(AbilityResult::Value)
             }
             AbilityOp::StartProcess(start) => {
-                Self::task_handle(&start.process, &start.args).map(AbilityResult::Value)
+                Self::task_handle(&start.process_name, &start.args).map(AbilityResult::Value)
             }
             AbilityOp::Await(handle) => {
                 let record = handle

@@ -8,13 +8,110 @@ impl RuntimeSessionManager {
         &self,
         registration: crate::ProcessRegistration,
         registry: Arc<dyn crate::ProcessRegistry>,
-        linked_module: ::lashlang::LinkedModule,
+        module_ref: ::lashlang::ModuleRef,
+        process_ref: ::lashlang::ProcessRef,
+        required_surface_ref: ::lashlang::RequiredSurfaceRef,
         process_name: String,
         args: serde_json::Map<String, serde_json::Value>,
         execution_context: crate::ProcessExecutionContext,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
-        let compiled = match ::lashlang::compile_linked_process(&linked_module, &process_name) {
+        let artifact = match self
+            .current
+            .host
+            .core
+            .lashlang_artifact_store
+            .get_module_artifact(&module_ref)
+        {
+            Ok(Some(artifact)) => artifact,
+            Ok(None) => {
+                return process_lashlang_failure(
+                    "process_module_artifact_missing",
+                    format!("missing lashlang module artifact `{module_ref}`"),
+                    None,
+                );
+            }
+            Err(err) => {
+                return process_lashlang_failure(
+                    "process_module_artifact_load_failed",
+                    format!("failed to load lashlang module artifact `{module_ref}`: {err}"),
+                    None,
+                );
+            }
+        };
+        if artifact.required_surface_ref != required_surface_ref {
+            return process_lashlang_failure(
+                "process_required_surface_mismatch",
+                format!(
+                    "lashlang process `{process_name}` requested surface {}, artifact has {}",
+                    required_surface_ref, artifact.required_surface_ref
+                ),
+                None,
+            );
+        }
+        if artifact.process_ref(&process_name) != Some(&process_ref) {
+            return process_lashlang_failure(
+                "process_ref_mismatch",
+                format!(
+                    "lashlang module `{module_ref}` does not export process `{process_name}` as requested ref {:?}",
+                    process_ref
+                ),
+                None,
+            );
+        }
+        let tool_surface = match self.current.plugins.tool_surface(&self.current.session_id) {
+            Ok(surface) => surface,
+            Err(err) => {
+                return process_lashlang_failure(
+                    "process_tool_surface_failed",
+                    err.to_string(),
+                    None,
+                );
+            }
+        };
+        let lashlang_abilities = crate::runtime::builder::lashlang_abilities_for_process_registry(
+            self.current.plugins.lashlang_abilities(),
+            self.current.host.process_registry.is_some(),
+        );
+        let current_surface = crate::session::lashlang_surface_from_tool_surface(
+            &tool_surface,
+            lashlang_abilities,
+            self.current.plugins.lashlang_resources(),
+        );
+        let relinked = match ::lashlang::LinkedModule::link(
+            artifact.canonical_ir.clone(),
+            current_surface,
+        ) {
+            Ok(linked) => linked,
+            Err(err) => {
+                return process_lashlang_failure(
+                    "process_surface_incompatible",
+                    format!(
+                        "lashlang process `{process_name}` is incompatible with this host surface: {err}"
+                    ),
+                    None,
+                );
+            }
+        };
+        if relinked.module_ref != module_ref
+            || relinked.required_surface_ref != required_surface_ref
+        {
+            return process_lashlang_failure(
+                "process_surface_incompatible",
+                format!(
+                    "lashlang process `{process_name}` resolved to module {} / surface {}, expected {module_ref} / {required_surface_ref}",
+                    relinked.module_ref, relinked.required_surface_ref
+                ),
+                None,
+            );
+        }
+        let compiled = match self.current.host.core.lashlang_process_cache.lock() {
+            Ok(mut cache) => cache.get_or_compile(&artifact, &process_ref, &required_surface_ref),
+            Err(_) => Err(::lashlang::RuntimeError::ValueError {
+                message: "lashlang compiled process cache lock poisoned".to_string(),
+            }),
+        };
+        let compiled = match compiled {
             Ok(compiled) => compiled,
             Err(err) => {
                 return process_lashlang_failure(
@@ -44,38 +141,28 @@ impl RuntimeSessionManager {
                 .and_then(|metadata| metadata.turn_id.clone()),
             self.current.turn_lease.clone(),
         );
-        let dispatch = match self.current.plugins.tool_surface(&self.current.session_id) {
-            Ok(surface) => crate::tool_dispatch::ToolDispatchContext {
-                plugins: Arc::clone(&self.current.plugins),
-                tools: self.current.plugins.tools(),
-                surface,
-                host: Arc::clone(&runtime_host),
-                processes: Arc::new(self.clone()),
-                effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(
-                    Arc::clone(&self.current.host.core.effect_controller),
-                ),
-                direct_completions: direct_completions.clone(),
-                tool_effect_metadata: None,
-                session_id: self.current.session_id.clone(),
-                event_tx,
-                turn_injection_bridge: crate::TurnInjectionBridge::new(),
-                attachment_store: Arc::clone(&self.current.host.core.attachment_store),
-                turn_context: crate::TurnContext::default(),
-            },
-            Err(err) => {
-                drop(runtime_host);
-                let _ = event_drain.await;
-                return process_lashlang_failure(
-                    "process_tool_surface_failed",
-                    err.to_string(),
-                    None,
-                );
-            }
+        let dispatch = crate::tool_dispatch::ToolDispatchContext {
+            plugins: Arc::clone(&self.current.plugins),
+            tools: self.current.plugins.tools(),
+            surface: tool_surface,
+            host: Arc::clone(&runtime_host),
+            processes: Arc::new(self.clone()),
+            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
+                &self.current.host.core.effect_controller,
+            )),
+            direct_completions: direct_completions.clone(),
+            tool_effect_metadata: None,
+            session_id: self.current.session_id.clone(),
+            event_tx,
+            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::clone(&self.current.host.core.attachment_store),
+            turn_context: crate::TurnContext::default(),
         };
         let mut ctx = crate::RuntimeExecutionContext::new(
             self.current.session_id.clone(),
             Arc::new(dispatch),
-            self.current.plugins.lashlang_abilities(),
+            lashlang_abilities,
+            Arc::clone(&self.current.host.core.lashlang_artifact_store),
             Arc::clone(&self.current.host.core.attachment_store),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -90,7 +177,7 @@ impl RuntimeSessionManager {
             ctx,
             registry: Arc::clone(&registry),
             process_id: registration.id.clone(),
-            wake_target_scope_key: execution_context.wake_target_scope_key,
+            wake_target_scope: execution_context.wake_target_scope,
             cancellation: cancellation.clone(),
             sleep_sequence: AtomicU64::new(0),
             signal_sequence: tokio::sync::Mutex::new(0),
@@ -100,7 +187,7 @@ impl RuntimeSessionManager {
         let output = {
             tokio::select! {
                 _ = cancellation.cancelled() => process_lashlang_cancelled("lashlang process was cancelled"),
-                result = ::lashlang::execute(&compiled, &mut state, &env) => {
+                result = ::lashlang::execute(compiled.as_ref(), &mut state, &env) => {
                     process_lashlang_execution_result(result)
                 }
             }
@@ -116,7 +203,7 @@ struct LashlangProcessHost<'run> {
     ctx: crate::RuntimeExecutionContext<'run>,
     registry: Arc<dyn crate::ProcessRegistry>,
     process_id: String,
-    wake_target_scope_key: Option<String>,
+    wake_target_scope: Option<crate::ProcessScope>,
     cancellation: tokio_util::sync::CancellationToken,
     sleep_sequence: AtomicU64,
     signal_sequence: tokio::sync::Mutex<u64>,
@@ -217,22 +304,6 @@ impl LashlangProcessHost<'_> {
         &self,
         start: ::lashlang::ProcessStart,
     ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
-        if start.module.process(&start.process).is_none()
-            && let Some(manifest) = self.ctx.callable_tool_manifest(&start.process)
-        {
-            let payload = crate::lashlang_bridge::lashlang_value_to_json(
-                &::lashlang::Value::Record(Arc::new(start.args)),
-            )?;
-            let reply = self
-                .ctx
-                .start_tool_call(
-                    uuid::Uuid::new_v4().to_string(),
-                    manifest.name.clone(),
-                    payload,
-                )
-                .await;
-            return protocol_reply_to_lashlang_value(reply);
-        }
         let (registration, label) = self
             .ctx
             .prepare_lashlang_process_start(start)
@@ -256,7 +327,7 @@ impl LashlangProcessHost<'_> {
                     event_type,
                     crate::lashlang_bridge::process_event_payload(&event.value)?,
                 )
-                .with_optional_wake_target_scope_key(self.wake_target_scope_key.clone()),
+                .with_optional_wake_target_scope(self.wake_target_scope.clone()),
             )
             .await
             .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;

@@ -13,6 +13,7 @@ mod tests {
         MockCall, mock_provider, runtime_with_plugins, runtime_with_plugins_and_tools,
         standard_test_policy,
     };
+    use ::lashlang::LashlangArtifactStore;
     use std::sync::Arc;
 
     async fn runtime_with_processes_and_tools(
@@ -92,12 +93,20 @@ mod tests {
                     .with_process_lifecycle(),
             ),
         )?;
-        let module_version = linked_module.module_version.clone();
+        ::lashlang::global_in_memory_lashlang_artifact_store()
+            .put_module_artifact(&linked_module.artifact)
+            .expect("store lashlang test module artifact");
+        let process_ref = linked_module
+            .artifact
+            .process_ref("main")
+            .expect("main process ref")
+            .clone();
         Ok(crate::ProcessRegistration::new(
             process_id,
             crate::ProcessInput::LashlangProcess {
-                module_version,
-                linked_module,
+                module_ref: linked_module.module_ref,
+                process_ref,
+                required_surface_ref: linked_module.required_surface_ref,
                 process_name: "main".to_string(),
                 args,
             },
@@ -156,12 +165,12 @@ mod tests {
 
     async fn grant_handle(
         registry: &Arc<dyn crate::ProcessRegistry>,
-        scope_key: &str,
+        owner_scope: &crate::ProcessScope,
         process_id: &str,
     ) {
         registry
             .grant_handle(
-                scope_key,
+                owner_scope,
                 process_id,
                 crate::ProcessHandleDescriptor::new(Some("test"), Some(process_id)),
             )
@@ -171,7 +180,7 @@ mod tests {
 
     fn worker_registration(registration: crate::ProcessRegistration) -> crate::ProcessRegistration {
         registration.with_provenance(
-            crate::ProcessCreatorScope::new("worker-runtime", "root"),
+            crate::ProcessScope::new("worker-runtime", "root"),
             "worker-profile",
         )
     }
@@ -179,6 +188,18 @@ mod tests {
     fn process_worker(
         registry: Arc<dyn crate::ProcessRegistry>,
         factory: Arc<dyn crate::SessionStoreFactory>,
+    ) -> crate::DurableProcessWorker {
+        process_worker_with_core(
+            registry,
+            factory,
+            crate::RuntimeCoreConfig::default().with_host_profile_id("worker-profile"),
+        )
+    }
+
+    fn process_worker_with_core(
+        registry: Arc<dyn crate::ProcessRegistry>,
+        factory: Arc<dyn crate::SessionStoreFactory>,
+        runtime_core: crate::RuntimeCoreConfig,
     ) -> crate::DurableProcessWorker {
         let tools: Arc<dyn crate::ToolProvider> = Arc::new(ProcessEchoTool);
         let plugin_host =
@@ -189,7 +210,7 @@ mod tests {
         crate::DurableProcessWorker::new(
             crate::DurableProcessWorkerConfig::new(
                 Arc::new(plugin_host),
-                crate::RuntimeCoreConfig::default().with_host_profile_id("worker-profile"),
+                runtime_core,
                 factory,
                 registry,
             )
@@ -208,8 +229,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lashlang_process_registration_serializes_refs_only() {
+        let registration = lashlang_process_registration(
+            "refs-only",
+            ::lashlang::parse("process main() { finish 1 }").expect("parse module"),
+            serde_json::Map::new(),
+        );
+
+        let json = serde_json::to_string(&registration).expect("serialize registration");
+
+        assert!(json.contains("module_ref"));
+        assert!(json.contains("process_ref"));
+        assert!(json.contains("required_surface_ref"));
+        assert!(!json.contains("linked_module"));
+        assert!(!json.contains("canonical_ir"));
+    }
+
     #[tokio::test]
-    async fn durable_process_worker_requires_structured_creator_scope_without_parsing_scope_key() {
+    async fn lashlang_process_fails_clearly_when_module_artifact_is_missing() {
+        let registry = Arc::new(crate::TestLocalProcessRegistry::default());
+        let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
+        let factory =
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
+        let empty_artifact_store: Arc<dyn ::lashlang::LashlangArtifactStore> =
+            Arc::new(::lashlang::InMemoryLashlangArtifactStore::new());
+        let worker = process_worker_with_core(
+            Arc::clone(&registry_dyn),
+            factory as Arc<dyn crate::SessionStoreFactory>,
+            crate::RuntimeCoreConfig::default()
+                .with_host_profile_id("worker-profile")
+                .with_lashlang_artifact_store(empty_artifact_store),
+        );
+        let registration = worker_registration(lashlang_process_registration(
+            "missing-artifact",
+            ::lashlang::parse("process main() { finish 1 }").expect("parse module"),
+            serde_json::Map::new(),
+        ));
+
+        let output = worker
+            .run_process(
+                registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("worker returns process failure output");
+
+        assert!(matches!(
+            output,
+            crate::ProcessAwaitOutput::Failure { code, .. }
+                if code == "process_module_artifact_missing"
+        ));
+    }
+
+    #[tokio::test]
+    async fn durable_process_worker_requires_structured_creator_scope() {
         let registry = Arc::new(crate::TestLocalProcessRegistry::default());
         let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
         let factory =
@@ -230,7 +305,6 @@ mod tests {
                 ),
             },
         );
-        registration.created_by_scope_key = "worker-runtime:root".to_string();
         registration.host_profile_id = "worker-profile".to_string();
 
         let err = worker
@@ -240,7 +314,7 @@ mod tests {
                 tokio_util::sync::CancellationToken::new(),
             )
             .await
-            .expect_err("worker should not parse creator session from scope key");
+            .expect_err("worker should require creator session provenance");
 
         assert!(
             err.to_string()
@@ -330,15 +404,20 @@ mod tests {
             .expect("process module"),
             args,
         ));
-        let crate::ProcessInput::LashlangProcess { linked_module, .. } =
+        let crate::ProcessInput::LashlangProcess { module_ref, .. } =
             lashlang_registration.input.as_ref()
         else {
             panic!("expected lashlang process input");
         };
+        let artifact = ::lashlang::global_in_memory_lashlang_artifact_store()
+            .get_module_artifact(module_ref)
+            .expect("load lashlang module artifact")
+            .expect("lashlang module artifact exists");
+        let requirements = ::lashlang::surface_requirements_for_program(&artifact.canonical_ir);
         let relink_without_process_abilities = ::lashlang::LinkedModule::link(
-            linked_module.program.clone(),
+            artifact.canonical_ir.clone(),
             ::lashlang::LashlangSurface::new(
-                linked_module.surface.resources.clone(),
+                requirements.resources,
                 ::lashlang::LashlangAbilities::default(),
             ),
         )
@@ -499,7 +578,10 @@ mod tests {
             && event.payload["text"] == serde_json::json!("raw:seed")));
         let wakes = registry
             .drain_wake_inputs(
-                &manager.processes.process_scope_key(&wake_target.session_id),
+                &manager
+                    .processes
+                    .process_scope(&wake_target.session_id)
+                    .id(),
                 10,
             )
             .await
@@ -509,7 +591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lashlang_process_uses_stored_linked_module_for_nested_starts() {
+    async fn lashlang_process_uses_artifact_refs_for_nested_starts() {
         let runtime = runtime_with_processes(Vec::new()).await;
         let manager = RuntimeSessionManager::new(&runtime, true, None, None)
             .expect("runtime session manager");
@@ -533,15 +615,19 @@ mod tests {
         .expect("process module");
         let registration =
             lashlang_process_registration("snapshot-parent", program, serde_json::Map::new());
-        let crate::ProcessInput::LashlangProcess { linked_module, .. } =
-            registration.input.as_ref()
+        let crate::ProcessInput::LashlangProcess { module_ref, .. } = registration.input.as_ref()
         else {
             panic!("expected lashlang process input");
         };
+        let artifact = ::lashlang::global_in_memory_lashlang_artifact_store()
+            .get_module_artifact(module_ref)
+            .expect("load lashlang module artifact")
+            .expect("lashlang module artifact exists");
+        let requirements = ::lashlang::surface_requirements_for_program(&artifact.canonical_ir);
         let relink = ::lashlang::LinkedModule::link(
-            linked_module.program.clone(),
+            artifact.canonical_ir.clone(),
             ::lashlang::LashlangSurface::new(
-                linked_module.surface.resources.clone(),
+                requirements.resources,
                 manager.current.plugins.lashlang_abilities(),
             ),
         )
@@ -817,8 +903,8 @@ mod tests {
             .as_ref()
             .expect("process registry")
             .clone();
-        let current_scope = manager.processes.process_scope_key("root");
-        let other_scope = manager.processes.process_scope_key("other");
+        let current_scope = manager.processes.process_scope("root");
+        let other_scope = manager.processes.process_scope("other");
         let process_ids = ["keep", "sole", "shared"];
 
         for process_id in process_ids {
@@ -873,7 +959,7 @@ mod tests {
                 .into_iter()
                 .map(|grant| grant.session_id)
                 .collect::<Vec<_>>(),
-            vec![other_scope]
+            vec!["other".to_string()]
         );
         let events_after = process_event_projection(&registry, &process_ids).await;
         assert_eq!(events_after[0], events_before[0]);
@@ -912,8 +998,8 @@ mod tests {
                 .with_effect_metadata(Some(metadata.clone()))
                 .with_effect_controller(&controller)
         };
-        let root_scope = manager.processes.process_scope_key("root");
-        let successor_scope = manager.processes.process_scope_key("successor");
+        let root_scope = manager.processes.process_scope("root");
+        let successor_scope = manager.processes.process_scope("successor");
 
         register_open_process(&registry, "transfer-me").await;
         grant_handle(&registry, &root_scope, "transfer-me").await;
@@ -935,7 +1021,7 @@ mod tests {
                 .await
                 .expect("successor grants")
                 .into_iter()
-                .any(|(grant, _)| grant.process_id == "transfer-me")
+                .any(|(grant, _)| { grant.process_id == "transfer-me" })
         );
 
         register_open_process(&registry, "cleanup-me").await;
