@@ -297,6 +297,7 @@ impl Session {
     pub(crate) fn code_execution_context<'run>(
         &self,
         session_id: &str,
+        agent_frame_id: &str,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         processes: Arc<dyn crate::ProcessService>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
@@ -317,6 +318,7 @@ impl Session {
             direct_completions: direct_completions.clone(),
             parent_invocation: None,
             session_id: session_id.to_string(),
+            agent_frame_id: agent_frame_id.to_string(),
             event_tx,
             checkpoint_messages,
             attachment_store: Arc::clone(&self.services.attachment_store),

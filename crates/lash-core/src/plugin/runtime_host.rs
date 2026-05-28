@@ -75,18 +75,6 @@ pub trait RuntimeSessionHost: Send + Sync {
         ))
     }
 
-    /// Pop the seed message that was queued for `session_id` via
-    /// `SessionCreateRequest::first_turn_input`. Returns `None` if no
-    /// seed was queued, or after a previous caller has already taken
-    /// it. Hosts call this when starting the inaugural turn on a
-    /// freshly created session.
-    async fn take_first_turn_input(
-        &self,
-        _session_id: &str,
-    ) -> Result<Option<PluginMessage>, PluginError> {
-        Ok(None)
-    }
-
     async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
         Err(PluginError::Session(
             "session closing is unavailable in this runtime".to_string(),

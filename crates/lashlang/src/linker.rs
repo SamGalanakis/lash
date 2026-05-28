@@ -402,11 +402,11 @@ pub enum LinkError {
         "trigger `{trigger}` binding for process `{process}` argument `{arg}` has incompatible type: expected {expected}, got {actual}"
     )]
     IncompatibleTriggerArgument {
-        trigger: String,
-        process: String,
-        arg: String,
-        expected: String,
-        actual: String,
+        trigger: Box<str>,
+        process: Box<str>,
+        arg: Box<str>,
+        expected: Box<str>,
+        actual: Box<str>,
         span: Option<Span>,
     },
     #[error("receiver for operation `{operation}` is not a module authority")]
@@ -695,7 +695,7 @@ impl<'module> Linker<'module> {
     ) -> Result<(), LinkError> {
         match binding {
             TriggerArg::EventBinding(name) => {
-                if name != &trigger.event_binding {
+                if name != trigger.event_binding {
                     return Err(LinkError::UnknownTriggerBinding {
                         trigger: trigger.name.to_string(),
                         arg: param.name.to_string(),
@@ -767,11 +767,11 @@ impl<'module> Linker<'module> {
             return Ok(());
         }
         Err(LinkError::IncompatibleTriggerArgument {
-            trigger: trigger.name.to_string(),
-            process: process.name.to_string(),
-            arg: param.name.to_string(),
-            expected: format_type_expr(&self.resolve_type_aliases(&param.ty)),
-            actual: resource_type.to_string(),
+            trigger: trigger.name.to_string().into_boxed_str(),
+            process: process.name.to_string().into_boxed_str(),
+            arg: param.name.to_string().into_boxed_str(),
+            expected: format_type_expr(&self.resolve_type_aliases(&param.ty)).into_boxed_str(),
+            actual: resource_type.to_string().into_boxed_str(),
             span,
         })
     }
@@ -786,11 +786,11 @@ impl<'module> Linker<'module> {
         span: Option<Span>,
     ) -> LinkError {
         LinkError::IncompatibleTriggerArgument {
-            trigger: trigger.name.to_string(),
-            process: process.name.to_string(),
-            arg: arg.to_string(),
-            expected: format_type_expr(&self.resolve_type_aliases(expected)),
-            actual: format_type_expr(&self.resolve_type_aliases(actual)),
+            trigger: trigger.name.to_string().into_boxed_str(),
+            process: process.name.to_string().into_boxed_str(),
+            arg: arg.to_string().into_boxed_str(),
+            expected: format_type_expr(&self.resolve_type_aliases(expected)).into_boxed_str(),
+            actual: format_type_expr(&self.resolve_type_aliases(actual)).into_boxed_str(),
             span,
         }
     }
@@ -1979,13 +1979,13 @@ mod tests {
             "#,
         )
         .expect("parse disabled schedule");
-        assert!(matches!(
+        assert!(
             LinkedModule::link(
                 schedule,
                 LashlangSurface::new(resources(), LashlangAbilities::all())
-            ),
-            Ok(_)
-        ));
+            )
+            .is_ok()
+        );
         assert!(matches!(
             LinkedModule::link(
                 crate::parse(
@@ -2116,7 +2116,7 @@ mod tests {
         .expect("parse payload mismatch");
         assert!(matches!(
             LinkedModule::link(payload_mismatch, full_surface()),
-            Err(LinkError::IncompatibleTriggerArgument { arg, .. }) if arg == "event"
+            Err(LinkError::IncompatibleTriggerArgument { arg, .. }) if arg.as_ref() == "event"
         ));
 
         let resource_mismatch = crate::parse(
@@ -2129,7 +2129,7 @@ mod tests {
         .expect("parse resource mismatch");
         assert!(matches!(
             LinkedModule::link(resource_mismatch, full_surface()),
-            Err(LinkError::IncompatibleTriggerArgument { arg, .. }) if arg == "path"
+            Err(LinkError::IncompatibleTriggerArgument { arg, .. }) if arg.as_ref() == "path"
         ));
     }
 

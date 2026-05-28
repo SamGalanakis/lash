@@ -4,10 +4,11 @@ mod tools;
 
 pub(crate) use session::switch_to_session_identifier;
 
-use super::runtime::send_user_message;
+use super::runtime::send_queued_work;
 use super::runtime::sync_runtime_tool_surface;
 use super::*;
 use crate::SkillCatalog;
+use crate::app::PendingImage;
 use crate::turn_runner::make_turn_input;
 
 #[derive(Clone)]
@@ -70,131 +71,204 @@ pub(super) fn promote_pending_steers_to_queue(
     app: &mut App,
     ui_trace: &mut Option<UiTraceRecorder>,
 ) {
-    while let Some(turn) = app.pending_steers.pop_front() {
+    while let Some(turn) = app.queues.pending_steers.pop_front() {
         record_queue_turn(ui_trace, &turn);
         app.queue_turn(turn);
     }
+}
+
+fn current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn ready_batches_for_idle_dispatch(
+    batches: &[lash_core::QueuedWorkBatch],
+) -> Vec<lash_core::QueuedWorkBatch> {
+    let now = current_epoch_ms();
+    let ready = batches
+        .iter()
+        .filter(|batch| batch.available_at_ms <= now)
+        .collect::<Vec<_>>();
+    let Some(first) = ready.first() else {
+        return Vec::new();
+    };
+    let first_slot_policy = first.slot_policy;
+    let first_delivery_policy = first.delivery_policy;
+    let first_merge_key = first.merge_key.clone();
+    let mut selected = Vec::new();
+    for batch in ready {
+        if selected.len() >= 64 {
+            break;
+        }
+        if selected.is_empty() {
+            selected.push((*batch).clone());
+            if first_slot_policy == lash_core::SlotPolicy::Exclusive {
+                break;
+            }
+            continue;
+        }
+        if first_slot_policy != lash_core::SlotPolicy::Join
+            || batch.slot_policy != lash_core::SlotPolicy::Join
+            || batch.delivery_policy != first_delivery_policy
+            || batch.merge_key != first_merge_key
+        {
+            break;
+        }
+        selected.push((*batch).clone());
+    }
+    selected
+}
+
+fn turn_input_display_text(input: &lash_core::TurnInput) -> String {
+    input
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            lash_core::InputItem::Text { text } => Some(text.as_str()),
+            lash_core::InputItem::ImageRef { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn prepared_turn_from_queued_input(input: &lash_core::TurnInput) -> Option<PreparedTurn> {
+    let text = turn_input_display_text(input);
+    let images = input
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            lash_core::InputItem::ImageRef { id } => input.image_blobs.get(id),
+            lash_core::InputItem::Text { .. } => None,
+        })
+        .enumerate()
+        .map(|(idx, png_bytes)| PendingImage {
+            id: idx + 1,
+            png_bytes: png_bytes.clone(),
+        })
+        .collect::<Vec<_>>();
+    if text.trim().is_empty() && images.is_empty() {
+        return None;
+    }
+    Some(PreparedTurn::prepare_with_effective_text(
+        text.clone(),
+        text,
+        images,
+    ))
+}
+
+fn display_turns_for_queued_batches(
+    app: &mut App,
+    batches: &[lash_core::QueuedWorkBatch],
+) -> Vec<PreparedTurn> {
+    let mut turns = Vec::new();
+    for batch in batches {
+        let queue_draft_id = batch.source_key.as_deref().and_then(|source| {
+            source
+                .strip_prefix("host:")
+                .or_else(|| source.strip_prefix("injection:"))
+        });
+        for item in &batch.items {
+            let lash_core::QueuedWorkPayload::TurnInput { input } = &item.payload else {
+                continue;
+            };
+            if let Some(draft_id) = queue_draft_id
+                && let Some(turn) = app.take_queued_turn_by_draft_id(draft_id)
+            {
+                turns.push(turn);
+                continue;
+            }
+            let content = turn_input_display_text(input);
+            if let Some(turn) = app.take_matching_queued_turn(&content) {
+                turns.push(turn);
+                continue;
+            }
+            if let Some(turn) = prepared_turn_from_queued_input(input) {
+                turns.push(turn);
+            }
+        }
+    }
+    turns
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_next_queued_turn(
     app: &mut App,
     ui_trace: &mut Option<UiTraceRecorder>,
-    terminal: &mut Terminal,
+    _terminal: &mut Terminal,
     logger: &mut SessionLogger,
-    args: &Args,
-    paused: &Arc<AtomicBool>,
-    ui_extensions: &TuiExtensions,
-    runtime_factory: &crate::session_bootstrap::CliSessionOpener,
-    lash_config: &crate::config::LashConfig,
+    _args: &Args,
+    _paused: &Arc<AtomicBool>,
+    _ui_extensions: &TuiExtensions,
+    _runtime_factory: &crate::session_bootstrap::CliSessionOpener,
+    _lash_config: &crate::config::LashConfig,
     runtime: &mut Option<LashSession>,
-    history: &mut Vec<Message>,
-    turn_counter: &mut usize,
+    _history: &mut Vec<Message>,
+    _turn_counter: &mut usize,
     last_turn: &mut Option<TurnReplayPayload>,
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
-    provider: &mut ProviderHandle,
-    current_model_variant: &mut Option<String>,
+    _provider: &mut ProviderHandle,
+    _current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
     desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
-    model_catalog: &CachedModelCatalog,
+    _model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
     app_tx: &crate::event::AppEventTx,
-    pending_clear_after_return: &mut bool,
-) -> anyhow::Result<()> {
-    while let Some((queued, was_pending)) = app.take_next_queued_turn() {
-        if runtime.is_none() {
-            tracing::debug!(
-                queued = queued.display_text,
-                was_pending,
-                "queued dispatch paused because runtime is still unavailable"
-            );
-            app.requeue_front(queued, was_pending);
-            return Ok(());
-        }
-        let queued = normalize_prepared_turn_for_dispatch(queued, &app.skills);
-        if let Some(cmd) = parse_slash_command(&queued.display_text, &app.skills, ui_extensions) {
-            if let Some(recorder) = ui_trace.as_mut() {
-                recorder.record_slash_command(queued.display_text.clone());
-            }
-            if handle_parsed_slash_command(
-                cmd,
-                terminal,
-                app,
-                logger,
-                args,
-                paused,
-                ui_extensions,
-                runtime_factory,
-                lash_config,
-                runtime,
-                history,
-                turn_counter,
-                last_turn,
-                runtime_return_rx,
-                cancel_token,
-                active_stream_id,
-                provider,
-                current_model_variant,
-                current_execution_mode,
-                desired_tool_state,
-                pending_reconfigure,
-                model_catalog,
-                toolset_hash,
-                app_tx,
-                pending_clear_after_return,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            continue;
-        }
+    _pending_clear_after_return: &mut bool,
+) -> anyhow::Result<bool> {
+    let Some(session) = runtime.as_ref().cloned() else {
+        tracing::debug!("queued dispatch paused because runtime is unavailable");
+        return Ok(false);
+    };
+    let queued_batches = session.queued_work().await?;
+    let ready_batches = ready_batches_for_idle_dispatch(&queued_batches);
+    if ready_batches.is_empty() {
+        return Ok(false);
+    }
 
-        if let Err(e) =
-            apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
-        {
-            push_system_message(
-                app,
-                format!(
-                    "Pending runtime reconfigure failed; queued message not sent: {}",
-                    e
-                ),
-            );
-            app.requeue_front(queued, was_pending);
-            return Ok(());
-        }
-        *toolset_hash = hash12(
-            &serde_json::to_vec(&desired_tool_state.tool_manifests())
-                .unwrap_or_else(|_| b"[]".to_vec()),
-        );
-        let turn_input = make_turn_input(&queued);
-        let current_tool_state = desired_tool_state.clone();
-        send_user_message(
-            queued.clone(),
-            turn_input.clone(),
+    if let Err(e) =
+        apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
+    {
+        push_system_message(
             app,
-            ui_trace.as_mut(),
-            logger,
-            runtime,
-            history,
-            runtime_return_rx,
-            cancel_token,
-            active_stream_id,
-            app_tx,
-            &current_tool_state,
-        )
-        .await;
+            format!(
+                "Pending runtime reconfigure failed; queued message not sent: {}",
+                e
+            ),
+        );
+        return Ok(false);
+    }
+    *toolset_hash = hash12(
+        &serde_json::to_vec(&desired_tool_state.tool_manifests())
+            .unwrap_or_else(|_| b"[]".to_vec()),
+    );
+    let display_turns = display_turns_for_queued_batches(app, &ready_batches);
+    if let Some(first_turn) = display_turns.first().cloned() {
         *last_turn = Some(TurnReplayPayload {
-            prepared_turn: queued,
-            turn_input,
+            turn_input: make_turn_input(&first_turn),
+            prepared_turn: first_turn,
             execution_mode: current_execution_mode.clone(),
         });
-        return Ok(());
     }
-    Ok(())
+    send_queued_work(
+        display_turns,
+        app,
+        ui_trace.as_mut(),
+        logger,
+        runtime,
+        runtime_return_rx,
+        cancel_token,
+        active_stream_id,
+        app_tx,
+    )
+    .await;
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -315,7 +389,7 @@ async fn handle_slash_command(
         }
         command::Command::Info => {
             let model = app.model.clone();
-            let context_window = app.context_window;
+            let context_window = app.usage.context_window;
             let cwd = app.cwd.clone();
             let session_name = app.session_name.clone();
             let standard_context_approach = (current_execution_mode == &ExecutionMode::standard())

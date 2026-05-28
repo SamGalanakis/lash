@@ -137,6 +137,7 @@ impl RuntimeSessionManager {
             direct_completions: direct_completions.clone(),
             parent_invocation: None,
             session_id: self.current.session_id.clone(),
+            agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::clone(&self.current.host.core.attachment_store),
@@ -297,7 +298,8 @@ impl LashlangProcessHost<'_> {
             ::lashlang::ProcessEventKind::Yield => "process.yield",
             ::lashlang::ProcessEventKind::Wake => "process.wake",
         };
-        let result = self.registry
+        let result = self
+            .registry
             .append_event(
                 &self.process_id,
                 crate::ProcessEventAppendRequest::new(
@@ -393,7 +395,7 @@ impl ::lashlang::ExecutionHost for LashlangProcessHost<'_> {
                 .await
                 .map(::lashlang::AbilityResult::Value),
             ::lashlang::AbilityOp::StartProcess(start) => self
-                .start_process(start)
+                .start_process(*start)
                 .await
                 .map(::lashlang::AbilityResult::Value),
             ::lashlang::AbilityOp::ProcessEvent(event) => {

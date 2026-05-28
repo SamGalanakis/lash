@@ -85,13 +85,16 @@ impl PluginFactory for SubagentsPluginFactory {
         let configurator = Arc::clone(&self.configurator);
         let parent_subagent = ctx.subagent.clone();
 
-        let provider: Arc<dyn ToolProvider> = Arc::new(rlm::RlmSubagentToolsProvider {
-            registry: Arc::clone(&registry),
-            session_spec: session_spec.clone(),
-            configurator: Arc::clone(&configurator),
-            parent_subagent,
-            include_submit_error: ctx.subagent.is_some(),
-        });
+        let provider: Arc<dyn ToolProvider> = Arc::new(
+            rlm::RlmSubagentToolsProvider {
+                registry: Arc::clone(&registry),
+                session_spec: session_spec.clone(),
+                configurator: Arc::clone(&configurator),
+                parent_subagent,
+                include_submit_error: ctx.subagent.is_some(),
+            }
+            .into_provider(),
+        );
 
         PluginSpecFactory::new(
             "subagents",

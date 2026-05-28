@@ -11,11 +11,11 @@ use lash_core::plugin::{
     SessionPlugin, SnapshotReader, SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride,
 };
 use lash_core::{
-    JsonSchema, PluginMessage, SessionCreateRequest, SessionPluginSource, SessionStartPoint,
-    ToolCall, ToolContext, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
+    JsonSchema, PluginMessage, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolResult,
     ToolScheduling,
 };
 use lash_tool_apply_patch::{PatchAction, inspect_patch_ops};
+use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 
 const PLAN_MODE_STATE_EVENT: &str = "plan_mode.state";
 const PLAN_TEMPLATE: &str = r#"# Plan
@@ -91,8 +91,8 @@ fn plan_exit_confirmation_display(selection: &str, note: Option<&str>) -> String
     }
 }
 
-fn fresh_context_session_id() -> String {
-    format!("plan-{}", uuid::Uuid::new_v4().simple())
+fn fresh_context_frame_id() -> String {
+    format!("plan-frame-{}", uuid::Uuid::new_v4().simple())
 }
 
 fn resolve_plan_path(run_session_id: &str) -> Result<PathBuf, String> {
@@ -724,16 +724,18 @@ impl PlanModeTools {
     }
 }
 
+fn plan_mode_provider(
+    state: Arc<Mutex<PlanModeState>>,
+    prompt: Option<Arc<dyn PlanModePrompt>>,
+) -> StaticToolProvider<PlanModeTools> {
+    StaticToolProvider::new(
+        vec![plan_exit_tool_definition()],
+        PlanModeTools { state, prompt },
+    )
+}
+
 #[async_trait::async_trait]
-impl ToolProvider for PlanModeTools {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![plan_exit_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "plan_exit").then(|| Arc::new(plan_exit_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for PlanModeTools {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
             "plan_exit" => self.execute_plan_exit(call.context).await,
@@ -806,10 +808,10 @@ impl SessionPlugin for PlanModePlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.tools().provider(Arc::new(PlanModeTools {
-            state: Arc::clone(&self.state),
-            prompt: self.prompt.clone(),
-        }))?;
+        reg.tools().provider(Arc::new(plan_mode_provider(
+            Arc::clone(&self.state),
+            self.prompt.clone(),
+        )))?;
 
         let before_turn_state = Arc::clone(&self.state);
         reg.turn().before(Arc::new(move |ctx| {
@@ -945,33 +947,23 @@ impl SessionPlugin for PlanModePlugin {
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()
                             .to_string();
-                        let seed = PluginMessage::text(
-                            lash_core::MessageRole::User,
-                            plan_exit_fresh_context_input(&plan_path),
-                        );
-                        let session_id = fresh_context_session_id();
-                        directives.push(PluginDirective::CreateSession {
-                            request: Box::new(
-                                SessionCreateRequest::child_inheriting_policy(
-                                    ctx.session_id.clone(),
-                                    SessionStartPoint::Empty,
-                                    lash_core::PluginOptions::default(),
-                                    "plan_execution",
-                                )
-                                .with_session_id(session_id.clone())
-                                .with_plugin_source(SessionPluginSource::CurrentHostFresh)
-                                .with_first_turn_input(seed),
+                        let frame_id = fresh_context_frame_id();
+                        let task = plan_exit_fresh_context_input(&plan_path);
+                        directives.push(PluginDirective::short_circuit(
+                            ToolResult::ok(json!({
+                                "approved": true,
+                                "plan_path": plan_path,
+                                "execution_mode": "fresh_context",
+                                "frame_id": frame_id.clone(),
+                            }))
+                            .with_control(
+                                ToolControl::SwitchAgentFrame {
+                                    frame_id,
+                                    initial_nodes: Vec::new(),
+                                    task: Some(task),
+                                },
                             ),
-                        });
-                        directives.push(PluginDirective::HandoffSession {
-                            session_id: session_id.clone(),
-                        });
-                        directives.push(PluginDirective::short_circuit(ToolResult::ok(json!({
-                            "approved": true,
-                            "plan_path": plan_path,
-                            "execution_mode": "fresh_context",
-                            "session_id": session_id,
-                        }))));
+                        ));
                     }
                     return Ok(directives);
                 }

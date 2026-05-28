@@ -15,11 +15,12 @@ use fff_search::{
 use serde_json::json;
 
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolFailureClass, ToolManifest, ToolProvider,
-    ToolResult, ToolRetryPolicy, ToolScheduling,
+    ToolCall, ToolDefinition, ToolFailureClass, ToolResult, ToolRetryPolicy, ToolScheduling,
 };
 
-use lash_tool_support::{object_schema, require_str};
+use lash_tool_support::{
+    StaticToolExecute, StaticToolProvider, canonicalize_under, object_schema, require_str,
+};
 
 const DEFAULT_MAX_RESULTS: usize = 20;
 const MAX_CURSORS: usize = 20;
@@ -274,16 +275,13 @@ impl Default for Grep {
     }
 }
 
+/// Build the cached `grep` tool provider rooted at the current workspace.
+pub fn grep_provider() -> StaticToolProvider<Grep> {
+    StaticToolProvider::new(vec![grep_tool_definition()], Grep::new())
+}
+
 #[async_trait::async_trait]
-impl ToolProvider for Grep {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![grep_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "grep").then(|| Arc::new(grep_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for Grep {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let cancellation_token = call.context.cancellation_token().cloned();
         self.execute_inner(call.args, cancellation_token).await
@@ -618,18 +616,17 @@ fn resolve_path_scope(
     requested: &str,
 ) -> Result<PathScope, ToolResult> {
     let candidate = Path::new(requested);
-    let absolute = if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else if let Some(base) = default_base {
-        base.join(candidate)
-    } else {
-        std::env::current_dir()
-            .map_err(|err| {
-                ToolResult::err_fmt(format_args!("failed to resolve current directory: {err}"))
-            })?
-            .join(candidate)
+    // Resolve relative paths against the search base (falling back to the
+    // process cwd) and then canonicalize on disk: search needs a real,
+    // existence-checked path so it can distinguish a file scan from a
+    // directory index and surface a clear error for missing paths.
+    let base = match default_base {
+        Some(base) => base.to_path_buf(),
+        None => std::env::current_dir().map_err(|err| {
+            ToolResult::err_fmt(format_args!("failed to resolve current directory: {err}"))
+        })?,
     };
-    let canonical = std::fs::canonicalize(&absolute).map_err(|err| {
+    let canonical = canonicalize_under(&base, candidate).map_err(|err| {
         ToolResult::err_fmt(format_args!(
             "`path` {requested} does not exist or is not accessible: {err}"
         ))
@@ -1426,10 +1423,15 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    fn grep_provider_with_base_path(base_path: std::path::PathBuf) -> StaticToolProvider<Grep> {
+        StaticToolProvider::new(vec![grep_tool_definition()], Grep::with_base_path(base_path))
+    }
+
     #[test]
     fn grep_uses_limit_argument_in_model_contract() {
         let definition = grep_tool_definition();
         let properties = definition
+            .contract
             .input_schema
             .get("properties")
             .and_then(serde_json::Value::as_object)
@@ -1449,7 +1451,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let tool = grep_provider_with_base_path(dir.path().to_path_buf());
         let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "hello"})).await;
         assert!(result.is_success());
         assert_eq!(result.value_for_projection()["count"], 2);
@@ -1472,7 +1474,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("alpha.rs"), "fn thing() {}\n").unwrap();
 
-        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let tool = grep_provider_with_base_path(dir.path().to_path_buf());
         let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "thing"})).await;
         assert!(result.is_success());
         assert_eq!(
@@ -1488,7 +1490,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("alpha.rs"), "ctx\nctx\n").unwrap();
 
-        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let tool = grep_provider_with_base_path(dir.path().to_path_buf());
         let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "ctx"})).await;
         assert!(result.is_success());
         assert_eq!(result.value_for_projection()["count"], 2);
@@ -1500,7 +1502,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("alpha.rs"), "ctx\n").unwrap();
 
-        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let tool = grep_provider_with_base_path(dir.path().to_path_buf());
         let result =
             lash_core::testing::run_tool(&tool, "grep", &json!({"query": "missing"})).await;
         assert!(result.is_success());
@@ -1521,7 +1523,7 @@ mod tests {
         std::fs::write(dir.path().join("alpha.rs"), "short searchable content\n").unwrap();
 
         let query = "definitely missing ".repeat(20);
-        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let tool = grep_provider_with_base_path(dir.path().to_path_buf());
         let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": query})).await;
 
         assert!(
@@ -1545,12 +1547,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("alpha.rs"), "ctx\n").unwrap();
 
-        let tool = Grep::with_base_path(dir.path().to_path_buf());
-        assert!(tool.backend.get().is_none());
+        let tool = grep_provider_with_base_path(dir.path().to_path_buf());
+        assert!(tool.executor().backend.get().is_none());
 
         let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "ctx"})).await;
         assert!(result.is_success());
-        assert!(tool.backend.get().is_some());
+        assert!(tool.executor().backend.get().is_some());
     }
 
     #[tokio::test]
@@ -1560,7 +1562,7 @@ mod tests {
         std::fs::write(dir.path().join("outer.txt"), "banana at root\n").unwrap();
         std::fs::write(dir.path().join("inner/inner.txt"), "banana in inner\n").unwrap();
 
-        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let tool = grep_provider_with_base_path(dir.path().to_path_buf());
         let result = lash_core::testing::run_tool(
             &tool,
             "grep",
@@ -1594,7 +1596,7 @@ mod tests {
         std::fs::write(dir.path().join("notes.txt"), "banana\n").unwrap();
         std::fs::write(dir.path().join("other.txt"), "banana\n").unwrap();
 
-        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let tool = grep_provider_with_base_path(dir.path().to_path_buf());
         let result = lash_core::testing::run_tool(
             &tool,
             "grep",
@@ -1620,7 +1622,7 @@ mod tests {
             "file path should exclude other.txt"
         );
         assert!(
-            tool.backend.get().is_none(),
+            tool.executor().backend.get().is_none(),
             "single-file grep should bypass the indexed backend"
         );
         assert_eq!(result.value_for_projection()["timed_out"], false);
@@ -1644,7 +1646,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = Grep::with_base_path(dir.path().to_path_buf());
+        let tool = grep_provider_with_base_path(dir.path().to_path_buf());
         let result = lash_core::testing::run_tool(
             &tool,
             "grep",
@@ -1672,7 +1674,7 @@ mod tests {
             "header cookie static_file abort redirect request response"
         );
         assert!(
-            tool.backend.get().is_none(),
+            tool.executor().backend.get().is_none(),
             "single-file grep should not initialize fff"
         );
         assert_eq!(result.value_for_projection()["timed_out"], false);
@@ -1688,7 +1690,7 @@ mod tests {
         let outside = TempDir::new().unwrap();
         std::fs::write(outside.path().join("external.txt"), "banana\n").unwrap();
 
-        let tool = Grep::with_base_path(workspace.path().to_path_buf());
+        let tool = grep_provider_with_base_path(workspace.path().to_path_buf());
         let result = lash_core::testing::run_tool(
             &tool,
             "grep",
@@ -1720,7 +1722,7 @@ mod tests {
         let outside = TempDir::new().unwrap();
         std::fs::write(outside.path().join("external.txt"), "banana\n").unwrap();
 
-        let tool = Grep::with_base_path(workspace.path().to_path_buf());
+        let tool = grep_provider_with_base_path(workspace.path().to_path_buf());
         let result = lash_core::testing::run_tool(
             &tool,
             "grep",
@@ -1746,7 +1748,7 @@ mod tests {
         let file = outside.path().join("external.txt");
         std::fs::write(&file, "banana split\n").unwrap();
 
-        let tool = Grep::with_base_path(workspace.path().to_path_buf());
+        let tool = grep_provider_with_base_path(workspace.path().to_path_buf());
         let result = lash_core::testing::run_tool(
             &tool,
             "grep",
@@ -1759,7 +1761,7 @@ mod tests {
             "external.txt"
         );
         assert!(
-            tool.backend.get().is_none(),
+            tool.executor().backend.get().is_none(),
             "inferred single-file grep should bypass fff"
         );
     }
@@ -1785,7 +1787,7 @@ mod tests {
     #[tokio::test]
     async fn test_grep_path_missing_returns_clear_error() {
         let workspace = TempDir::new().unwrap();
-        let tool = Grep::with_base_path(workspace.path().to_path_buf());
+        let tool = grep_provider_with_base_path(workspace.path().to_path_buf());
         let result = lash_core::testing::run_tool(
             &tool,
             "grep",

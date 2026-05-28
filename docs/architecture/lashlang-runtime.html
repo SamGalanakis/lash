@@ -26,7 +26,7 @@
 <div class="section" id="rlm-execution-path">
           <div class="section-header">
             <h2>RLM Execution Path</h2>
-            <p>The model emits code, the runtime executes it locally with the host's <code>ProjectedBindings</code> and resource handles in scope, and the resulting trajectory is persisted as protocol events. A block that invokes <code>continue_as</code> through an explicit receiver finishes the turn as <code>TurnOutcome::Handoff</code> instead of looping back to the model.</p>
+            <p>The model emits code, the runtime executes it locally with the host's <code>ProjectedBindings</code> and resource handles in scope, and the resulting trajectory is persisted as protocol events. A block that invokes <code>continue_as</code> through an explicit receiver finishes the turn as <code>TurnOutcome::AgentFrameSwitch</code> instead of looping back to the model.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">RLM and Lashlang execution</div>
@@ -46,10 +46,10 @@ sequenceDiagram
   Host-->>Executor: OperationResult / handle / error
   Executor-->>Runtime: ExecResponse + observations + images
   Runtime->>Commit: records resource operations + RLM trajectory in turn events
-  Runtime-->>Driver: Response::ExecResult or TurnOutcome::Handoff (continue_as)
+  Runtime-->>Driver: Response::ExecResult or TurnOutcome::AgentFrameSwitch (continue_as)
             </div>
           </div>
-          <p>An end-to-end fanout-and-merge program for a host surface that enables <code>TOOL.default</code> operations and background processes. It enumerates candidate files, starts per-file analyses as handles, awaits them as a record, builds a histogram with nested path assignment, and either finishes the trajectory or hands the partial work to a successor when the budget would be exceeded.</p>
+          <p>An end-to-end fanout-and-merge program for a host surface that enables <code>TOOL.default</code> operations and background processes. It enumerates candidate files, starts per-file analyses as handles, awaits them as a record, builds a histogram with nested path assignment, and either finishes the trajectory or hands the partial work to a new AgentFrame when the budget would be exceeded.</p>
           <pre><code>```lashlang
 process review_file(tool: TOOL, path: str) {
   report = await tool.spawn_agent({

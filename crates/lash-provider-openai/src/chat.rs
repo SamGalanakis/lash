@@ -42,7 +42,7 @@ impl OpenAiCompatibleProvider {
     fn build_chat_messages(req: &LlmRequest) -> Vec<Value> {
         let mut messages = Vec::new();
         for msg in &req.messages {
-            let role = Self::role_name(&msg.role);
+            let role = role_name(&msg.role);
             let mut text_parts = Vec::new();
             let mut tool_calls = Vec::new();
             let mut reasoning_details = Vec::new();
@@ -279,11 +279,7 @@ impl OpenAiCompatibleProvider {
         req: &LlmRequest,
         stream: bool,
     ) -> Result<Value, LlmTransportError> {
-        validate_image_attachments(
-            req,
-            &["image/jpeg", "image/png", "image/gif", "image/webp"],
-            "OpenAI",
-        )?;
+        validate_image_attachments(req, OPENAI_IMAGE_MIMES, "OpenAI")?;
         let mut messages = Self::build_chat_messages(req);
         let mut tools = Self::build_chat_tools(req)?;
         let policy = resolve_generation_policy(
@@ -301,7 +297,7 @@ impl OpenAiCompatibleProvider {
         });
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
-            body["tool_choice"] = json!(Self::tool_choice_value(&req.tool_choice));
+            body["tool_choice"] = json!(tool_choice_value(&req.tool_choice));
             body["parallel_tool_calls"] = json!(true);
         }
         if stream {

@@ -1,10 +1,8 @@
 use serde_json::{Value, json};
 
-use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
-};
+use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolScheduling};
 
-use lash_tool_support::object_schema;
+use lash_tool_support::{StaticToolExecute, StaticToolProvider, object_schema};
 
 /// Web search via Tavily API.
 pub struct WebSearch {
@@ -21,16 +19,13 @@ impl WebSearch {
     }
 }
 
+/// Build the cached `search_web` tool provider for the given Tavily API key.
+pub fn web_search_provider(api_key: impl Into<String>) -> StaticToolProvider<WebSearch> {
+    StaticToolProvider::new(vec![web_search_tool_definition()], WebSearch::new(api_key))
+}
+
 #[async_trait::async_trait]
-impl ToolProvider for WebSearch {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![web_search_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
-        (name == "search_web").then(|| std::sync::Arc::new(web_search_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for WebSearch {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let args = call.args;
         let query = args
@@ -138,6 +133,7 @@ mod tests {
         let definition = web_search_tool_definition();
 
         let properties = definition
+            .contract
             .input_schema
             .get("properties")
             .and_then(serde_json::Value::as_object)
@@ -147,21 +143,25 @@ mod tests {
         assert_eq!(properties["limit"]["default"], serde_json::json!(5));
         assert!(
             definition
+                .contract
                 .examples
                 .iter()
                 .all(|example| example.contains("limit"))
         );
         assert_eq!(
-            definition.output_schema["type"],
+            definition.contract.output_schema["type"],
             serde_json::json!("object")
         );
         assert_eq!(
-            definition.output_schema["required"],
+            definition.contract.output_schema["required"],
             serde_json::json!(["results"])
         );
-        assert_eq!(definition.activation, lash_core::ToolActivation::Always);
         assert_eq!(
-            definition.availability.base,
+            definition.manifest.activation,
+            lash_core::ToolActivation::Always
+        );
+        assert_eq!(
+            definition.manifest.availability.base,
             lash_core::ToolAvailability::Showcased
         );
     }

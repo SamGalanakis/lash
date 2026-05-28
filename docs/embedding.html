@@ -43,9 +43,68 @@
             <dt>Tracing as a first-class sink</dt>
             <dd>Every provider call across every session emits <code>TraceRecord</code>s through <code>TraceSink</code> implementations. JSONL by default, OTel optional.</dd>
             <dt>Snapshot and restore seams</dt>
-            <dd>Plugins, tool state, and the Lashlang VM each persist through versioned snapshot writers so a parked session resumes intact across process restarts.</dd>
+            <dd>Plugins, tool state, and the current AgentFrame's Lashlang VM each persist through versioned snapshot writers so a parked session resumes intact across process restarts.</dd>
           </dl>
           <p>Out of scope: tenancy, artifact lifecycle, procedure discovery, cross-session shared state. Those belong to the embedder.</p>
+        </div>
+
+        <div class="section" id="session-facade-abstractions">
+          <div class="section-header">
+            <h2>Session Facade Abstractions</h2>
+            <p>The public <code>lash</code> API is session-centered. Hosts keep one stable <code>LashSession</code> handle per app conversation or task; the runtime may switch the active internal <code>AgentFrame</code> underneath it without changing that host handle.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3>Host-facing handles</h3>
+              <dl class="def-list">
+                <dt><code>LashCore</code></dt>
+                <dd>Shared runtime factory for provider, model, mode presets, plugin stack, tool providers, store factory, attachment store, tracing, and advanced host knobs. It is cheap to clone and does not represent a conversation.</dd>
+                <dt><code>SessionBuilder</code></dt>
+                <dd>Short-lived opener for one session id. It resolves <code>SessionSpec</code> into a concrete <code>SessionPolicy</code>, chooses the mode, attaches or creates the store, reloads persisted state when present, and then yields a <code>LashSession</code>.</dd>
+                <dt><code>LashSession</code></dt>
+                <dd>The stable host-owned work identity. Use it to start turns, resume leased turns, read committed state, queue inputs, cancel background work, and reach explicit admin controls. <code>continue_as</code> does not replace this handle; <code>spawn_agent</code> is the operation that creates another session.</dd>
+              </dl>
+            </article>
+            <article class="panel">
+              <h3>Turn-facing handles</h3>
+              <dl class="def-list">
+                <dt><code>TurnInput</code></dt>
+                <dd>The user or host payload plus per-turn prompt/plugin context. It is data, not a running turn.</dd>
+                <dt><code>TurnBuilder</code></dt>
+                <dd>An ephemeral run request created by <code>session.turn(input)</code>. It layers cancellation, provider/model overrides, protocol turn options, prompt edits, and typed plugin input, then drives the turn through <code>stream</code>, <code>run</code>, <code>collect_with</code>, or <code>into_stream</code>.</dd>
+                <dt><code>TurnResult</code> / <code>TurnOutput</code></dt>
+                <dd>The committed result. <code>TurnResult</code> is the terminal outcome and usage; <code>TurnOutput</code> adds the collected semantic <code>TurnActivity</code> stream for app UIs and logs.</dd>
+              </dl>
+            </article>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Internal identity</th><th>What owns it</th><th>Why hosts care</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td><code>Session</code></td>
+                  <td><code>lash-core</code> runtime state, graph, plugin instances, tool state, usage ledger, queue state, and frame list.</td>
+                  <td>This is the durable unit behind <code>LashSession</code>. The session id is what app databases and stores should keep.</td>
+                </tr>
+                <tr>
+                  <td><code>AgentFrame</code></td>
+                  <td>The current agent assignment: effective policy, plugin options/source, tool access, subagent context, protocol turn options, execution snapshot, provenance, and prior-frame link.</td>
+                  <td><code>continue_as</code> appends a new frame in the same session with explicit <code>task</code> + <code>seed</code>. The facade keeps driving the same session until a real final result or stop.</td>
+                </tr>
+                <tr>
+                  <td><code>SessionGraph</code></td>
+                  <td>Durable nodes for inputs, assistant output, tool calls, protocol events, plugin nodes, and frame-switch boundaries. Nodes carry their <code>agent_frame_id</code>.</td>
+                  <td>Read views can show the full session history, while model projection normally reads only the current frame unless a projection explicitly widens scope.</td>
+                </tr>
+                <tr>
+                  <td><code>RuntimeSessionState</code></td>
+                  <td>Persisted session envelope: graph, frames, current frame id, policy, plugin/tool snapshots, usage, queued work, checkpoints, and head metadata.</td>
+                  <td>Hosts normally never construct it directly, but stores and advanced tools can persist or inspect it through the curated facade modules.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p>Rule of thumb: keep app code on <code>LashCore -> SessionBuilder -> LashSession -> TurnBuilder</code>. Drop below the facade only for custom runtime hosts, persistence implementations, protocol plugins, or diagnostics that genuinely need internal state.</p>
         </div>
 
         <div class="section" id="core-shape">

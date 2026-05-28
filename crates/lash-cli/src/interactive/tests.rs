@@ -107,7 +107,7 @@ fn promote_pending_steers_to_queue_preserves_order() {
     let mut ui_trace = None;
     promote_pending_steers_to_queue(&mut app, &mut ui_trace);
 
-    assert!(app.pending_steers.is_empty());
+    assert!(app.queues.pending_steers.is_empty());
     let queued: Vec<String> = std::iter::from_fn(|| app.take_next_queued_turn())
         .map(|(turn, _)| turn.display_text)
         .collect();
@@ -173,7 +173,7 @@ fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
     let mut ui_trace = None;
     promote_pending_steers_to_queue(&mut app, &mut ui_trace);
 
-    assert!(app.pending_steers.is_empty());
+    assert!(app.queues.pending_steers.is_empty());
     assert!(app.has_queued_messages());
     assert!(matches!(
         app.timeline.last(),

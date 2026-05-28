@@ -59,14 +59,14 @@ use lash_core::{
     PersistedSessionRead, ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest,
     ProcessEventAppendResult, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
     ProcessHandleGrantEntry, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
-    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
-    QueuedWorkClaimBoundary, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
-    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
-    RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult, SlotPolicy,
-    RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnLease,
-    SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo,
-    SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory, StoreError, VacuumReport,
-    ensure_supported_schema_version, prepare_process_event_append, prepare_process_registration,
+    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
+    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+    RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
+    RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
+    RuntimeTurnLease, SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta,
+    SessionPickerInfo, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
+    SlotPolicy, StoreError, VacuumReport, ensure_supported_schema_version,
+    prepare_process_event_append, prepare_process_registration,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -579,6 +579,8 @@ fn session_head_meta(head: &SessionHead) -> SessionHeadMeta {
         session_id: head.session_id.clone(),
         head_revision: 0,
         config: head.config.clone(),
+        agent_frames: head.agent_frames.clone(),
+        current_agent_frame_id: head.current_agent_frame_id.clone(),
         checkpoint_ref: head.checkpoint_ref.clone(),
         leaf_node_id: head.graph.leaf_node_id.clone(),
         graph_node_count: head.graph.nodes.len(),
@@ -761,18 +763,20 @@ fn ensure_runtime_turn_completion_conn(
 }
 
 fn decode_delivery_policy(value: String) -> Result<DeliveryPolicy, StoreError> {
-    DeliveryPolicy::from_str(&value)
-        .ok_or_else(|| StoreError::Backend(format!("unknown queued-work delivery policy `{value}`")))
+    DeliveryPolicy::from_wire_str(&value).ok_or_else(|| {
+        StoreError::Backend(format!("unknown queued-work delivery policy `{value}`"))
+    })
 }
 
 fn decode_slot_policy(value: String) -> Result<SlotPolicy, StoreError> {
-    SlotPolicy::from_str(&value)
+    SlotPolicy::from_wire_str(&value)
         .ok_or_else(|| StoreError::Backend(format!("unknown queued-work slot policy `{value}`")))
 }
 
 fn decode_merge_key(value: String) -> Result<MergeKey, StoreError> {
-    serde_json::from_str(&value)
-        .map_err(|err| StoreError::Backend(format!("failed to decode queued-work merge key: {err}")))
+    serde_json::from_str(&value).map_err(|err| {
+        StoreError::Backend(format!("failed to decode queued-work merge key: {err}"))
+    })
 }
 
 fn decode_queued_payload(value: String) -> Result<QueuedWorkPayload, StoreError> {
@@ -1017,7 +1021,6 @@ impl SqliteProcessRegistry {
         })
         .transpose()
     }
-
 }
 
 #[async_trait::async_trait]
@@ -2174,6 +2177,8 @@ impl Store {
         Some(SessionHead {
             session_id: meta.session_id,
             head_revision: meta.head_revision,
+            agent_frames: meta.agent_frames,
+            current_agent_frame_id: meta.current_agent_frame_id,
             graph,
             config: meta.config,
             checkpoint_ref: meta.checkpoint_ref,
@@ -2279,6 +2284,8 @@ impl RuntimePersistence for Store {
             session_id: meta.session_id,
             head_revision: meta.head_revision,
             config: meta.config,
+            agent_frames: meta.agent_frames,
+            current_agent_frame_id: meta.current_agent_frame_id,
             graph,
             checkpoint_ref: meta.checkpoint_ref,
             checkpoint,
@@ -2415,6 +2422,8 @@ impl RuntimePersistence for Store {
                 session_id: commit.session_id.clone(),
                 head_revision: next_revision,
                 config: commit.config,
+                agent_frames: commit.agent_frames,
+                current_agent_frame_id: commit.current_agent_frame_id,
                 checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
                 leaf_node_id,
                 graph_node_count,
@@ -2517,8 +2526,9 @@ impl RuntimePersistence for Store {
                 .optional()
                 .map_err(sqlite_error)?;
             if let Some(batch_id) = existing_id {
-                let existing = load_queued_batch_by_id_conn(&tx, &batch_id)?
-                    .ok_or_else(|| StoreError::Backend("queued work source row disappeared".to_string()))?;
+                let existing = load_queued_batch_by_id_conn(&tx, &batch_id)?.ok_or_else(|| {
+                    StoreError::Backend("queued work source row disappeared".to_string())
+                })?;
                 tx.commit().map_err(sqlite_error)?;
                 return Ok(existing);
             }
@@ -2594,12 +2604,15 @@ impl RuntimePersistence for Store {
                 .map_err(sqlite_error)?;
             let rows = stmt
                 .query_map(
-                    params![session_id, now as i64, (max_batches as i64).saturating_add(32)],
+                    params![
+                        session_id,
+                        now as i64,
+                        (max_batches as i64).saturating_add(32)
+                    ],
                     queued_batch_row_from_sql,
                 )
                 .map_err(sqlite_error)?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(sqlite_error)?
+            rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
         };
         let Some(first_row) = candidate_rows.first() else {
             tx.commit().map_err(sqlite_error)?;
@@ -2723,10 +2736,7 @@ impl RuntimePersistence for Store {
         })
     }
 
-    async fn abandon_queued_work_claim(
-        &self,
-        claim: &QueuedWorkClaim,
-    ) -> Result<(), StoreError> {
+    async fn abandon_queued_work_claim(&self, claim: &QueuedWorkClaim) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE queued_work_batches
@@ -2742,10 +2752,7 @@ impl RuntimePersistence for Store {
         Ok(())
     }
 
-    async fn list_queued_work(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<QueuedWorkBatch>, StoreError> {
+    async fn list_queued_work(&self, session_id: &str) -> Result<Vec<QueuedWorkBatch>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let rows = {
             let mut stmt = conn
@@ -2761,8 +2768,7 @@ impl RuntimePersistence for Store {
             let rows = stmt
                 .query_map(params![session_id], queued_batch_row_from_sql)
                 .map_err(sqlite_error)?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(sqlite_error)?
+            rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
         };
         rows.into_iter()
             .map(|row| queued_work_batch_from_conn(&conn, row))

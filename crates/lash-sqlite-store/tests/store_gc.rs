@@ -22,6 +22,64 @@ fn test_model_spec() -> ModelSpec {
     model_spec("gpt-5.4-mini")
 }
 
+#[tokio::test]
+async fn runtime_commit_persists_agent_frame_head_and_execution_snapshot() {
+    let store = Store::memory().expect("store");
+    let mut state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        policy: SessionPolicy {
+            model: test_model_spec(),
+            ..SessionPolicy::default()
+        },
+        ..RuntimeSessionState::default()
+    };
+    state.ensure_agent_frame_initialized();
+    let previous_frame_id = state.current_agent_frame_id.clone();
+    let assignment = state
+        .current_agent_frame()
+        .expect("initial frame")
+        .assignment
+        .clone();
+    state.append_agent_frame(lash_core::AgentFrameRecord::new(
+        "frame-2".to_string(),
+        "root".to_string(),
+        Some(previous_frame_id),
+        lash_core::AgentFrameReason::ContinueAs,
+        None,
+        assignment,
+        ProtocolTurnOptions::default(),
+    ));
+    state.set_execution_state_snapshot(Some(b"frame-vm".to_vec()));
+
+    store
+        .commit_runtime_state(RuntimeCommit::persisted_state(&state, &[]))
+        .await
+        .expect("commit runtime state");
+    let read = store
+        .load_session(SessionReadScope::FullGraph)
+        .await
+        .expect("load session")
+        .expect("session read");
+
+    assert_eq!(read.current_agent_frame_id, "frame-2");
+    assert_eq!(read.agent_frames.len(), 2);
+    let current = read
+        .agent_frames
+        .iter()
+        .find(|frame| frame.frame_id == "frame-2")
+        .expect("current frame");
+    assert_eq!(
+        current.execution_state_snapshot.as_deref(),
+        Some(&b"frame-vm"[..])
+    );
+    assert_eq!(
+        read.checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.execution_state.as_deref()),
+        Some(&b"frame-vm"[..])
+    );
+}
+
 #[test]
 fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
     let store = Store::memory().expect("store");
@@ -45,6 +103,8 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
     store.save_session_head(SessionHead {
         session_id: "root".to_string(),
         head_revision: 0,
+        agent_frames: Vec::new(),
+        current_agent_frame_id: String::new(),
         graph: SessionGraph::default(),
         config: PersistedSessionConfig {
             provider_id: "openai-compatible".into(),
@@ -778,6 +838,8 @@ async fn attachment_manifest_records_intent_and_commit_stamps_atomically() {
         session_id: "root".to_string(),
         expected_head_revision: Some(0),
         config: PersistedSessionConfig::default(),
+        agent_frames: Vec::new(),
+        current_agent_frame_id: String::new(),
         graph: lash_core::GraphCommitDelta::ReplaceFull(SessionGraph::default()),
         checkpoint: HydratedSessionCheckpoint {
             turn_state: PersistedTurnState::default(),

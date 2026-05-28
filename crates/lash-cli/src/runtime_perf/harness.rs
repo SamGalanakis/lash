@@ -103,6 +103,7 @@ impl BenchmarkRuntime {
             .expect("benchmark session")
             .turn(input)
             .cancel(cancel)
+            .advanced()
             .collect_session_events_with(&lash::advanced::NoopEventSink)
             .await
             .map_err(anyhow::Error::from)
@@ -218,12 +219,12 @@ pub(crate) fn validate_runtime_perf_turn(
                 value
             );
         }
-        TurnOutcome::Handoff { session_id } => {
+        TurnOutcome::AgentFrameSwitch { frame_id } => {
             anyhow::bail!(
-                "runtime perf scenario {} turn {} unexpectedly handed off to {}",
+                "runtime perf scenario {} turn {} unexpectedly switched to agent frame {}",
                 scenario.name(),
                 turn_index + 1,
-                session_id
+                frame_id
             );
         }
         TurnOutcome::Stopped(stop) => {

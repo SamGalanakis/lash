@@ -45,6 +45,9 @@ impl LashRuntime {
     /// Override protocol-owned turn options for this session.
     pub fn set_protocol_turn_options(&mut self, options: crate::ProtocolTurnOptions) {
         self.state.protocol_turn_options = options.clone();
+        if let Some(frame) = self.state.current_agent_frame_mut() {
+            frame.protocol_turn_options = options.clone();
+        }
         self.protocol_turn_options = options;
     }
 
@@ -58,8 +61,8 @@ impl LashRuntime {
     pub fn read_view(&self) -> crate::SessionReadView {
         crate::SessionReadView::from_runtime_state(
             &self.state,
-            self.policy.clone(),
-            self.protocol_turn_options.clone(),
+            self.state.effective_policy().clone(),
+            self.state.effective_protocol_turn_options().clone(),
         )
     }
 
@@ -81,6 +84,9 @@ impl LashRuntime {
     pub fn export_persisted_state(&self) -> RuntimeSessionState {
         let mut state = self.state.clone();
         state.protocol_turn_options = self.protocol_turn_options.clone();
+        if let Some(frame) = state.current_agent_frame_mut() {
+            frame.protocol_turn_options = self.protocol_turn_options.clone();
+        }
         if let Some(session) = self.session.as_ref() {
             let snapshot = session.plugins().tool_registry().export_state();
             state.tool_state_generation = Some(snapshot.generation());
@@ -140,6 +146,8 @@ impl LashRuntime {
         let head = crate::store::SessionHead {
             session_id: read.session_id.clone(),
             head_revision: read.head_revision,
+            agent_frames: read.agent_frames.clone(),
+            current_agent_frame_id: read.current_agent_frame_id.clone(),
             graph: read.graph,
             config: read.config.clone(),
             checkpoint_ref: read.checkpoint_ref.clone(),

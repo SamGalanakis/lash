@@ -233,7 +233,7 @@ pub(super) fn cleared_session_state(policy: SessionPolicy) -> SessionStateEnvelo
     }
 }
 
-pub(super) fn log_runtime_handoff(
+pub(super) fn log_runtime_transition(
     phase: &str,
     app: &App,
     runtime: &Option<lash::LashSession>,
@@ -247,11 +247,11 @@ pub(super) fn log_runtime_handoff(
         runtime_present = runtime.is_some(),
         runtime_return_rx_present,
         cancel_token_present,
-        queued_turns = app.queued_turns.len(),
-        pending_steers = app.pending_steers.len(),
+        queued_turns = app.queues.queued_turns.len(),
+        pending_steers = app.queues.pending_steers.len(),
         active_stream_id,
-        live_turn = app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
-        "interactive runtime handoff"
+        live_turn = app.live.turn.as_ref().map(|turn| turn.status_text.as_str()),
+        "interactive runtime transition"
     );
 }
 

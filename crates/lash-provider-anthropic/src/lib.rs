@@ -7,19 +7,19 @@ use serde_json::{Value, json};
 
 use lash_core::llm::transport::{LlmTransportError, validate_image_attachments};
 use lash_core::llm::types::{
-    LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
-    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmUsage,
-    ProviderReasoningReplay,
+    LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
+    LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmUsage, ProviderReasoningReplay,
 };
 use lash_core::provider::{
-    CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
-    ProviderState, ProviderTransport, resolve_generation_policy,
+    CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderModelPolicy,
+    ProviderOptions, resolve_generation_policy,
 };
 use lash_llm_transport::streaming::drive_sse_response;
 use lash_llm_transport::timeouts::{
     build_http_client, header_pairs, read_response_text, request_body_snapshot,
     response_start_timeout, send_request,
 };
+use lash_llm_transport::util::{OPENAI_IMAGE_MIMES, emit_provider_trace, extract_error_detail};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -32,30 +32,6 @@ enum AnthropicThinkingConfig {
     Budget { budget_tokens: i32 },
 }
 
-fn emit_provider_trace(
-    tx: Option<&lash_core::llm::types::LlmProviderTraceSender>,
-    provider: &'static str,
-    raw: &str,
-) {
-    let Some(tx) = tx else {
-        return;
-    };
-    let event_name = serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .or_else(|| value.get("event"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "provider_event".to_string());
-    tx.send(LlmProviderTraceEvent {
-        provider,
-        event_name,
-        raw: raw.to_string(),
-    });
-}
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 
 const CLAUDE_ADAPTIVE_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
@@ -392,11 +368,7 @@ impl AnthropicProvider {
     }
 
     fn build_request_body(&self, req: &LlmRequest) -> Result<Value, LlmTransportError> {
-        validate_image_attachments(
-            req,
-            &["image/jpeg", "image/png", "image/gif", "image/webp"],
-            "Anthropic",
-        )?;
+        validate_image_attachments(req, OPENAI_IMAGE_MIMES, "Anthropic")?;
         let (system_text, mut messages) = self.build_messages(req);
         let mut tools = self.build_tools(req);
 
@@ -914,33 +886,14 @@ fn is_retryable_error_event(event: &Value) -> bool {
     )
 }
 
-fn extract_error_detail(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(v) = serde_json::from_str::<Value>(trimmed)
-        && let Some(msg) = v
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-    {
-        return Some(msg.to_string());
-    }
-    Some(trimmed.chars().take(200).collect())
-}
-
 impl AnthropicProvider {
     pub fn into_components(self) -> ProviderComponents {
-        ProviderComponents::new(
-            Box::new(self.clone()),
-            Box::new(self),
-            std::sync::Arc::new(AnthropicModelPolicy),
-        )
+        ProviderComponents::new(Box::new(self), std::sync::Arc::new(AnthropicModelPolicy))
     }
 }
 
-impl ProviderState for AnthropicProvider {
+#[async_trait]
+impl Provider for AnthropicProvider {
     fn kind(&self) -> &'static str {
         "anthropic"
     }
@@ -974,60 +927,6 @@ impl ProviderState for AnthropicProvider {
         serde_json::Value::Object(map)
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderState> {
-        Box::new(self.clone())
-    }
-}
-
-impl ProviderModelPolicy for AnthropicModelPolicy {
-    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
-        let lower = model.to_ascii_lowercase();
-        if anthropic_supports_adaptive_thinking(model) {
-            if anthropic_supports_xhigh(model) {
-                CLAUDE_ADAPTIVE_XHIGH_VARIANTS
-            } else if anthropic_supports_max(model) {
-                CLAUDE_ADAPTIVE_MAX_VARIANTS
-            } else {
-                CLAUDE_ADAPTIVE_VARIANTS
-            }
-        } else if lower.contains("haiku-4")
-            || lower.contains("claude-opus-4")
-            || lower.contains("claude-sonnet-4")
-        {
-            CLAUDE_BUDGET_VARIANTS
-        } else {
-            &[]
-        }
-    }
-}
-
-impl AnthropicModelPolicy {
-    fn thinking_config(&self, model: &str, variant: &str) -> Option<AnthropicThinkingConfig> {
-        if !self.supported_variants(model).contains(&variant) {
-            return None;
-        }
-        if anthropic_supports_adaptive_thinking(model) {
-            if variant == "none" {
-                return None;
-            }
-            Some(AnthropicThinkingConfig::Adaptive {
-                effort: variant.to_string(),
-            })
-        } else {
-            let budget_tokens = match variant {
-                "none" => return None,
-                "low" => 1_024,
-                "medium" => 4_096,
-                "high" => 12_288,
-                _ => return None,
-            };
-            Some(AnthropicThinkingConfig::Budget { budget_tokens })
-        }
-    }
-}
-
-#[async_trait]
-impl ProviderTransport for AnthropicProvider {
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
@@ -1090,8 +989,7 @@ impl ProviderTransport for AnthropicProvider {
             let mut err = LlmTransportError::new(message)
                 .with_status(status.as_u16())
                 .with_headers(header_pairs(&headers))
-                .with_raw(text)
-                .retryable(status.as_u16() == 429 || status.as_u16() >= 500);
+                .with_raw(text);
             if let Some(request_body) = request_body {
                 err = err.with_request_body(request_body);
             }
@@ -1124,8 +1022,55 @@ impl ProviderTransport for AnthropicProvider {
         })
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+    fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
+    }
+}
+
+impl ProviderModelPolicy for AnthropicModelPolicy {
+    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        let lower = model.to_ascii_lowercase();
+        if anthropic_supports_adaptive_thinking(model) {
+            if anthropic_supports_xhigh(model) {
+                CLAUDE_ADAPTIVE_XHIGH_VARIANTS
+            } else if anthropic_supports_max(model) {
+                CLAUDE_ADAPTIVE_MAX_VARIANTS
+            } else {
+                CLAUDE_ADAPTIVE_VARIANTS
+            }
+        } else if lower.contains("haiku-4")
+            || lower.contains("claude-opus-4")
+            || lower.contains("claude-sonnet-4")
+        {
+            CLAUDE_BUDGET_VARIANTS
+        } else {
+            &[]
+        }
+    }
+}
+
+impl AnthropicModelPolicy {
+    fn thinking_config(&self, model: &str, variant: &str) -> Option<AnthropicThinkingConfig> {
+        if !self.supported_variants(model).contains(&variant) {
+            return None;
+        }
+        if anthropic_supports_adaptive_thinking(model) {
+            if variant == "none" {
+                return None;
+            }
+            Some(AnthropicThinkingConfig::Adaptive {
+                effort: variant.to_string(),
+            })
+        } else {
+            let budget_tokens = match variant {
+                "none" => return None,
+                "low" => 1_024,
+                "medium" => 4_096,
+                "high" => 12_288,
+                _ => return None,
+            };
+            Some(AnthropicThinkingConfig::Budget { budget_tokens })
+        }
     }
 }
 

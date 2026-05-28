@@ -1,6 +1,7 @@
 use std::sync::{Arc, RwLock};
 
-use lash_core::{ToolCall, ToolContext, ToolContract, ToolManifest, ToolProvider, ToolResult};
+use lash_core::{ToolCall, ToolContext, ToolResult};
+use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 use serde_json::{Value, json};
 
 use crate::common::{LLM_CANDIDATE_LIMIT, args_with_limit, catalog_key, limit_from_args};
@@ -94,16 +95,16 @@ impl ToolDiscoveryToolsProvider {
     }
 }
 
+/// Build the `search_tools` provider backed by a fresh discovery cache.
+pub fn tool_discovery_provider() -> StaticToolProvider<ToolDiscoveryToolsProvider> {
+    StaticToolProvider::new(
+        vec![search_tools_definition()],
+        ToolDiscoveryToolsProvider::new(),
+    )
+}
+
 #[async_trait::async_trait]
-impl ToolProvider for ToolDiscoveryToolsProvider {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![search_tools_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "search_tools").then(|| Arc::new(search_tools_definition().contract()))
-    }
-
+impl StaticToolExecute for ToolDiscoveryToolsProvider {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
             "search_tools" => match call.context.sessions().tool_catalog().await {
@@ -122,6 +123,7 @@ mod tests {
     use lash_core::plugin::{PluginError, SessionHandle, SessionSnapshot};
     use lash_core::{
         DirectCompletion, TokenUsage, ToolAgentSurface, ToolCall, ToolContract, ToolDefinition,
+        ToolProvider,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -209,7 +211,7 @@ mod tests {
         )
         .with_agent_surface(
             ToolAgentSurface::new(
-                [module.unwrap_or_else(|| match name {
+                [module.unwrap_or(match name {
                     "read_file" => "files",
                     "search_web" => "web",
                     _ => "tools",
@@ -220,7 +222,7 @@ mod tests {
                     _ => name,
                 },
             )
-            .with_aliases(aliases.into_iter()),
+            .with_aliases(aliases),
         );
         let manifest = tool.manifest();
         let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
@@ -257,7 +259,7 @@ mod tests {
 
     #[test]
     fn provider_exposes_search_tools_only() {
-        let names = ToolDiscoveryToolsProvider::new()
+        let names = tool_discovery_provider()
             .tool_manifests()
             .into_iter()
             .map(|definition| definition.name)
@@ -285,7 +287,7 @@ mod tests {
             ],
             ..Default::default()
         });
-        let provider = ToolDiscoveryToolsProvider::new();
+        let provider = tool_discovery_provider();
         let context = discovery_context(host);
 
         let args = json!({
@@ -331,7 +333,7 @@ mod tests {
             )),
             ..Default::default()
         });
-        let provider = ToolDiscoveryToolsProvider::new();
+        let provider = tool_discovery_provider();
         let context = discovery_context(host.clone());
 
         let args = json!({

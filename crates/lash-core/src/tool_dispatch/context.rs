@@ -43,6 +43,7 @@ pub struct ToolDispatchContext<'run> {
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
     pub session_id: String,
+    pub agent_frame_id: crate::AgentFrameId,
     pub event_tx: mpsc::Sender<SessionEvent>,
     pub(crate) checkpoint_messages: CheckpointMessageBuffer,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
@@ -54,6 +55,7 @@ impl<'run> ToolDispatchContext<'run> {
         crate::ProcessOpScope::new()
             .with_parent_invocation(self.parent_invocation.clone())
             .with_effect_controller(self.effect_controller.as_controller())
+            .with_agent_frame_id(Some(self.agent_frame_id.clone()))
     }
 }
 

@@ -370,7 +370,7 @@ impl App {
                     if p.request.is_freeform() {
                         self.push_prompt_response_user_block(display.clone());
                     } else {
-                        self.pending_option_prompt_response = Some(display.clone());
+                        self.queues.pending_option_prompt_response = Some(display.clone());
                     }
                     return Some(display);
                 }

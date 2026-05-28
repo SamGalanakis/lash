@@ -12,9 +12,9 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash_core::{
-    ToolAgentSurface, ToolAvailabilityConfig, ToolCall, ToolContract, ToolDefinition, ToolManifest,
-    ToolProvider, ToolResult, ToolScheduling,
+    ToolAgentSurface, ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolResult, ToolScheduling,
 };
+use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 
 /// Plugin factory for process-control tools.
 #[derive(Clone, Copy, Debug)]
@@ -64,9 +64,13 @@ impl SessionPlugin for ProcessControlsPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.tools().provider(Arc::new(ProcessControlsTools {
-            include_cancel_process: self.include_cancel_process,
-        }))?;
+        let include_cancel_process = self.include_cancel_process;
+        reg.tools().provider(Arc::new(StaticToolProvider::new(
+            process_control_tool_definitions(include_cancel_process),
+            ProcessControlsTools {
+                include_cancel_process,
+            },
+        )))?;
         Ok(())
     }
 }
@@ -76,19 +80,7 @@ struct ProcessControlsTools {
 }
 
 #[async_trait::async_trait]
-impl ToolProvider for ProcessControlsTools {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        process_control_tool_definitions(self.include_cancel_process)
-            .into_iter()
-            .map(|tool| tool.manifest())
-            .collect()
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        process_control_tool_definition(name, self.include_cancel_process)
-            .map(|tool| Arc::new(tool.contract()))
-    }
-
+impl StaticToolExecute for ProcessControlsTools {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
             "list_process_handles" => execute_process_list_tool_call(call.context).await,
@@ -139,17 +131,6 @@ fn process_control_tool_definitions(include_cancel_process: bool) -> Vec<ToolDef
         definitions.push(process_cancel_tool_definition());
     }
     definitions
-}
-
-fn process_control_tool_definition(
-    name: &str,
-    include_cancel_process: bool,
-) -> Option<ToolDefinition> {
-    match name {
-        "list_process_handles" => Some(process_list_tool_definition()),
-        "cancel_process" if include_cancel_process => Some(process_cancel_tool_definition()),
-        _ => None,
-    }
 }
 
 pub fn process_cancel_tool_definition() -> ToolDefinition {
@@ -248,7 +229,7 @@ mod tests {
     fn tool_definitions_expose_process_control_tools() {
         let names = process_control_tool_definitions(true)
             .into_iter()
-            .map(|tool| tool.name)
+            .map(|tool| tool.name().to_string())
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["list_process_handles", "cancel_process"]);

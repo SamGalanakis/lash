@@ -103,8 +103,8 @@ mod tests {
     fn search_tools_has_typed_result_schema() {
         let definition = search_tools_definition();
 
-        assert_eq!(definition.output_schema["type"], json!("array"));
-        let item = &definition.output_schema["items"];
+        assert_eq!(definition.contract.output_schema["type"], json!("array"));
+        let item = &definition.contract.output_schema["items"];
         assert_eq!(item["type"], json!("object"));
         let required = item["required"].as_array().expect("required");
         assert!(required.contains(&json!("name")));

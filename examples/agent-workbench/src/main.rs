@@ -909,12 +909,13 @@ impl SessionPlugin for WorkbenchSessionPlugin {
             .payload(button_trigger_event_type()),
         )?;
         reg.tools()
-            .provider(Arc::new(lash_tool_web::WebSearch::new(
+            .provider(Arc::new(lash_tool_web::web_search_provider(
                 self.tavily_api_key.clone(),
             )))?;
-        reg.tools().provider(Arc::new(lash_tool_web::FetchUrl::new(
-            self.tavily_api_key.clone(),
-        )))?;
+        reg.tools()
+            .provider(Arc::new(lash_tool_web::fetch_url_provider(
+                self.tavily_api_key.clone(),
+            )))?;
         Ok(())
     }
 }
@@ -943,6 +944,7 @@ Use background processes or subagents only when they clarify the user's request 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash::persistence::RuntimePersistence;
     use lashlang::LashlangArtifactStore;
 
     #[test]
@@ -973,17 +975,20 @@ mod tests {
     #[test]
     fn assistant_display_does_not_duplicate_matching_terminal_value() {
         assert_eq!(
-            combine_assistant_display_parts(Some("summary ready".to_string()), Some(
-                "summary ready".to_string()
-            )),
+            combine_assistant_display_parts(
+                Some("summary ready".to_string()),
+                Some("summary ready".to_string())
+            ),
             "summary ready"
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn button_host_event_starts_visible_lashlang_process() {
-        let data_dir =
-            std::env::temp_dir().join(format!("agent-workbench-processes-{}", uuid::Uuid::new_v4()));
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-processes-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
         let db_path = data_dir.join("processes.db");
         let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
@@ -1097,7 +1102,7 @@ mod tests {
         };
         let target_scope_id = lash::advanced::ProcessScope::new(state.current_session_id()).id();
         let session_store =
-            lash_sqlite_store::Store::open(session_store_factory.path_for_session(&session_id))
+            lash_sqlite_store::Store::open(&session_store_factory.path_for_session(&session_id))
                 .expect("open session store");
         let queued = session_store
             .list_queued_work(&session_id)

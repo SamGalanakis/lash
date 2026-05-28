@@ -82,20 +82,19 @@ sequenceDiagram
 
         <div class="section">
           <div class="section-header">
-            <h2>Handoff Continuations</h2>
-            <p>RLM's <code>continue_as</code> tool ends the current trajectory and queues a successor session with the packed <code>task</code> + <code>seed</code> as its first input. The low-level runtime exposes this as <code>TurnOutcome::Handoff { session_id }</code>. App hosts call <code>TurnBuilder::stream</code>, <code>run</code>, or <code>collect_with</code>; the <code>lash</code> facade drives handoff chains and returns the final turn result. The underlying runtime primitive is <code>stream_turn_following_handoffs</code>.</p>
+            <h2>AgentFrameSwitch Continuations</h2>
+            <p>RLM's <code>continue_as</code> tool ends the current trajectory and creates a fresh AgentFrame in the same session with the packed <code>task</code> + <code>seed</code>. The low-level runtime exposes this as <code>TurnOutcome::AgentFrameSwitch { frame_id }</code>. App hosts call <code>TurnBuilder::stream</code>, <code>run</code>, or <code>collect_with</code>; the <code>lash</code> facade drives AgentFrame chains and returns the final turn result. The underlying runtime primitive is <code>stream_turn_with_agent_frames</code>.</p>
           </div>
           <div class="diagram">
-            <div class="diagram-title">Handoff drive loop (runtime internal)</div>
+            <div class="diagram-title">AgentFrameSwitch drive loop (runtime internal)</div>
             <div class="mermaid">
 flowchart LR
-  Host["host (CLI / app / lash facade)"] --> Follow["runtime handoff follower"]
+  Host["host (CLI / app / lash facade)"] --> Follow["runtime AgentFrame switch follower"]
   Follow --> Turn["stream_turn"]
   Turn --> Outcome["TurnOutcome"]
   Outcome -- "Finished / Stopped" --> Done["final turn result"]
-  Outcome -- "Handoff(session_id)" --> Pending["pending_first_turn_inputs<br/>(seeded by continue_as)"]
-  Pending --> Successor["activate successor RLM session<br/>fresh window, inherited turn_index"]
-  Successor --> Turn
+  Outcome -- "AgentFrameSwitch(frame_id)" --> Frame["current AgentFrame<br/>task + seed"]
+  Frame --> Turn
             </div>
           </div>
         </div>
@@ -207,8 +206,8 @@ flowchart TD
             </li>
             <li>
               <div>
-                <h3>Handoffs are not a separate channel.</h3>
-                <p>A handoff is an outcome of the same turn path. App hosts get chaining through <code>TurnBuilder::stream</code>, <code>run</code>, or <code>collect_with</code>; lower-level runtime callers opt in with <code>stream_turn_following_handoffs</code>. Managed sessions, turn index, attachment store, and trace ids carry across the boundary automatically.</p>
+                <h3>AgentFrame switches are not a separate channel.</h3>
+                <p>An AgentFrame switch is an outcome of the same turn path. App hosts get chaining through <code>TurnBuilder::stream</code>, <code>run</code>, or <code>collect_with</code>; lower-level runtime callers opt in with <code>stream_turn_with_agent_frames</code>. The session id, turn index, attachment store, and trace ids carry across the boundary automatically.</p>
               </div>
             </li>
           </ol>

@@ -3,8 +3,7 @@
 Contributor reference for the docs design system. Read this before adding a new
 page or section.
 
-For the **visual** styleguide — see [`design-language.html`](./design-language.html).
-For the **canonical CSS** — see [`architecture/styles.css`](./architecture/styles.css).
+For the **canonical CSS** — see [`styles.css`](./styles.css).
 
 ---
 
@@ -12,14 +11,13 @@ For the **canonical CSS** — see [`architecture/styles.css`](./architecture/sty
 
 | Concern | Location |
 |---|---|
-| Tokens (color, spacing, type) | `architecture/styles.css` `:root` |
-| Shared components (`.frame`, `.hero`, `.nav`, `.card`, `.panel`, `.chapter-list`, `.section-nav`, `.diagram`, `.table`, …) | `architecture/styles.css` |
-| Page-specific components (mocks, swatches, principle-list, plan-dock) | `design-language.html` `<style>` |
-| Mermaid loader | `architecture/mermaid.js` (conditional — only fetches the lib when `.mermaid` blocks exist) |
+| Tokens (color, spacing, type) | `styles.css` `:root` |
+| Shared components (`.opener`, `.body`, `.section`, `.panel`, `.chapter-list`, `.pager`, `.diagram`, `.table`, …) | `styles.css` |
+| Page-specific components (mocks, exporter demos, landing scene) | Page-local `<style>` or focused JS/CSS assets such as `scene.js` |
+| Mermaid loader | `mermaid.js` (conditional — only fetches the lib when `.mermaid` blocks exist) |
 
-All HTML pages link the same stylesheet. Architecture pages use
-`<link rel="stylesheet" href="./styles.css">`; the docs root and design-language
-use `./architecture/styles.css`.
+All HTML pages link the same stylesheet. Root-level docs pages use
+`./styles.css`; architecture subpages use `../styles.css`.
 
 ---
 
@@ -114,41 +112,31 @@ important.
 ### Page shell
 
 ```html
-<div class="page">
-  <main class="frame">
-    <header class="hero">…</header>
-    <nav class="nav" aria-label="…">…</nav>
-    <section class="content">…</section>
-    <footer class="footer">…</footer>
-  </main>
-</div>
+<section class="opener">
+  <h1 class="opener__title">flow<span class="slash">/</span>turns</h1>
+  <p class="opener__lede">Lead paragraph — start with a sentence, not a comma-stuffed list.</p>
+</section>
+
+<main class="body" id="content">
+  <div class="section">…</div>
+</main>
+
+<section class="pager" aria-label="chapter navigation">…</section>
 ```
 
-`.page` provides the outer max-width and gutters. `.frame` is the warm-iron
-container with a subtle gradient. `.hero` is asymmetric on desktop
-(`1.18fr 0.82fr`), single-column at ≤1040px.
+`.opener` provides the editorial title block, `.body` provides the constrained
+reading column, and `.pager` carries previous/next navigation.
 
-### Hero
+### Opener
 
-Asymmetric two-column. Left: eyebrow + h1 + lead paragraph. Right: 2–3 `.card`
-or `.meta-card` summary tiles in `.hero-meta`.
+Use the opener for page identity: one h1, one lead paragraph, and optional CTA
+links only when the page is a redirect or entry point.
 
 ```html
-<header class="hero">
-  <div>
-    <div class="eyebrow">Architecture chapter 03</div>
-    <h1>flow<span class="slash">/</span>turns</h1>
-    <p>Lead paragraph — start with a sentence, not a comma-stuffed list.</p>
-  </div>
-  <div class="hero-meta">
-    <article class="card">
-      <div class="micro-label">Kernel</div>
-      <strong><code>lash-sansio</code></strong>
-      <span>One-line elaboration in body font.</span>
-    </article>
-    …
-  </div>
-</header>
+<section class="opener">
+  <h1 class="opener__title">runtime<span class="slash">/</span>host</h1>
+  <p class="opener__lede">One strong paragraph that tells readers what this page owns.</p>
+</section>
 ```
 
 The slash character in the h1 is sodium via `<span class="slash">/</span>`.
@@ -157,9 +145,9 @@ The slash character in the h1 is sodium via `<span class="slash">/</span>`.
 
 ```html
 <nav class="nav" aria-label="Architecture pages">
-  <a href="../index.html">Docs Home</a>
-  <a class="active" href="./flow.html">Data Flow</a>
-  <a href="./execution.html">Execution</a>
+  <a href="./index.html">Docs Home</a>
+  <a class="active" href="./architecture/flow.html">Data Flow</a>
+  <a href="./architecture/execution.html">Execution</a>
   …
 </nav>
 ```
@@ -175,7 +163,7 @@ For a multi-page index. Use this instead of `.toc-grid` of cards.
 ```html
 <ol class="chapter-list">
   <li>
-    <a href="./overview.html">
+    <a href="./architecture/overview.html">
       <span class="chapter-num">01</span>
       <div class="chapter-meta">
         <h3>Overview</h3>
@@ -278,19 +266,22 @@ Wrap in `.table` for horizontal-scroll on narrow viewports.
 
 `<th>` renders in Big Shoulders Display, sodium, uppercase.
 
-### Section nav (prev/next)
+### Pager (prev/next)
 
 End every chapter with prev/next links.
 
 ```html
-<div class="section-nav">
-  <a href="./modules.html"><span>Previous</span><strong>Modules</strong></a>
-  <a href="./execution.html"><span>Next</span><strong>Execution</strong></a>
-</div>
+<section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./architecture/modules.html"><span>previous</span><strong>modules</strong></a>
+    <a class="pager__next" href="./architecture/execution.html"><span>next</span><strong>execution</strong></a>
+  </div>
+</section>
 ```
 
-If only one direction exists, leave a `<span></span>` placeholder for the
-other so flexbox keeps the alignment.
+If only one direction exists, omit the absent link and let the remaining link
+hold its side of the grid.
 
 ---
 
@@ -312,7 +303,7 @@ These are the bans specific to this project. They are non-negotiable.
    hanging-number editorial run.
 5. **No new fonts.** Display, body, ui — that's the kit.
 6. **No raw hex.** Add a token instead. Exceptions: literal swatch chips in
-   the design-language Color section (they ARE the spec).
+   dedicated color-spec examples.
 7. **No raw px for spacing.** Use `--space-*` tokens.
 8. **No `outline: none` without a replacement focus indicator.** Use
    `box-shadow: var(--focus-ring)` on `:focus-visible`.
@@ -326,19 +317,19 @@ These are the bans specific to this project. They are non-negotiable.
 ## Adding a new architecture chapter
 
 1. Copy `architecture/overview.html` as the template.
-2. Update `<title>`, `.eyebrow`, h1, and lead paragraph.
-3. Update the `.nav` strip — add `class="active"` to the new page's link.
-4. Add an entry to `architecture/index.html`'s `.chapter-list`.
-5. Update prev/next `.section-nav` on the surrounding chapters.
-6. Run `/audit` to verify contrast, focus, and touch targets pass.
+2. Update `<title>`, `.opener__title`, and `.opener__lede`.
+3. Add an entry to `architecture/index.html`'s `.chapter-list`.
+4. Update prev/next `.pager` links on the surrounding chapters.
+5. Run `/audit` to verify contrast, focus, and touch targets pass.
 
-## Adding a new design-language section
+## Adding a page-local demo section
 
-1. Add an entry to the `.nav` strip (`<a href="#newsection" data-section="newsection">…</a>`).
-2. Add `<section id="newsection">` inside `.lookbook` with a `.section-head`
-   and the section content.
-3. The `IntersectionObserver` in the page's `<script>` auto-detects the new
-   section — no JS update needed.
+1. Keep the shared shell in `styles.css`; add only the component-specific CSS
+   needed by the demo.
+2. Put the section inside the normal `.body` / `.section` structure unless the
+   page is a purpose-built visual mockup.
+3. If the demo needs JavaScript, keep the data and behavior page-local or add a
+   focused asset next to the existing docs assets.
 
 ## Verifying changes
 

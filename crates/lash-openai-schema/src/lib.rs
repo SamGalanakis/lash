@@ -1,4 +1,3 @@
-use lash_sansio::llm::types::{LlmProviderTraceEvent, LlmProviderTraceSender};
 use serde_json::{Map, Value, json};
 
 /// Strip a leading `vendor/` prefix from a model id (e.g. `openai/gpt-4o` →
@@ -11,27 +10,39 @@ pub fn model_id(model: &str) -> &str {
         .unwrap_or(model)
 }
 
-/// Forward a raw provider event to the trace sink, deriving an event name from
-/// the JSON `type` (or `event`) field when present.
-pub fn emit_provider_trace(tx: Option<&LlmProviderTraceSender>, provider: &'static str, raw: &str) {
-    let Some(tx) = tx else {
-        return;
-    };
-    let event_name = serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .or_else(|| value.get("event"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "provider_event".to_string());
-    tx.send(LlmProviderTraceEvent {
-        provider,
-        event_name,
-        raw: raw.to_string(),
-    });
+/// Decide whether an error object embedded in a Responses SSE event (or a
+/// non-2xx Responses body) is retryable. Unlike the HTTP-status-based central
+/// classifier, this inspects the structured `error` object that the Responses
+/// stream surfaces *without* an HTTP status (numeric `code`/`status` of 429 or
+/// >= 500, or a known transient `code`/`type`/`status` string). Shared by the
+/// OpenAI Responses and Codex providers.
+pub fn responses_error_is_retryable(value: &Value) -> bool {
+    let numeric_code = value
+        .get("code")
+        .or_else(|| value.get("status"))
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        });
+    matches!(numeric_code, Some(429))
+        || matches!(numeric_code, Some(status) if status >= 500)
+        || value
+            .get("code")
+            .or_else(|| value.get("type"))
+            .or_else(|| value.get("status"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|code| {
+                matches!(
+                    code,
+                    "server_error"
+                        | "internal_server_error"
+                        | "service_unavailable"
+                        | "temporarily_unavailable"
+                        | "overloaded"
+                        | "rate_limit_exceeded"
+                )
+            })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

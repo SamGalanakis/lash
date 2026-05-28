@@ -348,7 +348,7 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
             section.push_str("\n- Several independent operations are needed -> call each module operation and keep the values in variables.");
         }
     }
-    section.push_str("\n- The trace is bloated, stale, or failed attempts dominate → use an available continuation tool to hand off concrete state to a fresh successor.");
+    section.push_str("\n- The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.");
     if has_operations {
         section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample fanout to two available operations (use `?` for fail-fast unwrapping):\n\n```lashlang\na = await web.search({ query: \"one\" })?\nb = await files.read({ path: \"notes/two.md\" })?\none = a\ntwo = b\nsubmit [one, two]\n```");
     } else {

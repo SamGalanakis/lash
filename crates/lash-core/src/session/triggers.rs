@@ -24,6 +24,10 @@ pub(crate) fn validate_host_event(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "host event emission preserves the event triple and runtime services as explicit trigger inputs"
+)]
 pub(crate) async fn emit_host_event(
     session_id: &str,
     plugins: Arc<crate::PluginSession>,

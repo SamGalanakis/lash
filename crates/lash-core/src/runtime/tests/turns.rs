@@ -423,7 +423,7 @@ async fn queued_checkpoint_input_preserves_images() {
         .await
         .expect("turn");
 
-    let requests = requests.lock().expect("request capture lock");
+    let requests = requests.lock().expect("request capture lock").clone();
     assert_eq!(requests.len(), 2);
     assert!(requests[1].messages.iter().any(|message| {
         message.role == crate::llm::types::LlmRole::User
@@ -669,7 +669,10 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
         .expect("turn")
         .expect("queued turn");
 
-    let requests = requests.lock().expect("request capture lock");
+    let requests = {
+        let guard = requests.lock().expect("request capture lock");
+        guard.clone()
+    };
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
     let message_text = |message: &crate::llm::types::LlmMessage| {
@@ -1135,63 +1138,6 @@ async fn child_relation_does_not_replace_active_session() {
 }
 
 #[tokio::test]
-async fn handoff_relation_routes_original_session_to_successor() {
-    let transport = mock_provider(vec![MockCall {
-        stream_events: Vec::new(),
-        response: Ok(LlmResponse {
-            full_text: "successor response".to_string(),
-            parts: vec![LlmOutputPart::Text {
-                text: "successor response".to_string(),
-                response_meta: None,
-            }],
-            ..LlmResponse::default()
-        }),
-    }]);
-    let mut runtime = runtime_with_plugins(Vec::new(), transport).await;
-    runtime.state.turn_index = 31;
-    let manager = runtime.session_manager().expect("session manager");
-    manager
-        .create_session(
-            crate::SessionCreateRequest::handoff_session(
-                runtime.session_id(),
-                "test",
-                serde_json::Map::new(),
-                crate::PluginOptions::default(),
-            )
-            .with_session_id("handoff-child")
-            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
-        )
-        .await
-        .expect("handoff session");
-
-    let assembled = runtime
-        .run_turn_assembled(
-            TurnInput {
-                items: vec![InputItem::Text {
-                    text: "next external turn".to_string(),
-                }],
-                image_blobs: HashMap::new(),
-                protocol_turn_options: None,
-                trace_turn_id: None,
-                protocol_extension: None,
-                turn_context: crate::TurnContext::default(),
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .expect("routed turn");
-
-    assert_eq!(runtime.session_id(), "root");
-    assert_eq!(runtime.export_state().turn_index, 32);
-    assert_eq!(assembled.state.session_id, "handoff-child");
-    assert_eq!(assembled.state.turn_index, 32);
-    assert_eq!(
-        assembled.assistant_output.safe_text.trim(),
-        "successor response"
-    );
-}
-
-#[tokio::test]
 async fn session_manager_rejects_duplicate_child_session_ids() {
     let runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     let manager = runtime.session_manager().expect("session manager");
@@ -1235,11 +1181,7 @@ async fn runtime_can_activate_managed_child_session() {
                 "test",
             )
             .with_session_id("child")
-            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork)
-            .with_first_turn_input(crate::PluginMessage::text(
-                crate::MessageRole::User,
-                "run child",
-            )),
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
         )
         .await
         .expect("child session");
@@ -1250,12 +1192,6 @@ async fn runtime_can_activate_managed_child_session() {
         .expect("activate child");
 
     assert_eq!(runtime.session_id(), "child");
-    let seed = manager
-        .take_first_turn_input("child")
-        .await
-        .expect("seed lookup")
-        .expect("seed");
-    assert_eq!(seed.content, "run child");
     assert!(
         manager
             .start_turn(

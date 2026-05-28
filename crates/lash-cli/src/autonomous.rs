@@ -4,7 +4,7 @@ use lash::{
     LashSession, TurnActivity, TurnActivitySink, TurnEvent, TurnInput,
     usage::{SessionUsageReport, TokenLedgerEntry, diff_usage_reports},
 };
-use lash_core::{SessionStateEnvelope, TurnOutcome};
+use lash_core::TurnOutcome;
 use tokio::sync::mpsc;
 
 use crate::SkillCatalog;
@@ -144,7 +144,6 @@ impl AutonomousRenderer {
 struct AutonomousTurnOutcome {
     done: crate::turn_runner::RuntimeRunResult,
     cancel: tokio_util::sync::CancellationToken,
-    handoff_session_id: Option<String>,
 }
 
 async fn run_autonomous_turn(
@@ -168,8 +167,6 @@ async fn run_autonomous_turn(
         });
     }
     let mut task = tokio::spawn(async move { (return_rx.await, cancel) });
-    let mut handoff_session_id = None;
-
     let (done, cancel) = loop {
         tokio::select! {
             Some(activity) = event_rx.recv() => {
@@ -190,9 +187,6 @@ async fn run_autonomous_turn(
         }
     };
     let done = done.map_err(|err| anyhow::anyhow!("autonomous turn task channel failed: {err}"))?;
-    if let TurnOutcome::Handoff { session_id } = &done.result.outcome {
-        handoff_session_id = Some(session_id.clone());
-    }
     while let Ok(activity) = event_rx.try_recv() {
         match renderer.handle(activity) {
             Ok(()) => {}
@@ -203,36 +197,7 @@ async fn run_autonomous_turn(
         }
     }
 
-    Ok(AutonomousTurnOutcome {
-        done,
-        cancel,
-        handoff_session_id,
-    })
-}
-
-async fn autonomous_handoff_first_turn(
-    session: &LashSession,
-    session_id: &str,
-) -> anyhow::Result<TurnInput> {
-    let seed = session
-        .control()
-        .children()
-        .take_first_turn_input(session_id)
-        .await
-        .map_err(|err| {
-            anyhow::anyhow!("failed to read first turn for session `{session_id}`: {err}")
-        })?
-        .ok_or_else(|| {
-            anyhow::anyhow!("handoff session `{session_id}` did not provide a first turn")
-        })?;
-    if seed.content.trim().is_empty() {
-        return Err(anyhow::anyhow!(
-            "handoff session `{session_id}` provided an empty first turn"
-        ));
-    }
-    let prepared =
-        PreparedTurn::prepare_with_effective_text(seed.content.clone(), seed.content, Vec::new());
-    Ok(make_turn_input(&prepared))
+    Ok(AutonomousTurnOutcome { done, cancel })
 }
 
 /// Run the session autonomously: send prompt, consume events, print final response to stdout.
@@ -250,36 +215,12 @@ pub(crate) async fn run_autonomous(
         turn_input = lash_protocol_rlm::RlmTurnInputExt::rlm_project(turn_input, bindings)?;
     }
     let mut renderer = AutonomousRenderer::new();
-    let mut stream_id = 1;
-    let (mut done, cancel) = loop {
-        let outcome =
-            run_autonomous_turn(session.clone(), turn_input, &mut renderer, stream_id).await?;
-        let turn_done = outcome.done;
-        if let Some(session_id) = outcome.handoff_session_id {
-            if !matches!(
-                &turn_done.result.outcome,
-                TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
-            ) {
-                break (turn_done, outcome.cancel);
-            }
-            turn_input = autonomous_handoff_first_turn(&session, &session_id).await?;
-            stream_id += 1;
-            continue;
-        }
-        break (turn_done, outcome.cancel);
-    };
+    let outcome = run_autonomous_turn(session.clone(), turn_input, &mut renderer, 1).await?;
+    let (mut done, cancel) = (outcome.done, outcome.cancel);
     if persistence.await_background_work {
         session.control().state().await_background_work().await?;
         let state = session.control().state().persist_current().await?;
-        done.result.state = SessionStateEnvelope {
-            session_id: state.session_id,
-            policy: state.policy,
-            session_graph: state.session_graph,
-            turn_index: state.turn_index,
-            token_usage: state.token_usage,
-            last_prompt_usage: state.last_prompt_usage,
-            protocol_turn_options: state.protocol_turn_options,
-        };
+        done.result.state = state.into_envelope();
     }
     let cumulative_usage = session.usage_report();
     if let Some(path) = &persistence.turn_usage_json {
@@ -318,7 +259,7 @@ pub(crate) async fn run_autonomous(
     }
 
     match &done.result.outcome {
-        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. } => {
+        TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. } => {
             let turn = &done.result;
             if !turn.assistant_output.safe_text.is_empty() {
                 renderer.finish_output(&turn.assistant_output.safe_text);

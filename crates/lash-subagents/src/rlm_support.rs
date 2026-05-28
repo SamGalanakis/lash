@@ -333,7 +333,7 @@ pub(crate) fn task_result_value(turn: &AssembledTurn) -> Value {
         }
         TurnOutcome::Stopped(TurnStop::SubmittedError { value }) => return value.clone(),
         TurnOutcome::Stopped(TurnStop::ToolError { value, .. }) => return value.clone(),
-        TurnOutcome::Handoff { session_id } => return json!({ "session_id": session_id }),
+        TurnOutcome::AgentFrameSwitch { frame_id } => return json!({ "frame_id": frame_id }),
         TurnOutcome::Stopped(_) => {}
     }
     if !turn.assistant_output.safe_text.trim().is_empty() {

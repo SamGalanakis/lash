@@ -7,26 +7,27 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
-    ToolRetryPolicy, ToolScheduling,
+    ToolCall, ToolDefinition, ToolProvider, ToolResult, ToolRetryPolicy, ToolScheduling,
 };
 
-use lash_tool_support::{object_schema, parse_optional_usize_arg, require_str, run_blocking_value};
+use lash_tool_support::{
+    StaticToolExecute, StaticToolProvider, object_schema, parse_optional_usize_arg, require_str,
+    run_blocking_value,
+};
 
 /// Read files with line-number-prefixed output. Supports images natively.
 #[derive(Default)]
 pub struct ReadFile;
 
+/// Build the cached `read_file` tool provider.
+pub fn read_file_provider() -> StaticToolProvider<ReadFile> {
+    StaticToolProvider::new(vec![read_file_tool_definition()], ReadFile)
+}
+
 pub struct ReadFilePluginFactory;
 
 struct ReadFilePlugin {
-    provider: Arc<ReadFile>,
-}
-
-impl ReadFile {
-    pub fn new() -> Self {
-        Self
-    }
+    provider: Arc<dyn ToolProvider>,
 }
 
 impl ReadFilePluginFactory {
@@ -48,7 +49,7 @@ impl PluginFactory for ReadFilePluginFactory {
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(ReadFilePlugin {
-            provider: Arc::new(ReadFile::new()),
+            provider: Arc::new(read_file_provider()),
         }))
     }
 }
@@ -59,8 +60,7 @@ impl SessionPlugin for ReadFilePlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.tools()
-            .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)
+        reg.tools().provider(Arc::clone(&self.provider))
     }
 }
 
@@ -96,15 +96,7 @@ impl ReadFileBlockingResult {
 }
 
 #[async_trait::async_trait]
-impl ToolProvider for ReadFile {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![read_file_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "read_file").then(|| Arc::new(read_file_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for ReadFile {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let args = call.args;
         let path_str = match require_str(args, "path") {
@@ -605,7 +597,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3").unwrap();
         let result = lash_core::testing::run_tool(
-            &ReadFile,
+            &read_file_provider(),
             "read_file",
             &json!({"path": path.to_str().unwrap()}),
         )
@@ -625,7 +617,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3\nline4\nline5").unwrap();
         let result = lash_core::testing::run_tool(
-            &ReadFile,
+            &read_file_provider(),
             "read_file",
             &json!({"path": path.to_str().unwrap(), "offset": 2, "limit": 2}),
         )
@@ -651,7 +643,7 @@ mod tests {
             .join("\n");
         std::fs::write(&path, content).unwrap();
         let result = lash_core::testing::run_tool(
-            &ReadFile,
+            &read_file_provider(),
             "read_file",
             &json!({"path": path.to_str().unwrap(), "limit": 200}),
         )
@@ -666,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_nonexistent() {
         let result = lash_core::testing::run_tool(
-            &ReadFile,
+            &read_file_provider(),
             "read_file",
             &json!({"path": "/nonexistent/path/to/file.txt"}),
         )

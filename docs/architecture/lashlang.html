@@ -49,14 +49,14 @@
             <dt>REPL state</dt>
             <dd>Variables persist across fenced blocks in the active RLM execution state. Read-only host bindings projected through RLM's projection API are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose. Lazy app projections are ref-backed and resolved before each block runs.</dd>
             <dt>Completion</dt>
-            <dd><code>submit</code> ends the program and turn. When the host exposes a continuation operation, <code>await TOOL.default.continue_as({ task: ..., seed: { ... } })?</code> is a receiver operation (not a keyword) that ends the current trajectory and queues a fresh-window successor session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</dd>
+            <dd><code>submit</code> ends the program and turn. When the host exposes a continuation operation, <code>await TOOL.default.continue_as({ task: ..., seed: { ... } })?</code> is a receiver operation (not a keyword) that ends the current trajectory and activates a fresh-window AgentFrame in the same session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</dd>
           </dl>
           <p>The examples below assume the host has linked a <code>TOOL.default</code> resource with the shown operations enabled.</p>
           <pre><code>```lashlang
 text = await TOOL.default.read_file({ path: "Cargo.toml" })?
 print { chars: len(text), head: slice(text, 0, 1200) }
 ```</code></pre>
-          <p>A typical handoff packs the concrete state the successor needs and ends the block. Computed expressions default to global state on the successor; values rooted at a projected binding (like <code>input.prompt</code>) stay projected, preserving their <code>ProjectionRef</code> when one exists.</p>
+          <p>A typical AgentFrame switch packs the concrete state the AgentFrame needs and ends the block. Computed expressions default to global state on the AgentFrame; values rooted at a projected binding (like <code>input.prompt</code>) stay projected, preserving their <code>ProjectionRef</code> when one exists.</p>
           <pre><code>```lashlang
 findings = []
 for path in await TOOL.default.glob({ pattern: "src/**/*.rs" })? {

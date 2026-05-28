@@ -111,7 +111,7 @@ impl ToolSurface {
     pub fn from_tool_definitions(tools: Vec<ToolDefinition>) -> Self {
         let contracts = tools
             .iter()
-            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect();
         Self::from_tools(
             tools.into_iter().map(|tool| tool.manifest()).collect(),
@@ -390,9 +390,9 @@ mod tests {
             }),
             serde_json::json!({ "type": "string" }),
         );
-        definition.availability = ToolAvailabilityConfig::same(availability);
-        definition.activation = ToolActivation::Always;
-        definition.scheduling = ToolScheduling::Parallel;
+        definition.manifest.availability = ToolAvailabilityConfig::same(availability);
+        definition.manifest.activation = ToolActivation::Always;
+        definition.manifest.scheduling = ToolScheduling::Parallel;
         definition
     }
 
@@ -402,7 +402,7 @@ mod tests {
     ) -> ToolSurfaceBuildInput {
         let contracts = tools
             .iter()
-            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect::<BTreeMap<_, _>>();
         ToolSurfaceBuildInput {
             tools: tools.into_iter().map(|tool| tool.manifest()).collect(),

@@ -42,13 +42,6 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             .await
     }
 
-    async fn take_first_turn_input(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<crate::PluginMessage>, crate::PluginError> {
-        self.managed.take_first_turn_input(session_id).await
-    }
-
     async fn close_session(&self, session_id: &str) -> Result<(), crate::PluginError> {
         self.managed
             .close_session(&self.current, &self.usage, session_id)
@@ -133,9 +126,16 @@ impl crate::ProcessService for RuntimeSessionManager {
         &self,
         session_id: &str,
         handle_ids: &[String],
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<(), crate::PluginError> {
         self.processes
-            .validate_process_handles_visible(&self.current, &self.managed, session_id, handle_ids)
+            .validate_process_handles_visible(
+                &self.current,
+                &self.managed,
+                session_id,
+                handle_ids,
+                scope,
+            )
             .await
     }
 

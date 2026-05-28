@@ -60,7 +60,7 @@ impl ExecutionHost for MockHost {
                     .map(AbilityResult::Value)
             }
             AbilityOp::StartProcess(start) => {
-                self.start_process(start).await.map(AbilityResult::Value)
+                self.start_process(*start).await.map(AbilityResult::Value)
             }
             AbilityOp::Await(handle) => self
                 .await_handle_value(handle)

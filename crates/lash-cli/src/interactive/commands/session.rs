@@ -75,7 +75,7 @@ fn fallback_policy_for_session_switch(
     let model = lash_core::ModelSpec::from_token_limits(
         app.model.clone(),
         current_model_variant.clone(),
-        app.context_window.unwrap_or(1) as usize,
+        app.usage.context_window.unwrap_or(1) as usize,
         None,
         None,
     )
@@ -231,7 +231,8 @@ pub(super) async fn handle_fork(
         logger,
         provider,
         &app.model,
-        app.context_window
+        app.usage
+            .context_window
             .expect("app context_window must be set before forking"),
         current_model_variant.as_deref(),
     )

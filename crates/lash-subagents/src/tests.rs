@@ -89,47 +89,48 @@ fn rlm_definitions_expose_spawn_without_mini_api() {
     let registry = default_registry(&BTreeMap::new());
     let rlm_defs = rlm::rlm_subagent_tool_definitions(&registry.names());
 
-    assert!(rlm_defs.iter().any(|tool| tool.name == "spawn_agent"));
+    assert!(rlm_defs.iter().any(|tool| tool.name() == "spawn_agent"));
     assert_eq!(
         rlm_defs
             .iter()
-            .map(|tool| tool.name.as_str())
+            .map(|tool| tool.name())
             .collect::<Vec<_>>(),
         vec!["spawn_agent"]
     );
 
     let rlm_spawn = rlm_defs
         .iter()
-        .find(|tool| tool.name == "spawn_agent")
+        .find(|tool| tool.name() == "spawn_agent")
         .expect("rlm spawn_agent");
     assert_eq!(
         rlm_spawn.effective_availability(),
         lash_core::ToolAvailability::Showcased
     );
     assert_eq!(
-        rlm_spawn.output_contract,
+        rlm_spawn.contract.output_contract,
         ToolOutputContract::from_input_schema("output", None)
     );
     assert_eq!(
-        rlm_spawn.argument_projection,
+        rlm_spawn.manifest.argument_projection,
         ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed")
     );
     assert!(
         rlm_spawn
+            .contract
             .examples
             .iter()
             .any(|example| example.contains("await agents.spawn"))
     );
-    assert!(rlm_spawn.description.contains("module operation"));
-    assert!(rlm_spawn.description.contains("agents: Agents"));
-    assert!(!rlm_spawn.description.contains("use `start spawn_agent"));
+    assert!(rlm_spawn.description().contains("module operation"));
+    assert!(rlm_spawn.description().contains("agents: Agents"));
+    assert!(!rlm_spawn.description().contains("use `start spawn_agent"));
 }
 
 #[test]
 fn spawn_schema_is_strict_and_nameless() {
     let registry = default_registry(&BTreeMap::new());
     let tool = rlm::spawn_agent_tool_definition(&registry.names());
-    let schema = tool.input_schema;
+    let schema = tool.contract.input_schema;
     let retired_key = ["agent", "_", "name"].concat();
 
     let properties = schema
@@ -216,6 +217,7 @@ fn single_capability_spawn_can_omit_capability_field() {
 
     assert!(
         !rlm_spawn
+            .contract
             .input_schema
             .get("required")
             .and_then(serde_json::Value::as_array)
@@ -226,6 +228,7 @@ fn single_capability_spawn_can_omit_capability_field() {
     );
     assert!(
         rlm_spawn
+            .contract
             .examples
             .iter()
             .all(|example| !example.contains("capability:")),
@@ -668,7 +671,7 @@ fn subagent_surface_reports_authority_notes() {
     ];
     let contracts = tools
         .iter()
-        .map(|tool| (tool.name.clone(), std::sync::Arc::new(tool.contract())))
+        .map(|tool| (tool.name().to_string(), std::sync::Arc::new(tool.contract())))
         .collect::<std::collections::BTreeMap<_, _>>();
     let ctx = ToolSurfaceContext {
         session_id: "child".to_string(),

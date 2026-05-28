@@ -193,7 +193,7 @@ impl ExecutionHost for HostBridge<'_> {
                 .await
                 .map(AbilityResult::Value),
             AbilityOp::StartProcess(start) => {
-                self.start_process(start).await.map(AbilityResult::Value)
+                self.start_process(*start).await.map(AbilityResult::Value)
             }
             AbilityOp::Await(handle) => self.await_handle(handle).await.map(AbilityResult::Value),
             AbilityOp::Cancel(handle) => self.cancel_handle(handle).await.map(AbilityResult::Value),

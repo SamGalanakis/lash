@@ -2,6 +2,42 @@ use crate::support::*;
 
 pub use lash_core::{AssistantOutput, TurnIssue};
 
+/// The two internal event sinks threaded through the turn-execution helpers.
+///
+/// `events` is the raw `SessionEvent` stream (the lower-level escape hatch,
+/// reachable from app code only via [`TurnBuilder::advanced`]); `turn_events`
+/// is the semantic [`TurnActivity`] stream used by the primary builder API.
+/// Bundling them keeps the internal turn fns to a single sink parameter.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct TurnSinks<'a> {
+    events: Option<&'a dyn EventSink>,
+    turn_events: Option<&'a dyn TurnActivitySink>,
+}
+
+impl<'a> TurnSinks<'a> {
+    pub(crate) fn turn(events: &'a dyn TurnActivitySink) -> Self {
+        Self {
+            events: None,
+            turn_events: Some(events),
+        }
+    }
+
+    pub(crate) fn session(events: &'a dyn EventSink) -> Self {
+        Self {
+            events: Some(events),
+            turn_events: None,
+        }
+    }
+
+    fn events(&self) -> Option<&'a dyn EventSink> {
+        self.events
+    }
+
+    fn turn_events(&self) -> Option<&'a dyn TurnActivitySink> {
+        self.turn_events
+    }
+}
+
 pub struct TurnBuilder {
     pub(crate) runtime: RuntimeHandle,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
@@ -130,30 +166,10 @@ impl TurnBuilder {
         })
     }
 
-    /// Run the turn while also sending raw session events to `events`.
-    ///
-    /// Most applications should use [`TurnBuilder::collect_with`] for semantic
-    /// turn activity. Benchmarks and diagnostics use this when they need the
-    /// same session-event stream as the lower-level runtime trace.
-    pub async fn collect_session_events_with(self, events: &dyn EventSink) -> Result<TurnResult> {
-        let (runtime, input, cancel) = self.prepare()?;
-        stream_prepared_turn(&runtime, input, Some(events), None, cancel).await
-    }
-
-    /// Run the logical host turn through foreground handoffs while sending raw
-    /// session events to `events`.
-    ///
-    /// Most callers should use [`TurnBuilder::collect_session_events_with`].
-    /// Benchmarks that need continuation counts can use this without
-    /// constructing the lower-level runtime directly.
-    pub async fn collect_followed_session_events_with(
-        self,
-        events: &dyn EventSink,
-    ) -> Result<FollowedTurnResult> {
-        let (runtime, input, cancel) = self.prepare()?;
-        let followed =
-            stream_prepared_followed(&runtime, input, Some(events), None, cancel).await?;
-        Ok(FollowedTurnResult::from_followed(followed))
+    /// Access lower-level turn execution that bypasses the semantic
+    /// [`TurnActivity`] tier.
+    pub fn advanced(self) -> AdvancedTurn {
+        AdvancedTurn { builder: self }
     }
 
     pub(crate) fn prepare(mut self) -> Result<(RuntimeHandle, TurnInput, CancellationToken)> {
@@ -172,7 +188,7 @@ impl TurnBuilder {
 
     pub async fn stream(self, events: &dyn TurnActivitySink) -> Result<TurnResult> {
         let (runtime, input, cancel) = self.prepare()?;
-        stream_prepared_turn(&runtime, input, None, Some(events), cancel).await
+        stream_prepared_turn(&runtime, input, TurnSinks::turn(events), cancel).await
     }
 
     pub async fn stream_with_effect_scope(
@@ -184,8 +200,7 @@ impl TurnBuilder {
         stream_prepared_turn_with_effect_scope(
             &runtime,
             input,
-            None,
-            Some(events),
+            TurnSinks::turn(events),
             effect_scope,
             cancel,
         )
@@ -197,12 +212,30 @@ impl TurnBuilder {
         let (tx, rx) = mpsc::channel(64);
         let sink = ChannelTurnActivitySink { tx };
         let completion = tokio::spawn(async move {
-            stream_prepared_turn(&runtime, input, None, Some(&sink), cancel).await
+            stream_prepared_turn(&runtime, input, TurnSinks::turn(&sink), cancel).await
         });
         Ok(TurnStream {
             activities: rx,
             completion,
         })
+    }
+}
+
+/// Lower-level turn execution that exposes the raw `SessionEvent` stream.
+///
+/// Reachable via [`TurnBuilder::advanced`]. Most applications should use
+/// [`TurnBuilder::collect_with`] for semantic turn activity; benchmarks and
+/// diagnostics use this when they need the same session-event stream as the
+/// lower-level runtime trace.
+pub struct AdvancedTurn {
+    builder: TurnBuilder,
+}
+
+impl AdvancedTurn {
+    /// Run the turn while sending raw session events to `events`.
+    pub async fn collect_session_events_with(self, events: &dyn EventSink) -> Result<TurnResult> {
+        let (runtime, input, cancel) = self.builder.prepare()?;
+        stream_prepared_turn(&runtime, input, TurnSinks::session(events), cancel).await
     }
 }
 
@@ -295,8 +328,7 @@ impl ResumeTurnBuilder {
         let assembled = resume_prepared_assembled(
             &self.runtime,
             &self.turn_id,
-            None,
-            Some(events),
+            TurnSinks::turn(events),
             self.cancel,
         )
         .await?;
@@ -311,8 +343,7 @@ impl ResumeTurnBuilder {
         let assembled = resume_prepared_assembled_with_effect_scope(
             &self.runtime,
             &self.turn_id,
-            None,
-            Some(events),
+            TurnSinks::turn(events),
             effect_scope,
             self.cancel,
         )
@@ -320,13 +351,28 @@ impl ResumeTurnBuilder {
         Ok(TurnResult::from_assembled(assembled))
     }
 
+    /// Access lower-level resume execution that bypasses the semantic
+    /// [`TurnActivity`] tier.
+    pub fn advanced(self) -> AdvancedResumeTurn {
+        AdvancedResumeTurn { builder: self }
+    }
+}
+
+/// Lower-level turn resume that exposes the raw `SessionEvent` stream.
+///
+/// Reachable via [`ResumeTurnBuilder::advanced`]; see [`AdvancedTurn`] for the
+/// rationale.
+pub struct AdvancedResumeTurn {
+    builder: ResumeTurnBuilder,
+}
+
+impl AdvancedResumeTurn {
     pub async fn collect_session_events_with(self, events: &dyn EventSink) -> Result<TurnResult> {
         let assembled = resume_prepared_assembled(
-            &self.runtime,
-            &self.turn_id,
-            Some(events),
-            None,
-            self.cancel,
+            &self.builder.runtime,
+            &self.builder.turn_id,
+            TurnSinks::session(events),
+            self.builder.cancel,
         )
         .await?;
         Ok(TurnResult::from_assembled(assembled))
@@ -338,32 +384,54 @@ impl ResumeTurnBuilder {
         effect_scope: RuntimeEffectControllerScope<'_>,
     ) -> Result<TurnResult> {
         let assembled = resume_prepared_assembled_with_effect_scope(
-            &self.runtime,
-            &self.turn_id,
-            Some(events),
-            None,
+            &self.builder.runtime,
+            &self.builder.turn_id,
+            TurnSinks::session(events),
             effect_scope,
-            self.cancel,
+            self.builder.cancel,
         )
         .await?;
         Ok(TurnResult::from_assembled(assembled))
     }
 }
 
+pub struct QueuedTurnBuilder {
+    pub(crate) runtime: RuntimeHandle,
+    pub(crate) cancel: CancellationToken,
+}
+
+impl QueuedTurnBuilder {
+    pub fn cancel(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    pub async fn run(self) -> Result<Option<TurnOutput>> {
+        let collector = RunActivityCollector::default();
+        let Some(result) = self.stream(&collector).await? else {
+            return Ok(None);
+        };
+        Ok(Some(TurnOutput {
+            result,
+            activities: collector.into_activities(),
+        }))
+    }
+
+    pub async fn stream(self, events: &dyn TurnActivitySink) -> Result<Option<TurnResult>> {
+        stream_next_queued_prepared_turn(&self.runtime, TurnSinks::turn(events), self.cancel).await
+    }
+}
+
 pub(crate) async fn resume_prepared_assembled(
     runtime: &RuntimeHandle,
     turn_id: &str,
-    session_events: Option<&dyn EventSink>,
-    turn_events: Option<&dyn TurnActivitySink>,
+    sinks: TurnSinks<'_>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
     let turn = writer
-        .resume_turn(
-            turn_id,
-            turn_options(session_events, turn_events, None, cancel),
-        )
+        .resume_turn(turn_id, turn_options(sinks, None, cancel))
         .await?;
     runtime.publish_from(&writer);
     Ok(turn)
@@ -372,34 +440,55 @@ pub(crate) async fn resume_prepared_assembled(
 pub(crate) async fn resume_prepared_assembled_with_effect_scope(
     runtime: &RuntimeHandle,
     turn_id: &str,
-    session_events: Option<&dyn EventSink>,
-    turn_events: Option<&dyn TurnActivitySink>,
+    sinks: TurnSinks<'_>,
     effect_scope: RuntimeEffectControllerScope<'_>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
     let turn = writer
-        .resume_turn(
-            turn_id,
-            turn_options(session_events, turn_events, Some(effect_scope), cancel),
-        )
+        .resume_turn(turn_id, turn_options(sinks, Some(effect_scope), cancel))
+        .await?;
+    runtime.publish_from(&writer);
+    Ok(turn)
+}
+
+pub(crate) async fn stream_next_queued_prepared_turn(
+    runtime: &RuntimeHandle,
+    sinks: TurnSinks<'_>,
+    cancel: CancellationToken,
+) -> Result<Option<TurnResult>> {
+    let turn = Box::pin(stream_next_queued_prepared_assembled(
+        runtime, sinks, cancel,
+    ))
+    .await?;
+    Ok(turn.map(TurnResult::from_assembled))
+}
+
+pub(crate) async fn stream_next_queued_prepared_assembled(
+    runtime: &RuntimeHandle,
+    sinks: TurnSinks<'_>,
+    cancel: CancellationToken,
+) -> Result<Option<AssembledTurn>> {
+    let writer_handle = runtime.writer();
+    let mut writer = writer_handle.lock().await;
+    let turn = writer
+        .stream_next_queued_work(turn_options(sinks, None, cancel))
         .await?;
     runtime.publish_from(&writer);
     Ok(turn)
 }
 
 fn turn_options<'a>(
-    session_events: Option<&'a dyn EventSink>,
-    turn_events: Option<&'a dyn TurnActivitySink>,
+    sinks: TurnSinks<'a>,
     effect_scope: Option<RuntimeEffectControllerScope<'a>>,
     cancel: CancellationToken,
 ) -> lash_core::TurnOptions<'a> {
     let mut opts = lash_core::TurnOptions::new(cancel);
-    if let Some(events) = session_events {
+    if let Some(events) = sinks.events() {
         opts = opts.with_events(events);
     }
-    if let Some(turn_events) = turn_events {
+    if let Some(turn_events) = sinks.turn_events() {
         opts = opts.with_turn_events(turn_events);
     }
     if let Some(effect_scope) = effect_scope {
@@ -435,34 +524,24 @@ fn validate_required_plugin_inputs(
 pub(crate) async fn stream_prepared_turn(
     runtime: &RuntimeHandle,
     input: TurnInput,
-    session_events: Option<&dyn EventSink>,
-    turn_events: Option<&dyn TurnActivitySink>,
+    sinks: TurnSinks<'_>,
     cancel: CancellationToken,
 ) -> Result<TurnResult> {
-    let turn = Box::pin(stream_prepared_assembled(
-        runtime,
-        input,
-        session_events,
-        turn_events,
-        cancel,
-    ))
-    .await?;
+    let turn = Box::pin(stream_prepared_assembled(runtime, input, sinks, cancel)).await?;
     Ok(TurnResult::from_assembled(turn))
 }
 
 pub(crate) async fn stream_prepared_turn_with_effect_scope(
     runtime: &RuntimeHandle,
     input: TurnInput,
-    session_events: Option<&dyn EventSink>,
-    turn_events: Option<&dyn TurnActivitySink>,
+    sinks: TurnSinks<'_>,
     effect_scope: RuntimeEffectControllerScope<'_>,
     cancel: CancellationToken,
 ) -> Result<TurnResult> {
     let turn = Box::pin(stream_prepared_assembled_with_effect_scope(
         runtime,
         input,
-        session_events,
-        turn_events,
+        sinks,
         effect_scope,
         cancel,
     ))
@@ -473,21 +552,16 @@ pub(crate) async fn stream_prepared_turn_with_effect_scope(
 pub(crate) async fn stream_prepared_assembled(
     runtime: &RuntimeHandle,
     input: TurnInput,
-    session_events: Option<&dyn EventSink>,
-    turn_events: Option<&dyn TurnActivitySink>,
+    sinks: TurnSinks<'_>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
-    let turn = Box::pin(stream_prepared_followed(
-        runtime,
-        input,
-        session_events,
-        turn_events,
-        cancel,
+    let turn = Box::pin(stream_prepared_agent_frame_run(
+        runtime, input, sinks, cancel,
     ))
     .await?;
     turn.into_final_turn().ok_or_else(|| {
         EmbedError::Runtime(lash_core::RuntimeError::new(
-            RuntimeErrorCode::EmptyFollowedTurn,
+            RuntimeErrorCode::EmptyAgentFrameRun,
             "runtime completed without an assembled turn",
         ))
     })
@@ -496,35 +570,32 @@ pub(crate) async fn stream_prepared_assembled(
 pub(crate) async fn stream_prepared_assembled_with_effect_scope(
     runtime: &RuntimeHandle,
     input: TurnInput,
-    session_events: Option<&dyn EventSink>,
-    turn_events: Option<&dyn TurnActivitySink>,
+    sinks: TurnSinks<'_>,
     effect_scope: RuntimeEffectControllerScope<'_>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
-    let turn = Box::pin(stream_prepared_followed_with_effect_scope(
+    let turn = Box::pin(stream_prepared_agent_frame_run_with_effect_scope(
         runtime,
         input,
-        session_events,
-        turn_events,
+        sinks,
         effect_scope,
         cancel,
     ))
     .await?;
     turn.into_final_turn().ok_or_else(|| {
         EmbedError::Runtime(lash_core::RuntimeError::new(
-            RuntimeErrorCode::EmptyFollowedTurn,
+            RuntimeErrorCode::EmptyAgentFrameRun,
             "runtime completed without an assembled turn",
         ))
     })
 }
 
-pub(crate) async fn stream_prepared_followed(
+pub(crate) async fn stream_prepared_agent_frame_run(
     runtime: &RuntimeHandle,
     input: TurnInput,
-    session_events: Option<&dyn EventSink>,
-    turn_events: Option<&dyn TurnActivitySink>,
+    sinks: TurnSinks<'_>,
     cancel: CancellationToken,
-) -> Result<lash_core::FollowedTurn> {
+) -> Result<lash_core::AgentFrameRun> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
     if let Some(extension) = input.protocol_extension.as_ref() {
@@ -533,23 +604,20 @@ pub(crate) async fn stream_prepared_followed(
             .await
             .map_err(EmbedError::Session)?;
     }
-    let turn = Box::pin(writer.stream_turn_following_handoffs(
-        input,
-        turn_options(session_events, turn_events, None, cancel),
-    ))
-    .await?;
+    let turn =
+        Box::pin(writer.stream_turn_with_agent_frames(input, turn_options(sinks, None, cancel)))
+            .await?;
     runtime.publish_from(&writer);
     Ok(turn)
 }
 
-pub(crate) async fn stream_prepared_followed_with_effect_scope(
+pub(crate) async fn stream_prepared_agent_frame_run_with_effect_scope(
     runtime: &RuntimeHandle,
     input: TurnInput,
-    session_events: Option<&dyn EventSink>,
-    turn_events: Option<&dyn TurnActivitySink>,
+    sinks: TurnSinks<'_>,
     effect_scope: RuntimeEffectControllerScope<'_>,
     cancel: CancellationToken,
-) -> Result<lash_core::FollowedTurn> {
+) -> Result<lash_core::AgentFrameRun> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
     if let Some(extension) = input.protocol_extension.as_ref() {
@@ -558,10 +626,10 @@ pub(crate) async fn stream_prepared_followed_with_effect_scope(
             .await
             .map_err(EmbedError::Session)?;
     }
-    let turn = Box::pin(writer.stream_turn_following_handoffs(
-        input,
-        turn_options(session_events, turn_events, Some(effect_scope), cancel),
-    ))
+    let turn = Box::pin(
+        writer
+            .stream_turn_with_agent_frames(input, turn_options(sinks, Some(effect_scope), cancel)),
+    )
     .await?;
     runtime.publish_from(&writer);
     Ok(turn)
@@ -636,40 +704,8 @@ impl TurnResult {
     pub fn is_success(&self) -> bool {
         matches!(
             self.outcome,
-            TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+            TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. }
         )
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct FollowedTurnResult {
-    pub turns: Vec<TurnResult>,
-}
-
-impl FollowedTurnResult {
-    fn from_followed(followed: lash_core::FollowedTurn) -> Self {
-        Self {
-            turns: followed
-                .turns
-                .into_iter()
-                .map(TurnResult::from_assembled)
-                .collect(),
-        }
-    }
-
-    pub fn final_turn(&self) -> Option<&TurnResult> {
-        self.turns.last()
-    }
-
-    pub fn into_final_turn(mut self) -> Option<TurnResult> {
-        self.turns.pop()
-    }
-
-    pub fn handoff_count(&self) -> usize {
-        self.turns
-            .iter()
-            .filter(|turn| matches!(turn.outcome, lash_core::TurnOutcome::Handoff { .. }))
-            .count()
     }
 }
 

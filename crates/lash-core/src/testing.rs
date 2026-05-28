@@ -11,9 +11,7 @@ use std::sync::{Arc, Mutex};
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{LlmRequest, LlmResponse};
 use crate::plugin::{PluginError, SessionCreateRequest, SessionHandle, SessionSnapshot};
-use crate::provider::{
-    ProviderComponents, ProviderHandle, ProviderModelPolicy, ProviderState, ProviderTransport,
-};
+use crate::provider::{Provider, ProviderComponents, ProviderHandle, ProviderModelPolicy};
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, ExecutionSummary, ModelSpec, OutputState, ProcessRegistry,
@@ -70,7 +68,7 @@ impl TestProvider {
 
     pub fn into_handle(self) -> ProviderHandle {
         let model_policy: Arc<dyn ProviderModelPolicy> = Arc::new(self.clone());
-        ProviderHandle::new(ProviderComponents::shared(self, model_policy))
+        ProviderHandle::new(ProviderComponents::new(Box::new(self), model_policy))
     }
 }
 
@@ -158,7 +156,8 @@ impl Default for TestProviderBuilder {
     }
 }
 
-impl ProviderState for TestProvider {
+#[async_trait::async_trait]
+impl Provider for TestProvider {
     fn kind(&self) -> &'static str {
         self.kind
     }
@@ -175,13 +174,6 @@ impl ProviderState for TestProvider {
         (self.serialize_config)()
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderState> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait::async_trait]
-impl ProviderTransport for TestProvider {
     async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         (self.complete)(request).await
     }
@@ -190,7 +182,7 @@ impl ProviderTransport for TestProvider {
         self.requires_streaming
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+    fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
 }
@@ -328,6 +320,7 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         ),
         parent_invocation: None,
         session_id: session_id.clone(),
+        agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: attachment_store.clone(),
@@ -540,9 +533,13 @@ impl crate::ProcessService for MockSessionManager {
     async fn list_visible(
         &self,
         session_id: &str,
-        _scope: crate::ProcessOpScope<'_>,
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
-        let owner_scope = crate::ProcessScope::new(session_id);
+        let owner_scope = scope
+            .agent_frame_id
+            .as_deref()
+            .map(|frame_id| crate::ProcessScope::for_agent_frame(session_id, frame_id))
+            .unwrap_or_else(|| crate::ProcessScope::new(session_id));
         self.process_registry.list_handle_grants(&owner_scope).await
     }
 
@@ -550,8 +547,13 @@ impl crate::ProcessService for MockSessionManager {
         &self,
         session_id: &str,
         handle_ids: &[String],
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<(), PluginError> {
-        let owner_scope = crate::ProcessScope::new(session_id);
+        let owner_scope = scope
+            .agent_frame_id
+            .as_deref()
+            .map(|frame_id| crate::ProcessScope::for_agent_frame(session_id, frame_id))
+            .unwrap_or_else(|| crate::ProcessScope::new(session_id));
         let visible = self
             .process_registry
             .list_handle_grants(&owner_scope)
@@ -606,10 +608,18 @@ impl crate::ProcessService for MockSessionManager {
         from_session_id: &str,
         to_session_id: &str,
         process_ids: Vec<String>,
-        _scope: crate::ProcessOpScope<'_>,
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<(), PluginError> {
-        let from_scope = crate::ProcessScope::new(from_session_id);
-        let to_scope = crate::ProcessScope::new(to_session_id);
+        let from_scope = scope
+            .agent_frame_id
+            .as_deref()
+            .map(|frame_id| crate::ProcessScope::for_agent_frame(from_session_id, frame_id))
+            .unwrap_or_else(|| crate::ProcessScope::new(from_session_id));
+        let to_scope = scope
+            .target_agent_frame_id
+            .as_deref()
+            .map(|frame_id| crate::ProcessScope::for_agent_frame(to_session_id, frame_id))
+            .unwrap_or_else(|| crate::ProcessScope::new(to_session_id));
         self.process_registry
             .transfer_handle_grants(&from_scope, &to_scope, &process_ids)
             .await
@@ -619,13 +629,17 @@ impl crate::ProcessService for MockSessionManager {
         &self,
         session_id: &str,
         keep_process_ids: Vec<String>,
-        _scope: crate::ProcessOpScope<'_>,
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
         let keep = keep_process_ids
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
-        let owner_scope = crate::ProcessScope::new(session_id);
+        let owner_scope = scope
+            .agent_frame_id
+            .as_deref()
+            .map(|frame_id| crate::ProcessScope::for_agent_frame(session_id, frame_id))
+            .unwrap_or_else(|| crate::ProcessScope::new(session_id));
         let grants = self
             .process_registry
             .list_handle_grants(&owner_scope)
@@ -925,7 +939,7 @@ mod test_protocol_fakes {
             )
             .await;
         for ((index, invocation), outcome) in parallel_specs.into_iter().zip(outcomes) {
-            let tool_record = outcome.record.unwrap_or_else(|| crate::ToolCallRecord {
+            let tool_record = outcome.record.unwrap_or(crate::ToolCallRecord {
                 call_id: Some(invocation.id),
                 tool: invocation.name,
                 args: invocation.args,
@@ -1206,11 +1220,11 @@ mod test_protocol_fakes {
             for outcome in completed {
                 if terminal_outcome.is_none() && outcome.output.is_success() {
                     terminal_outcome = match outcome.output.control.as_ref() {
-                        Some(crate::ToolControl::Handoff { session_id })
-                            if !session_id.trim().is_empty() =>
+                        Some(crate::ToolControl::SwitchAgentFrame { frame_id, .. })
+                            if !frame_id.trim().is_empty() =>
                         {
-                            Some(TurnOutcome::Handoff {
-                                session_id: session_id.clone(),
+                            Some(TurnOutcome::AgentFrameSwitch {
+                                frame_id: frame_id.clone(),
                             })
                         }
                         Some(crate::ToolControl::Finish { value }) => {

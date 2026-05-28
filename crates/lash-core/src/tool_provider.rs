@@ -36,6 +36,7 @@ pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 #[derive(Clone)]
 pub struct ToolContext<'run> {
     pub(crate) session_id: String,
+    pub(crate) agent_frame_id: crate::AgentFrameId,
     pub(crate) host: Arc<dyn RuntimeSessionHost>,
     pub(crate) processes: Arc<dyn crate::ProcessService>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
@@ -64,6 +65,7 @@ pub(crate) struct ToolProcessEventContext {
 
 pub(crate) struct ToolContextBuilder<'run> {
     session_id: String,
+    agent_frame_id: crate::AgentFrameId,
     host: Arc<dyn RuntimeSessionHost>,
     processes: Arc<dyn crate::ProcessService>,
     effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
@@ -84,6 +86,7 @@ impl<'run> ToolContextBuilder<'run> {
     ) -> Self {
         Self {
             session_id: dispatch.session_id.clone(),
+            agent_frame_id: dispatch.agent_frame_id.clone(),
             host: Arc::clone(&dispatch.host),
             processes: Arc::clone(&dispatch.processes),
             effect_controller: dispatch.effect_controller.clone(),
@@ -153,6 +156,7 @@ impl<'run> ToolContextBuilder<'run> {
     pub(crate) fn build(self) -> ToolContext<'run> {
         ToolContext {
             session_id: self.session_id,
+            agent_frame_id: self.agent_frame_id,
             host: self.host,
             processes: self.processes,
             effect_controller: self.effect_controller,
@@ -184,6 +188,7 @@ impl<'run> ToolContext<'run> {
     ) -> ToolContextBuilder<'run> {
         ToolContextBuilder {
             session_id,
+            agent_frame_id: String::new(),
             host,
             processes,
             effect_controller,
@@ -209,6 +214,10 @@ impl<'run> ToolContext<'run> {
         &self.session_id
     }
 
+    pub fn agent_frame_id(&self) -> &str {
+        &self.agent_frame_id
+    }
+
     pub fn sessions(&self) -> ToolSessionControl {
         ToolSessionControl {
             session_id: self.session_id.clone(),
@@ -225,6 +234,7 @@ impl<'run> ToolContext<'run> {
     pub fn processes(&self) -> ToolProcessControl<'run> {
         ToolProcessControl {
             session_id: self.session_id.clone(),
+            agent_frame_id: self.agent_frame_id.clone(),
             processes: Arc::clone(&self.processes),
             effect_controller: self.effect_controller.clone(),
             parent_invocation: self.parent_invocation.clone(),

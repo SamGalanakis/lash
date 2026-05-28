@@ -23,12 +23,6 @@ pub(super) async fn apply_before_tool_directives(
                     break;
                 }
             }
-            PluginDirective::HandoffSession { .. } => {
-                short_circuit = Some(ToolResult::err_fmt(
-                    "before_tool_call does not support session handoff",
-                ));
-                break;
-            }
             PluginDirective::ReplaceToolArgs { args: replacement } => {
                 args = replacement;
             }
@@ -84,10 +78,6 @@ pub(super) async fn apply_after_tool_directives(
                     ));
                     break;
                 }
-            }
-            PluginDirective::HandoffSession { .. } => {
-                result = ToolResult::err_fmt("after_tool_call does not support session handoff");
-                break;
             }
             PluginDirective::ShortCircuitTool { output } => {
                 result = ToolResult::from_output(output);

@@ -77,10 +77,12 @@ impl RuntimeTurnDriver<'_> {
         checkpoint: CheckpointKind,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<crate::CheckpointDelivery, RuntimeError> {
-        let mut committed = self
-            .checkpoint_messages
-            .drain()
-            .map_err(|err| RuntimeError::new(RuntimeErrorCode::Other("checkpoint_messages".to_string()), err))?;
+        let mut committed = self.checkpoint_messages.drain().map_err(|err| {
+            RuntimeError::new(
+                RuntimeErrorCode::Other("checkpoint_messages".to_string()),
+                err,
+            )
+        })?;
         let mut transient_messages = Vec::new();
         let mut turn_causes = Vec::new();
         let queue_claim = if let Some(store) = self.session.history_store() {
@@ -93,7 +95,9 @@ impl RuntimeTurnDriver<'_> {
                     64,
                 )
                 .await
-                .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?
+                .map_err(|err| {
+                    RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
+                })?
         } else {
             None
         };

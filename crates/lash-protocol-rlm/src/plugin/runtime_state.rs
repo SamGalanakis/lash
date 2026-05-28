@@ -16,6 +16,7 @@ pub(super) struct RlmRuntimeState {
     projection_resolver: Arc<dyn ProjectionResolver>,
     session_projected_bindings: tokio::sync::Mutex<RlmProjectedBindings>,
     execution: tokio::sync::Mutex<Option<RlmExecutionState>>,
+    active_agent_frame_id: tokio::sync::Mutex<Option<String>>,
 }
 
 impl RlmRuntimeState {
@@ -30,6 +31,7 @@ impl RlmRuntimeState {
             config,
             projection_resolver,
             session_projected_bindings: tokio::sync::Mutex::new(RlmProjectedBindings::new()),
+            active_agent_frame_id: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -96,10 +98,16 @@ impl RlmRuntimeState {
         &self,
         state: &lash_core::runtime::RuntimeSessionState,
     ) -> Result<(), SessionError> {
+        let mut active_agent_frame_id = self.active_agent_frame_id.lock().await;
         let mut execution = self.execution.lock().await;
         let execution = execution
             .as_mut()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
+        if active_agent_frame_id.as_deref() != Some(state.current_agent_frame_id.as_str()) {
+            *execution = RlmExecutionState::new(self.config.observe_projection.clone())?;
+            *self.session_projected_bindings.lock().await = RlmProjectedBindings::new();
+            *active_agent_frame_id = Some(state.current_agent_frame_id.clone());
+        }
         let protected_names = self.protected_projected_binding_names().await;
         if let Some(snapshot) = state.execution_state_snapshot().map(|bytes| bytes.to_vec()) {
             execution.restore_execution_state(&snapshot)?;

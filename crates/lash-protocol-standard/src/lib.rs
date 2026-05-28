@@ -224,7 +224,7 @@ async fn execute_batch_tool_call(call: ToolCall<'_>) -> ToolResult {
     for ((index, invocation), outcome) in
         parallel_specs.into_iter().zip(parallel_outcomes.drain(..))
     {
-        let tool_record = outcome.record.unwrap_or_else(|| lash_core::ToolCallRecord {
+        let tool_record = outcome.record.unwrap_or(lash_core::ToolCallRecord {
             call_id: Some(invocation.id),
             tool: invocation.name,
             args: invocation.args,
@@ -596,11 +596,11 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for StandardDriver {
         for outcome in completed {
             if terminal_outcome.is_none() && outcome.output.is_success() {
                 terminal_outcome = match outcome.output.control.as_ref() {
-                    Some(lash_core::ToolControl::Handoff { session_id })
-                        if !session_id.trim().is_empty() =>
+                    Some(lash_core::ToolControl::SwitchAgentFrame { frame_id, .. })
+                        if !frame_id.trim().is_empty() =>
                     {
-                        Some(TurnOutcome::Handoff {
-                            session_id: session_id.clone(),
+                        Some(TurnOutcome::AgentFrameSwitch {
+                            frame_id: frame_id.clone(),
                         })
                     }
                     Some(lash_core::ToolControl::Finish { value }) => {

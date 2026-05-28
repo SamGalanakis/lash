@@ -339,6 +339,13 @@ impl LashSession {
         }
     }
 
+    pub fn next_queued_turn(&self) -> QueuedTurnBuilder {
+        QueuedTurnBuilder {
+            runtime: self.runtime.clone(),
+            cancel: CancellationToken::new(),
+        }
+    }
+
     pub fn control(&self) -> SessionControl {
         SessionControl {
             runtime: self.runtime.clone(),
@@ -365,10 +372,6 @@ impl LashSession {
         ProcessControl::new(self.control())
     }
 
-    pub fn handoffs(&self) -> Handoffs {
-        Handoffs::new(self.control())
-    }
-
     pub fn plugin_actions(&self) -> PluginActions {
         PluginActions {
             control: self.control(),
@@ -380,7 +383,28 @@ impl LashSession {
             session: self,
             input,
             id: None,
+            delivery_policy: lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+            slot_policy: lash_core::SlotPolicy::Exclusive,
         }
+    }
+
+    pub async fn queued_work(&self) -> Result<Vec<lash_core::QueuedWorkBatch>> {
+        let observation = self.runtime.observe();
+        let store = observation.queue_store.as_ref().ok_or_else(|| {
+            EmbedError::Runtime(lash_core::RuntimeError::new(
+                lash_core::RuntimeErrorCode::StoreCommitFailed,
+                "queued work inspection requires a persistent runtime store",
+            ))
+        })?;
+        store
+            .list_queued_work(observation.session_id())
+            .await
+            .map_err(|err| {
+                EmbedError::Runtime(lash_core::RuntimeError::new(
+                    lash_core::RuntimeErrorCode::StoreCommitFailed,
+                    err.to_string(),
+                ))
+            })
     }
 
     pub fn read_view(&self) -> SessionReadView {
@@ -452,11 +476,23 @@ pub struct QueueInputBuilder<'a> {
     session: &'a LashSession,
     input: TurnInput,
     id: Option<String>,
+    delivery_policy: lash_core::DeliveryPolicy,
+    slot_policy: lash_core::SlotPolicy,
 }
 
 impl<'a> QueueInputBuilder<'a> {
     pub fn id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    pub fn delivery_policy(mut self, policy: lash_core::DeliveryPolicy) -> Self {
+        self.delivery_policy = policy;
+        self
+    }
+
+    pub fn slot_policy(mut self, policy: lash_core::SlotPolicy) -> Self {
+        self.slot_policy = policy;
         self
     }
 
@@ -472,8 +508,8 @@ impl<'a> QueueInputBuilder<'a> {
         lash_core::ensure_durable_turn_input(&self.input).map_err(EmbedError::Runtime)?;
         let mut draft = lash_core::QueuedWorkBatchDraft::new(
             observation.session_id().to_string(),
-            lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-            lash_core::SlotPolicy::Exclusive,
+            self.delivery_policy,
+            self.slot_policy,
             vec![lash_core::QueuedWorkPayload::turn_input(self.input)],
         );
         draft.source_key = source_key;

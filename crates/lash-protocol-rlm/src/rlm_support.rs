@@ -37,14 +37,14 @@ pub fn format_budget_suffix(
     }
     let pct = used.saturating_mul(100) / max.max(1);
     let mut content =
-        format!("Turn: {turn_index} · Tokens: {used} · handoff threshold: {max} ({pct}%).");
+        format!("Turn: {turn_index} · Tokens: {used} · frame switch threshold: {max} ({pct}%).");
     if pct >= 60 {
         let tail = if used >= max {
-            "Past the handoff threshold. End this block with `control.continue_as(...)` now; do not call `submit` or do more work after it. Pack only what the successor needs into `task` + `seed`; carry only necessary live process handles."
+            "Past the frame switch threshold. End this block with `control.continue_as(...)` now; do not call `submit` or do more work after it. Pack only what the new frame needs into `task` + `seed`; carry only necessary live process handles."
         } else if pct >= 90 {
             "Budget tight — finish only the current step, then end the block with `control.continue_as(...)`."
         } else {
-            "Look for a clean handoff point; when you hand off, make `control.continue_as(...)` the terminal action in the block."
+            "Look for a clean frame switch point; when you switch, make `control.continue_as(...)` the terminal action in the block."
         };
         content.push('\n');
         content.push_str(tail);

@@ -803,7 +803,7 @@ fn ui_projection_state_omits_transient_live_turn() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.set_status("retrying", Some("in 5s".into()), true);
-    if let Some(turn) = app.live_turn.as_mut() {
+    if let Some(turn) = app.live.turn.as_mut() {
         turn.has_visible_output = true;
     }
 

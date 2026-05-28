@@ -11,19 +11,19 @@ use sha2::{Digest, Sha256};
 
 use lash_core::llm::transport::{LlmTransportError, validate_image_attachments};
 use lash_core::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
-    LlmRequest, LlmResponse, LlmRole, LlmTerminalReason, LlmToolChoice, LlmUsage,
-    ProviderReasoningReplay, ProviderReplayMeta,
+    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
+    LlmTerminalReason, LlmToolChoice, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
 };
 use lash_core::provider::{
-    ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions, ProviderState,
-    ProviderTransport, resolve_generation_policy,
+    Provider, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
+    resolve_generation_policy,
 };
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::{
     build_http_client, header_pairs, read_response_text, request_body_snapshot,
     response_start_timeout, send_request,
 };
+use lash_llm_transport::util::{emit_provider_trace, parse_i64};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum GoogleThinkingConfig {
@@ -32,31 +32,6 @@ enum GoogleThinkingConfig {
 }
 
 pub mod oauth;
-
-fn emit_provider_trace(
-    tx: Option<&lash_core::llm::types::LlmProviderTraceSender>,
-    provider: &'static str,
-    raw: &str,
-) {
-    let Some(tx) = tx else {
-        return;
-    };
-    let event_name = serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .or_else(|| value.get("event"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "provider_event".to_string());
-    tx.send(LlmProviderTraceEvent {
-        provider,
-        event_name,
-        raw: raw.to_string(),
-    });
-}
 
 const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 const CODE_ASSIST_API_VERSION: &str = "v1internal";
@@ -321,36 +296,28 @@ impl GoogleOAuthProvider {
         }
     }
 
-    fn parse_i64(v: Option<&Value>) -> i64 {
-        match v {
-            Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
-            Some(Value::String(s)) => s.parse::<i64>().unwrap_or(0),
-            _ => 0,
-        }
-    }
-
     fn usage_from_event(event: &Value) -> LlmUsage {
         let meta = event
             .get("response")
             .and_then(|r| r.get("usageMetadata"))
             .unwrap_or(&Value::Null);
         LlmUsage {
-            input_tokens: Self::parse_i64(
+            input_tokens: parse_i64(
                 meta.get("promptTokenCount")
                     .or_else(|| meta.get("inputTokenCount"))
                     .or_else(|| meta.get("inputTokens")),
             ),
-            output_tokens: Self::parse_i64(
+            output_tokens: parse_i64(
                 meta.get("candidatesTokenCount")
                     .or_else(|| meta.get("outputTokenCount"))
                     .or_else(|| meta.get("outputTokens")),
             ),
-            cached_input_tokens: Self::parse_i64(
+            cached_input_tokens: parse_i64(
                 meta.get("cachedContentTokenCount")
                     .or_else(|| meta.get("cachedPromptTokenCount"))
                     .or_else(|| meta.get("cachedInputTokenCount")),
             ),
-            reasoning_tokens: Self::parse_i64(
+            reasoning_tokens: parse_i64(
                 meta.get("thoughtsTokenCount")
                     .or_else(|| meta.get("reasoningTokenCount"))
                     .or_else(|| meta.get("reasoningTokens")),
@@ -729,8 +696,7 @@ impl GoogleOAuthProvider {
             ))
             .with_status(status)
             .with_headers(header_pairs(&headers))
-            .with_raw(body)
-            .retryable(status == 429 || status >= 500));
+            .with_raw(body));
         }
 
         let upload_url = start_resp
@@ -779,8 +745,7 @@ impl GoogleOAuthProvider {
             ))
             .with_status(status)
             .with_headers(header_pairs(&headers))
-            .with_raw(body)
-            .retryable(status == 429 || status >= 500));
+            .with_raw(body));
         }
 
         let upload_status = finalize_resp
@@ -1003,8 +968,7 @@ impl GoogleOAuthProvider {
                 LlmTransportError::new(format!("Cloud Code request failed with {}", status))
                     .with_status(status)
                     .with_headers(header_pairs(&headers))
-                    .with_raw(body)
-                    .retryable(status == 429 || status >= 500);
+                    .with_raw(body);
             if let Some(request_body) = request_body {
                 err = err.with_request_body(request_body);
             }
@@ -1143,8 +1107,7 @@ impl GoogleOAuthProvider {
                 LlmTransportError::new(format!("Cloud Code loadCodeAssist failed with {}", status))
                     .with_status(status)
                     .with_headers(header_pairs(&headers))
-                    .with_raw(body)
-                    .retryable(status == 429 || status >= 500);
+                    .with_raw(body);
             if let Some(request_body) = request_body {
                 err = err.with_request_body(request_body);
             }
@@ -1163,11 +1126,12 @@ impl GoogleOAuthProvider {
 
 impl GoogleOAuthProvider {
     pub fn into_components(self) -> ProviderComponents {
-        ProviderComponents::shared(self, std::sync::Arc::new(GoogleModelPolicy))
+        ProviderComponents::new(Box::new(self), std::sync::Arc::new(GoogleModelPolicy))
     }
 }
 
-impl ProviderState for GoogleOAuthProvider {
+#[async_trait]
+impl Provider for GoogleOAuthProvider {
     fn kind(&self) -> &'static str {
         "google_oauth"
     }
@@ -1209,49 +1173,6 @@ impl ProviderState for GoogleOAuthProvider {
         serde_json::Value::Object(map)
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderState> {
-        Box::new(self.clone())
-    }
-}
-
-impl ProviderModelPolicy for GoogleModelPolicy {
-    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
-        let lower = model.to_ascii_lowercase();
-        if lower.contains("gemini-2.5") {
-            GEMINI_25_VARIANTS
-        } else if lower.contains("gemini-3.1") {
-            GEMINI_31_VARIANTS
-        } else if lower.contains("gemini-3") {
-            GEMINI_3_VARIANTS
-        } else {
-            &[]
-        }
-    }
-}
-
-impl GoogleModelPolicy {
-    fn thinking_config(&self, model: &str, variant: &str) -> Option<GoogleThinkingConfig> {
-        if !self.supported_variants(model).contains(&variant) {
-            return None;
-        }
-        let lower = model.to_ascii_lowercase();
-        if lower.contains("gemini-2.5") {
-            let budget_tokens = match variant {
-                "high" => 16_000,
-                "max" => 24_576,
-                _ => return None,
-            };
-            Some(GoogleThinkingConfig::Budget { budget_tokens })
-        } else {
-            Some(GoogleThinkingConfig::Level {
-                level: variant.to_string(),
-            })
-        }
-    }
-}
-
-#[async_trait]
-impl ProviderTransport for GoogleOAuthProvider {
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         validate_image_attachments(
             &req,
@@ -1316,8 +1237,44 @@ impl ProviderTransport for GoogleOAuthProvider {
         }
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+    fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
+    }
+}
+
+impl ProviderModelPolicy for GoogleModelPolicy {
+    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        let lower = model.to_ascii_lowercase();
+        if lower.contains("gemini-2.5") {
+            GEMINI_25_VARIANTS
+        } else if lower.contains("gemini-3.1") {
+            GEMINI_31_VARIANTS
+        } else if lower.contains("gemini-3") {
+            GEMINI_3_VARIANTS
+        } else {
+            &[]
+        }
+    }
+}
+
+impl GoogleModelPolicy {
+    fn thinking_config(&self, model: &str, variant: &str) -> Option<GoogleThinkingConfig> {
+        if !self.supported_variants(model).contains(&variant) {
+            return None;
+        }
+        let lower = model.to_ascii_lowercase();
+        if lower.contains("gemini-2.5") {
+            let budget_tokens = match variant {
+                "high" => 16_000,
+                "max" => 24_576,
+                _ => return None,
+            };
+            Some(GoogleThinkingConfig::Budget { budget_tokens })
+        } else {
+            Some(GoogleThinkingConfig::Level {
+                level: variant.to_string(),
+            })
+        }
     }
 }
 

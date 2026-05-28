@@ -183,7 +183,7 @@ pub enum TraceEvent {
         status: String,
         done_reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        handoff: Option<TraceHandoff>,
+        agent_frame_switch: Option<TraceAgentFrameSwitch>,
     },
     Custom {
         name: String,
@@ -380,8 +380,8 @@ pub struct TraceTokenUsage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TraceHandoff {
-    pub successor_session_id: String,
+pub struct TraceAgentFrameSwitch {
+    pub frame_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_start_and_handoff_records_are_jsonl_shaped() {
+    fn tool_start_and_frame_switch_records_are_jsonl_shaped() {
         let started = TraceRecord::new(
             TraceContext::default().for_session("root"),
             TraceEvent::ToolCallStarted {
@@ -507,8 +507,8 @@ mod tests {
             TraceEvent::TurnCompleted {
                 status: "completed".to_string(),
                 done_reason: "modelstop".to_string(),
-                handoff: Some(TraceHandoff {
-                    successor_session_id: "child-1".to_string(),
+                agent_frame_switch: Some(TraceAgentFrameSwitch {
+                    frame_id: "frame-1".to_string(),
                 }),
             },
         );
@@ -519,7 +519,7 @@ mod tests {
 
         let completed_json = serde_json::to_value(completed).unwrap();
         assert_eq!(completed_json["type"], "turn_completed");
-        assert_eq!(completed_json["handoff"]["successor_session_id"], "child-1");
+        assert_eq!(completed_json["agent_frame_switch"]["frame_id"], "frame-1");
     }
 
     #[test]

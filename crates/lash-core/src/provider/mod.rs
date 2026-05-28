@@ -36,6 +36,6 @@ pub use registry::{
 };
 pub use spec::ProviderSpec;
 pub use traits::{
-    DefaultProviderFailureClassifier, ProviderFailureClassifier, ProviderModelPolicy,
-    ProviderState, ProviderTransport, is_context_overflow_text,
+    DefaultProviderFailureClassifier, Provider, ProviderFailureClassifier, ProviderModelPolicy,
+    is_context_overflow_text,
 };

@@ -75,6 +75,7 @@ pub(crate) use services::NoopSessionManager;
 pub use services::{PersistentRuntimeServices, PluginActionInvokeError, RuntimeServices};
 pub use session_obj::PluginSession;
 pub use session_types::{
+    AgentFrameAssignment, AgentFrameId, AgentFrameReason, AgentFrameRecord, AgentFrameStatus,
     PluginOwned, SessionAppendNode, SessionContextSurface, SessionCreateRequest, SessionHandle,
     SessionPluginSource, SessionRelation, SessionSnapshot, SessionStartPoint, SessionToolAccess,
     SubagentSessionContext,
@@ -156,7 +157,7 @@ mod tests {
         fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
             self.tool_definitions()
                 .into_iter()
-                .find(|tool| tool.name == name)
+                .find(|tool| tool.name() == name)
                 .map(|tool| Arc::new(tool.contract()))
         }
 

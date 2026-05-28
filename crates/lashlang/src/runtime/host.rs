@@ -14,7 +14,7 @@ pub enum AbilityOp {
     Submit(Value),
     Finish(Value),
     Fail(Value),
-    StartProcess(ProcessStart),
+    StartProcess(Box<ProcessStart>),
     ProcessEvent(ProcessEvent),
     ProcessSleep(ProcessSleep),
     WaitSignal,

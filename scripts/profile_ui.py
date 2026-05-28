@@ -110,7 +110,8 @@ def maybe_build(
     if not force and binary.exists():
         return
     cmd = ["cargo", "build", "-q", "-p", "lash-cli"]
-    feature_list = list(cargo_features)
+    # `--ui-perf-benchmark` is gated behind the `bench` cargo feature.
+    feature_list = ["bench", *cargo_features]
     if dhat:
         feature_list.append("dhat-heap")
     if feature_list:

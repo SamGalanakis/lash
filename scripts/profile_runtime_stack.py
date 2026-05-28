@@ -160,7 +160,7 @@ def maybe_build(args: argparse.Namespace, root: Path) -> None:
     if not args.build:
         return
     cmd = ["cargo", "build", "-q", "-p", "lash-cli"]
-    features = ["runtime-perf", *args.cargo_feature]
+    features = ["bench", *args.cargo_feature]
     cmd.extend(["--features", ",".join(features)])
     if args.release:
         cmd.append("--release")

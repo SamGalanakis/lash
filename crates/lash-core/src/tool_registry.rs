@@ -997,7 +997,7 @@ mod tests {
     fn contract_from(definitions: Vec<ToolDefinition>, name: &str) -> Option<Arc<ToolContract>> {
         definitions
             .into_iter()
-            .find(|tool| tool.name == name)
+            .find(|tool| tool.name() == name)
             .map(|tool| Arc::new(tool.contract()))
     }
 

@@ -127,7 +127,6 @@ impl LashRuntime {
         let host = self.host.clone();
         let services = self.services.clone();
         let managed_sessions = Arc::clone(&self.managed_sessions);
-        let active_handoff_continuations = Arc::clone(&self.active_handoff_continuations);
         let managed_turns = Arc::clone(&self.managed_turns);
         let process_sync_needed = Arc::clone(&self.process_sync_needed);
         let runtime_scope_id = Arc::clone(&self.runtime_scope_id);
@@ -135,7 +134,6 @@ impl LashRuntime {
 
         let mut rebuilt = Self::from_host_state(policy, host, services, persisted_state).await?;
         rebuilt.managed_sessions = managed_sessions;
-        rebuilt.active_handoff_continuations = active_handoff_continuations;
         rebuilt.managed_turns = managed_turns;
         rebuilt.process_sync_needed = process_sync_needed;
         rebuilt.runtime_scope_id = runtime_scope_id;
@@ -149,7 +147,7 @@ impl LashRuntime {
     /// Promote a managed child session into the foreground runtime.
     ///
     /// Child sessions created through `RuntimeSessionHost::create_session` are real
-    /// runtimes, not serialized placeholders. Foreground handoff must therefore
+    /// runtimes, not serialized placeholders. Foreground activation must therefore
     /// claim that runtime instead of reconstructing a new empty state in the UI.
     pub async fn activate_managed_session(&mut self, session_id: &str) -> Result<(), SessionError> {
         let child = {

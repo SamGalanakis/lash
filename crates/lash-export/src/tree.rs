@@ -1,6 +1,5 @@
 //! Multi-session export — discover descendant sessions reachable from a
-//! root `.db` and classify each cross-session edge as either a `Handoff`
-//! (continue_as) or a `Subagent` (spawn_agent).
+//! root `.db` and classify cross-session edges created by `spawn_agent`.
 //!
 //! The on-disk shape is one `.db` per session in `sessions_dir/`, each
 //! carrying its full session relation in `session_meta`. For subagents,
@@ -33,18 +32,12 @@ pub struct LoadedSessionNode {
     pub kind: NodeRelation,
     /// Sessions that this session spawned (`spawn_agent`), in tool-call order.
     pub subagent_children: Vec<SubagentEdge>,
-    /// If this session ended with `continue_as`, the successor's session_id.
-    pub handoff_successor: Option<String>,
 }
 
 /// What kind of edge points *into* this session from its parent.
 #[derive(Clone, Debug)]
 pub enum NodeRelation {
     Root,
-    /// Parent ended with `continue_as` and this session took over.
-    Handoff {
-        parent_session_id: String,
-    },
     /// Parent called `spawn_agent` and waited for this session to submit.
     Subagent {
         parent_session_id: String,
@@ -97,7 +90,6 @@ impl LoadedSessionTree {
         let node = self.get(session_id)?;
         let parent_id = match &node.kind {
             NodeRelation::Root => return None,
-            NodeRelation::Handoff { parent_session_id } => parent_session_id.as_str(),
             NodeRelation::Subagent {
                 parent_session_id, ..
             } => parent_session_id.as_str(),
@@ -216,7 +208,6 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
     // order edges at the exact parent call.
     let mut node_kinds: HashMap<String, NodeRelation> = HashMap::new();
     let mut subagent_edges: HashMap<String, Vec<SubagentEdge>> = HashMap::new();
-    let mut handoff_targets: HashMap<String, String> = HashMap::new();
 
     for (i, c) in candidates.iter().enumerate() {
         if !keep[i] || c.meta.session_id == root_id {
@@ -238,17 +229,6 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
                     },
                 );
             }
-            lash_core::SessionRelation::Handoff {
-                parent_session_id, ..
-            } => {
-                handoff_targets.insert(parent_session_id.clone(), c.meta.session_id.clone());
-                node_kinds.insert(
-                    c.meta.session_id.clone(),
-                    NodeRelation::Handoff {
-                        parent_session_id: parent_session_id.clone(),
-                    },
-                );
-            }
         }
     }
 
@@ -262,44 +242,27 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
             let ChronologicalPayload::ToolCall(record) = &entry.payload else {
                 continue;
             };
-            match record.tool.as_str() {
-                "spawn_agent" => {
-                    if let Some(child_id) =
-                        find_spawn_child_for_record(&candidates, &keep, &parent_sid, record)
-                    {
-                        edges.push(SubagentEdge {
-                            child_session_id: child_id.clone(),
-                            task: extract_str(&record.args, "task"),
-                            capability: extract_str(&record.args, "capability"),
-                            call_id: record.call_id.clone(),
-                            status: record.output.status(),
-                            duration_ms: record.duration_ms,
-                        });
-                        node_kinds.insert(
-                            child_id,
-                            NodeRelation::Subagent {
-                                parent_session_id: parent_sid.clone(),
-                                task: extract_str(&record.args, "task"),
-                                capability: extract_str(&record.args, "capability"),
-                                parent_call_id: record.call_id.clone(),
-                            },
-                        );
-                    }
-                }
-                "continue_as" => {
-                    if let Some(child_id) =
-                        extract_session_id(&record.output.value_for_projection())
-                    {
-                        handoff_targets.insert(parent_sid.clone(), child_id.clone());
-                        node_kinds.insert(
-                            child_id,
-                            NodeRelation::Handoff {
-                                parent_session_id: parent_sid.clone(),
-                            },
-                        );
-                    }
-                }
-                _ => {}
+            if record.tool.as_str() == "spawn_agent"
+                && let Some(child_id) =
+                    find_spawn_child_for_record(&candidates, &keep, &parent_sid, record)
+            {
+                edges.push(SubagentEdge {
+                    child_session_id: child_id.clone(),
+                    task: extract_str(&record.args, "task"),
+                    capability: extract_str(&record.args, "capability"),
+                    call_id: record.call_id.clone(),
+                    status: record.output.status(),
+                    duration_ms: record.duration_ms,
+                });
+                node_kinds.insert(
+                    child_id,
+                    NodeRelation::Subagent {
+                        parent_session_id: parent_sid.clone(),
+                        task: extract_str(&record.args, "task"),
+                        capability: extract_str(&record.args, "capability"),
+                        parent_call_id: record.call_id.clone(),
+                    },
+                );
             }
         }
         for (child_idx, child) in candidates.iter().enumerate() {
@@ -344,11 +307,6 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
         let kind = if sid == root_id {
             NodeRelation::Root
         } else {
-            // Prefer the kind we derived from the parent's tool call. If
-            // the parent didn't carry a session_id in its tool result,
-            // fall back to a generic Subagent (this is the safe default
-            // since handoff is rare and continue_as always emits the
-            // session_id).
             node_kinds.remove(&sid).unwrap_or(NodeRelation::Subagent {
                 parent_session_id: c
                     .meta
@@ -375,7 +333,6 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
             db_path: c.db_path,
             kind,
             subagent_children: subagent_edges.remove(&sid).unwrap_or_default(),
-            handoff_successor: handoff_targets.remove(&sid),
         });
     }
 

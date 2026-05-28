@@ -1168,6 +1168,7 @@ pub(crate) async fn run_once_embed(
                         scenario, turn_index,
                     )))
                     .cancel(cancel)
+                    .advanced()
                     .collect_session_events_with(&lash::advanced::NoopEventSink)
                     .await
                     .map_err(anyhow::Error::from)

@@ -17,6 +17,7 @@ categories = ["api-bindings", "asynchronous"]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12" }
 lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.12" }
 lash-provider-auth = { path = "../lash-provider-auth", version = "=0.1.0-alpha.12" }
+lash-provider-openai = { path = "../lash-provider-openai", version = "=0.1.0-alpha.12" }
 lash-openai-schema = { path = "../lash-openai-schema", version = "=0.1.0-alpha.12" }
 async-trait = { workspace = true }
 base64 = { workspace = true }
@@ -24,4 +25,3 @@ reqwest = { workspace = true, features = ["json", "stream", "rustls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }

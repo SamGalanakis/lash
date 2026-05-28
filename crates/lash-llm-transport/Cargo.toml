@@ -19,3 +19,4 @@ lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.12" }
 tokio = { workspace = true, features = ["time"] }
 reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
 bytes = { workspace = true }
+serde_json = { workspace = true }

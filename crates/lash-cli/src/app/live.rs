@@ -139,7 +139,8 @@ pub(super) fn estimate_tokens_from_char_count(chars: i64) -> i64 {
 
 impl App {
     pub(super) fn ensure_live_turn(&mut self) -> &mut LiveTurnState {
-        self.live_turn
+        self.live
+            .turn
             .get_or_insert_with(|| LiveTurnState::new("starting", None))
     }
 
@@ -148,12 +149,12 @@ impl App {
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
         self.iteration = 0;
-        self.live_assistant.clear();
-        self.live_reasoning.clear();
+        self.live.assistant.clear();
+        self.live.reasoning.clear();
         self.clear_live_tool_output();
-        self.live_output_chars_estimate = 0;
-        self.live_output_tokens_estimate = 0;
-        self.live_turn = Some(LiveTurnState::new("starting", None));
+        self.usage.live_output_chars_estimate = 0;
+        self.usage.live_output_tokens_estimate = 0;
+        self.live.turn = Some(LiveTurnState::new("starting", None));
         self.follow_mode = FollowOutputMode::Contextual;
     }
 
@@ -162,24 +163,25 @@ impl App {
         self.running = false;
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
-        self.live_reasoning.clear();
-        self.live_assistant.clear();
+        self.live.reasoning.clear();
+        self.live.assistant.clear();
         self.clear_live_tool_output();
-        self.live_output_chars_estimate = 0;
-        self.live_output_tokens_estimate = 0;
+        self.usage.live_output_chars_estimate = 0;
+        self.usage.live_output_tokens_estimate = 0;
         if self.follow_mode == FollowOutputMode::Contextual {
             self.follow_mode = FollowOutputMode::Bottom;
         }
-        if let Some(display) = self.pending_option_prompt_response.take() {
+        if let Some(display) = self.queues.pending_option_prompt_response.take() {
             self.push_prompt_response_user_block(display);
         }
         if self
-            .live_turn
+            .live
+            .turn
             .as_ref()
             .and_then(|turn| turn.transient_until)
             .is_none_or(|until| until <= std::time::Instant::now())
         {
-            self.live_turn = None;
+            self.live.turn = None;
         }
     }
 
@@ -218,7 +220,7 @@ impl App {
     pub(super) fn clear_status(&mut self) {
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
-        self.live_turn = None;
+        self.live.turn = None;
     }
 
     pub fn note_manual_interrupt_requested(&mut self) {
@@ -227,7 +229,8 @@ impl App {
 
     pub(super) fn mark_first_token_arrived(&mut self) {
         if self
-            .live_turn
+            .live
+            .turn
             .as_ref()
             .is_some_and(|turn| turn.status_text == "thinking")
         {
@@ -236,7 +239,7 @@ impl App {
     }
 
     pub(super) fn mark_visible_output(&mut self) {
-        if let Some(turn) = self.live_turn.as_mut()
+        if let Some(turn) = self.live.turn.as_mut()
             && !turn.has_visible_output
         {
             turn.has_visible_output = true;
@@ -246,38 +249,40 @@ impl App {
     }
 
     pub(super) fn live_assistant_normalized_text(&self) -> Option<String> {
-        self.live_assistant
+        self.live
+            .assistant
             .has_renderable_output()
-            .then(|| self.live_assistant.normalized_text())
+            .then(|| self.live.assistant.normalized_text())
             .flatten()
     }
 
     pub(super) fn live_reasoning_normalized_text(&self) -> Option<String> {
-        self.live_reasoning
+        self.live
+            .reasoning
             .has_renderable_output()
-            .then(|| self.live_reasoning.normalized_text())
+            .then(|| self.live.reasoning.normalized_text())
             .flatten()
     }
 
     pub(super) fn ensure_live_markdown_rendered(&mut self, viewport_width: usize) {
-        self.live_reasoning.ensure_rendered(viewport_width);
-        self.live_assistant.ensure_rendered(viewport_width);
+        self.live.reasoning.ensure_rendered(viewport_width);
+        self.live.assistant.ensure_rendered(viewport_width);
     }
 
     pub fn live_reasoning_lines_snapshot(&self) -> Option<&[Line<'static>]> {
-        (!self.live_reasoning.lines().is_empty()).then_some(self.live_reasoning.lines())
+        (!self.live.reasoning.lines().is_empty()).then_some(self.live.reasoning.lines())
     }
 
     pub fn live_assistant_lines_snapshot(&self) -> Option<&[Line<'static>]> {
-        (!self.live_assistant.lines().is_empty()).then_some(self.live_assistant.lines())
+        (!self.live.assistant.lines().is_empty()).then_some(self.live.assistant.lines())
     }
 
     pub(crate) fn has_live_markdown_output(&self) -> bool {
-        self.live_reasoning.has_renderable_output() || self.live_assistant.has_renderable_output()
+        self.live.reasoning.has_renderable_output() || self.live.assistant.has_renderable_output()
     }
 
     pub(crate) fn live_reasoning_leading_padding(&self) -> usize {
-        if !self.live_reasoning.has_renderable_output() {
+        if !self.live.reasoning.has_renderable_output() {
             return 0;
         }
 
@@ -293,10 +298,10 @@ impl App {
     }
 
     pub(crate) fn live_assistant_leading_padding(&self) -> usize {
-        if !self.live_assistant.has_renderable_output() {
+        if !self.live.assistant.has_renderable_output() {
             return 0;
         }
-        if self.live_reasoning.has_renderable_output() {
+        if self.live.reasoning.has_renderable_output() {
             return 0;
         }
 
@@ -313,7 +318,7 @@ impl App {
     }
 
     pub(super) fn live_reasoning_height(&self) -> usize {
-        let lines = self.live_reasoning.lines();
+        let lines = self.live.reasoning.lines();
         if lines.is_empty() {
             return 0;
         }
@@ -321,7 +326,7 @@ impl App {
     }
 
     pub(super) fn live_assistant_height(&self) -> usize {
-        let lines = self.live_assistant.lines();
+        let lines = self.live.assistant.lines();
         if lines.is_empty() {
             return 0;
         }
@@ -329,7 +334,7 @@ impl App {
     }
 
     pub(crate) fn live_tool_output_anchor_block_index(&self) -> Option<usize> {
-        if self.live_tool_output.height() == 0 {
+        if self.live.tool_output.height() == 0 {
             return None;
         }
         self.timeline
@@ -361,9 +366,9 @@ impl App {
     }
 
     pub(super) fn clear_live_tool_output(&mut self) {
-        let had_output = self.live_tool_output.height() > 0;
+        let had_output = self.live.tool_output.height() > 0;
         let anchor_idx = self.live_tool_output_anchor_block_index();
-        self.live_tool_output.clear();
+        self.live.tool_output.clear();
         if had_output && let Some(idx) = anchor_idx {
             self.invalidate_height_cache_from(idx);
         }
@@ -388,7 +393,7 @@ impl App {
     }
 
     pub(super) fn commit_live_assistant_block(&mut self) {
-        let Some(cleaned) = self.live_assistant.take_normalized_text() else {
+        let Some(cleaned) = self.live.assistant.take_normalized_text() else {
             return;
         };
 
@@ -410,7 +415,7 @@ impl App {
     }
 
     pub(super) fn commit_live_reasoning_block(&mut self) {
-        let Some(cleaned) = self.live_reasoning.take_normalized_text() else {
+        let Some(cleaned) = self.live.reasoning.take_normalized_text() else {
             return;
         };
         let prior_len = self.timeline.len();
@@ -445,7 +450,7 @@ impl App {
 
     #[cfg(test)]
     pub(super) fn push_test_tool_output(&mut self, text: &str) {
-        self.live_tool_output.push_text(
+        self.live.tool_output.push_text(
             text,
             STREAMING_OUTPUT_LINE_CHAR_LIMIT,
             STREAMING_OUTPUT_MAX_LINES,

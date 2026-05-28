@@ -112,7 +112,7 @@ mod catalogue_tests {
         let definitions = vec![tool("search_tools"), tool("grep")];
         let contracts = definitions
             .iter()
-            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect();
         let surface = lash_core::ToolSurface::from_tools(
             definitions
@@ -151,7 +151,7 @@ mod catalogue_tests {
         let definitions = vec![tool("grep")];
         let contracts = definitions
             .iter()
-            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect();
         let surface = lash_core::ToolSurface::from_tools(
             definitions

@@ -261,7 +261,7 @@ impl SessionPlugin for AutoresearchPlugin {
                 if !state.mode.active
                     || !matches!(
                         &ctx.turn.outcome,
-                        lash_core::TurnOutcome::Finished(_) | lash_core::TurnOutcome::Handoff { .. }
+                        lash_core::TurnOutcome::Finished(_) | lash_core::TurnOutcome::AgentFrameSwitch { .. }
                     )
                 {
                     return Ok(Vec::new());
@@ -441,7 +441,7 @@ impl ToolProvider for AutoresearchTools {
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
         self.tool_definitions()
             .into_iter()
-            .find(|tool| tool.name == name)
+            .find(|tool| tool.name() == name)
             .map(|tool| Arc::new(tool.contract()))
     }
 

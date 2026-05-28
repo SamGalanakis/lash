@@ -8,17 +8,16 @@ use lash_plugin_plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
 
 use lash_core::plugin::runtime_host::RuntimeSessionHost;
 use lash_core::plugin::{
-    PluginDirective, PluginError, SessionPluginSource, SessionStartPoint, ToolCallHookContext,
-    ToolResultHookContext, ToolSurfaceContext,
+    PluginDirective, PluginError, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContext,
 };
 use lash_core::{
     AssembledTurn, MessageRole, PluginHost, RuntimeSessionState, SessionCreateRequest,
     SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot, SessionStateEnvelope,
-    ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolRegistry, ToolResult,
-    TurnHookContext, TurnResultHookContext,
+    ToolDefinition, ToolRegistry, ToolResult, TurnHookContext, TurnResultHookContext,
 };
 
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
+use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 
 fn unavailable_processes() -> Arc<dyn lash_core::ProcessService> {
     Arc::new(lash_core::UnavailableProcessService)
@@ -147,18 +146,14 @@ fn test_tool(
 struct PlanModeTestTools;
 
 #[async_trait::async_trait]
-impl ToolProvider for PlanModeTestTools {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![plan_mode_test_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "plan_exit").then(|| Arc::new(plan_mode_test_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for PlanModeTestTools {
     async fn execute(&self, call: lash_core::ToolCall<'_>) -> ToolResult {
         ToolResult::err_fmt(format_args!("unexpected tool call: {}", call.name))
     }
+}
+
+fn plan_mode_test_provider() -> StaticToolProvider<PlanModeTestTools> {
+    StaticToolProvider::new(vec![plan_mode_test_tool_definition()], PlanModeTestTools)
 }
 
 fn plan_mode_test_tool_definition() -> ToolDefinition {
@@ -176,7 +171,7 @@ fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
         .with_snapshot(mock_snapshot(run_session_id))
         .with_turn(mock_assembled_turn(run_session_id, ""))
         .with_tool_registry(
-            ToolRegistry::from_tool_provider(Arc::new(PlanModeTestTools))
+            ToolRegistry::from_tool_provider(Arc::new(plan_mode_test_provider()))
                 .expect("plan mode tool registry"),
         )
 }
@@ -218,7 +213,7 @@ fn ready_plan_markdown() -> &'static str {
 
 ## Steps
 - Tighten the allowlist.
-- Validate the plan before handoff.
+- Validate the plan before the frame switch.
 - Execute the implementation turn after approval.
 
 ## Files
@@ -498,7 +493,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     ];
     let contracts = tools
         .iter()
-        .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+        .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
         .collect::<std::collections::BTreeMap<_, _>>();
     let manifests = tools.into_iter().map(|tool| tool.manifest()).collect();
     let surface = session
@@ -1109,12 +1104,12 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
     );
     assert!(
         result_value.get("fresh_context_input").is_none(),
-        "seed prompt is now carried by SessionCreateRequest::first_turn_input, not the tool result"
+        "fresh-context execution is now carried by the frame-switch control, not the tool result"
     );
 }
 
 #[tokio::test]
-async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
+async fn plan_mode_after_tool_call_switches_agent_frame_on_fresh_context_approval() {
     #[derive(Clone, Default)]
     struct CapturingSessionManager {
         created: Arc<std::sync::Mutex<Vec<SessionCreateRequest>>>,
@@ -1197,41 +1192,30 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
         .await
         .expect("after_tool_call");
 
-    let create_request = directives
+    assert_eq!(manager.created.lock().expect("created").len(), 0);
+    let switch = directives
         .iter()
         .find_map(|owned| match &owned.value {
-            PluginDirective::CreateSession { request } => Some(request.as_ref()),
+            PluginDirective::ShortCircuitTool { output } => output.control.as_ref(),
             _ => None,
         })
-        .expect("create session directive");
-    assert_eq!(manager.created.lock().expect("created").len(), 0);
-    assert!(matches!(create_request.start, SessionStartPoint::Empty));
-    assert_eq!(
-        create_request.plugin_source,
-        SessionPluginSource::CurrentHostFresh
-    );
-    assert!(
-        create_request.initial_nodes.is_empty(),
-        "fresh-context execution should let the host drive the seed prompt as the first user turn"
-    );
-    let seed = create_request
-        .first_turn_input
-        .as_ref()
-        .expect("first_turn_input set on CreateSession directive");
-    assert_eq!(seed.role, lash_core::MessageRole::User);
-    assert_eq!(
-        seed.content,
-        "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
-    );
+        .expect("short circuit carries frame switch");
+    match switch {
+        lash_core::ToolControl::SwitchAgentFrame { frame_id, task, .. } => {
+            assert!(frame_id.starts_with("plan-frame-"));
+            assert_eq!(
+                task.as_deref(),
+                Some(
+                    "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
+                )
+            );
+        }
+        other => panic!("expected frame switch, got {other:?}"),
+    }
     assert!(
         directives
             .iter()
             .any(|owned| matches!(owned.value, PluginDirective::EmitRuntimeEvents { .. }))
-    );
-    assert!(
-        directives
-            .iter()
-            .any(|owned| matches!(owned.value, PluginDirective::HandoffSession { .. }))
     );
 }
 

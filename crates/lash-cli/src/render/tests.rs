@@ -760,7 +760,7 @@ fn shell_activity_renders_live_output_inline_under_tool() {
     .into();
     let now = std::time::Instant::now();
     app.running = true;
-    app.live_turn = Some(crate::app::LiveTurnState {
+    app.live.turn = Some(crate::app::LiveTurnState {
         status_text: "shell".into(),
         status_detail: None,
         phase_started_at: now,
@@ -769,7 +769,7 @@ fn shell_activity_renders_live_output_inline_under_tool() {
         output_start_anchor_pending: false,
         transient_until: None,
     });
-    app.live_tool_output.lines = vec!["Compiling lash-cli".into(), "warning: unused import".into()];
+    app.live.tool_output.lines = vec!["Compiling lash-cli".into(), "warning: unused import".into()];
 
     let rendered = app
         .rendered_block_lines_cached(0, 64, 20)
@@ -813,8 +813,8 @@ fn live_tool_output_without_running_activity_renders_as_tail_block() {
         0,
     )))]
     .into();
-    app.live_tool_output.title = Some("cargo check -p lash-cli".into());
-    app.live_tool_output.lines = vec!["Checking lash v0.2.91".into()];
+    app.live.tool_output.title = Some("cargo check -p lash-cli".into());
+    app.live.tool_output.lines = vec!["Checking lash v0.2.91".into()];
 
     let completed_block = app
         .rendered_block_lines_cached(0, 64, 20)

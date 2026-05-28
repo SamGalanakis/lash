@@ -173,7 +173,7 @@ fn plan_exit_fresh_context_tool_does_not_queue_ui_turn_or_switch() {
         app.timeline
             .iter()
             .all(|block| !matches!(block, UiTimelineItem::UserInput(_))),
-        "fresh-context handoff is a runtime transition, not a UI-queued turn"
+        "fresh-context switch is a runtime transition, not a UI-queued turn"
     );
 }
 
@@ -198,11 +198,12 @@ fn non_manual_error_sets_transient_status() {
     app.handle_session_event(SessionEvent::Done);
 
     assert_eq!(
-        app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+        app.live.turn.as_ref().map(|turn| turn.status_text.as_str()),
         Some("error")
     );
     assert_eq!(
-        app.live_turn
+        app.live
+            .turn
             .as_ref()
             .and_then(|turn| turn.status_detail.as_deref()),
         Some("LLM error: Claude request failed with 500")
@@ -226,11 +227,12 @@ fn retry_status_stays_visible_when_retry_request_starts() {
     });
 
     assert_eq!(
-        app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+        app.live.turn.as_ref().map(|turn| turn.status_text.as_str()),
         Some("retrying")
     );
     assert_eq!(
-        app.live_turn
+        app.live
+            .turn
             .as_ref()
             .and_then(|turn| turn.status_detail.as_deref()),
         Some("in 2s · attempt 2/4 · Codex returned non-SSE body but it could not be read")
@@ -243,11 +245,12 @@ fn retry_status_stays_visible_when_retry_request_starts() {
     });
 
     assert_eq!(
-        app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+        app.live.turn.as_ref().map(|turn| turn.status_text.as_str()),
         Some("retrying")
     );
     assert_eq!(
-        app.live_turn
+        app.live
+            .turn
             .as_ref()
             .and_then(|turn| turn.status_detail.as_deref()),
         Some("attempt 2/4 · Codex returned non-SSE body but it could not be read")
@@ -268,11 +271,11 @@ fn transient_status_expires_on_tick() {
     });
     app.handle_session_event(SessionEvent::Done);
 
-    if let Some(turn) = app.live_turn.as_mut() {
+    if let Some(turn) = app.live.turn.as_mut() {
         turn.transient_until = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
     }
     app.on_tick();
-    assert!(app.live_turn.is_none());
+    assert!(app.live.turn.is_none());
 }
 
 #[test]
@@ -291,7 +294,7 @@ fn queued_turns_are_fifo_and_skip_pending_injections() {
         order,
         vec![("queued-1".into(), false), ("queued-2".into(), false),]
     );
-    assert_eq!(app.pending_steers.len(), 2);
+    assert_eq!(app.queues.pending_steers.len(), 2);
 }
 
 #[test]
@@ -308,7 +311,7 @@ fn take_last_queued_turn_restores_explicit_queue_only() {
     assert!(!was_pending);
 
     assert!(app.take_last_queued_turn().is_none());
-    assert_eq!(app.pending_steers.len(), 1);
+    assert_eq!(app.queues.pending_steers.len(), 1);
 }
 
 #[test]
@@ -325,7 +328,7 @@ fn accepted_injected_turn_input_renders_matching_pending_steer() {
         checkpoint: lash_core::CheckpointKind::AfterWork,
     });
 
-    assert!(app.pending_steers.is_empty());
+    assert!(app.queues.pending_steers.is_empty());
     assert!(
         app.timeline
             .iter()
@@ -354,7 +357,7 @@ fn accepted_injected_turn_input_matches_by_runtime_content_even_when_display_tex
         checkpoint: lash_core::CheckpointKind::AfterWork,
     });
 
-    assert!(app.pending_steers.is_empty());
+    assert!(app.queues.pending_steers.is_empty());
     assert!(app.timeline.iter().any(|block| matches!(
         block,
         UiTimelineItem::UserInput(text) if text == "/localref lash for context if needed"
@@ -417,8 +420,11 @@ fn accepted_injected_turn_input_removes_matching_pending_steer_without_popping_w
         checkpoint: lash_core::CheckpointKind::AfterWork,
     });
 
-    assert_eq!(app.pending_steers.len(), 1);
-    assert_eq!(app.pending_steers[0].display_text, "first queued steer");
+    assert_eq!(app.queues.pending_steers.len(), 1);
+    assert_eq!(
+        app.queues.pending_steers[0].display_text,
+        "first queued steer"
+    );
 }
 
 #[test]
@@ -498,7 +504,7 @@ fn injected_messages_committed_do_not_duplicate_existing_visible_user_input() {
         })
         .count();
     assert_eq!(matching_blocks, 1);
-    assert!(app.pending_steers.is_empty());
+    assert!(app.queues.pending_steers.is_empty());
 }
 
 #[test]
@@ -508,7 +514,7 @@ fn queued_injection_stays_out_of_history_until_committed() {
 
     app.queue_pending_steer(turn.clone());
 
-    assert_eq!(app.pending_steers.len(), 1);
+    assert_eq!(app.queues.pending_steers.len(), 1);
     assert!(!matches!(
         app.timeline.last(),
         Some(UiTimelineItem::UserInput(_))
@@ -521,7 +527,7 @@ fn regular_queued_turn_stays_out_of_history_until_dispatched() {
     let turn = PreparedTurn::new("queued text".into(), Vec::new());
     app.queue_turn(turn);
 
-    assert_eq!(app.queued_turns.len(), 1);
+    assert_eq!(app.queues.queued_turns.len(), 1);
     assert!(!matches!(
         app.timeline.last(),
         Some(UiTimelineItem::UserInput(_))
@@ -540,7 +546,7 @@ fn history_up_restores_last_queued_turn_before_history() {
     assert_eq!(app.editor.pending_images.len(), 1);
     assert_eq!(app.editor.pending_images[0].id, 1);
     assert_eq!(app.editor.pending_images[0].png_bytes, vec![1, 2, 3]);
-    assert!(app.queued_turns.is_empty());
+    assert!(app.queues.queued_turns.is_empty());
     assert_eq!(app.editor.input_history_idx, None);
 }
 

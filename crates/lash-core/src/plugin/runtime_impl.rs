@@ -125,10 +125,6 @@ impl PluginHost {
         )
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "public plugin-host boundary keeps parent, snapshot, tool overlay, and authority explicit"
-    )]
     pub fn build_session_with_parent_and_surface(
         &self,
         session_id: impl Into<String>,

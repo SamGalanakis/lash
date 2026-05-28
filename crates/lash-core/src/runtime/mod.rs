@@ -41,8 +41,7 @@ use crate::llm::types::{
 };
 use crate::plugin::runtime_host::RuntimeSessionHost;
 use crate::plugin::{
-    CheckpointHookContext, PluginMessage, PrepareTurnRequest, SessionConfigChangedContext,
-    SessionRelation,
+    CheckpointHookContext, PrepareTurnRequest, SessionConfigChangedContext, SessionRelation,
 };
 use crate::sansio::{LlmCallError, Response};
 use crate::session_model::{
@@ -100,9 +99,9 @@ pub use process::{
     ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope, ProcessScopeId,
     ProcessService, ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions,
     ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
-    ProcessWake, ProcessWakeDedupeKey,
-    ProcessWakeDelivery, ProcessWakeSpec, UnavailableProcessService, current_epoch_ms,
-    epoch_ms_from_system_time, lashlang_process_event_types, materialize_process_event_semantics,
+    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
+    UnavailableProcessService, current_epoch_ms, epoch_ms_from_system_time,
+    lashlang_process_event_types, materialize_process_event_semantics,
     prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
     process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
     process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
@@ -110,16 +109,15 @@ pub use process::{
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
 pub use session_manager::DirectCompletionClient;
 pub use state::{PersistedSessionSnapshot, RuntimeSessionState, SessionStateEnvelope};
-pub use turn_loop::ensure_durable_turn_input;
-pub use turn_queue::{
-    DeliveryPolicy, MergeKey, QueuedCheckpointWork, QueuedTurnWork, QueuedWorkBatch,
-    QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkCompletion,
-    QueuedWorkItem, QueuedWorkPayload, QUEUED_WORK_CLAIM_TTL_MS, SlotPolicy,
-    process_wake_batch_draft,
-};
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
     apply_session_head, normalize_session_graph,
+};
+pub use turn_loop::ensure_durable_turn_input;
+pub use turn_queue::{
+    DeliveryPolicy, MergeKey, QUEUED_WORK_CLAIM_TTL_MS, QueuedCheckpointWork, QueuedTurnWork,
+    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
+    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, SlotPolicy, process_wake_batch_draft,
 };
 pub use usage::{
     SessionUsageReport, TokenLedgerEntry, UsageReportRow, UsageTotals, diff_token_ledger,
@@ -462,17 +460,17 @@ pub struct AssembledTurn {
     pub errors: Vec<TurnIssue>,
 }
 
-/// Result of driving one logical host turn through any foreground handoffs.
+/// Result of driving one logical host turn through any AgentFrame switches.
 ///
-/// A handoff is an internal runtime continuation, similar to compaction from a
-/// host's perspective. Callers that need a final answer can use
-/// [`LashRuntime::stream_turn_following_handoffs`] and inspect `final_turn()`.
+/// A frame switch is an internal runtime continuation, similar to compaction
+/// from a host's perspective. Callers that need a final answer can use
+/// [`LashRuntime::stream_turn_with_agent_frames`] and inspect `final_turn()`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct FollowedTurn {
+pub struct AgentFrameRun {
     pub turns: Vec<AssembledTurn>,
 }
 
-impl FollowedTurn {
+impl AgentFrameRun {
     pub fn final_turn(&self) -> Option<&AssembledTurn> {
         self.turns.last()
     }
@@ -481,10 +479,10 @@ impl FollowedTurn {
         self.turns.pop()
     }
 
-    pub fn handoff_count(&self) -> usize {
+    pub fn frame_switch_count(&self) -> usize {
         self.turns
             .iter()
-            .filter(|turn| matches!(turn.outcome, crate::TurnOutcome::Handoff { .. }))
+            .filter(|turn| matches!(turn.outcome, crate::TurnOutcome::AgentFrameSwitch { .. }))
             .count()
     }
 }
@@ -683,7 +681,7 @@ impl TurnActivitySink for NoopTurnActivitySink {
 
 /// Optional sinks and durable-effect scope passed to one of [`LashRuntime`]'s
 /// turn-driving entry points (`stream_turn`, `resume_turn`,
-/// `stream_turn_following_handoffs`).
+/// `stream_turn_with_agent_frames`).
 ///
 /// Construct via [`TurnOptions::new`] and chain `with_*` builders; defaults to
 /// no-op sinks and an inline effect scope derived from the runtime's own
@@ -778,7 +776,6 @@ pub struct LashRuntime {
     pub(in crate::runtime) state: RuntimeSessionState,
     pub(in crate::runtime) runtime_scope_id: Arc<str>,
     pub(in crate::runtime) managed_sessions: Arc<Mutex<HashMap<String, RuntimeHandle>>>,
-    pub(in crate::runtime) active_handoff_continuations: Arc<Mutex<HashMap<String, String>>>,
     pub(in crate::runtime) managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     /// Protocol-owned turn options for this session.
     pub(in crate::runtime) protocol_turn_options: crate::ProtocolTurnOptions,
@@ -788,13 +785,6 @@ pub struct LashRuntime {
     /// and are drained into `state.token_ledger` at turn-commit time.
     pub(in crate::runtime) shared_token_ledger: Arc<std::sync::Mutex<Vec<TokenLedgerEntry>>>,
     pub(in crate::runtime) process_sync_needed: Arc<AtomicBool>,
-    /// Seed `PluginMessage`s queued via
-    /// `SessionCreateRequest::first_turn_input` for child sessions.
-    /// Shared across `RuntimeSessionManager` instances built from this
-    /// runtime so the seed remains visible after the parent turn that
-    /// created the session has ended.
-    pub(in crate::runtime) pending_first_turn_inputs:
-        Arc<std::sync::Mutex<HashMap<String, crate::PluginMessage>>>,
     pub(in crate::runtime) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
     /// Resident-graph policy chosen by the host. Controls whether
     /// [`LashRuntime::refresh_session_graph_from_store`] reloads the full

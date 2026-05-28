@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use lash_core::session_model::MessageRole;
-use lash_core::{ChronologicalPayload, ToolCallRecord};
+use lash_core::{ChronologicalPayload, ToolCallRecord, ToolControl};
 
 use crate::LoadedSession;
 use crate::tree::{LoadedSessionNode, LoadedSessionTree, NodeRelation, SubagentEdge};
@@ -36,11 +36,7 @@ pub fn render_tree(tree: &LoadedSessionTree) -> String {
     out.push_str("<div class=\"page\"><div class=\"frame\">\n");
     write_crumb_bar(&mut out);
 
-    let view_heads: Vec<&LoadedSessionNode> = tree
-        .nodes
-        .iter()
-        .filter(|n| !matches!(n.kind, NodeRelation::Handoff { .. }))
-        .collect();
+    let view_heads: Vec<&LoadedSessionNode> = tree.nodes.iter().collect();
 
     for head in &view_heads {
         write_view(&mut out, tree, head);
@@ -72,7 +68,7 @@ pub(crate) fn write_crumb_bar(out: &mut String) {
 }
 
 fn write_view(out: &mut String, tree: &LoadedSessionTree, head: &LoadedSessionNode) {
-    let chain: Vec<&LoadedSessionNode> = view_chain(tree, head);
+    let chain: Vec<&LoadedSessionNode> = vec![head];
     let chain_stats = compute_chain_stats(&chain);
     let mut ctx = RenderCtx::new(&chain_stats);
     let view_id = view_id_of(head);
@@ -99,26 +95,7 @@ fn write_view(out: &mut String, tree: &LoadedSessionTree, head: &LoadedSessionNo
     let mut spine = String::new();
     let mut entries = String::new();
 
-    for (idx, node) in chain.iter().enumerate() {
-        if idx > 0 {
-            let parent = chain[idx - 1];
-            let handoff_call = parent
-                .chronological
-                .iter()
-                .rev()
-                .find_map(|e| match &e.payload {
-                    ChronologicalPayload::ToolCall(r) if r.tool == "continue_as" => Some(r),
-                    _ => None,
-                });
-            render_handoff_divider(
-                &mut entries,
-                &mut spine,
-                &mut ctx,
-                parent,
-                node,
-                handoff_call,
-            );
-        }
+    for node in &chain {
         render_node_entries(&mut entries, &mut spine, &mut ctx, tree, node);
     }
 
@@ -132,20 +109,6 @@ fn write_view(out: &mut String, tree: &LoadedSessionTree, head: &LoadedSessionNo
     out.push_str("</section>\n");
 }
 
-fn view_chain<'a>(
-    tree: &'a LoadedSessionTree,
-    head: &'a LoadedSessionNode,
-) -> Vec<&'a LoadedSessionNode> {
-    let mut chain = vec![head];
-    let mut cur = head;
-    while let Some(succ_id) = &cur.handoff_successor {
-        let Some(next) = tree.get(succ_id) else { break };
-        chain.push(next);
-        cur = next;
-    }
-    chain
-}
-
 fn view_id_of(node: &LoadedSessionNode) -> String {
     match &node.kind {
         NodeRelation::Root => "root".to_string(),
@@ -155,7 +118,6 @@ fn view_id_of(node: &LoadedSessionNode) -> String {
                 .unwrap_or_else(|| short_session_id(&node.meta.session_id));
             slug(&base)
         }
-        NodeRelation::Handoff { .. } => short_session_id(&node.meta.session_id),
     }
 }
 
@@ -238,7 +200,6 @@ fn write_view_hero(
                     .as_deref()
                     .map(|task| one_line_summary(task, 80))
                     .unwrap_or_else(|| "subagent".to_string()),
-                NodeRelation::Handoff { .. } => "handoff".to_string(),
             }
         } else {
             meta.session_name.clone()
@@ -259,7 +220,6 @@ fn write_view_hero(
                 format!("subagent · {name} · {cap}")
             }
         }
-        NodeRelation::Handoff { .. } => "handoff successor".to_string(),
     };
 
     out.push_str("<header class=\"trace-hero\">\n");
@@ -281,7 +241,6 @@ fn write_view_hero(
     let view_label = match &head.kind {
         NodeRelation::Root => "root".to_string(),
         NodeRelation::Subagent { .. } => "subagent".to_string(),
-        NodeRelation::Handoff { .. } => "handoff".to_string(),
     };
     write_meta_row(
         out,
@@ -293,13 +252,6 @@ fn write_view_hero(
     }
     if let Some(cwd) = &meta.cwd {
         write_meta_row(out, "cwd", cwd);
-    }
-    if chain.len() > 1 {
-        write_meta_row(
-            out,
-            "chain",
-            &format!("{} sessions joined by continue_as", chain.len()),
-        );
     }
     let subagent_count: usize = chain.iter().map(|n| n.subagent_children.len()).sum();
     if subagent_count > 0 {
@@ -330,7 +282,6 @@ fn write_lineage(out: &mut String, tree: &LoadedSessionTree, current: &LoadedSes
         if prev_kind.is_some() {
             let (glyph, label, kind) = match &node.kind {
                 NodeRelation::Subagent { .. } => ("▾", "spawn", "child"),
-                NodeRelation::Handoff { .. } => ("↪", "continue_as", "handoff"),
                 NodeRelation::Root => ("/", "", ""),
             };
             if !label.is_empty() {
@@ -357,7 +308,6 @@ fn write_lineage(out: &mut String, tree: &LoadedSessionTree, current: &LoadedSes
                     format!("subagent · {cap}")
                 }
             }
-            NodeRelation::Handoff { .. } => "handoff".to_string(),
         };
         let id_short = short_session_id(&node.meta.session_id);
         let label_text = match &node.kind {
@@ -366,7 +316,6 @@ fn write_lineage(out: &mut String, tree: &LoadedSessionTree, current: &LoadedSes
                 .map(|task| one_line_summary(task, 56))
                 .unwrap_or_else(|| short_session_id(&node.meta.session_id)),
             NodeRelation::Root => "root".to_string(),
-            NodeRelation::Handoff { .. } => "handoff".to_string(),
         };
         let _ = writeln!(
             out,
@@ -394,25 +343,6 @@ fn lineage_order(tree: &LoadedSessionTree) -> Vec<&LoadedSessionNode> {
         for edge in &node.subagent_children {
             if let Some(child) = tree.get(&edge.child_session_id) {
                 visit(tree, child, out);
-            }
-        }
-        if let Some(succ_id) = &node.handoff_successor
-            && let Some(succ) = tree.get(succ_id)
-        {
-            let mut c = succ;
-            loop {
-                for edge in &c.subagent_children {
-                    if let Some(child) = tree.get(&edge.child_session_id) {
-                        visit(tree, child, out);
-                    }
-                }
-                let Some(next_id) = &c.handoff_successor else {
-                    break;
-                };
-                let Some(next) = tree.get(next_id) else {
-                    break;
-                };
-                c = next;
             }
         }
     }
@@ -494,31 +424,40 @@ fn render_node_entries(
                 }
                 render_message(out, spine, ctx, message);
             }
-            ChronologicalPayload::ToolCall(record) => match record.tool.as_str() {
-                _ if record
+            ChronologicalPayload::ToolCall(record) => {
+                if record
                     .call_id
                     .as_ref()
-                    .is_some_and(|call_id| rlm_owned_tool_call_ids.contains(call_id)) => {}
-                "continue_as" => {
-                    // Suppressed — the seam is rendered by `write_view` between
-                    // chain elements as a handoff divider.
+                    .is_some_and(|call_id| rlm_owned_tool_call_ids.contains(call_id))
+                {
+                    continue;
                 }
-                "spawn_agent" => {
-                    if let Some(edge) = node
-                        .subagent_children
-                        .iter()
-                        .find(|e| e.call_id.as_deref() == record.call_id.as_deref())
-                        && let Some(child) = tree.get(&edge.child_session_id)
-                    {
-                        render_drill_card(out, spine, ctx, edge, child);
-                    } else {
+                if matches!(
+                    record.output.control,
+                    Some(ToolControl::SwitchAgentFrame { .. })
+                ) || record.tool == "continue_as"
+                {
+                    render_agent_frame_divider(out, spine, ctx, node, record);
+                    continue;
+                }
+                match record.tool.as_str() {
+                    "spawn_agent" => {
+                        if let Some(edge) = node
+                            .subagent_children
+                            .iter()
+                            .find(|e| e.call_id.as_deref() == record.call_id.as_deref())
+                            && let Some(child) = tree.get(&edge.child_session_id)
+                        {
+                            render_drill_card(out, spine, ctx, edge, child);
+                        } else {
+                            render_tool_call_entry(out, spine, ctx, record, None);
+                        }
+                    }
+                    _ => {
                         render_tool_call_entry(out, spine, ctx, record, None);
                     }
                 }
-                _ => {
-                    render_tool_call_entry(out, spine, ctx, record, None);
-                }
-            },
+            }
             ChronologicalPayload::ProtocolEvent(event) => {
                 let Some(step) = chronological_rlm_step(event) else {
                     continue;
@@ -696,68 +635,74 @@ fn render_drill_card(
     );
 }
 
-fn render_handoff_divider(
+fn render_agent_frame_divider(
     out: &mut String,
     spine: &mut String,
     ctx: &mut RenderCtx<'_>,
-    parent: &LoadedSessionNode,
-    successor: &LoadedSessionNode,
-    record: Option<&ToolCallRecord>,
+    node: &LoadedSessionNode,
+    record: &ToolCallRecord,
 ) {
     let id = ctx.next_id();
-    let task = record
-        .and_then(|r| r.args.get("task"))
-        .and_then(|v| v.as_str())
+    let (frame_id, control_task) = match &record.output.control {
+        Some(ToolControl::SwitchAgentFrame { frame_id, task, .. }) => {
+            (Some(frame_id.as_str()), task.as_deref())
+        }
+        _ => (None, None),
+    };
+    let task = control_task
+        .or_else(|| record.args.get("task").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_string();
+    let frame_short = frame_id
+        .map(short_session_id)
+        .unwrap_or_else(|| "next".to_string());
     let summary = if task.trim().is_empty() {
-        "continued in successor session".to_string()
+        "continued in a new agent frame".to_string()
     } else {
         one_line_summary(&task, 200)
     };
-    let parent_short = short_session_id(&parent.meta.session_id);
-    let succ_short = short_session_id(&successor.meta.session_id);
+    let session_short = short_session_id(&node.meta.session_id);
 
     let _ = writeln!(
         out,
-        "    <section class=\"handoff\" id=\"{id}\" aria-label=\"handoff from {p} to {s}\">",
-        p = escape_attr(&parent_short),
-        s = escape_attr(&succ_short)
+        "    <section class=\"agent-frame-switch\" id=\"{id}\" aria-label=\"agent frame switch from {p} to {s}\">",
+        p = escape_attr(&session_short),
+        s = escape_attr(&frame_short)
     );
-    out.push_str("      <div class=\"handoff-banner\">\n");
-    out.push_str("        <div class=\"handoff-glyph\">↪</div>\n");
-    out.push_str("        <div class=\"handoff-title\">\n");
-    out.push_str("          <span class=\"handoff-eyebrow\">↪ continued as</span>\n");
+    out.push_str("      <div class=\"agent-frame-banner\">\n");
+    out.push_str("        <div class=\"agent-frame-glyph\">↪</div>\n");
+    out.push_str("        <div class=\"agent-frame-title\">\n");
+    out.push_str("          <span class=\"agent-frame-eyebrow\">↪ new AgentFrame</span>\n");
     let _ = writeln!(
         out,
-        "          <span class=\"handoff-summary\">{}</span>",
+        "          <span class=\"agent-frame-summary\">{}</span>",
         escape(&summary)
     );
     out.push_str("        </div>\n");
     let _ = writeln!(
         out,
-        "        <div class=\"handoff-route\"><span class=\"route-id\">{}</span><span class=\"route-arrow\">→</span><span class=\"route-id sodium\">{}</span></div>",
-        escape(&parent_short),
-        escape(&succ_short)
+        "        <div class=\"agent-frame-route\"><span class=\"route-id\">{}</span><span class=\"route-arrow\">→</span><span class=\"route-id sodium\">{}</span></div>",
+        escape(&session_short),
+        escape(&frame_short)
     );
     out.push_str("      </div>\n");
 
-    out.push_str("      <div class=\"handoff-body\">\n");
+    out.push_str("      <div class=\"agent-frame-body\">\n");
     if !task.trim().is_empty() {
         let _ = writeln!(
             out,
-            "        <p class=\"handoff-task\">{}</p>",
+            "        <p class=\"agent-frame-task\">{}</p>",
             escape(&task)
         );
     }
 
-    if let Some(seed_value) = record.and_then(|r| r.args.get("seed"))
+    if let Some(seed_value) = record.args.get("seed")
         && let Some(seed_obj) = seed_value.as_object()
         && !seed_obj.is_empty()
     {
         let _ = writeln!(
             out,
-            "        <div><span class=\"handoff-seed-label\">seed · {} entries</span><div class=\"seed-list\">",
+            "        <div><span class=\"agent-frame-seed-label\">seed · {} entries</span><div class=\"seed-list\">",
             seed_obj.len()
         );
         for (name, value) in seed_obj {
@@ -775,7 +720,7 @@ fn render_handoff_divider(
         out.push_str("        </div></div>\n");
     }
 
-    let parent_turns = parent
+    let session_turns = node
         .chronological
         .iter()
         .filter(|e| {
@@ -785,7 +730,7 @@ fn render_handoff_divider(
             )
         })
         .count()
-        + parent
+        + node
             .chronological
             .iter()
             .filter(|e| {
@@ -795,32 +740,32 @@ fn render_handoff_divider(
                 )
             })
             .count();
-    let max_ctx_pct = parent
+    let max_ctx_pct = node
         .llm_prompts
         .iter()
         .filter_map(|p| {
             let usage = p.usage.as_ref()?;
-            let window = parent.context_window_tokens.filter(|w| *w > 0)?;
+            let window = node.context_window_tokens.filter(|w| *w > 0)?;
             Some(usage.input_tokens.max(0) as f64 * 100.0 / window as f64)
         })
         .fold(None::<f64>, |acc, x| Some(acc.map_or(x, |m| m.max(x))));
 
-    out.push_str("        <div class=\"handoff-stats\">\n");
+    out.push_str("        <div class=\"agent-frame-stats\">\n");
     if let Some(pct) = max_ctx_pct {
         let _ = writeln!(
             out,
-            "          <span class=\"handoff-stat\"><span class=\"handoff-stat-key\">parent ctx</span><span class=\"handoff-stat-val\">{:.0}%</span></span>",
+            "          <span class=\"agent-frame-stat\"><span class=\"agent-frame-stat-key\">ctx</span><span class=\"agent-frame-stat-val\">{:.0}%</span></span>",
             pct
         );
     }
     let _ = writeln!(
         out,
-        "          <span class=\"handoff-stat\"><span class=\"handoff-stat-key\">turns</span><span class=\"handoff-stat-val\">{}</span></span>",
-        parent_turns
+        "          <span class=\"agent-frame-stat\"><span class=\"agent-frame-stat-key\">turns</span><span class=\"agent-frame-stat-val\">{}</span></span>",
+        session_turns
     );
     let _ = writeln!(
         out,
-        "          <span class=\"handoff-stat\"><span class=\"handoff-stat-key\">reason</span><span class=\"handoff-stat-val\">continue_as</span></span>"
+        "          <span class=\"agent-frame-stat\"><span class=\"agent-frame-stat-key\">reason</span><span class=\"agent-frame-stat-val\">continue_as</span></span>"
     );
     out.push_str("        </div>\n");
 
@@ -829,8 +774,8 @@ fn render_handoff_divider(
 
     let _ = writeln!(
         spine,
-        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"handoff\" title=\"handoff to {}\"></a>",
-        escape_attr(&succ_short)
+        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"agent-frame\" title=\"AgentFrame {}\"></a>",
+        escape_attr(&frame_short)
     );
 }
 
@@ -847,28 +792,13 @@ pub fn render_tree_data_script(
                 .as_deref()
                 .map(|task| one_line_summary(task, 56))
                 .unwrap_or_else(|| short_session_id(&head.meta.session_id)),
-            NodeRelation::Handoff { .. } => "handoff".to_string(),
         };
         let sid = short_session_id(&head.meta.session_id);
         let parent_view = match &head.kind {
             NodeRelation::Root => None,
             NodeRelation::Subagent {
                 parent_session_id, ..
-            }
-            | NodeRelation::Handoff {
-                parent_session_id, ..
-            } => {
-                let mut cur = tree.get(parent_session_id);
-                while let Some(node) = cur {
-                    match &node.kind {
-                        NodeRelation::Handoff { .. } => {
-                            cur = tree.parent_of(&node.meta.session_id);
-                        }
-                        _ => break,
-                    }
-                }
-                cur.map(view_id_of)
-            }
+            } => tree.get(parent_session_id).map(view_id_of),
         };
         let parent_str = parent_view
             .map(|p| format!("\"{}\"", js_escape(&p)))

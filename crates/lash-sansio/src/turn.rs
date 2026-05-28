@@ -93,7 +93,7 @@ mod tests {
             }),
             serde_json::json!({ "type": "string" }),
         );
-        definition.scheduling = ToolScheduling::Parallel;
+        definition.manifest.scheduling = ToolScheduling::Parallel;
         definition
     }
 

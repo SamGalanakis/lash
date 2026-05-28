@@ -55,7 +55,7 @@ fn text_delta_accumulates_raw() {
         content: "\n\nfirst\n".into(),
     });
     assert_eq!(
-        app.live_assistant.normalized_text().as_deref(),
+        app.live.assistant.normalized_text().as_deref(),
         Some("first")
     );
 
@@ -63,7 +63,7 @@ fn text_delta_accumulates_raw() {
         content: "\n\n\nsecond\n".into(),
     });
     assert_eq!(
-        app.live_assistant.normalized_text().as_deref(),
+        app.live.assistant.normalized_text().as_deref(),
         Some("first\n\nsecond")
     );
 }
@@ -79,7 +79,8 @@ fn text_delta_code_fence_preserved() {
     });
     // The newline between ```python and # comment must be preserved
     assert!(
-        app.live_assistant
+        app.live
+            .assistant
             .normalized_text()
             .is_some_and(|text| text.contains("```python\n# comment"))
     );
@@ -112,11 +113,11 @@ fn text_delta_updates_live_token_estimate() {
     app.handle_session_event(SessionEvent::TextDelta {
         content: "abcd".into(),
     });
-    assert_eq!(app.live_output_tokens_estimate, 1);
+    assert_eq!(app.usage.live_output_tokens_estimate, 1);
     app.handle_session_event(SessionEvent::TextDelta {
         content: "efgh".into(),
     });
-    assert_eq!(app.live_output_tokens_estimate, 2);
+    assert_eq!(app.usage.live_output_tokens_estimate, 2);
 }
 
 #[test]
@@ -131,11 +132,12 @@ fn first_text_delta_switches_thinking_to_responding() {
         content: "hello".into(),
     });
     assert_eq!(
-        app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+        app.live.turn.as_ref().map(|turn| turn.status_text.as_str()),
         Some("responding")
     );
     assert_eq!(
-        app.live_turn
+        app.live
+            .turn
             .as_ref()
             .and_then(|turn| turn.status_detail.as_deref()),
         None
@@ -151,11 +153,12 @@ fn llm_request_sets_plain_thinking_status() {
         tool_list: String::new(),
     });
     assert_eq!(
-        app.live_turn.as_ref().map(|turn| turn.status_text.as_str()),
+        app.live.turn.as_ref().map(|turn| turn.status_text.as_str()),
         Some("thinking")
     );
     assert_eq!(
-        app.live_turn
+        app.live
+            .turn
             .as_ref()
             .and_then(|turn| turn.status_detail.as_deref()),
         None
@@ -181,7 +184,7 @@ fn llm_request_flushes_intermediate_stream_text() {
         tool_list: String::new(),
     });
 
-    assert!(app.live_assistant.normalized_text().is_none());
+    assert!(app.live.assistant.normalized_text().is_none());
     assert!(app.timeline.iter().any(|block| {
         matches!(block, UiTimelineItem::AssistantText(text) if text == "Let me continue testing.")
     }));
@@ -203,7 +206,7 @@ fn tool_call_flushes_intermediate_stream_text_immediately() {
         duration_ms: 1,
     });
 
-    assert!(app.live_assistant.normalized_text().is_none());
+    assert!(app.live.assistant.normalized_text().is_none());
     assert!(matches!(
         app.timeline.first(),
         Some(UiTimelineItem::AssistantText(text))
@@ -221,7 +224,7 @@ fn token_usage_resets_live_token_estimate() {
     app.handle_session_event(SessionEvent::TextDelta {
         content: "abcdefgh".into(),
     });
-    assert!(app.live_output_tokens_estimate > 0);
+    assert!(app.usage.live_output_tokens_estimate > 0);
     app.handle_session_event(SessionEvent::TokenUsage {
         protocol_iteration: 0,
         usage: TokenUsage {
@@ -237,9 +240,9 @@ fn token_usage_resets_live_token_estimate() {
             reasoning_tokens: 2,
         },
     });
-    assert_eq!(app.live_output_tokens_estimate, 0);
-    assert_eq!(app.last_response_usage.input_tokens, 10);
-    assert_eq!(app.last_response_usage.reasoning_tokens, 2);
+    assert_eq!(app.usage.live_output_tokens_estimate, 0);
+    assert_eq!(app.usage.last_response_usage.input_tokens, 10);
+    assert_eq!(app.usage.last_response_usage.reasoning_tokens, 2);
 }
 
 #[test]
@@ -248,7 +251,7 @@ fn input_only_streamed_usage_keeps_live_output_estimate() {
     app.handle_session_event(SessionEvent::TextDelta {
         content: "abcdefgh".into(),
     });
-    let live_estimate = app.live_output_tokens_estimate;
+    let live_estimate = app.usage.live_output_tokens_estimate;
     assert!(live_estimate > 0);
     app.handle_session_event(SessionEvent::TokenUsage {
         protocol_iteration: 0,
@@ -265,9 +268,9 @@ fn input_only_streamed_usage_keeps_live_output_estimate() {
             reasoning_tokens: 0,
         },
     });
-    assert_eq!(app.live_output_tokens_estimate, live_estimate);
-    assert_eq!(app.token_usage.input_tokens, 10);
-    assert_eq!(app.last_response_usage.input_tokens, 10);
+    assert_eq!(app.usage.live_output_tokens_estimate, live_estimate);
+    assert_eq!(app.usage.token_usage.input_tokens, 10);
+    assert_eq!(app.usage.last_response_usage.input_tokens, 10);
 }
 
 #[test]
@@ -280,7 +283,7 @@ fn tool_output_renders_during_generic_running_turn() {
     });
 
     assert_eq!(
-        app.live_tool_output.lines,
+        app.live.tool_output.lines,
         vec!["started git status --short".to_string()]
     );
 }
@@ -294,15 +297,15 @@ fn tool_output_carriage_return_rewrites_partial_line() {
         text: "Compiling alpha".into(),
         kind: "tool_output".into(),
     });
-    assert_eq!(app.live_tool_output.partial, "Compiling alpha");
+    assert_eq!(app.live.tool_output.partial, "Compiling alpha");
 
     app.handle_session_event(SessionEvent::Message {
         text: "\rCompiling beta".into(),
         kind: "tool_output".into(),
     });
 
-    assert!(app.live_tool_output.lines.is_empty());
-    assert_eq!(app.live_tool_output.partial, "Compiling beta");
+    assert!(app.live.tool_output.lines.is_empty());
+    assert_eq!(app.live.tool_output.partial, "Compiling beta");
 }
 
 #[test]
@@ -316,10 +319,10 @@ fn tool_output_crlf_commits_current_line() {
     });
 
     assert_eq!(
-        app.live_tool_output.lines,
+        app.live.tool_output.lines,
         vec!["started cargo check".to_string()]
     );
-    assert!(app.live_tool_output.partial.is_empty());
+    assert!(app.live.tool_output.partial.is_empty());
 }
 
 #[test]
@@ -333,10 +336,10 @@ fn tool_output_strips_ansi_escape_sequences_from_live_preview() {
     });
 
     assert_eq!(
-        app.live_tool_output.lines,
+        app.live.tool_output.lines,
         vec!["warning: check this".to_string()]
     );
-    assert!(app.live_tool_output.partial.is_empty());
+    assert!(app.live.tool_output.partial.is_empty());
 }
 
 #[test]
@@ -353,8 +356,8 @@ fn tool_output_strips_osc_escape_sequences_from_live_preview() {
         kind: "tool_output".into(),
     });
 
-    assert_eq!(app.live_tool_output.lines, vec!["done".to_string()]);
-    assert!(app.live_tool_output.partial.is_empty());
+    assert_eq!(app.live.tool_output.lines, vec!["done".to_string()]);
+    assert!(app.live.tool_output.partial.is_empty());
 }
 
 #[test]
@@ -368,10 +371,10 @@ fn tool_output_tabs_collapse_to_single_spaces_in_live_preview() {
     });
 
     assert_eq!(
-        app.live_tool_output.lines,
+        app.live.tool_output.lines,
         vec!["hash refs/tags/v0.2.29".to_string()]
     );
-    assert!(app.live_tool_output.partial.is_empty());
+    assert!(app.live.tool_output.partial.is_empty());
 }
 
 #[test]
@@ -438,7 +441,7 @@ fn rlm_budget_warning_uses_status_not_user_message() {
         event: lash_core::PluginRuntimeEvent::Status {
             key: "rlm_context_budget_warning".into(),
             label: "context budget".into(),
-            detail: Some("120292 tokens used; warn at 100000; choose handoff path".into()),
+            detail: Some("120292 tokens used; warn at 100000; choose frame switch path".into()),
         },
     });
 
@@ -448,12 +451,12 @@ fn rlm_budget_warning_uses_status_not_user_message() {
             .all(|block| !matches!(block, UiTimelineItem::UserInput(_))),
         "runtime budget warning must not be rendered as user input"
     );
-    assert!(app.live_turn.as_ref().is_some_and(|turn| {
+    assert!(app.live.turn.as_ref().is_some_and(|turn| {
         turn.status_text == "context budget"
             && turn
                 .status_detail
                 .as_deref()
-                .is_some_and(|detail| detail.contains("choose handoff path"))
+                .is_some_and(|detail| detail.contains("choose frame switch path"))
     }));
 }
 
@@ -479,7 +482,8 @@ fn plan_protocol_state_events_upsert_and_clear_blocks() {
                 && panel.content.contains(".lash/plans/test-session-id.md")
     ));
     assert!(
-        app.live_turn
+        app.live
+            .turn
             .as_ref()
             .is_some_and(|turn| turn.has_visible_output)
     );
@@ -523,7 +527,7 @@ fn cancelled_error_renders_as_system_message() {
         Some(UiTimelineItem::SystemMessage(msg)) if msg == "Manually interrupted."
     ));
     assert!(!app.running);
-    assert!(app.live_turn.is_none());
+    assert!(app.live.turn.is_none());
 }
 
 #[test]
@@ -546,7 +550,7 @@ fn cancelled_error_without_manual_request_still_stops_immediately() {
         Some(UiTimelineItem::SystemMessage(msg)) if msg == "Cancelled."
     ));
     assert!(!app.running);
-    assert!(app.live_turn.is_none());
+    assert!(app.live.turn.is_none());
 }
 
 #[test]
@@ -707,7 +711,7 @@ fn refresh_follow_output_anchor_reveals_output_start_once_then_follows_tail() {
     ));
     app.start_turn();
     app.follow_mode = FollowOutputMode::Contextual;
-    if let Some(turn) = app.live_turn.as_mut() {
+    if let Some(turn) = app.live.turn.as_mut() {
         turn.has_visible_output = true;
         turn.output_start_anchor_pending = true;
     }

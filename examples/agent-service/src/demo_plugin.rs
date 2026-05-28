@@ -96,7 +96,7 @@ impl ToolProvider for DemoTools {
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
         demo_tool_definitions()
             .into_iter()
-            .find(|tool| tool.name == name)
+            .find(|tool| tool.name() == name)
             .map(|tool| Arc::new(tool.contract()))
     }
 

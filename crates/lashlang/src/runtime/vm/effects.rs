@@ -93,13 +93,13 @@ impl<H: ExecutionHost> Vm<'_, H> {
                     })?;
                 let value = self
                     .host
-                    .perform(AbilityOp::StartProcess(ProcessStart {
+                    .perform(AbilityOp::StartProcess(Box::new(ProcessStart {
                         module_ref: module_context.module_ref.clone(),
                         process_ref,
                         required_surface_ref: module_context.required_surface_ref.clone(),
                         process_name,
                         args,
-                    }))
+                    })))
                     .await
                     .and_then(|result| result.into_value("process start"))
                     .map_err(|err| RuntimeError::ValueError {

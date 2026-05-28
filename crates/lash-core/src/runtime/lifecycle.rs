@@ -28,6 +28,9 @@ impl LashRuntime {
         if state.policy.provider.kind() == "unconfigured" {
             state.policy = policy.clone();
         }
+        state.ensure_agent_frame_initialized();
+        state.policy = state.effective_policy().clone();
+        state.protocol_turn_options = state.effective_protocol_turn_options().clone();
         normalize_session_graph(&mut state);
         if policy.model.id.trim().is_empty() {
             return Err(SessionError::Protocol(
@@ -93,12 +96,10 @@ impl LashRuntime {
             state,
             runtime_scope_id: Arc::<str>::from(uuid::Uuid::new_v4().to_string()),
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
-            active_handoff_continuations: Arc::new(Mutex::new(HashMap::new())),
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
             protocol_turn_options,
             shared_token_ledger: Arc::new(std::sync::Mutex::new(Vec::new())),
             process_sync_needed: Arc::new(AtomicBool::new(false)),
-            pending_first_turn_inputs: Arc::new(std::sync::Mutex::new(HashMap::new())),
             turn_phase_probe: None,
             residency: Residency::default(),
         })
@@ -225,7 +226,7 @@ impl LashRuntime {
 
     /// Persist any dirty state and drop the runtime, returning a lightweight
     /// handle the embedder can cache and resume later via
-    /// [`LashRuntime::resume`]. This is the webserver-embedder handoff
+    /// [`LashRuntime::resume`]. This is the webserver-embedder parking
     /// primitive: the handle holds only the session id, policy, and store
     /// reference — no graph nodes, no plugin session, no HTTP client.
     pub async fn park(mut self) -> Result<ParkedSession, SessionError> {

@@ -145,7 +145,11 @@ impl RuntimeExecutionContext<'_> {
         if let Err(err) = self
             .dispatch
             .processes
-            .validate_visible(&self.session_id, std::slice::from_ref(&handle_id))
+            .validate_visible(
+                &self.session_id,
+                std::slice::from_ref(&handle_id),
+                self.process_scope(self.parent_invocation.clone()),
+            )
             .await
         {
             return Self::recorded_process_error(
@@ -186,7 +190,11 @@ impl RuntimeExecutionContext<'_> {
         if let Err(err) = self
             .dispatch
             .processes
-            .validate_visible(&self.session_id, std::slice::from_ref(&handle_id))
+            .validate_visible(
+                &self.session_id,
+                std::slice::from_ref(&handle_id),
+                self.process_scope(self.parent_invocation.clone()),
+            )
             .await
         {
             return Self::recorded_process_error(
@@ -318,6 +326,7 @@ mod tests {
             ),
             parent_invocation: None,
             session_id: "session".to_string(),
+            agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -414,6 +423,7 @@ mod tests {
             ),
             parent_invocation: None,
             session_id: "session".to_string(),
+            agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),

@@ -38,6 +38,113 @@ pub enum SessionPluginSource {
     CurrentSessionFork,
 }
 
+pub type AgentFrameId = String;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFrameStatus {
+    #[default]
+    Active,
+    Superseded,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFrameReason {
+    #[default]
+    Initial,
+    ContinueAs,
+    Handoff,
+    PlanMode,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentFrameAssignment {
+    pub policy: SessionPolicy,
+    #[serde(default)]
+    pub plugin_options: PluginOptions,
+    #[serde(default)]
+    pub plugin_source: SessionPluginSource,
+    #[serde(default)]
+    pub tool_access: SessionToolAccess,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<SubagentSessionContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_source: Option<String>,
+}
+
+impl AgentFrameAssignment {
+    pub fn from_session_request(request: &SessionCreateRequest, policy: SessionPolicy) -> Self {
+        Self {
+            policy,
+            plugin_options: request.plugin_options.clone(),
+            plugin_source: request.plugin_source,
+            tool_access: request.tool_access.clone(),
+            subagent: request.subagent.clone(),
+            usage_source: request.usage_source.clone(),
+        }
+    }
+
+    pub fn from_policy(policy: SessionPolicy) -> Self {
+        Self {
+            policy,
+            plugin_options: PluginOptions::default(),
+            plugin_source: SessionPluginSource::CurrentHostFresh,
+            tool_access: SessionToolAccess::default(),
+            subagent: None,
+            usage_source: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentFrameRecord {
+    pub frame_id: AgentFrameId,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_frame_id: Option<AgentFrameId>,
+    #[serde(default)]
+    pub status: AgentFrameStatus,
+    #[serde(default)]
+    pub reason: AgentFrameReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caused_by: Option<crate::CausalRef>,
+    pub created_at: String,
+    pub assignment: AgentFrameAssignment,
+    #[serde(default)]
+    pub protocol_turn_options: ProtocolTurnOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state_ref: Option<crate::store::BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state_snapshot: Option<Vec<u8>>,
+}
+
+impl AgentFrameRecord {
+    pub fn new(
+        frame_id: impl Into<AgentFrameId>,
+        session_id: impl Into<String>,
+        previous_frame_id: Option<AgentFrameId>,
+        reason: AgentFrameReason,
+        caused_by: Option<crate::CausalRef>,
+        assignment: AgentFrameAssignment,
+        protocol_turn_options: ProtocolTurnOptions,
+    ) -> Self {
+        Self {
+            frame_id: frame_id.into(),
+            session_id: session_id.into(),
+            previous_frame_id,
+            status: AgentFrameStatus::Active,
+            reason,
+            caused_by,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            assignment,
+            protocol_turn_options,
+            execution_state_ref: None,
+            execution_state_snapshot: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionContextSurface {
     pub include_base_tools: bool,
@@ -78,12 +185,6 @@ pub enum SessionRelation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<crate::CausalRef>,
     },
-    Handoff {
-        parent_session_id: String,
-        reason: String,
-        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
-        metadata: serde_json::Map<String, serde_json::Value>,
-    },
 }
 
 impl SessionRelation {
@@ -91,9 +192,6 @@ impl SessionRelation {
         match self {
             Self::Root => None,
             Self::Child {
-                parent_session_id, ..
-            }
-            | Self::Handoff {
                 parent_session_id, ..
             } => Some(parent_session_id),
         }
@@ -113,12 +211,6 @@ pub struct SessionCreateRequest {
     pub plugin_source: SessionPluginSource,
     #[serde(default)]
     pub initial_nodes: Vec<SessionAppendNode>,
-    /// Optional seed message dispatched as the new session's first turn
-    /// input. The runtime stashes it during `create_session`; any host
-    /// that drives turns on the new session can claim it via
-    /// `RuntimeSessionHost::take_first_turn_input`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_turn_input: Option<PluginMessage>,
     #[serde(default)]
     pub tool_access: SessionToolAccess,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,7 +238,6 @@ impl SessionCreateRequest {
             policy: None,
             plugin_source: SessionPluginSource::CurrentHostFresh,
             initial_nodes: Vec::new(),
-            first_turn_input: None,
             tool_access: SessionToolAccess::default(),
             subagent: None,
             context_surface: SessionContextSurface::default(),
@@ -181,7 +272,6 @@ impl SessionCreateRequest {
             policy: None,
             plugin_source: SessionPluginSource::CurrentHostFresh,
             initial_nodes: Vec::new(),
-            first_turn_input: None,
             tool_access: SessionToolAccess::default(),
             subagent: None,
             context_surface: SessionContextSurface::default(),
@@ -199,32 +289,6 @@ impl SessionCreateRequest {
         Self {
             policy: Some(policy),
             ..Self::child_session(parent_session_id, start, plugin_options)
-        }
-    }
-
-    pub fn handoff_session(
-        parent_session_id: impl Into<String>,
-        reason: impl Into<String>,
-        metadata: serde_json::Map<String, serde_json::Value>,
-        plugin_options: PluginOptions,
-    ) -> Self {
-        Self {
-            session_id: Some(uuid::Uuid::new_v4().to_string()),
-            relation: SessionRelation::Handoff {
-                parent_session_id: parent_session_id.into(),
-                reason: reason.into(),
-                metadata,
-            },
-            start: SessionStartPoint::Empty,
-            policy: None,
-            plugin_source: SessionPluginSource::CurrentHostFresh,
-            initial_nodes: Vec::new(),
-            first_turn_input: None,
-            tool_access: SessionToolAccess::default(),
-            subagent: None,
-            context_surface: SessionContextSurface::default(),
-            plugin_options,
-            usage_source: None,
         }
     }
 
@@ -265,27 +329,6 @@ impl SessionCreateRequest {
         )
     }
 
-    pub fn handoff(
-        parent_session_id: impl Into<String>,
-        policy: SessionPolicy,
-        plugin_options: PluginOptions,
-        reason: impl Into<String>,
-        metadata: serde_json::Map<String, serde_json::Value>,
-        usage_source: impl Into<String>,
-    ) -> Self {
-        Self::related(
-            SessionRelation::Handoff {
-                parent_session_id: parent_session_id.into(),
-                reason: reason.into(),
-                metadata,
-            },
-            SessionStartPoint::Empty,
-            Some(policy),
-            plugin_options,
-            usage_source,
-        )
-    }
-
     fn related(
         relation: SessionRelation,
         start: SessionStartPoint,
@@ -300,7 +343,6 @@ impl SessionCreateRequest {
             policy,
             plugin_source: SessionPluginSource::CurrentHostFresh,
             initial_nodes: Vec::new(),
-            first_turn_input: None,
             tool_access: SessionToolAccess::default(),
             subagent: None,
             context_surface: SessionContextSurface::default(),
@@ -321,11 +363,6 @@ impl SessionCreateRequest {
 
     pub fn with_initial_nodes(mut self, initial_nodes: Vec<SessionAppendNode>) -> Self {
         self.initial_nodes = initial_nodes;
-        self
-    }
-
-    pub fn with_first_turn_input(mut self, first_turn_input: PluginMessage) -> Self {
-        self.first_turn_input = Some(first_turn_input);
         self
     }
 

@@ -9,11 +9,11 @@ pub use lash_plugin_rolling_history::RollingHistoryConfig;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
 use lash_plugin_tool_output_budget::{ToolOutputBudgetPluginFactory, tool_output_budget_stack};
-use lash_tool_apply_patch::ApplyPatchTool;
-use lash_tool_files::{Glob, Ls, ReadFilePluginFactory};
-use lash_tool_search::Grep;
+use lash_tool_apply_patch::apply_patch_provider;
+use lash_tool_files::{ReadFilePluginFactory, glob_provider, ls_provider};
+use lash_tool_search::grep_provider;
 use lash_tool_shell::StandardShellPluginFactory;
-use lash_tool_web::{FetchUrl, WebSearch};
+use lash_tool_web::{fetch_url_provider, web_search_provider};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StandardContextApproachKind {
@@ -107,20 +107,21 @@ fn push_local_runtime_tools(stack: &mut PluginStack, include_cancel_process: boo
     stack.push(Arc::new(StandardShellPluginFactory::new()));
     stack.push(Arc::new(StaticPluginFactory::new(
         "apply_patch",
-        PluginSpec::new().with_tool_provider(Arc::new(ApplyPatchTool) as Arc<dyn ToolProvider>),
+        PluginSpec::new()
+            .with_tool_provider(Arc::new(apply_patch_provider()) as Arc<dyn ToolProvider>),
     )));
     stack.push(Arc::new(ReadFilePluginFactory::new()));
     stack.push(Arc::new(StaticPluginFactory::new(
         "glob",
-        PluginSpec::new().with_tool_provider(Arc::new(Glob) as Arc<dyn ToolProvider>),
+        PluginSpec::new().with_tool_provider(Arc::new(glob_provider()) as Arc<dyn ToolProvider>),
     )));
     stack.push(Arc::new(StaticPluginFactory::new(
         "ls",
-        PluginSpec::new().with_tool_provider(Arc::new(Ls) as Arc<dyn ToolProvider>),
+        PluginSpec::new().with_tool_provider(Arc::new(ls_provider()) as Arc<dyn ToolProvider>),
     )));
     stack.push(Arc::new(StaticPluginFactory::new(
         "grep",
-        PluginSpec::new().with_tool_provider(Arc::new(Grep::new()) as Arc<dyn ToolProvider>),
+        PluginSpec::new().with_tool_provider(Arc::new(grep_provider()) as Arc<dyn ToolProvider>),
     )));
 }
 
@@ -129,12 +130,13 @@ fn push_web_tools(stack: &mut PluginStack, tavily_api_key: String) {
     stack.push(Arc::new(StaticPluginFactory::new(
         "search_web",
         PluginSpec::new()
-            .with_tool_provider(Arc::new(WebSearch::new(search_key)) as Arc<dyn ToolProvider>),
+            .with_tool_provider(Arc::new(web_search_provider(search_key)) as Arc<dyn ToolProvider>),
     )));
     stack.push(Arc::new(StaticPluginFactory::new(
         "fetch_url",
-        PluginSpec::new()
-            .with_tool_provider(Arc::new(FetchUrl::new(tavily_api_key)) as Arc<dyn ToolProvider>),
+        PluginSpec::new().with_tool_provider(
+            Arc::new(fetch_url_provider(tavily_api_key)) as Arc<dyn ToolProvider>
+        ),
     )));
 }
 

@@ -21,11 +21,11 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, PluginSpecFactory, SessionPlugin,
 };
 use lash_core::{
-    ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolCall, ToolContract,
-    ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
+    ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolCall, ToolDefinition,
+    ToolProvider, ToolResult, ToolScheduling,
 };
 
-use lash_tool_support::{object_schema, require_str};
+use lash_tool_support::{StaticToolExecute, StaticToolProvider, object_schema, require_str};
 
 struct ShellProcess {
     _master: Box<dyn MasterPty + Send>,
@@ -73,7 +73,7 @@ fn tool_callable_from_authority(access: &SessionToolAccess, name: &str) -> bool 
     if access.hides(name) {
         return false;
     }
-    access.tools.is_empty() || access.tools.iter().any(|tool| tool.name == name)
+    access.tools.is_empty() || access.tools.iter().any(|tool| tool.name() == name)
 }
 
 #[derive(Clone)]
@@ -1233,22 +1233,14 @@ impl Default for StandardShell {
     }
 }
 
+/// Build the cached shell tool provider (`shell.exec` / `shell.start`).
+pub fn shell_provider(shell: StandardShell) -> StaticToolProvider<StandardShell> {
+    let definitions = shell.tool_definitions();
+    StaticToolProvider::new(definitions, shell)
+}
+
 #[async_trait::async_trait]
-impl ToolProvider for StandardShell {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        self.tool_definitions()
-            .into_iter()
-            .map(|tool| tool.manifest())
-            .collect()
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        self.tool_definitions()
-            .into_iter()
-            .find(|tool| tool.name == name)
-            .map(|tool| Arc::new(tool.contract()))
-    }
-
+impl StaticToolExecute for StandardShell {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let cancellation_token = call.context.cancellation_token().cloned();
         self.dispatch(
@@ -1806,7 +1798,7 @@ impl PluginFactory for StandardShellPluginFactory {
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         let tool_access = ctx.tool_access.clone();
-        let provider = Arc::new(StandardShell::new()) as Arc<dyn ToolProvider>;
+        let provider = Arc::new(shell_provider(StandardShell::new())) as Arc<dyn ToolProvider>;
         PluginSpecFactory::new(
             "shell",
             Arc::new(move |_ctx| {
@@ -1832,11 +1824,15 @@ mod tests {
     use serde_json::json;
     use std::fs;
 
-    fn test_shell() -> StandardShell {
-        StandardShell::new().with_cwd("/")
+    fn test_shell() -> StaticToolProvider<StandardShell> {
+        shell_provider(StandardShell::new().with_cwd("/"))
     }
 
-    async fn run(shell: &StandardShell, name: &str, args: &serde_json::Value) -> ToolResult {
+    async fn run(
+        shell: &StaticToolProvider<StandardShell>,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         lash_core::testing::run_tool(shell, name, args).await
     }
 
@@ -1865,7 +1861,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_waits_for_process_exit() {
-        let shell = StandardShell::new().with_cwd("/");
+        let shell = shell_provider(StandardShell::new().with_cwd("/"));
         let result = run(
             &shell,
             "exec_command",
@@ -1966,7 +1962,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_timeout_kills_and_fails_running_process() {
-        let shell = StandardShell::new().with_cwd("/");
+        let shell = shell_provider(StandardShell::new().with_cwd("/"));
         let result = run(
             &shell,
             "exec_command",
@@ -2017,7 +2013,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_command_returns_handle_id_for_running_process() {
-        let shell = StandardShell::new().with_cwd("/");
+        let shell = shell_provider(StandardShell::new().with_cwd("/"));
         let result = run(
             &shell,
             "start_command",
@@ -2134,7 +2130,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_honors_workdir() {
-        let shell = StandardShell::new().with_cwd("/");
+        let shell = shell_provider(StandardShell::new().with_cwd("/"));
         let result = run(
             &shell,
             "exec_command",
@@ -2297,7 +2293,7 @@ mod tests {
         let shell = StandardShell::default();
         let defs = shell.tool_definitions();
         assert_eq!(defs.len(), 3);
-        assert!(defs.iter().all(|def| !def.description.is_empty()));
+        assert!(defs.iter().all(|def| !def.description().is_empty()));
     }
 
     #[test]
@@ -2306,9 +2302,10 @@ mod tests {
         let definition = shell
             .tool_definitions()
             .into_iter()
-            .find(|definition| definition.name == "start_command")
+            .find(|definition| definition.name() == "start_command")
             .expect("start_command definition");
         let properties = definition
+            .contract
             .input_schema
             .get("properties")
             .and_then(serde_json::Value::as_object)
@@ -2316,7 +2313,7 @@ mod tests {
 
         assert!(properties.contains_key("poll_ms"));
         assert!(!properties.contains_key("timeout_ms"));
-        assert!(definition.description.contains("shell.exec.timeout_ms"));
+        assert!(definition.description().contains("shell.exec.timeout_ms"));
         assert!(
             properties["poll_ms"]["description"]
                 .as_str()
@@ -2351,9 +2348,10 @@ mod tests {
         let definition = shell
             .tool_definitions()
             .into_iter()
-            .find(|definition| definition.name == "exec_command")
+            .find(|definition| definition.name() == "exec_command")
             .expect("exec_command definition");
         let properties = definition
+            .contract
             .input_schema
             .get("properties")
             .and_then(serde_json::Value::as_object)
@@ -2365,7 +2363,7 @@ mod tests {
         );
         assert!(
             definition
-                .description
+                .description()
                 .contains("Commands time out after 600000 ms by default")
         );
     }

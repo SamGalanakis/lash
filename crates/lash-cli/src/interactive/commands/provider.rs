@@ -61,7 +61,7 @@ pub(super) async fn handle_model(
             &app.model,
             current_model_variant.as_deref(),
         ));
-        if let Some(window) = app.context_window {
+        if let Some(window) = app.usage.context_window {
             lines.push(format!("Context window: {}", window));
         }
         lines.push("Usage: `/model <name>`".to_string());
@@ -114,8 +114,8 @@ pub(super) async fn handle_model(
             .await;
     }
     *current_model_variant = model_variant;
-    app.context_window = Some(resolved_model_spec.context_window());
-    app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
+    app.usage.context_window = Some(resolved_model_spec.context_window());
+    app.usage.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     app.model = selection.model.clone();
     app.set_model_variant(current_model_variant.clone());
     save_model_default(
@@ -131,7 +131,7 @@ pub(super) async fn handle_model(
     } else {
         msg.push_str("\nThis model does not expose configurable variants.");
     }
-    if let Some(window) = app.context_window {
+    if let Some(window) = app.usage.context_window {
         msg.push_str(&format!("\nContext window: {}", window));
     }
     push_system_message(app, msg);
@@ -255,8 +255,8 @@ pub(super) async fn handle_change_provider(
     let previous_kind = provider.kind();
     let previous_provider = provider.clone();
     let previous_model = app.model.clone();
-    let previous_context_window = app.context_window;
-    let previous_context_usage = app.context_usage_excludes_cached_input;
+    let previous_context_window = app.usage.context_window;
+    let previous_context_usage = app.usage.context_usage_excludes_cached_input;
     let previous_variant = current_model_variant.clone();
 
     terminal.restore();
@@ -279,8 +279,8 @@ pub(super) async fn handle_change_provider(
                     );
                     *provider = previous_provider;
                     app.model = previous_model;
-                    app.context_window = previous_context_window;
-                    app.context_usage_excludes_cached_input = previous_context_usage;
+                    app.usage.context_window = previous_context_window;
+                    app.usage.context_usage_excludes_cached_input = previous_context_usage;
                     *current_model_variant = previous_variant;
                     app.set_model_variant(current_model_variant.clone());
                     return Ok(false);
@@ -328,8 +328,8 @@ pub(super) async fn handle_change_provider(
                     push_system_message(app, format!("Provider default model is invalid: {}", e));
                     *provider = previous_provider;
                     app.model = previous_model;
-                    app.context_window = previous_context_window;
-                    app.context_usage_excludes_cached_input = previous_context_usage;
+                    app.usage.context_window = previous_context_window;
+                    app.usage.context_usage_excludes_cached_input = previous_context_usage;
                     *current_model_variant = previous_variant;
                     app.set_model_variant(current_model_variant.clone());
                     return Ok(false);
@@ -342,8 +342,8 @@ pub(super) async fn handle_change_provider(
                 );
                 *provider = previous_provider;
                 app.model = previous_model;
-                app.context_window = previous_context_window;
-                app.context_usage_excludes_cached_input = previous_context_usage;
+                app.usage.context_window = previous_context_window;
+                app.usage.context_usage_excludes_cached_input = previous_context_usage;
                 *current_model_variant = previous_variant;
                 app.set_model_variant(current_model_variant.clone());
                 return Ok(false);
@@ -358,8 +358,8 @@ pub(super) async fn handle_change_provider(
                         );
                         *provider = previous_provider;
                         app.model = previous_model;
-                        app.context_window = previous_context_window;
-                        app.context_usage_excludes_cached_input = previous_context_usage;
+                        app.usage.context_window = previous_context_window;
+                        app.usage.context_usage_excludes_cached_input = previous_context_usage;
                         *current_model_variant = previous_variant;
                         app.set_model_variant(current_model_variant.clone());
                         return Ok(false);
@@ -381,8 +381,8 @@ pub(super) async fn handle_change_provider(
                             );
                             *provider = previous_provider;
                             app.model = previous_model;
-                            app.context_window = previous_context_window;
-                            app.context_usage_excludes_cached_input = previous_context_usage;
+                            app.usage.context_window = previous_context_window;
+                            app.usage.context_usage_excludes_cached_input = previous_context_usage;
                             *current_model_variant = previous_variant;
                             app.set_model_variant(current_model_variant.clone());
                             return Ok(false);
@@ -408,8 +408,8 @@ pub(super) async fn handle_change_provider(
                     );
                     *provider = previous_provider;
                     app.model = previous_model;
-                    app.context_window = previous_context_window;
-                    app.context_usage_excludes_cached_input = previous_context_usage;
+                    app.usage.context_window = previous_context_window;
+                    app.usage.context_usage_excludes_cached_input = previous_context_usage;
                     *current_model_variant = previous_variant;
                     app.set_model_variant(current_model_variant.clone());
                     return Ok(false);
@@ -427,8 +427,9 @@ pub(super) async fn handle_change_provider(
                     .await;
             }
             *current_model_variant = model_variant;
-            app.context_window = Some(resolved_model_spec.context_window());
-            app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
+            app.usage.context_window = Some(resolved_model_spec.context_window());
+            app.usage.context_usage_excludes_cached_input =
+                provider.input_usage_excludes_cached_tokens();
             app.model = selection.model.clone();
             app.set_model_variant(current_model_variant.clone());
             let saved_kinds = new_cfg.provider_kinds().join(", ");

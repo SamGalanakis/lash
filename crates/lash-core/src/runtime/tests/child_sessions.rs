@@ -160,7 +160,7 @@ async fn parent_turn_receives_live_child_token_usage_events() {
 
     assert!(matches!(
         &turn.outcome,
-        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+        TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. }
     ));
     let events = sink.snapshot();
     let child_usage_event = events

@@ -35,6 +35,7 @@ pub(super) struct TurnCommitPipeline {
 
 struct FinalCommitInput<'a> {
     returned_state: &'a crate::SessionStateEnvelope,
+    tool_calls: &'a [ToolCallRecord],
     plugins: Option<&'a PluginSession>,
     execution_state_snapshot: Option<Option<Vec<u8>>>,
     store: Option<&'a (dyn RuntimePersistence + 'a)>,
@@ -83,6 +84,16 @@ impl TurnCommitPipeline {
             None => self
                 .final_state
                 .as_mut()
+                .expect("turn commit pipeline final state must be present"),
+        }
+    }
+
+    pub(super) fn state(&self) -> &RuntimeSessionState {
+        match self.draft.as_ref() {
+            Some(draft) => draft.state(),
+            None => self
+                .final_state
+                .as_ref()
                 .expect("turn commit pipeline final state must be present"),
         }
     }
@@ -283,6 +294,7 @@ impl TurnCommitPipeline {
         };
         self.final_commit_with_snapshots(FinalCommitInput {
             returned_state: &returned_turn.state,
+            tool_calls: &returned_turn.tool_calls,
             plugins: plugins.as_deref(),
             execution_state_snapshot,
             store: store.as_ref().map(|store| store.as_ref()),
@@ -352,6 +364,7 @@ impl TurnCommitPipeline {
     ) -> Result<(), StoreError> {
         let FinalCommitInput {
             returned_state,
+            tool_calls,
             plugins,
             execution_state_snapshot,
             store,
@@ -372,6 +385,7 @@ impl TurnCommitPipeline {
             state.set_execution_state_snapshot(execution_state_snapshot);
         }
         materialize_terminal_output(state, outcome);
+        materialize_agent_frame_switch(state, outcome, tool_calls);
         let progress_graph = self
             .draft
             .as_ref()
@@ -412,7 +426,7 @@ impl TurnCommitPipeline {
                 completed_turn,
                 completed_queue_claims,
             )
-                .await
+            .await
         } else {
             state.discard_runtime_snapshots();
             Ok(())
@@ -450,9 +464,7 @@ impl TurnCommitPipeline {
     }
 
     async fn snapshot_dirty_execution_state(session: &mut Session) -> Option<Option<Vec<u8>>> {
-        let Some(code_executor) = session.plugins().code_executor() else {
-            return None;
-        };
+        let code_executor = session.plugins().code_executor()?;
         if !code_executor.execution_state_dirty() {
             return None;
         }
@@ -508,6 +520,68 @@ fn materialize_terminal_output(state: &mut RuntimeSessionState, outcome: &TurnOu
         origin: None,
     }]);
     state.graph_replace_required = true;
+}
+
+fn materialize_agent_frame_switch(
+    state: &mut RuntimeSessionState,
+    outcome: &TurnOutcome,
+    tool_calls: &[ToolCallRecord],
+) {
+    let TurnOutcome::AgentFrameSwitch { frame_id } = outcome else {
+        return;
+    };
+    if frame_id.trim().is_empty() || state.current_agent_frame_id == *frame_id {
+        return;
+    }
+    let control = tool_calls
+        .iter()
+        .find_map(|record| match &record.output.control {
+            Some(crate::ToolControl::SwitchAgentFrame {
+                frame_id: control_frame_id,
+                initial_nodes,
+                task,
+            }) if control_frame_id == frame_id => Some((initial_nodes, task)),
+            _ => None,
+        });
+    let empty_nodes = Vec::new();
+    let empty_task = None;
+    let (initial_nodes, _task) = control.unwrap_or((&empty_nodes, &empty_task));
+    let previous = state.current_agent_frame().cloned();
+    let assignment = previous
+        .as_ref()
+        .map(|frame| frame.assignment.clone())
+        .unwrap_or_else(|| crate::AgentFrameAssignment::from_policy(state.policy.clone()));
+    let protocol_turn_options = previous
+        .as_ref()
+        .map(|frame| frame.protocol_turn_options.clone())
+        .unwrap_or_else(|| state.protocol_turn_options.clone());
+    let previous_frame_id = previous.map(|frame| frame.frame_id);
+    state.append_agent_frame(crate::AgentFrameRecord::new(
+        frame_id.clone(),
+        state.session_id.clone(),
+        previous_frame_id,
+        crate::AgentFrameReason::ContinueAs,
+        None,
+        assignment,
+        protocol_turn_options,
+    ));
+
+    let nodes = initial_nodes
+        .iter()
+        .filter_map(|value| {
+            match serde_json::from_value::<crate::SessionAppendNode>(value.clone()) {
+                Ok(node) => Some(node),
+                Err(err) => {
+                    tracing::warn!("failed to decode agent frame initial node: {err}");
+                    None
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    if !nodes.is_empty() {
+        super::append_session_nodes_to_state(state, &nodes);
+        state.graph_replace_required = true;
+    }
 }
 
 fn message_rendered_text(message: &Message) -> String {
@@ -571,6 +645,65 @@ mod tests {
             session_graph: graph,
             ..RuntimeSessionState::default()
         }
+    }
+
+    #[test]
+    fn agent_frame_switch_keeps_session_and_tags_initial_nodes_to_new_frame() {
+        let graph = SessionGraph::from_active_read_state(
+            &[text_message("u0", MessageRole::User, "old frame")],
+            &[],
+        );
+        let mut state = state_with_graph(graph);
+        state.ensure_agent_frame_initialized();
+        let previous_frame_id = state.current_agent_frame_id.clone();
+        let frame_id = "frame-2".to_string();
+        let seed_node = crate::SessionAppendNode::message(crate::PluginMessage::text(
+            MessageRole::User,
+            "seed message",
+        ));
+        let tool_calls = vec![crate::ToolCallRecord {
+            call_id: Some("continue-call".to_string()),
+            tool: "continue_as".to_string(),
+            args: serde_json::json!({ "task": "next task" }),
+            output: crate::ToolCallOutput::success(serde_json::json!({ "ok": true })).with_control(
+                crate::ToolControl::SwitchAgentFrame {
+                    frame_id: frame_id.clone(),
+                    initial_nodes: vec![serde_json::to_value(seed_node).expect("seed node json")],
+                    task: Some("next task".to_string()),
+                },
+            ),
+            duration_ms: 1,
+        }];
+
+        materialize_agent_frame_switch(
+            &mut state,
+            &TurnOutcome::AgentFrameSwitch {
+                frame_id: frame_id.clone(),
+            },
+            &tool_calls,
+        );
+
+        assert_eq!(state.session_id, "session-1");
+        assert_eq!(state.current_agent_frame_id, frame_id);
+        let current = state.current_agent_frame().expect("current frame");
+        assert_eq!(
+            current.previous_frame_id.as_deref(),
+            Some(previous_frame_id.as_str())
+        );
+        assert!(matches!(
+            current.reason,
+            crate::AgentFrameReason::ContinueAs
+        ));
+        let current_read = state
+            .session_graph
+            .read_model_for_agent_frame(&frame_id, false);
+        assert_eq!(current_read.messages.len(), 1);
+        assert_eq!(current_read.messages[0].parts[0].content, "seed message");
+        let previous_read = state
+            .session_graph
+            .read_model_for_agent_frame(&previous_frame_id, true);
+        assert_eq!(previous_read.messages.len(), 1);
+        assert_eq!(previous_read.messages[0].parts[0].content, "old frame");
     }
 
     #[tokio::test]
@@ -786,6 +919,7 @@ mod tests {
                 store: Some(&store),
                 usage_deltas: &usage,
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
+                tool_calls: &[],
                 completed_turn: None,
                 completed_queue_claims: Vec::new(),
             })
@@ -824,6 +958,7 @@ mod tests {
                 store: None,
                 usage_deltas: &[],
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
+                tool_calls: &[],
                 completed_turn: None,
                 completed_queue_claims: Vec::new(),
             })

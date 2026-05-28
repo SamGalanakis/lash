@@ -1,7 +1,12 @@
 use super::support::*;
 use crate::LlmTerminalReason;
 
-pub trait ProviderState: Send + Sync + std::fmt::Debug {
+/// A configured LLM backend: its identity and serialized config, its
+/// generation options, and the request transport. Every provider is a
+/// single type — there is no provider whose persisted state differs from
+/// its transport — so configuration and completion live on one trait.
+#[async_trait]
+pub trait Provider: Send + Sync + std::fmt::Debug {
     fn kind(&self) -> &'static str;
 
     fn options(&self) -> ProviderOptions;
@@ -12,18 +17,13 @@ pub trait ProviderState: Send + Sync + std::fmt::Debug {
     /// layers that on top.
     fn serialize_config(&self) -> serde_json::Value;
 
-    fn clone_boxed(&self) -> Box<dyn ProviderState>;
-}
-
-#[async_trait]
-pub trait ProviderTransport: Send + Sync + std::fmt::Debug {
     async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError>;
 
     fn requires_streaming(&self) -> bool {
         false
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport>;
+    fn clone_boxed(&self) -> Box<dyn Provider>;
 }
 
 pub trait ProviderModelPolicy: Send + Sync + std::fmt::Debug {

@@ -25,13 +25,13 @@
 <div class="section" id="turn-outcomes">
           <div class="section-header">
             <h2>Turn Outcomes</h2>
-            <p><code>TurnResult.outcome</code> is one of three categories: <code>Finished</code>, <code>Handoff</code>, <code>Stopped</code>. Branch on category; inspect the variant only when handling specific stop reasons.</p>
+            <p><code>TurnResult.outcome</code> is one of three categories: <code>Finished</code>, <code>AgentFrameSwitch</code>, <code>Stopped</code>. Branch on category; inspect the variant only when handling specific stop reasons.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">TurnOutcome shape</div>
             <pre><code>pub enum TurnOutcome {
     Finished(TurnFinish),
-    Handoff { session_id: String },
+    AgentFrameSwitch { frame_id: String },
     Stopped(TurnStop),
 }
 
@@ -42,13 +42,13 @@ pub enum TurnFinish {
 }</code></pre>
           </div>
           <p><code>Finished</code>: clean terminal value. <code>AssistantMessage</code> is the prose default for both modes; the runtime commit materializes the transcript message exactly once — there is no second "final message" stream event after <code>AssistantProseDelta</code>. <code>SubmittedValue</code> / <code>ToolValue</code> come from RLM <code>submit</code> or a tool-authored terminal; both arrive on the stream too.</p>
-          <p><code>Handoff</code>: a protocol plugin or tool returned control to a fresh session (usually compaction or continue-as). The new session is persisted before return; resume against <code>session_id</code>.</p>
+          <p><code>AgentFrameSwitch</code>: a protocol plugin or tool switched to a fresh AgentFrame inside the same session. Runtime callers normally use the facade, which keeps driving the same session until a terminal outcome is reached.</p>
           <p><code>Stopped</code>: turn aborted before a terminal value. Ten <code>TurnStop</code> variants:</p>
           <div class="table">
             <table>
               <thead><tr><th>Variant</th><th>Class</th><th>Cause</th></tr></thead>
               <tbody>
-                <tr><td><code>Cancelled</code></td><td>Host-driven</td><td>The cancellation token passed to <code>TurnBuilder::cancellation(...)</code> fired.</td></tr>
+                <tr><td><code>Cancelled</code></td><td>Host-driven</td><td>The cancellation token passed to <code>TurnBuilder::cancel(...)</code> fired.</td></tr>
                 <tr><td><code>InvalidInput</code></td><td>Host-driven</td><td>Input normalization rejected the <code>TurnInput</code> (e.g. missing attachment, malformed image ref).</td></tr>
                 <tr><td><code>Incomplete</code></td><td>Provider</td><td>The LLM hit its output limit mid-message without finishing.</td></tr>
                 <tr><td><code>ProviderError</code></td><td>Provider</td><td>The provider returned an error, a content-filter refusal, or a context-overflow terminal reason.</td></tr>
@@ -63,15 +63,17 @@ pub enum TurnFinish {
           </div>
           <p>Host-driven stops are recoverable next request. Provider stops usually want a different model or shorter context. Runtime stops indicate a configuration or authoring problem. <code>RuntimeError</code> is the only category where identical-input retry is unlikely to help.</p>
           <p>CAS commit conflicts are <em>not</em> a <code>Stopped</code> variant — they surface as <code>Err</code> from <code>run()</code>/<code>stream()</code>, no partial commit. See <a href="./persistence.html#contract">Persistence → The Contract</a>.</p>
-          <pre><code>match result.outcome {
-    lash::TurnOutcome::Finished(finish) =&gt; persist_terminal(finish)?,
-    lash::TurnOutcome::Handoff { session_id } =&gt; reopen(session_id).await?,
-    lash::TurnOutcome::Stopped(stop) =&gt; match stop {
-        lash::TurnStop::Cancelled
-        | lash::TurnStop::InvalidInput =&gt; report_user_visible(stop),
-        lash::TurnStop::ProviderError
-        | lash::TurnStop::Incomplete =&gt; offer_retry(stop),
-        lash::TurnStop::MaxTurns =&gt; suggest_higher_max_turns(),
+          <pre><code>use lash::advanced::{TurnOutcome, TurnStop};
+
+match result.outcome {
+    TurnOutcome::Finished(finish) =&gt; persist_terminal(finish)?,
+    TurnOutcome::AgentFrameSwitch { frame_id } =&gt; record_frame_boundary(frame_id)?,
+    TurnOutcome::Stopped(stop) =&gt; match stop {
+        TurnStop::Cancelled
+        | TurnStop::InvalidInput =&gt; report_user_visible(stop),
+        TurnStop::ProviderError
+        | TurnStop::Incomplete =&gt; offer_retry(stop),
+        TurnStop::MaxTurns =&gt; suggest_higher_max_turns(),
         other =&gt; record_for_diagnosis(other),
     },
 }</code></pre>
@@ -241,15 +243,17 @@ let prose_or_submit = session
             </article>
             <article class="panel">
               <h3>Outcome shape</h3>
-              <pre><code>match result.outcome {
-    lash::TurnOutcome::Finished(
-        lash::TurnFinish::SubmittedValue { value }
+              <pre><code>use lash::advanced::{TurnFinish, TurnOutcome};
+
+match result.outcome {
+    TurnOutcome::Finished(
+        TurnFinish::SubmittedValue { value }
     ) =&gt; {
         // Same value already arrived as TurnEvent::SubmittedValue.
         persist_typed_value(value)?;
     }
-    lash::TurnOutcome::Finished(
-        lash::TurnFinish::AssistantMessage { text }
+    TurnOutcome::Finished(
+        TurnFinish::AssistantMessage { text }
     ) =&gt; persist_text(text)?,
     other =&gt; handle_other_outcome(other)?,
 }</code></pre>

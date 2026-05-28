@@ -8,6 +8,7 @@ mod factory;
 mod policy;
 mod provider;
 mod responses;
+pub mod responses_shared;
 mod support;
 #[cfg(test)]
 mod tests;

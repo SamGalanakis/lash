@@ -1,6 +1,7 @@
 use crate::support::*;
 use crate::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
-use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
+use lash_core::llm::transport::ProviderFailureKind;
+use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolChoice, LlmToolSpec};
 use lash_core::provider::CacheRetention;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -291,7 +292,7 @@ fn provider_factories_materialize_distinct_kinds() {
     let direct = OpenAiProviderFactory
         .deserialize(json!({ "api_key": "key" }))
         .expect("direct config");
-    assert_eq!(direct.state.kind(), "openai");
+    assert_eq!(direct.provider.kind(), "openai");
 
     let compatible = OpenAiCompatibleProviderFactory
         .deserialize(json!({
@@ -299,7 +300,7 @@ fn provider_factories_materialize_distinct_kinds() {
             "base_url": OPENROUTER_BASE_URL
         }))
         .expect("compatible config");
-    assert_eq!(compatible.state.kind(), "openai-compatible");
+    assert_eq!(compatible.provider.kind(), "openai-compatible");
 }
 
 #[test]

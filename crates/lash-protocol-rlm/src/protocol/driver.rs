@@ -366,9 +366,11 @@ fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutc
         return None;
     }
     match record.output.control.as_ref()? {
-        lash_core::ToolControl::Handoff { session_id } if !session_id.trim().is_empty() => {
-            Some(TurnOutcome::Handoff {
-                session_id: session_id.clone(),
+        lash_core::ToolControl::SwitchAgentFrame { frame_id, .. }
+            if !frame_id.trim().is_empty() =>
+        {
+            Some(TurnOutcome::AgentFrameSwitch {
+                frame_id: frame_id.clone(),
             })
         }
         lash_core::ToolControl::Finish { value } => {
@@ -383,7 +385,7 @@ fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutc
                 value: failure.to_json_value(),
             }))
         }
-        lash_core::ToolControl::Handoff { .. } => None,
+        lash_core::ToolControl::SwitchAgentFrame { .. } => None,
     }
 }
 

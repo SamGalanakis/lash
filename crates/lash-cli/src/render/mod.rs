@@ -1334,15 +1334,15 @@ fn append_streaming_output_lines(
     content_style: Style,
     row_limit: usize,
 ) {
-    if app.live_tool_output.height() == 0 {
+    if app.live.tool_output.height() == 0 {
         return;
     }
 
-    let mut hidden_rows = app.live_tool_output.hidden;
-    let mut logical = Vec::with_capacity(app.live_tool_output.height());
-    logical.extend(app.live_tool_output.lines.iter().cloned());
-    if !app.live_tool_output.partial.is_empty() {
-        logical.push(app.live_tool_output.partial.clone());
+    let mut hidden_rows = app.live.tool_output.hidden;
+    let mut logical = Vec::with_capacity(app.live.tool_output.height());
+    logical.extend(app.live.tool_output.lines.iter().cloned());
+    if !app.live.tool_output.partial.is_empty() {
+        logical.push(app.live.tool_output.partial.clone());
     }
 
     if row_limit > 0 {
@@ -1389,7 +1389,7 @@ fn render_live_tool_output_inline(
     activity_kind: &ActivityKind,
     viewport_width: usize,
 ) {
-    if app.live_tool_output.height() == 0 || viewport_width == 0 {
+    if app.live.tool_output.height() == 0 || viewport_width == 0 {
         return;
     }
 
@@ -1425,9 +1425,9 @@ pub(crate) fn live_tool_output_standalone_lines(
     viewport_width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    if app.live_tool_output.height() == 0
+    if app.live.tool_output.height() == 0
         || viewport_width == 0
-        || app.live_tool_output.title.is_none()
+        || app.live.tool_output.title.is_none()
         || app.live_tool_output_anchor_block_index().is_some()
     {
         return lines;
@@ -1439,7 +1439,7 @@ pub(crate) fn live_tool_output_standalone_lines(
     ) {
         lines.push(Line::from(""));
     }
-    let title = app.live_tool_output.title.as_deref().unwrap_or_default();
+    let title = app.live.tool_output.title.as_deref().unwrap_or_default();
     lines.push(Line::from(vec![
         Span::styled("• ", Style::default().fg(theme::brand())),
         Span::styled(title.to_string(), theme::code_chrome()),

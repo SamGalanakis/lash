@@ -929,8 +929,8 @@ mod tests {
             .as_ref()
             .expect("process registry")
             .clone();
-        let current_scope = manager.processes.process_scope("root");
-        let other_scope = manager.processes.process_scope("other");
+        let current_scope = crate::ProcessScope::new("root");
+        let other_scope = crate::ProcessScope::new("other");
         let process_ids = ["keep", "sole", "shared"];
 
         for process_id in process_ids {
@@ -1020,8 +1020,8 @@ mod tests {
                 .with_parent_invocation(Some(metadata.clone()))
                 .with_effect_controller(&controller)
         };
-        let root_scope = manager.processes.process_scope("root");
-        let successor_scope = manager.processes.process_scope("successor");
+        let root_scope = crate::ProcessScope::new("root");
+        let target_scope = crate::ProcessScope::new("target");
 
         register_open_process(&registry, "transfer-me").await;
         grant_handle(&registry, &root_scope, "transfer-me").await;
@@ -1031,7 +1031,7 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 "root",
-                "successor",
+                "target",
                 vec!["transfer-me".to_string()],
                 scoped_request(),
             )
@@ -1039,9 +1039,9 @@ mod tests {
             .expect("transfer handles");
         assert!(
             registry
-                .list_handle_grants(&successor_scope)
+                .list_handle_grants(&target_scope)
                 .await
-                .expect("successor grants")
+                .expect("target grants")
                 .into_iter()
                 .any(|(grant, _)| { grant.process_id == "transfer-me" })
         );
@@ -1086,7 +1086,7 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 "root",
-                "successor",
+                "target",
                 Vec::<String>::new(),
                 crate::ProcessOpScope::new(),
             )
@@ -1100,6 +1100,7 @@ mod tests {
                 &manager.managed,
                 "root",
                 &["missing".to_string()],
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect_err("validation should fail");
@@ -1115,7 +1116,7 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 "root",
-                "successor",
+                "target",
                 vec!["missing".to_string()],
                 crate::ProcessOpScope::new(),
             )

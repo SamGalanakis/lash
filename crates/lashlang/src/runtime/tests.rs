@@ -56,7 +56,7 @@ impl ExecutionHost for RecordingProcessHost {
                 "module operations are not supported by this host",
             )),
             AbilityOp::StartProcess(start) => {
-                self.starts.lock().expect("starts lock").push(start);
+                self.starts.lock().expect("starts lock").push(*start);
                 let mut handle = Record::new();
                 handle.insert("__handle__".to_string(), Value::String("process".into()));
                 handle.insert("id".to_string(), Value::String("proc-1".into()));

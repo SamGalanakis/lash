@@ -47,6 +47,8 @@ impl SnapshotStore {
                 session_id: state.session_id,
                 head_revision: 7,
                 config,
+                agent_frames: state.agent_frames,
+                current_agent_frame_id: state.current_agent_frame_id,
                 graph: state.session_graph,
                 checkpoint_ref: None,
                 checkpoint: Some(lash_core::HydratedSessionCheckpoint {
@@ -175,6 +177,8 @@ impl lash_core::RuntimePersistence for SnapshotStore {
             session_id: commit.session_id.clone(),
             head_revision: 8,
             config: commit.config,
+            agent_frames: commit.agent_frames,
+            current_agent_frame_id: commit.current_agent_frame_id,
             graph,
             checkpoint_ref: Some(lash_core::BlobRef("checkpoint".to_string())),
             checkpoint: Some(commit.checkpoint),

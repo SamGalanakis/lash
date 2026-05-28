@@ -133,7 +133,7 @@ mod tests {
         ];
         let contracts: std::collections::BTreeMap<_, _> = tools
             .iter()
-            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect();
         let manifests = tools.iter().map(|tool| tool.manifest()).collect::<Vec<_>>();
         let contribution = rlm_tool_surface(ToolSurfaceContext {

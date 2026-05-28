@@ -628,7 +628,7 @@ submit {
             r#"
 agent = start spawn_child(task: "inspect carry-forward", capability: "explore")
 handles = await processes.list({})?
-handoff = await control.continue_as({
+frame = await control.continue_as({
   task: "continue from compact state",
   seed: {
     projected_problem: proj.text,
@@ -639,12 +639,12 @@ handoff = await control.continue_as({
   }
 })?
 submit {
-  session_id: handoff.session_id,
-  task: handoff.task,
-  seed_keys: handoff.seed_keys,
-  projected_count: handoff.projected_count,
-  global_count: handoff.global_count,
-  handle_count: handoff.handle_count
+  frame_id: frame.frame_id,
+  task: frame.task,
+  seed_keys: frame.seed_keys,
+  projected_count: frame.projected_count,
+  global_count: frame.global_count,
+  handle_count: frame.handle_count
 }
 "#
         }
@@ -1363,10 +1363,7 @@ fn continue_as_record(args: &Record) -> Value {
 
     let mut record = Record::default();
     record.insert("ok".to_string(), Value::Bool(true));
-    record.insert(
-        "session_id".to_string(),
-        Value::String("handoff:bench".into()),
-    );
+    record.insert("frame_id".to_string(), Value::String("frame:bench".into()));
     record.insert(
         "task".to_string(),
         args.get("task")

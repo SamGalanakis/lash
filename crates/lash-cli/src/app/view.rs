@@ -5,21 +5,21 @@ impl App {
         self.timeline = vec![UiTimelineItem::Splash].into();
         self.scroll_offset = 0;
         self.follow_mode = FollowOutputMode::Bottom;
-        self.live_assistant.clear();
-        self.live_reasoning.clear();
+        self.live.assistant.clear();
+        self.live.reasoning.clear();
         self.clear_status();
         self.editor.pending_images.clear();
         self.editor.pending_large_pastes.clear();
         self.clear_live_tool_output();
-        self.pending_steers.clear();
-        self.queued_turns.clear();
+        self.queues.pending_steers.clear();
+        self.queues.queued_turns.clear();
         self.overlay = None;
         self.activity_state.reset();
-        self.token_usage = TokenUsage::default();
-        self.last_response_usage = TokenUsage::default();
-        self.last_prompt_usage = None;
-        self.live_output_chars_estimate = 0;
-        self.live_output_tokens_estimate = 0;
+        self.usage.token_usage = TokenUsage::default();
+        self.usage.last_response_usage = TokenUsage::default();
+        self.usage.last_prompt_usage = None;
+        self.usage.live_output_chars_estimate = 0;
+        self.usage.live_output_tokens_estimate = 0;
         self.model_variant = None;
         self.clear_mode_indicators();
         self.plan_dock = None;
@@ -76,26 +76,31 @@ impl App {
         if self.follows_output() {
             self.expand_level = level;
             self.invalidate_height_cache();
-            if self.height_cache_width > 0 && self.height_cache_vh > 0 {
-                self.ensure_height_cache(self.height_cache_width, self.height_cache_vh);
-                self.scroll_offset =
-                    self.follow_output_anchor_offset(self.height_cache_width, self.height_cache_vh);
+            if self.render_cache.width > 0 && self.render_cache.viewport_height > 0 {
+                self.ensure_height_cache(
+                    self.render_cache.width,
+                    self.render_cache.viewport_height,
+                );
+                self.scroll_offset = self.follow_output_anchor_offset(
+                    self.render_cache.width,
+                    self.render_cache.viewport_height,
+                );
             } else {
                 self.scroll_offset = usize::MAX;
             }
             return;
         }
 
-        if self.height_cache_width > 0 {
-            let w = self.height_cache_width;
-            let vh = self.height_cache_vh;
+        if self.render_cache.width > 0 {
+            let w = self.render_cache.width;
+            let vh = self.render_cache.viewport_height;
             self.ensure_height_cache(w, vh);
         }
 
-        let anchor = if self.height_cache_width == 0 || self.height_cache.is_empty() {
+        let anchor = if self.render_cache.width == 0 || self.render_cache.heights.is_empty() {
             None
         } else {
-            let cache = &self.height_cache;
+            let cache = &self.render_cache.heights;
             let idx = cache.partition_point(|&cum| cum <= self.scroll_offset);
             if idx >= self.timeline.len() {
                 None
@@ -110,16 +115,16 @@ impl App {
         self.invalidate_height_cache();
 
         if let Some((anchor_idx, anchor_skip)) = anchor {
-            let w = self.height_cache_width;
-            let vh = self.height_cache_vh;
+            let w = self.render_cache.width;
+            let vh = self.render_cache.viewport_height;
             self.ensure_height_cache(w, vh);
 
             let new_block_start = if anchor_idx == 0 {
                 0
             } else {
-                self.height_cache[anchor_idx - 1]
+                self.render_cache.heights[anchor_idx - 1]
             };
-            let new_block_height = self.height_cache[anchor_idx] - new_block_start;
+            let new_block_height = self.render_cache.heights[anchor_idx] - new_block_start;
             let clamped_skip = anchor_skip.min(new_block_height.saturating_sub(1));
             self.scroll_offset = new_block_start + clamped_skip;
         }
@@ -127,9 +132,11 @@ impl App {
 
     pub fn scroll_up(&mut self, amount: usize) {
         if self.follows_output() {
-            if self.height_cache_width > 0 && self.height_cache_vh > 0 {
-                self.scroll_offset =
-                    self.follow_output_anchor_offset(self.height_cache_width, self.height_cache_vh);
+            if self.render_cache.width > 0 && self.render_cache.viewport_height > 0 {
+                self.scroll_offset = self.follow_output_anchor_offset(
+                    self.render_cache.width,
+                    self.render_cache.viewport_height,
+                );
             } else {
                 self.scroll_offset = 0;
             }
@@ -186,19 +193,19 @@ impl App {
             return;
         };
 
-        if self.height_cache_width == 0 || self.height_cache_vh == 0 {
+        if self.render_cache.width == 0 || self.render_cache.viewport_height == 0 {
             self.scroll_to_bottom();
             return;
         }
 
-        let width = self.height_cache_width;
-        let viewport_height = self.height_cache_vh;
+        let width = self.render_cache.width;
+        let viewport_height = self.render_cache.viewport_height;
         self.ensure_height_cache(width, viewport_height);
 
         let total_height = self.total_content_height(width, viewport_height);
         let max_scroll = total_height.saturating_sub(viewport_height);
         let block_start = self.block_start_offset(last_idx);
-        let block_end = self.height_cache[last_idx];
+        let block_end = self.render_cache.heights[last_idx];
         let block_height = block_end.saturating_sub(block_start);
         let block_content_start = self.block_content_start_offset(last_idx);
         let has_splash_before = self.timeline[..last_idx]
@@ -206,7 +213,8 @@ impl App {
             .any(|block| matches!(block, UiTimelineItem::Splash));
 
         let awaiting_first_visible_output = self
-            .live_turn
+            .live
+            .turn
             .as_ref()
             .is_some_and(|turn| !turn.has_visible_output);
 
@@ -238,7 +246,8 @@ impl App {
         }
 
         let awaiting_first_visible_output = self
-            .live_turn
+            .live
+            .turn
             .as_ref()
             .is_some_and(|turn| !turn.has_visible_output);
 
@@ -247,12 +256,13 @@ impl App {
         }
 
         let anchor_output_start = self
-            .live_turn
+            .live
+            .turn
             .as_ref()
             .is_some_and(|turn| turn.output_start_anchor_pending);
 
         if anchor_output_start {
-            if let Some(turn) = self.live_turn.as_mut() {
+            if let Some(turn) = self.live.turn.as_mut() {
                 turn.output_start_anchor_pending = false;
             }
             self.follow_mode = FollowOutputMode::Bottom;
@@ -283,17 +293,18 @@ impl App {
             return Some(self.block_content_start_offset(idx));
         }
 
-        let history_tail = self.height_cache.last().copied().unwrap_or(0);
-        if self.live_tool_output.height() > 0
-            && self.live_tool_output.title.is_some()
+        let history_tail = self.render_cache.heights.last().copied().unwrap_or(0);
+        if self.live.tool_output.height() > 0
+            && self.live.tool_output.title.is_some()
             && self.live_tool_output_anchor_block_index().is_none()
         {
             return Some(history_tail);
         }
-        if self.live_reasoning.has_renderable_output() {
+        if self.live.reasoning.has_renderable_output() {
             return Some(history_tail + self.live_reasoning_leading_padding());
         }
-        self.live_assistant
+        self.live
+            .assistant
             .has_renderable_output()
             .then_some(history_tail + self.live_assistant_leading_padding())
     }
@@ -340,7 +351,7 @@ impl App {
         if idx == 0 {
             0
         } else {
-            self.height_cache[idx - 1]
+            self.render_cache.heights[idx - 1]
         }
     }
 
@@ -371,52 +382,52 @@ impl App {
     }
 
     pub fn height_cache_snapshot(&self) -> &[usize] {
-        &self.height_cache
+        &self.render_cache.heights
     }
 
     fn ensure_height_cache(&mut self, width: usize, viewport_height: usize) {
-        let dimensions_changed =
-            self.height_cache_width != width || self.height_cache_vh != viewport_height;
+        let dimensions_changed = self.render_cache.width != width
+            || self.render_cache.viewport_height != viewport_height;
         if dimensions_changed {
-            self.height_cache.clear();
-            self.height_cache_dirty_from = 0;
+            self.render_cache.heights.clear();
+            self.render_cache.dirty_from = 0;
         }
-        if !self.height_cache.is_empty()
+        if !self.render_cache.heights.is_empty()
             && !dimensions_changed
-            && self.height_cache_dirty_from >= self.timeline.len()
+            && self.render_cache.dirty_from >= self.timeline.len()
         {
             return;
         }
-        self.height_cache_width = width;
-        self.height_cache_vh = viewport_height;
+        self.render_cache.width = width;
+        self.render_cache.viewport_height = viewport_height;
 
         let target_len = self.timeline.len();
-        if self.height_cache.len() > target_len {
-            self.height_cache.truncate(target_len);
+        if self.render_cache.heights.len() > target_len {
+            self.render_cache.heights.truncate(target_len);
         }
-        let dirty_from = self.height_cache_dirty_from.min(target_len);
+        let dirty_from = self.render_cache.dirty_from.min(target_len);
         if dirty_from == 0 {
-            self.height_cache.clear();
-            self.height_cache.reserve(target_len);
+            self.render_cache.heights.clear();
+            self.render_cache.heights.reserve(target_len);
         } else {
-            self.height_cache.truncate(dirty_from);
+            self.render_cache.heights.truncate(dirty_from);
         }
         let mut cumulative = if dirty_from == 0 {
             0
         } else {
-            self.height_cache[dirty_from - 1]
+            self.render_cache.heights[dirty_from - 1]
         };
         for i in dirty_from..target_len {
             cumulative += self.rendered_block_height_cached(i, width, viewport_height);
-            self.height_cache.push(cumulative);
+            self.render_cache.heights.push(cumulative);
         }
-        self.height_cache_dirty_from = target_len;
+        self.render_cache.dirty_from = target_len;
     }
 
     pub fn total_content_height(&mut self, width: usize, viewport_height: usize) -> usize {
         self.ensure_height_cache(width, viewport_height);
         self.ensure_live_markdown_rendered(width);
-        self.height_cache.last().copied().unwrap_or(0)
+        self.render_cache.heights.last().copied().unwrap_or(0)
             + crate::render::live_tool_output_standalone_height(self, width)
             + self.live_reasoning_height()
             + self.live_assistant_height()

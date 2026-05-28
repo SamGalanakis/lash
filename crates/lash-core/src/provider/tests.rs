@@ -21,17 +21,18 @@ struct FailingProvider {
 
 impl FailingProvider {
     fn into_components(self) -> ProviderComponents {
-        ProviderComponents::shared(self, Arc::new(StaticModelPolicy::new()))
+        ProviderComponents::new(Box::new(self), Arc::new(StaticModelPolicy::new()))
     }
 }
 
 impl MutatingProvider {
     fn into_components(self, policy: Arc<dyn ProviderModelPolicy>) -> ProviderComponents {
-        ProviderComponents::shared(self, policy)
+        ProviderComponents::new(Box::new(self), policy)
     }
 }
 
-impl ProviderState for MutatingProvider {
+#[async_trait::async_trait]
+impl Provider for MutatingProvider {
     fn kind(&self) -> &'static str {
         "mutating"
     }
@@ -48,12 +49,27 @@ impl ProviderState for MutatingProvider {
         serde_json::json!({ "marker": self.marker })
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderState> {
+    async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        self.marker = "complete".to_string();
+        Ok(LlmResponse {
+            full_text: "ok".to_string(),
+            parts: Vec::new(),
+            usage: LlmUsage::default(),
+            terminal_reason: crate::LlmTerminalReason::Stop,
+            terminal_diagnostic: None,
+            provider_usage: None,
+            request_body: None,
+            http_summary: None,
+        })
+    }
+
+    fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
 }
 
-impl ProviderState for FailingProvider {
+#[async_trait::async_trait]
+impl Provider for FailingProvider {
     fn kind(&self) -> &'static str {
         "failing"
     }
@@ -70,34 +86,6 @@ impl ProviderState for FailingProvider {
         serde_json::Value::Object(Default::default())
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderState> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait::async_trait]
-impl ProviderTransport for MutatingProvider {
-    async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
-        self.marker = "complete".to_string();
-        Ok(LlmResponse {
-            full_text: "ok".to_string(),
-            parts: Vec::new(),
-            usage: LlmUsage::default(),
-            terminal_reason: crate::LlmTerminalReason::Stop,
-            terminal_diagnostic: None,
-            provider_usage: None,
-            request_body: None,
-            http_summary: None,
-        })
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait::async_trait]
-impl ProviderTransport for FailingProvider {
     async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt <= self.fail_until {
@@ -122,14 +110,14 @@ impl ProviderTransport for FailingProvider {
         })
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+    fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
 }
 
 #[derive(Debug)]
 struct MetricsTransport {
-    inner: Box<dyn ProviderTransport>,
+    inner: Box<dyn Provider>,
     hits: Arc<AtomicUsize>,
 }
 
@@ -143,13 +131,33 @@ impl Clone for MetricsTransport {
 }
 
 #[async_trait::async_trait]
-impl ProviderTransport for MetricsTransport {
+impl Provider for MetricsTransport {
+    fn kind(&self) -> &'static str {
+        self.inner.kind()
+    }
+
+    fn options(&self) -> ProviderOptions {
+        self.inner.options()
+    }
+
+    fn set_options(&mut self, options: ProviderOptions) {
+        self.inner.set_options(options);
+    }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        self.inner.serialize_config()
+    }
+
     async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         self.hits.fetch_add(1, Ordering::SeqCst);
         self.inner.complete(request).await
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+    fn requires_streaming(&self) -> bool {
+        self.inner.requires_streaming()
+    }
+
+    fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
 }
@@ -300,11 +308,11 @@ async fn transport_mutations_are_visible_after_completion_returns() {
 }
 
 #[tokio::test]
-async fn map_transport_installs_transport_only_decorator() {
+async fn map_provider_installs_transport_decorator() {
     let hits = Arc::new(AtomicUsize::new(0));
     let components = MutatingProvider::default()
         .into_components(Arc::new(StaticModelPolicy::new()))
-        .map_transport({
+        .map_provider({
             let hits = Arc::clone(&hits);
             move |inner| Box::new(MetricsTransport { inner, hits })
         });

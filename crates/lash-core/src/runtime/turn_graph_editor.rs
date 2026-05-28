@@ -24,8 +24,14 @@ pub(super) struct TurnGraphEditor {
 }
 
 impl TurnGraphEditor {
-    pub(super) fn new(base_graph: Arc<SessionGraph>, base_read_model: SessionReadModel) -> Self {
-        let append_builder = base_graph.append_builder();
+    pub(super) fn new(
+        base_graph: Arc<SessionGraph>,
+        base_read_model: SessionReadModel,
+        agent_frame_id: crate::AgentFrameId,
+    ) -> Self {
+        let append_builder = base_graph
+            .append_builder()
+            .with_agent_frame_id(agent_frame_id);
         let active_messages = MessageSequence::from_base(base_read_model.messages);
         let graph_tool_calls = base_read_model.tool_calls.as_ref().clone();
         Self {
@@ -233,6 +239,7 @@ impl TurnGraphEditor {
         let replacement = build_active_read_replacement(
             active_path,
             self.append_builder.existing_node_ids(),
+            self.append_builder.agent_frame_id(),
             messages,
             tool_calls,
         );
@@ -372,7 +379,8 @@ mod tests {
     fn record_tool_calls_skips_duplicate_stable_keys() {
         let base_graph = Arc::new(SessionGraph::default());
         let base_read_model = base_graph.read_model();
-        let mut overlay = TurnGraphEditor::new(base_graph, base_read_model);
+        let mut overlay =
+            TurnGraphEditor::new(base_graph, base_read_model, "test-frame".to_string());
         let record = tool_record("call-1");
 
         overlay.record_tool_calls([record.clone(), record]);

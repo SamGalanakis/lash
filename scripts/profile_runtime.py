@@ -123,9 +123,9 @@ def maybe_build(
     if not force and binary.exists():
         return
     cmd = ["cargo", "build", "-q", "-p", "lash-cli"]
-    # `--runtime-perf-benchmark` is gated behind the `runtime-perf` cargo
+    # `--runtime-perf-benchmark` is gated behind the `bench` cargo
     # feature so production CLI builds don't inherit `lash/testing` fixtures.
-    feature_list = ["runtime-perf", *cargo_features]
+    feature_list = ["bench", *cargo_features]
     if dhat:
         feature_list.append("dhat-heap")
     cmd.extend(["--features", ",".join(feature_list)])

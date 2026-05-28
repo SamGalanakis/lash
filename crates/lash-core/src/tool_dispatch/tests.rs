@@ -78,7 +78,7 @@ fn contract_from(
 ) -> Option<Arc<crate::ToolContract>> {
     definitions
         .into_iter()
-        .find(|tool| tool.name == name)
+        .find(|tool| tool.name() == name)
         .map(|tool| Arc::new(tool.contract()))
 }
 
@@ -315,6 +315,7 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
         ),
         parent_invocation: None,
         session_id: "session".to_string(),
+        agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -352,6 +353,7 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
         ),
         parent_invocation: None,
         session_id: "session".to_string(),
+        agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -396,6 +398,7 @@ fn projection_policy_dispatch_context(
         ),
         parent_invocation: None,
         session_id: "session".to_string(),
+        agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -493,7 +496,7 @@ impl ToolProvider for RetryProbeTools {
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
-        (name == self.definition.name).then(|| Arc::new(self.definition.contract()))
+        (name == self.definition.name()).then(|| Arc::new(self.definition.contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -546,6 +549,7 @@ fn lazy_contract_dispatch_context(
         ),
         parent_invocation: None,
         session_id: "session".to_string(),
+        agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -572,6 +576,7 @@ fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContex
         ),
         parent_invocation: None,
         session_id: "session".to_string(),
+        agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -624,6 +629,7 @@ fn parallel_dispatch_context(
         ),
         parent_invocation: None,
         session_id: "session".to_string(),
+        agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -1247,6 +1253,7 @@ fn serial_dispatch_context(
         ),
         parent_invocation: None,
         session_id: "session".to_string(),
+        agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -1391,6 +1398,7 @@ async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
         ),
         parent_invocation: None,
         session_id: "session".to_string(),
+        agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -1521,6 +1529,7 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
         ),
         parent_invocation: None,
         session_id: "session".to_string(),
+        agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),

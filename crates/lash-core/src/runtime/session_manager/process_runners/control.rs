@@ -4,13 +4,21 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 impl ProcessCapability {
-    pub(in crate::runtime::session_manager) fn process_scope(
+    fn process_scope_for_op(
         &self,
         session_id: &str,
+        agent_frame_id: Option<&str>,
     ) -> crate::ProcessScope {
-        crate::ProcessScope::new(session_id)
+        agent_frame_id
+            .filter(|frame_id| !frame_id.is_empty())
+            .map(|frame_id| crate::ProcessScope::for_agent_frame(session_id, frame_id))
+            .unwrap_or_else(|| crate::ProcessScope::new(session_id))
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "process start composes current session, managed session, runner, target, registration, options, and scoped effect context"
+    )]
     pub(in crate::runtime::session_manager) async fn start_process(
         &self,
         current: &CurrentSessionCapability,
@@ -29,7 +37,7 @@ impl ProcessCapability {
             ));
         };
         self.mark_current_process_sync_needed(current, session_id);
-        let creator_scope = self.process_scope(session_id);
+        let creator_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
         let caused_by = scope
             .parent_invocation
             .as_ref()
@@ -44,7 +52,9 @@ impl ProcessCapability {
         let wake_target_scope = options
             .wake_session_id
             .as_deref()
-            .map(|session_id| self.process_scope(session_id))
+            .map(|session_id| {
+                self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref())
+            })
             .unwrap_or_else(|| creator_scope.clone());
         let execution_context = options
             .execution_context(&scope)
@@ -125,7 +135,8 @@ impl ProcessCapability {
                 current,
                 Arc::clone(registry),
                 crate::ProcessCommand::List {
-                    owner_scope: self.process_scope(session_id),
+                    owner_scope: self
+                        .process_scope_for_op(session_id, scope.agent_frame_id.as_deref()),
                 },
                 None,
                 scope.parent_invocation,
@@ -220,6 +231,7 @@ impl ProcessCapability {
         _managed: &ManagedSessionCapability,
         session_id: &str,
         handle_ids: &[String],
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<(), crate::PluginError> {
         if handle_ids.is_empty() {
             return Ok(());
@@ -231,7 +243,7 @@ impl ProcessCapability {
                 "process registry is unavailable in this runtime".to_string(),
             ));
         };
-        let owner_scope = self.process_scope(session_id);
+        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
         for (grant, _record) in registry.list_handle_grants(&owner_scope).await? {
             visible.insert(grant.process_id);
         }
@@ -265,8 +277,12 @@ impl ProcessCapability {
                 current,
                 Arc::clone(registry),
                 crate::ProcessCommand::Transfer {
-                    from_scope: self.process_scope(from_session_id),
-                    to_scope: self.process_scope(to_session_id),
+                    from_scope: self
+                        .process_scope_for_op(from_session_id, scope.agent_frame_id.as_deref()),
+                    to_scope: self.process_scope_for_op(
+                        to_session_id,
+                        scope.target_agent_frame_id.as_deref(),
+                    ),
                     process_ids,
                 },
                 None,
@@ -298,7 +314,7 @@ impl ProcessCapability {
                 "process registry is unavailable in this runtime".to_string(),
             ));
         };
-        let owner_scope = self.process_scope(session_id);
+        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
         let tasks = registry.list_handle_grants(&owner_scope).await?;
         let mut cancelled = Vec::new();
         for (grant, record) in tasks {
@@ -359,6 +375,10 @@ impl ProcessCapability {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "journaled process effects keep registry, command, runner, invocation, controller, and turn lease explicit"
+    )]
     async fn execute_process_effect(
         &self,
         current: &CurrentSessionCapability,

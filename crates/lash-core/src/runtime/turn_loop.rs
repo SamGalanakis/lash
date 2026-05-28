@@ -2,7 +2,11 @@ use super::*;
 
 fn trace_fields_from_outcome(
     outcome: &TurnOutcome,
-) -> (&'static str, &'static str, Option<lash_trace::TraceHandoff>) {
+) -> (
+    &'static str,
+    &'static str,
+    Option<lash_trace::TraceAgentFrameSwitch>,
+) {
     match outcome {
         TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => {
             ("completed", "assistant_message", None)
@@ -11,11 +15,11 @@ fn trace_fields_from_outcome(
             ("completed", "submitted_value", None)
         }
         TurnOutcome::Finished(TurnFinish::ToolValue { .. }) => ("completed", "tool_value", None),
-        TurnOutcome::Handoff { session_id } => (
+        TurnOutcome::AgentFrameSwitch { frame_id } => (
             "completed",
-            "handoff",
-            Some(lash_trace::TraceHandoff {
-                successor_session_id: session_id.clone(),
+            "agent_frame_switch",
+            Some(lash_trace::TraceAgentFrameSwitch {
+                frame_id: frame_id.clone(),
             }),
         ),
         TurnOutcome::Stopped(stop) => ("failed", trace_stop_reason(stop), None),
@@ -69,7 +73,7 @@ struct LeasedTurnFinish {
 
 impl LashRuntime {
     fn max_context_tokens(&self) -> usize {
-        self.policy.context_window_tokens()
+        self.state.effective_policy().context_window_tokens()
     }
     #[doc(hidden)]
     pub fn set_turn_phase_probe(&mut self, probe: Arc<dyn RuntimeTurnPhaseProbe>) {
@@ -109,7 +113,7 @@ impl LashRuntime {
             .session
             .as_ref()
             .and_then(|session| session.history_store());
-        self.policy = self.state.policy.clone();
+        self.policy = self.state.effective_policy().clone();
         turn_pipeline.state_mut().policy = self.policy.clone();
         turn_pipeline.state_mut().turn_index = turn_index;
 
@@ -216,6 +220,24 @@ impl LashRuntime {
 
         emit_session_events_to_sink(events, finalized.events).await;
         self.state = turn_pipeline.into_final_state();
+        if matches!(returned_turn.outcome, TurnOutcome::AgentFrameSwitch { .. })
+            && let Some(session) = self.session.as_mut()
+        {
+            let protocol_session = Arc::clone(session.plugins().protocol_session());
+            let session_id = self.state.session_id.clone();
+            protocol_session
+                .restore_session(
+                    crate::plugin::ProtocolSessionContext::new(session, &session_id),
+                    &self.state,
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::Other("protocol_restore_session".to_string()),
+                        err.to_string(),
+                    )
+                })?;
+        }
         self.emit_turn_persisted_event(&returned_turn).await;
         self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
 
@@ -237,7 +259,7 @@ impl LashRuntime {
             return;
         }
 
-        let (status, done_reason, handoff) = trace_fields_from_outcome(outcome);
+        let (status, done_reason, agent_frame_switch) = trace_fields_from_outcome(outcome);
         crate::trace::emit_trace(
             &self.host.core.trace_sink,
             &self.host.core.trace_context,
@@ -248,7 +270,7 @@ impl LashRuntime {
             lash_trace::TraceEvent::TurnCompleted {
                 status: status.to_string(),
                 done_reason: done_reason.to_string(),
-                handoff,
+                agent_frame_switch,
             },
         );
     }
@@ -311,7 +333,11 @@ impl LashRuntime {
         &mut self,
         opts: TurnOptions<'_>,
     ) -> Result<Option<AssembledTurn>, RuntimeError> {
-        let Some(store) = self.session.as_ref().and_then(|session| session.history_store()) else {
+        let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        else {
             return Ok(None);
         };
         let claim = store
@@ -323,7 +349,9 @@ impl LashRuntime {
                 64,
             )
             .await
-            .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
+            })?;
         let Some(claim) = claim else {
             return Ok(None);
         };
@@ -450,7 +478,7 @@ impl LashRuntime {
             .map_err(|err| {
                 RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
             })?;
-        let mut turn_policy = self.policy.clone();
+        let mut turn_policy = self.state.effective_policy().clone();
         turn_policy.model = checkpoint_record.model.clone();
         turn_policy.max_turns = checkpoint_record.machine_config.max_turns;
         self.protocol_turn_options = checkpoint_record.protocol_turn_options.clone();
@@ -504,34 +532,20 @@ impl LashRuntime {
         };
         let mut assembler = TurnAssembler::new();
         self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
-        let run_result = {
-            let run_future = driver.run_restored(
+        let run_result = drive_turn_to_completion(
+            driver.run_restored(
                 restored_machine,
                 event_tx,
                 cancel,
                 resume_protocol_iteration,
-            );
-            tokio::pin!(run_future);
-            loop {
-                tokio::select! {
-                    maybe_event = event_rx.recv() => {
-                        if let Some(event) = maybe_event {
-                            emit_runtime_stream_event_to_sinks(
-                                events,
-                                turn_events,
-                                event,
-                                &mut assembler,
-                            )
-                            .await;
-                        }
-                    }
-                    completed = &mut run_future => {
-                        child_usage_event_relay.clear();
-                        break completed;
-                    }
-                }
-            }
-        };
+            ),
+            &mut event_rx,
+            &mut assembler,
+            &child_usage_event_relay,
+            events,
+            turn_events,
+        )
+        .await;
         let (new_messages, _new_protocol_iteration) = match run_result {
             Ok(result) => result,
             Err(err) => {
@@ -551,9 +565,6 @@ impl LashRuntime {
                 return Err(err);
             }
         };
-        while let Some(event) = event_rx.recv().await {
-            emit_runtime_stream_event_to_sinks(events, turn_events, event, &mut assembler).await;
-        }
         self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
         let RuntimeTurnDriver {
             session,
@@ -618,22 +629,6 @@ impl LashRuntime {
             ));
         }
         input.trace_turn_id = Some(effect_scope.turn_id().to_string());
-        if let Some(execution_session_id) = self
-            .active_handoff_leaf(&self.state.session_id)
-            .await
-            .filter(|session_id| session_id != &self.state.session_id)
-        {
-            return self
-                .stream_turn_on_handoff_successor(
-                    execution_session_id,
-                    input,
-                    events,
-                    turn_events,
-                    effect_scope,
-                    cancel,
-                )
-                .await;
-        }
         self.stream_turn_inner(
             input.clone(),
             events,
@@ -645,61 +640,18 @@ impl LashRuntime {
         .await
     }
 
-    async fn active_handoff_leaf(&self, session_id: &str) -> Option<String> {
-        let continuations = self.active_handoff_continuations.lock().await;
-        let mut current = session_id.to_string();
-        let mut seen = std::collections::HashSet::new();
-        while seen.insert(current.clone()) {
-            let Some(next) = continuations.get(&current).cloned() else {
-                return (current != session_id).then_some(current);
-            };
-            current = next;
-        }
-        None
-    }
-
-    async fn stream_turn_on_handoff_successor(
-        &mut self,
-        execution_session_id: String,
-        input: TurnInput,
-        events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectControllerScope<'_>,
-        cancel: CancellationToken,
-    ) -> Result<AssembledTurn, RuntimeError> {
-        let runtime_handle = {
-            let registry = self.managed_sessions.lock().await;
-            registry.get(&execution_session_id).cloned()
-        }
-        .ok_or_else(|| {
-            RuntimeError::new(
-                RuntimeErrorCode::HandoffSuccessorMissing,
-                format!("active handoff session `{execution_session_id}` is unavailable"),
-            )
-        })?;
-        let mut runtime = runtime_handle.runtime.lock().await;
-        runtime.state.turn_index = self.state.turn_index;
-        let turn = runtime
-            .stream_turn_inner(input, events, turn_events, effect_scope, cancel, None)
-            .await?;
-        runtime_handle.publish_from(&runtime);
-        self.state.turn_index = turn.state.turn_index;
-        Ok(turn)
-    }
-
-    /// Stream one logical host turn, following foreground handoffs until a
-    /// non-handoff outcome is reached.
+    /// Stream one logical host turn, following foreground AgentFrame switches
+    /// until a terminal outcome is reached.
     ///
-    /// RLM `continue_as` creates a successor session with queued first-turn
-    /// input. Hosts that only care about the benchmark/app answer should not
-    /// need to special-case that intermediate outcome; this helper activates
-    /// each successor and drives its queued first turn with the normal runtime
-    /// turn guards.
-    pub async fn stream_turn_following_handoffs(
+    /// RLM `continue_as` creates a new frame in the same session. Hosts that
+    /// only care about the benchmark/app answer should not need to special-case
+    /// that intermediate outcome; this helper keeps driving the same session
+    /// through each frame's task with the normal runtime turn guards.
+    pub async fn stream_turn_with_agent_frames(
         &mut self,
         input: TurnInput,
         opts: TurnOptions<'_>,
-    ) -> Result<FollowedTurn, RuntimeError> {
+    ) -> Result<AgentFrameRun, RuntimeError> {
         let follow_trace_turn_id = input
             .trace_turn_id
             .clone()
@@ -708,7 +660,7 @@ impl LashRuntime {
         let effect_controller = Arc::clone(&self.host.core.effect_controller);
         let effect_scope =
             opts.resolve_effect_scope(effect_controller.as_ref(), &follow_trace_turn_id)?;
-        self.stream_turn_following_handoffs_inner(
+        self.stream_turn_with_agent_frames_inner(
             input,
             opts.events_or_noop(),
             opts.turn_events_or_noop(),
@@ -718,14 +670,14 @@ impl LashRuntime {
         .await
     }
 
-    async fn stream_turn_following_handoffs_inner(
+    async fn stream_turn_with_agent_frames_inner(
         &mut self,
         mut input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
         effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
-    ) -> Result<FollowedTurn, RuntimeError> {
+    ) -> Result<AgentFrameRun, RuntimeError> {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
             && input_turn_id != effect_scope.turn_id()
         {
@@ -753,43 +705,29 @@ impl LashRuntime {
                     None,
                 )
                 .await?;
-            let successor_session_id = match &turn.outcome {
-                TurnOutcome::Handoff { session_id } => Some(session_id.clone()),
+            let switched_frame_id = match &turn.outcome {
+                TurnOutcome::AgentFrameSwitch { frame_id } => Some(frame_id.clone()),
                 _ => None,
             };
+            let next_task = switched_frame_id
+                .as_ref()
+                .and_then(|frame_id| frame_switch_task(&turn, frame_id));
             turns.push(turn);
 
-            let Some(successor_session_id) = successor_session_id else {
-                return Ok(FollowedTurn { turns });
+            let Some(_frame_id) = switched_frame_id else {
+                return Ok(AgentFrameRun { turns });
             };
 
-            let seed = self
-                .pending_first_turn_inputs
-                .lock()
-                .expect("pending first turn inputs lock")
-                .remove(&successor_session_id)
-                .ok_or_else(|| {
-                    RuntimeError::new(
-                        RuntimeErrorCode::HandoffMissingFirstTurn,
-                        format!(
-                            "handoff session `{successor_session_id}` did not provide a first turn"
-                        ),
-                    )
-                })?;
-            input = turn_input_from_plugin_message(seed);
+            let task = next_task.ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::Other("agent_frame_missing_task".to_string()),
+                    "agent frame switch did not provide a task",
+                )
+            })?;
+            input = turn_input_from_text(task);
             input.protocol_turn_options = follow_protocol_turn_options.clone();
             input.trace_turn_id = Some(follow_trace_turn_id.clone());
             input.turn_context = follow_turn_context.clone();
-            if let Some(successor_handle) = {
-                let registry = self.managed_sessions.lock().await;
-                registry.get(&successor_session_id).cloned()
-            } {
-                let mut successor = successor_handle.runtime.lock().await;
-                successor.state.turn_index = self.state.turn_index.saturating_sub(1);
-                // Keep observers aligned if a handoff successor has not
-                // started its own streamed turn yet.
-                successor_handle.publish_from(&successor);
-            }
         }
     }
 
@@ -1089,7 +1027,7 @@ impl LashRuntime {
     ) -> Result<AssembledTurn, RuntimeError> {
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
         let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
-        let mut turn_policy = self.policy.clone();
+        let mut turn_policy = self.state.effective_policy().clone();
         if let Some(provider) = turn_context.provider().cloned() {
             turn_policy.provider = provider;
         }
@@ -1098,7 +1036,7 @@ impl LashRuntime {
         }
         let effective_protocol_turn_options = protocol_turn_options
             .clone()
-            .unwrap_or_else(|| self.protocol_turn_options.clone());
+            .unwrap_or_else(|| self.state.effective_protocol_turn_options().clone());
         let manager = self
             .runtime_session_manager_for_turn(Some(child_usage_event_relay.clone()))
             .map_err(|err| {
@@ -1276,29 +1214,15 @@ impl LashRuntime {
         };
         let protocol_run_offset = 0;
         self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
-        let run_result = {
-            let run_future = driver.run(prepared.messages, event_tx, cancel, protocol_run_offset);
-            tokio::pin!(run_future);
-            loop {
-                tokio::select! {
-                    maybe_event = event_rx.recv() => {
-                        if let Some(event) = maybe_event {
-                            emit_runtime_stream_event_to_sinks(
-                                events,
-                                turn_events,
-                                event,
-                                &mut assembler,
-                            )
-                            .await;
-                        }
-                    }
-                    completed = &mut run_future => {
-                        child_usage_event_relay.clear();
-                        break completed;
-                    }
-                }
-            }
-        };
+        let run_result = drive_turn_to_completion(
+            driver.run(prepared.messages, event_tx, cancel, protocol_run_offset),
+            &mut event_rx,
+            &mut assembler,
+            &child_usage_event_relay,
+            events,
+            turn_events,
+        )
+        .await;
         let (new_messages, _new_protocol_iteration) = match run_result {
             Ok(result) => result,
             Err(err) => {
@@ -1318,9 +1242,6 @@ impl LashRuntime {
                 return Err(err);
             }
         };
-        while let Some(event) = event_rx.recv().await {
-            emit_runtime_stream_event_to_sinks(events, turn_events, event, &mut assembler).await;
-        }
         self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
         tracing::debug!(
             new_message_count = new_messages.len(),
@@ -1367,22 +1288,23 @@ impl LashRuntime {
     }
 }
 
-fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
-    let mut items = Vec::new();
-    if !message.content.is_empty() {
-        items.push(InputItem::Text {
-            text: message.content,
-        });
-    }
-    let mut image_blobs = HashMap::new();
-    for (index, bytes) in message.images.into_iter().enumerate() {
-        let id = format!("handoff-seed-image-{index}");
-        image_blobs.insert(id.clone(), bytes);
-        items.push(InputItem::ImageRef { id });
-    }
+fn frame_switch_task(turn: &AssembledTurn, frame_id: &str) -> Option<String> {
+    turn.tool_calls
+        .iter()
+        .find_map(|record| match &record.output.control {
+            Some(crate::ToolControl::SwitchAgentFrame {
+                frame_id: control_frame_id,
+                task: Some(task),
+                ..
+            }) if control_frame_id == frame_id => Some(task.clone()),
+            _ => None,
+        })
+}
+
+fn turn_input_from_text(text: String) -> TurnInput {
     TurnInput {
-        items,
-        image_blobs,
+        items: vec![InputItem::Text { text }],
+        image_blobs: HashMap::new(),
         protocol_turn_options: None,
         trace_turn_id: None,
         protocol_extension: None,
@@ -1410,6 +1332,54 @@ async fn emit_turn_activity_to_sink(events: &dyn TurnActivitySink, activity: Tur
     if !events.is_noop() {
         events.emit(activity).await;
     }
+}
+
+/// Pump the turn driver's event channel into the host sinks while the run
+/// future executes, then drain any events emitted between completion and the
+/// sender dropping.
+///
+/// Both the fresh and resumed turn entry points construct a
+/// `RuntimeTurnDriver`, kick off its run future, and need identical
+/// event-pump/drain behavior before tearing the driver down. Only the driver
+/// construction and post-run teardown differ, so each caller owns those and
+/// shares this loop.
+async fn drive_turn_to_completion<F>(
+    run_future: F,
+    event_rx: &mut mpsc::Receiver<RuntimeStreamEvent>,
+    assembler: &mut TurnAssembler,
+    child_usage_event_relay: &ChildUsageEventRelay,
+    events: &dyn EventSink,
+    turn_events: &dyn TurnActivitySink,
+) -> Result<(crate::MessageSequence, usize), RuntimeError>
+where
+    F: std::future::Future<Output = Result<(crate::MessageSequence, usize), RuntimeError>>,
+{
+    let run_result = {
+        tokio::pin!(run_future);
+        loop {
+            tokio::select! {
+                maybe_event = event_rx.recv() => {
+                    if let Some(event) = maybe_event {
+                        emit_runtime_stream_event_to_sinks(
+                            events,
+                            turn_events,
+                            event,
+                            assembler,
+                        )
+                        .await;
+                    }
+                }
+                completed = &mut run_future => {
+                    child_usage_event_relay.clear();
+                    break completed;
+                }
+            }
+        }
+    };
+    while let Some(event) = event_rx.recv().await {
+        emit_runtime_stream_event_to_sinks(events, turn_events, event, assembler).await;
+    }
+    run_result
 }
 
 async fn emit_runtime_stream_event_to_sinks(

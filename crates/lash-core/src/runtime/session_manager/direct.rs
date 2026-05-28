@@ -1,25 +1,41 @@
 use super::*;
 
-type DirectCompletionFuture<'a, T> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, crate::PluginError>> + Send + 'a>>;
+/// Runtime-backed direct completion source.
+///
+/// Carries everything needed to plan and journal a direct LLM effect against
+/// the owning session manager.
+#[derive(Clone)]
+struct RuntimeDirectSource<'run> {
+    manager: Arc<RuntimeSessionManager>,
+    effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
+    turn_id: Option<String>,
+    turn_lease: Option<crate::RuntimeTurnLease>,
+}
 
-trait DirectCompletionInvoker: Send + Sync {
-    fn direct_completion<'a>(
-        &'a self,
-        request: crate::DirectRequest,
-        usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectCompletion>;
+#[cfg(any(test, feature = "testing"))]
+type TestDirectFn = Arc<
+    dyn Fn(crate::DirectRequest, String) -> Result<crate::DirectCompletion, crate::PluginError>
+        + Send
+        + Sync,
+>;
 
-    fn direct_llm_completion<'a>(
-        &'a self,
-        request: crate::LlmRequest,
-        usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectLlmCompletion>;
+/// Source of direct (single-shot) LLM completions for plugins and tools.
+///
+/// In production this is always backed by the runtime session manager; the
+/// test/testing variants exist only so that out-of-runtime test harnesses can
+/// inject a canned completion without standing up a full runtime.
+#[derive(Clone)]
+enum DirectCompletionSource<'run> {
+    Runtime(RuntimeDirectSource<'run>),
+    #[cfg(any(test, feature = "testing"))]
+    Unavailable(String),
+    #[cfg(any(test, feature = "testing"))]
+    TestFn(TestDirectFn),
 }
 
 #[derive(Clone)]
 pub struct DirectCompletionClient<'run> {
-    inner: Arc<dyn DirectCompletionInvoker + 'run>,
+    source: DirectCompletionSource<'run>,
 }
 
 impl<'run> DirectCompletionClient<'run> {
@@ -30,7 +46,7 @@ impl<'run> DirectCompletionClient<'run> {
         turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Self {
         Self {
-            inner: Arc::new(RuntimeDirectCompletionInvoker {
+            source: DirectCompletionSource::Runtime(RuntimeDirectSource {
                 manager,
                 effect_controller,
                 turn_id,
@@ -44,7 +60,21 @@ impl<'run> DirectCompletionClient<'run> {
         request: crate::DirectRequest,
         usage_source: &str,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
-        self.inner.direct_completion(request, usage_source).await
+        match &self.source {
+            DirectCompletionSource::Runtime(source) => {
+                source
+                    .manager
+                    .direct
+                    .invoke_direct_completion(source.invocation_context(), request, usage_source)
+                    .await
+            }
+            #[cfg(any(test, feature = "testing"))]
+            DirectCompletionSource::Unavailable(message) => {
+                Err(crate::PluginError::Session(message.clone()))
+            }
+            #[cfg(any(test, feature = "testing"))]
+            DirectCompletionSource::TestFn(invoke) => invoke(request, usage_source.to_string()),
+        }
     }
 
     pub async fn direct_llm_completion(
@@ -52,17 +82,33 @@ impl<'run> DirectCompletionClient<'run> {
         request: crate::LlmRequest,
         usage_source: &str,
     ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
-        self.inner
-            .direct_llm_completion(request, usage_source)
-            .await
+        match &self.source {
+            DirectCompletionSource::Runtime(source) => {
+                source
+                    .manager
+                    .direct
+                    .invoke_direct_llm_completion(
+                        source.invocation_context(),
+                        request,
+                        usage_source,
+                    )
+                    .await
+            }
+            #[cfg(any(test, feature = "testing"))]
+            DirectCompletionSource::Unavailable(message) => {
+                Err(crate::PluginError::Session(message.clone()))
+            }
+            #[cfg(any(test, feature = "testing"))]
+            DirectCompletionSource::TestFn(_) => Err(crate::PluginError::Session(
+                "direct LLM completions are unavailable in this test context".to_string(),
+            )),
+        }
     }
 
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn unavailable(message: impl Into<String>) -> Self {
         Self {
-            inner: Arc::new(UnavailableDirectCompletionInvoker {
-                message: message.into(),
-            }),
+            source: DirectCompletionSource::Unavailable(message.into()),
         }
     }
 
@@ -75,18 +121,21 @@ impl<'run> DirectCompletionClient<'run> {
             + 'static,
     {
         Self {
-            inner: Arc::new(TestDirectCompletionInvoker {
-                invoke: Arc::new(invoke),
-            }),
+            source: DirectCompletionSource::TestFn(Arc::new(invoke)),
         }
     }
 }
 
-struct RuntimeDirectCompletionInvoker<'run> {
-    manager: Arc<RuntimeSessionManager>,
-    effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
-    turn_id: Option<String>,
-    turn_lease: Option<crate::RuntimeTurnLease>,
+impl<'run> RuntimeDirectSource<'run> {
+    fn invocation_context(&self) -> DirectInvocationContext<'_> {
+        DirectInvocationContext {
+            current: &self.manager.current,
+            usage_capability: &self.manager.usage,
+            effect_controller: self.effect_controller.as_controller(),
+            turn_id: self.turn_id.as_deref(),
+            turn_lease: self.turn_lease.as_ref(),
+        }
+    }
 }
 
 pub(in crate::runtime::session_manager) struct DirectInvocationContext<'a> {
@@ -110,121 +159,15 @@ struct DirectLlmEffectPlan {
 
 enum DirectLlmProjection {
     Text {
-        request: crate::DirectRequest,
-        normalized_request: crate::LlmRequest,
+        request: Box<crate::DirectRequest>,
+        normalized_request: Box<crate::LlmRequest>,
         model: String,
         usage_source: String,
     },
     Full {
-        request: crate::LlmRequest,
+        request: Box<crate::LlmRequest>,
         usage_source: String,
     },
-}
-
-impl DirectCompletionInvoker for RuntimeDirectCompletionInvoker<'_> {
-    fn direct_completion<'a>(
-        &'a self,
-        request: crate::DirectRequest,
-        usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectCompletion> {
-        Box::pin(async move {
-            self.manager
-                .direct
-                .invoke_direct_completion(
-                    DirectInvocationContext {
-                        current: &self.manager.current,
-                        usage_capability: &self.manager.usage,
-                        effect_controller: self.effect_controller.as_controller(),
-                        turn_id: self.turn_id.as_deref(),
-                        turn_lease: self.turn_lease.as_ref(),
-                    },
-                    request,
-                    usage_source,
-                )
-                .await
-        })
-    }
-
-    fn direct_llm_completion<'a>(
-        &'a self,
-        request: crate::LlmRequest,
-        usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectLlmCompletion> {
-        Box::pin(async move {
-            self.manager
-                .direct
-                .invoke_direct_llm_completion(
-                    DirectInvocationContext {
-                        current: &self.manager.current,
-                        usage_capability: &self.manager.usage,
-                        effect_controller: self.effect_controller.as_controller(),
-                        turn_id: self.turn_id.as_deref(),
-                        turn_lease: self.turn_lease.as_ref(),
-                    },
-                    request,
-                    usage_source,
-                )
-                .await
-        })
-    }
-}
-
-#[cfg(any(test, feature = "testing"))]
-struct UnavailableDirectCompletionInvoker {
-    message: String,
-}
-
-#[cfg(any(test, feature = "testing"))]
-impl DirectCompletionInvoker for UnavailableDirectCompletionInvoker {
-    fn direct_completion<'a>(
-        &'a self,
-        _request: crate::DirectRequest,
-        _usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectCompletion> {
-        Box::pin(async move { Err(crate::PluginError::Session(self.message.clone())) })
-    }
-
-    fn direct_llm_completion<'a>(
-        &'a self,
-        _request: crate::LlmRequest,
-        _usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectLlmCompletion> {
-        Box::pin(async move { Err(crate::PluginError::Session(self.message.clone())) })
-    }
-}
-
-#[cfg(any(test, feature = "testing"))]
-struct TestDirectCompletionInvoker {
-    invoke: Arc<
-        dyn Fn(crate::DirectRequest, String) -> Result<crate::DirectCompletion, crate::PluginError>
-            + Send
-            + Sync,
-    >,
-}
-
-#[cfg(any(test, feature = "testing"))]
-impl DirectCompletionInvoker for TestDirectCompletionInvoker {
-    fn direct_completion<'a>(
-        &'a self,
-        request: crate::DirectRequest,
-        usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectCompletion> {
-        let invoke = Arc::clone(&self.invoke);
-        let usage_source = usage_source.to_string();
-        Box::pin(async move { invoke(request, usage_source) })
-    }
-
-    fn direct_llm_completion<'a>(
-        &'a self,
-        _request: crate::LlmRequest,
-        _usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectLlmCompletion> {
-        Box::pin(async {
-            Err(crate::PluginError::Session(
-                "direct LLM completions are unavailable in this test context".to_string(),
-            ))
-        })
-    }
 }
 
 impl DirectCompletionCapability {
@@ -281,8 +224,8 @@ impl DirectCompletionCapability {
                     provider,
                     envelope,
                     projection: DirectLlmProjection::Text {
-                        request,
-                        normalized_request,
+                        request: Box::new(request),
+                        normalized_request: Box::new(normalized_request),
                         model,
                         usage_source,
                     },
@@ -317,7 +260,7 @@ impl DirectCompletionCapability {
                     provider,
                     envelope,
                     projection: DirectLlmProjection::Full {
-                        request,
+                        request: Box::new(request),
                         usage_source,
                     },
                 })

@@ -422,7 +422,16 @@ fn is_default_tool_argument_projection_policy(policy: &ToolArgumentProjectionPol
 }
 
 #[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 #[serde(transparent)]
 pub struct ToolId(String);
@@ -464,7 +473,7 @@ impl std::fmt::Display for ToolId {
 /// Tool metadata exposed to prompts, catalogs, UI, and availability checks.
 /// The optional compact contract is the catalog-facing projection of the
 /// resolved contract; full schemas stay in [`ToolContract`].
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ToolManifest {
     pub id: ToolId,
     pub name: String,
@@ -617,51 +626,16 @@ impl ToolContract {
 }
 
 /// Static authoring helper for tools.
+///
+/// Composes the runtime [`ToolManifest`] and [`ToolContract`] projections. Both
+/// are `#[serde(flatten)]`ed so the serialized JSON shape stays flat (and wire/
+/// persistence compatible); the two structs have disjoint field names.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
-    pub id: ToolId,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub description: String,
-    #[serde(default = "ToolContract::default_input_schema")]
-    pub input_schema: serde_json::Value,
-    #[serde(default)]
-    pub output_schema: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub input_schema_projections: Vec<SchemaProjectionOverride>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub output_schema_projections: Vec<SchemaProjectionOverride>,
-    #[serde(default, skip_serializing_if = "ToolOutputContract::is_static")]
-    pub output_contract: ToolOutputContract,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub examples: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_default_tool_availability_config")]
-    pub availability: ToolAvailabilityConfig,
-    #[serde(default, skip_serializing_if = "is_default_tool_activation")]
-    pub activation: ToolActivation,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub availability_override: Option<ToolAvailability>,
-    #[serde(default, skip_serializing_if = "ToolAgentSurface::is_empty")]
-    pub agent_surface: ToolAgentSurface,
-    #[serde(
-        default,
-        skip_serializing_if = "is_default_tool_argument_projection_policy"
-    )]
-    pub argument_projection: ToolArgumentProjectionPolicy,
-    /// How this tool should be scheduled relative to peers when the model
-    /// emits a batch of tool calls. Defaults to [`ToolScheduling::Parallel`].
-    #[serde(
-        default = "default_tool_scheduling",
-        skip_serializing_if = "is_default_tool_scheduling"
-    )]
-    pub scheduling: ToolScheduling,
-    /// Whether this tool may be retried automatically after a failure that
-    /// explicitly opts into safe retry.
-    #[serde(
-        default = "default_tool_retry_policy",
-        skip_serializing_if = "is_default_tool_retry_policy"
-    )]
-    pub retry_policy: ToolRetryPolicy,
+    #[serde(flatten)]
+    pub manifest: ToolManifest,
+    #[serde(flatten)]
+    pub contract: ToolContract,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -777,25 +751,20 @@ impl ToolDefinition {
         input_schema: serde_json::Value,
         output_schema: serde_json::Value,
     ) -> Self {
-        let manifest = ToolManifest {
-            id: id.into(),
-            name: name.into(),
-            description: description.into(),
-            compact_contract: None,
-            availability: ToolAvailabilityConfig::showcased(),
-            activation: ToolActivation::Always,
-            availability_override: None,
-            agent_surface: ToolAgentSurface::default(),
-            argument_projection: ToolArgumentProjectionPolicy::default(),
-            scheduling: ToolScheduling::Parallel,
-            retry_policy: ToolRetryPolicy::Never,
-        };
-        let contract = ToolContract {
-            input_schema,
-            output_schema,
-            ..ToolContract::default()
-        };
-        Self::from_parts(manifest, contract)
+        Self {
+            manifest: ToolManifest {
+                id: id.into(),
+                name: name.into(),
+                description: description.into(),
+                compact_contract: None,
+                ..ToolManifest::default()
+            },
+            contract: ToolContract {
+                input_schema,
+                output_schema,
+                ..ToolContract::default()
+            },
+        }
     }
 
     pub fn raw_named(
@@ -852,22 +821,22 @@ impl ToolDefinition {
     }
 
     pub fn with_examples(mut self, examples: Vec<String>) -> Self {
-        self.examples = examples;
+        self.contract.examples = examples;
         self
     }
 
     pub fn with_availability(mut self, availability: ToolAvailabilityConfig) -> Self {
-        self.availability = availability;
+        self.manifest.availability = availability;
         self
     }
 
     pub fn with_activation(mut self, activation: ToolActivation) -> Self {
-        self.activation = activation;
+        self.manifest.activation = activation;
         self
     }
 
     pub fn with_agent_surface(mut self, agent_surface: ToolAgentSurface) -> Self {
-        self.agent_surface = agent_surface;
+        self.manifest.agent_surface = agent_surface;
         self
     }
 
@@ -875,22 +844,22 @@ impl ToolDefinition {
         mut self,
         argument_projection: ToolArgumentProjectionPolicy,
     ) -> Self {
-        self.argument_projection = argument_projection;
+        self.manifest.argument_projection = argument_projection;
         self
     }
 
     pub fn with_scheduling(mut self, scheduling: ToolScheduling) -> Self {
-        self.scheduling = scheduling;
+        self.manifest.scheduling = scheduling;
         self
     }
 
     pub fn with_retry_policy(mut self, retry_policy: ToolRetryPolicy) -> Self {
-        self.retry_policy = retry_policy;
+        self.manifest.retry_policy = retry_policy;
         self
     }
 
     pub fn with_output_contract(mut self, output_contract: ToolOutputContract) -> Self {
-        self.output_contract = output_contract;
+        self.contract.output_contract = output_contract;
         self
     }
 
@@ -900,9 +869,11 @@ impl ToolDefinition {
         schema: serde_json::Value,
     ) -> Self {
         let profile = profile.into();
-        self.input_schema_projections
+        self.contract
+            .input_schema_projections
             .retain(|projection| projection.profile != profile);
-        self.input_schema_projections
+        self.contract
+            .input_schema_projections
             .push(SchemaProjectionOverride { profile, schema });
         self
     }
@@ -913,9 +884,11 @@ impl ToolDefinition {
         schema: serde_json::Value,
     ) -> Self {
         let profile = profile.into();
-        self.output_schema_projections
+        self.contract
+            .output_schema_projections
             .retain(|projection| projection.profile != profile);
-        self.output_schema_projections
+        self.contract
+            .output_schema_projections
             .push(SchemaProjectionOverride { profile, schema });
         self
     }
@@ -935,12 +908,28 @@ impl ToolDefinition {
         ToolContract::default_input_schema()
     }
 
+    /// Tool identity. Read very widely, so exposed as a thin accessor over the
+    /// composed [`ToolManifest`].
+    pub fn id(&self) -> &ToolId {
+        &self.manifest.id
+    }
+
+    /// Tool name. Read very widely, so exposed as a thin accessor.
+    pub fn name(&self) -> &str {
+        &self.manifest.name
+    }
+
+    /// Tool description. Read very widely, so exposed as a thin accessor.
+    pub fn description(&self) -> &str {
+        &self.manifest.description
+    }
+
     pub fn input_signature(&self) -> String {
-        self.contract().input_signature(&self.manifest())
+        self.contract.input_signature(&self.manifest)
     }
 
     pub fn output_summary(&self) -> String {
-        self.contract().output_summary()
+        self.contract.output_summary()
     }
 
     pub fn signature(&self) -> String {
@@ -952,67 +941,34 @@ impl ToolDefinition {
     }
 
     pub fn compact_contract_with_example_limit(&self, example_limit: usize) -> CompactToolContract {
-        self.contract()
-            .compact_contract_with_example_limit(&self.manifest(), example_limit)
+        self.contract
+            .compact_contract_with_example_limit(&self.manifest, example_limit)
     }
 
     pub fn effective_availability(&self) -> ToolAvailability {
-        self.availability_override
-            .unwrap_or_else(|| self.availability.base())
+        self.manifest.effective_availability()
     }
 
     pub fn model_tool(&self) -> ModelTool {
-        self.contract().model_tool(&self.manifest())
+        self.contract.model_tool(&self.manifest)
     }
 
+    /// Project the manifest, computing the catalog-facing compact contract from
+    /// the resolved [`ToolContract`].
     pub fn manifest(&self) -> ToolManifest {
-        let mut manifest = ToolManifest {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            description: self.description.clone(),
-            compact_contract: None,
-            availability: self.availability.clone(),
-            activation: self.activation,
-            availability_override: self.availability_override,
-            agent_surface: self.agent_surface.clone(),
-            argument_projection: self.argument_projection.clone(),
-            scheduling: self.scheduling,
-            retry_policy: self.retry_policy,
-        };
-        manifest.compact_contract = Some(self.contract().compact_contract(&manifest));
+        let mut manifest = self.manifest.clone();
+        manifest.compact_contract = Some(self.contract.compact_contract(&manifest));
         manifest
     }
 
     pub fn contract(&self) -> ToolContract {
-        ToolContract {
-            input_schema: self.input_schema.clone(),
-            output_schema: self.output_schema.clone(),
-            input_schema_projections: self.input_schema_projections.clone(),
-            output_schema_projections: self.output_schema_projections.clone(),
-            output_contract: self.output_contract.clone(),
-            examples: self.examples.clone(),
-        }
+        self.contract.clone()
     }
 
-    fn from_parts(manifest: ToolManifest, contract: ToolContract) -> Self {
-        Self {
-            id: manifest.id,
-            name: manifest.name,
-            description: manifest.description,
-            input_schema: contract.input_schema,
-            output_schema: contract.output_schema,
-            input_schema_projections: contract.input_schema_projections,
-            output_schema_projections: contract.output_schema_projections,
-            output_contract: contract.output_contract,
-            examples: contract.examples,
-            availability: manifest.availability,
-            activation: manifest.activation,
-            availability_override: manifest.availability_override,
-            agent_surface: manifest.agent_surface,
-            argument_projection: manifest.argument_projection,
-            scheduling: manifest.scheduling,
-            retry_policy: manifest.retry_policy,
-        }
+    /// Recompose a definition from its [`ToolManifest`] and [`ToolContract`]
+    /// projections — the inverse of [`ToolDefinition::manifest`]/[`ToolDefinition::contract`].
+    pub fn from_parts(manifest: ToolManifest, contract: ToolContract) -> Self {
+        Self { manifest, contract }
     }
 
     pub fn format_tool_docs(tools: &[ToolDefinition]) -> String {
@@ -1037,8 +993,9 @@ impl ToolDefinition {
     }
 
     fn parameter_docs(&self) -> Vec<ParameterDoc> {
-        let mut params = schema_parameter_docs(&self.input_schema);
-        self.output_contract
+        let mut params = schema_parameter_docs(&self.contract.input_schema);
+        self.contract
+            .output_contract
             .apply_type_witness_parameter(&mut params);
         params
     }
@@ -1890,7 +1847,7 @@ mod tests {
             serde_json::json!({ "type": "string" }),
         );
 
-        assert_eq!(tool.retry_policy, ToolRetryPolicy::Never);
+        assert_eq!(tool.manifest.retry_policy, ToolRetryPolicy::Never);
         let manifest = tool.manifest();
         assert_eq!(manifest.retry_policy, ToolRetryPolicy::Never);
         let encoded = serde_json::to_value(&manifest).expect("manifest json");
@@ -1919,7 +1876,7 @@ mod tests {
         );
 
         let roundtrip = ToolDefinition::from_parts(manifest, tool.contract());
-        assert_eq!(roundtrip.retry_policy, tool.retry_policy);
+        assert_eq!(roundtrip.manifest.retry_policy, tool.manifest.retry_policy);
         let encoded = serde_json::to_value(roundtrip.manifest()).expect("manifest json");
         assert_eq!(encoded["retry_policy"]["type"], serde_json::json!("safe"));
     }
@@ -1935,7 +1892,7 @@ mod tests {
         );
 
         assert_eq!(
-            tool.argument_projection,
+            tool.manifest.argument_projection,
             ToolArgumentProjectionPolicy::MaterializeProjectedValues
         );
         let manifest = tool.manifest();
@@ -1961,10 +1918,13 @@ mod tests {
         );
 
         let manifest = tool.manifest();
-        assert_eq!(manifest.argument_projection, tool.argument_projection);
+        assert_eq!(manifest.argument_projection, tool.manifest.argument_projection);
 
         let roundtrip = ToolDefinition::from_parts(manifest, tool.contract());
-        assert_eq!(roundtrip.argument_projection, tool.argument_projection);
+        assert_eq!(
+            roundtrip.manifest.argument_projection,
+            tool.manifest.argument_projection
+        );
         let encoded = serde_json::to_value(roundtrip.manifest()).expect("manifest json");
         assert_eq!(
             encoded["argument_projection"],
@@ -2062,9 +2022,12 @@ mod tests {
                 .iter()
                 .any(|param| { param["name"] == "mode" && param["nullable"] == true })
         );
-        assert_eq!(tool.output_schema["properties"]["answer"]["type"], "string");
         assert_eq!(
-            tool.output_schema["properties"]["confidence"]["minimum"].as_f64(),
+            tool.contract.output_schema["properties"]["answer"]["type"],
+            "string"
+        );
+        assert_eq!(
+            tool.contract.output_schema["properties"]["confidence"]["minimum"].as_f64(),
             Some(0.0)
         );
     }
@@ -2096,8 +2059,8 @@ mod tests {
             output_schema.clone(),
         );
 
-        assert_eq!(tool.input_schema, input_schema);
-        assert_eq!(tool.output_schema, output_schema);
+        assert_eq!(tool.contract.input_schema, input_schema);
+        assert_eq!(tool.contract.output_schema, output_schema);
     }
 
     #[test]
@@ -2195,7 +2158,7 @@ mod tests {
         let serialized = serde_json::to_value(&tool).expect("serialize");
         assert!(serialized.get("output_contract").is_none());
         let deserialized: ToolDefinition = serde_json::from_value(serialized).expect("deserialize");
-        assert!(deserialized.output_contract.is_static());
+        assert!(deserialized.contract.output_contract.is_static());
     }
 
     #[test]
@@ -2730,7 +2693,7 @@ mod tests {
             "description": "Read a file"
         }))
         .unwrap();
-        assert!(tool.agent_surface.is_empty());
+        assert!(tool.manifest.agent_surface.is_empty());
     }
 
     #[test]
@@ -2742,7 +2705,8 @@ mod tests {
             ToolDefinition::default_input_schema(),
             serde_json::json!({"type": "string"}),
         );
-        with_metadata.agent_surface = ToolAgentSurface::new(["fs"], "read").with_aliases(["cat"]);
+        with_metadata.manifest.agent_surface =
+            ToolAgentSurface::new(["fs"], "read").with_aliases(["cat"]);
 
         assert!(
             ToolDefinition::format_tool_docs(&[with_metadata])

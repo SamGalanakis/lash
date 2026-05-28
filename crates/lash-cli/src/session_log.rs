@@ -409,6 +409,8 @@ mod tests {
         store.save_session_head(lash_core::SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
             graph,
             config: lash_core::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),

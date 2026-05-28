@@ -286,6 +286,13 @@ impl PreparedTurn {
     pub fn history_text(&self) -> String {
         self.display_text.trim().to_string()
     }
+
+    pub fn matches_content(&self, content: &str) -> bool {
+        self.display_text == content
+            || self.effective_text == content
+            || (!self.input_metadata.transforms.is_empty()
+                && content.starts_with(&self.display_text))
+    }
 }
 
 /// Who owns this turn. Used by the renderer and later by any feature that
@@ -342,7 +349,7 @@ pub struct UiProjectionState {
 impl UiProjectionState {
     pub fn from_app(app: &App) -> Self {
         Self {
-            last_response_usage: app.last_response_usage.clone(),
+            last_response_usage: app.usage.last_response_usage.clone(),
             plugin_mode_indicators: app.plugin_mode_indicators.clone(),
             plugin_panels: app
                 .timeline
@@ -352,7 +359,7 @@ impl UiProjectionState {
                     _ => None,
                 })
                 .collect(),
-            live_tool_output: app.live_tool_output.clone(),
+            live_tool_output: app.live.tool_output.clone(),
             live_assistant_text: app.live_assistant_normalized_text(),
             live_reasoning_text: app.live_reasoning_normalized_text(),
         }
@@ -383,6 +390,100 @@ pub struct TextSelection {
     pub visible: bool,
 }
 
+/// Incrementally maintained render caches for the history viewport.
+///
+/// Grouped out of [`App`] so render code touches one cohesive bag of
+/// height/layout caches instead of five sibling fields scattered through
+/// the god-struct.
+#[derive(Default)]
+pub struct RenderCache {
+    /// Cumulative height prefix sums for each block (used for O(1) total
+    /// height and O(log n) lookup).
+    pub heights: Vec<usize>,
+    /// Earliest block index whose cached height is stale.
+    pub dirty_from: usize,
+    /// Terminal width the height cache was computed for.
+    pub width: usize,
+    /// Viewport height the height cache was computed for (needed for Splash
+    /// centering).
+    pub viewport_height: usize,
+    /// Cached rendered lines for committed history blocks.
+    pub(crate) blocks: Vec<Option<BlockRenderCacheEntry>>,
+}
+
+/// Token/usage accounting for the active session.
+///
+/// Bundles the context-window accounting and live streaming estimates that
+/// runtime-event code and the status strip read, so they no longer reach
+/// into a flat field bag on [`App`].
+#[derive(Default)]
+pub struct UsageState {
+    /// Cumulative token usage for the current session: parent's own LLM
+    /// tokens plus the latest cumulative reported by each child session.
+    /// Recomputed on every [`lash::TurnEvent::Usage`] and
+    /// [`lash::TurnEvent::ChildUsage`].
+    pub token_usage: TokenUsage,
+    /// Parent's own LLM cumulative, kept separately so we can recompute
+    /// `token_usage` when child sessions update.
+    pub parent_session_cumulative: TokenUsage,
+    /// Latest cumulative reported per child session (subagents, compaction,
+    /// observers). Keyed by child session id.
+    pub child_session_cumulatives: HashMap<String, TokenUsage>,
+    /// Context window size for the current model (from models.dev).
+    pub context_window: Option<u64>,
+    /// Whether provider-reported input tokens exclude cached prompt tokens.
+    pub context_usage_excludes_cached_input: bool,
+    /// Latest completed model usage for context accounting.
+    pub last_response_usage: TokenUsage,
+    /// Latest normalized prompt-budget usage for context accounting and
+    /// folding.
+    pub last_prompt_usage: Option<PromptUsage>,
+    /// Estimated output character count from live streaming chunks.
+    pub live_output_chars_estimate: i64,
+    /// Estimated output tokens from live streamed chunks before final usage
+    /// arrives.
+    pub live_output_tokens_estimate: i64,
+}
+
+/// Streaming buffers for the in-flight turn.
+///
+/// Holds the live status state plus the incremental markdown/tool-output
+/// streams the active turn renders, separated from committed history.
+pub struct LiveTurnView {
+    /// Active live turn state for the bottom status strip.
+    pub turn: Option<LiveTurnState>,
+    /// Incremental markdown stream for assistant prose in the active turn.
+    pub assistant: LiveMarkdown,
+    /// Incremental markdown stream for reasoning in the active turn.
+    pub reasoning: LiveMarkdown,
+    /// Live tool output preview anchored to the active tool activity block.
+    pub tool_output: LiveToolOutput,
+}
+
+impl Default for LiveTurnView {
+    fn default() -> Self {
+        Self {
+            turn: None,
+            assistant: LiveMarkdown::new(crate::assistant_text::MarkdownLane::Assistant),
+            reasoning: LiveMarkdown::new(crate::assistant_text::MarkdownLane::Reasoning),
+            tool_output: LiveToolOutput::default(),
+        }
+    }
+}
+
+/// Queued and steering turns waiting to dispatch.
+#[derive(Default)]
+pub struct Queues {
+    /// Priority follow-ups entered with Enter while a turn is running.
+    pub pending_steers: std::collections::VecDeque<PreparedTurn>,
+    /// FIFO drafts explicitly queued for later turns.
+    pub queued_turns: std::collections::VecDeque<PreparedTurn>,
+    /// Most recent selection-style prompt response, held briefly so the next
+    /// tool result can render it inline if it exposes a question-panel
+    /// artifact.
+    pub pending_option_prompt_response: Option<String>,
+}
+
 pub struct App {
     pub timeline: UiTimeline,
     pub scroll_offset: usize,
@@ -392,72 +493,33 @@ pub struct App {
     pub iteration: usize,
     /// Spinner frame counter
     pub tick: usize,
-    /// Active live turn state for the bottom status strip.
-    pub live_turn: Option<LiveTurnState>,
-    /// Incremental markdown stream for assistant prose in the active turn.
-    live_assistant: LiveMarkdown,
-    /// Incremental markdown stream for reasoning in the active turn.
-    live_reasoning: LiveMarkdown,
+    /// Live-turn streaming buffers (status strip, assistant/reasoning
+    /// markdown streams, and the anchored tool-output preview).
+    pub live: LiveTurnView,
     /// Whether the UI needs a redraw.
     pub dirty: bool,
     /// Output-following mode for the history viewport.
     pub follow_mode: FollowOutputMode,
-    /// Cumulative height prefix sums for each block (used for O(1) total height and O(log n) lookup).
-    height_cache: Vec<usize>,
-    /// Earliest block index whose cached height is stale.
-    height_cache_dirty_from: usize,
-    /// Terminal width the height cache was computed for.
-    height_cache_width: usize,
-    /// Viewport height the height cache was computed for (needed for Splash centering).
-    height_cache_vh: usize,
-    /// Cached rendered lines for committed history blocks.
-    block_render_cache: Vec<Option<BlockRenderCacheEntry>>,
+    /// Incrementally maintained render/height caches for the viewport.
+    render_cache: RenderCache,
     /// Owned editor/input state.
     pub editor: EditorState,
-    /// Live tool output preview anchored to the active tool activity block.
-    pub live_tool_output: LiveToolOutput,
     /// Loaded skills registry.
     pub skills: SkillCatalog,
-    /// Priority follow-ups entered with Enter while a turn is running.
-    pub pending_steers: std::collections::VecDeque<PreparedTurn>,
-    /// FIFO drafts explicitly queued for later turns.
-    pub queued_turns: std::collections::VecDeque<PreparedTurn>,
-    /// Most recent selection-style prompt response, held briefly so the next
-    /// tool result can render it inline if it exposes a question-panel artifact.
-    pending_option_prompt_response: Option<String>,
+    /// Queued and steering turns waiting to dispatch.
+    pub queues: Queues,
     /// Active overlay/picker/dialog state.
     pub overlay: Option<OverlayState>,
     /// Whether the terminal window is currently focused.
     pub focused: bool,
-    /// Cumulative token usage for the current session: parent's own
-    /// LLM tokens plus the latest cumulative reported by each child
-    /// session. Recomputed on every [`TurnEvent::Usage`] and
-    /// [`TurnEvent::ChildUsage`].
-    pub token_usage: TokenUsage,
-    /// Parent's own LLM cumulative, kept separately so we can recompute
-    /// `token_usage` when child sessions update.
-    pub parent_session_cumulative: TokenUsage,
-    /// Latest cumulative reported per child session (subagents,
-    /// compaction, observers). Keyed by child session id.
-    pub child_session_cumulatives: HashMap<String, TokenUsage>,
-    /// Context window size for the current model (from models.dev).
-    pub context_window: Option<u64>,
-    /// Whether provider-reported input tokens exclude cached prompt tokens.
-    pub context_usage_excludes_cached_input: bool,
+    /// Token/usage accounting for the current session.
+    pub usage: UsageState,
     /// Active provider-native variant for the current model, if any.
     pub model_variant: Option<String>,
-    /// Latest completed model usage for context accounting.
-    pub last_response_usage: TokenUsage,
-    /// Latest normalized prompt-budget usage for context accounting and folding.
-    pub last_prompt_usage: Option<PromptUsage>,
-    /// Estimated output character count from live streaming chunks.
-    pub live_output_chars_estimate: i64,
-    /// Estimated output tokens from live streamed chunks before final usage arrives.
-    pub live_output_tokens_estimate: i64,
     /// Unique session name (e.g. "alpine-canyon").
     pub session_name: String,
-    /// Live session id (UUID) for the active runtime. Updated on resume,
-    /// fork, and handoff so UI sync calls target the real session.
+    /// Live session id (UUID) for the active runtime. Updated on resume
+    /// and fork so UI sync calls target the real session.
     pub session_id: String,
     /// Repo/branch/worktree metadata for the current cwd, when available.
     pub repo_status: Option<RepoStatus>,
@@ -555,17 +617,18 @@ impl App {
             self.dirty = true;
         }
 
-        if self.live_turn.as_ref().is_some_and(|turn| {
+        if self.live.turn.as_ref().is_some_and(|turn| {
             turn.transient_until
                 .is_some_and(|until| until <= std::time::Instant::now())
         }) {
-            self.live_turn = None;
+            self.live.turn = None;
             self.dirty = true;
             return;
         }
 
         if self
-            .live_turn
+            .live
+            .turn
             .as_ref()
             .is_some_and(|turn| turn.transient_until.is_some())
         {
@@ -593,34 +656,17 @@ impl App {
             model,
             iteration: 0,
             tick: 0,
-            live_turn: None,
-            live_assistant: LiveMarkdown::new(crate::assistant_text::MarkdownLane::Assistant),
-            live_reasoning: LiveMarkdown::new(crate::assistant_text::MarkdownLane::Reasoning),
+            live: LiveTurnView::default(),
             dirty: true,
             follow_mode: FollowOutputMode::Bottom,
-            height_cache: Vec::new(),
-            height_cache_dirty_from: 0,
-            height_cache_width: 0,
-            height_cache_vh: 0,
-            block_render_cache: Vec::new(),
+            render_cache: RenderCache::default(),
             editor: EditorState::default(),
-            live_tool_output: LiveToolOutput::default(),
             skills: SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
-            pending_steers: std::collections::VecDeque::new(),
-            queued_turns: std::collections::VecDeque::new(),
-            pending_option_prompt_response: None,
+            queues: Queues::default(),
             overlay: None,
             focused: true,
-            token_usage: TokenUsage::default(),
-            parent_session_cumulative: TokenUsage::default(),
-            child_session_cumulatives: HashMap::new(),
-            context_window: None,
-            context_usage_excludes_cached_input: false,
+            usage: UsageState::default(),
             model_variant: None,
-            last_response_usage: TokenUsage::default(),
-            last_prompt_usage: None,
-            live_output_chars_estimate: 0,
-            live_output_tokens_estimate: 0,
             session_name,
             session_id,
             repo_status: std::env::current_dir()
@@ -688,11 +734,11 @@ impl App {
     /// Recompute the session-wide cumulative token usage from the parent's
     /// cumulative plus the latest cumulative reported by each child session.
     fn recompute_session_token_usage(&mut self) {
-        let mut total = self.parent_session_cumulative.clone();
-        for child in self.child_session_cumulatives.values() {
+        let mut total = self.usage.parent_session_cumulative.clone();
+        for child in self.usage.child_session_cumulatives.values() {
             total.add(child);
         }
-        self.token_usage = total;
+        self.usage.token_usage = total;
     }
 
     /// Remove the empty-state splash once real conversation content is present.

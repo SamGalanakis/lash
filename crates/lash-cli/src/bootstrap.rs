@@ -740,7 +740,7 @@ mod tests {
         fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
             dummy_tools()
                 .into_iter()
-                .find(|tool| tool.name == name)
+                .find(|tool| tool.name() == name)
                 .map(|tool| std::sync::Arc::new(tool.contract()))
         }
 

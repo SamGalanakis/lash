@@ -31,7 +31,10 @@ pub enum StoreError {
     #[error("runtime turn checkpoint hash mismatch for `{session_id}`/`{turn_id}`")]
     RuntimeTurnCheckpointHashMismatch { session_id: String, turn_id: String },
     #[error("queued work claim `{claim_id}` for session `{session_id}` is missing or expired")]
-    QueuedWorkClaimExpired { session_id: String, claim_id: String },
+    QueuedWorkClaimExpired {
+        session_id: String,
+        claim_id: String,
+    },
     #[error(
         "{record_kind} schema_version {actual} is not supported by this binary (expected {expected})"
     )]
@@ -147,6 +150,10 @@ pub struct SessionHead {
     pub session_id: String,
     #[serde(default)]
     pub head_revision: u64,
+    #[serde(default)]
+    pub agent_frames: Vec<crate::AgentFrameRecord>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub current_agent_frame_id: crate::AgentFrameId,
     pub graph: crate::SessionGraph,
     pub config: crate::PersistedSessionConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +169,10 @@ pub struct SessionHeadMeta {
     #[serde(default)]
     pub head_revision: u64,
     pub config: crate::PersistedSessionConfig,
+    #[serde(default)]
+    pub agent_frames: Vec<crate::AgentFrameRecord>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub current_agent_frame_id: crate::AgentFrameId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_ref: Option<BlobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -192,6 +203,8 @@ pub struct PersistedSessionRead {
     pub session_id: String,
     pub head_revision: u64,
     pub config: crate::PersistedSessionConfig,
+    pub agent_frames: Vec<crate::AgentFrameRecord>,
+    pub current_agent_frame_id: crate::AgentFrameId,
     pub graph: crate::SessionGraph,
     pub checkpoint_ref: Option<BlobRef>,
     pub checkpoint: Option<HydratedSessionCheckpoint>,
@@ -226,6 +239,8 @@ pub struct RuntimeCommit {
     pub session_id: String,
     pub expected_head_revision: Option<u64>,
     pub config: crate::PersistedSessionConfig,
+    pub agent_frames: Vec<crate::AgentFrameRecord>,
+    pub current_agent_frame_id: crate::AgentFrameId,
     pub graph: GraphCommitDelta,
     pub checkpoint: HydratedSessionCheckpoint,
     pub usage_deltas: Vec<crate::TokenLedgerEntry>,
@@ -378,10 +393,7 @@ macro_rules! impl_unsupported_queued_work_methods {
         ) -> ::core::pin::Pin<
             Box<
                 dyn ::core::future::Future<
-                        Output = ::std::result::Result<
-                            $crate::QueuedWorkBatch,
-                            $crate::StoreError,
-                        >,
+                        Output = ::std::result::Result<$crate::QueuedWorkBatch, $crate::StoreError>,
                     > + Send
                     + 'async_trait,
             >,
@@ -435,10 +447,7 @@ macro_rules! impl_unsupported_queued_work_methods {
         ) -> ::core::pin::Pin<
             Box<
                 dyn ::core::future::Future<
-                        Output = ::std::result::Result<
-                            $crate::QueuedWorkClaim,
-                            $crate::StoreError,
-                        >,
+                        Output = ::std::result::Result<$crate::QueuedWorkClaim, $crate::StoreError>,
                     > + Send
                     + 'async_trait,
             >,
@@ -461,9 +470,8 @@ macro_rules! impl_unsupported_queued_work_methods {
             _claim: &'life1 $crate::QueuedWorkClaim,
         ) -> ::core::pin::Pin<
             Box<
-                dyn ::core::future::Future<
-                        Output = ::std::result::Result<(), $crate::StoreError>,
-                    > + Send
+                dyn ::core::future::Future<Output = ::std::result::Result<(), $crate::StoreError>>
+                    + Send
                     + 'async_trait,
             >,
         >
@@ -663,6 +671,8 @@ impl RuntimeCommit {
             session_id: state.session_id.clone(),
             expected_head_revision: state.head_revision,
             config: persisted_session_config_from_state(state),
+            agent_frames: state.agent_frames.clone(),
+            current_agent_frame_id: state.current_agent_frame_id.clone(),
             graph: if state.graph_replace_required || state.head_revision.is_none() {
                 GraphCommitDelta::ReplaceFull(state.session_graph.clone())
             } else {
@@ -687,6 +697,8 @@ impl RuntimeCommit {
             session_id: state.session_id.clone(),
             expected_head_revision: state.head_revision,
             config: persisted_session_config_from_state(state),
+            agent_frames: state.agent_frames.clone(),
+            current_agent_frame_id: state.current_agent_frame_id.clone(),
             graph,
             checkpoint: build_checkpoint_from_persisted_state(state),
             usage_deltas: usage_deltas.to_vec(),
@@ -701,7 +713,10 @@ impl RuntimeCommit {
         self
     }
 
-    pub fn completing_queue_claim(mut self, completed_queue_claim: crate::QueuedWorkCompletion) -> Self {
+    pub fn completing_queue_claim(
+        mut self,
+        completed_queue_claim: crate::QueuedWorkCompletion,
+    ) -> Self {
         self.completed_queue_claims.push(completed_queue_claim);
         self
     }
@@ -710,8 +725,7 @@ impl RuntimeCommit {
         mut self,
         completed_queue_claims: impl IntoIterator<Item = crate::QueuedWorkCompletion>,
     ) -> Self {
-        self.completed_queue_claims
-            .extend(completed_queue_claims);
+        self.completed_queue_claims.extend(completed_queue_claims);
         self
     }
 
@@ -731,6 +745,8 @@ fn persisted_session_state_from_head(
     let mut state = crate::RuntimeSessionState {
         session_id: head.session_id,
         policy: crate::SessionPolicy::default(),
+        agent_frames: head.agent_frames,
+        current_agent_frame_id: head.current_agent_frame_id,
         session_graph: head.graph,
         turn_index: 0,
         token_usage: crate::TokenUsage::default(),
@@ -767,6 +783,7 @@ fn persisted_session_state_from_head(
         state.execution_state_ref = checkpoint.execution_state_ref.clone();
         state.execution_state_snapshot = checkpoint.execution_state;
     }
+    state.ensure_agent_frame_initialized();
     state
 }
 
@@ -775,6 +792,8 @@ impl Default for SessionHead {
         Self {
             session_id: default_root_session_id(),
             head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
             graph: crate::SessionGraph::default(),
             config: crate::PersistedSessionConfig::default(),
             checkpoint_ref: None,
@@ -789,6 +808,8 @@ impl Default for SessionHeadMeta {
             session_id: default_root_session_id(),
             head_revision: 0,
             config: crate::PersistedSessionConfig::default(),
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
             checkpoint_ref: None,
             leaf_node_id: None,
             graph_node_count: 0,
@@ -912,6 +933,8 @@ fn persisted_session_state_from_read(read: PersistedSessionRead) -> crate::Runti
         SessionHead {
             session_id: read.session_id,
             head_revision: read.head_revision,
+            agent_frames: read.agent_frames,
+            current_agent_frame_id: read.current_agent_frame_id,
             graph: read.graph,
             config: read.config,
             checkpoint_ref: read.checkpoint_ref,

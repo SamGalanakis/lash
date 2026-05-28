@@ -64,7 +64,7 @@ impl RlmProtocolSession {
                 key: BUDGET_WARNING_STATUS.to_string(),
                 label: "context budget".to_string(),
                 detail: Some(format!(
-                    "{used} tokens used; warn at {threshold}; choose handoff path"
+                    "{used} tokens used; warn at {threshold}; choose frame switch path"
                 )),
             },
         ])])
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(key, BUDGET_WARNING_STATUS);
         assert_eq!(label, "context budget");
         assert!(detail.as_deref().is_some_and(|text| {
-            text.contains("120292 tokens used") && text.contains("choose handoff path")
+            text.contains("120292 tokens used") && text.contains("choose frame switch path")
         }));
     }
 }

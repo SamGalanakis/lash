@@ -6,26 +6,22 @@ use crate::session_model::plugin_message_to_message;
 #[derive(Clone, Copy)]
 struct PluginDirectivePolicy {
     abort_error: Option<&'static str>,
-    handoff_error: &'static str,
     tool_directive_error: &'static str,
 }
 
 impl PluginDirectivePolicy {
     const BEFORE_TURN: Self = Self {
         abort_error: None,
-        handoff_error: "tool directives are not valid in before_turn",
         tool_directive_error: "tool directives are not valid in before_turn",
     };
 
     const CHECKPOINT: Self = Self {
         abort_error: None,
-        handoff_error: "checkpoint hooks do not support session handoff",
         tool_directive_error: "checkpoint hooks only support abort, message enqueue, session creation, events, and trace events",
     };
 
     const AFTER_TURN: Self = Self {
         abort_error: Some("only message enqueue and session creation are valid in after_turn"),
-        handoff_error: "after_turn hooks do not support session handoff",
         tool_directive_error: "only message enqueue, session creation, events, and trace events are valid in after_turn",
     };
 }
@@ -71,9 +67,6 @@ async fn interpret_directive(
                 .await
                 .map_err(|err| PluginError::Session(err.to_string()))?;
             Ok(DirectiveAction::None)
-        }
-        PluginDirective::HandoffSession { .. } => {
-            Err(PluginError::Session(policy.handoff_error.to_string()))
         }
         PluginDirective::EmitRuntimeEvents { events: surface } => {
             Ok(DirectiveAction::EmitRuntimeEvents(

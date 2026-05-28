@@ -8,9 +8,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lash_core::{
     PreparedToolCall, SessionSpec, SubagentSessionContext, ToolArgumentProjectionPolicy, ToolCall,
-    ToolContext, ToolContract, ToolDefinition, ToolManifest, ToolPrepareCall, ToolProvider,
-    ToolResult, ToolScheduling,
+    ToolContext, ToolDefinition, ToolPrepareContext, ToolResult, ToolScheduling,
+    sansio::PendingToolCall,
 };
+use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -138,31 +139,17 @@ async fn run_child_session(
 }
 
 #[async_trait]
-impl ToolProvider for RlmSubagentToolsProvider {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        self.tool_definitions()
-            .into_iter()
-            .map(|tool| tool.manifest())
-            .collect()
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        self.tool_definitions()
-            .into_iter()
-            .find(|tool| tool.name == name)
-            .map(|tool| Arc::new(tool.contract()))
-    }
-
+impl StaticToolExecute for RlmSubagentToolsProvider {
     async fn prepare_tool_call(
         &self,
-        call: ToolPrepareCall<'_>,
+        pending: PendingToolCall,
+        context: &ToolPrepareContext,
     ) -> Result<PreparedToolCall, ToolResult> {
-        if call.pending.tool_name == "spawn_agent" {
-            let args = call.pending.args.clone();
-            self.prepare_spawn_agent(&args, call.context, call.pending)
-                .await
+        if pending.tool_name == "spawn_agent" {
+            let args = pending.args.clone();
+            self.prepare_spawn_agent(&args, context, pending).await
         } else {
-            Ok(PreparedToolCall::identity(call.pending))
+            Ok(PreparedToolCall::identity(pending))
         }
     }
 
@@ -177,6 +164,14 @@ impl ToolProvider for RlmSubagentToolsProvider {
 }
 
 impl RlmSubagentToolsProvider {
+    /// Build the cached subagent tool provider. The served definitions are
+    /// fixed once the provider is constructed (they depend only on the
+    /// registered capability names and whether `submit_error` is exposed).
+    pub(crate) fn into_provider(self) -> StaticToolProvider<Self> {
+        let definitions = self.tool_definitions();
+        StaticToolProvider::new(definitions, self)
+    }
+
     fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = rlm_subagent_tool_definitions(&self.registry.names());
         if self.include_submit_error {

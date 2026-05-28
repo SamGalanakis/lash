@@ -5,7 +5,7 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 
-use crate::service::ToolDiscoveryToolsProvider;
+use crate::service::tool_discovery_provider;
 use crate::surface::rlm_tool_surface;
 
 #[derive(Default)]
@@ -24,13 +24,13 @@ impl PluginFactory for ToolDiscoveryPluginFactory {
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(ToolDiscoveryPlugin {
-            provider: Arc::new(ToolDiscoveryToolsProvider::new()),
+            provider: Arc::new(tool_discovery_provider()),
         }))
     }
 }
 
 struct ToolDiscoveryPlugin {
-    provider: Arc<ToolDiscoveryToolsProvider>,
+    provider: Arc<dyn ToolProvider>,
 }
 
 impl SessionPlugin for ToolDiscoveryPlugin {
@@ -39,8 +39,7 @@ impl SessionPlugin for ToolDiscoveryPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.tools()
-            .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)?;
+        reg.tools().provider(Arc::clone(&self.provider))?;
         reg.surface().contribute(Arc::new(rlm_tool_surface));
         Ok(())
     }

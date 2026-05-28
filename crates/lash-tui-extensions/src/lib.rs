@@ -957,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_exit_event_clears_ui_for_fresh_context_handoff() {
+    fn plan_exit_event_clears_ui_for_fresh_context_frame_switch() {
         let extensions = TuiExtensions::builtin().expect("builtin extensions");
 
         let effects = extensions.effects_for_turn_event(&completed_tool_event(

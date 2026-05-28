@@ -77,6 +77,8 @@ pub struct SessionNodeRecord {
     pub parent_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caused_by: Option<crate::CausalRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_frame_id: Option<crate::AgentFrameId>,
     pub timestamp: String,
     #[serde(flatten)]
     pub payload: SessionNodePayload,
@@ -85,7 +87,6 @@ pub struct SessionNodeRecord {
 #[derive(Clone, Debug)]
 pub(crate) struct SessionNodeDraft {
     payload: SessionNodeDraftPayload,
-    node_id: Option<String>,
     caused_by: Option<crate::CausalRef>,
 }
 
@@ -103,7 +104,6 @@ impl SessionNodeDraft {
     pub(crate) fn message(message: Message) -> Self {
         Self {
             payload: SessionNodeDraftPayload::Message(message),
-            node_id: None,
             caused_by: None,
         }
     }
@@ -114,7 +114,6 @@ impl SessionNodeDraft {
                 plugin_type: plugin_type.into(),
                 body,
             },
-            node_id: None,
             caused_by: None,
         }
     }
@@ -122,15 +121,8 @@ impl SessionNodeDraft {
     pub(crate) fn protocol_event(event: ProtocolEvent) -> Self {
         Self {
             payload: SessionNodeDraftPayload::ProtocolEvent(event),
-            node_id: None,
             caused_by: None,
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn with_node_id(mut self, node_id: impl Into<String>) -> Self {
-        self.node_id = Some(node_id.into());
-        self
     }
 
     pub(crate) fn with_caused_by(mut self, caused_by: Option<crate::CausalRef>) -> Self {
@@ -247,9 +239,22 @@ pub(crate) struct SessionReadModel {
 pub(crate) struct SessionGraphAppendBuilder {
     existing_ids: HashSet<String>,
     leaf_node_id: Option<String>,
+    agent_frame_id: Option<crate::AgentFrameId>,
 }
 
 impl SessionGraphAppendBuilder {
+    pub(crate) fn with_agent_frame_id(
+        mut self,
+        agent_frame_id: impl Into<crate::AgentFrameId>,
+    ) -> Self {
+        self.agent_frame_id = Some(agent_frame_id.into());
+        self
+    }
+
+    pub(crate) fn agent_frame_id(&self) -> Option<&str> {
+        self.agent_frame_id.as_deref()
+    }
+
     pub(crate) fn leaf_node_id(&self) -> Option<&String> {
         self.leaf_node_id.as_ref()
     }
@@ -292,6 +297,7 @@ impl SessionGraphAppendBuilder {
                 node_id,
                 parent_node_id,
                 caused_by: None,
+                agent_frame_id: self.agent_frame_id.clone(),
                 timestamp: Utc::now().to_rfc3339(),
                 payload: SessionNodePayload::Event {
                     event: SessionEventRecord::Tool(ToolEvent::Invocation { stable_key, record }),
@@ -320,9 +326,7 @@ impl SessionGraphAppendBuilder {
                     if message.id.is_empty() {
                         message.id = fresh_node_id("m");
                     }
-                    let node_id = draft
-                        .node_id
-                        .unwrap_or_else(|| unique_message_node_id(&message.id, &self.existing_ids));
+                    let node_id = unique_message_node_id(&message.id, &self.existing_ids);
                     let caused_by = draft
                         .caused_by
                         .or_else(|| causal_ref_from_message_origin(&message.origin));
@@ -337,9 +341,7 @@ impl SessionGraphAppendBuilder {
                     )
                 }
                 SessionNodeDraftPayload::Plugin { plugin_type, body } => {
-                    let node_id = draft
-                        .node_id
-                        .unwrap_or_else(|| fresh_semantic_node_id("plugin", &self.existing_ids));
+                    let node_id = fresh_semantic_node_id("plugin", &self.existing_ids);
                     (
                         node_id,
                         draft.caused_by,
@@ -350,9 +352,7 @@ impl SessionGraphAppendBuilder {
                     )
                 }
                 SessionNodeDraftPayload::ProtocolEvent(event) => {
-                    let node_id = draft
-                        .node_id
-                        .unwrap_or_else(|| fresh_semantic_node_id("protocol", &self.existing_ids));
+                    let node_id = fresh_semantic_node_id("protocol", &self.existing_ids);
                     (
                         node_id,
                         draft.caused_by,
@@ -368,6 +368,7 @@ impl SessionGraphAppendBuilder {
                 node_id,
                 parent_node_id,
                 caused_by,
+                agent_frame_id: self.agent_frame_id.clone(),
                 timestamp: Utc::now().to_rfc3339(),
                 payload,
             });
@@ -463,6 +464,44 @@ impl SessionGraphCache {
         self.prompt_render_cache = Arc::new(BaseRenderCache::new());
     }
 
+    fn read_model_for_agent_frame(
+        &self,
+        graph: &SessionGraph,
+        frame_id: &str,
+        include_unscoped: bool,
+    ) -> SessionReadModel {
+        let mut active_messages = Vec::with_capacity(self.active_path_indices.len());
+        let mut active_message_ids = HashSet::new();
+        let mut active_tool_calls = Vec::with_capacity(self.active_path_indices.len());
+        let mut active_events = Vec::with_capacity(self.active_path_indices.len());
+        for idx in &self.active_path_indices {
+            let node = &graph.nodes[*idx];
+            if !node_belongs_to_agent_frame(node, frame_id, include_unscoped) {
+                continue;
+            }
+            if let Some(event) = node.event() {
+                active_events.push(event.clone());
+            }
+            if let Some(message) = node.message() {
+                if !message.is_transient() && active_message_ids.insert(message.id.clone()) {
+                    active_messages.push(message);
+                }
+                continue;
+            }
+            if let Some(event) = node.event()
+                && let SessionEventRecord::Tool(ToolEvent::Invocation { record, .. }) = event
+            {
+                active_tool_calls.push(record.clone());
+            }
+        }
+        SessionReadModel {
+            active_events: Arc::new(active_events),
+            messages: Arc::new(active_messages),
+            tool_calls: Arc::new(active_tool_calls),
+            prompt_render_cache: Arc::new(BaseRenderCache::new()),
+        }
+    }
+
     fn append_node(
         &mut self,
         node_index: usize,
@@ -551,8 +590,28 @@ impl SessionGraph {
         messages: &[Message],
         tool_calls: &[ToolCallRecord],
     ) {
+        self.append_active_read_delta_scoped(None, messages, tool_calls);
+    }
+
+    pub fn append_active_read_delta_for_agent_frame(
+        &mut self,
+        agent_frame_id: &str,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
+        self.append_active_read_delta_scoped(Some(agent_frame_id), messages, tool_calls);
+    }
+
+    fn append_active_read_delta_scoped(
+        &mut self,
+        agent_frame_id: Option<&str>,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         let appendable_messages = {
-            let read_model = self.read_model();
+            let read_model = agent_frame_id
+                .map(|frame_id| self.read_model_for_agent_frame(frame_id, false))
+                .unwrap_or_else(|| self.read_model());
             let mut seen_message_ids = read_model
                 .messages
                 .iter()
@@ -566,7 +625,9 @@ impl SessionGraph {
                 .cloned()
                 .collect::<Vec<_>>()
         };
-        let read_model = self.read_model();
+        let read_model = agent_frame_id
+            .map(|frame_id| self.read_model_for_agent_frame(frame_id, false))
+            .unwrap_or_else(|| self.read_model());
         let mut seen_tool_call_keys = read_model
             .tool_calls
             .iter()
@@ -588,18 +649,30 @@ impl SessionGraph {
             appendable_messages.len(),
             appendable_tool_calls.len(),
         );
-        self.append_message_batch(appendable_messages);
-        self.append_tool_call_records(appendable_tool_calls);
+        self.append_message_batch_scoped(agent_frame_id, appendable_messages);
+        self.append_tool_call_records_scoped(agent_frame_id, appendable_tool_calls);
     }
 
-    pub(crate) fn append_active_conversation_messages(&mut self, messages: &[Message]) {
+    pub(crate) fn append_active_conversation_messages_for_agent_frame(
+        &mut self,
+        agent_frame_id: &str,
+        messages: &[Message],
+    ) {
+        self.append_active_conversation_messages_scoped(Some(agent_frame_id), messages);
+    }
+
+    fn append_active_conversation_messages_scoped(
+        &mut self,
+        agent_frame_id: Option<&str>,
+        messages: &[Message],
+    ) {
         let appendable_messages = messages
             .iter()
             .filter(|message| !message.is_transient())
             .cloned()
             .collect::<Vec<_>>();
         self.reserve_append_capacity(appendable_messages.len(), appendable_messages.len(), 0);
-        self.append_message_batch(appendable_messages);
+        self.append_message_batch_scoped(agent_frame_id, appendable_messages);
     }
 
     pub fn from_nodes(nodes: Vec<SessionNodeRecord>, leaf_node_id: Option<String>) -> Self {
@@ -616,6 +689,7 @@ impl SessionGraph {
         SessionGraphAppendBuilder {
             existing_ids: self.nodes.iter().map(|node| node.node_id.clone()).collect(),
             leaf_node_id: self.leaf_node_id.clone(),
+            agent_frame_id: None,
         }
     }
 
@@ -669,11 +743,18 @@ impl SessionGraph {
         self.cache.get_or_init(|| SessionGraphCache::build(self))
     }
 
-    fn append_message_batch(&mut self, messages: Vec<Message>) {
+    fn append_message_batch_scoped(
+        &mut self,
+        agent_frame_id: Option<&str>,
+        messages: Vec<Message>,
+    ) {
         if messages.is_empty() {
             return;
         }
-        self.append_node_drafts(messages.into_iter().map(SessionNodeDraft::message));
+        self.append_node_drafts_scoped(
+            agent_frame_id,
+            messages.into_iter().map(SessionNodeDraft::message),
+        );
     }
 
     fn append_prebuilt_nodes(&mut self, nodes: Vec<SessionNodeRecord>) {
@@ -737,6 +818,18 @@ impl SessionGraph {
         }
     }
 
+    pub(crate) fn read_model_for_agent_frame(
+        &self,
+        frame_id: &str,
+        include_unscoped: bool,
+    ) -> SessionReadModel {
+        if frame_id.is_empty() {
+            return self.read_model();
+        }
+        self.cache()
+            .read_model_for_agent_frame(self, frame_id, include_unscoped)
+    }
+
     pub fn replace_active_tool_calls(&mut self, tool_calls: &[ToolCallRecord]) {
         let messages = Arc::clone(&self.cache().active_messages);
         self.replace_active_read_state(messages.as_slice(), tool_calls);
@@ -757,7 +850,32 @@ impl SessionGraph {
     where
         I: IntoIterator<Item = SessionNodeDraft>,
     {
+        self.append_node_drafts_scoped(None, drafts)
+    }
+
+    pub(crate) fn append_node_drafts_for_agent_frame<I>(
+        &mut self,
+        agent_frame_id: &str,
+        drafts: I,
+    ) -> Vec<String>
+    where
+        I: IntoIterator<Item = SessionNodeDraft>,
+    {
+        self.append_node_drafts_scoped(Some(agent_frame_id), drafts)
+    }
+
+    fn append_node_drafts_scoped<I>(
+        &mut self,
+        agent_frame_id: Option<&str>,
+        drafts: I,
+    ) -> Vec<String>
+    where
+        I: IntoIterator<Item = SessionNodeDraft>,
+    {
         let mut builder = self.append_builder();
+        if let Some(agent_frame_id) = agent_frame_id {
+            builder = builder.with_agent_frame_id(agent_frame_id.to_string());
+        }
         let nodes = builder.append_drafts(drafts);
         let node_ids = nodes
             .iter()
@@ -767,11 +885,18 @@ impl SessionGraph {
         node_ids
     }
 
-    pub(crate) fn append_tool_call_records<I>(&mut self, records: I) -> Vec<String>
+    fn append_tool_call_records_scoped<I>(
+        &mut self,
+        agent_frame_id: Option<&str>,
+        records: I,
+    ) -> Vec<String>
     where
         I: IntoIterator<Item = ToolCallRecord>,
     {
         let mut builder = self.append_builder();
+        if let Some(agent_frame_id) = agent_frame_id {
+            builder = builder.with_agent_frame_id(agent_frame_id.to_string());
+        }
         let nodes = builder.append_tool_call_records(records);
         let node_ids = nodes
             .iter()
@@ -881,14 +1006,37 @@ impl SessionGraph {
         messages: &[Message],
         tool_calls: &[ToolCallRecord],
     ) {
+        self.replace_active_read_state_scoped(None, messages, tool_calls);
+    }
+
+    pub fn replace_active_read_state_for_agent_frame(
+        &mut self,
+        agent_frame_id: &str,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
+        self.replace_active_read_state_scoped(Some(agent_frame_id), messages, tool_calls);
+    }
+
+    fn replace_active_read_state_scoped(
+        &mut self,
+        agent_frame_id: Option<&str>,
+        messages: &[Message],
+        tool_calls: &[ToolCallRecord],
+    ) {
         let current_nodes = self.active_path_nodes();
         let existing_ids = self
             .nodes
             .iter()
             .map(|node| node.node_id.clone())
             .collect::<HashSet<_>>();
-        let replacement =
-            build_active_read_replacement(current_nodes, &existing_ids, messages, tool_calls);
+        let replacement = build_active_read_replacement(
+            current_nodes,
+            &existing_ids,
+            agent_frame_id,
+            messages,
+            tool_calls,
+        );
         let data = self.data_mut();
         data.leaf_node_id = replacement.leaf_node_id;
         data.nodes.extend(replacement.new_tail_nodes);
@@ -979,6 +1127,17 @@ fn build_tree_children(
     children
 }
 
+fn node_belongs_to_agent_frame(
+    node: &SessionNodeRecord,
+    frame_id: &str,
+    include_unscoped: bool,
+) -> bool {
+    match node.agent_frame_id.as_deref() {
+        Some(node_frame_id) => node_frame_id == frame_id,
+        None => include_unscoped,
+    }
+}
+
 fn build_active_read_items<'a>(
     messages: &'a [Message],
     tool_calls: &'a [ToolCallRecord],
@@ -1023,6 +1182,7 @@ fn build_active_read_items<'a>(
 pub(crate) fn build_active_read_replacement<'a>(
     current_nodes: impl IntoIterator<Item = &'a SessionNodeRecord>,
     existing_node_ids: &HashSet<String>,
+    agent_frame_id: Option<&str>,
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
 ) -> ActiveReadReplacement {
@@ -1090,6 +1250,7 @@ pub(crate) fn build_active_read_replacement<'a>(
                     node_id,
                     parent_node_id,
                     caused_by: causal_ref_from_message_origin(&message.origin),
+                    agent_frame_id: agent_frame_id.map(ToOwned::to_owned),
                     timestamp: Utc::now().to_rfc3339(),
                     payload: SessionNodePayload::Event {
                         event: SessionEventRecord::Conversation(ConversationRecord::from_message(
@@ -1108,6 +1269,7 @@ pub(crate) fn build_active_read_replacement<'a>(
                     node_id,
                     parent_node_id,
                     caused_by: None,
+                    agent_frame_id: agent_frame_id.map(ToOwned::to_owned),
                     timestamp: Utc::now().to_rfc3339(),
                     payload: SessionNodePayload::Event {
                         event: SessionEventRecord::Tool(ToolEvent::Invocation {

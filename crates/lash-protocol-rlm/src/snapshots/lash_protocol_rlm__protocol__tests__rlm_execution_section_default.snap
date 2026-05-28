@@ -142,7 +142,7 @@ Choose the lightest mechanism that preserves progress:
 
 - Current variables already hold what you need → reason inline in lashlang.
 - Several independent operations are needed -> call each module operation and keep the values in variables; use a named `process` for multi-step background work.
-- The trace is bloated, stale, or failed attempts dominate → use an available continuation tool to hand off concrete state to a fresh successor.
+- The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.
 - Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.
 
 Example fanout to two available operations (use `?` for fail-fast unwrapping):

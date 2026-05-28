@@ -127,9 +127,9 @@ fn matches_at(bytes: &[u8], i: usize, needle: &[u8]) -> bool {
 
 // ─── multi-view rendering ───────────────────────────────────────────────────
 //
-// A *view* is a chain of sessions joined by `continue_as` handoffs — the
+// A *view* is a chain of sessions joined by `continue_as` AgentFrame switches — the
 // root and every subagent are heads of their own views. Inside a view,
-// successor sessions are inlined behind a handoff divider; subagents
+// AgentFrames are inlined behind a AgentFrame switch divider; subagents
 // become drill-in cards that switch the page to the subagent's view.
 
 pub(crate) fn js_escape(s: &str) -> String {

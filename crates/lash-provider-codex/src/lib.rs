@@ -1,34 +1,32 @@
 #![allow(clippy::result_large_err)]
 
 use async_trait::async_trait;
-use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 
 use lash_core::SchemaProjectionOverride;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 use lash_core::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmUsage, ProviderReasoningReplay,
-    ProviderReplayMeta, ResponseTextMeta, ResponseTextPhase,
+    LlmContentBlock, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent,
+    LlmTerminalReason, LlmUsage,
 };
 use lash_core::provider::{
-    CacheRetention, ProviderComponents, ProviderFactory, ProviderFailureClassifier,
-    ProviderModelPolicy, ProviderOptions, ProviderReliability, ProviderState, ProviderTransport,
-    resolve_generation_policy,
+    CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderFailureClassifier,
+    ProviderModelPolicy, ProviderOptions, ProviderReliability, resolve_generation_policy,
 };
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::{
     build_http_client, header_pairs, read_response_text, request_body_snapshot,
     response_start_timeout, send_request,
 };
-use lash_openai_schema::{
-    OpenAiSchemaProfile, SchemaProjectionError, emit_provider_trace, model_id, project_schema,
-    project_structured_output, project_tool_parameters,
-};
+use lash_llm_transport::util::emit_provider_trace;
+use lash_openai_schema::{OpenAiSchemaProfile, model_id};
+use lash_provider_openai::responses_shared as shared;
 
 pub mod oauth;
+
+/// Provider name used in shared-machinery error messages and trace events.
+const PROVIDER: &str = "Codex";
 
 const OPENAI_GPT5_VARIANTS: &[&str] = &["minimal", "low", "medium", "high"];
 const OPENAI_GPT5_XHIGH_VARIANTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
@@ -43,6 +41,14 @@ fn has_xhigh_suffix(model: &str) -> bool {
 }
 
 /// OpenAI Codex OAuth provider (ChatGPT Plus/Pro/Team via device-code flow).
+///
+/// Codex speaks the OpenAI Responses streaming protocol, so the request/stream
+/// machinery is shared verbatim from [`lash_provider_openai::responses_shared`].
+/// This crate owns only the Codex-specific surface: the
+/// `chatgpt.com/backend-api/codex/responses` endpoint, the `codex_cli_rs`
+/// originator/User-Agent headers, the system→`instructions` request shape with
+/// tool-result image folding, `clamp_reasoning_effort`, and Codex error/quota
+/// classification.
 #[derive(Clone, Debug)]
 pub struct CodexProvider {
     pub access_token: String,
@@ -55,499 +61,6 @@ pub struct CodexProvider {
 
 #[derive(Clone, Debug)]
 struct CodexModelPolicy;
-
-#[derive(Clone, Debug, Default)]
-struct CodexStreamingToolCall {
-    call_id: String,
-    tool_name: String,
-    input_json: String,
-    /// Codex Responses API item-id (e.g. `fc_...`). Preserved so we can
-    /// re-emit it on the next request body alongside `call_id`; Codex uses
-    /// it to pair the function_call with its sibling reasoning item.
-    item_id: String,
-}
-
-#[derive(Clone, Debug, Default)]
-struct CodexStreamState {
-    full_text: String,
-    pending_text_deltas: Vec<String>,
-    parts: Vec<LlmOutputPart>,
-    usage: LlmUsage,
-    final_response: Option<Value>,
-    current_text_part: Option<usize>,
-    current_message_item_id: Option<String>,
-    message_parts: HashMap<String, usize>,
-    /// Index of the reasoning-summary `LlmOutputPart` currently receiving
-    /// deltas. Each `response.reasoning_summary_part.added` starts a new
-    /// entry; the server groups reasoning output into multiple "parts"
-    /// (paragraphs) so we keep one slot per part instead of merging them
-    /// into a single blob.
-    current_reasoning_part: Option<usize>,
-    /// Streaming-time reasoning-summary deltas collected since the last
-    /// flush. Fed to `LlmStreamEvent::ReasoningDelta` by the caller so
-    /// the UI can render thinking incrementally.
-    reasoning_deltas: Vec<String>,
-    tool_calls: HashMap<String, CodexStreamingToolCall>,
-}
-
-impl CodexStreamState {
-    fn begin_message(&mut self, item: Option<&Value>) {
-        let item_id = item
-            .and_then(CodexProvider::message_item_id)
-            .map(str::to_string);
-        let meta = item.map(CodexProvider::response_text_meta_from_message_item);
-        let index = self.message_part_index(item_id.as_deref(), meta);
-        self.current_text_part = Some(index);
-        self.current_message_item_id = item_id;
-    }
-
-    fn finish_message(&mut self, item: Option<&Value>) {
-        if let Some(item) = item {
-            let text = CodexProvider::message_text_from_item(item);
-            let meta = CodexProvider::response_text_meta_from_message_item(item);
-            let item_id = meta.id.clone();
-            let index = self.message_part_index(item_id.as_deref(), Some(meta));
-            if !text.is_empty() {
-                self.reconcile_text_part(index, &text);
-            }
-        }
-        self.current_text_part = None;
-        self.current_message_item_id = None;
-    }
-
-    fn push_text_delta(&mut self, piece: &str) {
-        if piece.is_empty() {
-            return;
-        }
-
-        let part_index = self.ensure_text_part_index();
-
-        self.append_text_delta_to_part(part_index, piece);
-    }
-
-    fn reconcile_text_part(&mut self, part_index: usize, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        let existing = self
-            .parts
-            .get(part_index)
-            .and_then(|part| match part {
-                LlmOutputPart::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        if text == existing {
-            return;
-        }
-        if let Some(suffix) = text.strip_prefix(existing.as_str()) {
-            self.append_text_delta_to_part(part_index, suffix);
-            return;
-        }
-        self.set_text_part(part_index, text.to_string());
-    }
-
-    fn merge_final_response(&mut self, response: &Value) {
-        let structured_message_text = CodexProvider::has_structured_message_text(response);
-        for part in CodexProvider::response_parts_from_value(response) {
-            match part {
-                LlmOutputPart::Text {
-                    text,
-                    response_meta,
-                } => {
-                    let item_id = response_meta.as_ref().and_then(|meta| meta.id.clone());
-                    if item_id.is_none()
-                        && !structured_message_text
-                        && self.parts.iter().any(|part| {
-                            matches!(part, LlmOutputPart::Text { text, .. } if !text.is_empty())
-                        })
-                    {
-                        continue;
-                    }
-                    let index = self.message_part_index(item_id.as_deref(), response_meta);
-                    self.reconcile_text_part(index, &text);
-                }
-                part @ LlmOutputPart::Reasoning { .. } => {
-                    let part_item_id = match &part {
-                        LlmOutputPart::Reasoning { replay, .. } => {
-                            replay.as_ref().and_then(|meta| meta.item_id.as_deref())
-                        }
-                        _ => None,
-                    };
-                    if let Some(id) = part_item_id
-                        && let Some(existing) =
-                            self.parts.iter_mut().find(|existing| {
-                                matches!(existing, LlmOutputPart::Reasoning { replay, .. } if replay.as_ref().and_then(|meta| meta.item_id.as_deref()) == Some(id))
-                            })
-                    {
-                        *existing = part;
-                        continue;
-                    }
-                    if !self.parts.iter().any(|existing| existing == &part) {
-                        self.parts.push(part);
-                    }
-                }
-                part @ LlmOutputPart::ToolCall { .. } => {
-                    let (part_item_id, part_call_id) = match &part {
-                        LlmOutputPart::ToolCall {
-                            replay, call_id, ..
-                        } => (
-                            replay.as_ref().and_then(|meta| meta.item_id.as_deref()),
-                            call_id.as_str(),
-                        ),
-                        _ => (None, ""),
-                    };
-                    let duplicate = self.parts.iter().any(|existing| match existing {
-                        LlmOutputPart::ToolCall {
-                            replay: existing_replay,
-                            call_id: existing_call_id,
-                            ..
-                        } => {
-                            part_item_id
-                                .zip(
-                                    existing_replay
-                                        .as_ref()
-                                        .and_then(|meta| meta.item_id.as_deref()),
-                                )
-                                .is_some_and(|(a, b)| a == b)
-                                || (!part_call_id.is_empty() && part_call_id == existing_call_id)
-                        }
-                        _ => false,
-                    });
-                    if !duplicate {
-                        self.parts.push(part);
-                    }
-                }
-            }
-        }
-        self.recompute_full_text();
-    }
-
-    fn ensure_text_part_index(&mut self) -> usize {
-        if let Some(index) = self.current_text_part {
-            return index;
-        }
-        if let Some(index) = self
-            .parts
-            .iter()
-            .rposition(|part| matches!(part, LlmOutputPart::Text { .. }))
-        {
-            return index;
-        }
-
-        let index = self.parts.len();
-        self.parts.push(LlmOutputPart::Text {
-            text: String::new(),
-            response_meta: None,
-        });
-        index
-    }
-
-    fn message_part_index(
-        &mut self,
-        item_id: Option<&str>,
-        response_meta: Option<ResponseTextMeta>,
-    ) -> usize {
-        let index = if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
-            if let Some(index) = self.message_parts.get(item_id).copied() {
-                index
-            } else {
-                let index = self.parts.len();
-                self.parts.push(LlmOutputPart::Text {
-                    text: String::new(),
-                    response_meta: response_meta.clone(),
-                });
-                self.message_parts.insert(item_id.to_string(), index);
-                index
-            }
-        } else if let Some(index) = self.current_text_part {
-            index
-        } else {
-            let index = self.parts.len();
-            self.parts.push(LlmOutputPart::Text {
-                text: String::new(),
-                response_meta: response_meta.clone(),
-            });
-            index
-        };
-
-        if let Some(response_meta) = response_meta
-            && let Some(LlmOutputPart::Text {
-                response_meta: existing_meta,
-                ..
-            }) = self.parts.get_mut(index)
-        {
-            *existing_meta = Some(response_meta);
-        }
-        index
-    }
-
-    fn set_text_part(&mut self, part_index: usize, text: String) {
-        if let Some(LlmOutputPart::Text { text: existing, .. }) = self.parts.get_mut(part_index) {
-            *existing = text;
-        }
-        self.recompute_full_text();
-    }
-
-    fn append_text_delta_to_part(&mut self, part_index: usize, piece: &str) {
-        if piece.is_empty() {
-            return;
-        }
-        if let Some(LlmOutputPart::Text { text, .. }) = self.parts.get_mut(part_index) {
-            text.push_str(piece);
-        }
-        self.pending_text_deltas.push(piece.to_string());
-        self.recompute_full_text();
-    }
-
-    fn recompute_full_text(&mut self) {
-        self.full_text.clear();
-        for part in &self.parts {
-            if let LlmOutputPart::Text { text, .. } = part {
-                self.full_text.push_str(text);
-            }
-        }
-    }
-
-    fn begin_reasoning_part(&mut self) {
-        let index = self.parts.len();
-        self.parts.push(LlmOutputPart::Reasoning {
-            text: String::new(),
-            replay: None,
-        });
-        self.current_reasoning_part = Some(index);
-    }
-
-    fn push_reasoning_delta(&mut self, delta: &str) {
-        if delta.is_empty() {
-            return;
-        }
-        let index = match self.current_reasoning_part {
-            Some(index) => index,
-            None => {
-                // Some providers send a delta before the `part.added`
-                // event. Create an implicit part so we don't drop text.
-                self.begin_reasoning_part();
-                self.current_reasoning_part
-                    .expect("reasoning part just pushed")
-            }
-        };
-        if let Some(LlmOutputPart::Reasoning { text, .. }) = self.parts.get_mut(index) {
-            text.push_str(delta);
-        }
-        self.reasoning_deltas.push(delta.to_string());
-    }
-
-    fn finish_reasoning_part(&mut self) {
-        // Drop the cursor; the next `part.added` will open a fresh slot.
-        // Trim trailing whitespace off the completed part so concatenated
-        // paragraphs don't carry stray blanks.
-        if let Some(index) = self.current_reasoning_part.take()
-            && let Some(LlmOutputPart::Reasoning { text, .. }) = self.parts.get_mut(index)
-        {
-            let trimmed = text.trim_end();
-            if trimmed.len() != text.len() {
-                *text = trimmed.to_string();
-            }
-        }
-    }
-
-    /// Populate the most recent reasoning part with the authoritative
-    /// payload from `response.output_item.done`: the Codex `rs_...` id,
-    /// the `summary[*].text` entries, and the `encrypted_content` blob
-    /// that must be replayed on the next turn.
-    fn finalize_reasoning_item(&mut self, item: &Value) {
-        // Find the nearest Reasoning part without an id yet; server emits
-        // items in order so the latest slot is the right one to populate.
-        let Some((_, part)) = self
-            .parts
-            .iter_mut()
-            .enumerate()
-            .rev()
-            .find(|(_, p)| matches!(p, LlmOutputPart::Reasoning { .. }))
-        else {
-            return;
-        };
-        let LlmOutputPart::Reasoning { replay, .. } = part else {
-            return;
-        };
-        let meta = replay.get_or_insert_with(ProviderReasoningReplay::default);
-        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-            meta.item_id = Some(id.to_string());
-        }
-        if let Some(blob) = item.get("encrypted_content").and_then(|v| v.as_str()) {
-            meta.encrypted_content = Some(blob.to_string());
-        }
-        if let Some(arr) = item.get("summary").and_then(|v| v.as_array()) {
-            let texts: Vec<String> = arr
-                .iter()
-                .filter_map(|entry| entry.get("text").and_then(|v| v.as_str()).map(String::from))
-                .collect();
-            if !texts.is_empty() {
-                meta.summary = texts;
-            }
-        }
-    }
-
-    fn take_reasoning_deltas(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.reasoning_deltas)
-    }
-
-    fn take_text_deltas(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pending_text_deltas)
-    }
-
-    fn update_tool_call_from_item(&mut self, item: &Value) -> Option<String> {
-        let item_id = item.get("id").and_then(|v| v.as_str())?.to_string();
-        let tool_call = self.tool_calls.entry(item_id.clone()).or_default();
-        if tool_call.item_id.is_empty() {
-            tool_call.item_id = item_id.clone();
-        }
-        if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
-            tool_call.call_id = call_id.to_string();
-        }
-        if let Some(tool_name) = item.get("name").and_then(|v| v.as_str()) {
-            tool_call.tool_name = tool_name.to_string();
-        }
-        if let Some(arguments) = item.get("arguments").and_then(|v| v.as_str())
-            && !arguments.is_empty()
-        {
-            tool_call.input_json = arguments.to_string();
-        }
-        Some(item_id)
-    }
-
-    fn push_tool_call_delta(&mut self, item_id: &str, delta: &str) {
-        if item_id.is_empty() || delta.is_empty() {
-            return;
-        }
-        self.tool_calls
-            .entry(item_id.to_string())
-            .or_default()
-            .input_json
-            .push_str(delta);
-    }
-
-    fn set_tool_call_arguments(&mut self, item_id: &str, arguments: &str) {
-        if item_id.is_empty() {
-            return;
-        }
-        let tool_call = self.tool_calls.entry(item_id.to_string()).or_default();
-        tool_call.input_json = arguments.to_string();
-    }
-
-    fn finish_tool_call(&mut self, item: &Value) -> Option<LlmOutputPart> {
-        let item_id = self.update_tool_call_from_item(item)?;
-        let mut tool_call = self.tool_calls.remove(&item_id).unwrap_or_default();
-        if tool_call.call_id.is_empty() {
-            tool_call.call_id = uuid::Uuid::new_v4().to_string();
-        }
-        if tool_call.tool_name.is_empty() {
-            return None;
-        }
-        if tool_call.input_json.is_empty() {
-            tool_call.input_json = "{}".to_string();
-        }
-
-        let part = LlmOutputPart::ToolCall {
-            call_id: tool_call.call_id,
-            tool_name: tool_call.tool_name,
-            input_json: tool_call.input_json,
-            replay: (!tool_call.item_id.is_empty()).then_some(ProviderReplayMeta {
-                item_id: Some(tool_call.item_id),
-                opaque: None,
-            }),
-        };
-        if !self.parts.iter().any(|existing| existing == &part) {
-            self.parts.push(part.clone());
-            return Some(part);
-        }
-        None
-    }
-
-    fn response_parts(&self) -> Vec<LlmOutputPart> {
-        let parts = self
-            .parts
-            .iter()
-            .filter_map(|part| match part {
-                LlmOutputPart::Text { text, .. } if text.is_empty() => None,
-                LlmOutputPart::Reasoning { text, .. } if text.trim().is_empty() => None,
-                _ => Some(part.clone()),
-            })
-            .collect::<Vec<_>>();
-        if !parts.is_empty() {
-            return parts;
-        }
-
-        if let Some(final_response) = &self.final_response {
-            let parts = CodexProvider::response_parts_from_value(final_response);
-            if !parts.is_empty() {
-                return parts;
-            }
-            let text = CodexProvider::extract_text(final_response);
-            if !text.is_empty() {
-                return vec![LlmOutputPart::Text {
-                    text,
-                    response_meta: None,
-                }];
-            }
-        }
-
-        if !self.full_text.is_empty() {
-            return vec![LlmOutputPart::Text {
-                text: self.full_text.clone(),
-                response_meta: None,
-            }];
-        }
-
-        Vec::new()
-    }
-
-    fn response_full_text(&self, parts: &[LlmOutputPart]) -> String {
-        if !self.full_text.is_empty() {
-            return self.full_text.clone();
-        }
-        parts
-            .iter()
-            .filter_map(|part| match part {
-                LlmOutputPart::Text { text, .. } => Some(text.as_str()),
-                LlmOutputPart::ToolCall { .. } | LlmOutputPart::Reasoning { .. } => None,
-            })
-            .collect::<String>()
-    }
-
-    fn terminal_reason(&self, parts: &[LlmOutputPart]) -> LlmTerminalReason {
-        if let Some(final_response) = &self.final_response {
-            let incomplete_details = final_response.get("incomplete_details");
-            if incomplete_details
-                .and_then(|details| details.get("reason").and_then(Value::as_str))
-                .is_some_and(|reason| matches!(reason, "content_filter" | "safety"))
-            {
-                return LlmTerminalReason::ContentFilter;
-            }
-            if final_response.get("status").and_then(Value::as_str) == Some("incomplete")
-                || incomplete_details.is_some_and(|details| !details.is_null())
-            {
-                return LlmTerminalReason::OutputLimit;
-            }
-            if final_response.get("status").and_then(Value::as_str) == Some("cancelled") {
-                return LlmTerminalReason::Cancelled;
-            }
-            if final_response.get("status").and_then(Value::as_str) == Some("failed") {
-                return LlmTerminalReason::ProviderError;
-            }
-        }
-        if parts
-            .iter()
-            .any(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
-        {
-            LlmTerminalReason::ToolUse
-        } else {
-            LlmTerminalReason::Stop
-        }
-    }
-}
 
 impl CodexProvider {
     const CODEX_ORIGINATOR: &'static str = "codex_cli_rs";
@@ -648,39 +161,7 @@ impl CodexProvider {
             Some(m) => format!(" Try again in ~{m} min."),
             None => String::new(),
         };
-        Some(format!(
-            "You have hit your ChatGPT usage limit{plan}.{when}"
-        ))
-    }
-
-    fn responses_error_is_retryable(value: &Value) -> bool {
-        let numeric_code =
-            value
-                .get("code")
-                .or_else(|| value.get("status"))
-                .and_then(|v| match v {
-                    Value::Number(n) => n.as_i64(),
-                    Value::String(s) => s.trim().parse().ok(),
-                    _ => None,
-                });
-        matches!(numeric_code, Some(429))
-            || matches!(numeric_code, Some(status) if status >= 500)
-            || value
-                .get("code")
-                .or_else(|| value.get("type"))
-                .or_else(|| value.get("status"))
-                .and_then(|v| v.as_str())
-                .is_some_and(|code| {
-                    matches!(
-                        code,
-                        "server_error"
-                            | "internal_server_error"
-                            | "service_unavailable"
-                            | "temporarily_unavailable"
-                            | "overloaded"
-                            | "rate_limit_exceeded"
-                    )
-                })
+        Some(format!("You have hit your ChatGPT usage limit{plan}.{when}"))
     }
 
     fn should_parse_stream(stream_requested: bool, content_type: Option<&str>) -> bool {
@@ -710,23 +191,6 @@ impl CodexProvider {
         .with_code(code)
     }
 
-    fn input_image_part(att: &LlmAttachment) -> Value {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-        let data_url = format!("data:{};base64,{}", att.mime, b64);
-        json!({
-            "type": "input_image",
-            "image_url": data_url,
-        })
-    }
-
-    fn role_name(role: &LlmRole) -> &'static str {
-        match role {
-            LlmRole::User => "user",
-            LlmRole::Assistant => "assistant",
-            LlmRole::System => "system",
-        }
-    }
-
     fn build_input(req: &LlmRequest) -> (String, Vec<Value>) {
         let mut input = Vec::new();
         let mut instructions: Vec<String> = Vec::new();
@@ -750,7 +214,7 @@ impl CodexProvider {
             // image blocks accumulate into a single role-typed content
             // message that gets flushed before the next tool/reasoning
             // item so the wire ordering matches pi's shape.
-            let role_str = Self::role_name(&msg.role);
+            let role_str = shared::role_name(&msg.role);
             let mut pending_content: Vec<Value> = Vec::new();
 
             // Pre-compute which blocks have already been folded into an
@@ -797,7 +261,7 @@ impl CodexProvider {
                             continue;
                         };
                         if matches!(msg.role, LlmRole::User) {
-                            pending_content.push(Self::input_image_part(att));
+                            pending_content.push(shared::input_image_part(att));
                         }
                     }
                     LlmContentBlock::Reasoning { text, replay } => {
@@ -901,7 +365,7 @@ impl CodexProvider {
                             match sibling {
                                 LlmContentBlock::Image { attachment_idx } => {
                                     if let Some(att) = req.attachments.get(*attachment_idx) {
-                                        image_parts.push(Self::input_image_part(att));
+                                        image_parts.push(shared::input_image_part(att));
                                     }
                                 }
                                 LlmContentBlock::Text { text: t, .. }
@@ -1032,73 +496,16 @@ impl CodexProvider {
         prev["output"].as_array_mut().unwrap().extend(image_parts);
     }
 
-    fn projection_error(err: SchemaProjectionError) -> LlmTransportError {
-        LlmTransportError::new(format!(
-            "Codex schema projection failed: {}",
-            err.first_diagnostic()
-        ))
-        .with_kind(ProviderFailureKind::Validation)
-        .with_raw(
-            json!({
-                "profile": format!("{:?}", err.profile),
-                "diagnostics": err.diagnostics,
-            })
-            .to_string(),
-        )
-    }
-
     fn projected_schema(
         canonical: &Value,
         overrides: &[SchemaProjectionOverride],
         profile: OpenAiSchemaProfile,
     ) -> Result<Value, LlmTransportError> {
-        if let Some(override_schema) = overrides
-            .iter()
-            .find(|projection| projection.profile == profile.projection_id())
-            .map(|projection| projection.schema.clone())
-        {
-            return Ok(override_schema);
-        }
-        match profile {
-            OpenAiSchemaProfile::ToolParameters => {
-                project_tool_parameters(canonical).map(|projection| projection.schema)
-            }
-            OpenAiSchemaProfile::StructuredOutput => {
-                project_structured_output(canonical).map(|projection| projection.schema)
-            }
-            OpenAiSchemaProfile::StrictToolParameters => {
-                project_schema(canonical, profile).map(|projection| projection.schema)
-            }
-        }
-        .map_err(Self::projection_error)
+        shared::projected_schema(PROVIDER, canonical, overrides, profile)
     }
 
     fn build_tools(req: &LlmRequest) -> Result<Vec<Value>, LlmTransportError> {
-        req.tools
-            .iter()
-            .map(|tool| {
-                let parameters = Self::projected_schema(
-                    &tool.input_schema,
-                    &tool.input_schema_projections,
-                    OpenAiSchemaProfile::ToolParameters,
-                )?;
-                Ok(json!({
-                    "type": "function",
-                    "name": tool.name.clone(),
-                    "description": tool.description.clone(),
-                    "strict": false,
-                    "parameters": parameters,
-                }))
-            })
-            .collect()
-    }
-
-    fn tool_choice_value(choice: &LlmToolChoice) -> &'static str {
-        match choice {
-            LlmToolChoice::Auto => "auto",
-            LlmToolChoice::None => "none",
-            LlmToolChoice::Required => "required",
-        }
+        shared::build_tools(PROVIDER, req)
     }
 
     fn codex_user_agent() -> String {
@@ -1177,7 +584,7 @@ impl CodexProvider {
         // function" signal that gpt-5.x reasoning models take literally,
         // causing them to refuse to emit `call` expressions in lashlang.
         if !req.tools.is_empty() {
-            body["tool_choice"] = json!(Self::tool_choice_value(&req.tool_choice));
+            body["tool_choice"] = json!(shared::tool_choice_value(&req.tool_choice));
         }
         if let Some(effort) = policy.thinking {
             let mut reasoning = json!({
@@ -1214,353 +621,6 @@ impl CodexProvider {
         Ok(body)
     }
 
-    fn extract_text(value: &Value) -> String {
-        if let Some(s) = value.get("output_text").and_then(|v| v.as_str()) {
-            return s.to_string();
-        }
-        if let Some(arr) = value.get("output").and_then(|v| v.as_array()) {
-            let mut items_text: Vec<String> = Vec::new();
-            for item in arr {
-                let text = Self::message_text_from_item(item);
-                if !text.is_empty() {
-                    items_text.push(text);
-                }
-            }
-            return items_text.join("");
-        }
-        String::new()
-    }
-
-    fn message_item_id(item: &Value) -> Option<&str> {
-        item.get("id").and_then(|v| v.as_str())
-    }
-
-    fn response_text_meta_from_message_item(item: &Value) -> ResponseTextMeta {
-        ResponseTextMeta {
-            id: Self::message_item_id(item).map(str::to_string),
-            status: item
-                .get("status")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .or_else(|| Some("completed".to_string())),
-            phase: item
-                .get("phase")
-                .and_then(|v| v.as_str())
-                .and_then(|phase| match phase {
-                    "commentary" => Some(ResponseTextPhase::Commentary),
-                    "final_answer" => Some(ResponseTextPhase::FinalAnswer),
-                    _ => None,
-                }),
-        }
-    }
-
-    fn has_structured_message_text(value: &Value) -> bool {
-        value
-            .get("output")
-            .and_then(|v| v.as_array())
-            .is_some_and(|output| {
-                output.iter().any(|item| {
-                    item.get("type").and_then(|v| v.as_str()) == Some("message")
-                        && !Self::message_text_from_item(item).is_empty()
-                })
-            })
-    }
-
-    fn parse_i64(v: Option<&Value>) -> i64 {
-        match v {
-            Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
-            Some(Value::String(s)) => s.parse::<i64>().unwrap_or(0),
-            _ => 0,
-        }
-    }
-
-    fn extract_usage(value: &Value) -> LlmUsage {
-        let usage = value.get("usage").unwrap_or(&Value::Null);
-        LlmUsage {
-            input_tokens: Self::parse_i64(usage.get("input_tokens")),
-            output_tokens: Self::parse_i64(usage.get("output_tokens")),
-            cached_input_tokens: Self::parse_i64(
-                usage
-                    .get("input_tokens_details")
-                    .and_then(|d| d.get("cached_tokens"))
-                    .or_else(|| usage.get("cached_input_tokens"))
-                    .or_else(|| usage.get("cached_tokens")),
-            ),
-            reasoning_tokens: Self::parse_i64(usage.get("reasoning_tokens").or_else(|| {
-                usage
-                    .get("output_tokens_details")
-                    .and_then(|d| d.get("reasoning_tokens"))
-            })),
-        }
-    }
-
-    fn merge_usage(dst: &mut LlmUsage, next: &LlmUsage) {
-        if next.input_tokens > 0 {
-            dst.input_tokens = next.input_tokens;
-        }
-        if next.output_tokens > 0 {
-            dst.output_tokens = next.output_tokens;
-        }
-        if next.cached_input_tokens > 0 {
-            dst.cached_input_tokens = next.cached_input_tokens;
-        }
-        if next.reasoning_tokens > 0 {
-            dst.reasoning_tokens = next.reasoning_tokens;
-        }
-    }
-
-    fn log_sse_event(
-        event_type: &str,
-        raw: &str,
-        added_deltas: &[String],
-        full_len: usize,
-        usage: &LlmUsage,
-        has_final_response: bool,
-    ) {
-        tracing::debug!(
-            target: "lash_core::llm::codex_oauth",
-            event_type,
-            raw_len = raw.len(),
-            delta_count = added_deltas.len(),
-            delta_lens = ?added_deltas.iter().map(|d| d.len()).collect::<Vec<_>>(),
-            full_len,
-            input_tokens = usage.input_tokens,
-            output_tokens = usage.output_tokens,
-            cached_input_tokens = usage.cached_input_tokens,
-            reasoning_tokens = usage.reasoning_tokens,
-            has_final_response,
-            "codex sse event"
-        );
-    }
-
-    fn message_text_from_item(item: &Value) -> String {
-        item.get("content")
-            .and_then(|v| v.as_array())
-            .map(|content| {
-                content
-                    .iter()
-                    .filter_map(|part| match part.get("type").and_then(|v| v.as_str()) {
-                        Some("output_text") => part.get("text").and_then(|v| v.as_str()),
-                        Some("refusal") => part
-                            .get("refusal")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| part.get("text").and_then(|v| v.as_str())),
-                        _ => None,
-                    })
-                    .collect::<String>()
-            })
-            .unwrap_or_default()
-    }
-
-    fn response_from_stream_state(
-        state: CodexStreamState,
-        request_body: Option<String>,
-        http_summary: String,
-    ) -> LlmResponse {
-        let parts = state.response_parts();
-        let full_text = state.response_full_text(&parts);
-        let terminal_reason = state.terminal_reason(&parts);
-        LlmResponse {
-            full_text,
-            parts,
-            usage: state.usage,
-            terminal_reason,
-            terminal_diagnostic: None,
-            provider_usage: None,
-            request_body,
-            http_summary: Some(http_summary),
-        }
-    }
-
-    fn process_sse_event(
-        raw: &str,
-        state: &mut CodexStreamState,
-        emitted_parts: Option<&mut Vec<LlmOutputPart>>,
-    ) -> Result<(), LlmTransportError> {
-        let raw = raw.trim();
-        if raw.is_empty() || raw == "[DONE]" {
-            return Ok(());
-        }
-        let event: Value = serde_json::from_str(raw).map_err(|e| {
-            LlmTransportError::new(format!("Invalid Codex SSE payload: {e}")).with_raw(raw)
-        })?;
-        let event_type = event
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
-        if event_type == "error" {
-            let msg = event
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("Codex stream error");
-            return Err(LlmTransportError::new(msg).with_raw(event.to_string()));
-        }
-
-        let had_final_response = event.get("response").is_some();
-        let pending_text_delta_count = state.pending_text_deltas.len();
-
-        if let Some(resp_value) = event.get("response") {
-            state.final_response = Some(resp_value.clone());
-            let u = Self::extract_usage(resp_value);
-            Self::merge_usage(&mut state.usage, &u);
-        } else {
-            let u = Self::extract_usage(&event);
-            Self::merge_usage(&mut state.usage, &u);
-        }
-
-        match event_type.as_str() {
-            "response.output_item.added" => {
-                if let Some(item) = event.get("item") {
-                    match item.get("type").and_then(|v| v.as_str()) {
-                        Some("message") => state.begin_message(Some(item)),
-                        Some("function_call") => {
-                            let _ = state.update_tool_call_from_item(item);
-                        }
-                        // For reasoning items we wait for
-                        // `reasoning_summary_part.added` to open a slot —
-                        // the outer item carries no text on its own.
-                        _ => {}
-                    }
-                }
-            }
-            "response.reasoning_summary_part.added" => {
-                state.begin_reasoning_part();
-            }
-            "response.reasoning_summary_text.delta" => {
-                if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
-                    state.push_reasoning_delta(delta);
-                }
-            }
-            "response.reasoning_summary_text.done" => {
-                // The `text` field on this event is the full text for the
-                // current part; if our accumulator already matches we do
-                // nothing, otherwise reconcile by appending the missing
-                // suffix (mirrors the logic for `output_text.done`).
-                if let Some(text) = event.get("text").and_then(|v| v.as_str())
-                    && let Some(index) = state.current_reasoning_part
-                    && let Some(LlmOutputPart::Reasoning { text: existing, .. }) =
-                        state.parts.get(index)
-                {
-                    let existing = existing.clone();
-                    if text != existing
-                        && let Some(suffix) = text.strip_prefix(existing.as_str())
-                    {
-                        state.push_reasoning_delta(suffix);
-                    }
-                }
-            }
-            "response.reasoning_summary_part.done" => {
-                state.finish_reasoning_part();
-            }
-            "response.output_text.delta" => {
-                if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
-                    state.push_text_delta(delta);
-                }
-            }
-            "response.output_text.done" => {}
-            "response.function_call_arguments.delta" => {
-                if let Some(item_id) = event.get("item_id").and_then(|v| v.as_str())
-                    && let Some(delta) = event.get("delta").and_then(|v| v.as_str())
-                {
-                    state.push_tool_call_delta(item_id, delta);
-                }
-            }
-            "response.function_call_arguments.done" => {
-                if let Some(item_id) = event.get("item_id").and_then(|v| v.as_str())
-                    && let Some(arguments) = event.get("arguments").and_then(|v| v.as_str())
-                {
-                    state.set_tool_call_arguments(item_id, arguments);
-                }
-            }
-            "response.output_item.done" => {
-                if let Some(item) = event.get("item") {
-                    match item.get("type").and_then(|v| v.as_str()) {
-                        Some("message") => state.finish_message(Some(item)),
-                        Some("function_call") => {
-                            if let Some(parts) = emitted_parts
-                                && let Some(part) = state.finish_tool_call(item)
-                            {
-                                parts.push(part);
-                            } else {
-                                let _ = state.finish_tool_call(item);
-                            }
-                        }
-                        Some("reasoning") => {
-                            state.finish_reasoning_part();
-                            state.finalize_reasoning_item(item);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            "response.completed" => {
-                if let Some(resp_value) = event.get("response") {
-                    state.merge_final_response(resp_value);
-                }
-            }
-            "response.failed" => {
-                let error_value = event
-                    .get("response")
-                    .and_then(|r| r.get("error"))
-                    .or_else(|| event.get("error"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                let msg = error_value
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("Codex response failed");
-                return Err(LlmTransportError::new(msg)
-                    .retryable(Self::responses_error_is_retryable(&error_value))
-                    .with_raw(event.to_string()));
-            }
-            _ => {}
-        }
-
-        Self::log_sse_event(
-            &event_type,
-            raw,
-            &state.pending_text_deltas[pending_text_delta_count..],
-            state.full_text.len(),
-            &state.usage,
-            had_final_response,
-        );
-        Ok(())
-    }
-
-    fn parse_sse_payload(
-        payload: &str,
-        state: &mut CodexStreamState,
-    ) -> Result<(), LlmTransportError> {
-        let mut event_lines: Vec<String> = Vec::new();
-        for mut line in payload.lines().map(|l| l.to_string()) {
-            if line.ends_with('\r') {
-                line.pop();
-            }
-            if let Some(data) = line.strip_prefix("data:") {
-                event_lines.push(data.trim().to_string());
-                continue;
-            }
-            if line.starts_with("event:") {
-                continue;
-            }
-            if line.trim().is_empty() {
-                if !event_lines.is_empty() {
-                    let raw = event_lines.join("\n");
-                    Self::process_sse_event(&raw, state, None)?;
-                    event_lines.clear();
-                }
-                continue;
-            }
-        }
-        if !event_lines.is_empty() {
-            let raw = event_lines.join("\n");
-            Self::process_sse_event(&raw, state, None)?;
-        }
-        Ok(())
-    }
-
     fn looks_like_sse_payload(payload: &str) -> bool {
         let trimmed = payload.trim_start();
         trimmed.starts_with("event:")
@@ -1569,101 +629,9 @@ impl CodexProvider {
             || payload.contains("\ndata:")
     }
 
-    fn response_parts_from_value(value: &Value) -> Vec<LlmOutputPart> {
-        let mut parts = Vec::new();
-        if let Some(output) = value.get("output").and_then(|v| v.as_array()) {
-            for item in output {
-                match item.get("type").and_then(|v| v.as_str()).unwrap_or("") {
-                    "reasoning" => {
-                        let summary = item
-                            .get("summary")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|entry| {
-                                        entry.get("text").and_then(|v| v.as_str()).map(String::from)
-                                    })
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default();
-                        let text = summary.join("\n\n");
-                        parts.push(LlmOutputPart::Reasoning {
-                            text,
-                            replay: Some(ProviderReasoningReplay {
-                                item_id: item
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string),
-                                encrypted_content: item
-                                    .get("encrypted_content")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string),
-                                signature: None,
-                                redacted: false,
-                                summary,
-                            }),
-                        });
-                    }
-                    "message" => {
-                        let text = Self::message_text_from_item(item);
-                        if !text.is_empty() {
-                            parts.push(LlmOutputPart::Text {
-                                text,
-                                response_meta: Some(Self::response_text_meta_from_message_item(
-                                    item,
-                                )),
-                            });
-                        }
-                    }
-                    "function_call" => {
-                        let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
-                            continue;
-                        };
-                        let input_json = item
-                            .get("arguments")
-                            .map(|v| {
-                                v.as_str()
-                                    .map(str::to_string)
-                                    .unwrap_or_else(|| v.to_string())
-                            })
-                            .unwrap_or_else(|| "{}".to_string());
-                        parts.push(LlmOutputPart::ToolCall {
-                            call_id: item
-                                .get("call_id")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string)
-                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                            tool_name: name.to_string(),
-                            input_json,
-                            replay: item.get("id").and_then(|v| v.as_str()).map(|id| {
-                                ProviderReplayMeta {
-                                    item_id: Some(id.to_string()),
-                                    opaque: None,
-                                }
-                            }),
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if !parts
-            .iter()
-            .any(|part| matches!(part, LlmOutputPart::Text { text, .. } if !text.is_empty()))
-            && let Some(text) = value.get("output_text").and_then(|v| v.as_str())
-            && !text.is_empty()
-        {
-            parts.push(LlmOutputPart::Text {
-                text: text.to_string(),
-                response_meta: None,
-            });
-        }
-        parts
-    }
-
     fn terminal_reason_from_response_value(
         value: &Value,
-        parts: &[LlmOutputPart],
+        parts: &[lash_core::llm::types::LlmOutputPart],
     ) -> LlmTerminalReason {
         let incomplete_details = value.get("incomplete_details");
         if incomplete_details
@@ -1685,18 +653,76 @@ impl CodexProvider {
         }
         if parts
             .iter()
-            .any(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+            .any(|part| matches!(part, lash_core::llm::types::LlmOutputPart::ToolCall { .. }))
         {
             LlmTerminalReason::ToolUse
         } else {
             LlmTerminalReason::Stop
         }
     }
+
+    fn terminal_reason_from_state(
+        state: &shared::ResponsesStreamState,
+        parts: &[lash_core::llm::types::LlmOutputPart],
+    ) -> LlmTerminalReason {
+        match &state.final_response {
+            Some(final_response) => Self::terminal_reason_from_response_value(final_response, parts),
+            None => {
+                if parts
+                    .iter()
+                    .any(|part| matches!(part, lash_core::llm::types::LlmOutputPart::ToolCall { .. }))
+                {
+                    LlmTerminalReason::ToolUse
+                } else {
+                    LlmTerminalReason::Stop
+                }
+            }
+        }
+    }
+
+    fn response_from_stream_state(
+        state: shared::ResponsesStreamState,
+        request_body: Option<String>,
+        http_summary: String,
+    ) -> LlmResponse {
+        let parts = state.response_parts();
+        let terminal_reason = Self::terminal_reason_from_state(&state, &parts);
+        let full_text = if !state.full_text.is_empty() {
+            state.full_text.clone()
+        } else {
+            parts
+                .iter()
+                .filter_map(|part| match part {
+                    lash_core::llm::types::LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        };
+        LlmResponse {
+            full_text,
+            parts,
+            usage: state.usage,
+            terminal_reason,
+            terminal_diagnostic: None,
+            provider_usage: None,
+            request_body,
+            http_summary: Some(http_summary),
+        }
+    }
+
+    #[cfg(test)]
+    fn process_sse_event(
+        raw: &str,
+        state: &mut shared::ResponsesStreamState,
+        emitted_parts: Option<&mut Vec<lash_core::llm::types::LlmOutputPart>>,
+    ) -> Result<(), LlmTransportError> {
+        shared::process_sse_event(PROVIDER, raw, state, emitted_parts)
+    }
 }
 
 impl CodexProvider {
     pub fn into_components(self) -> ProviderComponents {
-        ProviderComponents::shared(self, std::sync::Arc::new(CodexModelPolicy))
+        ProviderComponents::new(Box::new(self), std::sync::Arc::new(CodexModelPolicy))
             .with_failure_classifier(std::sync::Arc::new(CodexFailureClassifier))
     }
 }
@@ -1713,6 +739,8 @@ impl ProviderFailureClassifier for CodexFailureClassifier {
             failure.status = Some(status);
             failure.kind = ProviderFailureKind::Http;
             let raw = failure.raw.as_deref().unwrap_or_default();
+            // Codex treats a 429 carrying a usage-limit marker as a hard quota
+            // failure (not retryable); other 429s and 5xx remain retryable.
             failure.retryable =
                 (status == 429 && !CodexProvider::is_usage_limit_error(raw)) || status >= 500;
             if let Some(summary) = CodexProvider::codex_error_summary(status, raw) {
@@ -1758,7 +786,39 @@ impl ProviderFailureClassifier for CodexFailureClassifier {
     }
 }
 
-impl ProviderState for CodexProvider {
+impl ProviderModelPolicy for CodexModelPolicy {
+    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        let lower = model.to_ascii_lowercase();
+        if !lower.contains("gpt-5") {
+            return &[];
+        }
+        if model_id(&lower) == "gpt-5.5" {
+            return OPENAI_GPT55_VARIANTS;
+        }
+        if lower.contains("codex") {
+            if has_xhigh_suffix(&lower) {
+                CODEX_XHIGH_VARIANTS
+            } else {
+                CODEX_VARIANTS
+            }
+        } else if has_xhigh_suffix(&lower) {
+            OPENAI_GPT5_XHIGH_VARIANTS
+        } else {
+            OPENAI_GPT5_VARIANTS
+        }
+    }
+}
+
+impl CodexModelPolicy {
+    fn reasoning_effort(&self, model: &str, variant: &str) -> Option<String> {
+        self.supported_variants(model)
+            .contains(&variant)
+            .then(|| variant.to_string())
+    }
+}
+
+#[async_trait]
+impl Provider for CodexProvider {
     fn kind(&self) -> &'static str {
         "codex"
     }
@@ -1802,44 +862,6 @@ impl ProviderState for CodexProvider {
         serde_json::Value::Object(map)
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderState> {
-        Box::new(self.clone())
-    }
-}
-
-impl ProviderModelPolicy for CodexModelPolicy {
-    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
-        let lower = model.to_ascii_lowercase();
-        if !lower.contains("gpt-5") {
-            return &[];
-        }
-        if model_id(&lower) == "gpt-5.5" {
-            return OPENAI_GPT55_VARIANTS;
-        }
-        if lower.contains("codex") {
-            if has_xhigh_suffix(&lower) {
-                CODEX_XHIGH_VARIANTS
-            } else {
-                CODEX_VARIANTS
-            }
-        } else if has_xhigh_suffix(&lower) {
-            OPENAI_GPT5_XHIGH_VARIANTS
-        } else {
-            OPENAI_GPT5_VARIANTS
-        }
-    }
-}
-
-impl CodexModelPolicy {
-    fn reasoning_effort(&self, model: &str, variant: &str) -> Option<String> {
-        self.supported_variants(model)
-            .contains(&variant)
-            .then(|| variant.to_string())
-    }
-}
-
-#[async_trait]
-impl ProviderTransport for CodexProvider {
     fn requires_streaming(&self) -> bool {
         true
     }
@@ -1909,12 +931,13 @@ impl ProviderTransport for CodexProvider {
                         .unwrap_or_default()
                 )
             });
+            // Retryability is decided centrally by `CodexFailureClassifier`
+            // from the attached HTTP status; no inline override here.
             let mut err = LlmTransportError::new(message)
                 .with_kind(ProviderFailureKind::Http)
                 .with_status(status.as_u16())
                 .with_headers(header_pairs(&headers))
-                .with_raw(text)
-                .retryable(status.as_u16() == 429 || status.as_u16() >= 500);
+                .with_raw(text);
             if let Some(request_body) = request_body.clone() {
                 err = err.with_request_body(request_body);
             }
@@ -1940,8 +963,8 @@ impl ProviderTransport for CodexProvider {
             })?;
             emit_provider_trace(provider_trace.as_ref(), "codex", &text);
             if Self::looks_like_sse_payload(&text) {
-                let mut state = CodexStreamState::default();
-                Self::parse_sse_payload(&text, &mut state)?;
+                let mut state = shared::ResponsesStreamState::default();
+                shared::parse_sse_payload(PROVIDER, &text, &mut state)?;
                 let response = Self::response_from_stream_state(
                     state,
                     request_body,
@@ -1952,7 +975,7 @@ impl ProviderTransport for CodexProvider {
                         tx.send(LlmStreamEvent::Usage(response.usage.clone()));
                     }
                     for part in &response.parts {
-                        if let LlmOutputPart::Text { text, .. } = part
+                        if let lash_core::llm::types::LlmOutputPart::Text { text, .. } = part
                             && !text.is_empty()
                         {
                             tx.send(LlmStreamEvent::Delta(text.clone()));
@@ -1960,10 +983,10 @@ impl ProviderTransport for CodexProvider {
                     }
                     for part in &response.parts {
                         match part {
-                            LlmOutputPart::ToolCall { .. } => {
+                            lash_core::llm::types::LlmOutputPart::ToolCall { .. } => {
                                 tx.send(LlmStreamEvent::Part(part.clone()));
                             }
-                            LlmOutputPart::Reasoning { text, .. }
+                            lash_core::llm::types::LlmOutputPart::Reasoning { text, .. }
                                 if !text.is_empty() && self.options.thinking.expose =>
                             {
                                 tx.send(LlmStreamEvent::ReasoningDelta(text.clone()));
@@ -1978,11 +1001,11 @@ impl ProviderTransport for CodexProvider {
                 LlmTransportError::new(format!("Invalid Codex response JSON: {e}"))
                     .with_raw(text.clone())
             })?;
-            let content = Self::extract_text(&value);
-            let usage = Self::extract_usage(&value);
-            let mut parts = Self::response_parts_from_value(&value);
+            let content = shared::extract_text(&value);
+            let usage = shared::usage_from_response_value(&value);
+            let mut parts = shared::response_parts_from_value(&value);
             if parts.is_empty() && !content.is_empty() {
-                parts.push(LlmOutputPart::Text {
+                parts.push(lash_core::llm::types::LlmOutputPart::Text {
                     text: content.clone(),
                     response_meta: None,
                 });
@@ -2017,7 +1040,7 @@ impl ProviderTransport for CodexProvider {
             );
         }
 
-        let mut state = CodexStreamState::default();
+        let mut state = shared::ResponsesStreamState::default();
         let expose_thinking = self.options.thinking.expose;
         drive_sse_response(
             resp,
@@ -2027,7 +1050,7 @@ impl ProviderTransport for CodexProvider {
                 emit_provider_trace(provider_trace.as_ref(), "codex", raw);
                 let prev_usage = state.usage.clone();
                 let mut emitted_parts = Vec::new();
-                Self::process_sse_event(raw, &mut state, Some(&mut emitted_parts))?;
+                shared::process_sse_event(PROVIDER, raw, &mut state, Some(&mut emitted_parts))?;
                 emit_stream_progress(
                     stream_events.as_ref(),
                     state.take_text_deltas(),
@@ -2041,7 +1064,9 @@ impl ProviderTransport for CodexProvider {
                         }
                     }
                     for part in emitted_parts {
-                        if matches!(part, LlmOutputPart::Reasoning { .. }) && !expose_thinking {
+                        if matches!(part, lash_core::llm::types::LlmOutputPart::Reasoning { .. })
+                            && !expose_thinking
+                        {
                             continue;
                         }
                         tx.send(LlmStreamEvent::Part(part));
@@ -2075,7 +1100,7 @@ impl ProviderTransport for CodexProvider {
         ))
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+    fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
 }
@@ -2130,8 +1155,12 @@ impl ProviderFactory for CodexProviderFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
+    use lash_core::llm::types::{
+        LlmJsonSchema, LlmMessage, LlmOutputPart, LlmToolChoice, LlmToolSpec, ResponseTextMeta,
+        ResponseTextPhase,
+    };
     use lash_core::provider::ProviderModelPolicy;
+    use shared::ResponsesStreamState as CodexStreamState;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
 

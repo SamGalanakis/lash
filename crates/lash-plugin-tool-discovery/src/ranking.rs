@@ -697,7 +697,7 @@ mod tests {
         )
         .with_agent_surface(
             ToolAgentSurface::new(
-                [module.unwrap_or_else(|| match name {
+                [module.unwrap_or(match name {
                     "read_file" => "files",
                     "search_web" => "web",
                     _ => "tools",
@@ -708,7 +708,7 @@ mod tests {
                     _ => name,
                 },
             )
-            .with_aliases(aliases.into_iter()),
+            .with_aliases(aliases),
         );
         catalog_tool_from_definition(tool)
     }

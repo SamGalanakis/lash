@@ -47,7 +47,7 @@ async fn standard_runtime_assembles_stream_only_text_response() {
 
     assert!(matches!(
         &turn.outcome,
-        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+        TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. }
     ));
     assert!(matches!(
         &turn.outcome,
@@ -108,7 +108,7 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
 
     assert!(matches!(
         &turn.outcome,
-        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+        TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. }
     ));
     assert!(matches!(
         &turn.outcome,

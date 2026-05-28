@@ -3,9 +3,7 @@ use crate::{PluginMessage, TurnCause, TurnInput};
 
 pub const QUEUED_WORK_CLAIM_TTL_MS: u64 = 15 * 60 * 1000;
 
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryPolicy {
     EarliestSafeBoundary,
@@ -20,7 +18,7 @@ impl DeliveryPolicy {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn from_wire_str(value: &str) -> Option<Self> {
         match value {
             "earliest_safe_boundary" => Some(Self::EarliestSafeBoundary),
             "after_current_turn_commit" => Some(Self::AfterCurrentTurnCommit),
@@ -29,9 +27,7 @@ impl DeliveryPolicy {
     }
 }
 
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotPolicy {
     Join,
@@ -46,7 +42,7 @@ impl SlotPolicy {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn from_wire_str(value: &str) -> Option<Self> {
         match value {
             "join" => Some(Self::Join),
             "exclusive" => Some(Self::Exclusive),
@@ -66,8 +62,12 @@ pub enum MergeKey {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum QueuedWorkPayload {
-    TurnInput { input: TurnInput },
-    ProcessWake { wake: ProcessWakeDelivery },
+    TurnInput {
+        input: Box<TurnInput>,
+    },
+    ProcessWake {
+        wake: ProcessWakeDelivery,
+    },
     HostEvent {
         name: String,
         #[serde(default)]
@@ -78,12 +78,16 @@ pub enum QueuedWorkPayload {
         #[serde(default)]
         payload: serde_json::Value,
     },
-    Resume { turn_id: String },
+    Resume {
+        turn_id: String,
+    },
 }
 
 impl QueuedWorkPayload {
     pub fn turn_input(input: TurnInput) -> Self {
-        Self::TurnInput { input }
+        Self::TurnInput {
+            input: Box::new(input),
+        }
     }
 
     pub fn process_wake(wake: ProcessWakeDelivery) -> Self {
@@ -249,9 +253,10 @@ impl QueuedWorkClaim {
             for item in &batch.items {
                 match &item.payload {
                     QueuedWorkPayload::TurnInput { input } => {
-                        if let Some(message) =
-                            plugin_message_from_turn_input_with_attachments(input, attachment_store)?
-                        {
+                        if let Some(message) = plugin_message_from_turn_input_with_attachments(
+                            input,
+                            attachment_store,
+                        )? {
                             transient_messages.push(message);
                         }
                     }

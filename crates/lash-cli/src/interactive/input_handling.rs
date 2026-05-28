@@ -19,7 +19,7 @@ use crate::input_items::insert_inline_marker;
 use crate::model_catalog::CachedModelCatalog;
 use crate::render;
 use crate::session_log::SessionLogger;
-use crate::turn_runner::{RuntimeRunResult, make_turn_input};
+use crate::turn_runner::RuntimeRunResult;
 use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_action};
 use crate::ui_trace::UiTraceRecorder;
 use crate::{
@@ -36,9 +36,39 @@ use super::helpers::{
     record_queue_pending_steer, record_queue_turn, should_preserve_selection_for_key,
 };
 use super::runtime::{
-    apply_pending_reconfigure, copy_selected_text_or_last_response, make_injected_plugin_message,
-    send_user_message,
+    apply_pending_reconfigure, copy_selected_text_or_last_response, enqueue_prepared_turn,
+    make_injected_plugin_message,
 };
+
+async fn enqueue_prepared_turn_for_cli(
+    queued: PreparedTurn,
+    app: &mut App,
+    ui_trace: &mut Option<UiTraceRecorder>,
+    runtime: &Option<LashSession>,
+    delivery_policy: lash_core::DeliveryPolicy,
+    slot_policy: lash_core::SlotPolicy,
+) -> bool {
+    let Some(session) = runtime.as_ref() else {
+        push_system_message(
+            app,
+            "Cannot queue this input while the session is switching.".to_string(),
+        );
+        app.restore_prepared_turn(queued);
+        return false;
+    };
+    match enqueue_prepared_turn(session, &queued, delivery_policy, slot_policy).await {
+        Ok(()) => {
+            record_queue_turn(ui_trace, &queued);
+            app.queue_turn(queued);
+            true
+        }
+        Err(err) => {
+            push_system_message(app, format!("Failed to queue input durably: {err}"));
+            app.restore_prepared_turn(queued);
+            false
+        }
+    }
+}
 
 pub(super) fn handle_surface_input(
     ui_extensions: &TuiExtensions,
@@ -207,48 +237,6 @@ fn apply_scroll_input_action(
         }
     }
     app.dirty = true;
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn activate_foreground_session_handoff(
-    app: &mut App,
-    session_id: String,
-    _history: &mut Vec<lash_core::session_model::Message>,
-    runtime: &mut Option<LashSession>,
-    _turn_counter: &mut usize,
-    _current_execution_mode: &mut ExecutionMode,
-    _current_model_variant: &mut Option<String>,
-    _ui_extensions: &TuiExtensions,
-) -> bool {
-    let Some(session) = runtime.as_ref() else {
-        push_system_message(app, "No active session for handoff.".to_string());
-        return false;
-    };
-    let queued_turn = match session.handoffs().take_first_turn_input(&session_id).await {
-        Ok(Some(seed)) if !seed.content.trim().is_empty() => {
-            Some(PreparedTurn::prepare_with_effective_text(
-                seed.content.clone(),
-                seed.content,
-                Vec::new(),
-            ))
-        }
-        Ok(_) => None,
-        Err(err) => {
-            push_system_message(
-                app,
-                format!("Failed to read first turn for session `{session_id}`: {err}"),
-            );
-            None
-        }
-    };
-
-    app.dirty = true;
-
-    if let Some(turn) = queued_turn {
-        app.queue_turn(turn);
-    }
-
-    true
 }
 
 pub(super) fn handle_mouse_event(
@@ -463,6 +451,39 @@ pub(super) fn handle_mouse_event(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Bundle of the long-lived interactive-loop state every key handler
+/// needs. Built once per key event by [`handle_key_event`] and threaded
+/// (by `&mut`) into the per-mode handlers so they don't each need to
+/// re-declare the ~25 borrows the dispatcher owns.
+pub(super) struct KeyHandlerCtx<'a> {
+    pub app: &'a mut App,
+    pub terminal: &'a mut Terminal,
+    pub ui_trace: &'a mut Option<UiTraceRecorder>,
+    pub logger: &'a mut SessionLogger,
+    pub args: &'a Args,
+    pub paused: &'a Arc<AtomicBool>,
+    pub ui_extensions: &'a TuiExtensions,
+    pub runtime_factory: &'a crate::session_bootstrap::CliSessionOpener,
+    pub lash_config: &'a crate::config::LashConfig,
+    pub runtime: &'a mut Option<LashSession>,
+    pub history: &'a mut Vec<Message>,
+    pub turn_counter: &'a mut usize,
+    pub last_turn: &'a mut Option<TurnReplayPayload>,
+    pub runtime_return_rx: &'a mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
+    pub cancel_token: &'a mut Option<CancellationToken>,
+    pub active_stream_id: &'a mut u64,
+    pub provider: &'a mut ProviderHandle,
+    pub current_model_variant: &'a mut Option<String>,
+    pub current_execution_mode: &'a mut ExecutionMode,
+    pub desired_tool_state: &'a mut ToolState,
+    pub pending_reconfigure: &'a mut bool,
+    pub model_catalog: &'a CachedModelCatalog,
+    pub toolset_hash: &'a mut String,
+    pub app_tx: &'a crate::event::AppEventTx,
+    pub pending_clear_after_return: &'a mut bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_key_event(
     key: KeyEvent,
     app: &mut App,
@@ -491,11 +512,120 @@ pub(super) async fn handle_key_event(
     app_tx: &crate::event::AppEventTx,
     pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<bool> {
+    let mut ctx = KeyHandlerCtx {
+        app,
+        terminal,
+        ui_trace,
+        logger,
+        args,
+        paused,
+        ui_extensions,
+        runtime_factory,
+        lash_config,
+        runtime,
+        history,
+        turn_counter,
+        last_turn,
+        runtime_return_rx,
+        cancel_token,
+        active_stream_id,
+        provider,
+        current_model_variant,
+        current_execution_mode,
+        desired_tool_state,
+        pending_reconfigure,
+        model_catalog,
+        toolset_hash,
+        app_tx,
+        pending_clear_after_return,
+    };
+    dispatch_key_event(key, &mut ctx).await
+}
+
+/// Route a key press to the handler for the active mode. Order matters and
+/// mirrors the historical fall-through: global shortcuts win first, then
+/// always-on scrolling, then the modal overlays (skill/session pickers,
+/// tree, prompt), surface/shortcut routing, and finally the default input
+/// dispatch.
+async fn dispatch_key_event(key: KeyEvent, ctx: &mut KeyHandlerCtx<'_>) -> anyhow::Result<bool> {
     // With kitty keyboard protocol, ignore Release/Repeat events
     if key.kind != KeyEventKind::Press {
         return Ok(false);
     }
-    app.dirty = true;
+    ctx.app.dirty = true;
+
+    if let Some(result) = handle_global_shortcut_key(key, ctx) {
+        return Ok(result);
+    }
+
+    // ── Always-on scroll keys (work in all states) ──
+    {
+        let (width, height) = ctx.terminal.size()?;
+        let vh = render::history_viewport_height(ctx.app, width, height);
+        if let Some(action) = classify_always_on_scroll_key(key, ctx.app, vh) {
+            apply_scroll_input_action(ctx.app, ctx.terminal, ctx.ui_trace, action);
+            return Ok(false);
+        }
+    }
+
+    if ctx.app.has_skill_picker() {
+        handle_skill_picker_key(key, ctx);
+        return Ok(false);
+    }
+    if ctx.app.has_session_picker() {
+        handle_session_picker_key(key, ctx).await;
+        return Ok(false);
+    }
+    if ctx.app.has_tree() {
+        return handle_tree_key(key, ctx).await;
+    }
+    if ctx.app.has_prompt() {
+        handle_prompt_key(key, ctx);
+        return Ok(false);
+    }
+
+    if let Some(event) = normalize_event(&TermEvent::Key(key))
+        && handle_surface_input(ctx.ui_extensions, &event, ctx.runtime.as_ref(), ctx.app)
+    {
+        return Ok(false);
+    }
+
+    if let Some(chord) = key_chord_from_event(key)
+        && let Some(shortcut) = ctx.ui_extensions.shortcut_for(chord)
+    {
+        let Some(session) = ctx.runtime.as_ref() else {
+            push_system_message(ctx.app, "No active session for UI shortcut.".to_string());
+            return Ok(false);
+        };
+        match ctx
+            .ui_extensions
+            .invoke_shortcut(
+                &shortcut,
+                TuiExtensionContext {
+                    actions: &session.plugin_actions(),
+                },
+            )
+            .await
+        {
+            Ok(effects) => apply_ui_host_effects(ctx.app, effects),
+            Err(err) => push_system_message(ctx.app, err),
+        }
+        return Ok(false);
+    }
+
+    handle_input_mode_key(key, ctx).await
+}
+
+/// Global shortcuts that fire regardless of the active mode (selection
+/// copy, Ctrl+C dismiss/quit, expand toggles, undo/redo, paste, Esc).
+/// Returns `Some(ret)` when the key was fully handled here, where `ret`
+/// is the `handle_key_event` return value; `None` to fall through.
+fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut KeyHandlerCtx<'_>) -> Option<bool> {
+    let app = &mut *ctx.app;
+    let terminal = &mut *ctx.terminal;
+    let ui_trace = &mut *ctx.ui_trace;
+    let app_tx = ctx.app_tx;
+    let cancel_token = &mut *ctx.cancel_token;
     let copy_shortcut = is_copy_shortcut(key);
     tracing::debug!(
         code = ?key.code,
@@ -520,7 +650,7 @@ pub(super) async fn handle_key_event(
     if (app.selection.visible || app.has_input_selection()) && copy_shortcut {
         tracing::debug!("selection copy took precedence over generic key handling");
         copy_selected_text_or_last_response(app, terminal.size().ok());
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+C: dismiss prompt if active, else quit
@@ -537,9 +667,9 @@ pub(super) async fn handle_key_event(
                 recorder.record_prompt_dismiss();
             }
             let _ = apply_terminal_action(app, terminal, UiAction::DismissPrompt);
-            return Ok(false);
+            return Some(false);
         }
-        return Ok(true);
+        return Some(true);
     }
 
     // ALT+O: reliable full expand toggle across most terminals.
@@ -547,7 +677,7 @@ pub(super) async fn handle_key_event(
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'o'))
     {
         app.toggle_full_expand();
-        return Ok(false);
+        return Some(false);
     }
 
     if queued_turn_edit_matches(key) {
@@ -555,7 +685,7 @@ pub(super) async fn handle_key_event(
             app.restore_prepared_turn(turn);
             app.update_suggestions();
         }
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+O: cycle expand (0↔1)
@@ -563,7 +693,7 @@ pub(super) async fn handle_key_event(
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'o'))
     {
         app.cycle_expand();
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+SHIFT+Z: redo the most recently undone edit.
@@ -574,7 +704,7 @@ pub(super) async fn handle_key_event(
         if app.editor_redo() {
             app.update_suggestions();
         }
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+Z: undo the most recent edit to the input draft.
@@ -585,7 +715,7 @@ pub(super) async fn handle_key_event(
         if app.editor_undo() {
             app.update_suggestions();
         }
-        return Ok(false);
+        return Some(false);
     }
 
     // ALT+Z: redo fallback for terminals that swallow CTRL+SHIFT+Z.
@@ -595,7 +725,7 @@ pub(super) async fn handle_key_event(
         if app.editor_redo() {
             app.update_suggestions();
         }
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+Y / CTRL+SHIFT+C: copy current selection when present,
@@ -603,7 +733,7 @@ pub(super) async fn handle_key_event(
     if copy_shortcut {
         tracing::debug!("copy shortcut matched without active selection precedence");
         copy_selected_text_or_last_response(app, terminal.size().ok());
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+SHIFT+V: always paste text from clipboard
@@ -617,7 +747,7 @@ pub(super) async fn handle_key_event(
             app.insert_pasted_text(&text);
             app.update_suggestions();
         }
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+V: paste image from clipboard (no text fallback)
@@ -650,7 +780,7 @@ pub(super) async fn handle_key_event(
                 let _ = app_tx.send(AppEvent::ClipboardImageReady { id: image_id, png });
             });
         }
-        return Ok(false);
+        return Some(false);
     }
 
     // Escape key behavior depends on state
@@ -674,42 +804,52 @@ pub(super) async fn handle_key_event(
             }
         }
         // When idle with no dialog: no-op
-        return Ok(false);
+        return Some(false);
     }
 
-    // ── Always-on scroll keys (work in all states) ──
+    None
+}
+
+/// Skill-picker overlay navigation: up/down move the highlight, Enter
+/// inserts the chosen skill as a `$name ` draft.
+fn handle_skill_picker_key(key: KeyEvent, ctx: &mut KeyHandlerCtx<'_>) {
+    let app = &mut *ctx.app;
+    let terminal = &mut *ctx.terminal;
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            let _ = apply_terminal_action(app, terminal, UiAction::SkillPickerUp);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let _ = apply_terminal_action(app, terminal, UiAction::SkillPickerDown);
+        }
+        KeyCode::Enter => {
+            if let UiActionOutcome::SkillPicked(Some(name)) =
+                apply_terminal_action(app, terminal, UiAction::SubmitSkillPicker)
+            {
+                app.set_input(format!("${} ", name));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Session-picker overlay navigation: up/down move the highlight, Enter
+/// switches to the selected session.
+async fn handle_session_picker_key(key: KeyEvent, ctx: &mut KeyHandlerCtx<'_>) {
+    let app = &mut *ctx.app;
+    let terminal = &mut *ctx.terminal;
+    let logger = &mut *ctx.logger;
+    let runtime_factory = ctx.runtime_factory;
+    let runtime = &mut *ctx.runtime;
+    let history = &mut *ctx.history;
+    let turn_counter = &mut *ctx.turn_counter;
+    let provider = &mut *ctx.provider;
+    let current_model_variant = &mut *ctx.current_model_variant;
+    let current_execution_mode = &mut *ctx.current_execution_mode;
+    let desired_tool_state = &mut *ctx.desired_tool_state;
+    let model_catalog = ctx.model_catalog;
+    let toolset_hash = &mut *ctx.toolset_hash;
     {
-        let (width, height) = terminal.size()?;
-        let vh = render::history_viewport_height(app, width, height);
-        if let Some(action) = classify_always_on_scroll_key(key, app, vh) {
-            apply_scroll_input_action(app, terminal, ui_trace, action);
-            return Ok(false);
-        }
-    }
-
-    // ── Skill picker key handling ──
-    if app.has_skill_picker() {
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                let _ = apply_terminal_action(app, terminal, UiAction::SkillPickerUp);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let _ = apply_terminal_action(app, terminal, UiAction::SkillPickerDown);
-            }
-            KeyCode::Enter => {
-                if let UiActionOutcome::SkillPicked(Some(name)) =
-                    apply_terminal_action(app, terminal, UiAction::SubmitSkillPicker)
-                {
-                    app.set_input(format!("${} ", name));
-                }
-            }
-            _ => {}
-        }
-        return Ok(false);
-    }
-
-    // ── Session picker key handling ──
-    if app.has_session_picker() {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 let _ = apply_terminal_action(app, terminal, UiAction::SessionPickerUp);
@@ -752,11 +892,21 @@ pub(super) async fn handle_key_event(
             }
             _ => {} // ignore other keys while picker is open
         }
-        return Ok(false);
     }
+}
 
-    // ── Tree overlay key handling ──
-    if app.has_tree() {
+/// Tree (branch) overlay navigation: up/down move the highlight,
+/// Ctrl/Alt+Left/Right switch branches, Enter switches to the selected
+/// node. Returns the `handle_key_event` result (always `Ok(false)` today;
+/// the `Result` keeps the `?`/`.await` ergonomics of the switch call).
+async fn handle_tree_key(key: KeyEvent, ctx: &mut KeyHandlerCtx<'_>) -> anyhow::Result<bool> {
+    let app = &mut *ctx.app;
+    let terminal = &mut *ctx.terminal;
+    let logger = &mut *ctx.logger;
+    let runtime = &mut *ctx.runtime;
+    let history = &mut *ctx.history;
+    let desired_tool_state = &mut *ctx.desired_tool_state;
+    {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 let _ = apply_terminal_action(app, terminal, UiAction::TreeUp);
@@ -809,11 +959,17 @@ pub(super) async fn handle_key_event(
             }
             _ => {}
         }
-        return Ok(false);
     }
+    Ok(false)
+}
 
-    // ── Prompt (ask dialog) key handling ──
-    if app.has_prompt() {
+/// Ask-dialog (prompt) key handling: navigation, multi-select toggles,
+/// note-field focus, and text entry.
+fn handle_prompt_key(key: KeyEvent, ctx: &mut KeyHandlerCtx<'_>) {
+    let app = &mut *ctx.app;
+    let terminal = &mut *ctx.terminal;
+    let ui_trace = &mut *ctx.ui_trace;
+    {
         let editing_text = app.is_prompt_text_entry();
         match key.code {
             KeyCode::Tab if app.prompt_supports_note() => {
@@ -871,36 +1027,38 @@ pub(super) async fn handle_key_event(
             }
             _ => {}
         }
-        return Ok(false);
     }
+}
 
-    if let Some(event) = normalize_event(&TermEvent::Key(key))
-        && handle_surface_input(ui_extensions, &event, runtime.as_ref(), app)
-    {
-        return Ok(false);
-    }
-
-    if let Some(chord) = key_chord_from_event(key)
-        && let Some(shortcut) = ui_extensions.shortcut_for(chord)
-    {
-        let Some(session) = runtime.as_ref() else {
-            push_system_message(app, "No active session for UI shortcut.".to_string());
-            return Ok(false);
-        };
-        match ui_extensions
-            .invoke_shortcut(
-                &shortcut,
-                TuiExtensionContext {
-                    actions: &session.plugin_actions(),
-                },
-            )
-            .await
-        {
-            Ok(effects) => apply_ui_host_effects(app, effects),
-            Err(err) => push_system_message(app, err),
-        }
-        return Ok(false);
-    }
+/// Default input dispatch when no modal overlay is active: suggestion
+/// navigation/completion, Tab/Enter send-or-queue, shell escapes, slash
+/// commands, and raw editing keys.
+async fn handle_input_mode_key(key: KeyEvent, ctx: &mut KeyHandlerCtx<'_>) -> anyhow::Result<bool> {
+    let app = &mut *ctx.app;
+    let terminal = &mut *ctx.terminal;
+    let ui_trace = &mut *ctx.ui_trace;
+    let logger = &mut *ctx.logger;
+    let args = ctx.args;
+    let paused = ctx.paused;
+    let ui_extensions = ctx.ui_extensions;
+    let runtime_factory = ctx.runtime_factory;
+    let lash_config = ctx.lash_config;
+    let runtime = &mut *ctx.runtime;
+    let history = &mut *ctx.history;
+    let turn_counter = &mut *ctx.turn_counter;
+    let last_turn = &mut *ctx.last_turn;
+    let runtime_return_rx = &mut *ctx.runtime_return_rx;
+    let cancel_token = &mut *ctx.cancel_token;
+    let active_stream_id = &mut *ctx.active_stream_id;
+    let provider = &mut *ctx.provider;
+    let current_model_variant = &mut *ctx.current_model_variant;
+    let current_execution_mode = &mut *ctx.current_execution_mode;
+    let desired_tool_state = &mut *ctx.desired_tool_state;
+    let pending_reconfigure = &mut *ctx.pending_reconfigure;
+    let model_catalog = ctx.model_catalog;
+    let toolset_hash = &mut *ctx.toolset_hash;
+    let app_tx = ctx.app_tx;
+    let pending_clear_after_return = &mut *ctx.pending_clear_after_return;
 
     match key.code {
         // Tab: complete selected suggestion
@@ -970,44 +1128,43 @@ pub(super) async fn handle_key_event(
                     }
                     return Ok(false);
                 }
-                record_queue_turn(ui_trace, &queued);
-                app.queue_turn(queued.clone());
+                if is_host_slash_command {
+                    push_system_message(
+                        app,
+                        "Slash commands cannot be queued as model turns. Wait for the current turn to finish or use an out-of-band command.",
+                    );
+                    app.restore_prepared_turn(queued);
+                    return Ok(false);
+                }
+                enqueue_prepared_turn_for_cli(
+                    queued,
+                    app,
+                    ui_trace,
+                    runtime,
+                    lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+                    lash_core::SlotPolicy::Exclusive,
+                )
+                .await;
                 return Ok(false);
             }
             if runtime.is_none() {
-                tracing::debug!(
-                    queued = queued.display_text,
-                    app_running = app.running,
-                    runtime_return_rx_present = runtime_return_rx.is_some(),
-                    "queueing turn because runtime handoff is still in progress"
+                push_system_message(
+                    app,
+                    "Cannot queue this input while the session is switching.".to_string(),
                 );
-                record_queue_turn(ui_trace, &queued);
-                app.queue_turn(queued);
+                app.restore_prepared_turn(queued);
                 return Ok(false);
             }
 
-            let turn_input = make_turn_input(&queued);
-            let current_tool_state = desired_tool_state.clone();
-            send_user_message(
-                queued.clone(),
-                turn_input.clone(),
+            enqueue_prepared_turn_for_cli(
+                queued,
                 app,
-                ui_trace.as_mut(),
-                logger,
+                ui_trace,
                 runtime,
-                history,
-                runtime_return_rx,
-                cancel_token,
-                active_stream_id,
-                app_tx,
-                &current_tool_state,
+                lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+                lash_core::SlotPolicy::Exclusive,
             )
             .await;
-            *last_turn = Some(TurnReplayPayload {
-                prepared_turn: queued,
-                turn_input,
-                execution_mode: current_execution_mode.clone(),
-            });
         }
         // Up/Down: navigate suggestions when popup is visible
         KeyCode::Up if app.has_suggestions() => {
@@ -1073,10 +1230,10 @@ pub(super) async fn handle_key_event(
                         }
                         return Ok(false);
                     }
-                    let queued =
-                        PreparedTurn::prepare(command_text.clone(), Vec::new(), &app.skills);
-                    record_queue_turn(ui_trace, &queued);
-                    app.queue_turn(queued);
+                    push_system_message(
+                        app,
+                        "Slash commands cannot be queued as model turns. Wait for the current turn to finish or use an out-of-band command.",
+                    );
                     return Ok(false);
                 }
                 if handle_parsed_slash_command(
@@ -1185,8 +1342,11 @@ pub(super) async fn handle_key_event(
                     return Ok(false);
                 }
                 if is_host_slash_command {
-                    record_queue_turn(ui_trace, &queued);
-                    app.queue_turn(queued.clone());
+                    push_system_message(
+                        app,
+                        "Slash commands cannot be queued as model turns. Wait for the current turn to finish or use an out-of-band command.",
+                    );
+                    app.restore_prepared_turn(queued);
                     return Ok(false);
                 }
                 if shell_escape_command(&queued.display_text).is_some() {
@@ -1198,7 +1358,7 @@ pub(super) async fn handle_key_event(
                     return Ok(false);
                 }
                 let injection = lash_core::InjectedTurnInput {
-                    id: None,
+                    id: Some(queued.draft_id.clone()),
                     message: make_injected_plugin_message(&queued),
                 };
                 let Some(session) = runtime.as_ref() else {
@@ -1230,14 +1390,11 @@ pub(super) async fn handle_key_event(
                 return Ok(false);
             }
             if runtime.is_none() {
-                tracing::debug!(
-                    queued = queued.display_text,
-                    app_running = app.running,
-                    runtime_return_rx_present = runtime_return_rx.is_some(),
-                    "queueing turn because runtime handoff is still in progress"
+                push_system_message(
+                    app,
+                    "Cannot send this input while the session is switching.".to_string(),
                 );
-                record_queue_turn(ui_trace, &queued);
-                app.queue_turn(queued);
+                app.restore_prepared_turn(queued);
                 return Ok(false);
             }
 
@@ -1342,7 +1499,8 @@ pub(super) async fn handle_key_event(
                 return Ok(true);
             }
 
-            // Regular user message — send to the active session
+            // Regular user message: enqueue durably, then the idle dispatcher
+            // claims it at the next loop boundary.
             if let Err(e) =
                 apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
             {
@@ -1359,28 +1517,15 @@ pub(super) async fn handle_key_event(
                 &serde_json::to_vec(&desired_tool_state.tool_manifests())
                     .unwrap_or_else(|_| b"[]".to_vec()),
             );
-            let turn_input = make_turn_input(&queued);
-            let current_tool_state = desired_tool_state.clone();
-            send_user_message(
-                queued.clone(),
-                turn_input.clone(),
+            enqueue_prepared_turn_for_cli(
+                queued,
                 app,
-                ui_trace.as_mut(),
-                logger,
+                ui_trace,
                 runtime,
-                history,
-                runtime_return_rx,
-                cancel_token,
-                active_stream_id,
-                app_tx,
-                &current_tool_state,
+                lash_core::DeliveryPolicy::EarliestSafeBoundary,
+                lash_core::SlotPolicy::Join,
             )
             .await;
-            *last_turn = Some(TurnReplayPayload {
-                prepared_turn: queued,
-                turn_input,
-                execution_mode: current_execution_mode.clone(),
-            });
         }
         KeyCode::Backspace => {
             if let Some(recorder) = ui_trace.as_mut() {

@@ -15,7 +15,7 @@
   /* ───────────────────────────────────────────────────────────────
      trace export · cross-session edges
      mockup of the html exporter's two-edge model
-     · continue_as → inline handoff divider, linear flow
+     · continue_as → inline AgentFrame divider, linear flow
      · spawn_agent → drill-in card; subagent has its own full view,
        reachable via breadcrumb
      ─────────────────────────────────────────────────────────────── */
@@ -94,7 +94,7 @@
   }
   /* Quieter separator: the breadcrumb is structural navigation, not an
      edge classification. Sodium-tinted arrows are reserved for the lineage
-     strip's actual edge glyphs (↪ handoff, ▾ spawn). */
+     strip's actual edge glyphs (↪ AgentFrame, ▾ spawn). */
   .crumb-sep {
     color: var(--ash-mid);
     font-weight: 400;
@@ -366,7 +366,7 @@
   /* Edge-marking ticks are short structural tabs, not entry rows. They sit
      on a hairline-ash background so the colored bar reads as a seam between
      sessions rather than another tick like the others. */
-  .spine-tick[data-spine="handoff"] {
+  .spine-tick[data-spine="agent-frame"] {
     background: var(--sodium);
     flex-grow: 0.4;
     box-shadow: 0 -1px 0 var(--line), 0 1px 0 var(--line);
@@ -420,7 +420,7 @@
   .entry--assistant .entry-glyph { color: var(--chalk); }
   .entry--tool .entry-glyph { color: var(--lichen); }
   .entry--rlm .entry-glyph { color: var(--info); }
-  .entry--handoff .entry-glyph { color: var(--sodium); }
+  .entry--agent-frame .entry-glyph { color: var(--sodium); }
   .entry--child .entry-glyph { color: var(--lichen); }
 
   .entry-body { padding-left: var(--space-sm); min-width: 0; }
@@ -441,7 +441,7 @@
   .entry--user .entry-tag { color: var(--sodium); }
   .entry-tag--tool { color: var(--lichen); font-weight: 600; }
   .entry-tag--rlm { color: var(--info); font-weight: 600; }
-  .entry-tag--handoff { color: var(--sodium); font-weight: 700; }
+  .entry-tag--agent-frame { color: var(--sodium); font-weight: 700; }
 
   .entry-headline {
     flex: 1 1 auto;
@@ -490,15 +490,15 @@
     color: var(--chalk);
   }
 
-  /* ─── handoff divider (continue_as · inline) ─── */
+  /* ─── AgentFrame switch divider (continue_as · inline) ─── */
 
-  .handoff {
+  .agent-frame-switch {
     position: relative;
     padding: var(--space-lg) 0 var(--space-xl);
     margin: var(--space-md) 0;
   }
-  .handoff::before,
-  .handoff::after {
+  .agent-frame-switch::before,
+  .agent-frame-switch::after {
     content: "";
     position: absolute;
     left: 0;
@@ -506,17 +506,17 @@
     height: 1px;
     background: linear-gradient(90deg, transparent, var(--line-strong) 12%, var(--line-strong) 88%, transparent);
   }
-  .handoff::before { top: 0; }
-  .handoff::after { bottom: 0; }
+  .agent-frame-switch::before { top: 0; }
+  .agent-frame-switch::after { bottom: 0; }
 
-  .handoff-banner {
+  .agent-frame-banner {
     display: grid;
     grid-template-columns: 56px minmax(0, 1fr) auto;
     gap: 0;
     align-items: center;
     margin-bottom: var(--space-sm);
   }
-  .handoff-glyph {
+  .agent-frame-glyph {
     text-align: right;
     padding-right: var(--space-sm);
     font-family: var(--font-display);
@@ -528,12 +528,12 @@
     display: grid;
     align-content: center;
   }
-  .handoff-title {
+  .agent-frame-title {
     padding-left: var(--space-sm);
     display: grid;
     gap: 2px;
   }
-  .handoff-eyebrow {
+  .agent-frame-eyebrow {
     font-family: var(--font-ui);
     text-transform: uppercase;
     letter-spacing: 0.28em;
@@ -541,7 +541,7 @@
     color: var(--sodium);
     font-weight: 700;
   }
-  .handoff-summary {
+  .agent-frame-summary {
     font-family: var(--font-display);
     font-size: 1.4rem;
     font-weight: 700;
@@ -549,7 +549,7 @@
     color: var(--chalk);
     line-height: 1.15;
   }
-  .handoff-route {
+  .agent-frame-route {
     display: grid;
     grid-auto-flow: column;
     gap: var(--space-xs);
@@ -560,17 +560,17 @@
     text-transform: uppercase;
     letter-spacing: 0.12em;
   }
-  .handoff-route .route-id { color: var(--chalk-mid); letter-spacing: 0.04em; }
-  .handoff-route .route-arrow { color: var(--sodium); }
+  .agent-frame-route .route-id { color: var(--chalk-mid); letter-spacing: 0.04em; }
+  .agent-frame-route .route-arrow { color: var(--sodium); }
 
-  .handoff-body {
+  .agent-frame-body {
     margin-left: 56px;
     padding-left: var(--space-sm);
     border-left: 1px solid var(--line);
     display: grid;
     gap: var(--space-md);
   }
-  .handoff-task {
+  .agent-frame-task {
     font-family: var(--font-body);
     font-size: 1.04rem;
     line-height: 1.6;
@@ -579,7 +579,7 @@
     margin: 0;
     padding: var(--space-sm) 0 0;
   }
-  .handoff-task::before {
+  .agent-frame-task::before {
     content: "task";
     display: block;
     font-family: var(--font-ui);
@@ -589,7 +589,7 @@
     color: var(--ash-text);
     margin-bottom: var(--space-2xs);
   }
-  .handoff-seed-label {
+  .agent-frame-seed-label {
     font-family: var(--font-ui);
     text-transform: uppercase;
     letter-spacing: 0.24em;
@@ -628,7 +628,7 @@
 
   /* Inline editorial list, hairline-divided — replaces the four metric tiles.
      Avoids the dashboard idiom while keeping all four stats scannable. */
-  .handoff-stats {
+  .agent-frame-stats {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-md);
@@ -638,25 +638,25 @@
     padding-top: var(--space-2xs);
     border-top: 1px solid var(--line);
   }
-  .handoff-stat {
+  .agent-frame-stat {
     display: inline-flex;
     align-items: baseline;
     gap: var(--space-2xs);
     font-variant-numeric: tabular-nums;
   }
-  .handoff-stat + .handoff-stat::before {
+  .agent-frame-stat + .agent-frame-stat::before {
     content: "·";
     color: var(--ash-mid);
     margin-right: var(--space-md);
     margin-left: calc(-1 * var(--space-md));
   }
-  .handoff-stat-key {
+  .agent-frame-stat-key {
     text-transform: uppercase;
     letter-spacing: 0.16em;
     font-size: 10px;
     color: var(--ash-text);
   }
-  .handoff-stat-val {
+  .agent-frame-stat-val {
     color: var(--chalk);
     font-weight: 600;
   }
@@ -867,8 +867,8 @@
     .controls { padding: var(--space-sm) var(--space-lg); }
     .transcript { padding: var(--space-md) var(--space-lg) var(--space-2xl); }
     .body { grid-template-columns: 32px minmax(0, 1fr); }
-    .handoff-stats { grid-template-columns: repeat(2, 1fr); }
-    .handoff-summary { font-size: 1.2rem; }
+    .agent-frame-stats { grid-template-columns: repeat(2, 1fr); }
+    .agent-frame-summary { font-size: 1.2rem; }
     .drill { grid-template-columns: 1fr; }
     .drill-right { border-left: none; border-top: 1px solid var(--line); padding: var(--space-sm) 0 0 0; text-align: left; grid-template-rows: auto auto; }
   }
@@ -876,7 +876,7 @@
     .doc-page { padding: var(--space-md); }
     .body { grid-template-columns: 0 minmax(0, 1fr); }
     .spine { display: none; }
-    .handoff-body { margin-left: 0; }
+    .agent-frame-body { margin-left: 0; }
   }
 </style>
 <style>
@@ -893,7 +893,7 @@
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">trace<span class="slash">/</span>edges</h1>
-    <p class="opener__lede">A mockup of the html exporter's two-edge model — <code>continue_as</code> renders as an inline handoff divider, and <code>spawn_agent</code> renders as a drill-in card. Click any node to follow the call tree.</p>
+    <p class="opener__lede">A mockup of the html exporter's two-edge model — <code>continue_as</code> renders as an inline AgentFrame divider, and <code>spawn_agent</code> renders as a drill-in card. Click any node to follow the call tree.</p>
   </section>
 
   <div id="content">
@@ -919,14 +919,14 @@
         <div>
           <span class="eyebrow">root session <span class="slash">·</span> s1·a47e</span>
           <h1>Audit auth-related code paths and recent migrations</h1>
-          <p>Root session of the run. Two parallel <span class="lichen">spawn_agent</span> children gather inventory, then a <span class="sodium">continue_as</span> handoff carries the synthesis into <code>s4·e51a</code>.</p>
+          <p>Root session of the run. Two parallel <span class="lichen">spawn_agent</span> children gather inventory, then a <span class="sodium">continue_as</span> AgentFrame switch carries the synthesis into frame <code>s4·e51a</code>.</p>
         </div>
         <div class="hero-meta">
           <div class="meta-row"><span class="meta-key">view</span><span class="meta-val"><span class="accent">s1·a47e</span> · root</span></div>
           <div class="meta-row"><span class="meta-key">model</span><span class="meta-val">claude-opus-4-7</span></div>
-          <div class="meta-row"><span class="meta-key">turns</span><span class="meta-val">8 (this view) + 4 successor (s4)</span></div>
+          <div class="meta-row"><span class="meta-key">turns</span><span class="meta-val">8 (this view) + 4 AgentFrame (s4)</span></div>
           <div class="meta-row"><span class="meta-key">subagents</span><span class="meta-val">2 — auth_files, db_migrations</span></div>
-          <div class="meta-row"><span class="meta-key">handoff</span><span class="meta-val">→ s4·e51a · continue_as</span></div>
+          <div class="meta-row"><span class="meta-key">frame</span><span class="meta-val">→ s4·e51a · continue_as</span></div>
           <div class="meta-row"><span class="meta-key">tokens</span><span class="meta-val">28.4k in · 3.1k out · 18% cached</span></div>
         </div>
       </header>
@@ -950,13 +950,13 @@
             <span class="lineage-node-label">subagent · explore</span>
             <span class="lineage-node-id">s3·d23f — db_migrations</span>
           </button>
-          <span class="lineage-edge" data-edge="handoff">
+          <span class="lineage-edge" data-edge="agent-frame">
             <span class="lineage-edge-glyph">↪</span>
             <span>continue_as</span>
           </span>
           <button class="lineage-node" data-go="root">
-            <span class="lineage-node-label">handoff (in this view)</span>
-            <span class="lineage-node-id"><span class="accent">s4</span>·e51a — successor</span>
+            <span class="lineage-node-label">AgentFrame (in this view)</span>
+            <span class="lineage-node-id"><span class="accent">s4</span>·e51a — AgentFrame</span>
           </button>
         </div>
       </nav>
@@ -971,7 +971,7 @@
         </div>
         <div class="chip-row">
           <span class="chip-label">edge</span>
-          <button class="chip">↪ handoff <span class="chip-count">1</span></button>
+          <button class="chip">↪ AgentFrame <span class="chip-count">1</span></button>
           <button class="chip">▾ subagent <span class="chip-count">2</span></button>
         </div>
       </section>
@@ -985,7 +985,7 @@
           <a class="spine-tick" data-spine="rlm" href="#"></a>
           <a class="spine-tick" data-spine="child" href="#"></a>
           <a class="spine-tick" data-spine="rlm" href="#"></a>
-          <a class="spine-tick" data-spine="handoff" href="#"></a>
+          <a class="spine-tick" data-spine="agent-frame" href="#"></a>
           <a class="spine-tick" data-spine="user" href="#"></a>
           <a class="spine-tick" data-spine="rlm" href="#"></a>
           <a class="spine-tick" data-spine="assistant" href="#"></a>
@@ -1096,26 +1096,26 @@
             </div>
           </article>
 
-          <!-- HANDOFF DIVIDER (continue_as · INLINE) -->
-          <section class="handoff" aria-label="handoff from s1 to s4">
-            <div class="handoff-banner">
-              <div class="handoff-glyph">↪</div>
-              <div class="handoff-title">
-                <span class="handoff-eyebrow">↪ continued as</span>
-                <span class="handoff-summary">Synthesise the audit into a ranked compliance plan.</span>
+          <!-- AGENTFRAME DIVIDER (continue_as · INLINE) -->
+          <section class="agent-frame-switch" aria-label="AgentFrame switch from s1 to s4">
+            <div class="agent-frame-banner">
+              <div class="agent-frame-glyph">↪</div>
+              <div class="agent-frame-title">
+                <span class="agent-frame-eyebrow">↪ continued as</span>
+                <span class="agent-frame-summary">Synthesise the audit into a ranked compliance plan.</span>
               </div>
-              <div class="handoff-route">
+              <div class="agent-frame-route">
                 <span class="route-id">s1·a47e</span>
                 <span class="route-arrow">→</span>
                 <span class="route-id sodium">s4·e51a</span>
               </div>
             </div>
 
-            <div class="handoff-body">
-              <p class="handoff-task">Take the auth-file inventory and the migration summary; produce a single ranked list of compliance touchpoints. Each item gets a one-line rationale and an effort estimate. Stop when the list is &lt; 12 items.</p>
+            <div class="agent-frame-body">
+              <p class="agent-frame-task">Take the auth-file inventory and the migration summary; produce a single ranked list of compliance touchpoints. Each item gets a one-line rationale and an effort estimate. Stop when the list is &lt; 12 items.</p>
 
               <div>
-                <span class="handoff-seed-label">seed · 4 entries</span>
+                <span class="agent-frame-seed-label">seed · 4 entries</span>
                 <div class="seed-list">
                   <span class="seed-pill" data-kind="projected"><span class="seed-name">problem</span><span class="seed-kind">projected</span></span>
                   <span class="seed-pill" data-kind="global"><span class="seed-name">auth_files</span><span class="seed-kind">global · 4 paths</span></span>
@@ -1124,16 +1124,16 @@
                 </div>
               </div>
 
-              <div class="handoff-stats">
-                <span class="handoff-stat"><span class="handoff-stat-key">parent ctx</span><span class="handoff-stat-val">78%</span></span>
-                <span class="handoff-stat"><span class="handoff-stat-key">seed</span><span class="handoff-stat-val">2.8 kb</span></span>
-                <span class="handoff-stat"><span class="handoff-stat-key">turns</span><span class="handoff-stat-val">8</span></span>
-                <span class="handoff-stat"><span class="handoff-stat-key">reason</span><span class="handoff-stat-val">continue_as</span></span>
+              <div class="agent-frame-stats">
+                <span class="agent-frame-stat"><span class="agent-frame-stat-key">parent ctx</span><span class="agent-frame-stat-val">78%</span></span>
+                <span class="agent-frame-stat"><span class="agent-frame-stat-key">seed</span><span class="agent-frame-stat-val">2.8 kb</span></span>
+                <span class="agent-frame-stat"><span class="agent-frame-stat-key">turns</span><span class="agent-frame-stat-val">8</span></span>
+                <span class="agent-frame-stat"><span class="agent-frame-stat-key">reason</span><span class="agent-frame-stat-val">continue_as</span></span>
               </div>
             </div>
           </section>
 
-          <!-- SUCCESSOR ENTRIES (s4·e51a · same view, linear flow) -->
+          <!-- AGENTFRAME ENTRIES (s4·e51a · same view, linear flow) -->
 
           <article class="entry entry--user">
             <div class="entry-rail">
@@ -1536,8 +1536,8 @@
   <section class="annotation">
     <div class="annotation-grid">
       <div>
-        <h2>↪ handoff · inline</h2>
-        <p>Continue_as is linear. The successor's entries flow in the same view, behind a sodium-bracketed divider that names the seam: task, seed (projected vs global), parent context %, the new session id. One scroll, one document.</p>
+        <h2>↪ AgentFrame · inline</h2>
+        <p><code>continue_as</code> is linear. The new frame's entries flow in the same view, behind a sodium-bracketed divider that names the seam: task, seed (projected vs global), parent context %, the new frame id. One scroll, one document.</p>
       </div>
       <div>
         <h2>▾ subagent · drill-in</h2>

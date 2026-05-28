@@ -554,14 +554,14 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
         TraceEvent::TurnCompleted {
             status,
             done_reason,
-            handoff,
+            agent_frame_switch,
         } => {
             attrs.push(KeyValue::new("lash.turn.status", status.clone()));
             attrs.push(KeyValue::new("lash.turn.done_reason", done_reason.clone()));
-            if let Some(handoff) = handoff {
+            if let Some(agent_frame_switch) = agent_frame_switch {
                 attrs.push(KeyValue::new(
-                    "lash.turn.handoff.successor_session_id",
-                    handoff.successor_session_id.clone(),
+                    "lash.turn.agent_frame_switch.frame_id",
+                    agent_frame_switch.frame_id.clone(),
                 ));
             }
         }
@@ -782,7 +782,7 @@ mod tests {
             TraceEvent::TurnCompleted {
                 status: "failed".to_string(),
                 done_reason: "error".to_string(),
-                handoff: None,
+                agent_frame_switch: None,
             },
         ))
         .unwrap();

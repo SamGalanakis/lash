@@ -133,6 +133,8 @@ pub struct ProcessOpScope<'scope> {
     pub parent_invocation: Option<crate::RuntimeInvocation>,
     pub effect_controller: Option<&'scope dyn crate::RuntimeEffectController>,
     pub turn_lease: Option<crate::RuntimeTurnLease>,
+    pub agent_frame_id: Option<crate::AgentFrameId>,
+    pub target_agent_frame_id: Option<crate::AgentFrameId>,
 }
 
 impl<'scope> ProcessOpScope<'scope> {
@@ -158,6 +160,19 @@ impl<'scope> ProcessOpScope<'scope> {
 
     pub fn with_turn_lease(mut self, turn_lease: Option<crate::RuntimeTurnLease>) -> Self {
         self.turn_lease = turn_lease;
+        self
+    }
+
+    pub fn with_agent_frame_id(mut self, agent_frame_id: Option<crate::AgentFrameId>) -> Self {
+        self.agent_frame_id = agent_frame_id;
+        self
+    }
+
+    pub fn with_target_agent_frame_id(
+        mut self,
+        agent_frame_id: Option<crate::AgentFrameId>,
+    ) -> Self {
+        self.target_agent_frame_id = agent_frame_id;
         self
     }
 }
@@ -199,6 +214,8 @@ impl ProcessStartOptions {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessScope {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_frame_id: Option<crate::AgentFrameId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,11 +245,27 @@ impl ProcessScope {
     pub fn new(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
+            agent_frame_id: None,
+        }
+    }
+
+    pub fn for_agent_frame(
+        session_id: impl Into<String>,
+        agent_frame_id: impl Into<crate::AgentFrameId>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            agent_frame_id: Some(agent_frame_id.into()),
         }
     }
 
     pub fn id(&self) -> ProcessScopeId {
-        ProcessScopeId::new(format!("session:{}", self.session_id))
+        match self.agent_frame_id.as_deref() {
+            Some(frame_id) if !frame_id.is_empty() => {
+                ProcessScopeId::new(format!("session:{}/frame:{frame_id}", self.session_id))
+            }
+            _ => ProcessScopeId::new(format!("session:{}", self.session_id)),
+        }
     }
 
     pub fn is_empty(&self) -> bool {

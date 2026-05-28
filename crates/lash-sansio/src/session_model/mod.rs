@@ -205,7 +205,7 @@ pub enum SessionEvent {
 #[serde(rename_all = "snake_case")]
 pub enum TurnOutcome {
     Finished(TurnFinish),
-    Handoff { session_id: String },
+    AgentFrameSwitch { frame_id: String },
     Stopped(TurnStop),
 }
 

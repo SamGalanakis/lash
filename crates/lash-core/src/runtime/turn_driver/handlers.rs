@@ -15,8 +15,8 @@ impl RuntimeTurnDriver<'_> {
             return Ok(());
         }
         match self.before_llm_call(machine, &request).await {
-            Ok(Some(crate::ProtocolLlmCallAction::Handoff { session_id })) => {
-                machine.finish_with_outcome(crate::TurnOutcome::Handoff { session_id });
+            Ok(Some(crate::ProtocolLlmCallAction::SwitchAgentFrame { frame_id })) => {
+                machine.finish_with_outcome(crate::TurnOutcome::AgentFrameSwitch { frame_id });
                 return Ok(());
             }
             Ok(None) => {}

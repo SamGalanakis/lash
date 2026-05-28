@@ -18,7 +18,7 @@ pub mod turn;
 pub mod usage;
 
 pub use crate::control::{
-    AdvancedToolsControl, Handoffs, HostEventsControl, PluginActions, ProcessControl, ToolsControl,
+    AdvancedToolsControl, HostEventsControl, PluginActions, ProcessControl, ToolsControl,
     TriggersControl,
 };
 pub use crate::core::{AdvancedLashCoreBuilder, LashCore, LashCoreBuilder, SessionDeleteReport};
@@ -29,24 +29,23 @@ pub use crate::session::{
     LashSession, ObservableSession, QueueInputBuilder, SessionBuilder, SessionConfigPatch,
 };
 pub use crate::turn::{
-    FollowedTurnResult, ResumeTurnBuilder, TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult,
-    TurnStream, message_role, message_text,
+    AdvancedResumeTurn, AdvancedTurn, QueuedTurnBuilder, ResumeTurnBuilder, TurnActivityFanout,
+    TurnBuilder, TurnOutput, TurnResult, TurnStream, message_role, message_text,
 };
 pub use lash_core::{
-    impl_unsupported_queued_work_methods,
     HostEvent, HostEventEmitReport, InputItem, ModelLimits, ModelSpec, PluginStack, SessionSpec,
     SessionTriggerInstallReport, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent,
-    TurnInput,
+    TurnInput, impl_unsupported_queued_work_methods,
 };
 
 pub mod prelude {
     pub use crate::{
-        AdvancedLashCoreBuilder, AdvancedToolsControl, EmbedError, FollowedTurnResult, Handoffs,
-        HostEvent, HostEventEmitReport, HostEventsControl, InputItem, LashCore, LashCoreBuilder,
-        LashSession, ModeId, ModePreset, ModelSpec, ObservableSession, PluginActions,
-        PluginBinding, PluginStack, ProcessControl, Result, ResumeTurnBuilder, SessionBuilder,
-        SessionSpec, SessionTriggerInstallReport, ToolsControl, TriggersControl, TurnActivity,
-        TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
+        AdvancedLashCoreBuilder, AdvancedToolsControl, EmbedError, HostEvent, HostEventEmitReport,
+        HostEventsControl, InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset,
+        ModelSpec, ObservableSession, PluginActions, PluginBinding, PluginStack, ProcessControl,
+        QueuedTurnBuilder, Result, ResumeTurnBuilder, SessionBuilder, SessionSpec,
+        SessionTriggerInstallReport, ToolsControl, TriggersControl, TurnActivity, TurnBuilder,
+        TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
     };
     pub use lash_core::TurnActivitySink;
 }
@@ -75,9 +74,9 @@ pub mod direct {
 
 pub mod persistence {
     pub use lash_core::{
-        AttachmentStore, BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint,
-        PersistedSessionConfig, PersistedSessionRead, PersistedTurnState, ProtocolEvent,
-        DeliveryPolicy, MergeKey, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
+        AttachmentStore, BlobRef, DeliveryPolicy, GcReport, GraphCommitDelta,
+        HydratedSessionCheckpoint, MergeKey, PersistedSessionConfig, PersistedSessionRead,
+        PersistedTurnState, ProtocolEvent, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
         QueuedWorkClaimBoundary, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
         RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
         RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
@@ -177,10 +176,10 @@ pub mod provider {
         ProviderRetryPolicy, ProviderTimeoutPolicy,
     };
     pub use lash_core::{
-        LlmTimeouts, ProviderComponents, ProviderFactory, ProviderHandle, ProviderModelPolicy,
-        ProviderOptions, ProviderRegistry, ProviderSpec, ProviderState, ProviderThinkingPolicy,
-        ProviderTransport, RequestTimeout, StaticModelPolicy, build_provider, provider_factory,
-        register_provider_factory,
+        LlmTimeouts, Provider, ProviderComponents, ProviderFactory, ProviderHandle,
+        ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec,
+        ProviderThinkingPolicy, RequestTimeout, StaticModelPolicy, build_provider,
+        provider_factory, register_provider_factory,
     };
 }
 

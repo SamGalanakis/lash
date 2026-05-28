@@ -21,7 +21,7 @@ use serde_json::Value;
 pub struct LlmPromptSnapshot {
     /// Session this call belongs to. Populated from `context.session_id`
     /// in the trace record. Critical for multi-session exports — one trace
-    /// file can span root + handoff successors + spawned subagents.
+    /// file can span root + AgentFrame switch AgentFrames + spawned subagents.
     pub session_id: Option<String>,
     pub turn_index: Option<u64>,
     pub protocol_iteration: Option<u64>,

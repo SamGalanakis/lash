@@ -1415,7 +1415,7 @@ body.hide-pruned .part--pruned { display: none; }
   .entry { grid-template-columns: 40px 1fr; }
 }
 
-/* ─── multi-view: breadcrumb, lineage, drill, handoff ─────────────────────── */
+/* ─── multi-view: breadcrumb, lineage, drill, AgentFrame switch ───────────── */
 
 .crumb-bar {
   position: sticky;
@@ -1610,15 +1610,15 @@ body.hide-pruned .part--pruned { display: none; }
   word-break: break-word;
 }
 
-/* ─── handoff divider (continue_as · inline) ─── */
+/* ─── AgentFrame switch divider (continue_as · inline) ─── */
 
-.handoff {
+.agent-frame-switch {
   position: relative;
   padding: 24px 0 32px;
   margin: 16px 0;
 }
-.handoff::before,
-.handoff::after {
+.agent-frame-switch::before,
+.agent-frame-switch::after {
   content: "";
   position: absolute;
   left: 0;
@@ -1626,16 +1626,16 @@ body.hide-pruned .part--pruned { display: none; }
   height: 1px;
   background: linear-gradient(90deg, transparent, var(--line-strong) 12%, var(--line-strong) 88%, transparent);
 }
-.handoff::before { top: 0; }
-.handoff::after { bottom: 0; }
-.handoff-banner {
+.agent-frame-switch::before { top: 0; }
+.agent-frame-switch::after { bottom: 0; }
+.agent-frame-banner {
   display: grid;
   grid-template-columns: 56px minmax(0, 1fr) auto;
   gap: 0;
   align-items: center;
   margin-bottom: 12px;
 }
-.handoff-glyph {
+.agent-frame-glyph {
   text-align: right;
   padding-right: 12px;
   font-family: var(--font-display);
@@ -1647,12 +1647,12 @@ body.hide-pruned .part--pruned { display: none; }
   display: grid;
   align-content: center;
 }
-.handoff-title {
+.agent-frame-title {
   padding-left: 12px;
   display: grid;
   gap: 2px;
 }
-.handoff-eyebrow {
+.agent-frame-eyebrow {
   font-family: var(--font-ui);
   text-transform: uppercase;
   letter-spacing: 0.28em;
@@ -1660,7 +1660,7 @@ body.hide-pruned .part--pruned { display: none; }
   color: var(--sodium);
   font-weight: 700;
 }
-.handoff-summary {
+.agent-frame-summary {
   font-family: var(--font-display);
   font-size: 1.4rem;
   font-weight: 700;
@@ -1668,7 +1668,7 @@ body.hide-pruned .part--pruned { display: none; }
   color: var(--chalk);
   line-height: 1.15;
 }
-.handoff-route {
+.agent-frame-route {
   display: grid;
   grid-auto-flow: column;
   gap: 8px;
@@ -1679,17 +1679,17 @@ body.hide-pruned .part--pruned { display: none; }
   text-transform: uppercase;
   letter-spacing: 0.12em;
 }
-.handoff-route .route-id { color: var(--chalk-mid); letter-spacing: 0.04em; }
-.handoff-route .route-arrow { color: var(--sodium); }
-.handoff-route .sodium { color: var(--sodium); }
-.handoff-body {
+.agent-frame-route .route-id { color: var(--chalk-mid); letter-spacing: 0.04em; }
+.agent-frame-route .route-arrow { color: var(--sodium); }
+.agent-frame-route .sodium { color: var(--sodium); }
+.agent-frame-body {
   margin-left: 56px;
   padding-left: 12px;
   border-left: 1px solid var(--line);
   display: grid;
   gap: 16px;
 }
-.handoff-task {
+.agent-frame-task {
   font-family: var(--font-body);
   font-size: 1.04rem;
   line-height: 1.6;
@@ -1698,7 +1698,7 @@ body.hide-pruned .part--pruned { display: none; }
   margin: 0;
   padding: 12px 0 0;
 }
-.handoff-task::before {
+.agent-frame-task::before {
   content: "task";
   display: block;
   font-family: var(--font-ui);
@@ -1708,7 +1708,7 @@ body.hide-pruned .part--pruned { display: none; }
   color: var(--ash-text);
   margin-bottom: 4px;
 }
-.handoff-seed-label {
+.agent-frame-seed-label {
   font-family: var(--font-ui);
   text-transform: uppercase;
   letter-spacing: 0.24em;
@@ -1744,7 +1744,7 @@ body.hide-pruned .part--pruned { display: none; }
 .seed-pill[data-kind="projected"] { border-color: rgba(232, 163, 60, 0.32); }
 .seed-pill[data-kind="projected"] .seed-kind { color: var(--sodium); }
 .seed-pill[data-kind="global"] .seed-kind { color: var(--lichen); }
-.handoff-stats {
+.agent-frame-stats {
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
@@ -1754,25 +1754,25 @@ body.hide-pruned .part--pruned { display: none; }
   padding-top: 4px;
   border-top: 1px solid var(--line);
 }
-.handoff-stat {
+.agent-frame-stat {
   display: inline-flex;
   align-items: baseline;
   gap: 4px;
   font-variant-numeric: tabular-nums;
 }
-.handoff-stat + .handoff-stat::before {
+.agent-frame-stat + .agent-frame-stat::before {
   content: "·";
   color: var(--ash-mid);
   margin-right: 16px;
   margin-left: -16px;
 }
-.handoff-stat-key {
+.agent-frame-stat-key {
   text-transform: uppercase;
   letter-spacing: 0.16em;
   font-size: 10px;
   color: var(--ash-text);
 }
-.handoff-stat-val { color: var(--chalk); font-weight: 600; }
+.agent-frame-stat-val { color: var(--chalk); font-weight: 600; }
 
 /* ─── drill-in card (spawn_agent · subagent) ─── */
 
@@ -1943,7 +1943,7 @@ body.hide-pruned .part--pruned { display: none; }
   .crumb-bar { padding: 12px 16px; }
   .lineage { grid-template-columns: 1fr; padding: 12px 16px; }
   .trace-hero { grid-template-columns: 1fr; gap: 16px; padding: 24px 16px; }
-  .handoff-body { margin-left: 0; }
+  .agent-frame-body { margin-left: 0; }
   .drill { grid-template-columns: 1fr; }
   .drill-right {
     border-left: none;

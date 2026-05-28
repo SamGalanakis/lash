@@ -20,6 +20,10 @@ pub struct SessionStateEnvelope {
     #[serde(default)]
     pub policy: SessionPolicy,
     #[serde(default)]
+    pub agent_frames: Vec<crate::AgentFrameRecord>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub current_agent_frame_id: crate::AgentFrameId,
+    #[serde(default)]
     pub session_graph: crate::SessionGraph,
     #[serde(default)]
     pub turn_index: usize,
@@ -33,7 +37,14 @@ pub struct SessionStateEnvelope {
 
 impl SessionStateEnvelope {
     pub(crate) fn read_model(&self) -> crate::session_graph::SessionReadModel {
-        self.session_graph.read_model()
+        self.session_graph.read_model_for_agent_frame(
+            &self.current_agent_frame_id,
+            self.agent_frames
+                .iter()
+                .find(|frame| frame.frame_id == self.current_agent_frame_id)
+                .map(|frame| frame.previous_frame_id.is_none())
+                .unwrap_or(true),
+        )
     }
 
     pub fn replace_active_read_state(
@@ -68,6 +79,8 @@ impl Default for SessionStateEnvelope {
         Self {
             session_id: "root".to_string(),
             policy: SessionPolicy::default(),
+            agent_frames: default_agent_frames("root", &SessionPolicy::default()),
+            current_agent_frame_id: default_agent_frame_id("root"),
             session_graph: crate::SessionGraph::default(),
             turn_index: 0,
             token_usage: TokenUsage::default(),
@@ -91,6 +104,10 @@ impl Default for SessionStateEnvelope {
 pub struct PersistedSessionSnapshot {
     pub session_id: String,
     pub policy: SessionPolicy,
+    #[serde(default)]
+    pub agent_frames: Vec<crate::AgentFrameRecord>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub current_agent_frame_id: crate::AgentFrameId,
     pub session_graph: crate::SessionGraph,
     pub turn_index: usize,
     pub token_usage: TokenUsage,
@@ -126,6 +143,10 @@ pub struct RuntimeSessionState {
     pub session_id: String,
     #[serde(default)]
     pub policy: SessionPolicy,
+    #[serde(default)]
+    pub agent_frames: Vec<crate::AgentFrameRecord>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub current_agent_frame_id: crate::AgentFrameId,
     #[serde(default)]
     pub session_graph: crate::SessionGraph,
     #[serde(default)]
@@ -172,11 +193,19 @@ pub struct RuntimeSessionState {
     pub graph_replace_required: bool,
 }
 
+impl From<RuntimeSessionState> for SessionStateEnvelope {
+    fn from(state: RuntimeSessionState) -> Self {
+        state.into_envelope()
+    }
+}
+
 impl RuntimeSessionState {
     pub fn from_state(state: SessionStateEnvelope) -> Self {
-        Self {
+        let mut state = Self {
             session_id: state.session_id,
             policy: state.policy,
+            agent_frames: state.agent_frames,
+            current_agent_frame_id: state.current_agent_frame_id,
             session_graph: state.session_graph,
             turn_index: state.turn_index,
             token_usage: state.token_usage,
@@ -194,7 +223,9 @@ impl RuntimeSessionState {
             checkpoint_ref: None,
             head_revision: None,
             graph_replace_required: false,
-        }
+        };
+        state.ensure_agent_frame_initialized();
+        state
     }
 
     /// Return the persistable subset of this runtime state as a
@@ -206,6 +237,8 @@ impl RuntimeSessionState {
         PersistedSessionSnapshot {
             session_id: self.session_id.clone(),
             policy: self.policy.clone(),
+            agent_frames: self.agent_frames.clone(),
+            current_agent_frame_id: self.current_agent_frame_id.clone(),
             session_graph: self.session_graph.clone(),
             turn_index: self.turn_index,
             token_usage: self.token_usage.clone(),
@@ -225,6 +258,8 @@ impl RuntimeSessionState {
         SessionStateEnvelope {
             session_id: self.session_id.clone(),
             policy: self.policy.clone(),
+            agent_frames: self.agent_frames.clone(),
+            current_agent_frame_id: self.current_agent_frame_id.clone(),
             session_graph: self.session_graph.clone(),
             turn_index: self.turn_index,
             token_usage: self.token_usage.clone(),
@@ -233,9 +268,31 @@ impl RuntimeSessionState {
         }
     }
 
+    /// Owned conversion into the persistable read-model envelope.
+    ///
+    /// Like [`Self::export_state`] but consumes `self` and moves the
+    /// persistable fields out instead of cloning. Use this when the
+    /// `RuntimeSessionState` is no longer needed afterwards.
+    pub fn into_envelope(self) -> SessionStateEnvelope {
+        SessionStateEnvelope {
+            session_id: self.session_id,
+            policy: self.policy,
+            agent_frames: self.agent_frames,
+            current_agent_frame_id: self.current_agent_frame_id,
+            session_graph: self.session_graph,
+            turn_index: self.turn_index,
+            token_usage: self.token_usage,
+            last_prompt_usage: self.last_prompt_usage,
+            protocol_turn_options: self.protocol_turn_options,
+        }
+    }
+
     pub fn apply_exported_state(&mut self, state: &SessionStateEnvelope) {
         self.session_id = state.session_id.clone();
         self.policy = state.policy.clone();
+        self.agent_frames = state.agent_frames.clone();
+        self.current_agent_frame_id = state.current_agent_frame_id.clone();
+        self.ensure_agent_frame_initialized();
         self.session_graph = state.session_graph.clone();
         self.turn_index = state.turn_index;
         self.token_usage = state.token_usage.clone();
@@ -258,7 +315,10 @@ impl RuntimeSessionState {
     }
 
     pub(crate) fn read_model(&self) -> crate::session_graph::SessionReadModel {
-        self.session_graph.read_model()
+        self.session_graph.read_model_for_agent_frame(
+            &self.current_agent_frame_id,
+            self.current_agent_frame_is_initial(),
+        )
     }
 
     pub fn replace_active_read_state(
@@ -267,12 +327,22 @@ impl RuntimeSessionState {
         tool_calls: &[ToolCallRecord],
     ) {
         self.session_graph
-            .replace_active_read_state(messages, tool_calls);
+            .replace_active_read_state_for_agent_frame(
+                &self.current_agent_frame_id,
+                messages,
+                tool_calls,
+            );
         self.graph_replace_required = false;
     }
 
     pub fn replace_active_tool_calls(&mut self, tool_calls: &[ToolCallRecord]) {
-        self.session_graph.replace_active_tool_calls(tool_calls);
+        let messages = self.read_model().messages;
+        self.session_graph
+            .replace_active_read_state_for_agent_frame(
+                &self.current_agent_frame_id,
+                messages.as_slice(),
+                tool_calls,
+            );
         self.graph_replace_required = false;
     }
 
@@ -281,13 +351,19 @@ impl RuntimeSessionState {
         messages: &[Message],
         tool_calls: &[ToolCallRecord],
     ) {
-        self.session_graph
-            .append_active_read_delta(messages, tool_calls);
+        self.session_graph.append_active_read_delta_for_agent_frame(
+            &self.current_agent_frame_id,
+            messages,
+            tool_calls,
+        );
     }
 
     pub fn append_active_conversation_messages(&mut self, messages: &[Message]) {
         self.session_graph
-            .append_active_conversation_messages(messages);
+            .append_active_conversation_messages_for_agent_frame(
+                &self.current_agent_frame_id,
+                messages,
+            );
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
@@ -299,7 +375,7 @@ impl RuntimeSessionState {
     }
 
     pub fn policy(&self) -> &SessionPolicy {
-        &self.policy
+        self.effective_policy()
     }
 
     pub fn turn_state(&self) -> PersistedTurnState {
@@ -327,27 +403,46 @@ impl RuntimeSessionState {
         self.plugin_snapshot_ref = result.manifest.plugin_snapshot_ref;
         self.plugin_snapshot_revision = result.manifest.plugin_snapshot_revision;
         self.execution_state_ref = result.manifest.execution_state_ref;
+        let execution_state_ref = self.execution_state_ref.clone();
+        if let Some(frame) = self.current_agent_frame_mut() {
+            frame.execution_state_ref = execution_state_ref;
+            frame.execution_state_snapshot = None;
+        }
         self.graph_replace_required = false;
         self.tool_state_snapshot = None;
         self.plugin_snapshot = None;
         self.execution_state_snapshot = None;
+        if let Some(frame) = self.current_agent_frame_mut() {
+            frame.execution_state_snapshot = None;
+        }
     }
 
     pub fn discard_runtime_snapshots(&mut self) {
         self.tool_state_snapshot = None;
         self.plugin_snapshot = None;
         self.execution_state_snapshot = None;
+        if let Some(frame) = self.current_agent_frame_mut() {
+            frame.execution_state_snapshot = None;
+        }
     }
 
     pub fn set_execution_state_snapshot(&mut self, execution_state_snapshot: Option<Vec<u8>>) {
         if execution_state_snapshot.is_none() {
             self.execution_state_ref = None;
         }
-        self.execution_state_snapshot = execution_state_snapshot;
+        self.execution_state_snapshot = execution_state_snapshot.clone();
+        if let Some(frame) = self.current_agent_frame_mut() {
+            if execution_state_snapshot.is_none() {
+                frame.execution_state_ref = None;
+            }
+            frame.execution_state_snapshot = execution_state_snapshot;
+        }
     }
 
     pub fn execution_state_snapshot(&self) -> Option<&[u8]> {
-        self.execution_state_snapshot.as_deref()
+        self.current_agent_frame()
+            .and_then(|frame| frame.execution_state_snapshot.as_deref())
+            .or(self.execution_state_snapshot.as_deref())
     }
 
     pub fn refresh_plugin_snapshots(&mut self, plugins: &crate::PluginSession) {
@@ -367,11 +462,104 @@ impl RuntimeSessionState {
     }
 }
 
+impl RuntimeSessionState {
+    pub fn current_agent_frame(&self) -> Option<&crate::AgentFrameRecord> {
+        self.agent_frames
+            .iter()
+            .find(|frame| frame.frame_id == self.current_agent_frame_id)
+    }
+
+    pub fn current_agent_frame_mut(&mut self) -> Option<&mut crate::AgentFrameRecord> {
+        let current_agent_frame_id = self.current_agent_frame_id.clone();
+        self.agent_frames
+            .iter_mut()
+            .find(|frame| frame.frame_id == current_agent_frame_id)
+    }
+
+    pub fn effective_policy(&self) -> &SessionPolicy {
+        self.current_agent_frame()
+            .map(|frame| &frame.assignment.policy)
+            .unwrap_or(&self.policy)
+    }
+
+    pub fn effective_protocol_turn_options(&self) -> &crate::ProtocolTurnOptions {
+        self.current_agent_frame()
+            .map(|frame| &frame.protocol_turn_options)
+            .unwrap_or(&self.protocol_turn_options)
+    }
+
+    pub fn ensure_agent_frame_initialized(&mut self) {
+        if self.current_agent_frame_id.is_empty() {
+            self.current_agent_frame_id = default_agent_frame_id(&self.session_id);
+        }
+        if self
+            .agent_frames
+            .iter()
+            .any(|frame| frame.frame_id == self.current_agent_frame_id)
+        {
+            return;
+        }
+        let mut frame = default_agent_frame(&self.session_id, &self.policy);
+        frame.frame_id = self.current_agent_frame_id.clone();
+        frame.protocol_turn_options = self.protocol_turn_options.clone();
+        frame.execution_state_ref = self.execution_state_ref.clone();
+        frame.execution_state_snapshot = self.execution_state_snapshot.clone();
+        self.agent_frames.push(frame);
+    }
+
+    pub fn reset_initial_agent_frame(
+        &mut self,
+        assignment: crate::AgentFrameAssignment,
+        protocol_turn_options: crate::ProtocolTurnOptions,
+    ) {
+        let frame_id = default_agent_frame_id(&self.session_id);
+        self.policy = assignment.policy.clone();
+        self.protocol_turn_options = protocol_turn_options.clone();
+        self.current_agent_frame_id = frame_id.clone();
+        self.agent_frames = vec![crate::AgentFrameRecord::new(
+            frame_id,
+            self.session_id.clone(),
+            None,
+            crate::AgentFrameReason::Initial,
+            None,
+            assignment,
+            protocol_turn_options,
+        )];
+    }
+
+    pub fn append_agent_frame(&mut self, mut frame: crate::AgentFrameRecord) {
+        let previous_frame_id = self.current_agent_frame_id.clone();
+        for existing in &mut self.agent_frames {
+            if existing.frame_id == previous_frame_id {
+                existing.status = crate::AgentFrameStatus::Superseded;
+            }
+        }
+        if frame.previous_frame_id.is_none() && !previous_frame_id.is_empty() {
+            frame.previous_frame_id = Some(previous_frame_id);
+        }
+        frame.status = crate::AgentFrameStatus::Active;
+        self.policy = frame.assignment.policy.clone();
+        self.protocol_turn_options = frame.protocol_turn_options.clone();
+        self.current_agent_frame_id = frame.frame_id.clone();
+        self.execution_state_ref = frame.execution_state_ref.clone();
+        self.execution_state_snapshot = frame.execution_state_snapshot.clone();
+        self.agent_frames.push(frame);
+    }
+
+    fn current_agent_frame_is_initial(&self) -> bool {
+        self.current_agent_frame()
+            .map(|frame| frame.previous_frame_id.is_none())
+            .unwrap_or(true)
+    }
+}
+
 impl Default for RuntimeSessionState {
     fn default() -> Self {
         Self {
             session_id: "root".to_string(),
             policy: SessionPolicy::default(),
+            agent_frames: default_agent_frames("root", &SessionPolicy::default()),
+            current_agent_frame_id: default_agent_frame_id("root"),
             session_graph: crate::SessionGraph::default(),
             turn_index: 0,
             token_usage: TokenUsage::default(),
@@ -413,6 +601,7 @@ pub(super) fn apply_session_checkpoint(
         state.plugin_snapshot = None;
         state.execution_state_ref = None;
         state.execution_state_snapshot = None;
+        state.ensure_agent_frame_initialized();
         return;
     };
     state.turn_index = checkpoint.turn_state.turn_index;
@@ -430,6 +619,11 @@ pub(super) fn apply_session_checkpoint(
     state.plugin_snapshot = checkpoint.plugin_snapshot;
     state.execution_state_ref = checkpoint.execution_state_ref.clone();
     state.execution_state_snapshot = None;
+    state.ensure_agent_frame_initialized();
+    if let Some(frame) = state.current_agent_frame_mut() {
+        frame.execution_state_ref = checkpoint.execution_state_ref.clone();
+        frame.execution_state_snapshot = checkpoint.execution_state;
+    }
 }
 
 pub(super) fn apply_session_head(
@@ -437,6 +631,8 @@ pub(super) fn apply_session_head(
     head: &crate::store::SessionHead,
 ) {
     state.session_graph = head.graph.clone();
+    state.agent_frames = head.agent_frames.clone();
+    state.current_agent_frame_id = head.current_agent_frame_id.clone();
     state.checkpoint_ref = head.checkpoint_ref.clone();
     state.token_ledger = head.token_ledger.clone();
     state.tool_state_ref = None;
@@ -447,6 +643,7 @@ pub(super) fn apply_session_head(
     state.plugin_snapshot = None;
     state.execution_state_ref = None;
     state.execution_state_snapshot = None;
+    state.ensure_agent_frame_initialized();
     state.head_revision = Some(head.head_revision);
     state.graph_replace_required = false;
     apply_persisted_session_config(&mut state.policy, &head.config);
@@ -460,7 +657,10 @@ pub(super) fn append_session_nodes_to_state(
         .iter()
         .map(session_append_node_draft)
         .collect::<Vec<_>>();
-    let node_ids = state.session_graph.append_node_drafts(drafts);
+    state.ensure_agent_frame_initialized();
+    let node_ids = state
+        .session_graph
+        .append_node_drafts_for_agent_frame(&state.current_agent_frame_id, drafts);
     normalize_session_graph(state);
     node_ids
 }
@@ -484,6 +684,26 @@ fn session_append_node_draft(
         } => crate::session_graph::SessionNodeDraft::plugin(plugin_type.clone(), body.clone())
             .with_caused_by(caused_by.clone()),
     }
+}
+
+fn default_agent_frame_id(session_id: &str) -> crate::AgentFrameId {
+    format!("{session_id}:frame:initial")
+}
+
+fn default_agent_frames(session_id: &str, policy: &SessionPolicy) -> Vec<crate::AgentFrameRecord> {
+    vec![default_agent_frame(session_id, policy)]
+}
+
+fn default_agent_frame(session_id: &str, policy: &SessionPolicy) -> crate::AgentFrameRecord {
+    crate::AgentFrameRecord::new(
+        default_agent_frame_id(session_id),
+        session_id.to_string(),
+        None,
+        crate::AgentFrameReason::Initial,
+        None,
+        crate::AgentFrameAssignment::from_policy(policy.clone()),
+        crate::ProtocolTurnOptions::default(),
+    )
 }
 
 /// Heal any graph corruption (orphaned leaf) on load.

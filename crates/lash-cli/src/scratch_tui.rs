@@ -433,8 +433,8 @@ fn status_bar_context_spans(app: &App) -> Option<StatusSlot> {
     // nonzero number — and using it as the displayed total reads as if the
     // streamed output bytes were the entire context, producing nonsense like
     // `36 · 0%` against a 1.1M-token window. Wait for real input accounting.
-    let Some(context_window) = app.context_window else {
-        let total = app.token_usage.input_tokens + app.token_usage.output_tokens;
+    let Some(context_window) = app.usage.context_window else {
+        let total = app.usage.token_usage.input_tokens + app.usage.token_usage.output_tokens;
         if total <= 0 {
             return None;
         }
@@ -449,13 +449,14 @@ fn status_bar_context_spans(app: &App) -> Option<StatusSlot> {
 
     let used = current_context_budget_tokens(app)
         .or_else(|| {
-            app.last_prompt_usage
+            app.usage
+                .last_prompt_usage
                 .as_ref()
                 .map(|usage| usage.context_budget_tokens as i64)
                 .filter(|used| *used > 0)
         })
         .or_else(|| {
-            let total = app.token_usage.input_tokens + app.token_usage.output_tokens;
+            let total = app.usage.token_usage.input_tokens + app.usage.token_usage.output_tokens;
             (total > 0).then_some(total)
         })?;
 
@@ -652,7 +653,7 @@ pub(crate) fn sync_chrome_turn_status(app: &App) {
         None
     } else {
         let background = process_summary(app);
-        Some(match app.live_turn.as_ref() {
+        Some(match app.live.turn.as_ref() {
             Some(turn) => TurnStatusSnapshot {
                 label: match turn.status_text.as_str() {
                     "error" => TurnStatusLabel::Error,
@@ -712,16 +713,18 @@ fn current_context_budget_tokens(app: &App) -> Option<i64> {
     if !app.running {
         return None;
     }
-    let input = app.last_response_usage.input_tokens.max(0);
-    let cached = app.last_response_usage.cached_input_tokens.max(0);
+    let input = app.usage.last_response_usage.input_tokens.max(0);
+    let cached = app.usage.last_response_usage.cached_input_tokens.max(0);
     // Suppress until input accounting from a completed response has landed.
     // Showing only the streaming output token estimate against the full
     // context window otherwise reads as `36 · 0%` on the first turn.
     if input == 0 && cached == 0 {
         return None;
     }
-    let output = (app.last_response_usage.output_tokens + app.live_output_tokens_estimate).max(0);
-    Some(if app.context_usage_excludes_cached_input {
+    let output = (app.usage.last_response_usage.output_tokens
+        + app.usage.live_output_tokens_estimate)
+        .max(0);
+    Some(if app.usage.context_usage_excludes_cached_input {
         input + output + cached
     } else {
         (input - cached).max(0) + output + cached
@@ -1314,8 +1317,8 @@ mod tests {
     fn status_bar_shows_context_window_usage() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         app.model_variant = Some("high".into());
-        app.context_window = Some(1_100_000);
-        app.last_prompt_usage = Some(PromptUsage {
+        app.usage.context_window = Some(1_100_000);
+        app.usage.last_prompt_usage = Some(PromptUsage {
             prompt_context_tokens: 0,
             input_tokens: 0,
             cached_input_tokens: 0,
@@ -1339,9 +1342,9 @@ mod tests {
         // the bar shows e.g. `36 · 0%` against a 1.1M-token window. The
         // meter should stay off until real input accounting lands.
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-        app.context_window = Some(1_100_000);
+        app.usage.context_window = Some(1_100_000);
         app.running = true;
-        app.live_output_tokens_estimate = 36;
+        app.usage.live_output_tokens_estimate = 36;
         // No `last_prompt_usage`, no `last_response_usage` — first turn.
 
         let snapshot = lash_tui::render_snapshot(80, 4, |frame| draw(frame, &mut app));

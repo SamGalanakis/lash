@@ -1,16 +1,12 @@
 use async_trait::async_trait;
-use lash_core::plugin::runtime_host::RuntimeSessionHost;
 use lash_core::{
-    MessageRole, PluginMessage, PluginOptions, SessionCreateRequest, SessionPluginSource,
-    SessionSnapshot, ToolArgumentProjectionPolicy, ToolAvailabilityConfig, ToolCall, ToolContext,
-    ToolContract, ToolControl, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
-    ToolScheduling,
+    ToolArgumentProjectionPolicy, ToolAvailabilityConfig, ToolCall, ToolContext, ToolContract,
+    ToolControl, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::plugin::RLM_PROTOCOL_PLUGIN_ID;
 use crate::projection::RlmSeed;
 
 pub(crate) struct RlmControlToolsProvider;
@@ -27,7 +23,7 @@ impl ToolProvider for RlmControlToolsProvider {
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let result = match call.name {
-            "continue_as" => continue_as_handoff(call.args, call.context).await,
+            "continue_as" => continue_as_switch_frame(call.args, call.context).await,
             _ => return ToolResult::err_fmt(format_args!("Unknown tool: {}", call.name)),
         };
         finalise_tool_result(result)
@@ -38,7 +34,7 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "tool:continue_as",
         "continue_as",
-        "Tail-call into a fresh RLM successor with a clean window.\n\nThe successor inherits **nothing** automatically — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected on the successor (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `control.continue_as(...)` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the successor needs in scope; leave bulky raw output behind.\n- If live async work is needed after handoff, include its handle in `seed` (for example from `processes.list(...)`). Referenced handles transfer to the successor and can be awaited there. Live handles not included in `seed` are cancelled when `control.continue_as(...)` succeeds.",
+        "Tail-call into a fresh RLM AgentFrame inside the current session with a clean window.\n\nThe new frame inherits **nothing** implicitly — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected in the new frame (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `control.continue_as(...)` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the new frame must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the new frame needs in scope; leave bulky raw output behind.\n- If live async work is needed after the switch, include its handle in `seed` (for example from `processes.list(...)`). Referenced handles transfer to the new frame and can be awaited there. Live handles not included in `seed` are cancelled when `control.continue_as(...)` succeeds.",
         continue_as_input_schema(),
         json!({ "type": "object", "additionalProperties": true }),
     )
@@ -94,12 +90,12 @@ pub fn continue_as_input_schema() -> Value {
         "properties": {
             "task": {
                 "type": "string",
-                "description": "Task for the successor session."
+                "description": "Task for the new AgentFrame."
             },
             "seed": {
                 "type": "object",
                 "additionalProperties": true,
-                "description": "Optional record/dict of concrete state for the successor."
+                "description": "Optional record/dict of concrete state for the new AgentFrame."
             }
         },
         "required": ["task"],
@@ -107,7 +103,7 @@ pub fn continue_as_input_schema() -> Value {
     })
 }
 
-async fn continue_as_handoff(
+async fn continue_as_switch_frame(
     args: &Value,
     context: &ToolContext<'_>,
 ) -> Result<ContinueAsResult, String> {
@@ -121,86 +117,42 @@ async fn continue_as_handoff(
         .await
         .map_err(|err| format!("continue_as process handle validation failed: {err}"))?;
 
-    let sessions = context.sessions();
-    let current_snapshot = sessions
-        .snapshot_current()
-        .await
-        .map_err(|err| format!("failed to snapshot current session: {err}"))?;
-    let successor_session_id = create_continue_as_successor(
-        &sessions,
-        context.session_id(),
-        current_snapshot,
-        task.clone(),
-        seed,
-    )
-    .await?;
+    let frame_id = uuid::Uuid::new_v4().to_string();
+    let initial_nodes = crate::rlm_seed_initial_nodes(seed);
+    let initial_nodes = initial_nodes
+        .into_iter()
+        .map(|node| {
+            serde_json::to_value(node)
+                .map_err(|err| format!("failed to encode continue_as frame seed node: {err}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     if let Err(err) = processes
-        .transfer_handles(&successor_session_id, referenced_handles_vec.clone())
+        .transfer_handles_to_frame(&frame_id, referenced_handles_vec.clone())
         .await
     {
-        let _ = sessions.close_session(&successor_session_id).await;
         return Err(format!("continue_as process handle transfer failed: {err}"));
     }
     if let Err(err) = processes
         .cancel_unreferenced_handles(referenced_handles_vec.clone())
         .await
     {
-        let _ = sessions.close_session(&successor_session_id).await;
         return Err(format!(
-            "continue_as process handle cleanup failed after successor creation: {err}"
+            "continue_as process handle cleanup failed after frame creation: {err}"
         ));
     }
 
     Ok(ContinueAsResult {
         value: json!({
             "ok": true,
-            "session_id": successor_session_id.clone(),
-            "task": task,
+            "frame_id": frame_id.clone(),
+            "task": task.clone(),
         }),
-        control: ToolControl::Handoff {
-            session_id: successor_session_id,
+        control: ToolControl::SwitchAgentFrame {
+            frame_id,
+            initial_nodes,
+            task: Some(task),
         },
     })
-}
-
-async fn create_continue_as_successor(
-    sessions: &dyn RuntimeSessionHost,
-    parent_session_id: &str,
-    current_snapshot: SessionSnapshot,
-    task: String,
-    seed: RlmSeed,
-) -> Result<String, String> {
-    let termination = current_snapshot
-        .protocol_turn_options
-        .decode()
-        .ok()
-        .unwrap_or_default();
-
-    let plugin_options = PluginOptions::typed(
-        RLM_PROTOCOL_PLUGIN_ID,
-        lash_rlm_types::RlmCreateExtras { termination },
-    )
-    .map_err(|err| format!("failed to encode rlm plugin options: {err}"))?;
-    let request = SessionCreateRequest::handoff(
-        parent_session_id,
-        current_snapshot.policy.clone(),
-        plugin_options,
-        "continue_as".to_string(),
-        serde_json::Map::new(),
-        "continue_as".to_string(),
-    )
-    .with_plugin_source(SessionPluginSource::CurrentSessionFork)
-    .with_initial_nodes(crate::rlm_seed_initial_nodes(seed))
-    .with_first_turn_input(PluginMessage::text(MessageRole::User, task));
-    let successor_session_id = request
-        .session_id
-        .clone()
-        .expect("fresh successor request sets session id");
-    sessions
-        .create_session(request)
-        .await
-        .map_err(|err| format!("failed to create continue_as successor: {err}"))?;
-    Ok(successor_session_id)
 }
 
 fn required_string(args: &Value, key: &str) -> Result<String, String> {
@@ -234,9 +186,9 @@ mod tests {
     use lash_core::plugin::runtime_host::RuntimeSessionHost;
     use lash_core::plugin::{PluginError, SessionHandle};
     use lash_core::{
-        RuntimeSessionState, SessionAppendNode, SessionPolicy, SessionStartPoint, ToolProvider,
+        RuntimeSessionState, SessionAppendNode, SessionCreateRequest, SessionPolicy, ToolProvider,
     };
-    use lash_rlm_types::{RlmCreateExtras, RlmProtocolEvent, RlmTermination};
+    use lash_rlm_types::{RlmProtocolEvent, RlmTermination};
 
     fn model_spec(model: &str) -> lash_core::ModelSpec {
         lash_core::ModelSpec::from_token_limits(model, None, 200_000, None, None)
@@ -256,7 +208,7 @@ mod tests {
     #[test]
     fn continue_as_tool_definition_preserves_projected_seed_refs_by_metadata() {
         assert_eq!(
-            continue_as_tool_definition().argument_projection,
+            continue_as_tool_definition().manifest.argument_projection,
             ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed")
         );
     }
@@ -337,6 +289,7 @@ mod tests {
             &self,
             _session_id: &str,
             handle_ids: &[String],
+            _scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<(), PluginError> {
             let visible = self.visible_handles.lock().expect("visible handles");
             if let Some(missing) = handle_ids.iter().find(|id| !visible.contains(*id)) {
@@ -369,11 +322,14 @@ mod tests {
             from_session_id: &str,
             to_session_id: &str,
             process_ids: Vec<String>,
-            _scope: lash_core::ProcessOpScope<'_>,
+            scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<(), PluginError> {
             self.transferred.lock().expect("transferred").push((
                 from_session_id.to_string(),
-                to_session_id.to_string(),
+                scope
+                    .target_agent_frame_id
+                    .clone()
+                    .unwrap_or_else(|| to_session_id.to_string()),
                 process_ids,
             ));
             Ok(())
@@ -434,7 +390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continue_as_creates_empty_rlm_successor_with_seed_and_task() {
+    async fn continue_as_creates_empty_rlm_frame_with_seed_and_task() {
         let mut session_graph = lash_core::SessionGraph::default();
         session_graph.append_protocol_event(rlm_protocol_event(RlmProtocolEvent::RlmGlobalsPatch(
             lash_rlm_types::RlmGlobalsPatchPluginBody {
@@ -473,58 +429,45 @@ mod tests {
 
         assert!(result.is_success(), "{:?}", result.value_for_projection());
         let value = result.value_for_projection();
-        assert!(value.get("session_id").and_then(Value::as_str).is_some());
-        assert!(matches!(
-            result.as_output().control,
-            Some(ToolControl::Handoff { .. })
-        ));
-        let created = manager.created.lock().expect("created");
-        assert_eq!(created.len(), 1);
-        let request = &created[0];
-        assert!(matches!(request.start, SessionStartPoint::Empty));
+        assert!(value.get("frame_id").and_then(Value::as_str).is_some());
+        let Some(ToolControl::SwitchAgentFrame {
+            frame_id,
+            initial_nodes,
+            task,
+        }) = result.as_output().control.as_ref()
+        else {
+            panic!("expected frame switch control");
+        };
         assert_eq!(
-            request.plugin_source,
-            SessionPluginSource::CurrentSessionFork
+            value.get("frame_id").and_then(Value::as_str),
+            Some(frame_id.as_str())
         );
-        assert_eq!(request.relation.parent_session_id(), Some("test-session"));
-        assert_eq!(
-            request
-                .first_turn_input
-                .as_ref()
-                .map(|message| message.content.as_str()),
-            Some("finish from here")
-        );
-        assert_eq!(request.initial_nodes.len(), 1);
+        assert_eq!(task.as_deref(), Some("finish from here"));
+        assert_eq!(initial_nodes.len(), 1);
+        let node = serde_json::from_value::<SessionAppendNode>(initial_nodes[0].clone())
+            .expect("decode initial node");
         let SessionAppendNode::ProtocolEvent {
             event: protocol_event,
             ..
-        } = &request.initial_nodes[0]
+        } = node
         else {
             panic!("expected seed globals event");
         };
-        let Some(RlmProtocolEvent::RlmSeed(seed)) = decode_rlm_protocol_event(protocol_event)
+        let Some(RlmProtocolEvent::RlmSeed(seed)) = decode_rlm_protocol_event(&protocol_event)
         else {
             panic!("expected RlmSeed");
         };
         assert_eq!(seed.globals["x"], json!(1));
         assert_eq!(seed.globals["query"], json!("original"));
         assert!(seed.projected.is_empty());
-        let extras = request
-            .plugin_options
-            .decode::<RlmCreateExtras>(RLM_PROTOCOL_PLUGIN_ID)
-            .expect("decode extras")
-            .expect("rlm extras");
-        assert!(matches!(
-            extras.termination,
-            RlmTermination::SubmitRequired { schema: Some(_) }
-        ));
+        assert!(manager.created.lock().expect("created").is_empty());
     }
 
     #[tokio::test]
     async fn continue_as_routes_projected_entries_and_globals_to_one_seed_event() {
         // Mixed seed: `proj` was a projected source on the parent (encoded with
         // the canonical `__projected__` JSON wrapper), `glob` was a regular
-        // global. The successor receives both through one durable RLM seed event.
+        // global. The new frame receives both through one durable RLM seed event.
         let manager = Arc::new(BatonManager {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
@@ -548,18 +491,22 @@ mod tests {
         let result = run_continue_as(&provider, manager.clone(), &args).await;
         assert!(result.is_success(), "{:?}", result.value_for_projection());
 
-        let created = manager.created.lock().expect("created");
-        let request = &created[0];
-
-        assert_eq!(request.initial_nodes.len(), 1);
+        let Some(ToolControl::SwitchAgentFrame { initial_nodes, .. }) =
+            result.as_output().control.as_ref()
+        else {
+            panic!("expected frame switch control");
+        };
+        assert_eq!(initial_nodes.len(), 1);
+        let node = serde_json::from_value::<SessionAppendNode>(initial_nodes[0].clone())
+            .expect("decode initial node");
         let SessionAppendNode::ProtocolEvent {
             event: protocol_event,
             ..
-        } = &request.initial_nodes[0]
+        } = node
         else {
             panic!("expected seed globals event");
         };
-        let Some(RlmProtocolEvent::RlmSeed(seed)) = decode_rlm_protocol_event(protocol_event)
+        let Some(RlmProtocolEvent::RlmSeed(seed)) = decode_rlm_protocol_event(&protocol_event)
         else {
             panic!("expected RlmSeed");
         };
@@ -569,12 +516,7 @@ mod tests {
         assert_eq!(seed.projected.entries.len(), 1);
         assert_eq!(seed.projected.entries[0].0, "proj");
         assert_eq!(seed.projected.entries[0].1, json!("carry-over"));
-        let extras = request
-            .plugin_options
-            .decode::<RlmCreateExtras>(RLM_PROTOCOL_PLUGIN_ID)
-            .expect("decode extras")
-            .expect("rlm extras");
-        assert_eq!(extras.termination, RlmTermination::default());
+        assert!(manager.created.lock().expect("created").is_empty());
     }
 
     #[tokio::test]
@@ -604,16 +546,16 @@ mod tests {
 
         assert!(result.is_success(), "{:?}", result.value_for_projection());
         let value = result.value_for_projection();
-        let successor = value
-            .get("session_id")
+        let frame_id = value
+            .get("frame_id")
             .and_then(Value::as_str)
-            .expect("successor")
+            .expect("frame")
             .to_string();
         assert_eq!(
             *manager.transferred.lock().expect("transferred"),
             vec![(
                 "test-session".to_string(),
-                successor,
+                frame_id,
                 vec!["h1".to_string(), "h2".to_string()]
             )]
         );
@@ -624,7 +566,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continue_as_rejects_unknown_seed_handle_before_creating_successor() {
+    async fn continue_as_rejects_unknown_seed_handle_before_creating_frame() {
         let manager = Arc::new(BatonManager {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {

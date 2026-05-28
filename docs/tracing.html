@@ -74,7 +74,7 @@ impl TraceSink for FanoutTraceSink {
           <div class="def-list-grid">
             <article class="panel">
               <h3>Session lifecycle</h3>
-              <p><code>SessionStarted</code>, <code>TurnStarted</code>, <code>TurnCompleted</code> (with handoff successor id where applicable).</p>
+              <p><code>SessionStarted</code>, <code>TurnStarted</code>, <code>TurnCompleted</code> (with AgentFrame switch id where applicable).</p>
             </article>
             <article class="panel">
               <h3>Prompt</h3>
@@ -159,8 +159,8 @@ $ cargo run -p lash-trace-viewer -- trace.jsonl \
           </div>
           <pre><code># In your downstream Cargo.toml — pull in lash-core with the otel-trace
 # feature alongside the lash-runtime facade.
-lash-runtime = "=0.1.0-alpha.4"
-lash-core    = { version = "=0.1.0-alpha.4", features = ["otel-trace"] }</code></pre>
+lash-runtime = "=0.1.0-alpha.12"
+lash-core    = { version = "=0.1.0-alpha.12", features = ["otel-trace"] }</code></pre>
           <p><code>lash_core::OtelTraceSink</code> wraps an <code>opentelemetry</code> tracer and converts every event to a span with payload attributes. Use in place of (or alongside) <code>JsonlTraceSink</code>:</p>
           <pre><code>use lash::{LashCore, tracing::{TraceLevel, TraceSink}};
 use lash_core::OtelTraceSink;

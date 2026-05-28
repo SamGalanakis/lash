@@ -34,14 +34,13 @@ use crate::ui_trace::{
 use crate::update;
 use crate::{Args, scratch_tui};
 use crate::{
-    apply_ui_host_effects, controls_text, hash12, help_text, info_text,
-    normalize_prepared_turn_for_dispatch, push_system_message, turn_has_visible_output,
-    version_text,
+    apply_ui_host_effects, controls_text, hash12, help_text, info_text, push_system_message,
+    turn_has_visible_output, version_text,
 };
 
 use self::helpers::{
     TurnReplayPayload, UiSnapshotWorker, cleared_session_state, drain_aux_trace_ops,
-    log_runtime_handoff, record_queue_turn,
+    log_runtime_transition, record_queue_turn,
 };
 
 use self::commands::{dispatch_next_queued_turn, promote_pending_steers_to_queue};
@@ -53,8 +52,7 @@ use self::runtime::{apply_pending_reconfigure, send_user_message, sync_runtime_t
 pub(crate) use self::runtime::{generate_session_name, notify_desktop};
 
 use self::input_handling::{
-    activate_foreground_session_handoff, apply_terminal_action, handle_key_event,
-    handle_mouse_event, handle_surface_input,
+    apply_terminal_action, handle_key_event, handle_mouse_event, handle_surface_input,
 };
 
 // Items used only by tests via `use super::*;` in tests.rs.
@@ -105,8 +103,8 @@ pub(crate) async fn run_app(
     );
     app.set_ui_extensions(Arc::clone(&ui_extensions));
     app.set_chrome_state(chrome_state);
-    app.context_window = Some(initial_context_window);
-    app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
+    app.usage.context_window = Some(initial_context_window);
+    app.usage.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     let mut current_model_variant = initial_model_variant.or_else(|| {
         crate::provider_metadata::default_model_variant_for_provider(
             provider.kind(),
@@ -329,7 +327,7 @@ pub(crate) async fn run_app(
     });
 
     loop {
-        log_runtime_handoff(
+        log_runtime_transition(
             "loop_top",
             &app,
             &runtime,
@@ -338,13 +336,9 @@ pub(crate) async fn run_app(
             active_stream_id,
         );
 
-        if !app.running
-            && runtime.is_some()
-            && runtime_return_rx.is_none()
-            && app.has_queued_messages()
-        {
+        if !app.running && runtime.is_some() && runtime_return_rx.is_none() {
             tracing::debug!("dispatching queued turn from idle-ready trigger");
-            dispatch_next_queued_turn(
+            if dispatch_next_queued_turn(
                 &mut app,
                 &mut ui_trace,
                 &mut terminal,
@@ -371,8 +365,10 @@ pub(crate) async fn run_app(
                 &app_tx,
                 &mut pending_clear_after_return,
             )
-            .await?;
-            continue;
+            .await?
+            {
+                continue;
+            }
         }
 
         // Check if runtime turn completed — reclaim runtime + updated history
@@ -385,65 +381,6 @@ pub(crate) async fn run_app(
                         active_stream_id,
                         "runtime return received in interactive loop"
                     );
-                    if done.stream_id == active_stream_id
-                        && !pending_clear_after_return
-                        && let lash_core::TurnOutcome::Handoff { session_id } = &done.result.outcome
-                    {
-                        let session_id = session_id.clone();
-                        app.stop_turn();
-                        runtime_return_rx = None;
-                        cancel_token = None;
-                        if activate_foreground_session_handoff(
-                            &mut app,
-                            session_id,
-                            &mut history,
-                            &mut runtime,
-                            &mut turn_counter,
-                            &mut current_execution_mode,
-                            &mut current_model_variant,
-                            ui_extensions.as_ref(),
-                        )
-                        .await
-                        {
-                            if let Err(err) = sync_runtime_tool_surface(&mut runtime).await {
-                                push_system_message(
-                                    &mut app,
-                                    format!(
-                                        "Failed to sync tool surface after session handoff: {err}"
-                                    ),
-                                );
-                            }
-                            dispatch_next_queued_turn(
-                                &mut app,
-                                &mut ui_trace,
-                                &mut terminal,
-                                logger,
-                                args,
-                                &paused,
-                                ui_extensions.as_ref(),
-                                &runtime_factory,
-                                &lash_config,
-                                &mut runtime,
-                                &mut history,
-                                &mut turn_counter,
-                                &mut last_turn,
-                                &mut runtime_return_rx,
-                                &mut cancel_token,
-                                &mut active_stream_id,
-                                &mut provider,
-                                &mut current_model_variant,
-                                &mut current_execution_mode,
-                                &mut desired_tool_state,
-                                &mut pending_reconfigure,
-                                model_catalog.as_ref(),
-                                &mut toolset_hash,
-                                &app_tx,
-                                &mut pending_clear_after_return,
-                            )
-                            .await?;
-                        }
-                        continue;
-                    }
                     if let Err(err) = sync_runtime_tool_surface(&mut runtime).await {
                         push_system_message(
                             &mut app,
@@ -462,7 +399,7 @@ pub(crate) async fn run_app(
                         }
                         history.clear();
                         turn_counter = 0;
-                        app.token_usage = TokenUsage::default();
+                        app.usage.token_usage = TokenUsage::default();
                         app.stop_turn();
                         app.clear_mode_indicators();
                         app.set_model_variant(current_model_variant.clone());
@@ -470,7 +407,7 @@ pub(crate) async fn run_app(
                         cancel_token = None;
                         pending_clear_after_return = false;
                         app.dirty = true;
-                        log_runtime_handoff(
+                        log_runtime_transition(
                             "runtime_return_ignored_or_cleared",
                             &app,
                             &runtime,
@@ -487,7 +424,7 @@ pub(crate) async fn run_app(
                     let no_visible_output = matches!(
                         &done.result.outcome,
                         lash_core::TurnOutcome::Finished(_)
-                            | lash_core::TurnOutcome::Handoff { .. }
+                            | lash_core::TurnOutcome::AgentFrameSwitch { .. }
                     ) && !turn_has_visible_output(&done.result);
                     let state = done.result.state;
                     tracing::info!(
@@ -522,15 +459,15 @@ pub(crate) async fn run_app(
                     let read_view = state.read_view();
                     history = read_view.messages().to_vec();
                     turn_counter = state.turn_index;
-                    app.token_usage = state.token_usage.clone();
-                    app.last_prompt_usage = state.last_prompt_usage.clone();
+                    app.usage.token_usage = state.token_usage.clone();
+                    app.usage.last_prompt_usage = state.last_prompt_usage.clone();
                     tracing::debug!(
                         stream_id = done.stream_id,
                         turn_index = state.turn_index,
                         outcome = ?done.result.outcome,
                         messages = read_view.messages().len(),
                         blocks = app.timeline.len(),
-                        had_live_turn = app.live_turn.is_some(),
+                        had_live_turn = app.live.turn.is_some(),
                         running = app.running,
                         "reconciling completed runtime turn"
                     );
@@ -595,7 +532,7 @@ pub(crate) async fn run_app(
                     app.finish_turn_from_read_view(&read_view);
                     runtime_return_rx = None;
                     cancel_token = None;
-                    log_runtime_handoff(
+                    log_runtime_transition(
                         "runtime_return_completed",
                         &app,
                         &runtime,
@@ -637,7 +574,7 @@ pub(crate) async fn run_app(
                     app.stop_turn();
                     runtime_return_rx = None;
                     cancel_token = None;
-                    log_runtime_handoff(
+                    log_runtime_transition(
                         "runtime_return_channel_closed",
                         &app,
                         &runtime,

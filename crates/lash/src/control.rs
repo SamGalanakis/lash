@@ -453,16 +453,6 @@ impl SessionControl {
         manager.create_session(request).await.map_err(Into::into)
     }
 
-    async fn take_first_turn_input(&self, session_id: &str) -> Result<Option<PluginMessage>> {
-        let writer = self.runtime.writer();
-        let runtime = writer.lock().await;
-        let manager = runtime.session_manager()?;
-        manager
-            .take_first_turn_input(session_id)
-            .await
-            .map_err(Into::into)
-    }
-
     async fn start_child_turn(&self, session_id: &str, input: TurnInput) -> Result<AssembledTurn> {
         let manager = {
             let writer = self.runtime.writer();
@@ -766,21 +756,6 @@ impl ProcessControl {
 }
 
 #[derive(Clone)]
-pub struct Handoffs {
-    control: SessionControl,
-}
-
-impl Handoffs {
-    pub(crate) fn new(control: SessionControl) -> Self {
-        Self { control }
-    }
-
-    pub async fn take_first_turn_input(&self, session_id: &str) -> Result<Option<PluginMessage>> {
-        self.control.take_first_turn_input(session_id).await
-    }
-}
-
-#[derive(Clone)]
 pub struct StateControl {
     control: SessionControl,
 }
@@ -869,10 +844,6 @@ pub struct ChildrenControl {
 impl ChildrenControl {
     pub async fn create_session(&self, request: SessionCreateRequest) -> Result<SessionHandle> {
         self.control.create_child_session(request).await
-    }
-
-    pub async fn take_first_turn_input(&self, session_id: &str) -> Result<Option<PluginMessage>> {
-        self.control.take_first_turn_input(session_id).await
     }
 
     pub async fn start_turn(&self, session_id: &str, input: TurnInput) -> Result<AssembledTurn> {

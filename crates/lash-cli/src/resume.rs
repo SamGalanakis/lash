@@ -109,8 +109,8 @@ async fn restore_model_from_graph_config(
         })?;
     let restored_context_window = config.model.context_window_tokens() as u64;
     app.model = restored_model.to_string();
-    app.context_window = Some(restored_context_window);
-    app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
+    app.usage.context_window = Some(restored_context_window);
+    app.usage.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     if let Some(rt) = runtime.as_mut() {
         let _ = rt
             .control()
@@ -179,8 +179,8 @@ async fn apply_graph_resume_state(
         .as_ref()
         .map(|state| state.turn_index)
         .unwrap_or(0);
-    app.token_usage = restored_token_usage(turn_state).unwrap_or_default();
-    app.last_prompt_usage = normalized_last_prompt_usage(
+    app.usage.token_usage = restored_token_usage(turn_state).unwrap_or_default();
+    app.usage.last_prompt_usage = normalized_last_prompt_usage(
         turn_state
             .as_ref()
             .and_then(|state| state.last_prompt_usage.clone()),
@@ -257,8 +257,8 @@ pub async fn load_resumed_session(
     app.timeline = loaded.blocks;
     app.session_id = loaded.session_id;
     app.session_name = loaded.session_name;
-    app.last_response_usage = loaded.last_token_usage;
-    app.last_prompt_usage = None;
+    app.usage.last_response_usage = loaded.last_token_usage;
+    app.usage.last_prompt_usage = None;
     app.plugin_mode_indicators = loaded.plugin_mode_indicators;
     app.timeline.push(UiTimelineItem::SystemMessage(format!(
         "Resumed: {}",
@@ -278,7 +278,7 @@ pub async fn load_resumed_session(
     )
     .await?;
     app.stop_turn();
-    app.live_tool_output = loaded.live_tool_output;
+    app.live.tool_output = loaded.live_tool_output;
     app.invalidate_height_cache();
     app.resume_follow_output();
     Ok(())
@@ -360,6 +360,8 @@ mod tests {
         store.save_session_head(lash_core::SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
             graph,
             config: lash_core::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),
@@ -471,11 +473,11 @@ mod tests {
 
         assert_eq!(turn_counter, 7);
         assert_eq!(execution_mode, ExecutionMode::standard());
-        assert_eq!(app.token_usage.input_tokens, 1200);
-        assert_eq!(app.token_usage.output_tokens, 340);
-        assert_eq!(app.token_usage.cached_input_tokens, 80);
-        assert_eq!(app.token_usage.reasoning_tokens, 55);
-        let app_prompt_usage = app.last_prompt_usage.expect("app prompt usage");
+        assert_eq!(app.usage.token_usage.input_tokens, 1200);
+        assert_eq!(app.usage.token_usage.output_tokens, 340);
+        assert_eq!(app.usage.token_usage.cached_input_tokens, 80);
+        assert_eq!(app.usage.token_usage.reasoning_tokens, 55);
+        let app_prompt_usage = app.usage.last_prompt_usage.expect("app prompt usage");
         assert_eq!(app_prompt_usage.prompt_context_tokens, 4096);
         assert_eq!(app_prompt_usage.context_budget_tokens, 4096);
     }

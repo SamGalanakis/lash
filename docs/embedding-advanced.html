@@ -49,7 +49,7 @@
               <p>Only active-path nodes resident; orphans on disk. Lower memory, occasional store reads when crossing forks. Long-lived multi-session servers.</p>
             </article>
           </div>
-          <pre><code>use lash::Residency;
+          <pre><code>use lash::advanced::Residency;
 
 let core = LashCore::rlm()
     .provider(provider)
@@ -103,7 +103,7 @@ let core = LashCore::rlm()
               <p>Concurrent self. Inherits parent execution mode and tool authority, including recursive spawning. For a sibling branch of the same work.</p>
             </article>
           </div>
-          <p>Both tiers consult <code>tier_models</code> for an override, then fall back to <code>default_agent_model(tier)</code>, then the parent's model. Pass overrides through <code>default_registry(&amp;tier_models)</code>.</p>
+          <p>Both tiers consult <code>tier_models</code> for an override, then fall back to the parent's model. Pass overrides through <code>default_registry(&amp;tier_models)</code>.</p>
           <h3>Capability resolution</h3>
           <p><code>Capability::resolve(ctx)</code> sees the live parent <code>SessionPolicy</code> and returns a <code>SessionSpec</code>. The runtime composes spec against parent policy to produce effective child config. The spec is what's persisted, so a resumed subagent re-derives the same authority.</p>
           <p>Three interactive-only tools are always stripped from subagents: <code>ask</code>, <code>showcase</code>, <code>plan_exit</code>. A subagent calling them would block indefinitely.</p>
@@ -160,7 +160,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
     .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
     .advanced()
-    .residency(Residency::ActivePathOnly)
+    .residency(lash::advanced::Residency::ActivePathOnly)
     .build()?;</code></pre>
           <p>Streaming is semantic: <code>TurnBuilder::stream</code> emits <code>TurnActivity</code> and resolves to a <code>TurnResult</code>. Raw runtime telemetry belongs in tracing, not the app surface.</p>
         </div>

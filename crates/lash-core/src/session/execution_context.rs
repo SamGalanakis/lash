@@ -65,6 +65,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             .with_parent_invocation(parent_invocation)
             .with_effect_controller(self.dispatch.effect_controller.as_controller())
             .with_turn_lease(self.turn_lease.clone())
+            .with_agent_frame_id(Some(self.dispatch.agent_frame_id.clone()))
     }
 
     #[allow(
@@ -197,7 +198,7 @@ impl<'run> RuntimeExecutionContext<'run> {
                 start.module_ref, start.process_name, start.process_ref
             ));
         }
-        let args = match serde_json::to_value(&lashlang::Value::Record(Arc::new(start.args)))
+        let args = match serde_json::to_value(lashlang::Value::Record(Arc::new(start.args)))
             .map_err(|err| format!("failed to serialize process args: {err}"))?
         {
             serde_json::Value::Object(map) => map,
@@ -306,10 +307,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         sequence: u64,
         duration_ms: u64,
     ) -> Result<(), crate::RuntimeEffectControllerError> {
-        let cancellation = self
-            .cancellation_token
-            .clone()
-            .unwrap_or_else(CancellationToken::new);
+        let cancellation = self.cancellation_token.clone().unwrap_or_default();
         let invocation = crate::runtime::causal::process_sleep_invocation(
             &self.session_id,
             self.parent_invocation.as_ref(),
@@ -394,6 +392,7 @@ mod tests {
             ),
             parent_invocation: None,
             session_id: "session".to_string(),
+            agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -450,6 +449,7 @@ mod tests {
             ),
             parent_invocation: None,
             session_id: "session".to_string(),
+            agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -536,6 +536,7 @@ mod tests {
             ),
             parent_invocation: None,
             session_id: "session".to_string(),
+            agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
@@ -596,6 +597,7 @@ mod tests {
             ),
             parent_invocation: None,
             session_id: "session".to_string(),
+            agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
