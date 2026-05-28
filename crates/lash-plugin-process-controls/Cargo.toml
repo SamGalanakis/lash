@@ -14,9 +14,9 @@ keywords = ["lash", "agent", "plugin", "process", "runtime"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.10", default-features = false }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.11", default-features = false }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.10", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.11", default-features = false, features = ["testing"] }
