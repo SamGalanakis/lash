@@ -2,10 +2,10 @@
 
 use lash_core::plugin::PluginError;
 use lash_core::{
-    AssembledTurn, InputItem, PluginOptions, SessionCreateRequest, SessionPolicy, SessionSnapshot,
-    SessionSpec, SessionStartPoint, SessionToolAccess, SubagentSessionContext, ToolDefinition,
-    ToolResult, ToolScheduling, ToolSurfaceContribution, TurnFinish, TurnInput, TurnOutcome,
-    TurnStop,
+    AssembledTurn, CausalRef, InputItem, PluginOptions, SessionCreateRequest, SessionPolicy,
+    SessionSnapshot, SessionSpec, SessionStartPoint, SessionToolAccess, SubagentSessionContext,
+    ToolDefinition, ToolResult, ToolScheduling, ToolSurfaceContribution, TurnFinish, TurnInput,
+    TurnOutcome, TurnStop,
 };
 use lash_rlm_types::RlmTermination;
 use serde_json::{Value, json};
@@ -45,7 +45,7 @@ pub(crate) struct SpawnCreateRequestInput<'a> {
     pub(crate) output_schema: Option<Value>,
     pub(crate) seed: lash_protocol_rlm::RlmSeed,
     pub(crate) parent_subagent: Option<&'a SubagentSessionContext>,
-    pub(crate) originating_tool_call_id: Option<&'a str>,
+    pub(crate) caused_by: Option<CausalRef>,
     pub(crate) configurator: &'a dyn SubagentSessionConfigurator,
 }
 
@@ -61,7 +61,7 @@ pub(crate) async fn build_spawn_create_request(
         output_schema,
         seed,
         parent_subagent,
-        originating_tool_call_id,
+        caused_by,
         configurator,
     } = input;
     let mut policy = session_spec.resolve_against(&current_snapshot.policy);
@@ -104,7 +104,7 @@ pub(crate) async fn build_spawn_create_request(
         parent_session_id,
         capability_name,
         parent_subagent,
-        originating_tool_call_id,
+        caused_by,
     )
 }
 
@@ -113,10 +113,10 @@ fn finalize_subagent_create_request(
     parent_session_id: &str,
     capability_name: &str,
     parent_subagent: Option<&SubagentSessionContext>,
-    originating_tool_call_id: Option<&str>,
+    caused_by: Option<CausalRef>,
 ) -> Result<SessionCreateRequest, String> {
-    if let Some(tool_call_id) = originating_tool_call_id {
-        request = request.with_originating_tool_call_id(tool_call_id);
+    if let Some(caused_by) = caused_by {
+        request = request.with_caused_by(caused_by);
     }
     let child_depth = parent_subagent
         .map(|parent| parent.depth.saturating_add(1))
@@ -278,13 +278,13 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "tool:submit_error",
         "submit_error",
-        "End the current subagent task as a terminal failure with a concise reason. Use `await TOOL.default.submit_error({ reason: \"...\" })?` when the child cannot produce a valid result.",
+        "End the current subagent task as a terminal failure with a concise reason. Use this when the child cannot produce a valid result.",
         json!({
             "type": "object",
             "properties": {
                 "reason": {
                     "type": "string",
-                    "description": "Failure reason returned to the parent spawn_agent call."
+                    "description": "Failure reason returned to the parent agents.spawn call."
                 }
             },
             "required": ["reason"],
@@ -292,6 +292,7 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
         }),
         json!({ "type": "object", "additionalProperties": true }),
     )
+    .with_agent_surface(lash_core::ToolAgentSurface::new(["tools"], "submit_error"))
     .with_scheduling(ToolScheduling::Serial)
 }
 

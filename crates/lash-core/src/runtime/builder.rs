@@ -5,7 +5,7 @@ use crate::{
     EmbeddedRuntimeHost, LashRuntime, PersistentRuntimeServices, PluginStack, ProcessRegistry,
     ProcessRuntimeHost, RuntimeCoreConfig, RuntimeEffectController, RuntimePersistence,
     RuntimeServices, RuntimeSessionState, SessionError, SessionPolicy, SessionStoreFactory,
-    TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
+    TerminationPolicy,
 };
 
 enum PluginSource {
@@ -32,8 +32,6 @@ pub struct EmbeddedRuntimeBuilder {
     policy: Option<SessionPolicy>,
     initial_state: Option<RuntimeSessionState>,
     plugin_source: PluginSource,
-    turn_injection_bridge: TurnInjectionBridge,
-    turn_input_injection_bridge: TurnInputInjectionBridge,
     core: RuntimeCoreConfig,
     session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     store: Option<Arc<dyn RuntimePersistence>>,
@@ -47,8 +45,6 @@ impl Default for EmbeddedRuntimeBuilder {
             policy: None,
             initial_state: None,
             plugin_source: PluginSource::Host(PluginHost::empty()),
-            turn_injection_bridge: TurnInjectionBridge::new(),
-            turn_input_injection_bridge: TurnInputInjectionBridge::new(),
             core: RuntimeCoreConfig::default(),
             session_store_factory: None,
             store: None,
@@ -103,16 +99,6 @@ impl EmbeddedRuntimeBuilder {
 
     pub fn with_plugin_stack(self, stack: PluginStack) -> Self {
         self.with_plugin_factories(stack.into_factories())
-    }
-
-    pub fn with_turn_injection_bridge(mut self, bridge: TurnInjectionBridge) -> Self {
-        self.turn_injection_bridge = bridge;
-        self
-    }
-
-    pub fn with_turn_input_injection_bridge(mut self, bridge: TurnInputInjectionBridge) -> Self {
-        self.turn_input_injection_bridge = bridge;
-        self
     }
 
     pub fn with_runtime_core(mut self, core: RuntimeCoreConfig) -> Self {
@@ -287,12 +273,7 @@ impl EmbeddedRuntimeBuilder {
                 LashRuntime::from_persistent_background_state(
                     state.policy.clone(),
                     ProcessRuntimeHost::new(embedded_host, process_registry),
-                    PersistentRuntimeServices::new_with_bridges(
-                        plugins,
-                        self.turn_injection_bridge,
-                        self.turn_input_injection_bridge,
-                        store,
-                    ),
+                    PersistentRuntimeServices::new(plugins, store),
                     state,
                 )
                 .await
@@ -301,12 +282,7 @@ impl EmbeddedRuntimeBuilder {
                 LashRuntime::from_persistent_embedded_state(
                     state.policy.clone(),
                     embedded_host,
-                    PersistentRuntimeServices::new_with_bridges(
-                        plugins,
-                        self.turn_injection_bridge,
-                        self.turn_input_injection_bridge,
-                        store,
-                    ),
+                    PersistentRuntimeServices::new(plugins, store),
                     state,
                 )
                 .await
@@ -315,11 +291,7 @@ impl EmbeddedRuntimeBuilder {
                 LashRuntime::from_background_state(
                     state.policy.clone(),
                     ProcessRuntimeHost::new(embedded_host, process_registry),
-                    RuntimeServices::new_with_bridges(
-                        plugins,
-                        self.turn_injection_bridge,
-                        self.turn_input_injection_bridge,
-                    ),
+                    RuntimeServices::new(plugins),
                     state,
                 )
                 .await
@@ -328,11 +300,7 @@ impl EmbeddedRuntimeBuilder {
                 LashRuntime::from_embedded_state(
                     state.policy.clone(),
                     embedded_host,
-                    RuntimeServices::new_with_bridges(
-                        plugins,
-                        self.turn_injection_bridge,
-                        self.turn_input_injection_bridge,
-                    ),
+                    RuntimeServices::new(plugins),
                     state,
                 )
                 .await

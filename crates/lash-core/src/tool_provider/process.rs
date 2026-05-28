@@ -8,13 +8,13 @@ pub struct ToolProcessControl<'run> {
     pub(super) session_id: String,
     pub(super) processes: Arc<dyn crate::ProcessService>,
     pub(super) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
-    pub(super) effect_metadata: Option<crate::EffectInvocationMetadata>,
+    pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
 }
 
 impl ToolProcessControl<'_> {
     fn process_scope(&self) -> crate::ProcessOpScope<'_> {
         crate::ProcessOpScope::new()
-            .with_effect_metadata(self.effect_metadata.clone())
+            .with_parent_invocation(self.parent_invocation.clone())
             .with_effect_controller(self.effect_controller.as_controller())
     }
 

@@ -38,13 +38,14 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "tool:continue_as",
         "continue_as",
-        "Tail-call into a fresh RLM successor with a clean window.\n\nThe successor inherits **nothing** automatically — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected on the successor (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `continue_as` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the successor needs in scope; leave bulky raw output behind.\n- If live async work is needed after handoff, include its handle in `seed` (for example from `list_process_handles`). Referenced handles transfer to the successor and can be awaited there. Live handles not included in `seed` are cancelled when `continue_as` succeeds.",
+        "Tail-call into a fresh RLM successor with a clean window.\n\nThe successor inherits **nothing** automatically — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected on the successor (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `control.continue_as(...)` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the successor needs in scope; leave bulky raw output behind.\n- If live async work is needed after handoff, include its handle in `seed` (for example from `processes.list(...)`). Referenced handles transfer to the successor and can be awaited there. Live handles not included in `seed` are cancelled when `control.continue_as(...)` succeeds.",
         continue_as_input_schema(),
         json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(vec![
-        r#"await TOOL.default.continue_as({ task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } })?"#.into(),
+        r#"await control.continue_as({ task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } })?"#.into(),
     ])
+    .with_agent_surface(lash_core::ToolAgentSurface::new(["control"], "continue_as"))
     .with_argument_projection(ToolArgumentProjectionPolicy::preserve_projected_refs_in_field(
         "seed",
     ))
@@ -496,6 +497,7 @@ mod tests {
         assert_eq!(request.initial_nodes.len(), 1);
         let SessionAppendNode::ProtocolEvent {
             event: protocol_event,
+            ..
         } = &request.initial_nodes[0]
         else {
             panic!("expected seed globals event");
@@ -552,6 +554,7 @@ mod tests {
         assert_eq!(request.initial_nodes.len(), 1);
         let SessionAppendNode::ProtocolEvent {
             event: protocol_event,
+            ..
         } = &request.initial_nodes[0]
         else {
             panic!("expected seed globals event");

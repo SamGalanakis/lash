@@ -100,8 +100,8 @@ impl LlmToolsProvider {
                     stream_events: None,
                     generation: lash_core::GenerationOptions::default(),
                     session_id: Some(format!("{}-llm-query", context.session_id())),
-                    originating_tool_call_id: None,
-                    idempotency_key: None,
+                    caused_by: None,
+                    replay: None,
                 },
                 "llm_query",
             )
@@ -137,11 +137,12 @@ pub fn llm_query_tool_definition() -> ToolDefinition {
         "Run a one-shot LLM prompt over supplied data and return its result. The `task` plus everything in `inputs` is rendered into that single prompt; the call cannot use tools, inspect files, or gather more context beyond what you pass it. Use this for extracting information, classification, summarization, judging, or transformation over data already in your variables. `inputs` can be any structured value. `output` is optional and defaults to a string; when present, it requests structured output using record descriptors or `Type { ... }` literals.",
         llm_query_input_schema(),
         vec![
-            r#"summary = await TOOL.default.llm_query({ task: "Summarize the supplied notes in three bullets", inputs: { notes: notes } })?"#.into(),
-            r#"claims = await TOOL.default.llm_query({ task: "Extract the key claim from each supplied chunk", inputs: { chunks: chunks }, output: { claims: "list[str]" } })?"#.into(),
+            r#"summary = await llm.query({ task: "Summarize the supplied notes in three bullets", inputs: { notes: notes } })?"#.into(),
+            r#"claims = await llm.query({ task: "Extract the key claim from each supplied chunk", inputs: { chunks: chunks }, output: { claims: "list[str]" } })?"#.into(),
         ],
         ToolScheduling::Parallel,
     )
+    .with_agent_surface(lash_core::ToolAgentSurface::new(["llm"], "query"))
     .with_output_from_input_schema("output", Some(json!({ "type": "string" })))
 }
 

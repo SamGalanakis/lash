@@ -145,7 +145,7 @@ impl SessionLogger {
             cwd: meta.cwd,
             relation: lash_core::SessionRelation::Child {
                 parent_session_id: parent_session_id.to_string(),
-                originating_tool_call_id: None,
+                caused_by: None,
             },
         });
         Ok(())
@@ -629,7 +629,7 @@ mod tests {
                     .and_then(|path| path.to_str().map(str::to_string)),
                 relation: lash_core::SessionRelation::Child {
                     parent_session_id: "parent".to_string(),
-                    originating_tool_call_id: None,
+                    caused_by: None,
                 },
             });
             persist_root_snapshot(
@@ -670,7 +670,7 @@ mod tests {
                 cwd: None,
                 relation: lash_core::SessionRelation::Child {
                     parent_session_id: "parent-id".to_string(),
-                    originating_tool_call_id: None,
+                    caused_by: None,
                 },
             });
 

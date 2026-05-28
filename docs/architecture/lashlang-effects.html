@@ -51,7 +51,7 @@
         <div class="section" id="tool-calls-and-async-handles">
           <div class="section-header">
             <h2>Resource Operations And Process Handles</h2>
-            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, triggers, and cron schedules are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. Trigger declarations are typed bindings to process starts; cron schedules still compile bodies. Runtime activation for resource events and cron ticks is not wired yet.</p>
+            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, triggers, and cron schedules are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. Trigger declarations are typed bindings to process starts; installing them stores activation routes over content-addressed module artifacts, and host event emits start the routed process with the event node as causal parent. Cron schedules still compile bodies; cron tick activation is not wired yet.</p>
           </div>
           <dl class="def-list">
             <dt><code>await RESOURCE.alias.operation({ ... })</code></dt>

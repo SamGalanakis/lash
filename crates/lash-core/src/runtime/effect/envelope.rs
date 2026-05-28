@@ -17,15 +17,6 @@ use crate::{
 
 use super::executor::RuntimeEffectControllerError;
 
-/// Where a runtime effect originated.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum EffectOrigin {
-    Turn,
-    DirectCompletion { usage_source: String },
-    DirectLlmCompletion { usage_source: String },
-}
-
 /// Durable category for a runtime effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,31 +48,202 @@ impl RuntimeEffectKind {
     }
 }
 
-/// Serializable metadata attached to every controller-run runtime effect.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct EffectInvocationMetadata {
-    pub session_id: String,
-    pub origin: EffectOrigin,
-    pub turn_id: Option<String>,
-    pub turn_index: Option<usize>,
-    pub protocol_iteration: Option<usize>,
-    pub effect_id: String,
-    pub effect_kind: RuntimeEffectKind,
-    pub idempotency_key: String,
+/// Canonical lineage for a runtime-side invocation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeInvocation {
+    pub scope: RuntimeScope,
+    pub subject: RuntimeSubject,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_checkpoint_hash: Option<String>,
+    pub caused_by: Option<CausalRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<RuntimeReplay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_hash: Option<String>,
+}
+
+impl RuntimeInvocation {
+    pub fn effect(
+        scope: RuntimeScope,
+        effect_id: impl Into<String>,
+        kind: RuntimeEffectKind,
+        replay_key: impl Into<String>,
+        checkpoint_hash: Option<String>,
+    ) -> Self {
+        Self {
+            scope,
+            subject: RuntimeSubject::Effect {
+                effect_id: effect_id.into(),
+                kind,
+            },
+            caused_by: None,
+            replay: Some(RuntimeReplay {
+                key: replay_key.into(),
+            }),
+            checkpoint_hash,
+        }
+    }
+
+    pub fn with_caused_by(mut self, caused_by: Option<CausalRef>) -> Self {
+        self.caused_by = caused_by;
+        self
+    }
+
+    pub fn effect_id(&self) -> Option<&str> {
+        match &self.subject {
+            RuntimeSubject::Effect { effect_id, .. } => Some(effect_id),
+            _ => None,
+        }
+    }
+
+    pub fn effect_kind(&self) -> Option<RuntimeEffectKind> {
+        match &self.subject {
+            RuntimeSubject::Effect { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
+
+    pub fn replay_key(&self) -> Option<&str> {
+        self.replay.as_ref().map(|replay| replay.key.as_str())
+    }
+
+    pub fn causal_ref(&self) -> Option<CausalRef> {
+        match &self.subject {
+            RuntimeSubject::Effect { effect_id, .. } => Some(CausalRef::Effect {
+                session_id: self.scope.session_id.clone(),
+                turn_id: self.scope.turn_id.clone(),
+                effect_id: effect_id.clone(),
+            }),
+            RuntimeSubject::Process { process_id } => Some(CausalRef::Process {
+                process_id: process_id.clone(),
+            }),
+            RuntimeSubject::ProcessEvent {
+                process_id,
+                sequence,
+                ..
+            } => Some(CausalRef::ProcessEvent {
+                process_id: process_id.clone(),
+                sequence: *sequence,
+            }),
+            RuntimeSubject::SessionNode { node_id } => Some(CausalRef::SessionNode {
+                session_id: self.scope.session_id.clone(),
+                node_id: node_id.clone(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeScope {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_iteration: Option<usize>,
+}
+
+impl RuntimeScope {
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            turn_id: None,
+            turn_index: None,
+            protocol_iteration: None,
+        }
+    }
+
+    pub fn for_turn(
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+        turn_index: usize,
+        protocol_iteration: usize,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            turn_id: Some(turn_id.into()),
+            turn_index: Some(turn_index),
+            protocol_iteration: Some(protocol_iteration),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeReplay {
+    pub key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RuntimeSubject {
+    Effect {
+        effect_id: String,
+        kind: RuntimeEffectKind,
+    },
+    Process {
+        process_id: String,
+    },
+    ProcessEvent {
+        process_id: String,
+        sequence: u64,
+        event_type: String,
+    },
+    SessionNode {
+        node_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CausalRef {
+    Turn {
+        session_id: String,
+        turn_id: String,
+    },
+    Effect {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        effect_id: String,
+    },
+    ToolCall {
+        session_id: String,
+        call_id: String,
+    },
+    Process {
+        process_id: String,
+    },
+    ProcessEvent {
+        process_id: String,
+        sequence: u64,
+    },
+    SessionNode {
+        session_id: String,
+        node_id: String,
+    },
 }
 
 /// Fully serializable envelope emitted at Lash's nondeterministic boundary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeEffectEnvelope {
-    pub metadata: EffectInvocationMetadata,
+    pub invocation: RuntimeInvocation,
     pub command: RuntimeEffectCommand,
 }
 
 impl RuntimeEffectEnvelope {
-    pub fn new(metadata: EffectInvocationMetadata, command: RuntimeEffectCommand) -> Self {
-        Self { metadata, command }
+    pub fn new(invocation: RuntimeInvocation, command: RuntimeEffectCommand) -> Self {
+        Self::try_new(invocation, command).expect("valid runtime effect invocation")
+    }
+
+    pub fn try_new(
+        invocation: RuntimeInvocation,
+        command: RuntimeEffectCommand,
+    ) -> Result<Self, RuntimeEffectControllerError> {
+        validate_effect_invocation(&invocation, command.kind())?;
+        Ok(Self {
+            invocation,
+            command,
+        })
     }
 
     pub fn stable_hash(&self) -> Result<String, RuntimeEffectControllerError> {
@@ -92,6 +254,45 @@ impl RuntimeEffectEnvelope {
             )
         })
     }
+}
+
+fn validate_effect_invocation(
+    invocation: &RuntimeInvocation,
+    command_kind: RuntimeEffectKind,
+) -> Result<(), RuntimeEffectControllerError> {
+    let RuntimeSubject::Effect { effect_id, kind } = &invocation.subject else {
+        return Err(RuntimeEffectControllerError::new(
+            "runtime_effect_invocation_subject",
+            "runtime effect envelope subject must be an effect",
+        ));
+    };
+    if effect_id.trim().is_empty() {
+        return Err(RuntimeEffectControllerError::new(
+            "runtime_effect_invocation_subject",
+            "runtime effect envelope effect id must be non-empty",
+        ));
+    }
+    if *kind != command_kind {
+        return Err(RuntimeEffectControllerError::new(
+            "runtime_effect_invocation_kind",
+            format!(
+                "runtime effect invocation kind {} does not match command kind {}",
+                kind.as_str(),
+                command_kind.as_str()
+            ),
+        ));
+    }
+    if invocation
+        .replay
+        .as_ref()
+        .is_none_or(|replay| replay.key.is_empty())
+    {
+        return Err(RuntimeEffectControllerError::new(
+            "runtime_effect_replay_required",
+            "runtime effect envelope requires replay.key",
+        ));
+    }
+    Ok(())
 }
 
 /// Serializable command emitted at Lash's nondeterministic runtime boundary.
@@ -358,8 +559,8 @@ pub struct DirectRequestSpec {
     pub attachments: Vec<LlmAttachmentSpec>,
     pub output: DirectOutputSpec,
     pub session_id: Option<String>,
-    pub originating_tool_call_id: Option<String>,
-    pub idempotency_key: Option<String>,
+    pub caused_by: Option<CausalRef>,
+    pub replay: Option<RuntimeReplay>,
 }
 
 impl DirectRequestSpec {
@@ -375,8 +576,8 @@ impl DirectRequestSpec {
             attachments: attachment_specs_from_attachments(&request.attachments, attachment_store)?,
             output: request.output.clone(),
             session_id: request.session_id.clone(),
-            originating_tool_call_id: request.originating_tool_call_id.clone(),
-            idempotency_key: request.idempotency_key.clone(),
+            caused_by: request.caused_by.clone(),
+            replay: request.replay.clone(),
         })
     }
 
@@ -394,8 +595,8 @@ impl DirectRequestSpec {
             output: self.output,
             stream_events,
             session_id: self.session_id,
-            originating_tool_call_id: self.originating_tool_call_id,
-            idempotency_key: self.idempotency_key,
+            caused_by: self.caused_by,
+            replay: self.replay,
         }
     }
 }

@@ -47,7 +47,7 @@ pub enum ToolRetryPolicy {
         max_delay_ms: u64,
     },
     /// Retry only failures that explicitly report a safe retry disposition,
-    /// and only when the runtime can provide a stable idempotency key.
+    /// and only when the runtime can provide a stable replay key.
     Idempotent {
         max_attempts: u32,
         base_delay_ms: u64,
@@ -105,7 +105,7 @@ impl ToolRetryPolicy {
         }
     }
 
-    pub fn requires_idempotency_key(self) -> bool {
+    pub fn requires_replay_key(self) -> bool {
         matches!(self, Self::Idempotent { .. })
     }
 }
@@ -214,16 +214,110 @@ fn is_default_tool_activation(activation: &ToolActivation) -> bool {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ToolDiscoveryMetadata {
+pub struct ToolAgentSurface {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub module_path: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
+    pub operation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_type: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
 }
 
-impl ToolDiscoveryMetadata {
+impl ToolAgentSurface {
+    pub fn new(
+        module_path: impl IntoIterator<Item = impl Into<String>>,
+        operation: impl Into<String>,
+    ) -> Self {
+        Self {
+            module_path: module_path.into_iter().map(Into::into).collect(),
+            operation: Some(operation.into()),
+            authority_type: None,
+            aliases: Vec::new(),
+        }
+    }
+
+    pub fn with_authority_type(mut self, authority_type: impl Into<String>) -> Self {
+        self.authority_type = Some(authority_type.into());
+        self
+    }
+
+    pub fn with_aliases(mut self, aliases: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.aliases = aliases.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn executable_for(&self, tool_name: &str) -> ToolAgentExecutableSurface {
+        let module_path = if self.module_path.is_empty() {
+            vec!["tools".to_string()]
+        } else {
+            self.module_path.clone()
+        };
+        let operation = self
+            .operation
+            .as_deref()
+            .filter(|operation| !operation.trim().is_empty())
+            .unwrap_or(tool_name)
+            .to_string();
+        let authority_type = self
+            .authority_type
+            .as_deref()
+            .filter(|authority_type| !authority_type.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| default_authority_type(&module_path));
+        ToolAgentExecutableSurface {
+            module_path,
+            operation,
+            authority_type,
+            aliases: self.aliases.clone(),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.namespace.is_none() && self.aliases.is_empty()
+        self.module_path.is_empty()
+            && self.operation.is_none()
+            && self.authority_type.is_none()
+            && self.aliases.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolAgentExecutableSurface {
+    pub module_path: Vec<String>,
+    pub operation: String,
+    pub authority_type: String,
+    pub aliases: Vec<String>,
+}
+
+impl ToolAgentExecutableSurface {
+    pub fn module_path_string(&self) -> String {
+        self.module_path.join(".")
+    }
+
+    pub fn call_path(&self) -> String {
+        format!("{}.{}", self.module_path_string(), self.operation)
+    }
+}
+
+fn default_authority_type(module_path: &[String]) -> String {
+    let base = module_path
+        .first()
+        .map(String::as_str)
+        .unwrap_or("tools")
+        .trim_matches('_');
+    let mut out = String::new();
+    for part in base.split('_').filter(|part| !part.is_empty()) {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.extend(chars);
+        }
+    }
+    if out.is_empty() {
+        "Tools".to_string()
+    } else {
+        out
     }
 }
 
@@ -384,8 +478,8 @@ pub struct ToolManifest {
     pub activation: ToolActivation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_override: Option<ToolAvailability>,
-    #[serde(default, skip_serializing_if = "ToolDiscoveryMetadata::is_empty")]
-    pub discovery: ToolDiscoveryMetadata,
+    #[serde(default, skip_serializing_if = "ToolAgentSurface::is_empty")]
+    pub agent_surface: ToolAgentSurface,
     #[serde(
         default,
         skip_serializing_if = "is_default_tool_argument_projection_policy"
@@ -458,8 +552,9 @@ impl ToolContract {
         manifest: &ToolManifest,
         example_limit: usize,
     ) -> CompactToolContract {
+        let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
         CompactToolContract {
-            name: manifest.name.clone(),
+            name: agent_surface.call_path(),
             signature: self.input_signature(manifest),
             returns: self.output_summary(),
             parameters: self.parameter_metadata(),
@@ -470,18 +565,24 @@ impl ToolContract {
     }
 
     pub fn input_signature(&self, manifest: &ToolManifest) -> String {
+        let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
         let params = self
             .parameter_docs()
             .into_iter()
             .map(|p| p.signature_fragment())
             .collect::<Vec<_>>();
+        let body = if params.is_empty() {
+            "{}".to_string()
+        } else {
+            format!("{{ {} }}", params.join(", "))
+        };
         format!(
-            "{}{}({})",
-            manifest.name,
+            "await {}{}({})?",
+            agent_surface.call_path(),
             self.output_contract
                 .type_parameter_suffix()
                 .unwrap_or_default(),
-            params.join(", ")
+            body
         )
     }
 
@@ -540,8 +641,8 @@ pub struct ToolDefinition {
     pub activation: ToolActivation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_override: Option<ToolAvailability>,
-    #[serde(default, skip_serializing_if = "ToolDiscoveryMetadata::is_empty")]
-    pub discovery: ToolDiscoveryMetadata,
+    #[serde(default, skip_serializing_if = "ToolAgentSurface::is_empty")]
+    pub agent_surface: ToolAgentSurface,
     #[serde(
         default,
         skip_serializing_if = "is_default_tool_argument_projection_policy"
@@ -684,7 +785,7 @@ impl ToolDefinition {
             availability: ToolAvailabilityConfig::showcased(),
             activation: ToolActivation::Always,
             availability_override: None,
-            discovery: ToolDiscoveryMetadata::default(),
+            agent_surface: ToolAgentSurface::default(),
             argument_projection: ToolArgumentProjectionPolicy::default(),
             scheduling: ToolScheduling::Parallel,
             retry_policy: ToolRetryPolicy::Never,
@@ -765,8 +866,8 @@ impl ToolDefinition {
         self
     }
 
-    pub fn with_discovery(mut self, discovery: ToolDiscoveryMetadata) -> Self {
-        self.discovery = discovery;
+    pub fn with_agent_surface(mut self, agent_surface: ToolAgentSurface) -> Self {
+        self.agent_surface = agent_surface;
         self
     }
 
@@ -835,19 +936,7 @@ impl ToolDefinition {
     }
 
     pub fn input_signature(&self) -> String {
-        let params = self
-            .parameter_docs()
-            .into_iter()
-            .map(|p| p.signature_fragment())
-            .collect::<Vec<_>>();
-        format!(
-            "{}{}({})",
-            self.name,
-            self.output_contract
-                .type_parameter_suffix()
-                .unwrap_or_default(),
-            params.join(", ")
-        )
+        self.contract().input_signature(&self.manifest())
     }
 
     pub fn output_summary(&self) -> String {
@@ -885,7 +974,7 @@ impl ToolDefinition {
             availability: self.availability.clone(),
             activation: self.activation,
             availability_override: self.availability_override,
-            discovery: self.discovery.clone(),
+            agent_surface: self.agent_surface.clone(),
             argument_projection: self.argument_projection.clone(),
             scheduling: self.scheduling,
             retry_policy: self.retry_policy,
@@ -919,7 +1008,7 @@ impl ToolDefinition {
             availability: manifest.availability,
             activation: manifest.activation,
             availability_override: manifest.availability_override,
-            discovery: manifest.discovery,
+            agent_surface: manifest.agent_surface,
             argument_projection: manifest.argument_projection,
             scheduling: manifest.scheduling,
             retry_policy: manifest.retry_policy,
@@ -2038,15 +2127,15 @@ mod tests {
             }),
         )
         .with_examples(vec![
-            "search_docs(query=\"rust\")".to_string(),
-            "search_docs(query=\"rust\", limit=3)".to_string(),
-            "search_docs(query=\"ignored\")".to_string(),
+            "await tools.search_docs({ query: \"rust\" })?".to_string(),
+            "await tools.search_docs({ query: \"rust\", limit: 3 })?".to_string(),
+            "await tools.search_docs({ query: \"ignored\" })?".to_string(),
         ]);
 
         let contract = tool.compact_contract();
         assert_eq!(
             contract.signature,
-            "search_docs(query: str, limit?: int <= 10 = 5)"
+            "await tools.search_docs({ query: str, limit?: int <= 10 = 5 })?"
         );
         assert_eq!(
             contract.returns,
@@ -2075,12 +2164,12 @@ mod tests {
 
         let docs = ToolDefinition::format_tool_docs(&[tool]);
         assert!(docs.contains(
-            "### search_docs(query: str, limit?: int <= 10 = 5) -> record{matches: list[str], next_page?: str | null}"
+            "### await tools.search_docs({ query: str, limit?: int <= 10 = 5 })? -> record{matches: list[str], next_page?: str | null}"
         ));
         assert!(!docs.contains("Returns:"));
         assert!(docs.contains("Parameters:\n- `query: str`\n- `limit?: int <= 10 = 5`"));
         assert!(docs.contains(
-            "Examples: search_docs(query=\"rust\"); search_docs(query=\"rust\", limit=3)"
+            "Examples: await tools.search_docs({ query: \"rust\" })?; await tools.search_docs({ query: \"rust\", limit: 3 })?"
         ));
     }
 
@@ -2123,19 +2212,20 @@ mod tests {
             }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         )
+        .with_agent_surface(ToolAgentSurface::new(["agents"], "spawn"))
         .with_output_from_input_schema("output", None);
 
         let contract = tool.compact_contract();
         assert_eq!(
             contract.signature,
-            "spawn_agent<T = any>(output?: TypeSpec<T>)"
+            "await agents.spawn<T = any>({ output?: TypeSpec<T> })?"
         );
         assert_eq!(contract.returns, "T");
         assert!(contract.return_fields.is_empty());
         assert_eq!(contract.render_returns(), "");
         assert_eq!(
             ToolDefinition::format_tool_docs(&[tool]),
-            "### spawn_agent<T = any>(output?: TypeSpec<T>) -> T\nRun a subagent\nParameters:\n- `output?: TypeSpec<T>`"
+            "### await agents.spawn<T = any>({ output?: TypeSpec<T> })? -> T\nRun a subagent\nParameters:\n- `output?: TypeSpec<T>`"
         );
     }
 
@@ -2155,12 +2245,13 @@ mod tests {
             }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         )
+        .with_agent_surface(ToolAgentSurface::new(["llm"], "query"))
         .with_output_from_input_schema("output", Some(serde_json::json!({ "type": "string" })));
 
         let contract = tool.compact_contract();
         assert_eq!(
             contract.signature,
-            "llm_query<T = str>(task: str, output?: TypeSpec<T>)"
+            "await llm.query<T = str>({ task: str, output?: TypeSpec<T> })?"
         );
         assert_eq!(contract.returns, "T");
         assert!(contract.return_fields.is_empty());
@@ -2294,8 +2385,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&contract).unwrap(),
             serde_json::json!({
-                "name": "mcp__appworld__spotify_search_songs",
-                "signature": "mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null)",
+                "name": "tools.mcp__appworld__spotify_search_songs",
+                "signature": "await tools.mcp__appworld__spotify_search_songs({ access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null })?",
                 "returns": "record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}",
                 "parameters": [
                     {
@@ -2438,11 +2529,11 @@ mod tests {
 
         assert_eq!(
             contract.render_markdown(),
-            "### mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null) -> record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\n[MCP appworld] Search for songs with a query.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message.\nExamples: search songs by genre"
+            "### await tools.mcp__appworld__spotify_search_songs({ access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null })? -> record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\n[MCP appworld] Search for songs with a query.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message.\nExamples: search songs by genre"
         );
         assert_eq!(
             contract.render_signature(),
-            "mcp__appworld__spotify_search_songs(access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null) -> record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message."
+            "await tools.mcp__appworld__spotify_search_songs({ access_token: str, genre?: str | null = null, page_limit?: int >= 1 <= 20 = 5, sort_by?: str | null = null })? -> record{response: list[record{album_id: int | null, album_title: str | null, artists: list[record{id: int, name: str}], duration: int, genre: str, like_count: int, play_count: int, rating: float, release_date: str, song_id: int, title: str}]} | record{response: record{message: str}}\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `genre?: str | null = null` — Only include songs from this genre.\n- `page_limit?: int >= 1 <= 20 = 5` — Maximum number of songs to return.\n- `sort_by?: str | null = null` — Field to sort by. Prefix with '-' for descending order.\nReturn fields:\n- `response: list[record]` — Matched songs.\n- `response[].album_id: int | null` — Album identifier when the song belongs to an album.\n- `response[].album_title: str | null`\n- `response[].artists[].id: int`\n- `response[].artists[].name: str`\n- `response[].duration: int`\n- `response[].genre: str`\n- `response[].like_count: int`\n- `response[].play_count: int >= 0` — Number of times the song was played.\n- `response[].rating: float`\n- `response[].release_date: str` — Song release date in YYYY-MM-DD format.\n- `response[].song_id: int` — Stable song identifier.\n- `response[].title: str` — Song title.\n- `response.message: str` — Failure or status message."
         );
         assert_eq!(
             contract.render_returns(),
@@ -2538,8 +2629,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&contract).unwrap(),
             serde_json::json!({
-                "name": "mcp__appworld__spotify_show_album_library",
-                "signature": "mcp__appworld__spotify_show_album_library(access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5)",
+                "name": "tools.mcp__appworld__spotify_show_album_library",
+                "signature": "await tools.mcp__appworld__spotify_show_album_library({ access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5 })?",
                 "returns": "record{response: list[record{added_at: null | str, album_id: int, genre: str, song_ids: list[int], title: str}] | record{message: str}}",
                 "parameters": [
                     {
@@ -2627,23 +2718,23 @@ mod tests {
         );
         assert_eq!(
             contract.render_markdown(),
-            "### mcp__appworld__spotify_show_album_library(access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5) -> record{response: list[record{added_at: null | str, album_id: int, genre: str, song_ids: list[int], title: str}] | record{message: str}}\n[MCP appworld] Search or show a list of albums in your album library.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `page_index?: int >= 0 = 0` — The index of the page to return.\n- `page_limit?: int >= 1 <= 20 = 5` — The maximum number of results to return per page.\nReturn fields:\n- `response: list[record]` — Albums in the user's library.\n- `response[].added_at: str | null` — When the album was added to the library.\n- `response[].album_id: int`\n- `response[].genre: str min_len 1` — Album genre.\n- `response[].song_ids[]: int`\n- `response[].title: str min_len 1`\n- `response.message: str` — Failure or status message.\nExamples: show album library"
+            "### await tools.mcp__appworld__spotify_show_album_library({ access_token: str, page_index?: int >= 0 = 0, page_limit?: int >= 1 <= 20 = 5 })? -> record{response: list[record{added_at: null | str, album_id: int, genre: str, song_ids: list[int], title: str}] | record{message: str}}\n[MCP appworld] Search or show a list of albums in your album library.\nParameters:\n- `access_token: str` — Access token obtained from spotify app login.\n- `page_index?: int >= 0 = 0` — The index of the page to return.\n- `page_limit?: int >= 1 <= 20 = 5` — The maximum number of results to return per page.\nReturn fields:\n- `response: list[record]` — Albums in the user's library.\n- `response[].added_at: str | null` — When the album was added to the library.\n- `response[].album_id: int`\n- `response[].genre: str min_len 1` — Album genre.\n- `response[].song_ids[]: int`\n- `response[].title: str min_len 1`\n- `response.message: str` — Failure or status message.\nExamples: show album library"
         );
     }
 
     #[test]
-    fn tool_discovery_metadata_serde_defaults_are_empty() {
+    fn tool_agent_surface_serde_defaults_are_empty() {
         let tool: ToolDefinition = serde_json::from_value(serde_json::json!({
             "id": "tool:read_file",
             "name": "read_file",
             "description": "Read a file"
         }))
         .unwrap();
-        assert!(tool.discovery.is_empty());
+        assert!(tool.agent_surface.is_empty());
     }
 
     #[test]
-    fn tool_discovery_metadata_does_not_render_prompt_docs() {
+    fn tool_agent_surface_controls_prompt_call_form() {
         let mut with_metadata = ToolDefinition::raw_with_id(
             "tool:read_file",
             "read_file",
@@ -2651,15 +2742,11 @@ mod tests {
             ToolDefinition::default_input_schema(),
             serde_json::json!({"type": "string"}),
         );
-        with_metadata.discovery = ToolDiscoveryMetadata {
-            namespace: Some("filesystem".to_string()),
-            aliases: vec!["cat".to_string()],
-        };
-        let mut without_metadata = with_metadata.clone();
-        without_metadata.discovery = Default::default();
-        assert_eq!(
-            ToolDefinition::format_tool_docs(&[with_metadata]),
-            ToolDefinition::format_tool_docs(&[without_metadata])
+        with_metadata.agent_surface = ToolAgentSurface::new(["fs"], "read").with_aliases(["cat"]);
+
+        assert!(
+            ToolDefinition::format_tool_docs(&[with_metadata])
+                .contains("### await fs.read({})? -> str")
         );
     }
 }

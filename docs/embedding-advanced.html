@@ -68,7 +68,7 @@ let core = LashCore::rlm()
             <h2>Durable Workflows</h2>
             <p>Standard <code>LashCore</code> persists at the turn boundary. For sub-turn durability — expensive LLM calls, long tool calls, process control, mid-turn worker migration — run the turn with a scoped <code>RuntimeEffectController</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
           </div>
-          <p>Shape: the runtime driver polls <code>TurnMachine</code> and claims a <code>RuntimeTurnLease</code>. For each reply-producing turn effect it saves a lease-guarded <code>RuntimeTurnCheckpoint</code>, builds <code>RuntimeEffectEnvelope</code> metadata, invokes the active scoped controller, renews the same lease token before journaling the returned outcome by idempotency key, and feeds it back as the matching response. <code>LashSession::resume_turn(turn_id)</code> claims ownership again, reloads the checkpoint, and replays any already-completed effect outcomes without rerunning input hooks or stream history. Controller/runtime errors abandon lease ownership while preserving resumable state; only the final commit clears the checkpoint and journal.</p>
+          <p>Shape: the runtime driver polls <code>TurnMachine</code> and claims a <code>RuntimeTurnLease</code>. For each reply-producing turn effect it saves a lease-guarded <code>RuntimeTurnCheckpoint</code>, builds a <code>RuntimeEffectEnvelope</code> with a typed <code>RuntimeInvocation</code>, invokes the active scoped controller, renews the same lease token before journaling the returned outcome by <code>replay.key</code>, and feeds it back as the matching response. <code>LashSession::resume_turn(turn_id)</code> claims ownership again, reloads the checkpoint, and replays any already-completed effect outcomes without rerunning input hooks or stream history. Controller/runtime errors abandon lease ownership while preserving resumable state; only the final commit clears the checkpoint and journal.</p>
           <p>Full contract: <a href="./architecture/durability.html">Architecture → Durability</a>. Embedders without workflow orchestration use the regular <a href="./persistence.html">session-store path</a>.</p>
         </div>
 
@@ -188,7 +188,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
             <article class="panel"><h3><a href="./tracing.html">Tracing</a></h3><p><code>TraceSink</code>, JSONL schema v2, fan-out, <code>lash-trace-viewer</code>, OTel export.</p></article>
             <article class="panel"><h3><a href="./cli.html">CLI</a></h3><p>Slash commands, keyboard shortcuts, config schema, env vars, resume/fork.</p></article>
             <article class="panel"><h3><a href="./architecture/">Architecture</a></h3><p>Crate map, residency, session graph, plugin host traits, providers, Lashlang internals.</p></article>
-            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p><code>RuntimeEffectController</code>, deterministic effect metadata, idempotency keys, checkpoint / restore, workflow adapter seam.</p></article>
+            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p><code>RuntimeEffectController</code>, <code>RuntimeInvocation</code>, replay keys, checkpoint / restore, workflow adapter seam.</p></article>
           </div>
         </div>
   </main>

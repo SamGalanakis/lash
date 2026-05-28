@@ -103,20 +103,6 @@ pub trait RuntimeSessionHost: Send + Sync {
         ))
     }
 
-    /// Push a user-visible message into the target session's turn-input
-    /// injection bridge so it surfaces at the next iteration boundary of
-    /// the current turn (or at the start of the next turn if the target
-    /// is idle).
-    async fn inject_turn_input(
-        &self,
-        _session_id: &str,
-        _input: crate::InjectedTurnInput,
-    ) -> Result<(), PluginError> {
-        Err(PluginError::Session(
-            "turn input injection is unavailable in this session".to_string(),
-        ))
-    }
-
     async fn append_session_nodes(
         &self,
         _session_id: &str,

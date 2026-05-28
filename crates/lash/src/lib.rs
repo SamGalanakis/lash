@@ -33,6 +33,7 @@ pub use crate::turn::{
     TurnStream, message_role, message_text,
 };
 pub use lash_core::{
+    impl_unsupported_queued_work_methods,
     HostEvent, HostEventEmitReport, InputItem, ModelLimits, ModelSpec, PluginStack, SessionSpec,
     SessionTriggerInstallReport, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent,
     TurnInput,
@@ -53,9 +54,9 @@ pub mod prelude {
 pub mod tools {
     pub use crate::ToolState;
     pub use lash_core::{
-        PreparedToolCall, ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability,
-        ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord, ToolContext,
-        ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolManifest, ToolOutputContract,
+        PreparedToolCall, ToolActivation, ToolAgentSurface, ToolArgumentProjectionPolicy,
+        ToolAvailability, ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord,
+        ToolContext, ToolContract, ToolDefinition, ToolManifest, ToolOutputContract,
         ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult, ToolScheduling,
         ToolSourceHandle,
     };
@@ -76,14 +77,16 @@ pub mod persistence {
     pub use lash_core::{
         AttachmentStore, BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint,
         PersistedSessionConfig, PersistedSessionRead, PersistedTurnState, ProtocolEvent,
+        DeliveryPolicy, MergeKey, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
+        QueuedWorkClaimBoundary, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
         RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
         RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
         RuntimeEffectJournalRecord, RuntimePersistence, RuntimeSessionState, RuntimeTurnCheckpoint,
         RuntimeTurnCompletion, RuntimeTurnLease, RuntimeTurnMachineConfigSnapshot,
         SessionCheckpoint, SessionEventRecord, SessionGraph, SessionHead, SessionHeadMeta,
         SessionMeta, SessionNodeRecord, SessionReadScope, SessionReadView, SessionStateEnvelope,
-        SessionStoreCreateRequest, SessionStoreFactory, StoreError, TokenLedgerEntry, VacuumReport,
-        load_persisted_session_state, load_persisted_session_state_active_path,
+        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, TokenLedgerEntry,
+        VacuumReport, load_persisted_session_state, load_persisted_session_state_active_path,
         runtime_turn_checkpoint_hash,
     };
     pub use lash_local_store::FileAttachmentStore;
@@ -133,20 +136,20 @@ pub mod advanced {
     // Do not expose runtime bridge internals here to fill that gap.
     pub use lash_core::{
         AssembledTurn, DirectCompletionClient, DirectRequestSpec, DurableProcessWorker,
-        DurableProcessWorkerConfig, EffectInvocationMetadata, EffectOrigin, EmbeddedRuntimeHost,
-        EventSink, InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
-        NoopEventSink, NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage,
-        ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessInput,
-        ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
-        ProcessScopeId, ProcessService, ProcessSessionDeleteReport, ProcessStartOptions,
-        ProcessWakeDelivery, ProtocolSessionExtensionHandle, ProtocolTurnOptions, Residency,
-        RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
-        RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
-        RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
-        RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
-        RuntimeObservation, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionEvent, SessionHandle,
-        SessionPolicy, SessionStateEnvelope, TerminationPolicy, TurnCause, TurnContext, TurnFinish,
-        TurnOutcome, TurnStop, lashlang_process_event_types, process_wake_input_from_event_payload,
+        DurableProcessWorkerConfig, EmbeddedRuntimeHost, EventSink, InlineRuntimeEffectController,
+        LashRuntime, LlmAttachmentSpec, LlmRequestSpec, NoopEventSink, NoopTurnActivitySink,
+        PersistentRuntimeServices, PluginMessage, ProcessHandleDescriptor, ProcessHandleGrant,
+        ProcessHandleGrantEntry, ProcessInput, ProcessOpScope, ProcessRecord, ProcessRegistration,
+        ProcessRegistry, ProcessScope, ProcessScopeId, ProcessService, ProcessSessionDeleteReport,
+        ProcessStartOptions, ProcessWakeDelivery, ProtocolSessionExtensionHandle,
+        ProtocolTurnOptions, Residency, RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand,
+        RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
+        RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+        RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode,
+        RuntimeHandle, RuntimeInvocation, RuntimeObservation, RuntimeTurnCheckpoint,
+        RuntimeTurnLease, SessionEvent, SessionHandle, SessionPolicy, SessionStateEnvelope,
+        TerminationPolicy, TurnCause, TurnContext, TurnFinish, TurnOutcome, TurnStop,
+        lashlang_process_event_types, process_wake_input_from_event_payload,
         process_wake_turn_cause, process_wake_turn_text, render_turn_causes_prompt,
     };
 }

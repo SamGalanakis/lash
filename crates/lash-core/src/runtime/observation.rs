@@ -16,6 +16,7 @@ pub struct RuntimeObservation {
     pub tool_catalog: Arc<Vec<serde_json::Value>>,
     pub tool_catalog_error: Option<String>,
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
+    pub queue_store: Option<Arc<dyn crate::RuntimePersistence>>,
 }
 
 impl RuntimeObservation {
@@ -48,6 +49,10 @@ impl RuntimeObservation {
             tool_catalog,
             tool_catalog_error,
             process_registry: runtime.host.process_registry.clone(),
+            queue_store: runtime
+                .session
+                .as_ref()
+                .and_then(|session| session.history_store()),
         }
     }
 

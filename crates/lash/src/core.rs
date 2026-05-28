@@ -54,24 +54,20 @@ impl LashCore {
             return Err(EmbedError::MissingSessionStoreFactory);
         };
         let process = if let Some(process_registry) = self.env.process_registry.as_ref() {
-            let metadata = lash_core::EffectInvocationMetadata {
-                session_id: session_id.clone(),
-                origin: lash_core::EffectOrigin::Turn,
-                turn_id: None,
-                turn_index: None,
-                protocol_iteration: None,
-                effect_id: format!("process:delete-session:{session_id}"),
-                effect_kind: lash_core::RuntimeEffectKind::Process,
-                idempotency_key: format!("{session_id}:delete-session"),
-                turn_checkpoint_hash: None,
-            };
+            let invocation = lash_core::RuntimeInvocation::effect(
+                lash_core::RuntimeScope::new(session_id.clone()),
+                format!("process:delete-session:{session_id}"),
+                lash_core::RuntimeEffectKind::Process,
+                format!("{session_id}:delete-session"),
+                None,
+            );
             let outcome = self
                 .env
                 .core
                 .effect_controller
                 .execute_effect(
                     lash_core::RuntimeEffectEnvelope::new(
-                        metadata,
+                        invocation,
                         lash_core::RuntimeEffectCommand::Process {
                             command: lash_core::ProcessCommand::DeleteSession {
                                 session_id: session_id.clone(),

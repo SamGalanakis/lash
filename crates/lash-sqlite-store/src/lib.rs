@@ -54,19 +54,19 @@ use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use lash_core::{
-    AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
-    GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead, ProcessAwaitOutput,
-    ProcessEvent, ProcessEventAppendRequest, ProcessExternalRef, ProcessHandleDescriptor,
-    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistration,
-    ProcessRegistry, ProcessScope, ProcessScopeId, ProcessWakeDelivery,
+    AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef,
+    DeliveryPolicy, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, MergeKey,
+    PersistedSessionRead, ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest,
+    ProcessEventAppendResult, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessHandleGrantEntry, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
+    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
+    QueuedWorkClaimBoundary, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
     RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
-    RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
+    RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult, SlotPolicy,
     RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnLease,
     SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo,
     SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory, StoreError, VacuumReport,
-    ensure_supported_schema_version, materialize_process_event_semantics,
-    prepare_process_registration, process_event_payload_hash, process_wake_delivery,
-    require_event_idempotency, system_time_from_epoch_ms,
+    ensure_supported_schema_version, prepare_process_event_append, prepare_process_registration,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -197,6 +197,41 @@ CREATE TABLE IF NOT EXISTS runtime_effect_journal (
     PRIMARY KEY (session_id, turn_id, idempotency_key)
 );
 
+CREATE TABLE IF NOT EXISTS queued_work_batches (
+    enqueue_seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id          TEXT NOT NULL UNIQUE,
+    session_id        TEXT NOT NULL,
+    source_key        TEXT,
+    delivery_policy   TEXT NOT NULL,
+    slot_policy       TEXT NOT NULL,
+    merge_key_json    TEXT NOT NULL,
+    available_at_ms   INTEGER NOT NULL,
+    enqueued_at_ms    INTEGER NOT NULL,
+    claim_id          TEXT,
+    claim_owner_id    TEXT,
+    claim_token       TEXT,
+    claim_fencing_token INTEGER NOT NULL DEFAULT 0,
+    claim_claimed_at_ms INTEGER NOT NULL DEFAULT 0,
+    claim_expires_at_ms INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (session_id, source_key)
+        ON CONFLICT IGNORE
+);
+
+CREATE TABLE IF NOT EXISTS queued_work_items (
+    batch_id      TEXT NOT NULL,
+    item_index    INTEGER NOT NULL,
+    item_id       TEXT NOT NULL,
+    payload_json  TEXT NOT NULL,
+    PRIMARY KEY (batch_id, item_index),
+    FOREIGN KEY (batch_id) REFERENCES queued_work_batches(batch_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_queued_work_ready
+    ON queued_work_batches(session_id, available_at_ms, enqueue_seq);
+
+CREATE INDEX IF NOT EXISTS idx_queued_work_claim
+    ON queued_work_batches(session_id, claim_id, claim_token);
+
 CREATE TABLE IF NOT EXISTS attachment_manifest (
     attachment_id    TEXT PRIMARY KEY,
     session_id       TEXT NOT NULL,
@@ -220,7 +255,7 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// Canonical schema version. There is no migration chain — older databases
 /// must be deleted before opening. See the [`SCHEMA`] doc comment for the
 /// rationale.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 1_000;
@@ -229,7 +264,7 @@ const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (
     process_id            TEXT PRIMARY KEY,
     registration_hash     TEXT NOT NULL,
-    created_by_scope_id  TEXT,
+    owner_scope_id       TEXT NOT NULL,
     host_profile_id       TEXT NOT NULL,
     created_at_ms         INTEGER NOT NULL,
     updated_at_ms         INTEGER NOT NULL,
@@ -267,28 +302,9 @@ CREATE INDEX IF NOT EXISTS idx_process_handle_grants_session
 CREATE INDEX IF NOT EXISTS idx_process_handle_grants_process
     ON process_handle_grants(process_id);
 
-CREATE TABLE IF NOT EXISTS process_wake_inbox (
-    wake_id           TEXT PRIMARY KEY,
-    target_session_id TEXT NOT NULL,
-    target_scope_id  TEXT NOT NULL,
-    process_id        TEXT NOT NULL,
-    sequence          INTEGER NOT NULL,
-    dedupe_key        TEXT NOT NULL,
-    input             TEXT NOT NULL,
-    created_at_ms     INTEGER NOT NULL,
-    acknowledged_at_ms INTEGER,
-    UNIQUE (target_scope_id, dedupe_key),
-    FOREIGN KEY (process_id) REFERENCES processes(process_id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_process_wake_inbox_target
-    ON process_wake_inbox(target_scope_id, acknowledged_at_ms, created_at_ms);
-
-CREATE INDEX IF NOT EXISTS idx_process_wake_inbox_session
-    ON process_wake_inbox(target_session_id);
 ";
 
-const PROCESS_SCHEMA_VERSION: i32 = 2;
+const PROCESS_SCHEMA_VERSION: i32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StoreBacking {
@@ -744,6 +760,145 @@ fn ensure_runtime_turn_completion_conn(
     Ok(())
 }
 
+fn decode_delivery_policy(value: String) -> Result<DeliveryPolicy, StoreError> {
+    DeliveryPolicy::from_str(&value)
+        .ok_or_else(|| StoreError::Backend(format!("unknown queued-work delivery policy `{value}`")))
+}
+
+fn decode_slot_policy(value: String) -> Result<SlotPolicy, StoreError> {
+    SlotPolicy::from_str(&value)
+        .ok_or_else(|| StoreError::Backend(format!("unknown queued-work slot policy `{value}`")))
+}
+
+fn decode_merge_key(value: String) -> Result<MergeKey, StoreError> {
+    serde_json::from_str(&value)
+        .map_err(|err| StoreError::Backend(format!("failed to decode queued-work merge key: {err}")))
+}
+
+fn decode_queued_payload(value: String) -> Result<QueuedWorkPayload, StoreError> {
+    serde_json::from_str(&value)
+        .map_err(|err| StoreError::Backend(format!("failed to decode queued-work payload: {err}")))
+}
+
+fn queued_work_batch_from_conn(
+    conn: &Connection,
+    row: QueuedBatchRow,
+) -> Result<QueuedWorkBatch, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT item_id, payload_json
+             FROM queued_work_items
+             WHERE batch_id = ?1
+             ORDER BY item_index ASC",
+        )
+        .map_err(sqlite_error)?;
+    let rows = stmt
+        .query_map(params![row.batch_id.as_str()], |item_row| {
+            Ok((item_row.get::<_, String>(0)?, item_row.get::<_, String>(1)?))
+        })
+        .map_err(sqlite_error)?;
+    let mut items = Vec::new();
+    for item in rows {
+        let (item_id, payload_json) = item.map_err(sqlite_error)?;
+        items.push(QueuedWorkItem {
+            item_id,
+            payload: decode_queued_payload(payload_json)?,
+        });
+    }
+    Ok(QueuedWorkBatch {
+        batch_id: row.batch_id,
+        session_id: row.session_id,
+        enqueue_seq: row.enqueue_seq,
+        source_key: row.source_key,
+        delivery_policy: decode_delivery_policy(row.delivery_policy)?,
+        slot_policy: decode_slot_policy(row.slot_policy)?,
+        merge_key: decode_merge_key(row.merge_key_json)?,
+        available_at_ms: row.available_at_ms,
+        enqueued_at_ms: row.enqueued_at_ms,
+        items,
+    })
+}
+
+struct QueuedBatchRow {
+    enqueue_seq: u64,
+    batch_id: String,
+    session_id: String,
+    source_key: Option<String>,
+    delivery_policy: String,
+    slot_policy: String,
+    merge_key_json: String,
+    available_at_ms: u64,
+    enqueued_at_ms: u64,
+    claim_fencing_token: u64,
+}
+
+fn queued_batch_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedBatchRow> {
+    Ok(QueuedBatchRow {
+        enqueue_seq: row.get::<_, i64>(0)? as u64,
+        batch_id: row.get(1)?,
+        session_id: row.get(2)?,
+        source_key: row.get(3)?,
+        delivery_policy: row.get(4)?,
+        slot_policy: row.get(5)?,
+        merge_key_json: row.get(6)?,
+        available_at_ms: row.get::<_, i64>(7)? as u64,
+        enqueued_at_ms: row.get::<_, i64>(8)? as u64,
+        claim_fencing_token: row.get::<_, i64>(9)? as u64,
+    })
+}
+
+fn load_queued_batch_by_id_conn(
+    conn: &Connection,
+    batch_id: &str,
+) -> Result<Option<QueuedWorkBatch>, StoreError> {
+    let row = conn
+        .query_row(
+            "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                    slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                    claim_fencing_token
+             FROM queued_work_batches
+             WHERE batch_id = ?1",
+            params![batch_id],
+            queued_batch_row_from_sql,
+        )
+        .optional()
+        .map_err(sqlite_error)?;
+    row.map(|row| queued_work_batch_from_conn(conn, row))
+        .transpose()
+}
+
+fn ensure_queued_work_completion_conn(
+    conn: &Connection,
+    completed: &QueuedWorkCompletion,
+) -> Result<(), StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT COUNT(*)
+             FROM queued_work_batches
+             WHERE session_id = ?1
+               AND claim_id = ?2
+               AND claim_token = ?3",
+        )
+        .map_err(sqlite_error)?;
+    let count: usize = stmt
+        .query_row(
+            params![
+                completed.session_id,
+                completed.claim_id,
+                completed.lease_token
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(sqlite_error)? as usize;
+    if count != completed.batch_ids.len() {
+        return Err(StoreError::QueuedWorkClaimExpired {
+            session_id: completed.session_id.clone(),
+            claim_id: completed.claim_id.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn decode_checkpoint(bytes: &[u8]) -> Option<SessionCheckpoint> {
     rmp_serde::from_slice(bytes).ok()
 }
@@ -843,14 +998,14 @@ impl SqliteProcessRegistry {
     fn load_event_by_key_conn(
         conn: &Connection,
         process_id: &str,
-        idempotency_key: &str,
+        replay_key: &str,
     ) -> Result<Option<(String, ProcessEvent)>, lash_core::PluginError> {
         let row: Option<(String, String)> = conn
             .query_row(
                 "SELECT payload_hash, event_json
                  FROM process_events
                  WHERE process_id = ?1 AND idempotency_key = ?2",
-                params![process_id, idempotency_key],
+                params![process_id, replay_key],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
@@ -863,30 +1018,6 @@ impl SqliteProcessRegistry {
         .transpose()
     }
 
-    fn insert_wake_conn(
-        conn: &Connection,
-        delivery: ProcessWakeDelivery,
-    ) -> Result<(), lash_core::PluginError> {
-        conn.execute(
-            "INSERT OR IGNORE INTO process_wake_inbox (
-                wake_id, target_session_id, target_scope_id, process_id, sequence, dedupe_key,
-                input, created_at_ms
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                delivery.wake_id,
-                delivery.target_session_id,
-                delivery.target_scope_id.as_str(),
-                delivery.process_id,
-                delivery.sequence as i64,
-                delivery.dedupe_key,
-                delivery.input,
-                delivery.created_at_ms as i64,
-            ],
-        )
-        .map_err(process_sqlite_error)?;
-        Ok(())
-    }
 }
 
 #[async_trait::async_trait]
@@ -910,18 +1041,18 @@ impl ProcessRegistry for SqliteProcessRegistry {
         let now = current_epoch_ms();
         let record =
             ProcessRecord::from_prepared_registration(registration, registration_hash, now);
-        let created_by_scope_id = record.created_by_scope_id();
+        let owner_scope_id = record.owner_scope_id();
         tx.execute(
             "INSERT INTO processes (
-                process_id, registration_hash, created_by_scope_id, host_profile_id,
+                process_id, registration_hash, owner_scope_id, host_profile_id,
                 created_at_ms, updated_at_ms, record_json
              )
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 &record.id,
                 &record.registration_hash,
-                created_by_scope_id.as_ref().map(ProcessScopeId::as_str),
-                &record.host_profile_id,
+                owner_scope_id.as_str(),
+                record.host_profile_id(),
                 record.created_at_ms as i64,
                 record.updated_at_ms as i64,
                 process_encode_json(&record)?,
@@ -1165,13 +1296,6 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 params![session_id],
             )
             .map_err(process_sqlite_error)?;
-        let deleted_wake_count = tx
-            .execute(
-                "DELETE FROM process_wake_inbox WHERE target_session_id = ?1",
-                params![session_id],
-            )
-            .map_err(process_sqlite_error)?;
-
         let mut cancel_process_ids = Vec::new();
         let mut preserved_process_ids = Vec::new();
         for (process_id, record) in removed {
@@ -1199,7 +1323,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         Ok(lash_core::ProcessSessionDeleteReport {
             session_id: session_id.to_string(),
             revoked_handle_count,
-            deleted_wake_count,
+            deleted_wake_count: 0,
             cancel_process_ids,
             preserved_process_ids,
         })
@@ -1209,44 +1333,18 @@ impl ProcessRegistry for SqliteProcessRegistry {
         &self,
         process_id: &str,
         request: ProcessEventAppendRequest,
-    ) -> Result<ProcessEvent, lash_core::PluginError> {
+    ) -> Result<ProcessEventAppendResult, lash_core::PluginError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(process_sqlite_error)?;
         let mut record = Self::load_process_conn(&tx, process_id)?.ok_or_else(|| {
             lash_core::PluginError::Session(format!("unknown process `{process_id}`"))
         })?;
-        let payload_hash = process_event_payload_hash(&request.event_type, &request.payload)?;
-        if let Some(idempotency_key) = request.idempotency_key.as_deref()
-            && let Some((existing_hash, existing)) =
-                Self::load_event_by_key_conn(&tx, process_id, idempotency_key)?
-        {
-            if existing_hash == payload_hash {
-                return Ok(existing);
-            }
-            return Err(lash_core::PluginError::Session(format!(
-                "process `{process_id}` event idempotency key `{idempotency_key}` conflicts with an existing event"
-            )));
-        }
-        let declared = record
-            .event_types
-            .iter()
-            .find(|declared| declared.name == request.event_type)
-            .ok_or_else(|| {
-                lash_core::PluginError::Session(format!(
-                    "process `{process_id}` emitted undeclared event type `{}`",
-                    request.event_type
-                ))
-            })?;
-        require_event_idempotency(process_id, &request, &declared.semantics)?;
-        declared
-            .payload_schema
-            .validate(&request.payload)
-            .map_err(|err| {
-                lash_core::PluginError::Session(format!(
-                    "invalid `{}` payload: {err}",
-                    request.event_type
-                ))
-            })?;
+        let replay_lookup =
+            if let Some(replay_key) = request.replay.as_ref().map(|replay| replay.key.as_str()) {
+                Self::load_event_by_key_conn(&tx, process_id, replay_key)?
+            } else {
+                None
+            };
         let sequence = tx
             .query_row(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM process_events WHERE process_id = ?1",
@@ -1254,27 +1352,21 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(process_sqlite_error)? as u64;
-        let semantics = materialize_process_event_semantics(
-            process_id,
-            sequence,
-            &request.payload,
-            &declared.semantics,
-        )?;
-        if semantics.terminal.is_some() && record.terminal.is_some() {
-            return Err(lash_core::PluginError::Session(format!(
-                "process `{process_id}` is already terminal"
-            )));
-        }
         let occurred_at_ms = current_epoch_ms();
-        let event = ProcessEvent {
-            process_id: process_id.to_string(),
+        let prepared = prepare_process_event_append(
+            &record,
+            request,
             sequence,
-            event_type: request.event_type,
-            payload: request.payload,
-            idempotency_key: request.idempotency_key.clone(),
-            semantics: semantics.clone(),
-            occurred_at: system_time_from_epoch_ms(occurred_at_ms),
-        };
+            replay_lookup,
+            occurred_at_ms,
+        )?;
+        if prepared.replayed {
+            return Ok(ProcessEventAppendResult {
+                event: prepared.event,
+                wake_delivery: prepared.wake_delivery,
+            });
+        }
+        let event = prepared.event;
         tx.execute(
             "INSERT INTO process_events (
                 process_id, sequence, event_type, payload_hash, idempotency_key,
@@ -1285,33 +1377,25 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 process_id,
                 sequence as i64,
                 &event.event_type,
-                &payload_hash,
-                event.idempotency_key.as_deref(),
-                occurred_at_ms as i64,
+                &prepared.payload_hash,
+                event.invocation.replay_key(),
+                prepared.occurred_at_ms as i64,
                 process_encode_json(&event)?,
             ],
         )
         .map_err(process_sqlite_error)?;
-        if let Some(terminal) = event.semantics.terminal.clone() {
+        if let Some(terminal) = prepared.terminal_update.clone() {
             record.terminal = Some(terminal);
         }
-        record.updated_at_ms = occurred_at_ms;
+        record.updated_at_ms = prepared.occurred_at_ms;
         Self::save_process_conn(&tx, &record)?;
-        if let Some(wake) = semantics.wake
-            && let Some(target_scope) = request.wake_target_scope
-        {
-            let delivery = process_wake_delivery(
-                target_scope,
-                process_id.to_string(),
-                sequence,
-                wake,
-                event.occurred_at,
-            )?;
-            Self::insert_wake_conn(&tx, delivery)?;
-        }
+        let wake_delivery = prepared.wake_delivery;
         tx.commit().map_err(process_sqlite_error)?;
         self.notify.notify_waiters();
-        Ok(event)
+        Ok(ProcessEventAppendResult {
+            event,
+            wake_delivery,
+        })
     }
 
     async fn events_after(
@@ -1410,7 +1494,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 event_type,
                 serde_json::json!({ "await_output": await_output }),
             )
-            .with_idempotency_key(format!("process:{process_id}:terminal:{event_type}")),
+            .with_replay_key(format!("process:{process_id}:terminal:{event_type}")),
         )
         .await?;
         self.get_process(process_id).await.ok_or_else(|| {
@@ -1425,69 +1509,18 @@ impl ProcessRegistry for SqliteProcessRegistry {
         Self::load_process_conn(&conn, process_id).ok().flatten()
     }
 
-    async fn drain_wake_inputs(
-        &self,
-        target_scope_id: &ProcessScopeId,
-        limit: usize,
-    ) -> Result<Vec<ProcessWakeDelivery>, lash_core::PluginError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT wake_id, target_session_id, target_scope_id, process_id, sequence,
-                        dedupe_key, input, created_at_ms
-                 FROM process_wake_inbox
-                 WHERE target_scope_id = ?1 AND acknowledged_at_ms IS NULL
-                 ORDER BY created_at_ms ASC, wake_id ASC
-                 LIMIT ?2",
-            )
-            .map_err(process_sqlite_error)?;
-        let rows = stmt
-            .query_map(params![target_scope_id.as_str(), limit as i64], |row| {
-                let target_scope_id = row.get::<_, String>(2)?;
-                Ok(ProcessWakeDelivery {
-                    wake_id: row.get(0)?,
-                    target_session_id: row.get(1)?,
-                    target_scope_id: ProcessScopeId::from(target_scope_id),
-                    process_id: row.get(3)?,
-                    sequence: row.get::<_, i64>(4)? as u64,
-                    dedupe_key: row.get(5)?,
-                    input: row.get(6)?,
-                    created_at_ms: row.get::<_, i64>(7)? as u64,
-                })
-            })
-            .map_err(process_sqlite_error)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(process_sqlite_error)
-    }
-
-    async fn ack_wake_input(&self, wake_id: &str) -> Result<(), lash_core::PluginError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE process_wake_inbox
-             SET acknowledged_at_ms = COALESCE(acknowledged_at_ms, ?2)
-             WHERE wake_id = ?1",
-            params![wake_id, current_epoch_ms() as i64],
-        )
-        .map_err(process_sqlite_error)?;
-        Ok(())
-    }
-
     async fn ack_wake(
         &self,
         process_id: &str,
         sequence: u64,
     ) -> Result<(), lash_core::PluginError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE process_wake_inbox
-             SET acknowledged_at_ms = COALESCE(acknowledged_at_ms, ?3)
-             WHERE process_id = ?1 AND sequence = ?2",
-            params![process_id, sequence as i64, current_epoch_ms() as i64],
-        )
-        .map_err(process_sqlite_error)?;
+        if Self::load_process_conn(&conn, process_id)?.is_none() {
+            return Err(lash_core::PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        let _ = sequence;
         Ok(())
     }
 }
@@ -2303,6 +2336,15 @@ impl RuntimePersistence for Store {
                 }
                 ensure_runtime_turn_completion_conn(&tx, completed)?;
             }
+            for completed in &commit.completed_queue_claims {
+                if completed.session_id != commit.session_id {
+                    return Err(StoreError::QueuedWorkClaimExpired {
+                        session_id: completed.session_id.clone(),
+                        claim_id: completed.claim_id.clone(),
+                    });
+                }
+                ensure_queued_work_completion_conn(&tx, completed)?;
+            }
 
             let stored_checkpoint =
                 Self::put_checkpoint_conn(&tx, &commit.checkpoint, self.options.blob_profile)
@@ -2414,6 +2456,24 @@ impl RuntimePersistence for Store {
                 )
                 .map_err(sqlite_error)?;
             }
+            for completed in &commit.completed_queue_claims {
+                for batch_id in &completed.batch_ids {
+                    tx.execute(
+                        "DELETE FROM queued_work_batches
+                         WHERE session_id = ?1
+                           AND batch_id = ?2
+                           AND claim_id = ?3
+                           AND claim_token = ?4",
+                        params![
+                            completed.session_id,
+                            batch_id,
+                            completed.claim_id,
+                            completed.lease_token
+                        ],
+                    )
+                    .map_err(sqlite_error)?;
+                }
+            }
             if !commit.committed_attachment_ids.is_empty() {
                 let now = current_epoch_ms() as i64;
                 let mut stmt = tx
@@ -2437,6 +2497,276 @@ impl RuntimePersistence for Store {
         };
         self.maybe_auto_gc();
         Ok(result)
+    }
+
+    async fn enqueue_queued_work(
+        &self,
+        batch: QueuedWorkBatchDraft,
+    ) -> Result<QueuedWorkBatch, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(sqlite_error)?;
+        if let Some(source_key) = batch.source_key.as_deref() {
+            let existing_id: Option<String> = tx
+                .query_row(
+                    "SELECT batch_id
+                     FROM queued_work_batches
+                     WHERE session_id = ?1 AND source_key = ?2",
+                    params![batch.session_id, source_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sqlite_error)?;
+            if let Some(batch_id) = existing_id {
+                let existing = load_queued_batch_by_id_conn(&tx, &batch_id)?
+                    .ok_or_else(|| StoreError::Backend("queued work source row disappeared".to_string()))?;
+                tx.commit().map_err(sqlite_error)?;
+                return Ok(existing);
+            }
+        }
+        let now = current_epoch_ms();
+        let nonce = self.commit_count.fetch_add(1, AtomicOrdering::Relaxed);
+        let batch_id = format!(
+            "qwb:{:x}",
+            Sha256::digest(
+                format!("{}:{:?}:{now}:{nonce}", batch.session_id, batch.source_key).as_bytes()
+            )
+        );
+        tx.execute(
+            "INSERT INTO queued_work_batches (
+                batch_id, session_id, source_key, delivery_policy, slot_policy,
+                merge_key_json, available_at_ms, enqueued_at_ms
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                &batch_id,
+                &batch.session_id,
+                batch.source_key.as_deref(),
+                batch.delivery_policy.as_str(),
+                batch.slot_policy.as_str(),
+                encode_json(&batch.merge_key),
+                batch.available_at_ms as i64,
+                now as i64,
+            ],
+        )
+        .map_err(sqlite_error)?;
+        for (index, payload) in batch.payloads.iter().enumerate() {
+            let item_id = format!("{batch_id}:item:{index}");
+            tx.execute(
+                "INSERT INTO queued_work_items (batch_id, item_index, item_id, payload_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![&batch_id, index as i64, item_id, encode_json(payload)],
+            )
+            .map_err(sqlite_error)?;
+        }
+        let enqueued = load_queued_batch_by_id_conn(&tx, &batch_id)?
+            .ok_or_else(|| StoreError::Backend("queued work insert disappeared".to_string()))?;
+        tx.commit().map_err(sqlite_error)?;
+        Ok(enqueued)
+    }
+
+    async fn claim_ready_queued_work(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        boundary: QueuedWorkClaimBoundary,
+        lease_ttl_ms: u64,
+        max_batches: usize,
+    ) -> Result<Option<QueuedWorkClaim>, StoreError> {
+        if max_batches == 0 {
+            return Ok(None);
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(sqlite_error)?;
+        let now = current_epoch_ms();
+        let candidate_rows = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                            slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                            claim_fencing_token
+                     FROM queued_work_batches
+                     WHERE session_id = ?1
+                       AND available_at_ms <= ?2
+                       AND (claim_token IS NULL OR claim_expires_at_ms <= ?2)
+                     ORDER BY enqueue_seq ASC
+                     LIMIT ?3",
+                )
+                .map_err(sqlite_error)?;
+            let rows = stmt
+                .query_map(
+                    params![session_id, now as i64, (max_batches as i64).saturating_add(32)],
+                    queued_batch_row_from_sql,
+                )
+                .map_err(sqlite_error)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(sqlite_error)?
+        };
+        let Some(first_row) = candidate_rows.first() else {
+            tx.commit().map_err(sqlite_error)?;
+            return Ok(None);
+        };
+        let first_delivery = decode_delivery_policy(first_row.delivery_policy.clone())?;
+        if boundary == QueuedWorkClaimBoundary::ActiveTurnCheckpoint
+            && first_delivery != DeliveryPolicy::EarliestSafeBoundary
+        {
+            tx.commit().map_err(sqlite_error)?;
+            return Ok(None);
+        }
+        let first_slot = decode_slot_policy(first_row.slot_policy.clone())?;
+        let first_merge_key = decode_merge_key(first_row.merge_key_json.clone())?;
+        let mut selected = Vec::new();
+        for row in candidate_rows {
+            if selected.len() >= max_batches {
+                break;
+            }
+            let delivery = decode_delivery_policy(row.delivery_policy.clone())?;
+            let slot = decode_slot_policy(row.slot_policy.clone())?;
+            let merge_key = decode_merge_key(row.merge_key_json.clone())?;
+            if selected.is_empty() {
+                selected.push(row);
+                if first_slot == SlotPolicy::Exclusive {
+                    break;
+                }
+                continue;
+            }
+            if first_slot != SlotPolicy::Join
+                || slot != SlotPolicy::Join
+                || delivery != first_delivery
+                || merge_key != first_merge_key
+            {
+                break;
+            }
+            selected.push(row);
+        }
+        let Some(first) = selected.first() else {
+            tx.commit().map_err(sqlite_error)?;
+            return Ok(None);
+        };
+        let fencing_token = first.claim_fencing_token.saturating_add(1);
+        let claim_id = format!("qwc:{}:{fencing_token}", first.enqueue_seq);
+        let lease_token = format!(
+            "{:x}",
+            Sha256::digest(format!("{session_id}:{owner_id}:{claim_id}:{now}").as_bytes())
+        );
+        let expires_at = now.saturating_add(lease_ttl_ms);
+        for row in &selected {
+            tx.execute(
+                "UPDATE queued_work_batches
+                 SET claim_id = ?3,
+                     claim_owner_id = ?4,
+                     claim_token = ?5,
+                     claim_fencing_token = claim_fencing_token + 1,
+                     claim_claimed_at_ms = ?6,
+                     claim_expires_at_ms = ?7
+                 WHERE session_id = ?1
+                   AND batch_id = ?2
+                   AND (claim_token IS NULL OR claim_expires_at_ms <= ?6)",
+                params![
+                    session_id,
+                    row.batch_id,
+                    claim_id,
+                    owner_id,
+                    lease_token,
+                    now as i64,
+                    expires_at as i64
+                ],
+            )
+            .map_err(sqlite_error)?;
+        }
+        let mut batches = Vec::new();
+        for row in selected {
+            batches.push(queued_work_batch_from_conn(&tx, row)?);
+        }
+        tx.commit().map_err(sqlite_error)?;
+        Ok(Some(QueuedWorkClaim {
+            session_id: session_id.to_string(),
+            claim_id,
+            owner_id: owner_id.to_string(),
+            lease_token,
+            fencing_token,
+            claimed_at_epoch_ms: now,
+            expires_at_epoch_ms: expires_at,
+            batches,
+        }))
+    }
+
+    async fn renew_queued_work_claim(
+        &self,
+        claim: &QueuedWorkClaim,
+        lease_ttl_ms: u64,
+    ) -> Result<QueuedWorkClaim, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = current_epoch_ms();
+        let expires_at = now.saturating_add(lease_ttl_ms);
+        let changed = conn
+            .execute(
+                "UPDATE queued_work_batches
+                 SET claim_expires_at_ms = ?4
+                 WHERE session_id = ?1 AND claim_id = ?2 AND claim_token = ?3",
+                params![
+                    claim.session_id,
+                    claim.claim_id,
+                    claim.lease_token,
+                    expires_at as i64
+                ],
+            )
+            .map_err(sqlite_error)?;
+        if changed != claim.batches.len() {
+            return Err(StoreError::QueuedWorkClaimExpired {
+                session_id: claim.session_id.clone(),
+                claim_id: claim.claim_id.clone(),
+            });
+        }
+        Ok(QueuedWorkClaim {
+            expires_at_epoch_ms: expires_at,
+            ..claim.clone()
+        })
+    }
+
+    async fn abandon_queued_work_claim(
+        &self,
+        claim: &QueuedWorkClaim,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE queued_work_batches
+             SET claim_id = NULL,
+                 claim_owner_id = NULL,
+                 claim_token = NULL,
+                 claim_claimed_at_ms = 0,
+                 claim_expires_at_ms = 0
+             WHERE session_id = ?1 AND claim_id = ?2 AND claim_token = ?3",
+            params![claim.session_id, claim.claim_id, claim.lease_token],
+        )
+        .map_err(sqlite_error)?;
+        Ok(())
+    }
+
+    async fn list_queued_work(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<QueuedWorkBatch>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                            slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                            claim_fencing_token
+                     FROM queued_work_batches
+                     WHERE session_id = ?1
+                     ORDER BY enqueue_seq ASC",
+                )
+                .map_err(sqlite_error)?;
+            let rows = stmt
+                .query_map(params![session_id], queued_batch_row_from_sql)
+                .map_err(sqlite_error)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(sqlite_error)?
+        };
+        rows.into_iter()
+            .map(|row| queued_work_batch_from_conn(&conn, row))
+            .collect()
     }
 
     async fn claim_runtime_turn_lease(
@@ -2673,7 +3003,7 @@ impl RuntimePersistence for Store {
             params![
                 record.session_id,
                 record.turn_id,
-                record.idempotency_key,
+                record.replay_key,
                 record.envelope_hash,
                 record.effect_kind.as_str(),
                 encode_json(&record),
@@ -2688,14 +3018,14 @@ impl RuntimePersistence for Store {
         &self,
         session_id: &str,
         turn_id: &str,
-        idempotency_key: &str,
+        replay_key: &str,
     ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let row: Option<String> = conn
             .query_row(
                 "SELECT outcome_json FROM runtime_effect_journal
                  WHERE session_id = ?1 AND turn_id = ?2 AND idempotency_key = ?3",
-                params![session_id, turn_id, idempotency_key],
+                params![session_id, turn_id, replay_key],
                 |row| row.get(0),
             )
             .optional()
@@ -2990,7 +3320,10 @@ mod tests {
                 metadata: serde_json::Value::Null,
             },
         )
-        .with_provenance(lash_core::ProcessScope::new("session"), "test-host")
+        .with_process_provenance(lash_core::ProcessProvenance::new(
+            lash_core::ProcessScope::new("session"),
+            "test-host",
+        ))
     }
 
     fn process_wake_event_type() -> lash_core::ProcessEventType {
@@ -3086,14 +3419,8 @@ mod tests {
             .await
             .expect("persisted process");
 
-        assert_eq!(record.created_by_scope_id(), Some(owner_scope.id()));
-        assert_eq!(
-            record
-                .created_by_scope
-                .as_ref()
-                .map(|scope| scope.session_id.as_str()),
-            Some("session")
-        );
+        assert_eq!(record.owner_scope_id(), owner_scope.id());
+        assert_eq!(record.provenance.owner_scope.session_id.as_str(), "session");
         assert_eq!(
             registry
                 .await_process("proc-persist")
@@ -3139,7 +3466,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_process_keyed_events_and_wake_inbox_are_durable() {
+    async fn sqlite_process_keyed_events_materialize_idempotent_wakes() {
         let registry = SqliteProcessRegistry::memory().expect("registry");
         let target_scope = lash_core::ProcessScope::new("session");
         let target_scope_id = target_scope.id();
@@ -3156,7 +3483,7 @@ mod tests {
                 "wake_input": "Process wake: deploy failed",
             }),
         )
-        .with_idempotency_key("wake:deploy failed")
+        .with_replay_key("wake:deploy failed")
         .with_wake_target_scope(target_scope);
 
         let first = registry
@@ -3168,7 +3495,13 @@ mod tests {
             .await
             .expect("replay append");
 
-        assert_eq!(first.sequence, second.sequence);
+        assert_eq!(first.event.sequence, second.event.sequence);
+        assert_eq!(first.wake_delivery, second.wake_delivery);
+        let wake = first.wake_delivery.expect("wake delivery");
+        assert_eq!(wake.input, "Process wake: deploy failed");
+        assert_eq!(wake.target_scope_id, target_scope_id);
+        assert_eq!(wake.process_id, "proc-wake");
+        assert_eq!(wake.sequence, first.event.sequence);
         assert!(
             registry
                 .append_event(
@@ -3180,28 +3513,10 @@ mod tests {
                             "wake_input": "Process wake: other",
                         }),
                     )
-                    .with_idempotency_key("wake:deploy failed"),
+                    .with_replay_key("wake:deploy failed"),
                 )
                 .await
                 .is_err()
-        );
-
-        let wakes = registry
-            .drain_wake_inputs(&target_scope_id, 10)
-            .await
-            .expect("drain wakes");
-        assert_eq!(wakes.len(), 1);
-        assert_eq!(wakes[0].input, "Process wake: deploy failed");
-        registry
-            .ack_wake_input(&wakes[0].wake_id)
-            .await
-            .expect("ack wake");
-        assert!(
-            registry
-                .drain_wake_inputs(&target_scope_id, 10)
-                .await
-                .expect("drain after ack")
-                .is_empty()
         );
     }
 

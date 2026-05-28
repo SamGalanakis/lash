@@ -96,7 +96,10 @@ async fn execute<H: ExecutionHost>(
     host: &H,
 ) -> Result<ExecutionOutcome, ExecuteError> {
     let program = parse(source)?;
-    let compiled = if program_contains_start_process(&program.main) {
+    let compiled = if let Ok(linked) = lashlang::LinkedModule::link(program.clone(), test_surface())
+    {
+        lashlang::compile_linked(&linked)
+    } else if program_contains_start_process(&program.main) {
         let linked = lashlang::LinkedModule::link(program, test_surface()).map_err(|err| {
             ExecuteError::Runtime(lashlang::RuntimeError::ValueError {
                 message: err.to_string(),
@@ -112,18 +115,17 @@ async fn execute<H: ExecutionHost>(
 }
 
 fn test_surface() -> lashlang::LashlangSurface {
-    lashlang::LashlangSurface::new(
-        lashlang::ResourceCatalog::tool_default([
-            "read_file",
-            "echo",
-            "exec_command",
-            "apply_patch",
-            "spawn_agent",
-            "list_process_handles",
-            "boom",
-        ]),
-        lashlang::LashlangAbilities::all(),
-    )
+    let mut resources = lashlang::ResourceCatalog::tool_default(["echo", "boom"]);
+    resources.add_module_instance(["files"], "Files");
+    resources.add_operation("Files", "read", "read_file");
+    resources.add_operation("Files", "patch", "apply_patch");
+    resources.add_module_instance(["shell"], "Shell");
+    resources.add_operation("Shell", "exec", "exec_command");
+    resources.add_module_instance(["agents"], "Agents");
+    resources.add_operation("Agents", "spawn", "spawn_agent");
+    resources.add_module_instance(["processes"], "Processes");
+    resources.add_operation("Processes", "list", "list_process_handles");
+    lashlang::LashlangSurface::new(resources, lashlang::LashlangAbilities::all())
 }
 
 fn program_contains_start_process(expr: &lashlang::Expr) -> bool {
@@ -230,7 +232,7 @@ impl MockHost {
                 Ok(Value::Record(record.into()))
             }
             "apply_patch" => Ok(Value::String("patch applied".into())),
-            "spawn_agent" => {
+            "spawn_agent" | "inspect_chunk" => {
                 let task = args
                     .get("task")
                     .and_then(|v| match v {
@@ -416,10 +418,7 @@ submit { counts: counts, items: items }
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_tool_call_success_is_wrapped_with_ok_and_value() {
     let host = MockHost::default().with_file("a.txt", "hello world");
-    let Value::Record(r) = run(
-        &host,
-        r#"submit await TOOL.default.read_file({ path: "a.txt" })"#,
-    ) else {
+    let Value::Record(r) = run(&host, r#"submit await files.read({ path: "a.txt" })"#) else {
         panic!("expected wrapped record");
     };
     assert_eq!(r["ok"], Value::Bool(true));
@@ -429,7 +428,7 @@ async fn prompt_claim_tool_call_success_is_wrapped_with_ok_and_value() {
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_tool_call_failure_is_wrapped_with_ok_false_and_error() {
     let host = MockHost::default();
-    let Value::Record(r) = run(&host, "submit await TOOL.default.boom({})") else {
+    let Value::Record(r) = run(&host, "submit await tools.boom({})") else {
         panic!("expected wrapped record");
     };
     assert_eq!(r["ok"], Value::Bool(false));
@@ -445,7 +444,7 @@ async fn prompt_claim_value_field_reaches_the_underlying_tool_output() {
     assert_eq!(
         run(
             &host,
-            r#"r = await TOOL.default.read_file({ path: "a.txt" })
+            r#"r = await files.read({ path: "a.txt" })
 submit r.value"#,
         ),
         Value::String("file text".to_string().into())
@@ -458,7 +457,7 @@ async fn prompt_claim_question_unwraps_successful_tool_results() {
     assert_eq!(
         run(
             &host,
-            r#"text = await TOOL.default.read_file({ path: "a.txt" })?
+            r#"text = await files.read({ path: "a.txt" })?
 submit text"#,
         ),
         Value::String("file text".to_string().into())
@@ -469,7 +468,7 @@ submit text"#,
 async fn prompt_claim_question_aborts_failed_tool_results_with_error() {
     let host = MockHost::default();
     let mut state = State::new();
-    let err = execute("submit await TOOL.default.boom({})?", &mut state, &host)
+    let err = execute("submit await tools.boom({})?", &mut state, &host)
         .await
         .expect_err("failed result unwrap should abort");
     let ExecuteError::Runtime(err) = err else {
@@ -1094,7 +1093,7 @@ async fn prompt_claim_builtin_validate_checks_type_literals_mid_program() {
 
 // ─────────────────────────────────────────────────────────────────────
 // Simple worked example from the prompt's "Example format" block:
-//   r = await TOOL.default.read_file({ path: "Cargo.toml" })
+//   r = await files.read({ path: "Cargo.toml" })
 //   submit split(r.value, "\n")[2]
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1104,7 +1103,7 @@ async fn prompt_example_format_block_executes_as_shown() {
     assert_eq!(
         run(
             &host,
-            r#"r = await TOOL.default.read_file({ path: "Cargo.toml" })
+            r#"r = await files.read({ path: "Cargo.toml" })
 submit split(r.value, "\n")[2]"#,
         ),
         Value::String("line2".to_string().into())
@@ -1120,9 +1119,9 @@ async fn prompt_fanout_example_unwraps_spawn_and_wait_results_with_question() {
     let host = MockHost::default();
     let Value::List(results) = run(
         &host,
-        r#"process spawn_agent(task: str, capability: str) { finish task }
-a = start spawn_agent(task: "chunk_1", capability: "explore")
-b = start spawn_agent(task: "chunk_2", capability: "explore")
+        r#"process inspect_chunk(task: str, capability: str) { finish task }
+a = start inspect_chunk(task: "chunk_1", capability: "explore")
+b = start inspect_chunk(task: "chunk_2", capability: "explore")
 results = await { a: a, b: b }
 a_result = results.a?
 b_result = results.b?
@@ -1141,7 +1140,7 @@ async fn prompt_example_allow_nonzero_exit_inspects_shell_exit_code() {
     assert_eq!(
         run(
             &host,
-            r#"probe = await TOOL.default.exec_command({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })?
+            r#"probe = await shell.exec({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })?
 submit probe.exit_code == 0 ? "Cargo.lock exists" : "Cargo.lock is missing""#,
         ),
         Value::String("Cargo.lock is missing".into())
@@ -1157,7 +1156,7 @@ async fn prompt_example_loop_builds_collection_without_comprehension() {
         &host,
         r#"items = []
 for path in ["Cargo.toml", "README.md"] {
-  text = await TOOL.default.read_file({ path: path })?
+  text = await files.read({ path: path })?
   items = push(items, { path: path, chars: len(text) })
 }
 submit items"#,
@@ -1179,7 +1178,7 @@ async fn prompt_example_prints_targeted_slice_for_large_values() {
     let host = MockHost::default().with_file("Cargo.toml", "abcdef");
     let (outcome, _) = run_continued(
         &host,
-        r#"text = await TOOL.default.read_file({ path: "Cargo.toml" })?
+        r#"text = await files.read({ path: "Cargo.toml" })?
 print { chars: len(text), head: slice(text, 0, 3) }"#,
     );
     assert!(matches!(outcome, ExecutionOutcome::Continued));
@@ -1201,8 +1200,8 @@ async fn prompt_example_validates_nontrivial_edit_before_submit() {
 -old
 +new
 *** End Patch"""
-await TOOL.default.apply_patch({ input: patch })?
-check = await TOOL.default.exec_command({ cmd: "cargo check --workspace --all-targets", allow_nonzero_exit: true })?
+await files.patch({ input: patch })?
+check = await shell.exec({ cmd: "cargo check --workspace --all-targets", allow_nonzero_exit: true })?
 if check.exit_code != 0 {
   print slice(check.output, 0, 4000)
 } else {

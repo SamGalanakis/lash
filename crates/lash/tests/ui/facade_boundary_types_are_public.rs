@@ -23,9 +23,7 @@ use lash::provider::{
     ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder, ProviderRetryPolicy,
     ProviderTimeoutPolicy,
 };
-use lash::tools::{
-    ToolActivation, ToolCallRecord, ToolDiscoveryMetadata, ToolOutputContract,
-};
+use lash::tools::{ToolActivation, ToolAgentSurface, ToolCallRecord, ToolOutputContract};
 use lash::turn::{AssistantOutput, TurnIssue};
 use lash::{ModelLimits, ModelSpec};
 
@@ -66,6 +64,8 @@ impl RuntimePersistence for FacadeStore {
             manifest,
         })
     }
+
+    lash::impl_unsupported_queued_work_methods!();
 
     async fn claim_runtime_turn_lease(
         &self,
@@ -132,7 +132,7 @@ impl RuntimePersistence for FacadeStore {
         &self,
         _session_id: &str,
         _turn_id: &str,
-        _idempotency_key: &str,
+        _replay_key: &str,
     ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError> {
         Ok(None)
     }
@@ -170,6 +170,7 @@ fn persistence_types_are_nameable(
         checkpoint: Default::default(),
         usage_deltas: ledger,
         completed_turn: None,
+        completed_queue_claims: Vec::new(),
         committed_attachment_ids: Vec::new(),
     }
 }
@@ -223,9 +224,9 @@ fn tool_contract_types_are_nameable(
     activation: ToolActivation,
     record: ToolCallRecord,
     contract: ToolOutputContract,
-    discovery: ToolDiscoveryMetadata,
+    agent_surface: ToolAgentSurface,
 ) {
-    let _ = (activation, record, contract, discovery);
+    let _ = (activation, record, contract, agent_surface);
 }
 
 fn tool_surface_types_are_nameable(

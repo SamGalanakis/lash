@@ -63,14 +63,6 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             .start_turn(&self.current, &self.usage, session_id, input)
             .await
     }
-    async fn inject_turn_input(
-        &self,
-        session_id: &str,
-        input: crate::InjectedTurnInput,
-    ) -> Result<(), crate::PluginError> {
-        self.managed.inject_turn_input(session_id, input).await
-    }
-
     async fn append_session_nodes(
         &self,
         session_id: &str,

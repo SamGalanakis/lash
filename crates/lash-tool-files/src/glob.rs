@@ -167,10 +167,14 @@ fn glob_tool_definition() -> ToolDefinition {
                 serde_json::json!({ "type": "object", "additionalProperties": true }),
             )
             .with_examples(vec![
-                r#"glob(pattern="**/*.rs", path="crates/lash/src", limit=50)"#.into(),
-                r#"glob(pattern="**/Cargo.toml", path=".")"#.into(),
+                r#"await files.glob({ pattern: "**/*.rs", path: "crates/lash/src", limit: 50 })?"#.into(),
+                r#"await files.glob({ pattern: "**/Cargo.toml", path: "." })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["find_files"]))
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["files"],
+                "glob",
+                &["find_files"],
+            ))
             .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }

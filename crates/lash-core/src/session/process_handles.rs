@@ -83,7 +83,7 @@ impl RuntimeExecutionContext<'_> {
                         Some("tool"),
                         Some(tool_name.clone()),
                     )),
-                self.process_scope(self.effect_metadata.clone()),
+                self.process_scope(self.parent_invocation.clone()),
             )
             .await
         {
@@ -159,7 +159,7 @@ impl RuntimeExecutionContext<'_> {
         let output = self
             .await_process_with_cancellation(
                 &handle_id,
-                self.effect_metadata.clone(),
+                self.parent_invocation.clone(),
                 self.cancellation_token.clone(),
             )
             .await;
@@ -203,7 +203,7 @@ impl RuntimeExecutionContext<'_> {
             .cancel(
                 &self.session_id,
                 &handle_id,
-                self.process_scope(self.effect_metadata.clone()),
+                self.process_scope(self.parent_invocation.clone()),
             )
             .await
         {
@@ -316,10 +316,10 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
-            tool_effect_metadata: None,
+            parent_invocation: None,
             session_id: "session".to_string(),
             event_tx,
-            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -412,10 +412,10 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
-            tool_effect_metadata: None,
+            parent_invocation: None,
             session_id: "session".to_string(),
             event_tx,
-            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });

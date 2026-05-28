@@ -216,9 +216,10 @@ async fn process_registry_validates_custom_events_and_materializes_wakes() {
         .await
         .expect("append");
 
-    assert_eq!(event.sequence, 1);
+    assert_eq!(event.event.sequence, 1);
     assert_eq!(
         event
+            .event
             .semantics
             .wake
             .as_ref()
@@ -234,7 +235,7 @@ async fn process_registry_validates_custom_events_and_materializes_wakes() {
         1
     );
     registry
-        .ack_wake("proc-1", event.sequence)
+        .ack_wake("proc-1", event.event.sequence)
         .await
         .expect("ack wake");
     assert!(
@@ -414,10 +415,9 @@ async fn processes_can_exist_with_zero_grants() {
 }
 
 #[tokio::test]
-async fn delete_session_process_state_revokes_handles_and_deletes_wakes_by_session_id() {
+async fn delete_session_process_state_revokes_handles_by_session_id() {
     let registry = TestLocalProcessRegistry::default();
     let deleted_scope = ProcessScope::new("deleted");
-    let deleted_scope_id = deleted_scope.id();
     let remaining_scope = ProcessScope::new("remaining");
     for process_id in ["sole", "shared", "terminal"] {
         registry
@@ -469,7 +469,7 @@ async fn delete_session_process_state_revokes_handles_and_deletes_wakes_by_sessi
         .expect("delete session process state");
 
     assert_eq!(report.revoked_handle_count, 3);
-    assert_eq!(report.deleted_wake_count, 1);
+    assert_eq!(report.deleted_wake_count, 0);
     assert_eq!(report.cancel_process_ids, vec!["sole".to_string()]);
     assert_eq!(report.preserved_process_ids, vec!["shared".to_string()]);
     assert!(
@@ -486,13 +486,6 @@ async fn delete_session_process_state_revokes_handles_and_deletes_wakes_by_sessi
             .expect("remaining grants")
             .len(),
         1
-    );
-    assert!(
-        registry
-            .drain_wake_inputs(&deleted_scope_id, 10)
-            .await
-            .expect("deleted wakes")
-            .is_empty()
     );
 }
 
@@ -525,22 +518,18 @@ async fn delete_session_process_command_requests_cancel_only_for_unshared_active
         .await
         .expect("grant remaining");
     let controller = crate::InlineRuntimeEffectController::default();
-    let metadata = crate::EffectInvocationMetadata {
-        session_id: "deleted".to_string(),
-        origin: crate::EffectOrigin::Turn,
-        turn_id: None,
-        turn_index: None,
-        protocol_iteration: None,
-        effect_id: "process:delete-session:deleted".to_string(),
-        effect_kind: crate::RuntimeEffectKind::Process,
-        idempotency_key: "deleted:delete-session".to_string(),
-        turn_checkpoint_hash: None,
-    };
+    let invocation = crate::RuntimeInvocation::effect(
+        crate::RuntimeScope::new("deleted"),
+        "process:delete-session:deleted",
+        crate::RuntimeEffectKind::Process,
+        "deleted:delete-session",
+        None,
+    );
 
     let outcome = crate::RuntimeEffectController::execute_effect(
         &controller,
         crate::RuntimeEffectEnvelope::new(
-            metadata,
+            invocation,
             crate::RuntimeEffectCommand::Process {
                 command: crate::ProcessCommand::DeleteSession {
                     session_id: "deleted".to_string(),

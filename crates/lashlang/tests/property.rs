@@ -25,7 +25,7 @@ impl ExecutionHost for DeterministicHost {
                 )),
                 "fail" => Err(ExecutionHostError::new("fail")),
                 _ => Err(ExecutionHostError::new(format!(
-                    "unknown resource operation: {}",
+                    "unknown module operation: {}",
                     operation.operation
                 ))),
             },
@@ -70,10 +70,28 @@ async fn execute<H: ExecutionHost>(
     state: &mut State,
     host: &H,
 ) -> Result<ExecutionOutcome, ExecuteError> {
-    let compiled = lashlang::compile(source)?;
+    let compiled = if source.contains("tools.") {
+        let program = parse(source)?;
+        let linked = lashlang::LinkedModule::link(program, property_surface()).map_err(|err| {
+            ExecuteError::Runtime(lashlang::RuntimeError::ValueError {
+                message: err.to_string(),
+            })
+        })?;
+        lashlang::compile_linked(&linked)
+    } else {
+        lashlang::compile(source)?
+    };
     lashlang::execute(&compiled, state, host)
         .await
         .map_err(ExecuteError::Runtime)
+}
+
+fn property_surface() -> lashlang::LashlangSurface {
+    let mut resources = lashlang::ResourceCatalog::new();
+    resources.add_module_instance(["tools"], "Tools");
+    resources.add_operation("Tools", "echo", "echo");
+    resources.add_operation("Tools", "fail", "fail");
+    lashlang::LashlangSurface::new(resources, lashlang::LashlangAbilities::all())
 }
 
 #[derive(Clone, Debug)]
@@ -297,7 +315,7 @@ proptest! {
         value in gen_value_strategy()
     ) {
         let source = format!(
-            "r = await TOOL.default.echo({{ value: {} }})\nsubmit r\n",
+            "r = await tools.echo({{ value: {} }})\nsubmit r\n",
             value.to_source()
         );
         let host = DeterministicHost;

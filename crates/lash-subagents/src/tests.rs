@@ -32,7 +32,6 @@ static SEED_PROBE_STATES: LazyLock<Mutex<BTreeMap<String, Arc<SeedProbeState>>>>
 struct SeedProbeState {
     parent_response: String,
     captured_child_prompt: Arc<Mutex<Option<String>>>,
-    request_count: AtomicUsize,
 }
 
 struct SeedProbeProviderFactory;
@@ -119,8 +118,11 @@ fn rlm_definitions_expose_spawn_without_mini_api() {
         rlm_spawn
             .examples
             .iter()
-            .any(|example| example.contains("await TOOL.default.spawn_agent"))
+            .any(|example| example.contains("await agents.spawn"))
     );
+    assert!(rlm_spawn.description.contains("module operation"));
+    assert!(rlm_spawn.description.contains("agents: Agents"));
+    assert!(!rlm_spawn.description.contains("use `start spawn_agent"));
 }
 
 #[test]
@@ -158,7 +160,10 @@ fn spawn_schema_is_strict_and_nameless() {
         "capability".to_string(),
         serde_json::Value::String("explore".to_string()),
     );
-    rejected.insert(retired_key, serde_json::Value::String("legacy".to_string()));
+    rejected.insert(
+        retired_key,
+        serde_json::Value::String("retired".to_string()),
+    );
     assert!(
         compiled
             .validate(&serde_json::Value::Object(rejected))
@@ -271,7 +276,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         output_schema: None,
         seed: Default::default(),
         parent_subagent: None,
-        originating_tool_call_id: None,
+        caused_by: None,
         configurator: &noop,
     })
     .await
@@ -307,7 +312,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         })),
         seed: Default::default(),
         parent_subagent: None,
-        originating_tool_call_id: None,
+        caused_by: None,
         configurator: &noop,
     })
     .await
@@ -333,7 +338,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
 async fn rlm_spawn_seed_is_visible_to_child_executor_and_prompt() {
     let (outcome, prompt) = run_seed_probe(
         r#"```lashlang
-result = await TOOL.default.spawn_agent({
+result = await agents.spawn({
   capability: "default",
   task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: ["a", "b"] },
@@ -361,8 +366,8 @@ submit result
 async fn rlm_spawn_process_handle_returns_child_submitted_value() {
     let (outcome, prompt) = run_seed_probe(
         r#"```lashlang
-process spawn_child(tool: TOOL) {
-  result = await tool.spawn_agent({
+process spawn_child(agents: Agents) {
+  result = await agents.spawn({
     capability: "default",
     task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
     seed: { chunk: ["a", "b"] },
@@ -370,7 +375,7 @@ process spawn_child(tool: TOOL) {
   })?
   finish result
 }
-handle = start spawn_child(tool: TOOL.default)
+handle = start spawn_child(agents: agents)
 result = (await handle)?
 submit result
 ```"#,
@@ -394,7 +399,7 @@ submit result
 async fn rlm_spawn_defaults_single_capability_when_omitted() {
     let (outcome, prompt) = run_seed_probe(
         r#"```lashlang
-result = await TOOL.default.spawn_agent({
+result = await agents.spawn({
   task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: ["a", "b"] },
   output: Type { len: int }
@@ -442,7 +447,7 @@ for line in lines {
   }
 }
 chunk = slice(data, 0, 2)
-result = await TOOL.default.spawn_agent({
+result = await agents.spawn({
   capability: "default",
   task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: chunk },
@@ -483,7 +488,8 @@ async fn complete_seed_probe_request(
     request: LlmRequest,
 ) -> Result<LlmResponse, lash_core::llm::transport::LlmTransportError> {
     let prompt = request_text(&request);
-    let is_child = state.request_count.fetch_add(1, Ordering::SeqCst) > 0;
+    let is_child = prompt.contains("Subagent capability: default. Depth: 1/5.")
+        || prompt.contains("- `chunk`:");
     if is_child {
         *state.captured_child_prompt.lock().expect("captured prompt") = Some(prompt);
         Ok(LlmResponse {
@@ -515,7 +521,6 @@ async fn run_seed_probe(
     let state = Arc::new(SeedProbeState {
         parent_response: parent_response.to_string(),
         captured_child_prompt: Arc::clone(&captured_child_prompt),
-        request_count: AtomicUsize::new(0),
     });
     let provider_id = format!(
         "seed-probe-{}",
@@ -525,7 +530,7 @@ async fn run_seed_probe(
         .lock()
         .expect("seed probe states")
         .insert(provider_id.clone(), Arc::clone(&state));
-    let provider = seed_probe_provider(provider_id.clone(), state);
+    let provider = seed_probe_provider(provider_id.clone(), Arc::clone(&state));
 
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::default()),
@@ -568,10 +573,10 @@ async fn run_seed_probe(
     .await
     .expect("runtime");
 
-    let turn = runtime
-        .run_turn_assembled(input, tokio_util::sync::CancellationToken::new())
-        .await
-        .expect("turn");
+    let turn =
+        Box::pin(runtime.run_turn_assembled(input, tokio_util::sync::CancellationToken::new()))
+            .await
+            .expect("turn");
 
     let prompt = captured_child_prompt
         .lock()

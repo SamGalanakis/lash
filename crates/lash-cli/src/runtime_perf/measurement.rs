@@ -1049,15 +1049,15 @@ fn completed_checkpoint_tool(index: usize, call: PendingToolCall) -> CompletedTo
 
 fn checkpoint_exec_code(protocol_iteration: usize) -> String {
     format!(
-        r#"process benchmark_echo_process(tool: TOOL, value: str, ordinal: int) {{
+        r#"process benchmark_echo_process(tool: Tools, value: str, ordinal: int) {{
   result = await tool.benchmark_echo({{ value: value, ordinal: ordinal }})?
   finish result
 }}
 
 print("checkpoint turn {protocol_iteration}")
-first = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 1)
-second = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 2)
-third = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 3)
+first = start benchmark_echo_process(tool: tools, value: "runtime perf benchmark ok", ordinal: 1)
+second = start benchmark_echo_process(tool: tools, value: "runtime perf benchmark ok", ordinal: 2)
+third = start benchmark_echo_process(tool: tools, value: "runtime perf benchmark ok", ordinal: 3)
 fanout = await {{
   a: first,
   b: second,

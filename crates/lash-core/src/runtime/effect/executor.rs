@@ -331,6 +331,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                     .run_llm_call(
                         Arc::new((*request).into_request(None, None)),
                         protocol_iteration,
+                        envelope.invocation,
                         &runner.event_tx,
                         &runner.cancellation,
                     )
@@ -345,7 +346,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                 let mut results = runner
                     .driver
                     .run_tool_calls(
-                        vec![(call, envelope.metadata)],
+                        vec![(call, envelope.invocation)],
                         &runner.event_tx,
                         &runner.cancellation,
                     )
@@ -368,7 +369,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                             &code,
                             messages,
                             protocol_iteration,
-                            envelope.metadata,
+                            envelope.invocation,
                             &runner.event_tx,
                         )
                         .await,

@@ -175,7 +175,7 @@ mod catalogue_tests {
 
         assert!(!preamble.execution_prompt.contains("process name"));
         assert!(!preamble.execution_prompt.contains("sleep for"));
-        assert!(preamble.execution_prompt.contains("Resource operations"));
+        assert!(preamble.execution_prompt.contains("Module operations"));
     }
 
     #[test]

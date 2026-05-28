@@ -1040,13 +1040,20 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       };
     }
 
+    function displayToolName(name) {
+      if (name === "search_web") return "web.search";
+      if (name === "fetch_url") return "web.fetch";
+      if (name === "spawn_agent") return "agents.spawn";
+      return name || "tool";
+    }
+
     function appendTool(event, parent = timeline) {
       if (parent === timeline) clearEmpty();
       const ok = toolSucceeded(event);
       const el = document.createElement("div");
       el.className = "tool" + (ok ? "" : " fail");
       el.innerHTML = `<div class="tool-head"><strong></strong><span class="badge"></span><span></span></div><div class="tool-summary"></div><details><summary>JSON payload</summary><pre></pre></details>`;
-      el.querySelector("strong").textContent = event.name || "tool";
+      el.querySelector("strong").textContent = displayToolName(event.name);
       el.querySelector(".badge").textContent = ok ? "completed" : "failed";
       el.querySelector(".tool-head span:last-child").textContent = `${ok ? "ok" : "failed"} in ${event.duration_ms || 0}ms`;
       const result = toolResult(event);

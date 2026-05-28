@@ -213,10 +213,16 @@ pub struct ProcessEvent {
     pub sequence: u64,
     pub event_type: String,
     pub payload: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
+    pub invocation: crate::RuntimeInvocation,
     pub semantics: ProcessEventSemantics,
     pub occurred_at: SystemTime,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcessEventAppendResult {
+    pub event: ProcessEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_delivery: Option<ProcessWakeDelivery>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -224,7 +230,7 @@ pub struct ProcessEventAppendRequest {
     pub event_type: String,
     pub payload: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
+    pub replay: Option<crate::RuntimeReplay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_target_scope: Option<ProcessScope>,
 }
@@ -234,18 +240,20 @@ impl ProcessEventAppendRequest {
         Self {
             event_type: event_type.into(),
             payload,
-            idempotency_key: None,
+            replay: None,
             wake_target_scope: None,
         }
     }
 
-    pub fn with_idempotency_key(mut self, idempotency_key: impl Into<String>) -> Self {
-        self.idempotency_key = Some(idempotency_key.into());
+    pub fn with_replay_key(mut self, replay_key: impl Into<String>) -> Self {
+        self.replay = Some(crate::RuntimeReplay {
+            key: replay_key.into(),
+        });
         self
     }
 
-    pub fn with_optional_idempotency_key(mut self, idempotency_key: Option<String>) -> Self {
-        self.idempotency_key = idempotency_key;
+    pub fn with_optional_replay(mut self, replay: Option<crate::RuntimeReplay>) -> Self {
+        self.replay = replay;
         self
     }
 
@@ -263,10 +271,10 @@ impl ProcessEventAppendRequest {
         let payload = serde_json::json!({
             "reason": reason,
         });
-        let idempotency_key = process_event_payload_hash("process.cancel_requested", &payload)
+        let replay_key = process_event_payload_hash("process.cancel_requested", &payload)
             .unwrap_or_else(|_| format!("process:{process_id}:cancel_requested"));
-        Self::new("process.cancel_requested", payload).with_idempotency_key(format!(
-            "process:{process_id}:cancel_requested:{idempotency_key}"
+        Self::new("process.cancel_requested", payload).with_replay_key(format!(
+            "process:{process_id}:cancel_requested:{replay_key}"
         ))
     }
 }

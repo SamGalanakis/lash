@@ -192,7 +192,7 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
         session_id: "chat/alpha".to_string(),
         relation: lash_core::SessionRelation::Child {
             parent_session_id: "parent".to_string(),
-            originating_tool_call_id: None,
+            caused_by: None,
         },
         policy: SessionPolicy {
             model: model_spec("first-model"),
@@ -218,7 +218,7 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
             cwd: Some("/tmp/original".to_string()),
             relation: lash_core::SessionRelation::Child {
                 parent_session_id: "parent".to_string(),
-                originating_tool_call_id: None,
+                caused_by: None,
             },
         })
         .await
@@ -299,7 +299,7 @@ async fn sqlite_factory_delete_session_removes_database_and_sidecars_idempotentl
 }
 
 #[tokio::test]
-async fn runtime_effect_journal_replays_by_idempotency_key_and_clears_on_final_commit() {
+async fn runtime_effect_journal_replays_by_replay_key_and_clears_on_final_commit() {
     let store = Store::memory().expect("store");
     let lease = store
         .claim_runtime_turn_lease("root", "turn-1", "test-owner", 60_000)
@@ -309,7 +309,7 @@ async fn runtime_effect_journal_replays_by_idempotency_key_and_clears_on_final_c
         schema_version: RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
         session_id: "root".to_string(),
         turn_id: "turn-1".to_string(),
-        idempotency_key: "root:turn-1:1:0:sleep:1".to_string(),
+        replay_key: "root:turn-1:1:0:sleep:1".to_string(),
         envelope_hash: "hash-a".to_string(),
         effect_kind: RuntimeEffectKind::Sleep,
         outcome: RuntimeEffectOutcome::Sleep,
@@ -321,7 +321,7 @@ async fn runtime_effect_journal_replays_by_idempotency_key_and_clears_on_final_c
         .expect("save journal");
 
     let loaded = store
-        .load_runtime_effect_outcome("root", "turn-1", &record.idempotency_key)
+        .load_runtime_effect_outcome("root", "turn-1", &record.replay_key)
         .await
         .expect("load journal")
         .expect("journal record");
@@ -339,7 +339,7 @@ async fn runtime_effect_journal_replays_by_idempotency_key_and_clears_on_final_c
         .expect("final commit clears turn");
 
     let cleared = store
-        .load_runtime_effect_outcome("root", "turn-1", &record.idempotency_key)
+        .load_runtime_effect_outcome("root", "turn-1", &record.replay_key)
         .await
         .expect("load after clear");
     assert!(cleared.is_none());
@@ -408,7 +408,7 @@ async fn stale_completed_turn_commit_rejects_and_preserves_resume_state() {
     );
     assert!(
         store
-            .load_runtime_effect_outcome("root", "turn-stale-final", &record.idempotency_key)
+            .load_runtime_effect_outcome("root", "turn-stale-final", &record.replay_key)
             .await
             .expect("load journal")
             .is_some()
@@ -472,7 +472,7 @@ async fn expired_completed_turn_commit_rejects_and_preserves_resume_state() {
     );
     assert!(
         store
-            .load_runtime_effect_outcome("root", "turn-expired-final", &record.idempotency_key)
+            .load_runtime_effect_outcome("root", "turn-expired-final", &record.replay_key)
             .await
             .expect("load journal")
             .is_some()
@@ -518,7 +518,7 @@ async fn abandon_runtime_turn_lease_releases_owner_and_preserves_resume_data() {
     );
     assert!(
         store
-            .load_runtime_effect_outcome("root", "turn-abandon", &record.idempotency_key)
+            .load_runtime_effect_outcome("root", "turn-abandon", &record.replay_key)
             .await
             .expect("load journal")
             .is_some()
@@ -732,7 +732,7 @@ fn runtime_effect_record(
         schema_version: RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
         session_id: session_id.to_string(),
         turn_id: turn_id.to_string(),
-        idempotency_key: format!("{session_id}:{turn_id}:{effect}"),
+        replay_key: format!("{session_id}:{turn_id}:{effect}"),
         envelope_hash: format!("hash-{effect}"),
         effect_kind: RuntimeEffectKind::Sleep,
         outcome: RuntimeEffectOutcome::Sleep,
@@ -791,6 +791,7 @@ async fn attachment_manifest_records_intent_and_commit_stamps_atomically() {
         },
         usage_deltas: Vec::new(),
         completed_turn: None,
+        completed_queue_claims: Vec::new(),
         committed_attachment_ids: vec![attachment_a.clone()],
     };
     store

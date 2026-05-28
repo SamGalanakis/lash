@@ -2,17 +2,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use tokio::sync::Mutex;
 
 use crate::plugin::PluginError;
 
 use super::events::{
-    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessTerminalState,
-    ProcessWakeDelivery,
+    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
+    ProcessTerminalState,
 };
-use super::materialization::materialize_event_semantics;
 use super::model::{
     ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
     ProcessRecord, ProcessRegistration, ProcessScope, ProcessScopeId, ProcessSessionDeleteReport,
@@ -20,16 +18,14 @@ use super::model::{
 use super::registry::ProcessRegistry;
 use super::time::current_epoch_ms;
 use super::validation::{
-    ensure_core_event_types, process_event_payload_hash, process_registration_hash,
-    require_event_idempotency, validate_process_registration,
+    ensure_core_event_types, prepare_process_event_append, process_registration_hash,
+    validate_process_registration,
 };
-use super::wake::process_wake_delivery;
 
 /// In-memory process registry for core tests.
 pub struct TestLocalProcessRegistry {
     managed: Arc<Mutex<ManagedProcessMap>>,
     grants: Arc<Mutex<ManagedGrantMap>>,
-    wake_inbox: Arc<Mutex<ManagedWakeInbox>>,
 }
 
 impl Default for TestLocalProcessRegistry {
@@ -37,19 +33,12 @@ impl Default for TestLocalProcessRegistry {
         Self {
             managed: Arc::new(Mutex::new(HashMap::new())),
             grants: Arc::new(Mutex::new(HashMap::new())),
-            wake_inbox: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 type ManagedProcessMap = HashMap<String, ManagedProcessRecord>;
 type ManagedGrantMap = HashMap<ProcessScopeId, HashMap<String, ProcessHandleGrant>>;
-type ManagedWakeInbox = HashMap<String, ManagedWakeDelivery>;
-
-struct ManagedWakeDelivery {
-    delivery: ProcessWakeDelivery,
-    acked: bool,
-}
 
 struct ManagedProcessRecord {
     record: ProcessRecord,
@@ -252,12 +241,6 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             });
             removed
         };
-        let deleted_wake_count = {
-            let mut wake_inbox = self.wake_inbox.lock().await;
-            let before = wake_inbox.len();
-            wake_inbox.retain(|_, entry| entry.delivery.target_session_id != session_id);
-            before.saturating_sub(wake_inbox.len())
-        };
         let managed = self.managed.lock().await;
         let grants = self.grants.lock().await;
         let mut cancel_process_ids = Vec::new();
@@ -285,7 +268,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         Ok(ProcessSessionDeleteReport {
             session_id: session_id.to_string(),
             revoked_handle_count: removed.len(),
-            deleted_wake_count,
+            deleted_wake_count: 0,
             cancel_process_ids,
             preserved_process_ids,
         })
@@ -295,94 +278,49 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         &self,
         process_id: &str,
         request: ProcessEventAppendRequest,
-    ) -> Result<ProcessEvent, PluginError> {
+    ) -> Result<ProcessEventAppendResult, PluginError> {
         let mut managed = self.managed.lock().await;
         let Some(record) = managed.get_mut(process_id) else {
             return Err(PluginError::Session(format!(
                 "unknown process `{process_id}`"
             )));
         };
-        let payload_hash = process_event_payload_hash(&request.event_type, &request.payload)?;
-        if let Some(idempotency_key) = request.idempotency_key.as_deref()
-            && let Some((existing_hash, existing)) = record.keyed_events.get(idempotency_key)
-        {
-            if existing_hash == &payload_hash {
-                return Ok(existing.clone());
-            }
-            return Err(PluginError::Session(format!(
-                "process `{process_id}` event idempotency key `{idempotency_key}` conflicts with an existing event"
-            )));
-        }
-        let declared = record
-            .record
-            .event_types
-            .iter()
-            .find(|declared| declared.name == request.event_type)
-            .ok_or_else(|| {
-                PluginError::Session(format!(
-                    "process `{process_id}` emitted undeclared event type `{}`",
-                    request.event_type
-                ))
-            })?;
-        require_event_idempotency(process_id, &request, &declared.semantics)?;
-        declared
-            .payload_schema
-            .validate(&request.payload)
-            .map_err(|err| {
-                PluginError::Session(format!("invalid `{}` payload: {err}", request.event_type))
-            })?;
+        let replay_lookup = request
+            .replay
+            .as_ref()
+            .and_then(|replay| record.keyed_events.get(replay.key.as_str()))
+            .map(|(hash, event)| (hash.clone(), event.clone()));
         let sequence = record.events.len() as u64 + 1;
-        let semantics = materialize_event_semantics(
-            process_id,
+        let prepared = prepare_process_event_append(
+            &record.record,
+            request,
             sequence,
-            &request.payload,
-            &declared.semantics,
+            replay_lookup,
+            current_epoch_ms(),
         )?;
-        if semantics.terminal.is_some() && record.record.terminal.is_some() {
-            return Err(PluginError::Session(format!(
-                "process `{process_id}` is already terminal"
-            )));
+        if prepared.replayed {
+            return Ok(ProcessEventAppendResult {
+                event: prepared.event,
+                wake_delivery: prepared.wake_delivery,
+            });
         }
-        let event = ProcessEvent {
-            process_id: process_id.to_string(),
-            sequence,
-            event_type: request.event_type,
-            payload: request.payload,
-            idempotency_key: request.idempotency_key.clone(),
-            semantics: semantics.clone(),
-            occurred_at: SystemTime::now(),
-        };
-        if let Some(terminal) = event.semantics.terminal.clone() {
+        let event = prepared.event;
+        if let Some(terminal) = prepared.terminal_update.clone() {
             record.record.terminal = Some(terminal);
         }
-        record.record.updated_at_ms = current_epoch_ms();
+        record.record.updated_at_ms = prepared.occurred_at_ms;
         record.events.push(event.clone());
-        if let Some(idempotency_key) = request.idempotency_key {
+        if let Some(replay) = event.invocation.replay.clone() {
             record
                 .keyed_events
-                .insert(idempotency_key, (payload_hash, event.clone()));
+                .insert(replay.key, (prepared.payload_hash, event.clone()));
         }
-        if let Some(wake) = semantics.wake
-            && let Some(target_scope) = request.wake_target_scope
-        {
-            let delivery = process_wake_delivery(
-                target_scope,
-                process_id.to_string(),
-                sequence,
-                wake,
-                event.occurred_at,
-            )?;
-            self.wake_inbox
-                .lock()
-                .await
-                .entry(delivery.wake_id.clone())
-                .or_insert(ManagedWakeDelivery {
-                    delivery,
-                    acked: false,
-                });
-        }
+        let wake_delivery = prepared.wake_delivery;
         record.notify.notify_waiters();
-        Ok(event)
+        Ok(ProcessEventAppendResult {
+            event,
+            wake_delivery,
+        })
     }
 
     async fn events_after(
@@ -491,7 +429,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
                 event_type,
                 serde_json::json!({ "await_output": await_output }),
             )
-            .with_idempotency_key(format!("process:{process_id}:terminal:{event_type}")),
+            .with_replay_key(format!("process:{process_id}:terminal:{event_type}")),
         )
         .await?;
         self.get_process(process_id).await.ok_or_else(|| {
@@ -506,36 +444,6 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         managed.get(process_id).map(|record| record.record.clone())
     }
 
-    async fn drain_wake_inputs(
-        &self,
-        target_scope_id: &ProcessScopeId,
-        limit: usize,
-    ) -> Result<Vec<ProcessWakeDelivery>, PluginError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let wake_inbox = self.wake_inbox.lock().await;
-        let mut entries = wake_inbox
-            .values()
-            .filter(|entry| !entry.acked && &entry.delivery.target_scope_id == target_scope_id)
-            .map(|entry| entry.delivery.clone())
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| {
-            left.created_at_ms
-                .cmp(&right.created_at_ms)
-                .then_with(|| left.wake_id.cmp(&right.wake_id))
-        });
-        entries.truncate(limit);
-        Ok(entries)
-    }
-
-    async fn ack_wake_input(&self, wake_id: &str) -> Result<(), PluginError> {
-        if let Some(entry) = self.wake_inbox.lock().await.get_mut(wake_id) {
-            entry.acked = true;
-        }
-        Ok(())
-    }
-
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError> {
         let mut managed = self.managed.lock().await;
         let Some(record) = managed.get_mut(process_id) else {
@@ -544,12 +452,6 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             )));
         };
         record.acked_wakes.insert(sequence);
-        let mut wake_inbox = self.wake_inbox.lock().await;
-        for entry in wake_inbox.values_mut() {
-            if entry.delivery.process_id == process_id && entry.delivery.sequence == sequence {
-                entry.acked = true;
-            }
-        }
         Ok(())
     }
 }

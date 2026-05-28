@@ -76,7 +76,7 @@ pub enum SessionRelation {
     Child {
         parent_session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        originating_tool_call_id: Option<String>,
+        caused_by: Option<crate::CausalRef>,
     },
     Handoff {
         parent_session_id: String,
@@ -175,7 +175,7 @@ impl SessionCreateRequest {
             session_id: Some(uuid::Uuid::new_v4().to_string()),
             relation: SessionRelation::Child {
                 parent_session_id: parent_session_id.into(),
-                originating_tool_call_id: None,
+                caused_by: None,
             },
             start,
             policy: None,
@@ -238,7 +238,7 @@ impl SessionCreateRequest {
         Self::related(
             SessionRelation::Child {
                 parent_session_id: parent_session_id.into(),
-                originating_tool_call_id: None,
+                caused_by: None,
             },
             start,
             Some(policy),
@@ -256,7 +256,7 @@ impl SessionCreateRequest {
         Self::related(
             SessionRelation::Child {
                 parent_session_id: parent_session_id.into(),
-                originating_tool_call_id: None,
+                caused_by: None,
             },
             start,
             None,
@@ -339,13 +339,12 @@ impl SessionCreateRequest {
         self
     }
 
-    pub fn with_originating_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+    pub fn with_caused_by(mut self, caused_by: crate::CausalRef) -> Self {
         if let SessionRelation::Child {
-            originating_tool_call_id,
-            ..
+            caused_by: cause, ..
         } = &mut self.relation
         {
-            *originating_tool_call_id = Some(tool_call_id.into());
+            *cause = Some(caused_by);
         }
         self
     }
@@ -390,30 +389,58 @@ pub struct SubagentSessionContext {
 pub enum SessionAppendNode {
     Message {
         message: PluginMessage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<crate::CausalRef>,
     },
     ProtocolEvent {
         event: crate::ProtocolEvent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<crate::CausalRef>,
     },
     Plugin {
         plugin_type: String,
         #[serde(default)]
         body: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<crate::CausalRef>,
     },
 }
 
 impl SessionAppendNode {
     pub fn message(message: PluginMessage) -> Self {
-        Self::Message { message }
+        Self::Message {
+            message,
+            caused_by: None,
+        }
     }
 
     pub fn plugin(plugin_type: impl Into<String>, body: serde_json::Value) -> Self {
         Self::Plugin {
             plugin_type: plugin_type.into(),
             body,
+            caused_by: None,
         }
     }
 
     pub fn protocol_event(event: crate::ProtocolEvent) -> Self {
-        Self::ProtocolEvent { event }
+        Self::ProtocolEvent {
+            event,
+            caused_by: None,
+        }
+    }
+
+    pub fn with_caused_by(mut self, caused_by: crate::CausalRef) -> Self {
+        match &mut self {
+            Self::Message {
+                caused_by: cause, ..
+            }
+            | Self::ProtocolEvent {
+                caused_by: cause, ..
+            }
+            | Self::Plugin {
+                caused_by: cause, ..
+            } => *cause = Some(caused_by),
+        }
+        self
     }
 }

@@ -121,7 +121,7 @@ mod tests {
     use lash_core::plugin::runtime_host::RuntimeSessionHost;
     use lash_core::plugin::{PluginError, SessionHandle, SessionSnapshot};
     use lash_core::{
-        DirectCompletion, TokenUsage, ToolCall, ToolContract, ToolDefinition, ToolDiscoveryMetadata,
+        DirectCompletion, TokenUsage, ToolAgentSurface, ToolCall, ToolContract, ToolDefinition,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -198,7 +198,7 @@ mod tests {
     fn catalog_tool_with_metadata(
         name: &str,
         description: &str,
-        namespace: Option<&str>,
+        module: Option<&str>,
         aliases: Vec<&str>,
     ) -> Value {
         let tool = ToolDefinition::raw_named(
@@ -207,17 +207,32 @@ mod tests {
             ToolContract::default_input_schema(),
             json!({}),
         )
-        .with_discovery(ToolDiscoveryMetadata {
-            namespace: namespace.map(str::to_string),
-            aliases: aliases.into_iter().map(str::to_string).collect(),
-        });
+        .with_agent_surface(
+            ToolAgentSurface::new(
+                [module.unwrap_or_else(|| match name {
+                    "read_file" => "files",
+                    "search_web" => "web",
+                    _ => "tools",
+                })],
+                match name {
+                    "read_file" => "read",
+                    "search_web" => "search",
+                    _ => name,
+                },
+            )
+            .with_aliases(aliases.into_iter()),
+        );
         let manifest = tool.manifest();
+        let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
+        let call = agent_surface.call_path();
         json!({
             "id": manifest.id,
             "name": manifest.name,
-            "namespace": manifest.discovery.namespace,
+            "module_path": agent_surface.module_path.clone(),
+            "operation": agent_surface.operation.clone(),
+            "call": call,
             "description": manifest.description,
-            "aliases": manifest.discovery.aliases,
+            "aliases": agent_surface.aliases.clone(),
             "availability": "searchable",
             "callable": false,
             "showcased": false,
@@ -275,7 +290,7 @@ mod tests {
 
         let args = json!({
             "query": "cat",
-            "namespace": "filesystem",
+            "module": "filesystem",
             "limit": 1,
         });
         let result = provider
@@ -291,15 +306,16 @@ mod tests {
         let value = result.value_for_projection();
         let results = value.as_array().expect("search result list");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["name"], json!("read_file"));
+        assert_eq!(results[0]["name"], json!("filesystem.read"));
+        assert_eq!(results[0]["call"], json!("filesystem.read"));
         assert!(
             results[0]["signature"]
                 .as_str()
                 .expect("signature")
-                .starts_with("read_file() -> ")
+                .starts_with("await filesystem.read({})? -> ")
         );
         assert_eq!(results[0]["description"], json!("Read file contents"));
-        assert!(results[0].get("namespace").is_none());
+        assert_eq!(results[0]["module_path"], json!(["filesystem"]));
         assert!(results[0].get("score").is_none());
     }
 
@@ -335,7 +351,7 @@ mod tests {
         assert!(result.is_success(), "{result:?}");
         let value = result.value_for_projection();
         let results = value.as_array().expect("search result list");
-        assert_eq!(ranked_names(results), vec!["search_web"]);
+        assert_eq!(ranked_names(results), vec!["web.search"]);
         let requests = host
             .direct_requests
             .lock()

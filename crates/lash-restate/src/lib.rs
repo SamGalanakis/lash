@@ -51,11 +51,11 @@
 //! Restate's Rust SDK requires journaled closures to be awaited immediately and
 //! not to call the Restate context from inside the closure. This adapter follows
 //! that rule: every Lash effect is wrapped as one immediately awaited
-//! `ctx.run(...).name(envelope.metadata.idempotency_key)` call, sleep commands
+//! `ctx.run(...).name(envelope.invocation.replay.key)` call, sleep commands
 //! map to Restate's durable timer, and process commands call Restate workflow
 //! scheduling directly through idempotent registry/workflow operations. Lash's
-//! own runtime journal stores the same completed effect outcome by idempotency
-//! key and envelope hash before the restored `TurnMachine` consumes it.
+//! own runtime journal stores the same completed effect outcome by replay key
+//! and envelope hash before the restored `TurnMachine` consumes it.
 
 use std::fmt;
 use std::future::Future;
@@ -65,12 +65,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lash_core::{
-    DurableProcessWorker, EffectInvocationMetadata, PluginError, ProcessAwaitOutput,
-    ProcessCommand, ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, RuntimeEffectCommand,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeError,
+    DurableProcessWorker, PluginError, ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome,
+    ProcessExecutionContext, ProcessExternalRef, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimeInvocation,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
@@ -500,7 +499,7 @@ where
 
     async fn journal_effect<'run, T, Fut>(
         &'run self,
-        metadata: EffectInvocationMetadata,
+        metadata: RuntimeInvocation,
         future: Fut,
     ) -> Result<T, RestateEffectError>
     where
@@ -559,7 +558,7 @@ where
                 };
                 let duration = Duration::from_millis(*duration_ms);
                 if let Err(err) = self.context.sleep_send(duration).await {
-                    tracing_sleep_error(&envelope.metadata, &err);
+                    tracing_sleep_error(&envelope.invocation, &err);
                     return Err(RuntimeEffectControllerError::new(
                         "restate_effect_controller",
                         err.to_string(),
@@ -569,10 +568,10 @@ where
             }
             RestateEffectExecution::JournaledRun => {
                 let current_hash = envelope.stable_hash()?;
-                let metadata = envelope.metadata.clone();
+                let invocation = envelope.invocation.clone();
                 let journal_hash = current_hash.clone();
                 let journaled = self
-                    .journal_effect(metadata, async move {
+                    .journal_effect(invocation, async move {
                         let outcome = local_executor.execute(envelope).await;
                         JournaledRuntimeEffect {
                             envelope_hash: journal_hash,
@@ -744,15 +743,14 @@ fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExec
     }
 }
 
-fn restate_effect_name(metadata: &EffectInvocationMetadata) -> String {
-    if metadata.idempotency_key.is_empty() {
-        format!(
-            "lash:{}:{}",
-            metadata.effect_kind.as_str(),
-            metadata.effect_id
-        )
+fn restate_effect_name(invocation: &RuntimeInvocation) -> String {
+    if let Some(replay_key) = invocation.replay_key() {
+        format!("lash:{replay_key}")
+    } else if let (Some(kind), Some(effect_id)) = (invocation.effect_kind(), invocation.effect_id())
+    {
+        format!("lash:{}:{effect_id}", kind.as_str())
     } else {
-        format!("lash:{}", metadata.idempotency_key)
+        "lash:runtime-invocation".to_string()
     }
 }
 
@@ -773,10 +771,10 @@ fn validate_journaled_effect_hash(
     Ok(journaled.outcome)
 }
 
-fn tracing_sleep_error(metadata: &EffectInvocationMetadata, err: &TerminalError) {
+fn tracing_sleep_error(invocation: &RuntimeInvocation, err: &TerminalError) {
     tracing::warn!(
-        session_id = %metadata.session_id,
-        effect_id = %metadata.effect_id,
+        session_id = %invocation.scope.session_id,
+        effect_id = invocation.effect_id().unwrap_or(""),
         effect_kind = %RuntimeEffectKind::Sleep.as_str(),
         error = %err,
         "Restate durable sleep failed"
@@ -794,21 +792,17 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn restate_effect_name_uses_lash_idempotency_key() {
-        let metadata = EffectInvocationMetadata {
-            session_id: "session".to_string(),
-            origin: lash_core::EffectOrigin::Turn,
-            turn_id: Some("turn".to_string()),
-            turn_index: Some(1),
-            protocol_iteration: Some(2),
-            effect_id: "effect".to_string(),
-            effect_kind: RuntimeEffectKind::ToolCall,
-            idempotency_key: "session:turn:1:2:tool_call:effect".to_string(),
-            turn_checkpoint_hash: None,
-        };
+    fn restate_effect_name_uses_lash_replay_key() {
+        let invocation = RuntimeInvocation::effect(
+            lash_core::RuntimeScope::for_turn("session", "turn", 1, 2),
+            "effect",
+            RuntimeEffectKind::ToolCall,
+            "session:turn:1:2:tool_call:effect",
+            None,
+        );
 
         assert_eq!(
-            restate_effect_name(&metadata),
+            restate_effect_name(&invocation),
             "lash:session:turn:1:2:tool_call:effect"
         );
     }
@@ -862,8 +856,8 @@ mod tests {
             attachments: Vec::new(),
             output: Default::default(),
             session_id: Some("session".to_string()),
-            originating_tool_call_id: None,
-            idempotency_key: None,
+            caused_by: None,
+            replay: None,
         }
     }
 
@@ -1149,18 +1143,14 @@ mod tests {
         }
     }
 
-    fn effect_metadata(kind: RuntimeEffectKind, effect_id: &str) -> EffectInvocationMetadata {
-        EffectInvocationMetadata {
-            session_id: "session".to_string(),
-            origin: lash_core::EffectOrigin::Turn,
-            turn_id: Some("turn".to_string()),
-            turn_index: Some(1),
-            protocol_iteration: Some(0),
-            effect_id: effect_id.to_string(),
-            effect_kind: kind,
-            idempotency_key: format!("session:turn:1:0:{}:{effect_id}", kind.as_str()),
-            turn_checkpoint_hash: Some("0".repeat(64)),
-        }
+    fn runtime_invocation(kind: RuntimeEffectKind, effect_id: &str) -> RuntimeInvocation {
+        RuntimeInvocation::effect(
+            lash_core::RuntimeScope::for_turn("session", "turn", 1, 0),
+            effect_id,
+            kind,
+            format!("session:turn:1:0:{}:{effect_id}", kind.as_str()),
+            Some("0".repeat(64)),
+        )
     }
 
     #[tokio::test]
@@ -1170,7 +1160,7 @@ mod tests {
         let err = host
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::ExecCode, "exec"),
+                    runtime_invocation(RuntimeEffectKind::ExecCode, "exec"),
                     RuntimeEffectCommand::ExecCode {
                         code: "1 + 1".to_string(),
                     },
@@ -1195,7 +1185,7 @@ mod tests {
         let outcome = host
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Sleep, "sleep"),
+                    runtime_invocation(RuntimeEffectKind::Sleep, "sleep"),
                     RuntimeEffectCommand::Sleep { duration_ms: 42 },
                 ),
                 RuntimeEffectLocalExecutor::unavailable(),
@@ -1220,7 +1210,7 @@ mod tests {
         let outcome = host
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Process, "background-start"),
+                    runtime_invocation(RuntimeEffectKind::Process, "background-start"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::Start {
                             registration,
@@ -1334,7 +1324,7 @@ mod tests {
         let outcome = host
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Process, "lashlang-process-start"),
+                    runtime_invocation(RuntimeEffectKind::Process, "lashlang-process-start"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::Start {
                             registration,
@@ -1433,7 +1423,7 @@ mod tests {
         let outcome = host
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Process, "process-list-s1"),
+                    runtime_invocation(RuntimeEffectKind::Process, "process-list-s1"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::List {
                             owner_scope: s1.clone(),
@@ -1456,7 +1446,7 @@ mod tests {
         let outcome = host
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Process, "process-transfer"),
+                    runtime_invocation(RuntimeEffectKind::Process, "process-transfer"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::Transfer {
                             from_scope: s1.clone(),
@@ -1503,7 +1493,7 @@ mod tests {
         let outcome = host
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Process, "background-cancel"),
+                    runtime_invocation(RuntimeEffectKind::Process, "background-cancel"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::Cancel {
                             process_id: "task-cancel".to_string(),
@@ -1561,8 +1551,8 @@ mod tests {
                         .wake_target_scope
                         .map(|scope| scope.session_id),
                     tool_effect_id: execution_context
-                        .tool_effect_metadata
-                        .map(|metadata| metadata.effect_id),
+                        .causal_invocation
+                        .and_then(|invocation| invocation.effect_id().map(str::to_string)),
                 });
             Ok(ProcessAwaitOutput::Success {
                 value: serde_json::json!({"ok": true}),
@@ -1594,7 +1584,7 @@ mod tests {
         let registration = external_registration("task-smoke");
         let execution_context = ProcessExecutionContext::default()
             .with_wake_target_scope(lash_core::ProcessScope::new("wake-smoke"))
-            .with_tool_effect_metadata(Some(effect_metadata(
+            .with_causal_invocation(Some(runtime_invocation(
                 RuntimeEffectKind::ToolCall,
                 "tool-smoke",
             )));
@@ -1602,7 +1592,7 @@ mod tests {
         let outcome = host
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Process, "background-smoke-start"),
+                    runtime_invocation(RuntimeEffectKind::Process, "background-smoke-start"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::Start {
                             registration,
@@ -1687,7 +1677,7 @@ mod tests {
         let outcome = host
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Process, "background-smoke-cancel"),
+                    runtime_invocation(RuntimeEffectKind::Process, "background-smoke-cancel"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::Cancel {
                             process_id: "task-smoke".to_string(),
@@ -1762,7 +1752,7 @@ mod tests {
                 "process.wake",
                 serde_json::json!({ "message": line, "wake_input": line }),
             )
-            .with_idempotency_key(format!("process.wake:{line}"));
+            .with_replay_key(format!("process.wake:{line}"));
             if let Err(err) = call.context.process_events().emit_request(event).await {
                 return lash_core::ToolResult::err_fmt(err);
             }
@@ -1860,13 +1850,16 @@ mod tests {
                 },
             },
         )
-        .with_provenance(creator_scope.clone(), "recovery-host")
+        .with_process_provenance(lash_core::ProcessProvenance::new(
+            creator_scope.clone(),
+            "recovery-host",
+        ))
         .with_extra_event_types([process_wake_event_type()]);
 
         host_a
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Process, "recovery-start"),
+                    runtime_invocation(RuntimeEffectKind::Process, "recovery-start"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::Start {
                             registration,
@@ -1910,23 +1903,35 @@ mod tests {
                 control: None,
             }
         );
-        let wakes = registry_b
-            .drain_wake_inputs(&scope_id, 10)
+        let queue_store = store_factory
+            .create_store(&lash_core::SessionStoreCreateRequest {
+                session_id: "root".to_string(),
+                relation: lash_core::SessionRelation::default(),
+                policy: lash_core::SessionPolicy {
+                    provider: lash_core::ProviderHandle::default(),
+                    model: lash_core::ModelSpec::from_token_limits(
+                        "mock-model",
+                        None,
+                        200_000,
+                        None,
+                        None,
+                    )
+                    .expect("model spec"),
+                    ..lash_core::SessionPolicy::default()
+                },
+            })
+            .expect("open root session store");
+        let queued = queue_store
+            .list_queued_work("root")
             .await
-            .expect("drain reopened wakes");
-        assert_eq!(wakes.len(), 1);
-        assert_eq!(wakes[0].input, "wake-after-rebuild");
-        registry_b
-            .ack_wake_input(&wakes[0].wake_id)
-            .await
-            .expect("ack wake");
-        assert!(
-            registry_b
-                .drain_wake_inputs(&scope_id, 10)
-                .await
-                .expect("drain after ack")
-                .is_empty()
-        );
+            .expect("list queued wakes");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].items.len(), 1);
+        let lash_core::QueuedWorkPayload::ProcessWake { wake } = &queued[0].items[0].payload else {
+            panic!("expected process wake queue payload");
+        };
+        assert_eq!(wake.input, "wake-after-rebuild");
+        assert_eq!(wake.target_scope_id, scope_id);
 
         let worker_b = recovery_worker(Arc::clone(&registry_b), store_factory);
         let endpoint_b = Endpoint::builder()
@@ -1943,7 +1948,7 @@ mod tests {
         host_b
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Process, "recovery-cancel"),
+                    runtime_invocation(RuntimeEffectKind::Process, "recovery-cancel"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::Cancel {
                             process_id: "recover-tool".to_string(),
@@ -2058,7 +2063,7 @@ mod tests {
             .expect("register workflow process");
         let execution_context = ProcessExecutionContext::default()
             .with_wake_target_scope(lash_core::ProcessScope::new("wake-session"))
-            .with_tool_effect_metadata(Some(effect_metadata(
+            .with_causal_invocation(Some(runtime_invocation(
                 RuntimeEffectKind::ToolCall,
                 "tool-effect",
             )));

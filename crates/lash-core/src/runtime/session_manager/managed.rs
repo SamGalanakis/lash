@@ -117,29 +117,4 @@ impl ManagedSessionCapability {
             .remove(session_id))
     }
 
-    pub(in crate::runtime::session_manager) async fn inject_turn_input(
-        &self,
-        session_id: &str,
-        input: crate::InjectedTurnInput,
-    ) -> Result<(), crate::PluginError> {
-        let runtime_handle = {
-            let registry = self.registry.lock().await;
-            registry.get(session_id).cloned()
-        };
-        let Some(runtime_handle) = runtime_handle else {
-            return Err(crate::PluginError::Session(format!(
-                "unknown or inactive session `{session_id}` for turn input injection"
-            )));
-        };
-        let runtime = runtime_handle.runtime.lock().await;
-        let Some(session) = runtime.session.as_ref() else {
-            return Err(crate::PluginError::Session(format!(
-                "session `{session_id}` has no live turn-input bridge"
-            )));
-        };
-        session
-            .turn_input_injection_bridge()
-            .enqueue(vec![input])
-            .map_err(crate::PluginError::Session)
-    }
 }

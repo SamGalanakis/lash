@@ -59,19 +59,10 @@ pub struct DirectRequest {
     pub stream_events: Option<LlmEventSender>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// Set this when issuing a direct completion from inside a tool's
-    /// `execute`. Carries the calling tool's call id all the way to the
-    /// trace event so the renderer can group fan-outs (e.g.
-    /// tournament_rerank's batch reranks) under their parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub originating_tool_call_id: Option<String>,
-    /// Stable caller-provided idempotency discriminator for direct effects.
-    ///
-    /// Calls from a parent tool automatically include that tool call id in the
-    /// derived key. Set this when the same tool or plugin hook may issue more
-    /// than one otherwise-identical direct request during a turn.
+    pub caused_by: Option<crate::CausalRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
+    pub replay: Option<crate::RuntimeReplay>,
 }
 
 impl DirectRequest {
@@ -88,8 +79,8 @@ impl DirectRequest {
             generation: crate::GenerationOptions::default(),
             stream_events: None,
             session_id: None,
-            originating_tool_call_id: None,
-            idempotency_key: None,
+            caused_by: None,
+            replay: None,
         }
     }
 
@@ -111,8 +102,13 @@ impl DirectRequest {
         }
     }
 
-    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
-        self.idempotency_key = Some(key.into());
+    pub fn with_replay_key(mut self, key: impl Into<String>) -> Self {
+        self.replay = Some(crate::RuntimeReplay { key: key.into() });
+        self
+    }
+
+    pub fn with_caused_by(mut self, caused_by: crate::CausalRef) -> Self {
+        self.caused_by = Some(caused_by);
         self
     }
 }
@@ -245,8 +241,8 @@ pub(crate) fn build_llm_request(
         generation,
         stream_events: _,
         session_id,
-        originating_tool_call_id: _,
-        idempotency_key: _,
+        caused_by: _,
+        replay: _,
     } = request;
 
     let output_spec = match output {

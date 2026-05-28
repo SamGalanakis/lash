@@ -114,7 +114,7 @@ pub struct ProtocolBeforeLlmCallContext<'run> {
     pub state: SessionReadView,
     pub latest_prompt_usage: Option<PromptUsage>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
-    pub(crate) process_effect_metadata: crate::EffectInvocationMetadata,
+    pub(crate) process_parent_invocation: crate::RuntimeInvocation,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
 }
 
@@ -131,7 +131,7 @@ impl ProtocolBeforeLlmCallContext<'_> {
 
     pub fn process_scope(&self) -> crate::ProcessOpScope<'_> {
         crate::ProcessOpScope::new()
-            .with_effect_metadata(Some(self.process_effect_metadata.clone()))
+            .with_parent_invocation(Some(self.process_parent_invocation.clone()))
             .with_effect_controller(self.effect_controller.as_controller())
     }
 }

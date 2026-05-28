@@ -127,6 +127,7 @@ impl RuntimePersistence for RuntimePerfStore {
             checkpoint,
             usage_deltas,
             completed_turn,
+            completed_queue_claims: _,
             committed_attachment_ids: _,
         } = commit;
         let mut meta_guard = self
@@ -230,6 +231,8 @@ impl RuntimePersistence for RuntimePerfStore {
             manifest,
         })
     }
+
+    lash_core::impl_unsupported_queued_work_methods!();
 
     async fn claim_runtime_turn_lease(
         &self,
@@ -354,7 +357,7 @@ impl RuntimePersistence for RuntimePerfStore {
                 (
                     record.session_id.clone(),
                     record.turn_id.clone(),
-                    record.idempotency_key.clone(),
+                    record.replay_key.clone(),
                 ),
                 record,
             );
@@ -365,7 +368,7 @@ impl RuntimePersistence for RuntimePerfStore {
         &self,
         session_id: &str,
         turn_id: &str,
-        idempotency_key: &str,
+        replay_key: &str,
     ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError> {
         Ok(self
             .runtime_effect_journal
@@ -374,7 +377,7 @@ impl RuntimePersistence for RuntimePerfStore {
             .get(&(
                 session_id.to_string(),
                 turn_id.to_string(),
-                idempotency_key.to_string(),
+                replay_key.to_string(),
             ))
             .cloned())
     }

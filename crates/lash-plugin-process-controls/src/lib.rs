@@ -1,5 +1,5 @@
-//! Protocol-stack runtime-control tools (`list_process_handles`,
-//! `cancel_process`).
+//! Protocol-stack runtime-control tools (`processes.list`,
+//! `processes.cancel`).
 //!
 //! Dedicated plugins register these tools into the normal tool-provider
 //! surface, so protocol crates do not own or duplicate runtime control behavior.
@@ -12,8 +12,8 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash_core::{
-    ToolAvailabilityConfig, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
-    ToolResult, ToolScheduling,
+    ToolAgentSurface, ToolAvailabilityConfig, ToolCall, ToolContract, ToolDefinition, ToolManifest,
+    ToolProvider, ToolResult, ToolScheduling,
 };
 
 /// Plugin factory for process-control tools.
@@ -127,7 +127,8 @@ pub fn process_list_tool_definition() -> ToolDefinition {
             "additionalProperties": false
         }),
     )
-    .with_examples(vec!["list_process_handles()".into()])
+    .with_examples(vec!["await processes.list({})?".into()])
+    .with_agent_surface(ToolAgentSurface::new(["processes"], "list"))
     .with_availability(ToolAvailabilityConfig::callable())
     .with_scheduling(ToolScheduling::Parallel)
 }
@@ -161,7 +162,7 @@ pub fn process_cancel_tool_definition() -> ToolDefinition {
             "properties": {
                 "process_id": {
                     "type": "string",
-                    "description": "Process id returned by a process handle or `list_process_handles`."
+                    "description": "Process id returned by a process handle or `processes.list(...)`."
                 }
             },
             "required": ["process_id"],
@@ -178,9 +179,10 @@ pub fn process_cancel_tool_definition() -> ToolDefinition {
         }),
     )
     .with_examples(vec![
-        r#"cancel_process(process_id="tool:call-01JZK7G4QP9Q4J7W3Q2E1H6M9C")"#.into(),
-        r#"cancel_process(process_id="subagent:session-01JZK7G4QP9Q4J7W3Q2E1H6M9C")"#.into(),
+        r#"await processes.cancel({ process_id: "tool:call-01JZK7G4QP9Q4J7W3Q2E1H6M9C" })?"#.into(),
+        r#"await processes.cancel({ process_id: "subagent:session-01JZK7G4QP9Q4J7W3Q2E1H6M9C" })?"#.into(),
     ])
+    .with_agent_surface(ToolAgentSurface::new(["processes"], "cancel"))
     .with_availability(ToolAvailabilityConfig::callable())
     .with_scheduling(ToolScheduling::Parallel)
 }

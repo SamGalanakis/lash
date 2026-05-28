@@ -326,10 +326,10 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
-        tool_effect_metadata: None,
+        parent_invocation: None,
         session_id: session_id.clone(),
         event_tx,
-        turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: attachment_store.clone(),
         turn_context: crate::TurnContext::default(),
     });
@@ -853,10 +853,9 @@ mod test_protocol_fakes {
             }),
             serde_json::json!({ "type": "object", "additionalProperties": true }),
         )
-        .with_discovery(crate::ToolDiscoveryMetadata {
-            namespace: Some("runtime".to_string()),
-            aliases: vec!["parallel_tools".to_string()],
-        })
+        .with_agent_surface(
+            crate::ToolAgentSurface::new(["tools"], "batch").with_aliases(["parallel_tools"]),
+        )
         .with_scheduling(crate::ToolScheduling::Parallel)
     }
 

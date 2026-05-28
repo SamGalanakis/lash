@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result as AnyhowResult, anyhow};
 use async_trait::async_trait;
@@ -25,25 +25,54 @@ use lash::provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy};
 use lash::{
     LashCore, ModeId, ModePreset, SessionSpec, TurnActivity, TurnActivitySink, TurnEvent,
     TurnInput, TurnOutput,
+    tracing::{JsonlTraceSink, TraceLevel, TraceRecord, TraceSink, TraceSinkError},
 };
-use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
+use lash_provider_openai::{
+    OPENROUTER_BASE_URL, OpenAiCompatibleProvider, OpenAiCompatibleProviderFactory,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use tokio::time::timeout;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 const SESSION_ID_PREFIX: &str = "workbench";
 const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 200_000;
-const BUTTON_TRIGGER_RESOURCE: &str = "TRIGGER";
-const BUTTON_TRIGGER_ALIAS: &str = "button";
+const BUTTON_TRIGGER_RESOURCE: &str = "Button";
+const BUTTON_TRIGGER_ALIAS: &str = "ui.button";
 const BUTTON_TRIGGER_EVENT: &str = "pressed";
-const PROCESS_FOLLOWUP_WAIT: Duration = Duration::from_secs(12);
+
+#[derive(Default)]
+struct StderrTraceSink {
+    lock: Mutex<()>,
+}
+
+impl TraceSink for StderrTraceSink {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
+        let line = serde_json::to_string(record)?;
+        let _guard = self.lock.lock().map_err(|_| TraceSinkError::LockPoisoned)?;
+        eprintln!("{line}");
+        Ok(())
+    }
+}
+
+struct FanoutTraceSink {
+    sinks: Vec<Arc<dyn TraceSink>>,
+}
+
+impl TraceSink for FanoutTraceSink {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
+        for sink in &self.sinks {
+            sink.append(record)?;
+        }
+        Ok(())
+    }
+}
 
 #[tokio::main]
 async fn main() -> AnyhowResult<()> {
     let _ = dotenvy::dotenv();
+    OpenAiCompatibleProviderFactory::register();
 
     let addr: SocketAddr = std::env::var("AGENT_WORKBENCH_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3030".to_string())
@@ -53,6 +82,10 @@ async fn main() -> AnyhowResult<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(".agent-workbench"));
     std::fs::create_dir_all(&data_dir).with_context(|| format!("create {}", data_dir.display()))?;
+    let trace_path = std::env::var("AGENT_WORKBENCH_TRACE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join("trace.jsonl"));
+    eprintln!("agent-workbench trace: {}", trace_path.display());
 
     let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
     if api_key.trim().is_empty() {
@@ -106,6 +139,13 @@ async fn main() -> AnyhowResult<()> {
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )))
+        .trace_sink(Some(Arc::new(FanoutTraceSink {
+            sinks: vec![
+                Arc::new(StderrTraceSink::default()),
+                Arc::new(JsonlTraceSink::new(trace_path)),
+            ],
+        })))
+        .trace_level(TraceLevel::Extended)
         .configure_plugins(|plugins| {
             plugins.push(Arc::new(WorkbenchPluginFactory::new(
                 tavily_api_key.clone(),
@@ -415,8 +455,14 @@ async fn stream_turn(
                 return;
             }
         };
-        if let Err(err) =
-            run_agent_turn(&state, &tx, session, TurnInput::text(turn_text), turn_model).await
+        if let Err(err) = run_agent_turn(
+            &state,
+            &tx,
+            session,
+            TurnInput::text(turn_text),
+            turn_model.clone(),
+        )
+        .await
         {
             let _ = tx
                 .send(StreamItem::Error {
@@ -454,32 +500,6 @@ async fn stream_button_trigger(state: AppState, button: ButtonChoice) -> Respons
                         started_process_text(report.started_process_ids.len()),
                     );
                     let _ = tx.send(StreamItem::Message { message }).await;
-
-                    match wait_for_started_processes(
-                        &state,
-                        &report.started_process_ids,
-                        PROCESS_FOLLOWUP_WAIT,
-                    )
-                    .await
-                    {
-                        Ok(true) => {
-                            run_button_followup_turn(&state, &tx).await;
-                        }
-                        Ok(false) => {
-                            let message = state.push_message(
-                                "event",
-                                "process still running; the next turn will pick up its wake",
-                            );
-                            let _ = tx.send(StreamItem::Message { message }).await;
-                        }
-                        Err(err) => {
-                            let _ = tx
-                                .send(StreamItem::Error {
-                                    message: err.to_string(),
-                                })
-                                .await;
-                        }
-                    }
                 }
             }
             Err(err) => {
@@ -526,67 +546,6 @@ fn started_process_text(count: usize) -> String {
         0 => "no trigger handled the button event".to_string(),
         1 => "started 1 background process".to_string(),
         count => format!("started {count} background processes"),
-    }
-}
-
-async fn wait_for_started_processes(
-    state: &AppState,
-    process_ids: &[String],
-    wait: Duration,
-) -> AnyhowResult<bool> {
-    let result = timeout(wait, async {
-        for process_id in process_ids {
-            state
-                .process_registry
-                .await_process(process_id)
-                .await
-                .with_context(|| format!("await process {process_id}"))?;
-        }
-        Ok::<(), anyhow::Error>(())
-    })
-    .await;
-    match result {
-        Ok(Ok(())) => Ok(true),
-        Ok(Err(err)) => Err(err),
-        Err(_) => Ok(false),
-    }
-}
-
-async fn run_button_followup_turn(state: &AppState, tx: &mpsc::Sender<StreamItem>) {
-    match state
-        .core
-        .session(state.current_session_id())
-        .rlm()
-        .open()
-        .await
-    {
-        Ok(session) => match model_spec_for_request(state, None, None) {
-            Ok(model) => {
-                if let Err(err) =
-                    run_agent_turn(state, tx, session, TurnInput::empty(), model).await
-                {
-                    let _ = tx
-                        .send(StreamItem::Error {
-                            message: err.to_string(),
-                        })
-                        .await;
-                }
-            }
-            Err(err) => {
-                let _ = tx
-                    .send(StreamItem::Error {
-                        message: err.message,
-                    })
-                    .await;
-            }
-        },
-        Err(err) => {
-            let _ = tx
-                .send(StreamItem::Error {
-                    message: err.to_string(),
-                })
-                .await;
-        }
     }
 }
 
@@ -779,17 +738,35 @@ fn model_spec_for_request(
 }
 
 fn assistant_text_for_display(output: &TurnOutput, streamed_prose: &str) -> String {
-    if let Some(value) = output.submitted_value() {
-        return terminal_value_text(value);
+    let terminal = output
+        .submitted_value()
+        .map(terminal_value_text)
+        .or_else(|| {
+            output
+                .tool_value()
+                .map(|(_tool_name, value)| terminal_value_text(value))
+        });
+    let assistant = (!streamed_prose.trim().is_empty())
+        .then(|| streamed_prose.to_string())
+        .or_else(|| {
+            output
+                .assistant_message()
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_string)
+        });
+    combine_assistant_display_parts(assistant, terminal)
+}
+
+fn combine_assistant_display_parts(assistant: Option<String>, terminal: Option<String>) -> String {
+    let assistant = assistant.filter(|text| !text.trim().is_empty());
+    let terminal = terminal.filter(|text| !text.trim().is_empty());
+    match (assistant, terminal) {
+        (Some(assistant), Some(terminal)) if assistant.trim() == terminal.trim() => assistant,
+        (Some(assistant), Some(terminal)) => format!("{}\n\n{}", assistant.trim_end(), terminal),
+        (Some(assistant), None) => assistant,
+        (None, Some(terminal)) => terminal,
+        (None, None) => String::new(),
     }
-    if let Some((_tool_name, value)) = output.tool_value() {
-        return terminal_value_text(value);
-    }
-    output
-        .assistant_message()
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or(streamed_prose)
-        .to_string()
 }
 
 fn terminal_value_text(value: &Value) -> String {
@@ -944,7 +921,7 @@ impl SessionPlugin for WorkbenchSessionPlugin {
 
 fn button_trigger_lashlang_resources() -> lashlang::ResourceCatalog {
     let mut resources = lashlang::ResourceCatalog::new();
-    resources.add_alias(BUTTON_TRIGGER_RESOURCE, BUTTON_TRIGGER_ALIAS);
+    resources.add_module_instance(["ui", "button"], BUTTON_TRIGGER_RESOURCE);
     resources.add_trigger_event(
         BUTTON_TRIGGER_RESOURCE,
         BUTTON_TRIGGER_EVENT,
@@ -956,8 +933,8 @@ fn button_trigger_lashlang_resources() -> lashlang::ResourceCatalog {
 const WORKBENCH_PROMPT: &str = r#"You are running inside the Agent Workbench demo.
 
 Available host features:
-- Web access is limited to `search_web` and `fetch_url`, both backed by the same Tavily tools the CLI uses.
-- You may spawn subagents for independent investigation.
+- Web access is limited to `web.search(...)` and `web.fetch(...)`, both backed by the same Tavily tools the CLI uses.
+- You may call `agents.spawn(...)` for independent investigation.
 - You may use Lashlang background processes or subagents for work that should continue independently.
 - The red and blue UI buttons emit the host event listed under Host Events.
 
@@ -966,6 +943,7 @@ Use background processes or subagents only when they clarify the user's request 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lashlang::LashlangArtifactStore;
 
     #[test]
     fn reset_session_rotation_replaces_workbench_session_id() {
@@ -981,12 +959,38 @@ mod tests {
         assert!(new.starts_with(SESSION_ID_PREFIX));
     }
 
+    #[test]
+    fn assistant_display_keeps_streamed_prose_with_terminal_value() {
+        assert_eq!(
+            combine_assistant_display_parts(
+                Some("I started the background checks.".to_string()),
+                Some("summary ready".to_string()),
+            ),
+            "I started the background checks.\n\nsummary ready"
+        );
+    }
+
+    #[test]
+    fn assistant_display_does_not_duplicate_matching_terminal_value() {
+        assert_eq!(
+            combine_assistant_display_parts(Some("summary ready".to_string()), Some(
+                "summary ready".to_string()
+            )),
+            "summary ready"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn button_host_event_starts_visible_lashlang_process() {
-        let db_path = std::env::temp_dir().join(format!(
-            "agent-workbench-processes-{}.db",
-            uuid::Uuid::new_v4()
+        let data_dir =
+            std::env::temp_dir().join(format!("agent-workbench-processes-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let db_path = data_dir.join("processes.db");
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
         ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory.clone();
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&db_path).expect("open registry"),
         ) as Arc<dyn lash::advanced::ProcessRegistry>;
@@ -1005,6 +1009,7 @@ mod tests {
             .default_mode(ModeId::rlm())
             .provider(provider)
             .model(model)
+            .store_factory(core_store_factory)
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .advanced()
             .effect_controller(Arc::new(
@@ -1091,13 +1096,22 @@ mod tests {
             web_configured: false,
         };
         let target_scope_id = lash::advanced::ProcessScope::new(state.current_session_id()).id();
-        let wakes = process_registry
-            .drain_wake_inputs(&target_scope_id, 10)
+        let session_store =
+            lash_sqlite_store::Store::open(session_store_factory.path_for_session(&session_id))
+                .expect("open session store");
+        let queued = session_store
+            .list_queued_work(&session_id)
             .await
-            .expect("list pending wake inputs");
-        assert_eq!(wakes.len(), 1);
-        assert!(wakes[0].input.contains("user pressed the blue button"));
-        assert_eq!(wakes[0].target_scope_id, target_scope_id);
+            .expect("list queued work");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].items.len(), 1);
+        let lash::persistence::QueuedWorkPayload::ProcessWake { wake } =
+            &queued[0].items[0].payload
+        else {
+            panic!("expected process wake queue payload");
+        };
+        assert!(wake.input.contains("user pressed the blue button"));
+        assert_eq!(wake.target_scope_id, target_scope_id);
         let Json(work) = list_work(State(state)).await.expect("list work");
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].terminal, "completed");
@@ -1113,7 +1127,7 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == "process.wake")
         );
-        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1234,6 +1248,146 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn persisted_trigger_route_fires_after_reopening_sqlite_artifact_store() {
+        let data_dir =
+            std::env::temp_dir().join(format!("agent-workbench-trigger-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let process_registry_path = data_dir.join("processes.db");
+        let artifact_store_path = data_dir.join("artifacts.db");
+        let session_id = WorkbenchSessionIds::fresh().current();
+
+        let linked = lashlang::LinkedModule::link(
+            lashlang::parse(test_button_trigger_source()).expect("parse trigger source"),
+            lashlang::LashlangSurface::new(
+                button_trigger_lashlang_resources(),
+                workbench_lashlang_abilities(),
+            ),
+        )
+        .expect("link trigger source");
+
+        {
+            let artifact_store = Arc::new(
+                lash_sqlite_store::Store::open(&artifact_store_path).expect("open artifacts"),
+            );
+            let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
+                artifact_store.clone();
+            let process_registry = Arc::new(
+                lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
+                    .expect("open registry"),
+            ) as Arc<dyn lash::advanced::ProcessRegistry>;
+            let core = test_workbench_core(
+                session_store_factory.clone(),
+                process_registry,
+                artifact_store_for_core,
+            );
+            let session = core
+                .session(session_id.clone())
+                .rlm()
+                .open()
+                .await
+                .expect("open session");
+            let install = session
+                .triggers()
+                .install_lashlang_source(test_button_trigger_source())
+                .await
+                .expect("install trigger source");
+            assert_eq!(install.installed, vec!["remembered"]);
+            assert!(
+                artifact_store
+                    .get_module_artifact(&linked.module_ref)
+                    .expect("load stored module artifact")
+                    .is_some()
+            );
+            drop(session);
+            drop(core);
+        }
+
+        let artifact_store = Arc::new(
+            lash_sqlite_store::Store::open(&artifact_store_path).expect("reopen artifacts"),
+        );
+        assert!(
+            artifact_store
+                .get_module_artifact(&linked.module_ref)
+                .expect("load reopened module artifact")
+                .is_some()
+        );
+        let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
+            artifact_store.clone();
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
+                .expect("reopen registry"),
+        ) as Arc<dyn lash::advanced::ProcessRegistry>;
+        let core = test_workbench_core(
+            session_store_factory,
+            Arc::clone(&process_registry),
+            artifact_store_for_core,
+        );
+        let reopened = core
+            .session(session_id)
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session");
+        let report = reopened
+            .host_events()
+            .emit(
+                BUTTON_TRIGGER_RESOURCE,
+                BUTTON_TRIGGER_ALIAS,
+                BUTTON_TRIGGER_EVENT,
+                json!({
+                    "button": "Red",
+                    "message": "user pressed the red button",
+                    "pressed_at": "2026-05-27T00:00:00Z"
+                }),
+            )
+            .await
+            .expect("emit reopened host event");
+        assert_eq!(report.started_process_ids.len(), 1);
+        process_registry
+            .await_process(&report.started_process_ids[0])
+            .await
+            .expect("trigger process should finish");
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    fn test_workbench_core(
+        session_store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
+        process_registry: Arc<dyn lash::advanced::ProcessRegistry>,
+        artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    ) -> LashCore {
+        let provider = ProviderHandle::new(
+            OpenAiCompatibleProvider::new(String::new(), OPENROUTER_BASE_URL).into_components(),
+        );
+        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+            .expect("model spec");
+        LashCore::builder()
+            .install_mode(ModePreset::rlm_with_config(
+                lash::modes::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            ))
+            .default_mode(ModeId::rlm())
+            .provider(provider)
+            .model(model)
+            .store_factory(session_store_factory)
+            .plugin(Arc::new(WorkbenchPluginFactory::new("")))
+            .advanced()
+            .runtime_core_config(
+                lash::advanced::RuntimeCoreConfig::default()
+                    .with_lashlang_artifact_store(artifact_store)
+                    .with_effect_controller(Arc::new(
+                        lash::advanced::InlineRuntimeEffectController::default(),
+                    )),
+            )
+            .process_registry(process_registry)
+            .build()
+            .expect("build core")
+    }
+
     fn test_button_trigger_source() -> &'static str {
         r#"
         type ButtonChoice = enum["Red", "Blue"]
@@ -1249,7 +1403,7 @@ mod tests {
           finish { button: checked.button, ok: true }
         }
 
-        trigger remembered on TRIGGER.button.pressed as event
+        trigger remembered on ui.button.pressed as event
           -> remember(event: event)
         "#
     }

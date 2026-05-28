@@ -1,18 +1,14 @@
 use std::sync::Arc;
 
-use crate::plugin::PluginError;
+use crate::plugin::{PluginError, SessionTriggerMatcher, SessionTriggerRoute};
 
-pub(crate) async fn emit_host_event(
-    session_id: &str,
-    plugins: Arc<crate::PluginSession>,
-    artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
-    processes: Arc<dyn crate::ProcessService>,
-    surface: lashlang::LashlangSurface,
+pub(crate) fn validate_host_event(
+    plugins: &crate::PluginSession,
     resource_type: &str,
     alias: &str,
     event: &str,
-    payload: serde_json::Value,
-) -> Result<crate::HostEventEmitReport, PluginError> {
+    payload: &serde_json::Value,
+) -> Result<(), PluginError> {
     let declared = plugins
         .host_events()
         .get(resource_type, alias, event)
@@ -21,75 +17,34 @@ pub(crate) async fn emit_host_event(
                 "unknown host event `{resource_type}.{alias}.{event}`"
             ))
         })?;
-    validate_payload(&payload, &declared.payload_ty).map_err(|message| {
+    validate_payload(payload, &declared.payload_ty).map_err(|message| {
         PluginError::Session(format!(
             "invalid payload for host event `{resource_type}.{alias}.{event}`: {message}"
         ))
-    })?;
+    })
+}
 
-    let triggers = plugins.installed_lashlang_triggers()?;
-    if triggers.is_empty() {
+pub(crate) async fn emit_host_event(
+    session_id: &str,
+    plugins: Arc<crate::PluginSession>,
+    processes: Arc<dyn crate::ProcessService>,
+    host_event_invocation: crate::RuntimeInvocation,
+    resource_type: &str,
+    alias: &str,
+    event: &str,
+    payload: serde_json::Value,
+) -> Result<crate::HostEventEmitReport, PluginError> {
+    let routes = plugins.installed_lashlang_trigger_routes()?;
+    if routes.is_empty() {
         return Ok(crate::HostEventEmitReport::empty());
     }
 
     let mut started_process_ids = Vec::new();
-    for installed in triggers {
-        let program = lashlang::parse(&installed.source).map_err(|err| {
-            PluginError::Session(format!(
-                "parse installed trigger `{}`: {}",
-                installed.name,
-                lashlang::format_parse_diagnostic(&installed.source, &err)
-            ))
-        })?;
-        let linked = lashlang::LinkedModule::link(program, surface.clone()).map_err(|err| {
-            PluginError::Session(format!(
-                "link installed trigger `{}`: {}",
-                installed.name,
-                lashlang::format_link_diagnostic(&installed.source, &err)
-            ))
-        })?;
-        let Some(trigger) =
-            linked
-                .artifact
-                .canonical_ir
-                .declarations
-                .iter()
-                .find_map(|declaration| match declaration {
-                    lashlang::Declaration::Trigger(trigger)
-                        if trigger.name.as_str() == installed.name.as_str() =>
-                    {
-                        Some(trigger)
-                    }
-                    _ => None,
-                })
-        else {
-            return Err(PluginError::Session(format!(
-                "installed trigger `{}` is missing from its module",
-                installed.name
-            )));
-        };
-        if !trigger_matches(trigger, resource_type, alias, event) {
+    for route in routes {
+        if !route_matches(&route, resource_type, alias, event) {
             continue;
         }
-        artifact_store
-            .put_module_artifact(&linked.artifact)
-            .map_err(|err| {
-                PluginError::Session(format!(
-                    "store installed trigger `{}` module artifact: {err}",
-                    installed.name
-                ))
-            })?;
-        let args = trigger_process_args(trigger, resource_type, alias, payload.clone())?;
-        let process_ref = linked
-            .artifact
-            .process_ref(trigger.process_name.as_str())
-            .cloned()
-            .ok_or_else(|| {
-                PluginError::Session(format!(
-                    "trigger `{}` target process `{}` is not exported",
-                    trigger.name, trigger.process_name
-                ))
-            })?;
+        let args = trigger_process_args(&route, resource_type, alias, payload.clone())?;
         let process_id = format!("process:{}", uuid::Uuid::new_v4());
         let args = match serde_json::to_value(lashlang::Value::Record(Arc::new(args)))
             .map_err(|err| PluginError::Session(format!("serialize trigger process args: {err}")))?
@@ -104,10 +59,10 @@ pub(crate) async fn emit_host_event(
         let registration = crate::ProcessRegistration::new(
             process_id.clone(),
             crate::ProcessInput::LashlangProcess {
-                module_ref: linked.module_ref.clone(),
-                process_ref,
-                required_surface_ref: linked.required_surface_ref.clone(),
-                process_name: trigger.process_name.to_string(),
+                module_ref: route.module_ref.clone(),
+                process_ref: route.process_ref.clone(),
+                required_surface_ref: route.required_surface_ref.clone(),
+                process_name: route.process_name.clone(),
                 args,
             },
         )
@@ -120,9 +75,10 @@ pub(crate) async fn emit_host_event(
                     .with_wake_session_id(session_id.to_string())
                     .with_descriptor(crate::ProcessHandleDescriptor::new(
                         Some("lashlang"),
-                        Some(trigger.process_name.as_str()),
+                        Some(route.process_name.as_str()),
                     )),
-                crate::ProcessOpScope::new(),
+                crate::ProcessOpScope::new()
+                    .with_parent_invocation(Some(host_event_invocation.clone())),
             )
             .await?;
         started_process_ids.push(process_id);
@@ -133,57 +89,60 @@ pub(crate) async fn emit_host_event(
     })
 }
 
-fn trigger_matches(
-    trigger: &lashlang::TriggerDecl,
+fn route_matches(
+    route: &SessionTriggerRoute,
     resource_type: &str,
     alias: &str,
     event: &str,
 ) -> bool {
-    match &trigger.source {
-        lashlang::TriggerSource::Binding {
-            resource,
+    match &route.matcher {
+        SessionTriggerMatcher::Resource {
+            resource_type: trigger_resource_type,
+            alias: trigger_alias,
             event: trigger_event,
         } => {
-            resource.resource_type.as_str() == resource_type
-                && resource.alias.as_str() == alias
-                && trigger_event.as_str() == event
+            trigger_resource_type == resource_type
+                && trigger_alias == alias
+                && trigger_event == event
         }
-        lashlang::TriggerSource::Each {
+        SessionTriggerMatcher::AnyResource {
             resource_type: trigger_resource_type,
             event: trigger_event,
             ..
-        } => trigger_resource_type.as_str() == resource_type && trigger_event.as_str() == event,
+        } => trigger_resource_type == resource_type && trigger_event == event,
     }
 }
 
 fn trigger_process_args(
-    trigger: &lashlang::TriggerDecl,
+    route: &SessionTriggerRoute,
     emitted_resource_type: &str,
     emitted_alias: &str,
     payload: serde_json::Value,
 ) -> Result<lashlang::Record, PluginError> {
-    let mut args = lashlang::Record::with_capacity(trigger.args.len());
-    for (name, binding) in &trigger.args {
-        let value = match binding {
-            lashlang::TriggerArg::EventBinding(binding)
-                if binding.as_str() == trigger.event_binding.as_str() =>
+    let mut args = lashlang::Record::with_capacity(route.args.len());
+    for arg in &route.args {
+        let value = match &arg.value {
+            lashlang::TriggerArg::EventBinding(event_binding)
+                if event_binding.as_str() == route.event_binding.as_str() =>
             {
                 lashlang::from_json(payload.clone())
             }
-            lashlang::TriggerArg::ResourceBinding(binding) => {
-                let lashlang::TriggerSource::Each {
-                    resource_binding, ..
-                } = &trigger.source
-                else {
-                    return Err(PluginError::Session(format!(
-                        "trigger `{}` argument `{}` references unsupported binding `{}`",
-                        trigger.name, name, binding
-                    )));
+            lashlang::TriggerArg::ResourceBinding(resource_binding_name) => {
+                let resource_binding = match &route.matcher {
+                    SessionTriggerMatcher::AnyResource {
+                        resource_binding, ..
+                    } => resource_binding,
+                    SessionTriggerMatcher::Resource { .. } => {
+                        return Err(PluginError::Session(format!(
+                            "trigger `{}` argument `{}` references unsupported binding `{}`",
+                            route.name, arg.name, resource_binding_name
+                        )));
+                    }
                 };
-                if binding != resource_binding {
+                if resource_binding_name.as_str() != resource_binding.as_str() {
                     return Err(PluginError::Session(format!(
                         "trigger `{}` argument `{}` references unknown binding `{}`",
-                        trigger.name, name, binding
+                        route.name, arg.name, resource_binding_name
                     )));
                 }
                 lashlang::Value::Resource(lashlang::ResourceHandle::new(
@@ -197,14 +156,14 @@ fn trigger_process_args(
                     resource.alias.as_str(),
                 ))
             }
-            lashlang::TriggerArg::EventBinding(binding) => {
+            lashlang::TriggerArg::EventBinding(event_binding) => {
                 return Err(PluginError::Session(format!(
                     "trigger `{}` argument `{}` references unknown binding `{}`",
-                    trigger.name, name, binding
+                    route.name, arg.name, event_binding
                 )));
             }
         };
-        args.insert(name.to_string(), value);
+        args.insert(arg.name.clone(), value);
     }
     Ok(args)
 }

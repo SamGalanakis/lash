@@ -119,15 +119,12 @@ pub fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_
     })
 }
 
-pub fn discovery_metadata(namespace: &str, aliases: &[&str]) -> lash_core::ToolDiscoveryMetadata {
-    lash_core::ToolDiscoveryMetadata {
-        namespace: if namespace.is_empty() {
-            None
-        } else {
-            Some(namespace.to_string())
-        },
-        aliases: aliases.iter().map(|value| value.to_string()).collect(),
-    }
+pub fn agent_surface(
+    module_path: impl IntoIterator<Item = impl Into<String>>,
+    operation: impl Into<String>,
+    aliases: &[&str],
+) -> lash_core::ToolAgentSurface {
+    lash_core::ToolAgentSurface::new(module_path, operation).with_aliases(aliases.iter().copied())
 }
 
 /// Run blocking filesystem work off the async runtime.

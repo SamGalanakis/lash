@@ -97,6 +97,30 @@ pub(in crate::runtime::session_manager) struct DirectInvocationContext<'a> {
     turn_lease: Option<&'a crate::RuntimeTurnLease>,
 }
 
+enum DirectLlmPlanInput {
+    Text(crate::DirectRequest),
+    Full(crate::LlmRequest),
+}
+
+struct DirectLlmEffectPlan {
+    provider: crate::ProviderHandle,
+    envelope: crate::RuntimeEffectEnvelope,
+    projection: DirectLlmProjection,
+}
+
+enum DirectLlmProjection {
+    Text {
+        request: crate::DirectRequest,
+        normalized_request: crate::LlmRequest,
+        model: String,
+        usage_source: String,
+    },
+    Full {
+        request: crate::LlmRequest,
+        usage_source: String,
+    },
+}
+
 impl DirectCompletionInvoker for RuntimeDirectCompletionInvoker<'_> {
     fn direct_completion<'a>(
         &'a self,
@@ -204,6 +228,103 @@ impl DirectCompletionInvoker for TestDirectCompletionInvoker {
 }
 
 impl DirectCompletionCapability {
+    fn plan_direct_llm_effect(
+        &self,
+        context: &DirectInvocationContext<'_>,
+        input: DirectLlmPlanInput,
+        usage_source: &str,
+    ) -> Result<DirectLlmEffectPlan, crate::PluginError> {
+        let current = context.current;
+        let provider = current.policy.provider.clone();
+        let usage_source = usage_source.to_string();
+        match input {
+            DirectLlmPlanInput::Text(request) => {
+                let model = request.model.clone();
+                if let Some(variant) = request.model_variant.as_deref() {
+                    provider
+                        .validate_variant(&model, variant)
+                        .map_err(crate::PluginError::Session)?;
+                }
+                let normalized_request =
+                    crate::direct::build_llm_request(&provider, request.clone(), model.clone());
+                let request_spec = crate::DirectRequestSpec::from_request(
+                    &request,
+                    current.host.core.attachment_store.as_ref(),
+                )?;
+                let normalized_spec = crate::LlmRequestSpec::from_request(
+                    &normalized_request,
+                    current.host.core.attachment_store.as_ref(),
+                )?;
+                let discriminator = crate::runtime::causal::direct_request_discriminator(
+                    &request_spec,
+                    request.replay.as_ref(),
+                    request.caused_by.as_ref(),
+                )?;
+                let invocation = crate::runtime::causal::direct_effect_invocation(
+                    &current.session_id,
+                    &usage_source,
+                    crate::RuntimeEffectKind::DirectCompletion,
+                    discriminator,
+                    context.turn_id,
+                    request.caused_by.clone(),
+                );
+                let envelope = crate::RuntimeEffectEnvelope::new(
+                    invocation,
+                    crate::RuntimeEffectCommand::DirectCompletion {
+                        request: Box::new(request_spec),
+                        normalized_request: Box::new(normalized_spec),
+                        model: model.clone(),
+                        usage_source: usage_source.clone(),
+                    },
+                );
+                Ok(DirectLlmEffectPlan {
+                    provider,
+                    envelope,
+                    projection: DirectLlmProjection::Text {
+                        request,
+                        normalized_request,
+                        model,
+                        usage_source,
+                    },
+                })
+            }
+            DirectLlmPlanInput::Full(request) => {
+                let request_spec = crate::LlmRequestSpec::from_request(
+                    &request,
+                    current.host.core.attachment_store.as_ref(),
+                )?;
+                let discriminator = crate::runtime::causal::direct_request_discriminator(
+                    &request_spec,
+                    None,
+                    None,
+                )?;
+                let invocation = crate::runtime::causal::direct_effect_invocation(
+                    &current.session_id,
+                    &usage_source,
+                    crate::RuntimeEffectKind::DirectLlmCompletion,
+                    discriminator,
+                    context.turn_id,
+                    None,
+                );
+                let envelope = crate::RuntimeEffectEnvelope::new(
+                    invocation,
+                    crate::RuntimeEffectCommand::DirectLlmCompletion {
+                        request: Box::new(request_spec),
+                        usage_source: usage_source.clone(),
+                    },
+                );
+                Ok(DirectLlmEffectPlan {
+                    provider,
+                    envelope,
+                    projection: DirectLlmProjection::Full {
+                        request,
+                        usage_source,
+                    },
+                })
+            }
+        }
+    }
+
     pub(in crate::runtime::session_manager) async fn invoke_direct_completion(
         &self,
         context: DirectInvocationContext<'_>,
@@ -211,45 +332,22 @@ impl DirectCompletionCapability {
         usage_source: &str,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
         let current = context.current;
-        let provider = current.policy.provider.clone();
-        let model = request.model.clone();
-        if let Some(variant) = request.model_variant.as_deref() {
-            provider
-                .validate_variant(&model, variant)
-                .map_err(crate::PluginError::Session)?;
-        }
-        let llm_request =
-            crate::direct::build_llm_request(&provider, request.clone(), model.clone());
-        let request_spec = crate::DirectRequestSpec::from_request(
-            &request,
-            current.host.core.attachment_store.as_ref(),
-        )?;
-        let normalized_spec = crate::LlmRequestSpec::from_request(
-            &llm_request,
-            current.host.core.attachment_store.as_ref(),
-        )?;
-        let discriminator = crate::runtime::effect::direct_request_discriminator(
-            &request_spec,
-            request.idempotency_key.as_deref(),
-            request.originating_tool_call_id.as_deref(),
-        )?;
-        let metadata = crate::runtime::effect::direct_effect_metadata(
-            &current.session_id,
-            usage_source,
-            crate::RuntimeEffectKind::DirectCompletion,
-            discriminator,
-            context.turn_id,
-        );
-        let usage_source = usage_source.to_string();
-        let envelope = crate::RuntimeEffectEnvelope::new(
-            metadata,
-            crate::RuntimeEffectCommand::DirectCompletion {
-                request: Box::new(request_spec),
-                normalized_request: Box::new(normalized_spec),
-                model: model.clone(),
-                usage_source: usage_source.clone(),
-            },
-        );
+        let plan =
+            self.plan_direct_llm_effect(&context, DirectLlmPlanInput::Text(request), usage_source)?;
+        let DirectLlmEffectPlan {
+            provider,
+            envelope,
+            projection:
+                DirectLlmProjection::Text {
+                    request,
+                    normalized_request,
+                    model,
+                    usage_source,
+                },
+        } = plan
+        else {
+            unreachable!("direct completion planner returned non-text projection")
+        };
         crate::runtime::effect::invoke_journaled_effect(
             crate::runtime::effect::JournaledEffectInvocation::new(
                 current.store.as_ref().map(|store| store.as_ref()),
@@ -266,7 +364,7 @@ impl DirectCompletionCapability {
                     current,
                     context.usage_capability,
                     &request,
-                    &llm_request,
+                    &normalized_request,
                     &model,
                     &usage_source,
                     outcome,
@@ -284,28 +382,20 @@ impl DirectCompletionCapability {
         usage_source: &str,
     ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
         let current = context.current;
-        let provider = current.policy.provider.clone();
-        let request_spec = crate::LlmRequestSpec::from_request(
-            &request,
-            current.host.core.attachment_store.as_ref(),
-        )?;
-        let discriminator =
-            crate::runtime::effect::direct_request_discriminator(&request_spec, None, None)?;
-        let metadata = crate::runtime::effect::direct_effect_metadata(
-            &current.session_id,
-            usage_source,
-            crate::RuntimeEffectKind::DirectLlmCompletion,
-            discriminator,
-            context.turn_id,
-        );
-        let usage_source = usage_source.to_string();
-        let envelope = crate::RuntimeEffectEnvelope::new(
-            metadata,
-            crate::RuntimeEffectCommand::DirectLlmCompletion {
-                request: Box::new(request_spec),
-                usage_source: usage_source.clone(),
-            },
-        );
+        let plan =
+            self.plan_direct_llm_effect(&context, DirectLlmPlanInput::Full(request), usage_source)?;
+        let DirectLlmEffectPlan {
+            provider,
+            envelope,
+            projection:
+                DirectLlmProjection::Full {
+                    request,
+                    usage_source,
+                },
+        } = plan
+        else {
+            unreachable!("direct LLM planner returned non-full projection")
+        };
         crate::runtime::effect::invoke_journaled_effect(
             crate::runtime::effect::JournaledEffectInvocation::new(
                 current.store.as_ref().map(|store| store.as_ref()),

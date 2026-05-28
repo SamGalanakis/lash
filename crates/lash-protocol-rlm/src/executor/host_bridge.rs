@@ -102,18 +102,9 @@ impl HostBridge<'_> {
         receiver: FlowValue,
         args: Vec<FlowValue>,
     ) -> Result<FlowValue, ExecutionHostError> {
-        let resource = match &receiver {
-            FlowValue::Resource(resource) => resource,
-            _ => {
-                return Err(ExecutionHostError::new(format!(
-                    "resource operation `{operation}` requires a resource receiver"
-                )));
-            }
-        };
-        if resource.resource_type != "TOOL" || resource.alias != "default" {
+        if !matches!(&receiver, FlowValue::Resource(_)) {
             return Err(ExecutionHostError::new(format!(
-                "resource `{}`.`{}` is not executable in this host",
-                resource.resource_type, resource.alias
+                "module operation `{operation}` requires a module authority receiver"
             )));
         }
         let index = self.next_index();
@@ -124,9 +115,9 @@ impl HostBridge<'_> {
                 "args": flow_values_to_json(&args).await,
             })
         };
-        payload.as_object_mut().ok_or_else(|| {
-            ExecutionHostError::new("resource operation payload must be an object")
-        })?;
+        payload
+            .as_object_mut()
+            .ok_or_else(|| ExecutionHostError::new("module operation payload must be an object"))?;
         let reply = self
             .ctx
             .call_tool(

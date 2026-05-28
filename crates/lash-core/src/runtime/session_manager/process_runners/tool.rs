@@ -7,7 +7,7 @@ impl RuntimeSessionManager {
         registration: crate::ProcessRegistration,
         registry: Arc<dyn crate::ProcessRegistry>,
         call: crate::PreparedToolCall,
-        tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
         wake_target_scope: Option<crate::ProcessScope>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
@@ -16,7 +16,7 @@ impl RuntimeSessionManager {
                 registration,
                 registry,
                 call,
-                tool_effect_metadata,
+                parent_invocation,
                 wake_target_scope,
                 cancellation,
             )
@@ -38,7 +38,7 @@ impl RuntimeSessionManager {
         registration: crate::ProcessRegistration,
         registry: Arc<dyn crate::ProcessRegistry>,
         call: crate::PreparedToolCall,
-        tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
         wake_target_scope: Option<crate::ProcessScope>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<crate::ToolCallOutput, crate::PluginError> {
@@ -50,9 +50,9 @@ impl RuntimeSessionManager {
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
                 &self.current.host.core.effect_controller,
             )),
-            tool_effect_metadata
+            parent_invocation
                 .as_ref()
-                .and_then(|metadata: &crate::EffectInvocationMetadata| metadata.turn_id.clone()),
+                .and_then(|invocation: &crate::RuntimeInvocation| invocation.scope.turn_id.clone()),
             self.current.turn_lease.clone(),
         );
         let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
@@ -68,17 +68,22 @@ impl RuntimeSessionManager {
                 &self.current.host.core.effect_controller,
             )),
             direct_completions: direct_completions.clone(),
-            tool_effect_metadata: tool_effect_metadata.clone(),
+            parent_invocation: parent_invocation.clone(),
             session_id: self.current.session_id.clone(),
             event_tx,
-            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::clone(&self.current.host.core.attachment_store),
             turn_context: crate::TurnContext::default(),
         });
         let tool_context = crate::ToolContext::from_dispatch(Arc::clone(&dispatch))
             .prepared_call(&call)
             .async_process(registration.id.clone(), cancellation)
-            .process_events(registration.id.clone(), registry, wake_target_scope)
+            .process_events(
+                registration.id.clone(),
+                registry,
+                wake_target_scope,
+                self.current.store.clone(),
+            )
             .build();
         let outcome = crate::tool_dispatch::dispatch_prepared_tool_call_with_execution_context(
             dispatch.as_ref(),

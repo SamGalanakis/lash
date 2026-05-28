@@ -290,8 +290,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn execute_success_path_uses_host() {
-        let compiled = compile("v = await TOOL.default.anything({})? submit v")
-            .expect("source should compile");
+        let linked = LinkedModule::link(
+            parse("v = await tools.anything({})? submit v").expect("source should parse"),
+            LashlangSurface::new(
+                ResourceCatalog::tool_default(["anything"]),
+                LashlangAbilities::default(),
+            ),
+        )
+        .expect("source should link");
+        let compiled = compile_linked(&linked);
         let mut state = State::new();
         let outcome = execute(&compiled, &mut state, &Host)
             .await

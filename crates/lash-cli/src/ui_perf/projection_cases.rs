@@ -140,7 +140,7 @@ fn build_projection_read_view(turn_count: usize) -> SessionReadView {
                         reasoning: format!(
                             "Check runtime state {turn}.\n\n```lashlang\nsubmit \"ok\"\n```"
                         ),
-                        code: "now = await TOOL.default.exec_command({ cmd: \"date -u\" })?\nprint now"
+                        code: "now = await shell.exec({ cmd: \"date -u\" })?\nprint now"
                             .to_string(),
                         output: vec!["time".to_string()],
                         tool_call_ids: vec![call_id],

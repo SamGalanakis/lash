@@ -1,5 +1,6 @@
 mod assembly;
 mod builder;
+pub(crate) mod causal;
 mod config_ops;
 mod effect;
 mod environment;
@@ -21,6 +22,7 @@ mod turn_commit_pipeline;
 mod turn_driver;
 mod turn_graph_editor;
 mod turn_loop;
+mod turn_queue;
 mod usage;
 
 use std::any::Any;
@@ -73,13 +75,16 @@ use assembly::{
 #[allow(unused_imports)]
 use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
+pub use causal::process_event_invocation;
+pub(crate) use causal::tool_retry_sleep_invocation;
+pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
-    DirectRequestSpec, EffectInvocationMetadata, EffectOrigin, InlineRuntimeEffectController,
-    LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    CausalRef, DirectRequestSpec, InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec,
+    ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
+    RuntimeReplay, RuntimeScope, RuntimeSubject,
 };
-pub(crate) use effect::{RuntimeEffectControllerHandle, tool_retry_sleep_metadata};
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{RuntimeError, RuntimeErrorCode};
 pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeCoreConfig};
@@ -88,22 +93,30 @@ pub use observation::{RuntimeHandle, RuntimeObservation};
 #[cfg(any(test, feature = "testing"))]
 pub use process::TestLocalProcessRegistry;
 pub use process::{
-    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventSemantics,
-    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
-    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
-    ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
-    ProcessScopeId, ProcessService, ProcessSessionDeleteReport, ProcessStartGrant,
-    ProcessStartOptions, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
-    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
-    UnavailableProcessService, current_epoch_ms, epoch_ms_from_system_time,
-    lashlang_process_event_types, materialize_process_event_semantics,
-    prepare_process_registration, process_event_payload_hash, process_wake_delivery,
-    process_wake_input_from_event_payload, process_wake_turn_cause, process_wake_turn_text,
-    require_event_idempotency, system_time_from_epoch_ms,
+    PreparedProcessEventAppend, ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest,
+    ProcessEventAppendResult, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
+    ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessOpScope, ProcessProvenance,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope, ProcessScopeId,
+    ProcessService, ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions,
+    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
+    ProcessWake, ProcessWakeDedupeKey,
+    ProcessWakeDelivery, ProcessWakeSpec, UnavailableProcessService, current_epoch_ms,
+    epoch_ms_from_system_time, lashlang_process_event_types, materialize_process_event_semantics,
+    prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
+    process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
+    process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
 };
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
 pub use session_manager::DirectCompletionClient;
 pub use state::{PersistedSessionSnapshot, RuntimeSessionState, SessionStateEnvelope};
+pub use turn_loop::ensure_durable_turn_input;
+pub use turn_queue::{
+    DeliveryPolicy, MergeKey, QueuedCheckpointWork, QueuedTurnWork, QueuedWorkBatch,
+    QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkCompletion,
+    QueuedWorkItem, QueuedWorkPayload, QUEUED_WORK_CLAIM_TTL_MS, SlotPolicy,
+    process_wake_batch_draft,
+};
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
     apply_session_head, normalize_session_graph,

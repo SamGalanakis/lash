@@ -197,6 +197,16 @@ impl RecordingTurnEvents {
     }
 }
 
+#[derive(Clone)]
+struct RecordingQueuedBatch {
+    batch: crate::QueuedWorkBatch,
+    claim_id: Option<String>,
+    claim_token: Option<String>,
+    claim_owner_id: Option<String>,
+    claim_fencing_token: u64,
+    claim_expires_at_ms: u64,
+}
+
 #[derive(Default)]
 pub(crate) struct RecordingStore {
     pub(crate) session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
@@ -216,6 +226,8 @@ pub(crate) struct RecordingStore {
     runtime_effect_journal_save_count: Mutex<usize>,
     runtime_turn_lease_renew_count: Mutex<usize>,
     runtime_turn_lease_abandon_count: Mutex<usize>,
+    queued_work: Mutex<Vec<RecordingQueuedBatch>>,
+    queued_work_next_seq: Mutex<u64>,
 }
 
 crate::impl_noop_attachment_manifest!(RecordingStore);
@@ -300,6 +312,30 @@ impl crate::store::RuntimePersistence for RecordingStore {
                 });
             }
         }
+        for completed in &commit.completed_queue_claims {
+            let mut queued = self.queued_work.lock().expect("lock queued work");
+            let matches = queued
+                .iter()
+                .filter(|entry| {
+                    entry.batch.session_id == completed.session_id
+                        && entry.claim_id.as_deref() == Some(completed.claim_id.as_str())
+                        && entry.claim_token.as_deref() == Some(completed.lease_token.as_str())
+                        && completed.batch_ids.contains(&entry.batch.batch_id)
+                })
+                .count();
+            if matches != completed.batch_ids.len() {
+                return Err(crate::store::StoreError::QueuedWorkClaimExpired {
+                    session_id: completed.session_id.clone(),
+                    claim_id: completed.claim_id.clone(),
+                });
+            }
+            queued.retain(|entry| {
+                !(entry.batch.session_id == completed.session_id
+                    && entry.claim_id.as_deref() == Some(completed.claim_id.as_str())
+                    && entry.claim_token.as_deref() == Some(completed.lease_token.as_str())
+                    && completed.batch_ids.contains(&entry.batch.batch_id))
+            });
+        }
         let mut graph = self.session_graph.lock().expect("lock graph");
         let leaf_node_id = match &commit.graph {
             crate::store::GraphCommitDelta::Unchanged { leaf_node_id } => leaf_node_id.clone(),
@@ -372,6 +408,194 @@ impl crate::store::RuntimePersistence for RecordingStore {
             checkpoint_ref,
             manifest,
         })
+    }
+
+    async fn enqueue_queued_work(
+        &self,
+        batch: crate::QueuedWorkBatchDraft,
+    ) -> Result<crate::QueuedWorkBatch, crate::store::StoreError> {
+        let mut queued = self.queued_work.lock().expect("lock queued work");
+        if let Some(source_key) = batch.source_key.as_deref()
+            && let Some(existing) = queued.iter().find(|entry| {
+                entry.batch.session_id == batch.session_id
+                    && entry.batch.source_key.as_deref() == Some(source_key)
+            })
+        {
+            return Ok(existing.batch.clone());
+        }
+        let mut next_seq = self
+            .queued_work_next_seq
+            .lock()
+            .expect("lock queued work seq");
+        *next_seq = next_seq.saturating_add(1);
+        let batch_id = format!("recording-qwb-{next_seq}");
+        let enqueued_at_ms = current_epoch_ms();
+        let payloads = batch.payloads;
+        let stored = crate::QueuedWorkBatch {
+            batch_id: batch_id.clone(),
+            session_id: batch.session_id,
+            enqueue_seq: *next_seq,
+            source_key: batch.source_key,
+            delivery_policy: batch.delivery_policy,
+            slot_policy: batch.slot_policy,
+            merge_key: batch.merge_key,
+            available_at_ms: batch.available_at_ms,
+            enqueued_at_ms,
+            items: payloads
+                .into_iter()
+                .enumerate()
+                .map(|(index, payload)| crate::QueuedWorkItem {
+                    item_id: format!("{batch_id}:item:{index}"),
+                    payload,
+                })
+                .collect(),
+        };
+        queued.push(RecordingQueuedBatch {
+            batch: stored.clone(),
+            claim_id: None,
+            claim_token: None,
+            claim_owner_id: None,
+            claim_fencing_token: 0,
+            claim_expires_at_ms: 0,
+        });
+        queued.sort_by_key(|entry| entry.batch.enqueue_seq);
+        Ok(stored)
+    }
+
+    async fn claim_ready_queued_work(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        boundary: crate::QueuedWorkClaimBoundary,
+        lease_ttl_ms: u64,
+        max_batches: usize,
+    ) -> Result<Option<crate::QueuedWorkClaim>, crate::store::StoreError> {
+        if max_batches == 0 {
+            return Ok(None);
+        }
+        let now = current_epoch_ms();
+        let mut queued = self.queued_work.lock().expect("lock queued work");
+        queued.sort_by_key(|entry| entry.batch.enqueue_seq);
+        let first_index = queued.iter().position(|entry| {
+            entry.batch.session_id == session_id
+                && entry.batch.available_at_ms <= now
+                && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
+        });
+        let Some(first_index) = first_index else {
+            return Ok(None);
+        };
+        let first = queued[first_index].batch.clone();
+        if boundary == crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint
+            && first.delivery_policy != crate::DeliveryPolicy::EarliestSafeBoundary
+        {
+            return Ok(None);
+        }
+        let mut indices = vec![first_index];
+        if first.slot_policy == crate::SlotPolicy::Join {
+            for (index, entry) in queued.iter().enumerate().skip(first_index + 1) {
+                if indices.len() >= max_batches {
+                    break;
+                }
+                if entry.batch.session_id != session_id
+                    || entry.batch.available_at_ms > now
+                    || (entry.claim_token.is_some() && entry.claim_expires_at_ms > now)
+                    || entry.batch.slot_policy != crate::SlotPolicy::Join
+                    || entry.batch.delivery_policy != first.delivery_policy
+                    || entry.batch.merge_key != first.merge_key
+                {
+                    break;
+                }
+                indices.push(index);
+            }
+        }
+        let fencing_token = queued[first_index].claim_fencing_token.saturating_add(1);
+        let claim_id = format!("recording-qwc:{}:{fencing_token}", first.enqueue_seq);
+        let lease_token = format!("{session_id}:{owner_id}:{claim_id}:{now}");
+        let expires_at = now.saturating_add(lease_ttl_ms);
+        let mut batches = Vec::new();
+        for index in indices {
+            let entry = &mut queued[index];
+            entry.claim_id = Some(claim_id.clone());
+            entry.claim_token = Some(lease_token.clone());
+            entry.claim_owner_id = Some(owner_id.to_string());
+            entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
+            entry.claim_expires_at_ms = expires_at;
+            batches.push(entry.batch.clone());
+        }
+        Ok(Some(crate::QueuedWorkClaim {
+            session_id: session_id.to_string(),
+            claim_id,
+            owner_id: owner_id.to_string(),
+            lease_token,
+            fencing_token,
+            claimed_at_epoch_ms: now,
+            expires_at_epoch_ms: expires_at,
+            batches,
+        }))
+    }
+
+    async fn renew_queued_work_claim(
+        &self,
+        claim: &crate::QueuedWorkClaim,
+        lease_ttl_ms: u64,
+    ) -> Result<crate::QueuedWorkClaim, crate::store::StoreError> {
+        let mut queued = self.queued_work.lock().expect("lock queued work");
+        let expires_at = current_epoch_ms().saturating_add(lease_ttl_ms);
+        let mut changed = 0;
+        for entry in queued.iter_mut() {
+            if entry.batch.session_id == claim.session_id
+                && entry.claim_id.as_deref() == Some(claim.claim_id.as_str())
+                && entry.claim_token.as_deref() == Some(claim.lease_token.as_str())
+            {
+                entry.claim_expires_at_ms = expires_at;
+                changed += 1;
+            }
+        }
+        if changed != claim.batches.len() {
+            return Err(crate::store::StoreError::QueuedWorkClaimExpired {
+                session_id: claim.session_id.clone(),
+                claim_id: claim.claim_id.clone(),
+            });
+        }
+        Ok(crate::QueuedWorkClaim {
+            expires_at_epoch_ms: expires_at,
+            ..claim.clone()
+        })
+    }
+
+    async fn abandon_queued_work_claim(
+        &self,
+        claim: &crate::QueuedWorkClaim,
+    ) -> Result<(), crate::store::StoreError> {
+        let mut queued = self.queued_work.lock().expect("lock queued work");
+        for entry in queued.iter_mut() {
+            if entry.batch.session_id == claim.session_id
+                && entry.claim_id.as_deref() == Some(claim.claim_id.as_str())
+                && entry.claim_token.as_deref() == Some(claim.lease_token.as_str())
+            {
+                entry.claim_id = None;
+                entry.claim_token = None;
+                entry.claim_owner_id = None;
+                entry.claim_expires_at_ms = 0;
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_queued_work(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::QueuedWorkBatch>, crate::store::StoreError> {
+        let mut batches = self
+            .queued_work
+            .lock()
+            .expect("lock queued work")
+            .iter()
+            .filter(|entry| entry.batch.session_id == session_id)
+            .map(|entry| entry.batch.clone())
+            .collect::<Vec<_>>();
+        batches.sort_by_key(|batch| batch.enqueue_seq);
+        Ok(batches)
     }
 
     async fn claim_runtime_turn_lease(
@@ -524,7 +748,7 @@ impl crate::store::RuntimePersistence for RecordingStore {
                 (
                     record.session_id.clone(),
                     record.turn_id.clone(),
-                    record.idempotency_key.clone(),
+                    record.replay_key.clone(),
                 ),
                 record,
             );
@@ -539,7 +763,7 @@ impl crate::store::RuntimePersistence for RecordingStore {
         &self,
         session_id: &str,
         turn_id: &str,
-        idempotency_key: &str,
+        replay_key: &str,
     ) -> Result<Option<crate::RuntimeEffectJournalRecord>, crate::store::StoreError> {
         Ok(self
             .runtime_effect_journal
@@ -548,7 +772,7 @@ impl crate::store::RuntimePersistence for RecordingStore {
             .get(&(
                 session_id.to_string(),
                 turn_id.to_string(),
-                idempotency_key.to_string(),
+                replay_key.to_string(),
             ))
             .cloned())
     }
@@ -1144,48 +1368,6 @@ pub(crate) async fn standard_runtime_with_transport_and_host(
         standard_test_policy(),
         host,
         crate::RuntimeServices::new(plugin_session_with_tools("root", tools)),
-        RuntimeSessionState::default(),
-    )
-    .await
-    .expect("runtime");
-    runtime.policy.provider = transport.clone().into_handle();
-    runtime
-}
-
-pub(crate) async fn standard_runtime_with_bridge(
-    transport: TestProvider,
-    turn_injection_bridge: crate::TurnInjectionBridge,
-) -> LashRuntime {
-    let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
-    let mut runtime = LashRuntime::from_embedded_state(
-        standard_test_policy(),
-        test_host_config(),
-        crate::RuntimeServices::new_with_bridges(
-            plugin_session_with_tools("root", tools),
-            turn_injection_bridge,
-            crate::TurnInputInjectionBridge::new(),
-        ),
-        RuntimeSessionState::default(),
-    )
-    .await
-    .expect("runtime");
-    runtime.policy.provider = transport.clone().into_handle();
-    runtime
-}
-
-pub(crate) async fn standard_runtime_with_input_bridge(
-    transport: TestProvider,
-    turn_input_injection_bridge: crate::TurnInputInjectionBridge,
-) -> LashRuntime {
-    let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
-    let mut runtime = LashRuntime::from_embedded_state(
-        standard_test_policy(),
-        test_host_config(),
-        crate::RuntimeServices::new_with_bridges(
-            plugin_session_with_tools("root", tools),
-            crate::TurnInjectionBridge::new(),
-            turn_input_injection_bridge,
-        ),
         RuntimeSessionState::default(),
     )
     .await

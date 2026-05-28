@@ -1086,7 +1086,7 @@ fn snippet_preview_wraps_long_markdown_bullets_to_viewport_width() {
 #[test]
 fn lashlang_code_block_is_hidden_below_full_expand() {
     let blocks = vec![UiTimelineItem::LashlangCode(
-        "r = await TOOL.default.read_file({ path: \"a\" })\nsubmit r.value".to_string(),
+        "r = await tools.read_file({ path: \"a\" })\nsubmit r.value".to_string(),
     )];
     for level in [0u8, 1] {
         let rendered = render_block(&blocks, 0, level, 80, 24);
@@ -1401,7 +1401,7 @@ fn live_reasoning_compacts_after_turn_stops() {
 
 #[test]
 fn lashlang_code_block_renders_header_and_body_at_full_expand() {
-    let code = "r = await TOOL.default.read_file({ path: \"a\" })\nsubmit r.value";
+    let code = "r = await tools.read_file({ path: \"a\" })\nsubmit r.value";
     let blocks = vec![UiTimelineItem::LashlangCode(code.to_string())];
     let rendered = render_block(&blocks, 0, 2, 80, 24);
     let text: Vec<String> = rendered
@@ -1420,7 +1420,7 @@ fn lashlang_code_block_renders_header_and_body_at_full_expand() {
     );
     assert!(
         text.iter()
-            .any(|line| line.starts_with("╎ r = await TOOL.default.read_file")),
+            .any(|line| line.starts_with("╎ r = await tools.read_file")),
         "missing first code line in {text:?}",
     );
     assert!(

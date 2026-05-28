@@ -45,20 +45,20 @@ pub fn shell_prompt_contributions() -> Vec<PromptContribution> {
     shell_prompt_contributions_for_access(&SessionToolAccess::default())
 }
 
-/// Returns the shell prompt contributions, gating the `write_stdin`
+/// Returns the shell prompt contributions, gating the `shell.write`
 /// reference on whether that tool is actually callable in the current
 /// session.
 pub fn shell_prompt_contributions_for_access(
     access: &SessionToolAccess,
 ) -> Vec<PromptContribution> {
     let mut command_execution = String::from(
-        "Use `exec_command` for one-shot commands; it returns only after the process exits and successful results include `status: \"completed\"`, `done: true`, and `exit_code`. Use `start_command` only for interactive or intentionally long-lived processes; it may return `status: \"running\"`, `done: false`, and `session_id`, which means the output is partial and must not be treated as completion.",
+        "Use `shell.exec` for one-shot commands; it returns only after the process exits and successful results include `status: \"completed\"`, `done: true`, and `exit_code`. Use `shell.start` only for interactive or intentionally long-lived processes; it may return `status: \"running\"`, `done: false`, and `session_id`, which means the output is partial and must not be treated as completion.",
     );
     if tool_callable_from_authority(access, "write_stdin") {
-        command_execution.push_str(" Continue running sessions with `write_stdin`.");
+        command_execution.push_str(" Continue running sessions with `shell.write`.");
     }
     command_execution.push_str(
-        " For builds, installs, tests, migrations, service setup, and verification commands, use `exec_command` and wait for completion before concluding.",
+        " For builds, installs, tests, migrations, service setup, and verification commands, use `shell.exec` and wait for completion before concluding.",
     );
     vec![
         PromptContribution::guidance("Command Execution", command_execution),
@@ -199,7 +199,7 @@ impl ShellRuntime {
     fn command_for_spawn(&self, command: &str, shell_path: &str, pty: bool) -> String {
         let shell_name = Self::shell_name(shell_path);
         let echo_off = if pty {
-            // Disable terminal echo so bytes delivered via `write_stdin`
+            // Disable terminal echo so bytes delivered via `shell.write`
             // don't appear in the captured output stream. The PTY allocates
             // with `ECHO` on by default (matching interactive terminals),
             // but agents drive these sessions programmatically and the echo
@@ -1264,8 +1264,8 @@ impl ToolProvider for StandardShell {
 
 impl StandardShell {
     fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        let exec_command_description = "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and the result has `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`; by default this fails the tool. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes (including SIGPIPE 141 from `cmd | head`-style pipelines) fail the tool by default. Pass `allow_nonzero_exit: true` to receive the result without failure on either nonzero exit or timeout, then inspect `exit_code` and `timed_out`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.";
-        let start_command_description = "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. Use `poll_ms` only to choose the initial observation window; use `exec_command.timeout_ms` for bounded one-shot commands. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.";
+        let exec_command_description = "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and the result has `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`; by default this fails the tool. Use `shell.start` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes (including SIGPIPE 141 from `cmd | head`-style pipelines) fail the tool by default. Pass `allow_nonzero_exit: true` to receive the result without failure on either nonzero exit or timeout, then inspect `exit_code` and `timed_out`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.";
+        let start_command_description = "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. Use `poll_ms` only to choose the initial observation window; use `shell.exec.timeout_ms` for bounded one-shot commands. Use `shell.exec` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.";
         let command_common = |command_description: &str| {
             json!({
                 "cmd": {
@@ -1316,10 +1316,14 @@ impl StandardShell {
                 output_schema.clone(),
             )
             .with_examples(vec![
-                r#"exec_command(cmd="cargo test -p lash-protocol-rlm", timeout_ms=600000)"#.into(),
-                r#"exec_command(cmd="test -f Cargo.lock", allow_nonzero_exit=true)"#.into(),
+                r#"await shell.exec({ cmd: "cargo test -p lash-protocol-rlm", timeout_ms: 600000 })?"#.into(),
+                r#"await shell.exec({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata("shell", &["shell", "bash"]))
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["shell"],
+                "exec",
+                &["shell", "bash"],
+            ))
             .with_scheduling(ToolScheduling::Serial),
             ToolDefinition::raw(
                 "tool:start_command",
@@ -1338,17 +1342,18 @@ impl StandardShell {
                 output_schema.clone(),
             )
             .with_examples(vec![
-                r#"start_command(cmd="python -m http.server 8000", poll_ms=1000)"#.into(),
+                r#"await shell.start({ cmd: "python -m http.server 8000", poll_ms: 1000 })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata(
-                "shell",
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["shell"],
+                "start",
                 &["long_running_command", "pty"],
             ))
             .with_scheduling(ToolScheduling::Serial),
             ToolDefinition::raw(
                 "tool:write_stdin",
                 "write_stdin",
-                "Write bytes to a running command handle from `start_command` and poll for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. Results with `status: \"running\"`, `done: false`, and `session_id` are partial; continue polling or writing until a completed result with `exit_code` if command completion matters. If the process exits, nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
+                "Write bytes to a running command handle from `shell.start` and poll for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. Results with `status: \"running\"`, `done: false`, and `session_id` are partial; continue polling or writing until a completed result with `exit_code` if command completion matters. If the process exits, nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
                 object_schema(
                     json!({
                         "session_id": {
@@ -1387,11 +1392,12 @@ impl StandardShell {
                 output_schema,
             )
             .with_examples(vec![
-                r#"write_stdin(session_id=1, chars="status\n", poll_ms=1000)"#.into(),
-                r#"write_stdin(session_id=1, chars="", close_stdin=true)"#.into(),
+                r#"await shell.write({ session_id: 1, chars: "status\n", poll_ms: 1000 })?"#.into(),
+                r#"await shell.write({ session_id: 1, chars: "", close_stdin: true })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata(
-                "shell",
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["shell"],
+                "write",
                 &["send_stdin", "poll_command"],
             ))
             .with_scheduling(ToolScheduling::Serial),
@@ -1782,7 +1788,7 @@ fn parse_standard_session_id(args: &serde_json::Value) -> Result<String, ToolRes
 /// PluginFactory for the built-in shell tool surface.
 ///
 /// Wires `StandardShell` into the active session with the access-gated
-/// `write_stdin` mention in the prompt contribution so the model only
+/// `shell.write` mention in the prompt contribution so the model only
 /// sees that bullet when the tool is actually callable.
 #[derive(Default)]
 pub struct StandardShellPluginFactory;
@@ -2310,7 +2316,7 @@ mod tests {
 
         assert!(properties.contains_key("poll_ms"));
         assert!(!properties.contains_key("timeout_ms"));
-        assert!(definition.description.contains("exec_command.timeout_ms"));
+        assert!(definition.description.contains("shell.exec.timeout_ms"));
         assert!(
             properties["poll_ms"]["description"]
                 .as_str()

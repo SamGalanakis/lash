@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use lash_core::plugin::StaticPluginFactory;
 use lash_core::{
-    PluginError, PluginFactory, PluginSpec, ToolCall, ToolContract, ToolDefinition,
-    ToolDiscoveryMetadata, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
+    PluginError, PluginFactory, PluginSpec, ToolAgentSurface, ToolCall, ToolContract,
+    ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 use serde_json::json;
 
@@ -160,14 +160,14 @@ fn ask_tool_definition() -> ToolDefinition {
                 json!({ "type": "object", "additionalProperties": true }),
             )
             .with_examples(vec![
-                "ask(question=\"Which environment should I use?\", options=[\"staging\", \"prod\"])"
+                "await user.ask({ question: \"Which environment should I use?\", options: [\"staging\", \"prod\"] })?"
                     .into(),
-                "ask(question=\"Which checks should I run?\", options=[\"unit\", \"lint\", \"e2e\"], selection_mode=\"multi\")".into(),
+                "await user.ask({ question: \"Which checks should I run?\", options: [\"unit\", \"lint\", \"e2e\"], selection_mode: \"multi\" })?".into(),
             ])
-            .with_discovery(ToolDiscoveryMetadata {
-                namespace: Some("user".to_string()),
-                aliases: vec!["prompt_user".to_string(), "request_input".to_string()],
-            })
+            .with_agent_surface(
+                ToolAgentSurface::new(["user"], "ask")
+                    .with_aliases(["prompt_user", "request_input"]),
+            )
             .with_scheduling(ToolScheduling::Parallel)
 }
 

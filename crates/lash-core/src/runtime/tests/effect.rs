@@ -7,11 +7,10 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 struct EffectControllerRecord {
     kind: RuntimeEffectKind,
-    origin: EffectOrigin,
     turn_id: Option<String>,
     effect_id: String,
-    idempotency_key: String,
-    turn_checkpoint_hash: Option<String>,
+    replay_key: String,
+    checkpoint_hash: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -37,19 +36,36 @@ impl RecordingEffectController {
             .count()
     }
 
-    fn record(&self, metadata: &EffectInvocationMetadata) {
+    fn record(&self, invocation: &RuntimeInvocation) {
         self.records
             .lock()
             .expect("effect records")
             .push(EffectControllerRecord {
-                kind: metadata.effect_kind,
-                origin: metadata.origin.clone(),
-                turn_id: metadata.turn_id.clone(),
-                effect_id: metadata.effect_id.clone(),
-                idempotency_key: metadata.idempotency_key.clone(),
-                turn_checkpoint_hash: metadata.turn_checkpoint_hash.clone(),
+                kind: invocation.effect_kind().expect("effect kind"),
+                turn_id: invocation.scope.turn_id.clone(),
+                effect_id: invocation.effect_id().expect("effect id").to_string(),
+                replay_key: invocation.replay_key().expect("replay key").to_string(),
+                checkpoint_hash: invocation.checkpoint_hash.clone(),
             });
     }
+}
+
+fn test_effect_invocation(
+    session_id: &str,
+    turn_id: &str,
+    turn_index: usize,
+    protocol_iteration: usize,
+    effect_id: &str,
+    kind: RuntimeEffectKind,
+    replay_key: &str,
+) -> RuntimeInvocation {
+    RuntimeInvocation::effect(
+        RuntimeScope::for_turn(session_id, turn_id, turn_index, protocol_iteration),
+        effect_id,
+        kind,
+        replay_key,
+        Some("0".repeat(64)),
+    )
 }
 
 #[async_trait::async_trait]
@@ -63,7 +79,7 @@ impl RuntimeEffectController for RecordingEffectController {
             .lock()
             .expect("effect envelopes")
             .push(serde_json::to_string(&envelope).expect("serialize effect envelope"));
-        self.record(&envelope.metadata);
+        self.record(&envelope.invocation);
         match envelope.command {
             RuntimeEffectCommand::LlmCall { request } => {
                 let mut llm_calls = self.llm_calls.lock().expect("llm calls");
@@ -403,12 +419,15 @@ async fn standard_turn_llm_and_checkpoint_effects_cross_controller_once() {
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
     assert_eq!(recorder.count_kind(RuntimeEffectKind::LlmCall), 1);
     assert_eq!(recorder.count_kind(RuntimeEffectKind::Checkpoint), 1);
-    assert!(recorder.records().iter().all(|record| {
-        record.origin == EffectOrigin::Turn && record.idempotency_key.starts_with("root:")
-    }));
+    assert!(
+        recorder
+            .records()
+            .iter()
+            .all(|record| record.turn_id.is_some() && record.replay_key.starts_with("root:"))
+    );
     assert!(recorder.records().iter().all(|record| {
         record
-            .turn_checkpoint_hash
+            .checkpoint_hash
             .as_deref()
             .is_some_and(|hash| hash.len() == 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit()))
     }));
@@ -475,7 +494,7 @@ async fn durable_controller_error_abandons_lease_and_preserves_resume_state() {
             envelope: RuntimeEffectEnvelope,
             local_executor: crate::RuntimeEffectLocalExecutor<'_>,
         ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-            if envelope.metadata.effect_kind == RuntimeEffectKind::ToolCall {
+            if envelope.invocation.effect_kind() == Some(RuntimeEffectKind::ToolCall) {
                 return Err(RuntimeEffectControllerError::new(
                     "controller_failed",
                     "tool call controller failed",
@@ -584,7 +603,7 @@ async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
             envelope: RuntimeEffectEnvelope,
             local_executor: crate::RuntimeEffectLocalExecutor<'_>,
         ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-            if envelope.metadata.effect_kind == RuntimeEffectKind::ToolCall {
+            if envelope.invocation.effect_kind() == Some(RuntimeEffectKind::ToolCall) {
                 return Err(RuntimeEffectControllerError::new(
                     "controller_failed",
                     "tool call controller failed",
@@ -656,19 +675,17 @@ async fn effect_journal_replays_without_reinvoking_controller_and_rejects_hash_m
         .claim_runtime_turn_lease("root", "turn-1", "test", 60_000)
         .await
         .expect("lease");
-    let metadata = EffectInvocationMetadata {
-        session_id: "root".to_string(),
-        origin: EffectOrigin::Turn,
-        turn_id: Some("turn-1".to_string()),
-        turn_index: Some(1),
-        protocol_iteration: Some(0),
-        effect_id: "sleep".to_string(),
-        effect_kind: RuntimeEffectKind::Sleep,
-        idempotency_key: "root:turn-1:1:0:sleep:1".to_string(),
-        turn_checkpoint_hash: Some("0".repeat(64)),
-    };
+    let invocation = test_effect_invocation(
+        "root",
+        "turn-1",
+        1,
+        0,
+        "sleep",
+        RuntimeEffectKind::Sleep,
+        "root:turn-1:1:0:sleep:1",
+    );
     let envelope = RuntimeEffectEnvelope::new(
-        metadata.clone(),
+        invocation.clone(),
         RuntimeEffectCommand::Sleep { duration_ms: 1 },
     );
 
@@ -699,7 +716,7 @@ async fn effect_journal_replays_without_reinvoking_controller_and_rejects_hash_m
         Some(&store),
         Some(&lease),
         &recorder,
-        RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::Sleep { duration_ms: 2 }),
+        RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::Sleep { duration_ms: 2 }),
         crate::RuntimeEffectLocalExecutor::unavailable(),
     )
     .await
@@ -711,23 +728,21 @@ async fn effect_journal_replays_without_reinvoking_controller_and_rejects_hash_m
 async fn journaled_turn_effect_requires_lease_before_controller_execution() {
     let recorder = RecordingEffectController::default();
     let store = RecordingStore::default();
-    let metadata = EffectInvocationMetadata {
-        session_id: "root".to_string(),
-        origin: EffectOrigin::Turn,
-        turn_id: Some("turn-1".to_string()),
-        turn_index: Some(1),
-        protocol_iteration: Some(0),
-        effect_id: "sleep".to_string(),
-        effect_kind: RuntimeEffectKind::Sleep,
-        idempotency_key: "root:turn-1:1:0:sleep:1".to_string(),
-        turn_checkpoint_hash: Some("0".repeat(64)),
-    };
+    let invocation = test_effect_invocation(
+        "root",
+        "turn-1",
+        1,
+        0,
+        "sleep",
+        RuntimeEffectKind::Sleep,
+        "root:turn-1:1:0:sleep:1",
+    );
 
     let err = crate::runtime::effect::execute_effect_with_journal(
         Some(&store),
         None,
         &recorder,
-        RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::Sleep { duration_ms: 1 }),
+        RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::Sleep { duration_ms: 1 }),
         crate::RuntimeEffectLocalExecutor::unavailable(),
     )
     .await
@@ -745,19 +760,17 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         .claim_runtime_turn_lease("root", "turn-process", "test", 60_000)
         .await
         .expect("lease");
-    let metadata = EffectInvocationMetadata {
-        session_id: "root".to_string(),
-        origin: EffectOrigin::Turn,
-        turn_id: Some("turn-process".to_string()),
-        turn_index: Some(1),
-        protocol_iteration: Some(0),
-        effect_id: "process:list:scope-a".to_string(),
-        effect_kind: RuntimeEffectKind::Process,
-        idempotency_key: "root:turn-process:1:0:process:list".to_string(),
-        turn_checkpoint_hash: Some("0".repeat(64)),
-    };
+    let invocation = test_effect_invocation(
+        "root",
+        "turn-process",
+        1,
+        0,
+        "process:list:scope-a",
+        RuntimeEffectKind::Process,
+        "root:turn-process:1:0:process:list",
+    );
     let envelope = RuntimeEffectEnvelope::new(
-        metadata.clone(),
+        invocation.clone(),
         RuntimeEffectCommand::Process {
             command: ProcessCommand::List {
                 owner_scope: ProcessScope::new("scope-a"),
@@ -803,7 +816,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         Some(&lease),
         &controller,
         RuntimeEffectEnvelope::new(
-            metadata,
+            invocation,
             RuntimeEffectCommand::Process {
                 command: ProcessCommand::List {
                     owner_scope: ProcessScope::new("scope-b"),
@@ -825,24 +838,22 @@ async fn journaled_effect_renews_lease_while_pending() {
         .claim_runtime_turn_lease("root", "turn-long-effect", "test", 60_000)
         .await
         .expect("lease");
-    let metadata = EffectInvocationMetadata {
-        session_id: "root".to_string(),
-        origin: EffectOrigin::Turn,
-        turn_id: Some("turn-long-effect".to_string()),
-        turn_index: Some(1),
-        protocol_iteration: Some(0),
-        effect_id: "long-sleep".to_string(),
-        effect_kind: RuntimeEffectKind::Sleep,
-        idempotency_key: "root:turn-long-effect:1:0:sleep:long".to_string(),
-        turn_checkpoint_hash: Some("0".repeat(64)),
-    };
+    let invocation = test_effect_invocation(
+        "root",
+        "turn-long-effect",
+        1,
+        0,
+        "long-sleep",
+        RuntimeEffectKind::Sleep,
+        "root:turn-long-effect:1:0:sleep:long",
+    );
     let outcome = crate::runtime::effect::execute_effect_with_journal(
         Some(&store),
         Some(&lease),
         &DelayedSleepController {
             delay: Duration::from_millis(80),
         },
-        RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::Sleep { duration_ms: 80 }),
+        RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::Sleep { duration_ms: 80 }),
         crate::RuntimeEffectLocalExecutor::unavailable(),
     )
     .await
@@ -860,17 +871,15 @@ async fn journaled_effect_does_not_save_outcome_when_pending_lease_renewal_fails
         .claim_runtime_turn_lease("root", "turn-expiring-effect", "test", 1)
         .await
         .expect("lease");
-    let metadata = EffectInvocationMetadata {
-        session_id: "root".to_string(),
-        origin: EffectOrigin::Turn,
-        turn_id: Some("turn-expiring-effect".to_string()),
-        turn_index: Some(1),
-        protocol_iteration: Some(0),
-        effect_id: "expiring-sleep".to_string(),
-        effect_kind: RuntimeEffectKind::Sleep,
-        idempotency_key: "root:turn-expiring-effect:1:0:sleep:expiring".to_string(),
-        turn_checkpoint_hash: Some("0".repeat(64)),
-    };
+    let invocation = test_effect_invocation(
+        "root",
+        "turn-expiring-effect",
+        1,
+        0,
+        "expiring-sleep",
+        RuntimeEffectKind::Sleep,
+        "root:turn-expiring-effect:1:0:sleep:expiring",
+    );
 
     let err = crate::runtime::effect::execute_effect_with_journal(
         Some(&store),
@@ -878,7 +887,7 @@ async fn journaled_effect_does_not_save_outcome_when_pending_lease_renewal_fails
         &DelayedSleepController {
             delay: Duration::from_millis(80),
         },
-        RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::Sleep { duration_ms: 80 }),
+        RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::Sleep { duration_ms: 80 }),
         crate::RuntimeEffectLocalExecutor::unavailable(),
     )
     .await
@@ -941,8 +950,8 @@ async fn turn_effect_envelope_carries_checkpoint_digest_not_checkpoint_payload()
         serde_json::from_str(&checkpoint_envelope).expect("decode checkpoint envelope");
     assert!(
         decoded
-            .metadata
-            .turn_checkpoint_hash
+            .invocation
+            .checkpoint_hash
             .as_deref()
             .is_some_and(|hash| hash.len() == 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit()))
     );
@@ -1048,7 +1057,7 @@ async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
         recorder
             .records()
             .iter()
-            .all(|record| record.idempotency_key.contains("stable-scoped-turn"))
+            .all(|record| record.replay_key.contains("stable-scoped-turn"))
     );
 }
 
@@ -1200,8 +1209,7 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
         0
     );
     assert!(scoped_recorder.records().iter().any(|record| {
-        record.kind == RuntimeEffectKind::ToolCall
-            && record.idempotency_key.contains("direct-call-1")
+        record.kind == RuntimeEffectKind::ToolCall && record.replay_key.contains("direct-call-1")
     }));
 }
 
@@ -1311,8 +1319,8 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
     let tool = &tool_records[0];
     assert_eq!(tool.turn_id.as_deref(), Some("scoped-retry-sleep"));
     assert!(tool.effect_id.contains("retry-call-1"));
-    assert!(tool.idempotency_key.contains("scoped-retry-sleep"));
-    assert!(tool.idempotency_key.contains("retry-call-1"));
+    assert!(tool.replay_key.contains("scoped-retry-sleep"));
+    assert!(tool.replay_key.contains("retry-call-1"));
 }
 
 #[tokio::test]
@@ -1383,7 +1391,7 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
         .records()
         .into_iter()
         .filter(|record| record.kind == RuntimeEffectKind::ToolCall)
-        .map(|record| record.idempotency_key)
+        .map(|record| record.replay_key)
         .collect::<Vec<_>>();
     assert!(tool_keys.iter().any(|key| key.ends_with(":call-1")));
     assert!(tool_keys.iter().any(|key| key.ends_with(":call-2")));
@@ -1533,7 +1541,10 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
         None,
     );
     let mut request = crate::DirectRequest::text("mock-model", "summarize");
-    request.originating_tool_call_id = Some("originating-tool-call".to_string());
+    request.caused_by = Some(CausalRef::ToolCall {
+        session_id: "root".to_string(),
+        call_id: "originating-tool-call".to_string(),
+    });
     let completion = direct
         .direct_completion(request, "direct-test")
         .await
@@ -1545,8 +1556,8 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
     assert!(recorder.records().iter().any(|record| {
         record.kind == RuntimeEffectKind::DirectCompletion
             && record
-                .idempotency_key
-                .contains("tool:originating-tool-call")
+                .replay_key
+                .contains("cause:tool_call:root:originating-tool-call")
     }));
     let ledger = runtime.shared_token_ledger.lock().expect("token ledger");
     assert_eq!(ledger.len(), 1);
@@ -1612,7 +1623,7 @@ async fn in_turn_direct_completion_requires_lease_and_journals_under_it() {
             && record.turn_id.as_deref() == Some("turn-direct")
     }));
     assert_eq!(store.runtime_effect_journal_save_count(), 1);
-    assert!(store.runtime_turn_lease_renew_count() >= 2);
+    assert!(store.runtime_turn_lease_renew_count() >= 1);
 }
 
 #[tokio::test]

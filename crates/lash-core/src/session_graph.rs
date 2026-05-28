@@ -75,9 +75,68 @@ pub struct SessionNodeRecord {
     pub node_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caused_by: Option<crate::CausalRef>,
     pub timestamp: String,
     #[serde(flatten)]
     pub payload: SessionNodePayload,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SessionNodeDraft {
+    payload: SessionNodeDraftPayload,
+    node_id: Option<String>,
+    caused_by: Option<crate::CausalRef>,
+}
+
+#[derive(Clone, Debug)]
+enum SessionNodeDraftPayload {
+    Message(Message),
+    Plugin {
+        plugin_type: String,
+        body: serde_json::Value,
+    },
+    ProtocolEvent(ProtocolEvent),
+}
+
+impl SessionNodeDraft {
+    pub(crate) fn message(message: Message) -> Self {
+        Self {
+            payload: SessionNodeDraftPayload::Message(message),
+            node_id: None,
+            caused_by: None,
+        }
+    }
+
+    pub(crate) fn plugin(plugin_type: impl Into<String>, body: serde_json::Value) -> Self {
+        Self {
+            payload: SessionNodeDraftPayload::Plugin {
+                plugin_type: plugin_type.into(),
+                body,
+            },
+            node_id: None,
+            caused_by: None,
+        }
+    }
+
+    pub(crate) fn protocol_event(event: ProtocolEvent) -> Self {
+        Self {
+            payload: SessionNodeDraftPayload::ProtocolEvent(event),
+            node_id: None,
+            caused_by: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn with_node_id(mut self, node_id: impl Into<String>) -> Self {
+        self.node_id = Some(node_id.into());
+        self
+    }
+
+    pub(crate) fn with_caused_by(mut self, caused_by: Option<crate::CausalRef>) -> Self {
+        self.caused_by = caused_by;
+        self
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -215,27 +274,7 @@ impl SessionGraphAppendBuilder {
     where
         I: IntoIterator<Item = Message>,
     {
-        let mut nodes = Vec::new();
-        for mut message in messages {
-            if message.id.is_empty() {
-                message.id = fresh_node_id("m");
-            }
-            let node_id = unique_message_node_id(&message.id, &self.existing_ids);
-            self.existing_ids.insert(node_id.clone());
-            let parent_node_id = self.leaf_node_id.clone();
-            self.leaf_node_id = Some(node_id.clone());
-            nodes.push(SessionNodeRecord {
-                node_id,
-                parent_node_id,
-                timestamp: Utc::now().to_rfc3339(),
-                payload: SessionNodePayload::Event {
-                    event: SessionEventRecord::Conversation(ConversationRecord::from_message(
-                        message,
-                    )),
-                },
-            });
-        }
-        nodes
+        self.append_drafts(messages.into_iter().map(SessionNodeDraft::message))
     }
 
     pub(crate) fn append_tool_call_records<I>(&mut self, records: I) -> Vec<SessionNodeRecord>
@@ -252,6 +291,7 @@ impl SessionGraphAppendBuilder {
             nodes.push(SessionNodeRecord {
                 node_id,
                 parent_node_id,
+                caused_by: None,
                 timestamp: Utc::now().to_rfc3339(),
                 payload: SessionNodePayload::Event {
                     event: SessionEventRecord::Tool(ToolEvent::Invocation { stable_key, record }),
@@ -265,19 +305,71 @@ impl SessionGraphAppendBuilder {
     where
         I: IntoIterator<Item = ProtocolEvent>,
     {
+        self.append_drafts(events.into_iter().map(SessionNodeDraft::protocol_event))
+    }
+
+    pub(crate) fn append_drafts<I>(&mut self, drafts: I) -> Vec<SessionNodeRecord>
+    where
+        I: IntoIterator<Item = SessionNodeDraft>,
+    {
         let mut nodes = Vec::new();
-        for event in events {
-            let node_id = fresh_semantic_node_id("protocol", &self.existing_ids);
-            self.existing_ids.insert(node_id.clone());
+        for draft in drafts {
             let parent_node_id = self.leaf_node_id.clone();
+            let (node_id, caused_by, payload) = match draft.payload {
+                SessionNodeDraftPayload::Message(mut message) => {
+                    if message.id.is_empty() {
+                        message.id = fresh_node_id("m");
+                    }
+                    let node_id = draft
+                        .node_id
+                        .unwrap_or_else(|| unique_message_node_id(&message.id, &self.existing_ids));
+                    let caused_by = draft
+                        .caused_by
+                        .or_else(|| causal_ref_from_message_origin(&message.origin));
+                    (
+                        node_id,
+                        caused_by,
+                        SessionNodePayload::Event {
+                            event: SessionEventRecord::Conversation(
+                                ConversationRecord::from_message(message),
+                            ),
+                        },
+                    )
+                }
+                SessionNodeDraftPayload::Plugin { plugin_type, body } => {
+                    let node_id = draft
+                        .node_id
+                        .unwrap_or_else(|| fresh_semantic_node_id("plugin", &self.existing_ids));
+                    (
+                        node_id,
+                        draft.caused_by,
+                        SessionNodePayload::Plugin {
+                            plugin_type,
+                            body: SharedJsonValue::new(body),
+                        },
+                    )
+                }
+                SessionNodeDraftPayload::ProtocolEvent(event) => {
+                    let node_id = draft
+                        .node_id
+                        .unwrap_or_else(|| fresh_semantic_node_id("protocol", &self.existing_ids));
+                    (
+                        node_id,
+                        draft.caused_by,
+                        SessionNodePayload::Event {
+                            event: SessionEventRecord::Protocol(event),
+                        },
+                    )
+                }
+            };
+            self.existing_ids.insert(node_id.clone());
             self.leaf_node_id = Some(node_id.clone());
             nodes.push(SessionNodeRecord {
                 node_id,
                 parent_node_id,
+                caused_by,
                 timestamp: Utc::now().to_rfc3339(),
-                payload: SessionNodePayload::Event {
-                    event: SessionEventRecord::Protocol(event),
-                },
+                payload,
             });
         }
         nodes
@@ -581,35 +673,7 @@ impl SessionGraph {
         if messages.is_empty() {
             return;
         }
-
-        let messages = messages.into_iter();
-        let mut existing_ids = self
-            .nodes
-            .iter()
-            .map(|node| node.node_id.clone())
-            .collect::<HashSet<_>>();
-        let mut parent_node_id = self.leaf_node_id.clone();
-        let mut nodes = Vec::with_capacity(messages.len());
-        for mut message in messages {
-            if message.id.is_empty() {
-                message.id = fresh_node_id("m");
-            }
-            let node_id = unique_message_node_id(&message.id, &existing_ids);
-            existing_ids.insert(node_id.clone());
-            nodes.push(SessionNodeRecord {
-                node_id: node_id.clone(),
-                parent_node_id,
-                timestamp: Utc::now().to_rfc3339(),
-                payload: SessionNodePayload::Event {
-                    event: SessionEventRecord::Conversation(ConversationRecord::from_message(
-                        message,
-                    )),
-                },
-            });
-            parent_node_id = Some(node_id);
-        }
-
-        self.append_prebuilt_nodes(nodes);
+        self.append_node_drafts(messages.into_iter().map(SessionNodeDraft::message));
     }
 
     fn append_prebuilt_nodes(&mut self, nodes: Vec<SessionNodeRecord>) {
@@ -643,44 +707,8 @@ impl SessionGraph {
         }
     }
 
-    pub fn append_message(&mut self, mut message: Message) -> String {
-        if message.id.is_empty() {
-            message.id = fresh_node_id("m");
-        }
-        let existing_ids = self
-            .nodes
-            .iter()
-            .map(|node| node.node_id.clone())
-            .collect::<HashSet<_>>();
-        let node_id = unique_message_node_id(&message.id, &existing_ids);
-        let previous_leaf = self.leaf_node_id.clone();
-        let parent_node_id = previous_leaf.clone();
-        let node = SessionNodeRecord {
-            node_id: node_id.clone(),
-            parent_node_id,
-            timestamp: Utc::now().to_rfc3339(),
-            payload: SessionNodePayload::Event {
-                event: SessionEventRecord::Conversation(ConversationRecord::from_message(message)),
-            },
-        };
-        self.detach_initialized_cache_for_append();
-        if let Some(cache_lock) = Arc::get_mut(&mut self.cache)
-            && let Some(cache) = cache_lock.get_mut()
-        {
-            let data = Arc::make_mut(&mut self.inner);
-            data.nodes.push(node);
-            cache.append_node(
-                data.nodes.len() - 1,
-                data.nodes.last().expect("just appended graph node"),
-                previous_leaf.as_deref(),
-            );
-            data.leaf_node_id = Some(node_id.clone());
-            return node_id;
-        }
-        let data = self.data_mut();
-        data.nodes.push(node);
-        data.leaf_node_id = Some(node_id.clone());
-        node_id
+    pub fn append_message(&mut self, message: Message) -> String {
+        self.append_node_draft(SessionNodeDraft::message(message))
     }
 
     pub fn append_plugin(
@@ -688,41 +716,7 @@ impl SessionGraph {
         plugin_type: impl Into<String>,
         body: serde_json::Value,
     ) -> String {
-        let existing_ids = self
-            .nodes
-            .iter()
-            .map(|node| node.node_id.clone())
-            .collect::<HashSet<_>>();
-        let node_id = fresh_semantic_node_id("plugin", &existing_ids);
-        let previous_leaf = self.leaf_node_id.clone();
-        let parent_node_id = previous_leaf.clone();
-        let node = SessionNodeRecord {
-            node_id: node_id.clone(),
-            parent_node_id,
-            timestamp: Utc::now().to_rfc3339(),
-            payload: SessionNodePayload::Plugin {
-                plugin_type: plugin_type.into(),
-                body: SharedJsonValue::new(body),
-            },
-        };
-        self.detach_initialized_cache_for_append();
-        if let Some(cache_lock) = Arc::get_mut(&mut self.cache)
-            && let Some(cache) = cache_lock.get_mut()
-        {
-            let data = Arc::make_mut(&mut self.inner);
-            data.nodes.push(node);
-            cache.append_node(
-                data.nodes.len() - 1,
-                data.nodes.last().expect("just appended graph node"),
-                previous_leaf.as_deref(),
-            );
-            data.leaf_node_id = Some(node_id.clone());
-            return node_id;
-        }
-        let data = self.data_mut();
-        data.nodes.push(node);
-        data.leaf_node_id = Some(node_id.clone());
-        node_id
+        self.append_node_draft(SessionNodeDraft::plugin(plugin_type, body))
     }
 
     pub fn active_path_nodes(&self) -> Vec<&SessionNodeRecord> {
@@ -749,15 +743,28 @@ impl SessionGraph {
     }
 
     pub fn append_protocol_event(&mut self, event: ProtocolEvent) -> String {
+        self.append_node_draft(SessionNodeDraft::protocol_event(event))
+    }
+
+    pub(crate) fn append_node_draft(&mut self, draft: SessionNodeDraft) -> String {
+        self.append_node_drafts([draft])
+            .into_iter()
+            .next()
+            .expect("single draft append must create one node")
+    }
+
+    pub(crate) fn append_node_drafts<I>(&mut self, drafts: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = SessionNodeDraft>,
+    {
         let mut builder = self.append_builder();
-        let nodes = builder.append_protocol_events([event]);
-        let node_id = nodes
-            .first()
-            .expect("protocol event append must create one node")
-            .node_id
-            .clone();
+        let nodes = builder.append_drafts(drafts);
+        let node_ids = nodes
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect::<Vec<_>>();
         self.append_prebuilt_nodes(nodes);
-        node_id
+        node_ids
     }
 
     pub(crate) fn append_tool_call_records<I>(&mut self, records: I) -> Vec<String>
@@ -1082,6 +1089,7 @@ pub(crate) fn build_active_read_replacement<'a>(
                 SessionNodeRecord {
                     node_id,
                     parent_node_id,
+                    caused_by: causal_ref_from_message_origin(&message.origin),
                     timestamp: Utc::now().to_rfc3339(),
                     payload: SessionNodePayload::Event {
                         event: SessionEventRecord::Conversation(ConversationRecord::from_message(
@@ -1099,6 +1107,7 @@ pub(crate) fn build_active_read_replacement<'a>(
                 SessionNodeRecord {
                     node_id,
                     parent_node_id,
+                    caused_by: None,
                     timestamp: Utc::now().to_rfc3339(),
                     payload: SessionNodePayload::Event {
                         event: SessionEventRecord::Tool(ToolEvent::Invocation {
@@ -1181,6 +1190,23 @@ fn tool_call_active_read_key(stable_key: &str, record: &ToolCallRecord) -> Strin
 pub(crate) fn tool_call_record_active_read_key(record: &ToolCallRecord) -> String {
     let stable_key = stable_tool_call_key(record);
     tool_call_active_read_key(&stable_key, record)
+}
+
+fn causal_ref_from_message_origin(
+    origin: &Option<crate::MessageOrigin>,
+) -> Option<crate::CausalRef> {
+    let Some(crate::MessageOrigin::Process {
+        process_id,
+        sequence,
+        ..
+    }) = origin
+    else {
+        return None;
+    };
+    Some(crate::CausalRef::ProcessEvent {
+        process_id: process_id.clone(),
+        sequence: *sequence,
+    })
 }
 
 fn unique_tool_node_id(stable_key: &str, existing_ids: &HashSet<String>) -> String {

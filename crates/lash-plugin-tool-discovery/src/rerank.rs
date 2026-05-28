@@ -65,8 +65,8 @@ pub(crate) fn llm_rerank_request(
         stream_events: None,
         generation: lash_core::GenerationOptions::default(),
         session_id: None,
-        originating_tool_call_id: None,
-        idempotency_key: None,
+        caused_by: None,
+                    replay: None,
     }
 }
 
@@ -85,7 +85,7 @@ fn llm_rerank_prompt(args: &Value, candidates: &[Value], limit: usize) -> String
             "Do not include tools outside the candidate list."
         ],
         "query": args.get("query").and_then(Value::as_str).unwrap_or_default(),
-        "namespace": args.get("namespace").cloned().unwrap_or(Value::Null),
+        "module": args.get("module").cloned().unwrap_or(Value::Null),
         "exclude": args.get("exclude").cloned().unwrap_or_else(|| json!([])),
         "limit": limit,
         "candidates": compact_candidates,
@@ -182,8 +182,8 @@ mod tests {
     #[test]
     fn llm_rerank_request_uses_structured_name_enum_schema() {
         let candidates = vec![
-            json!({"name": "read_file", "signature": "read_file() -> str", "description": "Read file"}),
-            json!({"name": "search_web", "signature": "search_web(query: str) -> record", "description": "Search web"}),
+            json!({"name": "read_file", "signature": "await files.read({ path: str })? -> str", "description": "Read file"}),
+            json!({"name": "search_web", "signature": "await web.search({ query: str })? -> record", "description": "Search web"}),
         ];
 
         let request = llm_rerank_request(&json!({"query": "find docs"}), &candidates, 2);
@@ -224,7 +224,9 @@ mod tests {
 
     #[test]
     fn llm_rerank_prompt_excludes_filtered_candidates() {
-        let candidates = vec![json!({"name": "search_web", "signature": "search_web() -> str"})];
+        let candidates = vec![
+            json!({"name": "search_web", "signature": "await web.search({ query: str })? -> record"}),
+        ];
         let request = llm_rerank_request(
             &json!({"query": "", "exclude": ["read_file"]}),
             &candidates,

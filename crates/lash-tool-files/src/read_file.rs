@@ -156,10 +156,14 @@ fn read_file_tool_definition() -> ToolDefinition {
                 serde_json::json!({ "type": "string" }),
             )
             .with_examples(vec![
-                r#"read_file(path="Cargo.toml")"#.into(),
-                r#"read_file(path="src/main.rs", offset=1, limit=120)"#.into(),
+                r#"await files.read({ path: "Cargo.toml" })?"#.into(),
+                r#"await files.read({ path: "src/main.rs", offset: 1, limit: 120 })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["cat", "view_file"]))
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["files"],
+                "read",
+                &["cat", "view_file"],
+            ))
             .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
@@ -209,7 +213,7 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ReadFi
     // Binary detection
     if is_likely_binary(path) {
         return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
-            "Binary file detected: {path_str}. Use `read_image` for images, or `exec_command` for binary inspection."
+            "Binary file detected: {path_str}. Use image-aware reads for images, or `shell.exec` for binary inspection."
         )));
     }
 

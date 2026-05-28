@@ -41,6 +41,7 @@ struct FinalCommitInput<'a> {
     usage_deltas: &'a [crate::TokenLedgerEntry],
     outcome: &'a TurnOutcome,
     completed_turn: Option<crate::RuntimeTurnCompletion>,
+    completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
 }
 
 enum PersistedGraphMark {
@@ -269,6 +270,7 @@ impl TurnCommitPipeline {
         session: Option<&mut Session>,
         usage_deltas: &[crate::TokenLedgerEntry],
         completed_turn: Option<crate::RuntimeTurnCompletion>,
+        completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     ) -> Result<(), RuntimeError> {
         let (store, plugins, execution_state_snapshot) = match session {
             Some(session) => {
@@ -287,6 +289,7 @@ impl TurnCommitPipeline {
             usage_deltas,
             outcome: &returned_turn.outcome,
             completed_turn,
+            completed_queue_claims,
         })
         .await
         .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
@@ -339,7 +342,8 @@ impl TurnCommitPipeline {
         let draft = self.draft_mut();
         let state = draft.state();
         let graph = draft.graph_commit(state.graph_replace_required);
-        self.apply_commit(store, graph, usage_deltas, None).await
+        self.apply_commit(store, graph, usage_deltas, None, Vec::new())
+            .await
     }
 
     async fn final_commit_with_snapshots(
@@ -354,6 +358,7 @@ impl TurnCommitPipeline {
             usage_deltas,
             outcome,
             completed_turn,
+            completed_queue_claims,
         } = input;
         let state = self.final_state_mut();
         state.apply_exported_state(returned_state);
@@ -400,7 +405,13 @@ impl TurnCommitPipeline {
                     },
                 }
             };
-            self.apply_commit(store, graph, usage_deltas, completed_turn)
+            self.apply_commit(
+                store,
+                graph,
+                usage_deltas,
+                completed_turn,
+                completed_queue_claims,
+            )
                 .await
         } else {
             state.discard_runtime_snapshots();
@@ -414,12 +425,14 @@ impl TurnCommitPipeline {
         graph: GraphCommitDelta,
         usage_deltas: &[crate::TokenLedgerEntry],
         completed_turn: Option<crate::RuntimeTurnCompletion>,
+        completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     ) -> Result<(), StoreError> {
         let state = self.state_mut();
         let mark = PersistedGraphMark::from_graph_commit(&graph);
         let mut commit =
             RuntimeCommit::persisted_state_with_graph_commit(state, graph, usage_deltas);
         commit.completed_turn = completed_turn;
+        commit.completed_queue_claims = completed_queue_claims;
         let result = store.commit_runtime_state(commit).await?;
         state.apply_persisted_commit_result(result);
         if let Some(draft) = self.draft.as_mut() {
@@ -774,6 +787,7 @@ mod tests {
                 usage_deltas: &usage,
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 completed_turn: None,
+                completed_queue_claims: Vec::new(),
             })
             .await
             .expect("commit");
@@ -811,6 +825,7 @@ mod tests {
                 usage_deltas: &[],
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 completed_turn: None,
+                completed_queue_claims: Vec::new(),
             })
             .await
             .expect("no-store commit");

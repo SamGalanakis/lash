@@ -166,11 +166,11 @@ process echo(value: any) {
   finish value
 }
 
-process spawn_agent(task: str, capability: str) {
+process spawn_child(task: str, capability: str) {
   finish { claim: format("done:{0}", task) }
 }
 
-process llm_query(prompt: str, model: str) {
+process query_llm(prompt: str, model: str) {
   finish { text: "benchmark summary", tokens: 42 }
 }
 "#;
@@ -263,7 +263,7 @@ cancelled = start echo(value: "cancelled")
 cancel cancelled
 handle = start echo(value: "awaited")
 awaited = (await handle)?
-direct = await TOOL.default.echo({ value: trimmed_user })?
+direct = await tools.echo({ value: trimmed_user })?
 print direct
 state = {
   tags: push(tokens, "delta"),
@@ -337,9 +337,9 @@ submit join(formatted, ",")
         }
         Scenario::DirectUnwrap => {
             r#"
-first = await TOOL.default.echo({ value: "alpha" })?
-second = await TOOL.default.echo({ value: format("{0}:{1}", first, "beta") })?
-third = await TOOL.default.echo({ value: join([first, second], ",") })?
+first = await tools.echo({ value: "alpha" })?
+second = await tools.echo({ value: format("{0}:{1}", first, "beta") })?
+third = await tools.echo({ value: join([first, second], ",") })?
 submit third
 "#
         }
@@ -569,10 +569,10 @@ submit {
         }
         Scenario::WrappedErrorPaths => {
             r#"
-missing = await TOOL.default.missing_tool({ value: "x" })
-boom = await TOOL.default.boom({ reason: "explicit" })
-ok = await TOOL.default.echo({ value: "still-running" })
-probe = await TOOL.default.exec_command({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })
+missing = await tools.missing_tool({ value: "x" })
+boom = await tools.boom({ reason: "explicit" })
+ok = await tools.echo({ value: "still-running" })
+probe = await shell.exec({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })
 submit {
   missing_ok: missing.ok,
   missing_error: contains(missing.error, "unknown tool"),
@@ -586,11 +586,11 @@ submit {
         }
         Scenario::ToolControlSurface => {
             r#"
-first = start spawn_agent(task: "inspect auth", capability: "explore")
-second = start spawn_agent(task: "inspect api", capability: "explore")
-llm = start llm_query(prompt: "summarize benchmark", model: "gpt-5.4-mini")
+first = start spawn_child(task: "inspect auth", capability: "explore")
+second = start spawn_child(task: "inspect api", capability: "explore")
+llm = start query_llm(prompt: "summarize benchmark", model: "gpt-5.4-mini")
 probe = start echo(value: "app log")
-handles = await TOOL.default.list_process_handles({})?
+handles = await processes.list({})?
 results = await {
   first: first,
   second: second,
@@ -626,9 +626,9 @@ submit {
         }
         Scenario::ContinueAsSeedSurface => {
             r#"
-agent = start spawn_agent(task: "inspect carry-forward", capability: "explore")
-handles = await TOOL.default.list_process_handles({})?
-handoff = await TOOL.default.continue_as({
+agent = start spawn_child(task: "inspect carry-forward", capability: "explore")
+handles = await processes.list({})?
+handoff = await control.continue_as({
   task: "continue from compact state",
   seed: {
     projected_problem: proj.text,
@@ -718,8 +718,8 @@ submit {
         }
         Scenario::FanoutExpressionSurface => {
             r#"
-left = await TOOL.default.echo({ value: "left" })
-right = await TOOL.default.echo({ value: "right" })
+left = await tools.echo({ value: "left" })
+right = await tools.echo({ value: "right" })
 computed = len(history) + 39
 discarded = ["branch_a", 40 + 2, len(history)]
 batched_results = await {
@@ -764,19 +764,18 @@ submit {
 }
 
 pub fn benchmark_surface() -> LashlangSurface {
-    LashlangSurface::new(
-        ResourceCatalog::tool_default([
-            "echo",
-            "boom",
-            "exec_command",
-            "llm_query",
-            "spawn_agent",
-            "list_process_handles",
-            "continue_as",
-            "missing_tool",
-        ]),
-        LashlangAbilities::all(),
-    )
+    let mut resources = ResourceCatalog::tool_default(["echo", "boom", "missing_tool"]);
+    resources.add_module_instance(["shell"], "Shell");
+    resources.add_operation("Shell", "exec", "exec_command");
+    resources.add_module_instance(["llm"], "Llm");
+    resources.add_operation("Llm", "query", "llm_query");
+    resources.add_module_instance(["agents"], "Agents");
+    resources.add_operation("Agents", "spawn", "spawn_agent");
+    resources.add_module_instance(["processes"], "Processes");
+    resources.add_operation("Processes", "list", "list_process_handles");
+    resources.add_module_instance(["control"], "Control");
+    resources.add_operation("Control", "continue_as", "continue_as");
+    LashlangSurface::new(resources, LashlangAbilities::all())
 }
 
 pub fn linked_benchmark_program(source: &str) -> LinkedModule {
@@ -1314,7 +1313,7 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
             );
             Ok(Value::Record(Arc::new(record)))
         }
-        "llm_query" => {
+        "llm_query" | "query_llm" => {
             let mut record = Record::default();
             record.insert(
                 "text".to_string(),
@@ -1323,7 +1322,7 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
             record.insert("tokens".to_string(), Value::Number(42.0));
             Ok(Value::Record(Arc::new(record)))
         }
-        "spawn_agent" => {
+        "spawn_agent" | "spawn_child" => {
             let task = args
                 .get("task")
                 .and_then(|value| match value {
@@ -1411,14 +1410,14 @@ fn process_handles_record() -> Value {
     let mut chunk_1 = Record::default();
     chunk_1.insert("__handle__".to_string(), Value::String("process".into()));
     chunk_1.insert("id".to_string(), Value::String("spawn-one".into()));
-    chunk_1.insert("tool".to_string(), Value::String("spawn_agent".into()));
-    chunk_1.insert("value".to_string(), spawn_agent_value("inspect auth"));
+    chunk_1.insert("tool".to_string(), Value::String("spawn_child".into()));
+    chunk_1.insert("value".to_string(), spawn_child_value("inspect auth"));
 
     let mut chunk_2 = Record::default();
     chunk_2.insert("__handle__".to_string(), Value::String("process".into()));
     chunk_2.insert("id".to_string(), Value::String("spawn-two".into()));
-    chunk_2.insert("tool".to_string(), Value::String("spawn_agent".into()));
-    chunk_2.insert("value".to_string(), spawn_agent_value("inspect api"));
+    chunk_2.insert("tool".to_string(), Value::String("spawn_child".into()));
+    chunk_2.insert("value".to_string(), spawn_child_value("inspect api"));
 
     let mut tool = Record::default();
     tool.insert("spawn_one".to_string(), Value::Record(Arc::new(chunk_1)));
@@ -1429,7 +1428,7 @@ fn process_handles_record() -> Value {
     Value::Record(Arc::new(out))
 }
 
-fn spawn_agent_value(name: &str) -> Value {
+fn spawn_child_value(name: &str) -> Value {
     let mut record = Record::default();
     record.insert(
         "claim".to_string(),
@@ -1445,7 +1444,7 @@ fn unknown_tool(name: &str) -> ExecutionHostError {
 impl BenchHost {
     fn task_handle(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
         match name {
-            "echo" | "llm_query" | "spawn_agent" | "continue_as" => {
+            "echo" | "query_llm" | "spawn_child" | "continue_as" => {
                 let mut record = Record::default();
                 record.insert("__handle__".to_string(), Value::String("process".into()));
                 record.insert("tool".to_string(), Value::String(name.to_string().into()));

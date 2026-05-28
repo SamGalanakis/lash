@@ -28,6 +28,7 @@ impl<'run> RuntimeTurnDriver<'run> {
             chronological_projection,
             self.protocol_extension.clone(),
             self.turn_context.clone(),
+            self.checkpoint_messages.clone(),
         )
     }
 }

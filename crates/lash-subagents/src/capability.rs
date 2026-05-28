@@ -1,6 +1,6 @@
 //! Pluggable capability model for subagents.
 //!
-//! A `Capability` describes how to translate a `spawn_agent { capability: "name" }`
+//! A `Capability` describes how to translate an `agents.spawn({ capability: "name" })`
 //! call into the model, plugin source, tool surface, and recursion authority
 //! of the spawned session. Built-in `explore` / `peer` tiers are tiny
 //! `TierCapability` instances; downstream code can register arbitrary

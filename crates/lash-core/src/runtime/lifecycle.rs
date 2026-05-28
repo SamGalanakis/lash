@@ -199,12 +199,7 @@ impl LashRuntime {
             embedded = embedded.with_session_store_factory(Arc::clone(factory));
         }
         let mut runtime = if let Some(store) = store {
-            let services = PersistentRuntimeServices::new_with_bridges(
-                plugin_session,
-                crate::session::TurnInjectionBridge::new(),
-                crate::session::TurnInputInjectionBridge::new(),
-                store,
-            );
+            let services = PersistentRuntimeServices::new(plugin_session, store);
             match env.process_registry.as_ref().cloned() {
                 Some(process_registry) => {
                     let host = ProcessRuntimeHost::new(embedded, process_registry);

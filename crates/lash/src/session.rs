@@ -232,11 +232,9 @@ impl SessionBuilder {
         )?;
         env.plugin_host = Some(Arc::new(plugin_host));
         let runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
-        let turn_input_injection_bridge = runtime.turn_input_injection_bridge()?;
         let handle = RuntimeHandle::new(runtime);
         Ok(LashSession {
             runtime: handle,
-            turn_input_injection_bridge,
             mode,
             parent_session_id: self.parent_session_id,
             active_plugins: self.active_plugins,
@@ -257,7 +255,7 @@ impl SessionBuilder {
                 .as_ref()
                 .map(|parent_session_id| lash_core::SessionRelation::Child {
                     parent_session_id: parent_session_id.clone(),
-                    originating_tool_call_id: None,
+                    caused_by: None,
                 })
                 .unwrap_or_default(),
             policy: policy.clone(),
@@ -275,7 +273,6 @@ impl SessionBuilder {
 #[derive(Clone)]
 pub struct LashSession {
     pub(crate) runtime: RuntimeHandle,
-    pub(crate) turn_input_injection_bridge: lash_core::TurnInputInjectionBridge,
     pub(crate) mode: ModeId,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
@@ -345,7 +342,6 @@ impl LashSession {
     pub fn control(&self) -> SessionControl {
         SessionControl {
             runtime: self.runtime.clone(),
-            turn_input_injection_bridge: self.turn_input_injection_bridge.clone(),
         }
     }
 
@@ -465,14 +461,32 @@ impl<'a> QueueInputBuilder<'a> {
     }
 
     pub async fn send(self) -> Result<()> {
-        let message = queued_input_message(self.input)?;
-        self.session
-            .turn_input_injection_bridge
-            .enqueue(vec![lash_core::InjectedTurnInput {
-                id: self.id,
-                message,
-            }])
-            .map_err(|message| EmbedError::Session(SessionError::Protocol(message)))
+        let source_key = self.id.map(|id| format!("host:{id}"));
+        let observation = self.session.runtime.observe();
+        let store = observation.queue_store.as_ref().ok_or_else(|| {
+            EmbedError::Runtime(lash_core::RuntimeError::new(
+                lash_core::RuntimeErrorCode::StoreCommitFailed,
+                "queued turn input requires a persistent runtime store",
+            ))
+        })?;
+        lash_core::ensure_durable_turn_input(&self.input).map_err(EmbedError::Runtime)?;
+        let mut draft = lash_core::QueuedWorkBatchDraft::new(
+            observation.session_id().to_string(),
+            lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+            lash_core::SlotPolicy::Exclusive,
+            vec![lash_core::QueuedWorkPayload::turn_input(self.input)],
+        );
+        draft.source_key = source_key;
+        store
+            .enqueue_queued_work(draft)
+            .await
+            .map(|_| ())
+            .map_err(|err| {
+                EmbedError::Runtime(lash_core::RuntimeError::new(
+                    lash_core::RuntimeErrorCode::StoreCommitFailed,
+                    err.to_string(),
+                ))
+            })
     }
 }
 
@@ -483,28 +497,4 @@ impl<'a> std::future::IntoFuture for QueueInputBuilder<'a> {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.send())
     }
-}
-
-fn queued_input_message(input: TurnInput) -> Result<PluginMessage> {
-    let mut text = Vec::new();
-    let mut images = Vec::new();
-    for item in input.items {
-        match item {
-            InputItem::Text { text: item_text } => text.push(item_text),
-            InputItem::ImageRef { id } => {
-                let Some(bytes) = input.image_blobs.get(&id).cloned() else {
-                    return Err(EmbedError::MissingQueuedImageBlob { id });
-                };
-                images.push(bytes);
-            }
-        }
-    }
-    let content = text.join("\n");
-    Ok(PluginMessage {
-        role: MessageRole::User,
-        content,
-        origin: None,
-        parts: Vec::new(),
-        images,
-    })
 }

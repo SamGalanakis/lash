@@ -36,5 +36,6 @@ tokio-util = { workspace = true }
 
 [dev-dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12", features = ["testing"] }
+lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.12" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 trybuild = "1"

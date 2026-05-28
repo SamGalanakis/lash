@@ -33,9 +33,9 @@ pub(crate) fn args_with_limit(args: &Value, limit: usize) -> Value {
     Value::Object(args)
 }
 
-pub(crate) fn namespace_filter(value: Option<&Value>) -> Vec<String> {
+pub(crate) fn module_filter(value: Option<&Value>) -> Vec<String> {
     match value {
-        Some(Value::String(namespace)) => namespace
+        Some(Value::String(module)) => module
             .split(',')
             .map(str::trim)
             .filter(|value| !value.is_empty())

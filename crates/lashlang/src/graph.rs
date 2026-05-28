@@ -74,12 +74,7 @@ fn static_graph_for_program(
                 match &trigger.source {
                     TriggerSource::Binding { resource, event } => {
                         let resource_id = resource_node_id(resource);
-                        nodes.push(node(
-                            &resource_id,
-                            "resource",
-                            format!("{}.{}", resource.resource_type, resource.alias),
-                            span,
-                        ));
+                        nodes.push(node(&resource_id, "resource", resource.path_string(), span));
                         edges.push(edge(&resource_id, &trigger_id, event.as_str(), span));
                     }
                     TriggerSource::Each {
@@ -100,12 +95,7 @@ fn static_graph_for_program(
                 for (_, arg) in &trigger.args {
                     if let TriggerArg::ResourceRef(resource) = arg {
                         let resource_id = resource_node_id(resource);
-                        nodes.push(node(
-                            &resource_id,
-                            "resource",
-                            format!("{}.{}", resource.resource_type, resource.alias),
-                            span,
-                        ));
+                        nodes.push(node(&resource_id, "resource", resource.path_string(), span));
                         edges.push(edge(&trigger_id, resource_id, "binds", span));
                     }
                 }
@@ -241,12 +231,7 @@ fn collect_expr_graph(
         }
         Expr::ResourceRef(resource) => {
             let resource_id = resource_node_id(resource);
-            nodes.push(node(
-                &resource_id,
-                "resource",
-                format!("{}.{}", resource.resource_type, resource.alias),
-                span,
-            ));
+            nodes.push(node(&resource_id, "resource", resource.path_string(), span));
             edges.push(edge(owner, resource_id, "uses", span));
         }
         Expr::If {
@@ -389,6 +374,7 @@ fn trigger_bindings_value(args: &[(crate::ast::AstString, TriggerArg)]) -> Value
                     "kind": "resource_ref",
                     "resource_type": resource.resource_type.as_str(),
                     "alias": resource.alias.as_str(),
+                    "path": resource.path_string(),
                 }),
             })
             .collect(),
@@ -406,7 +392,7 @@ fn span_value(span: Option<Span>) -> Value {
 }
 
 fn resource_node_id(resource: &ResourceRefExpr) -> String {
-    format!("resource:{}.{}", resource.resource_type, resource.alias)
+    format!("resource:{}", resource.path_string())
 }
 
 fn process_node_id(process_ref: &ProcessRef) -> String {
@@ -557,11 +543,7 @@ impl ProcessMapBuilder<'_> {
             }
             Expr::ResourceRef(resource) => {
                 let resource_id = resource_node_id(resource);
-                self.node(
-                    &resource_id,
-                    "resource",
-                    &format!("{}.{}", resource.resource_type, resource.alias),
-                );
+                self.node(&resource_id, "resource", &resource.path_string());
                 self.edge(owner, &resource_id, "uses");
             }
             Expr::If {
@@ -656,8 +638,8 @@ mod tests {
 
     fn linked(source: &str) -> crate::LinkedModule {
         let mut resources = crate::ResourceCatalog::new();
-        resources.add_alias("TOOL", "default");
-        resources.add_operation("TOOL", "read_file", "read_file");
+        resources.add_module_instance(["tools"], "Tools");
+        resources.add_operation("Tools", "read_file", "read_file");
         crate::LinkedModule::link(
             crate::parse(source).expect("parse module"),
             crate::LashlangSurface::new(resources, crate::LashlangAbilities::all()),
@@ -669,7 +651,7 @@ mod tests {
     fn process_map_uses_stable_refs_and_handles_cycles() {
         let linked = linked(
             r#"
-            process scan(tool: TOOL) {
+            process scan(tool: Tools) {
               start scan(tool: tool)
               text = await tool.read_file({ path: "." })?
               finish text

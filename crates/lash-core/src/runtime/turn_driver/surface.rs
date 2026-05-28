@@ -312,7 +312,7 @@ impl RuntimeTurnDriver<'_> {
             Some(self.turn_id.clone()),
             self.turn_lease.clone(),
         );
-        let process_effect_metadata = self.turn_effect_metadata(
+        let process_parent_invocation = self.turn_effect_invocation(
             machine,
             crate::sansio::EffectId(u64::MAX),
             RuntimeEffectKind::Process,
@@ -332,7 +332,7 @@ impl RuntimeTurnDriver<'_> {
                     ),
                     latest_prompt_usage,
                     direct_completions,
-                    process_effect_metadata,
+                    process_parent_invocation,
                     effect_controller,
                 },
                 request,

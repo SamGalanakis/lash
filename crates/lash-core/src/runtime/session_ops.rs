@@ -209,7 +209,7 @@ impl LashRuntime {
         Ok(())
     }
 
-    pub fn install_lashlang_trigger_source(
+    pub async fn install_lashlang_trigger_source(
         &mut self,
         source: &str,
     ) -> Result<crate::SessionTriggerInstallReport, SessionError> {
@@ -228,41 +228,93 @@ impl LashRuntime {
         );
         let report = session
             .plugins()
-            .install_lashlang_trigger_source(source, surface)
+            .install_lashlang_trigger_source(
+                source,
+                surface,
+                self.host.core.lashlang_artifact_store.as_ref(),
+            )
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
         self.stamp_live_plugin_state();
+        if let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        {
+            let commit = crate::store::RuntimeCommit::persisted_state(&self.state, &[]);
+            let result = store.commit_runtime_state(commit).await.map_err(|err| {
+                SessionError::Protocol(format!("failed to persist trigger registry state: {err}"))
+            })?;
+            self.state.apply_persisted_commit_result(result);
+        }
         Ok(report)
     }
 
     pub async fn emit_host_event(
-        &self,
+        &mut self,
         resource_type: &str,
         alias: &str,
         event: &str,
         payload: serde_json::Value,
     ) -> Result<crate::HostEventEmitReport, SessionError> {
+        {
+            let Some(session) = self.session.as_ref() else {
+                return Err(SessionError::Protocol(
+                    "runtime session not available".to_string(),
+                ));
+            };
+            crate::session::triggers::validate_host_event(
+                session.plugins(),
+                resource_type,
+                alias,
+                event,
+                &payload,
+            )
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        }
+        let append = self
+            .append_session_nodes(crate::AppendSessionNodesRequest {
+                nodes: vec![crate::SessionAppendNode::plugin(
+                    "lash.host_event",
+                    serde_json::json!({
+                        "resource_type": resource_type,
+                        "alias": alias,
+                        "event": event,
+                        "payload": payload.clone(),
+                    }),
+                )],
+                requires_ancestor_node_id: None,
+            })
+            .await?;
+        let host_event_node_id = match append {
+            crate::AppendSessionNodesResult::Appended { node_ids, .. } => {
+                node_ids.into_iter().next().unwrap_or_default()
+            }
+            crate::AppendSessionNodesResult::StaleBranch {
+                current_leaf_node_id,
+            } => {
+                return Err(SessionError::Protocol(format!(
+                    "host event append targeted a stale session branch at {:?}",
+                    current_leaf_node_id
+                )));
+            }
+        };
+        let host_event_invocation = crate::runtime::causal::session_node_invocation(
+            &self.state.session_id,
+            host_event_node_id,
+        );
         let Some(session) = self.session.as_ref() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
             ));
         };
-        let tool_surface = session
-            .tool_surface(&self.state.session_id)
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        let surface = crate::session::lashlang_surface_from_tool_surface(
-            &tool_surface,
-            session.plugins().lashlang_abilities(),
-            session.plugins().lashlang_resources(),
-        );
         let manager = self
             .runtime_session_manager()
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
         crate::session::triggers::emit_host_event(
             &self.state.session_id,
             Arc::clone(session.plugins()),
-            Arc::clone(&self.host.core.lashlang_artifact_store),
             manager as Arc<dyn crate::ProcessService>,
-            surface,
+            host_event_invocation,
             resource_type,
             alias,
             event,

@@ -35,14 +35,13 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
     let mut last_hash: Option<String> = None;
     let mut first_seen: HashMap<String, PromptAnchor> = HashMap::new();
 
-    // Build fan-out index: any LLM call that carries an originating tool
-    // call id is rendered as a child of that tool entry, NOT as a peer
+    // Build fan-out index: any LLM call caused by a tool call is rendered as a child of that tool entry, NOT as a peer
     // in the chronological flow. This collapses tournament_rerank-style
     // batches under their parent tool.
     let mut fanout_index: HashMap<String, Vec<usize>> = HashMap::new();
     let mut fanout_consumed: HashSet<usize> = HashSet::new();
     for (idx, prompt) in session.llm_prompts.iter().enumerate() {
-        if let Some(tcid) = &prompt.originating_tool_call_id {
+        if let Some(tcid) = tool_call_id_from_cause(&prompt.caused_by) {
             fanout_index.entry(tcid.clone()).or_default().push(idx);
             fanout_consumed.insert(idx);
         }
@@ -255,6 +254,13 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
         entries,
         spine,
         usage_chart,
+    }
+}
+
+fn tool_call_id_from_cause(caused_by: &Option<lash_core::CausalRef>) -> Option<&String> {
+    match caused_by {
+        Some(lash_core::CausalRef::ToolCall { call_id, .. }) => Some(call_id),
+        _ => None,
     }
 }
 

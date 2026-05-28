@@ -40,7 +40,7 @@ impl ToolProvider for WebSearch {
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
         if self.api_key.trim().is_empty() {
-            return ToolResult::err(json!("Tavily API key is required for search_web"));
+            return ToolResult::err(json!("Tavily API key is required for web.search"));
         }
 
         let body = json!({
@@ -77,7 +77,7 @@ fn web_search_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
                 "tool:search_web",
                 "search_web",
-                "Search the web for candidate sources. Returns `{results, answer?}` with snippet text; use `fetch_url` when you need the page itself.",
+                "Search the web for candidate sources. Returns `{results, answer?}` with snippet text; use `web.fetch` when you need the page itself.",
                 object_schema(
                     serde_json::json!({
                         "query": { "type": "string" },
@@ -119,9 +119,13 @@ fn web_search_tool_definition() -> ToolDefinition {
                 }),
             )
             .with_examples(vec![
-                "search_web(query=\"latest Rust release notes\", limit=5)".into(),
+                "await web.search({ query: \"latest Rust release notes\", limit: 5 })?".into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata("web", &["web_search"]))
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["web"],
+                "search",
+                &["web_search"],
+            ))
             .with_scheduling(ToolScheduling::Parallel)
 }
 

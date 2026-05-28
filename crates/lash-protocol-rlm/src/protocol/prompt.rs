@@ -44,10 +44,10 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 
 pub const LASHLANG_COMMON_PATTERNS_SECTION: &str = r#"### Common patterns
 
-Operation-level errors are different from successful results that contain domain errors. `?` aborts the block only when the resource operation itself failed:
+Operation-level errors are different from successful results that contain domain errors. `?` aborts the block only when the module operation itself failed:
 
 ```lashlang
-probe = await TOOL.default.tool_name({ key: "value" })?
+probe = await web.search({ query: "value" })?
 submit probe
 ```
 
@@ -56,7 +56,7 @@ Build collections with explicit loops, not comprehensions:
 ```lashlang
 items = []
 for key in ["a", "b"] {
-  value = await TOOL.default.tool_name({ key: key })?
+  value = await web.search({ query: key })?
   items = push(items, { key: key, value: value })
 }
 submit items
@@ -65,7 +65,7 @@ submit items
 Print narrow observations. Keep large values in variables and print only keys, lengths, selected fields, or slices:
 
 ```lashlang
-result = await TOOL.default.tool_name({ key: "value" })?
+result = await web.search({ query: "value" })?
 text = to_string(result)
 print { chars: len(text), head: slice(text, 0, 1200) }
 ```
@@ -73,8 +73,8 @@ print { chars: len(text), head: slice(text, 0, 1200) }
 For multi-step work, inspect intermediate results before submitting success. Reaching `submit` ends the turn even mid-block:
 
 ```lashlang
-first = await TOOL.default.tool_a({ key: "value" })?
-second = await TOOL.default.tool_b({ input: first })?
+first = await web.search({ query: "value" })?
+second = await web.fetch({ url: first[0].url })?
 if contains(to_string(second), "needs_more_work") {
   print { first: first, second: second }
 } else {
@@ -156,12 +156,12 @@ pub fn rlm_execution_section_for_surface(
 
 fn render_host_events_section(surface: &lashlang::LashlangSurface) -> Option<String> {
     let mut lines = Vec::new();
-    for (resource_type, catalog) in &surface.resources.resource_types {
-        for alias in &catalog.aliases {
-            for (event, binding) in &catalog.trigger_events {
+    for module in surface.resources.module_instances.values() {
+        if let Some(resource_type) = surface.resources.resource_types.get(&module.resource_type) {
+            for (event, binding) in &resource_type.trigger_events {
                 lines.push(format!(
-                    "- `{}.{alias}.{event}` payload `{}`",
-                    resource_type,
+                    "- `{}.{event}` payload `{}`",
+                    module.alias,
                     lashlang::format_type_expr(&binding.payload_ty)
                 ));
             }
@@ -179,9 +179,9 @@ fn render_host_events_section(surface: &lashlang::LashlangSurface) -> Option<Str
 fn render_execution_intro(has_operations: bool) -> String {
     let mut section = String::from("**All actions go through `lashlang`.** ");
     if has_operations {
-        section.push_str("Invoke documented operations with receiver syntax like `await TOOL.default.tool_name({ ... })?` from inside a fenced `lashlang` block. Start from resources listed under **Showcased Tools**; if a discovery tool is available, use it to find and load additional operations before calling them. Emit a block whenever you need to call an available operation or compute a value. Plain prose is for direct conversational replies that need no action.");
+        section.push_str("Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a fenced `lashlang` block. Start from operations listed under **Showcased Tools**; if a discovery tool is available, use it to find additional module call forms before calling them. Emit a block whenever you need to call an available operation or compute a value. Plain prose is for direct conversational replies that need no action.");
     } else {
-        section.push_str("Use fenced `lashlang` blocks to compute values, inspect current variables, and submit structured answers. No receiver operations are available in this turn, so do not invent tool calls. Plain prose is for direct conversational replies that need no computation.");
+        section.push_str("Use fenced `lashlang` blocks to compute values, inspect current variables, and submit structured answers. No module operations are available in this turn, so do not invent tool calls. Plain prose is for direct conversational replies that need no computation.");
     }
     section.push_str(
         r#"
@@ -211,7 +211,7 @@ Example — inspect with an available operation, then submit:
 Checking the available data.
 
 ```lashlang
-result = await TOOL.default.tool_name({ key: "value" })?
+result = await web.search({ query: "value" })?
 print { summary: slice(to_string(result), 0, 200) }
 ```
 ````
@@ -257,7 +257,7 @@ fn render_language_section(
     bullets.push("- Strings: `\"...\"` supports `\\n`, `\\r`, `\\t`, `\\\"`, and `\\\\`; `\"\"\"...\"\"\"` is multiline with the same escapes; `r\"\"\"...\"\"\"` and `r'''...'''` are raw multiline strings and preserve content exactly. Use raw multiline strings for JSON, Markdown, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.".to_string());
     bullets.push("- Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.".to_string());
     if has_operations {
-        bullets.push("- Resource operations: call host capabilities through an explicit receiver, e.g. `await TOOL.default.tool_name({ key: value })?` or `await RESOURCE.alias.operation({ query: q })?`. `?` aborts the block with sanitized operation metadata if the operation fails.".to_string());
+        bullets.push("- Module operations: call host capabilities through documented lowercase module paths, e.g. `await agents.spawn({ task: task })?`, `await web.search({ query: q })?`, or `await gmail.work.send({ to: to, body: body })?`. Bare calls are builtins only, not tools. `?` aborts the block with sanitized operation metadata if the operation fails.".to_string());
     }
     if abilities.processes {
         let mut forms = vec![
@@ -274,21 +274,13 @@ fn render_language_section(
             forms.push("`payload = wait signal`");
             forms.push("`signal run handle with payload`");
         }
-        let mut catalog_scopes = vec!["top level"];
-        if abilities.triggers {
-            catalog_scopes.push("trigger bindings");
-        }
-        if abilities.schedules.cron {
-            catalog_scopes.push("schedules");
-        }
         bullets.push(format!(
-            "- Background processes: declare reusable work with `process name(param: TYPE) {{ ... }}` and start it with `handle = start name(param: value)`. Process bodies use only passed resource handles, input values, locals, and builtins; catalog handles such as `TOOL.default` belong at {}. Inside a process use {}; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside processes. Resolve a handle with `await handle` or `(await handle)?`; cancel with `cancel handle` (best-effort).",
-            join_words(&catalog_scopes),
+            "- Background processes: declare reusable work with `process name(param: TYPE) {{ ... }}` and start it with `handle = start name(param: value)`. Pass typed module authorities explicitly, e.g. `process notify(mail: Gmail) {{ await mail.send({{ body: body }})? finish true }}` and `start notify(mail: gmail.work)`. Process bodies use only passed authority handles, input values, locals, and builtins. Inside a process use {}; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside processes. Resolve a handle with `await handle` or `(await handle)?`; cancel with `cancel handle` (best-effort).",
             join_words(&forms)
         ));
     }
     if abilities.triggers && abilities.processes {
-        bullets.push("- Triggers: resource-event declarations that may appear alongside normal foreground code. Use `trigger name on RESOURCE.alias.event as event -> process_name(param: event, tool: RESOURCE.alias)` or `trigger name on each RESOURCE.event as resource, event -> process_name(resource_param: resource, event_param: event)`. Bind every target process parameter explicitly. Trigger args may only be the whole event payload, a concrete catalog resource alias, or the resource handle from `on each`; trigger declarations cannot contain code, `await`, `print`, `submit`, loops, assignments, resource operations, or computed records.".to_string());
+        bullets.push("- Triggers: module-event declarations that may appear alongside normal foreground code. Use `trigger clicked on ui.button.pressed as event -> handle_click(event: event, ui: ui.button)` or `trigger changed on each file.changed as file, event -> process_name(file: file, event: event)`. Bind every target process parameter explicitly. Trigger args may only be the whole event payload, a concrete module authority, or the authority handle from `on each`; trigger declarations cannot contain code, `await`, `print`, `submit`, loops, assignments, module operations, or computed records.".to_string());
     }
     if abilities.schedules.cron {
         bullets.push("- Schedules: declare cron activation with `schedule name every cron(\"0 * * * *\") as tick { ... }`.".to_string());
@@ -300,7 +292,7 @@ fn render_language_section(
             ""
         };
         bullets.push(format!(
-            "- Independent operation fanout: call independent operations directly and store their values, e.g. `a = await TOOL.default.tool_a({{ key: \"one\" }})?` and `b = await TOOL.default.tool_b({{ key: \"two\" }})?`.{tail}"
+            "- Independent operation fanout: call independent operations directly and store their values, e.g. `a = await web.search({{ query: \"one\" }})?` and `b = await files.read({{ path: \"notes/two.md\" }})?`.{tail}"
         ));
     }
     bullets.push("- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. There is no `while` loop; use bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string());
@@ -351,16 +343,16 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
     );
     if has_operations {
         if processes {
-            section.push_str("\n- Several independent operations are needed → call each receiver operation and keep the values in variables; use a named `process` for multi-step background work.");
+            section.push_str("\n- Several independent operations are needed -> call each module operation and keep the values in variables; use a named `process` for multi-step background work.");
         } else {
-            section.push_str("\n- Several independent operations are needed → call each receiver operation and keep the values in variables.");
+            section.push_str("\n- Several independent operations are needed -> call each module operation and keep the values in variables.");
         }
     }
     section.push_str("\n- The trace is bloated, stale, or failed attempts dominate → use an available continuation tool to hand off concrete state to a fresh successor.");
     if has_operations {
-        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample fanout to two available operations (use `?` for fail-fast unwrapping):\n\n```lashlang\na = await TOOL.default.tool_a({ key: \"one\" })?\nb = await TOOL.default.tool_b({ key: \"two\" })?\none = a\ntwo = b\nsubmit [one, two]\n```");
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample fanout to two available operations (use `?` for fail-fast unwrapping):\n\n```lashlang\na = await web.search({ query: \"one\" })?\nb = await files.read({ path: \"notes/two.md\" })?\none = a\ntwo = b\nsubmit [one, two]\n```");
     } else {
-        section.push_str("\n- No receiver operations are available in this turn — don't infer one exists from generic lashlang syntax.");
+        section.push_str("\n- No module operations are available in this turn — don't infer one exists from generic lashlang syntax.");
     }
     section
 }

@@ -2720,6 +2720,7 @@ dependencies = [
  "lash-protocol-rlm",
  "lash-protocol-standard",
  "lash-rlm-types",
+ "lash-sqlite-store",
  "lash-trace",
  "serde",
  "serde_json",

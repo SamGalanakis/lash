@@ -19,8 +19,6 @@ pub enum PluginActionInvokeError {
 #[derive(Clone)]
 pub struct RuntimeServices {
     pub plugins: Arc<PluginSession>,
-    pub turn_injection_bridge: crate::session::TurnInjectionBridge,
-    pub turn_input_injection_bridge: crate::session::TurnInputInjectionBridge,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     pub(crate) store: Option<Arc<dyn crate::store::RuntimePersistence>>,
@@ -42,22 +40,8 @@ pub(crate) struct NoopSessionManager;
 impl RuntimeSessionHost for NoopSessionManager {}
 impl RuntimeServices {
     pub fn new(plugins: Arc<PluginSession>) -> Self {
-        Self::new_with_bridges(
-            plugins,
-            crate::session::TurnInjectionBridge::new(),
-            crate::session::TurnInputInjectionBridge::new(),
-        )
-    }
-
-    pub fn new_with_bridges(
-        plugins: Arc<PluginSession>,
-        turn_injection_bridge: crate::session::TurnInjectionBridge,
-        turn_input_injection_bridge: crate::session::TurnInputInjectionBridge,
-    ) -> Self {
         Self {
             plugins,
-            turn_injection_bridge,
-            turn_input_injection_bridge,
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             lashlang_artifact_store: lashlang::global_in_memory_lashlang_artifact_store(),
             store: None,
@@ -86,24 +70,8 @@ impl PersistentRuntimeServices {
         plugins: Arc<PluginSession>,
         store: Arc<dyn crate::store::RuntimePersistence>,
     ) -> Self {
-        Self::new_with_bridges(
-            plugins,
-            crate::session::TurnInjectionBridge::new(),
-            crate::session::TurnInputInjectionBridge::new(),
-            store,
-        )
-    }
-
-    pub fn new_with_bridges(
-        plugins: Arc<PluginSession>,
-        turn_injection_bridge: crate::session::TurnInjectionBridge,
-        turn_input_injection_bridge: crate::session::TurnInputInjectionBridge,
-        store: Arc<dyn crate::store::RuntimePersistence>,
-    ) -> Self {
         Self(RuntimeServices {
             plugins,
-            turn_injection_bridge,
-            turn_input_injection_bridge,
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             lashlang_artifact_store: lashlang::global_in_memory_lashlang_artifact_store(),
             store: Some(store),

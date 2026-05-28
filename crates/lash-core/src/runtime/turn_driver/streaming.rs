@@ -89,13 +89,13 @@ impl RuntimeTurnDriver<'_> {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<(Result<LlmResponse, LlmCallError>, bool), RuntimeEffectControllerError> {
-        let metadata = self.turn_effect_metadata(machine, id, RuntimeEffectKind::LlmCall)?;
+        let invocation = self.turn_effect_invocation(machine, id, RuntimeEffectKind::LlmCall)?;
         self.execute_typed_turn_effect(
             machine,
             event_tx,
             cancel,
             RuntimeEffectEnvelope::new(
-                metadata,
+                invocation,
                 RuntimeEffectCommand::LlmCall {
                     request: Box::new(LlmRequestSpec::from_request(
                         &request,
@@ -191,6 +191,7 @@ impl RuntimeTurnDriver<'_> {
         &mut self,
         request: Arc<LlmRequest>,
         protocol_iteration: usize,
+        invocation: crate::RuntimeInvocation,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
@@ -223,7 +224,7 @@ impl RuntimeTurnDriver<'_> {
             crate::runtime::effect::emit_llm_trace_started(
                 &self.host.core.trace_sink,
                 &self.host.core.trace_context,
-                self.trace_context(protocol_iteration)
+                crate::trace::trace_context_from_invocation(&invocation)
                     .for_llm_call(llm_call_id.clone()),
                 &request,
             );
@@ -394,7 +395,7 @@ impl RuntimeTurnDriver<'_> {
                     crate::runtime::effect::emit_llm_trace_completed(
                         &self.host.core.trace_sink,
                         &self.host.core.trace_context,
-                        self.trace_context(protocol_iteration)
+                        crate::trace::trace_context_from_invocation(&invocation)
                             .for_llm_call(llm_call_id),
                         response,
                         debug.elapsed_ms(),
@@ -405,7 +406,7 @@ impl RuntimeTurnDriver<'_> {
                     crate::runtime::effect::emit_llm_trace_failed(
                         &self.host.core.trace_sink,
                         &self.host.core.trace_context,
-                        self.trace_context(protocol_iteration)
+                        crate::trace::trace_context_from_invocation(&invocation)
                             .for_llm_call(llm_call_id),
                         crate::runtime::effect::LlmTraceFailure::from(error),
                         Some(stream_summary.clone()),

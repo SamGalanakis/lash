@@ -10,32 +10,23 @@ fn current_epoch_ms() -> u64 {
 }
 
 impl<'run> RuntimeTurnDriver<'run> {
-    pub(super) fn turn_effect_metadata(
+    pub(super) fn turn_effect_invocation(
         &self,
         machine: &TurnMachine,
         effect_id: crate::sansio::EffectId,
         effect_kind: RuntimeEffectKind,
-    ) -> Result<EffectInvocationMetadata, RuntimeEffectControllerError> {
-        let turn_checkpoint_hash = crate::runtime_turn_checkpoint_hash(&machine.checkpoint())
+    ) -> Result<RuntimeInvocation, RuntimeEffectControllerError> {
+        let checkpoint_hash = crate::runtime_turn_checkpoint_hash(&machine.checkpoint())
             .map_err(RuntimeEffectControllerError::from)?;
-        Ok(EffectInvocationMetadata {
-            session_id: self.session_id.clone(),
-            origin: EffectOrigin::Turn,
-            turn_id: Some(self.turn_id.clone()),
-            turn_index: Some(self.turn_index),
-            protocol_iteration: Some(machine.protocol_iteration()),
-            effect_id: effect_id.0.to_string(),
+        Ok(crate::runtime::causal::turn_effect_invocation(
+            &self.session_id,
+            &self.turn_id,
+            self.turn_index,
+            machine.protocol_iteration(),
+            effect_id,
             effect_kind,
-            idempotency_key: crate::runtime::effect::turn_idempotency_key(
-                &self.session_id,
-                &self.turn_id,
-                self.turn_index,
-                machine.protocol_iteration(),
-                effect_kind,
-                effect_id,
-            ),
-            turn_checkpoint_hash: Some(turn_checkpoint_hash),
-        })
+            Some(checkpoint_hash),
+        ))
     }
 
     pub(super) async fn execute_typed_turn_effect<T>(
@@ -46,7 +37,7 @@ impl<'run> RuntimeTurnDriver<'run> {
         envelope: RuntimeEffectEnvelope,
         decode: impl FnOnce(RuntimeEffectOutcome) -> Result<T, RuntimeEffectControllerError>,
     ) -> Result<T, RuntimeEffectControllerError> {
-        self.persist_turn_checkpoint_for_effect(machine, &envelope.metadata)
+        self.persist_turn_checkpoint_for_effect(machine, &envelope.invocation)
             .await?;
         let effect_scope = self.effect_scope;
         let controller = effect_scope.controller();
@@ -74,7 +65,7 @@ impl<'run> RuntimeTurnDriver<'run> {
     async fn persist_turn_checkpoint_for_effect(
         &mut self,
         machine: &TurnMachine,
-        metadata: &EffectInvocationMetadata,
+        invocation: &RuntimeInvocation,
     ) -> Result<(), RuntimeEffectControllerError> {
         let Some(store) = self.session.history_store() else {
             return Ok(());
@@ -84,25 +75,28 @@ impl<'run> RuntimeTurnDriver<'run> {
                 "runtime_turn_lease_required",
                 format!(
                     "runtime effect `{}` for turn `{}` requires a runtime turn lease",
-                    metadata.idempotency_key, self.turn_id
+                    invocation.replay_key().unwrap_or("<missing replay>"),
+                    self.turn_id
                 ),
             ));
         };
         let renewed_lease = crate::runtime::effect::renew_runtime_turn_lease_for_effect(
             store.as_ref(),
             &lease,
-            metadata,
+            invocation,
         )
         .await?;
         let checkpoint = machine.checkpoint();
         let checkpoint_hash = crate::runtime_turn_checkpoint_hash(&checkpoint)
             .map_err(RuntimeEffectControllerError::from)?;
-        if metadata.turn_checkpoint_hash.as_deref() != Some(checkpoint_hash.as_str()) {
+        if invocation.checkpoint_hash.as_deref() != Some(checkpoint_hash.as_str()) {
             return Err(RuntimeEffectControllerError::new(
                 "runtime_turn_checkpoint_hash_mismatch",
                 format!(
                     "effect `{}` expected checkpoint hash {:?}, computed `{}`",
-                    metadata.effect_id, metadata.turn_checkpoint_hash, checkpoint_hash
+                    invocation.effect_id().unwrap_or("<unknown>"),
+                    invocation.checkpoint_hash,
+                    checkpoint_hash
                 ),
             ));
         }

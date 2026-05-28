@@ -10,11 +10,11 @@ use crate::tool_dispatch::schedule_tool_batch;
 async fn run_one_tool_call(
     index: usize,
     prepared_tool: crate::PreparedToolCall,
-    effect_metadata: crate::EffectInvocationMetadata,
+    invocation: crate::RuntimeInvocation,
     context: crate::RuntimeExecutionContext<'_>,
 ) -> crate::sansio::CompletedToolCall {
     let executed = context
-        .execute_prepared_tool_call(prepared_tool, index, Some(effect_metadata))
+        .execute_prepared_tool_call(prepared_tool, index, Some(invocation))
         .await;
     debug_assert_eq!(executed.index, index);
     executed.completed
@@ -90,17 +90,20 @@ impl RuntimeTurnDriver<'_> {
                     continue;
                 }
             };
-            let mut metadata =
-                self.turn_effect_metadata(machine, id, RuntimeEffectKind::ToolCall)?;
-            metadata.effect_id = format!("{}:{}", id.0, prepared.call_id);
-            metadata.idempotency_key = format!("{}:{}", metadata.idempotency_key, prepared.call_id);
+            let parent_invocation =
+                self.turn_effect_invocation(machine, id, RuntimeEffectKind::ToolCall)?;
+            let invocation = crate::runtime::causal::child_tool_effect_invocation(
+                &parent_invocation,
+                id,
+                &prepared.call_id,
+            );
             let result = self
                 .execute_typed_turn_effect(
                     machine,
                     event_tx,
                     cancel,
                     RuntimeEffectEnvelope::new(
-                        metadata,
+                        invocation,
                         RuntimeEffectCommand::ToolCall { call: prepared },
                     ),
                     RuntimeEffectOutcome::into_tool_call,
@@ -116,7 +119,7 @@ impl RuntimeTurnDriver<'_> {
 
     pub(in crate::runtime) async fn run_tool_calls(
         &mut self,
-        pending_tools: Vec<(crate::PreparedToolCall, crate::EffectInvocationMetadata)>,
+        pending_tools: Vec<(crate::PreparedToolCall, crate::RuntimeInvocation)>,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<Vec<crate::sansio::CompletedToolCall>, crate::RuntimeEffectControllerError> {
@@ -161,14 +164,14 @@ impl RuntimeTurnDriver<'_> {
                 let context = context.clone();
                 let cancel = cancel.clone();
                 let tool_cancel = tool_cancel.clone();
-                move |(index, (pending_tool, effect_metadata))| {
+                move |(index, (pending_tool, parent_invocation))| {
                     let context = context.clone().with_cancellation_token(tool_cancel.clone());
                     let cancel = cancel.clone();
                     let tool_cancel = tool_cancel.clone();
                     let cancelled_tool = pending_tool.clone();
                     async move {
                         let tool_call =
-                            run_one_tool_call(index, pending_tool, effect_metadata, context);
+                            run_one_tool_call(index, pending_tool, parent_invocation, context);
                         tokio::pin!(tool_call);
                         tokio::select! {
                             biased;

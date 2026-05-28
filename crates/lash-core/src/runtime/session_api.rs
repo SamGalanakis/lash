@@ -189,20 +189,40 @@ impl LashRuntime {
             .map(|manager| manager as Arc<dyn crate::ProcessService>)
     }
 
+    pub async fn enqueue_turn_input(
+        &self,
+        input: crate::TurnInput,
+        delivery_policy: crate::DeliveryPolicy,
+        slot_policy: crate::SlotPolicy,
+        source_key: Option<String>,
+    ) -> Result<crate::QueuedWorkBatch, RuntimeError> {
+        super::turn_loop::ensure_durable_turn_input(&input)?;
+        let store = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::StoreCommitFailed,
+                    "queued turn input requires a persistent runtime store",
+                )
+            })?;
+        let mut draft = crate::QueuedWorkBatchDraft::new(
+            self.state.session_id.clone(),
+            delivery_policy,
+            slot_policy,
+            vec![crate::QueuedWorkPayload::turn_input(input)],
+        );
+        draft.source_key = source_key;
+        store
+            .enqueue_queued_work(draft)
+            .await
+            .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))
+    }
+
     /// The plugin session bound to the currently active runtime session, if any.
     pub fn plugin_session(&self) -> Option<Arc<crate::PluginSession>> {
         self.session.as_ref().map(|s| Arc::clone(s.plugins()))
-    }
-
-    pub fn turn_input_injection_bridge(
-        &self,
-    ) -> Result<crate::TurnInputInjectionBridge, SessionError> {
-        let Some(session) = self.session.as_ref() else {
-            return Err(SessionError::Protocol(
-                "runtime session not available".to_string(),
-            ));
-        };
-        Ok(session.turn_input_injection_bridge().clone())
     }
 
     /// Run the registered history rewrite pipeline against the current

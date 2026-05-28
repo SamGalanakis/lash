@@ -40,7 +40,7 @@ pub(crate) fn compile_program_internal(program: &Program) -> CompiledProgram {
 
 pub fn compile_linked(linked: &LinkedModule) -> CompiledProgram {
     let (chunk, compile_stats) =
-        Compiler::compile_linked_program(&linked.artifact.canonical_ir, (&linked.artifact).into());
+        Compiler::compile_linked_program(linked.program(), (&linked.artifact).into());
     CompiledProgram {
         chunk,
         compile_stats,
@@ -69,17 +69,16 @@ pub fn compile_linked_process(
     linked: &LinkedModule,
     process_name: &str,
 ) -> Result<CompiledProgram, RuntimeError> {
-    let process = linked
-        .artifact
-        .canonical_ir
+    let linked_program = linked.program();
+    let process = linked_program
         .process(process_name)
         .ok_or_else(|| RuntimeError::ValueError {
             message: format!("unknown process `{process_name}`"),
         })?;
     let process_program = Program {
-        declarations: linked.artifact.canonical_ir.declarations.clone(),
+        declarations: linked_program.declarations.clone(),
         main: process.body.clone(),
-        declaration_spans: linked.artifact.canonical_ir.declaration_spans.clone(),
+        declaration_spans: linked_program.declaration_spans.clone(),
         expression_spans: Vec::new(),
     };
     let (chunk, compile_stats) =

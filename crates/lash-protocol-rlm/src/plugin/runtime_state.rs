@@ -127,7 +127,7 @@ impl RlmRuntimeState {
         let protected_names = self.protected_projected_binding_names().await;
         execution.prune_protected_globals(&protected_names);
         for node in nodes {
-            if let lash_core::SessionAppendNode::ProtocolEvent { event } = node
+            if let lash_core::SessionAppendNode::ProtocolEvent { event, .. } = node
                 && let Some(event) = decode_rlm_protocol_event(event)
             {
                 self.apply_seed_or_globals_event(execution, event, &protected_names)

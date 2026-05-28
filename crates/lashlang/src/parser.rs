@@ -210,9 +210,7 @@ impl Parser {
                 args,
             });
         }
-        let resource = self.parse_resource_ref()?;
-        self.expect_exact(TokenKind::Dot, "`.`")?;
-        let event = self.expect_ident()?;
+        let (resource, event) = self.parse_module_event_path()?;
         self.expect_contextual("as")?;
         let source = TriggerSource::Binding { resource, event };
         let event_binding = self.expect_ident()?;
@@ -291,14 +289,27 @@ impl Parser {
     ) -> Result<TriggerArg, ParseError> {
         let token = self.peek().clone();
         match &token.kind {
-            TokenKind::Ident(name)
-                if is_resource_namespace(name)
-                    && self
-                        .tokens
-                        .get(self.index + 1)
-                        .is_some_and(|next| matches!(next.kind, TokenKind::Dot)) =>
+            TokenKind::Ident(_)
+                if self
+                    .tokens
+                    .get(self.index + 1)
+                    .is_some_and(|next| matches!(next.kind, TokenKind::Dot)) =>
             {
-                self.parse_resource_ref().map(TriggerArg::ResourceRef)
+                let path = self.parse_module_path()?;
+                if path
+                    .first()
+                    .is_some_and(|root| root.as_str() == event_binding)
+                    || resource_binding.is_some_and(|binding| {
+                        path.first().is_some_and(|root| root.as_str() == binding)
+                    })
+                {
+                    return Err(ParseError::Expected {
+                        expected: "event binding, on-each resource binding, or module path",
+                        found: "computed trigger argument".to_string(),
+                        span: token.span,
+                    });
+                }
+                Ok(TriggerArg::ResourceRef(ResourceRefExpr::unresolved(path)))
             }
             TokenKind::Ident(name) => {
                 let name = name.clone();
@@ -309,14 +320,12 @@ impl Parser {
                 if resource_binding.is_some_and(|binding| binding == name.as_str()) {
                     return Ok(TriggerArg::ResourceBinding(name));
                 }
-                Err(ParseError::Expected {
-                    expected: "event binding, on-each resource binding, or RESOURCE.alias",
-                    found: format!("identifier `{name}`"),
-                    span: token.span,
-                })
+                Ok(TriggerArg::ResourceRef(ResourceRefExpr::unresolved(vec![
+                    name,
+                ])))
             }
             other => Err(ParseError::Expected {
-                expected: "event binding, on-each resource binding, or RESOURCE.alias",
+                expected: "event binding, on-each resource binding, or module path",
                 found: render_kind(other),
                 span: token.span,
             }),
@@ -721,20 +730,6 @@ impl Parser {
                             operation: field,
                             args,
                         };
-                    } else if let Expr::Variable(resource_type) = &expr
-                        && is_resource_namespace(resource_type)
-                    {
-                        if self.process_depth > 0 {
-                            return Err(ParseError::Expected {
-                                expected: "resource handle parameter",
-                                found: format!("catalog handle `{resource_type}.{field}`"),
-                                span: self.tokens[self.index.saturating_sub(1)].span,
-                            });
-                        }
-                        expr = Expr::ResourceRef(ResourceRefExpr {
-                            resource_type: resource_type.clone(),
-                            alias: field,
-                        });
                     } else {
                         expr = Expr::Field {
                             target: Box::new(expr),
@@ -1279,14 +1274,29 @@ impl Parser {
         false
     }
 
-    fn parse_resource_ref(&mut self) -> Result<ResourceRefExpr, ParseError> {
-        let resource_type = self.expect_ident()?;
-        self.expect_exact(TokenKind::Dot, "`.`")?;
-        let alias = self.expect_ident()?;
-        Ok(ResourceRefExpr {
-            resource_type,
-            alias,
-        })
+    fn parse_module_event_path(&mut self) -> Result<(ResourceRefExpr, AstString), ParseError> {
+        let mut path = self.parse_module_path()?;
+        if path.len() < 2 {
+            return Err(ParseError::Expected {
+                expected: "module event path like `ui.button.pressed`",
+                found: path
+                    .first()
+                    .map(|value| format!("identifier `{value}`"))
+                    .unwrap_or_else(|| "empty path".to_string()),
+                span: self.tokens[self.index.saturating_sub(1)].span,
+            });
+        }
+        let event = path.pop().expect("checked path length");
+        Ok((ResourceRefExpr::unresolved(path), event))
+    }
+
+    fn parse_module_path(&mut self) -> Result<Vec<AstString>, ParseError> {
+        let mut path = vec![self.expect_ident()?];
+        while matches!(self.peek_kind(), TokenKind::Dot) {
+            self.bump();
+            path.push(self.expect_ident()?);
+        }
+        Ok(path)
     }
 
     fn peek_contextual(&self, keyword: &str) -> bool {
@@ -1326,13 +1336,6 @@ impl Parser {
 
 fn token_can_be_key(kind: &TokenKind) -> bool {
     matches!(kind, TokenKind::Ident(_) | TokenKind::String(_)) || keyword_key_name(kind).is_some()
-}
-
-fn is_resource_namespace(name: &str) -> bool {
-    name.chars().any(|ch| ch.is_ascii_alphabetic())
-        && name
-            .chars()
-            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn keyword_key_name(kind: &TokenKind) -> Option<&'static str> {
@@ -1610,7 +1613,7 @@ mod tests {
         let program = parse(
             r#"
             type EmailInput = { source: "gmail" | "manual", message_id: string? }
-            process triage(gmail: GMAIL, input: EmailInput) -> null {
+            process triage(gmail: Gmail, input: EmailInput) -> null {
               if input.source == "gmail" {
                 msg = await gmail.get_message(input.message_id)?
               } else {
@@ -1618,10 +1621,10 @@ mod tests {
               }
               finish msg
             }
-            trigger personal_mail on GMAIL.personal.new_message as event
-              -> triage(gmail: GMAIL.personal, input: event)
+            trigger personal_mail on gmail.personal.new_message as event
+              -> triage(gmail: gmail.personal, input: event)
             schedule daily every cron("0 8 * * *", tz: "UTC") as tick {
-              start triage(gmail: GMAIL.personal, input: { source: "manual", message_id: tick.id })
+              start triage(gmail: gmail.personal, input: { source: "manual", message_id: tick.id })
             }
             "#,
         )
@@ -1656,16 +1659,15 @@ mod tests {
     }
 
     #[test]
-    fn process_body_rejects_catalog_handles() {
-        let err = parse(
+    fn process_body_parses_passed_authority_calls() {
+        parse(
             r#"
-            process bad() {
-              await GMAIL.personal.get_message("id")?
+            process ok(mail: Gmail) {
+              await mail.get_message({ id: "id" })?
             }
             "#,
         )
-        .expect_err("catalog handle should be rejected inside process bodies");
-        assert!(matches!(err, ParseError::Expected { .. }));
+        .expect("passed authority call should parse inside process bodies");
     }
 
     #[test]

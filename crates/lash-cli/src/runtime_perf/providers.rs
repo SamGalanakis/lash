@@ -8,7 +8,7 @@ use lash_core::llm::types::{
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolManifest,
+    ToolAgentSurface, ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolManifest,
     ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
 };
 
@@ -258,14 +258,18 @@ fn gmail_like_tool_definition(index: usize, name: &str) -> ToolDefinition {
             r#"call {name} {{ user_id: "me", query: "from:alerts@example.com newer_than:7d", limit: 25 }}"#
         ),
     ])
-    .with_discovery(ToolDiscoveryMetadata {
-        namespace: Some("gmail".to_string()),
-        aliases: vec![
+    .with_agent_surface(
+        ToolAgentSurface::new(
+            ["gmail"],
             name.trim_start_matches("GMAIL_")
                 .to_ascii_lowercase()
-                .replace('_', " "),
-        ],
-    })
+                .replace('_', "_"),
+        )
+        .with_aliases([name
+            .trim_start_matches("GMAIL_")
+            .to_ascii_lowercase()
+            .replace('_', " ")]),
+    )
     .with_scheduling(ToolScheduling::Parallel);
 
     if index.is_multiple_of(7) {
@@ -721,10 +725,10 @@ fn benchmark_stream_profile_for_request(
         }
         RuntimePerfScenario::RlmToolCalls => {
             let text = r#"```lashlang
-first = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 1 })?
-second = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 2 })?
-third = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 3 })?
-fourth = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 4 })?
+first = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 1 })?
+second = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 2 })?
+third = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 3 })?
+fourth = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 4 })?
 submit first.value
 ```"#
                 .to_string();
@@ -732,20 +736,20 @@ submit first.value
         }
         RuntimePerfScenario::RlmProcessHandles => {
             let text = r#"```lashlang
-process benchmark_echo_process(tool: TOOL, value: str, ordinal: int) {
+process benchmark_echo_process(tool: Tools, value: str, ordinal: int) {
   result = await tool.benchmark_echo({ value: value, ordinal: ordinal })?
   finish result
 }
 
-process benchmark_slow_process(tool: TOOL, value: str, delay_ms: int) {
+process benchmark_slow_process(tool: Tools, value: str, delay_ms: int) {
   result = await tool.benchmark_slow({ value: value, delay_ms: delay_ms })?
   finish result
 }
 
-first = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 1)
-second = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 2)
-slow = start benchmark_slow_process(tool: TOOL.default, value: "cancelled", delay_ms: 50)
-live = await TOOL.default.list_process_handles({})?
+first = start benchmark_echo_process(tool: tools, value: "runtime perf benchmark ok", ordinal: 1)
+second = start benchmark_echo_process(tool: tools, value: "runtime perf benchmark ok", ordinal: 2)
+slow = start benchmark_slow_process(tool: tools, value: "cancelled", delay_ms: 50)
+live = await processes.list({})?
 cancel slow
 first_result = (await first)?
 second_result = (await second)?
@@ -756,7 +760,7 @@ submit first_result.value
         }
         RuntimePerfScenario::RlmLlmQuery => {
             let text = r#"```lashlang
-result = await TOOL.default.llm_query({
+result = await llm.query({
   task: "Return the exact benchmark marker.",
   inputs: { marker: "runtime perf benchmark ok" }
 })?
@@ -833,7 +837,7 @@ mod tests {
         assert_eq!(defs.len(), 63);
         assert!(defs.iter().all(|def| {
             def.availability.base == ToolAvailability::Callable
-                && def.discovery.namespace.as_deref() == Some("gmail")
+                && def.agent_surface.module_path == vec!["gmail".to_string()]
                 && !def.input_schema["properties"]
                     .as_object()
                     .expect("object schema")

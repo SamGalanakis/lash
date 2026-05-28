@@ -313,10 +313,10 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
-        tool_effect_metadata: None,
+        parent_invocation: None,
         session_id: "session".to_string(),
         event_tx,
-        turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -350,10 +350,10 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
-        tool_effect_metadata: None,
+        parent_invocation: None,
         session_id: "session".to_string(),
         event_tx,
-        turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -394,10 +394,10 @@ fn projection_policy_dispatch_context(
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
-        tool_effect_metadata: None,
+        parent_invocation: None,
         session_id: "session".to_string(),
         event_tx,
-        turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -500,7 +500,7 @@ impl ToolProvider for RetryProbeTools {
         self.observed_attempts.lock().expect("attempts").push((
             call.context.attempt_number(),
             call.context.max_attempts(),
-            call.context.idempotency_key().map(str::to_string),
+            call.context.replay_key().map(str::to_string),
         ));
         let attempt_index = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
         if self.cancel_on_first {
@@ -544,10 +544,10 @@ fn lazy_contract_dispatch_context(
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
-        tool_effect_metadata: None,
+        parent_invocation: None,
         session_id: "session".to_string(),
         event_tx,
-        turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -570,10 +570,10 @@ fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContex
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
-        tool_effect_metadata: None,
+        parent_invocation: None,
         session_id: "session".to_string(),
         event_tx,
-        turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -622,10 +622,10 @@ fn parallel_dispatch_context(
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
-        tool_effect_metadata: None,
+        parent_invocation: None,
         session_id: "session".to_string(),
         event_tx,
-        turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -830,7 +830,7 @@ async fn safe_retry_policy_retries_safe_failure_and_stops_on_success() {
 
 #[derive(Default)]
 struct SleepRecordingEffectController {
-    sleeps: Arc<std::sync::Mutex<Vec<crate::EffectInvocationMetadata>>>,
+    sleeps: Arc<std::sync::Mutex<Vec<crate::RuntimeInvocation>>>,
 }
 
 #[async_trait::async_trait]
@@ -843,7 +843,7 @@ impl crate::RuntimeEffectController for SleepRecordingEffectController {
         self.sleeps
             .lock()
             .expect("sleep records")
-            .push(envelope.metadata);
+            .push(envelope.invocation);
         Ok(crate::RuntimeEffectOutcome::Sleep)
     }
 }
@@ -894,10 +894,13 @@ async fn retry_delay_crosses_effect_controller_as_sleep_effect() {
     assert!(outcome.record.output.is_success());
     let sleeps = recorder.sleeps.lock().expect("sleep records");
     assert_eq!(sleeps.len(), 1);
-    assert_eq!(sleeps[0].effect_kind, crate::RuntimeEffectKind::Sleep);
     assert_eq!(
-        sleeps[0].idempotency_key,
-        "lash-tool:session:call-1:retry_probe:attempt:1:sleep"
+        sleeps[0].effect_kind(),
+        Some(crate::RuntimeEffectKind::Sleep)
+    );
+    assert_eq!(
+        sleeps[0].replay_key(),
+        Some("lash-tool:session:call-1:retry_probe:attempt:1:sleep")
     );
 }
 
@@ -991,7 +994,7 @@ async fn cancellation_stops_retry_immediately() {
 }
 
 #[tokio::test]
-async fn retry_context_has_stable_idempotency_key_across_attempts() {
+async fn retry_context_has_stable_replay_key_across_attempts() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let context = retry_dispatch_context(
@@ -1242,10 +1245,10 @@ fn serial_dispatch_context(
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
-        tool_effect_metadata: None,
+        parent_invocation: None,
         session_id: "session".to_string(),
         event_tx,
-        turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -1386,10 +1389,10 @@ async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
-        tool_effect_metadata: None,
+        parent_invocation: None,
         session_id: "session".to_string(),
         event_tx,
-        turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     });
@@ -1516,10 +1519,10 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
-        tool_effect_metadata: None,
+        parent_invocation: None,
         session_id: "session".to_string(),
         event_tx,
-        turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     });

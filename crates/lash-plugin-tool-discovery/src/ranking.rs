@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::catalog::CatalogTool;
 use crate::common::{
     FUZZY_SCORE_CAP, RRF_K, SEMANTIC_CANDIDATE_FLOOR, exclude_filter, limit_from_args,
-    namespace_filter, round_score, tokenize,
+    module_filter, round_score, tokenize,
 };
 #[cfg(feature = "semantic-tool-search")]
 use crate::schema_index::semantic_index_text;
@@ -257,10 +257,11 @@ impl DiscoveryDoc {
     fn from_tool(tool: CatalogTool) -> Self {
         let mut fields = Vec::new();
         push_field(&mut fields, "name", vec![tool.name.clone()], 9.0, true);
+        push_field(&mut fields, "call", vec![tool.call.clone()], 9.0, true);
         push_field(
             &mut fields,
-            "namespace",
-            tool.namespace.iter().cloned().collect(),
+            "module",
+            vec![tool.module_path.join(".")],
             3.0,
             true,
         );
@@ -316,13 +317,16 @@ impl DiscoveryDoc {
     }
 
     fn matches_filters(&self, args: &Value) -> bool {
-        let namespaces = namespace_filter(args.get("namespace"));
-        if !namespaces.is_empty()
+        let modules = module_filter(args.get("module"));
+        if !modules.is_empty()
             && !self
                 .tool
-                .namespace
-                .as_deref()
-                .is_some_and(|namespace| namespaces.iter().any(|candidate| candidate == namespace))
+                .module_path
+                .iter()
+                .any(|segment| modules.iter().any(|candidate| candidate == segment))
+            && !modules
+                .iter()
+                .any(|candidate| candidate == &self.tool.module_path.join("."))
         {
             return false;
         }
@@ -667,7 +671,7 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::{ToolContract, ToolDefinition, ToolDiscoveryMetadata};
+    use lash_core::{ToolAgentSurface, ToolContract, ToolDefinition};
     use serde_json::{Value, json};
 
     fn catalog_tool(name: &str, description: &str) -> Value {
@@ -682,7 +686,7 @@ mod tests {
     fn catalog_tool_with_metadata(
         name: &str,
         description: &str,
-        namespace: Option<&str>,
+        module: Option<&str>,
         aliases: Vec<&str>,
     ) -> Value {
         let tool = ToolDefinition::raw_named(
@@ -691,21 +695,36 @@ mod tests {
             ToolContract::default_input_schema(),
             json!({}),
         )
-        .with_discovery(ToolDiscoveryMetadata {
-            namespace: namespace.map(str::to_string),
-            aliases: aliases.into_iter().map(str::to_string).collect(),
-        });
+        .with_agent_surface(
+            ToolAgentSurface::new(
+                [module.unwrap_or_else(|| match name {
+                    "read_file" => "files",
+                    "search_web" => "web",
+                    _ => "tools",
+                })],
+                match name {
+                    "read_file" => "read",
+                    "search_web" => "search",
+                    _ => name,
+                },
+            )
+            .with_aliases(aliases.into_iter()),
+        );
         catalog_tool_from_definition(tool)
     }
 
     fn catalog_tool_from_definition(tool: ToolDefinition) -> Value {
         let manifest = tool.manifest();
+        let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
+        let call = agent_surface.call_path();
         json!({
             "id": manifest.id,
             "name": manifest.name,
-            "namespace": manifest.discovery.namespace,
+            "module_path": agent_surface.module_path.clone(),
+            "operation": agent_surface.operation.clone(),
+            "call": call,
             "description": manifest.description,
-            "aliases": manifest.discovery.aliases,
+            "aliases": agent_surface.aliases.clone(),
             "availability": "searchable",
             "callable": false,
             "showcased": false,
@@ -738,9 +757,9 @@ mod tests {
             ],
         );
         let results = index.search(&json!({ "query": "spotify songs" }));
-        assert_eq!(results[0]["name"], json!("spotify_search_songs"));
+        assert_eq!(results[0]["name"], json!("tools.spotify_search_songs"));
         let typo = index.search(&json!({ "query": "spotfy songs" }));
-        assert_eq!(typo[0]["name"], json!("spotify_search_songs"));
+        assert_eq!(typo[0]["name"], json!("tools.spotify_search_songs"));
     }
 
     #[test]
@@ -784,10 +803,10 @@ mod tests {
                 "required": ["response"]
             }),
         )
-        .with_discovery(ToolDiscoveryMetadata {
-            namespace: Some("appworld".to_string()),
-            aliases: vec!["spotify_filter_songs".to_string()],
-        });
+        .with_agent_surface(
+            ToolAgentSurface::new(["appworld"], "spotify_filter_songs")
+                .with_aliases(["spotify_filter_songs"]),
+        );
         let show_song = ToolDefinition::raw_named(
             "mcp__appworld__spotify_show_song",
             "Get a Spotify song record.",
@@ -825,10 +844,10 @@ mod tests {
                 "required": ["response"]
             }),
         )
-        .with_discovery(ToolDiscoveryMetadata {
-            namespace: Some("appworld".to_string()),
-            aliases: vec!["spotify_show_song".to_string(), "song_details".to_string()],
-        });
+        .with_agent_surface(
+            ToolAgentSurface::new(["appworld"], "spotify_show_song")
+                .with_aliases(["spotify_show_song", "song_details"]),
+        );
 
         let index = ToolDiscoveryIndex::build(
             1,
@@ -839,13 +858,10 @@ mod tests {
         );
         let results = index.search(&json!({
             "query": "play_count genre title",
-            "namespace": "appworld"
+            "module": "appworld"
         }));
 
-        assert_eq!(
-            results[0]["name"],
-            json!("mcp__appworld__spotify_show_song")
-        );
+        assert_eq!(results[0]["name"], json!("appworld.spotify_show_song"));
     }
 
     #[test]
@@ -981,7 +997,7 @@ mod tests {
 
         assert_eq!(
             ranked_names(&index.search(&json!({ "query": "cat" }))),
-            vec!["read_file"]
+            vec!["files.read"]
         );
     }
 }

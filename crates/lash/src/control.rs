@@ -5,7 +5,6 @@ pub use lash_core::{AcceptedInjectedTurnInput, PluginAction};
 #[derive(Clone)]
 pub struct SessionControl {
     pub(crate) runtime: RuntimeHandle,
-    pub(crate) turn_input_injection_bridge: lash_core::TurnInputInjectionBridge,
 }
 
 impl SessionControl {
@@ -217,6 +216,7 @@ impl SessionControl {
         let mut runtime = writer.lock().await;
         let result = runtime
             .install_lashlang_trigger_source(source)
+            .await
             .map_err(Into::into);
         self.runtime.publish_from(&runtime);
         result
@@ -230,7 +230,7 @@ impl SessionControl {
         payload: serde_json::Value,
     ) -> Result<lash_core::HostEventEmitReport> {
         let writer = self.runtime.writer();
-        let runtime = writer.lock().await;
+        let mut runtime = writer.lock().await;
         let result = runtime
             .emit_host_event(resource_type, alias, event, payload)
             .await
@@ -494,15 +494,37 @@ impl SessionControl {
     }
 
     async fn inject_turn_input(&self, id: Option<String>, message: PluginMessage) -> Result<()> {
-        self.turn_input_injection_bridge
-            .enqueue(vec![lash_core::InjectedTurnInput { id, message }])
-            .map_err(|message| EmbedError::Session(SessionError::Protocol(message)))
+        self.inject_turn_inputs(vec![lash_core::InjectedTurnInput { id, message }])
+            .await
     }
 
     async fn inject_turn_inputs(&self, messages: Vec<lash_core::InjectedTurnInput>) -> Result<()> {
-        self.turn_input_injection_bridge
-            .enqueue(messages)
-            .map_err(|message| EmbedError::Session(SessionError::Protocol(message)))
+        let observation = self.runtime.observe();
+        let store = observation.queue_store.as_ref().ok_or_else(|| {
+            EmbedError::Runtime(lash_core::RuntimeError::new(
+                lash_core::RuntimeErrorCode::StoreCommitFailed,
+                "queued turn input requires a persistent runtime store",
+            ))
+        })?;
+        for input in messages {
+            let source_key = input.id.map(|id| format!("injection:{id}"));
+            let turn_input = turn_input_from_plugin_message(input.message);
+            lash_core::ensure_durable_turn_input(&turn_input).map_err(EmbedError::Runtime)?;
+            let mut draft = lash_core::QueuedWorkBatchDraft::new(
+                observation.session_id().to_string(),
+                lash_core::DeliveryPolicy::EarliestSafeBoundary,
+                lash_core::SlotPolicy::Join,
+                vec![lash_core::QueuedWorkPayload::turn_input(turn_input)],
+            );
+            draft.source_key = source_key;
+            store.enqueue_queued_work(draft).await.map_err(|err| {
+                EmbedError::Runtime(lash_core::RuntimeError::new(
+                    lash_core::RuntimeErrorCode::StoreCommitFailed,
+                    err.to_string(),
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     async fn tool_registry(&self) -> Result<Arc<lash_core::ToolRegistry>> {
@@ -518,6 +540,21 @@ impl SessionControl {
                 ))
             })
     }
+}
+
+fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
+    let mut input = TurnInput::empty();
+    if !message.content.is_empty() {
+        input.items.push(InputItem::Text {
+            text: message.content,
+        });
+    }
+    for (index, bytes) in message.images.into_iter().enumerate() {
+        let id = format!("injected-image-{index}");
+        input.items.push(InputItem::ImageRef { id: id.clone() });
+        input.image_blobs.insert(id, bytes);
+    }
+    input
 }
 
 #[derive(Clone)]

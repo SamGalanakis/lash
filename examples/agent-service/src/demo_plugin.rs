@@ -5,7 +5,10 @@ use lash::{
     PluginBinding,
     plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
     prompt::PromptContribution,
-    tools::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult},
+    tools::{
+        ToolAgentSurface, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
+        ToolResult,
+    },
 };
 use serde_json::json;
 
@@ -134,6 +137,7 @@ fn read_board_tool() -> ToolDefinition {
         }),
         json!({ "type": "object" }),
     )
+    .with_agent_surface(ToolAgentSurface::new(["board"], "read"))
 }
 
 fn play_move_tool() -> ToolDefinition {
@@ -149,6 +153,7 @@ fn play_move_tool() -> ToolDefinition {
         }),
         json!({ "type": "object" }),
     )
+    .with_agent_surface(ToolAgentSurface::new(["board"], "play"))
 }
 
 fn load_chat_board_for_plugin(

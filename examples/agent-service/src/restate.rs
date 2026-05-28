@@ -533,13 +533,12 @@ mod restate_tests {
             .kind("mock-provider")
             .complete(|_request| async {
                 let text = r#"```lashlang
-tool = TOOL.default
-process play_center(tool: TOOL) {
-  board = await tool.read_board({})?
-  move = await tool.play_move({ cell: 4 })?
-  finish { before: board, move: move }
+process play_center(board_tool: Board) {
+  state = await board_tool.read({})?
+  move = await board_tool.play({ cell: 4 })?
+  finish { before: state, move: move }
 }
-handle = start play_center(tool: tool)
+handle = start play_center(board_tool: board)
 result = (await handle)?
 submit "done via Restate E2E"
 ```"#;

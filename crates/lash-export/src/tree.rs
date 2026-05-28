@@ -4,7 +4,7 @@
 //!
 //! The on-disk shape is one `.db` per session in `sessions_dir/`, each
 //! carrying its full session relation in `session_meta`. For subagents,
-//! `SessionRelation::Child.originating_tool_call_id` anchors the child to
+//! `SessionRelation::Child.caused_by` anchors the child to
 //! the parent `spawn_agent` call without relying on model-authored names.
 //!
 //! One provider trace JSONL covers the whole `lash` invocation. Each
@@ -226,7 +226,7 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
             lash_core::SessionRelation::Root => {}
             lash_core::SessionRelation::Child {
                 parent_session_id,
-                originating_tool_call_id,
+                caused_by,
             } => {
                 node_kinds.insert(
                     c.meta.session_id.clone(),
@@ -234,7 +234,7 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
                         parent_session_id: parent_session_id.clone(),
                         task: None,
                         capability: None,
-                        parent_call_id: originating_tool_call_id.clone(),
+                        parent_call_id: tool_call_id_from_cause(caused_by),
                     },
                 );
             }
@@ -308,7 +308,7 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
             }
             let lash_core::SessionRelation::Child {
                 parent_session_id,
-                originating_tool_call_id,
+                caused_by,
             } = &child.meta.relation
             else {
                 continue;
@@ -326,7 +326,7 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
                 child_session_id: child.meta.session_id.clone(),
                 task: None,
                 capability: None,
-                call_id: originating_tool_call_id.clone(),
+                call_id: tool_call_id_from_cause(caused_by),
                 status: ToolCallStatus::Success,
                 duration_ms: 0,
             });
@@ -418,19 +418,26 @@ fn find_spawn_child_for_record(
             }
             let lash_core::SessionRelation::Child {
                 parent_session_id: child_parent,
-                originating_tool_call_id,
+                caused_by,
             } = &candidate.meta.relation
             else {
                 continue;
             };
             if child_parent == parent_session_id
-                && originating_tool_call_id.as_ref() == Some(call_id)
+                && tool_call_id_from_cause(caused_by).as_deref() == Some(call_id)
             {
                 return Some(candidate.meta.session_id.clone());
             }
         }
     }
     extract_session_id(&record.output.value_for_projection())
+}
+
+fn tool_call_id_from_cause(caused_by: &Option<lash_core::CausalRef>) -> Option<String> {
+    match caused_by {
+        Some(lash_core::CausalRef::ToolCall { call_id, .. }) => Some(call_id.clone()),
+        _ => None,
+    }
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -468,14 +475,17 @@ mod tests {
     }
 
     #[test]
-    fn spawn_child_lookup_uses_persisted_originating_call_id() {
+    fn spawn_child_lookup_uses_persisted_tool_call_cause() {
         let candidates = vec![
             candidate("root", lash_core::SessionRelation::Root),
             candidate(
                 "child-from-relation",
                 lash_core::SessionRelation::Child {
                     parent_session_id: "root".to_string(),
-                    originating_tool_call_id: Some("call-7".to_string()),
+                    caused_by: Some(lash_core::CausalRef::ToolCall {
+                        session_id: "root".to_string(),
+                        call_id: "call-7".to_string(),
+                    }),
                 },
             ),
         ];

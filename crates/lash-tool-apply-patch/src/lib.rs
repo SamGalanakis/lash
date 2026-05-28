@@ -16,7 +16,7 @@ const MOVE_TO_MARKER: &str = "*** Move to: ";
 const EOF_MARKER: &str = "*** End of File";
 const CHANGE_CONTEXT_MARKER: &str = "@@ ";
 const EMPTY_CHANGE_CONTEXT_MARKER: &str = "@@";
-const APPLY_PATCH_INSTRUCTIONS: &str = r#"Use the `apply_patch` tool to edit files. Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
+const APPLY_PATCH_INSTRUCTIONS: &str = r#"Use `files.patch(...)` to edit files. The patch body is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
 
 *** Begin Patch
 [ one or more file sections ]
@@ -89,7 +89,7 @@ It is important to remember:
 - You must include a header with your intended action (Add/Delete/Update)
 - You must prefix new lines with `+` even when creating a new file
 - File references can only be relative, NEVER ABSOLUTE.
-- Avoid re-reading a file just to confirm a successful patch; if `apply_patch` succeeds, trust it and move on to the next targeted check"#;
+- Avoid re-reading a file just to confirm a successful patch; if `files.patch` succeeds, trust it and move on to the next targeted check"#;
 
 #[derive(Default)]
 pub struct ApplyPatchTool;
@@ -144,7 +144,7 @@ fn apply_patch_tool_definition() -> ToolDefinition {
                     serde_json::json!({
                         "input": {
                             "type": "string",
-                            "description": "Patch body in apply_patch format"
+                            "description": "Patch body in the file patch format"
                         },
                         "workdir": {
                             "type": "string",
@@ -156,12 +156,16 @@ fn apply_patch_tool_definition() -> ToolDefinition {
                 serde_json::json!({ "type": "object", "additionalProperties": true }),
             )
             .with_examples(vec![
-                "apply_patch(input=\"*** Begin Patch\\n*** Add File: hello.txt\\n+hello\\n*** End Patch\")"
+                "await files.patch({ input: \"*** Begin Patch\\n*** Add File: hello.txt\\n+hello\\n*** End Patch\" })?"
                     .into(),
-                "apply_patch(input=\"*** Begin Patch\\n*** Update File: src/main.rs\\n@@ fn main() {\\n-    old();\\n+    new();\\n*** End Patch\")"
+                "await files.patch({ input: \"*** Begin Patch\\n*** Update File: src/main.rs\\n@@ fn main() {\\n-    old();\\n+    new();\\n*** End Patch\" })?"
                     .into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["patch", "edit_file"]))
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["files"],
+                "patch",
+                &["patch", "edit_file"],
+            ))
             .with_scheduling(ToolScheduling::Serial)
 }
 

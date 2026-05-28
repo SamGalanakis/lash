@@ -393,14 +393,16 @@ fn write_surface_requirements(writer: &mut HashWriter, requirements: &SurfaceReq
     writer.bool(requirements.abilities.triggers);
     writer.bool(requirements.abilities.schedules.cron);
     writer.atom("resources");
+    writer.atom("modules");
+    writer.usize(requirements.resources.module_instances.len());
+    for (module_path, module) in &requirements.resources.module_instances {
+        writer.atom(module_path);
+        writer.atom(&module.resource_type);
+        writer.atom(&module.alias);
+    }
     writer.usize(requirements.resources.resource_types.len());
     for (resource_type, catalog) in &requirements.resources.resource_types {
         writer.atom(resource_type);
-        writer.atom("aliases");
-        writer.usize(catalog.aliases.len());
-        for alias in &catalog.aliases {
-            writer.atom(alias);
-        }
         writer.atom("operations");
         writer.usize(catalog.operations.len());
         for (operation, binding) in &catalog.operations {
@@ -748,6 +750,12 @@ fn write_optional_expr(
 }
 
 fn write_resource_ref(writer: &mut HashWriter, resource: &ResourceRefExpr) {
+    writer.atom("path");
+    writer.usize(resource.path.len());
+    for segment in &resource.path {
+        writer.atom(segment.as_str());
+    }
+    writer.atom("handle");
     writer.atom(resource.resource_type.as_str());
     writer.atom(resource.alias.as_str());
 }
@@ -1232,10 +1240,12 @@ impl<'program> RequirementsCollector<'program> {
             } => {
                 let receiver = self.collect_expr(receiver, scope);
                 if let Some(RequirementBinding::Resource { resource_type }) = receiver {
+                    let (operation, host_operation) =
+                        self.resource_operation_requirement(&resource_type, operation.as_str());
                     self.requirements.resources.add_operation(
                         resource_type,
-                        operation.to_string(),
-                        operation.to_string(),
+                        operation,
+                        host_operation,
                     );
                 }
                 for arg in args {
@@ -1309,9 +1319,30 @@ impl<'program> RequirementsCollector<'program> {
     }
 
     fn require_resource_ref(&mut self, resource: &ResourceRefExpr) {
-        self.requirements.resources.add_alias(
+        self.requirements.resources.add_module_instance(
+            resource.path.iter().map(|segment| segment.as_str()),
             resource.resource_type.to_string(),
-            resource.alias.to_string(),
         );
+    }
+
+    fn resource_operation_requirement(
+        &self,
+        resource_type: &str,
+        operation: &str,
+    ) -> (String, String) {
+        if let Some(catalog) = self.resource_catalog {
+            if let Some(binding) = catalog.resolve_operation(resource_type, operation) {
+                return (operation.to_string(), binding.host_operation.clone());
+            }
+            if let Some((surface_operation, binding)) =
+                catalog.resolve_operation_by_host(resource_type, operation)
+            {
+                return (
+                    surface_operation.to_string(),
+                    binding.host_operation.clone(),
+                );
+            }
+        }
+        (operation.to_string(), operation.to_string())
     }
 }

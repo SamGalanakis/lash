@@ -26,11 +26,8 @@ pub struct LlmPromptSnapshot {
     pub turn_index: Option<u64>,
     pub protocol_iteration: Option<u64>,
     pub llm_call_id: Option<String>,
-    /// When this LLM call was issued from inside a tool's
-    /// `direct_completion`, carries the originating tool's call id.
-    /// The renderer uses this to fold fan-out reranks (tournament_rerank,
-    /// llm_query batches, etc.) under their parent tool call.
-    pub originating_tool_call_id: Option<String>,
+    /// Typed causal source from `context.metadata.caused_by`.
+    pub caused_by: Option<lash_core::CausalRef>,
     pub timestamp: Option<String>,
     pub model: Option<String>,
     pub model_variant: Option<String>,
@@ -134,10 +131,10 @@ fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
             .and_then(|c| c.get("llm_call_id"))
             .and_then(Value::as_str)
             .map(str::to_string),
-        originating_tool_call_id: context
-            .and_then(|c| c.get("originating_tool_call_id"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        caused_by: context
+            .and_then(|c| c.get("metadata"))
+            .and_then(|m| m.get("caused_by"))
+            .and_then(trace_causal_ref),
         timestamp: record
             .get("timestamp")
             .and_then(Value::as_str)
@@ -160,6 +157,10 @@ fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
         request_hash,
         usage: None,
     })
+}
+
+fn trace_causal_ref(value: &Value) -> Option<lash_core::CausalRef> {
+    serde_json::from_value(value.clone()).ok()
 }
 
 fn usage_from_completed_record(record: &Value) -> Option<LlmCallUsage> {

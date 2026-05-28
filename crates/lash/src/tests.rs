@@ -204,6 +204,8 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         })
     }
 
+    lash_core::impl_unsupported_queued_work_methods!();
+
     async fn claim_runtime_turn_lease(
         &self,
         session_id: &str,
@@ -301,7 +303,7 @@ impl lash_core::RuntimePersistence for SnapshotStore {
                 (
                     record.session_id.clone(),
                     record.turn_id.clone(),
-                    record.idempotency_key.clone(),
+                    record.replay_key.clone(),
                 ),
                 record,
             );
@@ -312,7 +314,7 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         &self,
         session_id: &str,
         turn_id: &str,
-        idempotency_key: &str,
+        replay_key: &str,
     ) -> std::result::Result<
         Option<lash_core::RuntimeEffectJournalRecord>,
         lash_core::store::StoreError,
@@ -324,7 +326,7 @@ impl lash_core::RuntimePersistence for SnapshotStore {
             .get(&(
                 session_id.to_string(),
                 turn_id.to_string(),
-                idempotency_key.to_string(),
+                replay_key.to_string(),
             ))
             .cloned())
     }
@@ -411,6 +413,8 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
         unreachable!("test should fail before committing to the reused child store")
     }
 
+    lash_core::impl_unsupported_queued_work_methods!();
+
     async fn claim_runtime_turn_lease(
         &self,
         session_id: &str,
@@ -477,7 +481,7 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
         &self,
         _session_id: &str,
         _turn_id: &str,
-        _idempotency_key: &str,
+        _replay_key: &str,
     ) -> std::result::Result<
         Option<lash_core::RuntimeEffectJournalRecord>,
         lash_core::store::StoreError,
@@ -648,6 +652,7 @@ fn app_tool_definition() -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "object" }),
     )
+    .with_agent_surface(lash_core::ToolAgentSurface::new(["tools"], "app_lookup"))
 }
 
 struct LongTextTools;
@@ -679,6 +684,7 @@ fn long_text_tool_definition() -> lash_core::ToolDefinition {
         }),
         serde_json::json!({ "type": "string" }),
     )
+    .with_agent_surface(lash_core::ToolAgentSurface::new(["tools"], "app_lookup"))
 }
 
 struct SurfacePluginFactory;

@@ -48,7 +48,7 @@ impl ToolProvider for FetchUrl {
         };
 
         if self.api_key.trim().is_empty() {
-            return ToolResult::err(json!("Tavily API key is required for fetch_url"));
+            return ToolResult::err(json!("Tavily API key is required for web.fetch"));
         }
 
         let body = json!({
@@ -64,12 +64,12 @@ impl ToolProvider for FetchUrl {
             .await;
         let resp = match resp {
             Ok(resp) => resp,
-            Err(err) => return ToolResult::err(json!(format!("fetch_url request failed: {err}"))),
+            Err(err) => return ToolResult::err(json!(format!("web.fetch request failed: {err}"))),
         };
         let status = resp.status();
         let value: serde_json::Value = match resp.json().await {
             Ok(value) => value,
-            Err(err) => return ToolResult::err(json!(format!("fetch_url response failed: {err}"))),
+            Err(err) => return ToolResult::err(json!(format!("web.fetch response failed: {err}"))),
         };
         if !status.is_success() {
             return ToolResult::err(value);
@@ -115,9 +115,10 @@ fn fetch_url_tool_definition() -> ToolDefinition {
                     "additionalProperties": false
                 }),
             )
-            .with_examples(vec!["fetch_url(url=\"https://www.rust-lang.org/\")".into()])
-            .with_discovery(lash_tool_support::discovery_metadata(
-                "web",
+            .with_examples(vec!["await web.fetch({ url: \"https://www.rust-lang.org/\" })?".into()])
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["web"],
+                "fetch",
                 &["fetch", "open_url"],
             ))
             .with_scheduling(ToolScheduling::Parallel)

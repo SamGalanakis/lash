@@ -1,12 +1,36 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
 use crate::plugin::{PluginSession, RuntimeSessionHost};
 use crate::{
     PreparedToolCall, SessionEvent, ToolCallRecord, ToolFailure, ToolFailureClass, ToolProvider,
-    ToolResult, ToolSurface, TurnInjectionBridge,
+    ToolResult, ToolSurface,
 };
+
+#[derive(Clone, Default)]
+pub(crate) struct CheckpointMessageBuffer {
+    queue: Arc<Mutex<Vec<crate::PluginMessage>>>,
+}
+
+impl CheckpointMessageBuffer {
+    pub(crate) fn enqueue(&self, messages: Vec<crate::PluginMessage>) -> Result<(), String> {
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|_| "checkpoint message buffer poisoned".to_string())?;
+        queue.extend(messages);
+        Ok(())
+    }
+
+    pub(crate) fn drain(&self) -> Result<Vec<crate::PluginMessage>, String> {
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|_| "checkpoint message buffer poisoned".to_string())?;
+        Ok(queue.drain(..).collect())
+    }
+}
 
 #[derive(Clone)]
 pub struct ToolDispatchContext<'run> {
@@ -17,10 +41,10 @@ pub struct ToolDispatchContext<'run> {
     pub processes: Arc<dyn crate::ProcessService>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
-    pub(crate) tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+    pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
     pub session_id: String,
     pub event_tx: mpsc::Sender<SessionEvent>,
-    pub turn_injection_bridge: TurnInjectionBridge,
+    pub(crate) checkpoint_messages: CheckpointMessageBuffer,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub turn_context: crate::TurnContext,
 }
@@ -28,7 +52,7 @@ pub struct ToolDispatchContext<'run> {
 impl<'run> ToolDispatchContext<'run> {
     pub fn process_scope(&self) -> crate::ProcessOpScope<'_> {
         crate::ProcessOpScope::new()
-            .with_effect_metadata(self.tool_effect_metadata.clone())
+            .with_parent_invocation(self.parent_invocation.clone())
             .with_effect_controller(self.effect_controller.as_controller())
     }
 }

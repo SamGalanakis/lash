@@ -73,7 +73,7 @@ mod tests {
 
         assert!(content.contains("Tokens: 95000 · handoff threshold: 100000 (95%)"));
         assert!(content.contains("Budget tight"));
-        assert!(content.contains("`continue_as`"));
+        assert!(content.contains("`control.continue_as(...)`"));
         assert!(!content.contains("Past the handoff threshold"));
         assert!(!content.contains("Look for a clean handoff point"));
     }
@@ -86,7 +86,7 @@ mod tests {
 
         assert!(content.contains("Tokens: 120292 · handoff threshold: 100000 (120%)"));
         assert!(content.contains("Past the handoff threshold"));
-        assert!(content.contains("End this block with `continue_as` now"));
+        assert!(content.contains("End this block with `control.continue_as(...)` now"));
         assert!(content.contains("do not call `submit`"));
         assert!(content.contains("`task` + `seed`"));
     }

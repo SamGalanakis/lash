@@ -456,27 +456,34 @@ pub(super) fn append_session_nodes_to_state(
     state: &mut RuntimeSessionState,
     nodes: &[crate::SessionAppendNode],
 ) -> Vec<String> {
-    let mut node_ids = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        match node {
-            crate::SessionAppendNode::Message { message } => {
-                let message = plugin_message_to_message(message);
-                node_ids.push(state.session_graph.append_message(message));
-            }
-            crate::SessionAppendNode::ProtocolEvent { event } => {
-                node_ids.push(state.session_graph.append_protocol_event(event.clone()));
-            }
-            crate::SessionAppendNode::Plugin { plugin_type, body } => {
-                node_ids.push(
-                    state
-                        .session_graph
-                        .append_plugin(plugin_type.clone(), body.clone()),
-                );
-            }
-        }
-    }
+    let drafts = nodes
+        .iter()
+        .map(session_append_node_draft)
+        .collect::<Vec<_>>();
+    let node_ids = state.session_graph.append_node_drafts(drafts);
     normalize_session_graph(state);
     node_ids
+}
+
+fn session_append_node_draft(
+    node: &crate::SessionAppendNode,
+) -> crate::session_graph::SessionNodeDraft {
+    match node {
+        crate::SessionAppendNode::Message { message, caused_by } => {
+            crate::session_graph::SessionNodeDraft::message(plugin_message_to_message(message))
+                .with_caused_by(caused_by.clone())
+        }
+        crate::SessionAppendNode::ProtocolEvent { event, caused_by } => {
+            crate::session_graph::SessionNodeDraft::protocol_event(event.clone())
+                .with_caused_by(caused_by.clone())
+        }
+        crate::SessionAppendNode::Plugin {
+            plugin_type,
+            body,
+            caused_by,
+        } => crate::session_graph::SessionNodeDraft::plugin(plugin_type.clone(), body.clone())
+            .with_caused_by(caused_by.clone()),
+    }
 }
 
 /// Heal any graph corruption (orphaned leaf) on load.

@@ -148,11 +148,12 @@ fn ls_tool_definition() -> ToolDefinition {
                 serde_json::json!({ "type": "object", "additionalProperties": true }),
             )
             .with_examples(vec![
-                r#"ls(path=".", depth=1, limit=100)"#.into(),
-                r#"ls(path="crates/lash/src/tools", with_lines=true)"#.into(),
+                r#"await files.list({ path: ".", depth: 1, limit: 100 })?"#.into(),
+                r#"await files.list({ path: "crates/lash/src/tools", with_lines: true })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata(
-                "filesystem",
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["files"],
+                "list",
                 &["list_files", "list_directory"],
             ))
             .with_scheduling(ToolScheduling::Parallel)

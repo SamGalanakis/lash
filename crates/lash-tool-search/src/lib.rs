@@ -321,12 +321,13 @@ fn grep_tool_definition() -> ToolDefinition {
                 json!({ "type": "object", "additionalProperties": true }),
             )
             .with_examples(vec![
-                r#"grep(query="ToolProvider", path="crates/lash/src")"#.into(),
-                r#"grep(query="*.rs apply_patch", path=".")"#.into(),
-                r#"grep(query="current_query")"#.into(),
+                r#"await files.grep({ query: "ToolProvider", path: "crates/lash/src" })?"#.into(),
+                r#"await files.grep({ query: "*.rs apply_patch", path: "." })?"#.into(),
+                r#"await files.grep({ query: "current_query" })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata(
-                "filesystem",
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["files"],
+                "grep",
                 &["search_files", "ripgrep"],
             ))
             .with_scheduling(ToolScheduling::Parallel)

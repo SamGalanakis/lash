@@ -11,13 +11,6 @@ impl ProcessCapability {
         crate::ProcessScope::new(session_id)
     }
 
-    pub(in crate::runtime::session_manager) fn process_scope_id(
-        &self,
-        session_id: &str,
-    ) -> crate::ProcessScopeId {
-        self.process_scope(session_id).id()
-    }
-
     pub(in crate::runtime::session_manager) async fn start_process(
         &self,
         current: &CurrentSessionCapability,
@@ -37,9 +30,16 @@ impl ProcessCapability {
         };
         self.mark_current_process_sync_needed(current, session_id);
         let creator_scope = self.process_scope(session_id);
-        let registration = registration.with_provenance(
-            creator_scope.clone(),
-            current.host.core.host_profile_id.clone(),
+        let caused_by = scope
+            .parent_invocation
+            .as_ref()
+            .and_then(crate::RuntimeInvocation::causal_ref);
+        let registration = registration.with_process_provenance(
+            crate::ProcessProvenance::new(
+                creator_scope.clone(),
+                current.host.core.host_profile_id.clone(),
+            )
+            .with_caused_by(caused_by),
         );
         let wake_target_scope = options
             .wake_session_id
@@ -64,7 +64,7 @@ impl ProcessCapability {
                     execution_context: Box::new(execution_context),
                 },
                 Some(runner),
-                scope.effect_metadata,
+                scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
             )
@@ -96,7 +96,7 @@ impl ProcessCapability {
                     process_id: process_id.to_string(),
                 },
                 None,
-                scope.effect_metadata,
+                scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
             )
@@ -128,7 +128,7 @@ impl ProcessCapability {
                     owner_scope: self.process_scope(session_id),
                 },
                 None,
-                scope.effect_metadata,
+                scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
             )
@@ -170,7 +170,7 @@ impl ProcessCapability {
                     reason: Some("requested by host".to_string()),
                 },
                 None,
-                scope.effect_metadata,
+                scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
             )
@@ -270,7 +270,7 @@ impl ProcessCapability {
                     process_ids,
                 },
                 None,
-                scope.effect_metadata,
+                scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
             )
@@ -365,14 +365,18 @@ impl ProcessCapability {
         registry: Arc<dyn crate::ProcessRegistry>,
         command: crate::ProcessCommand,
         runner: Option<Arc<dyn crate::runtime::effect::ProcessRunner>>,
-        parent_metadata: Option<crate::EffectInvocationMetadata>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
         effect_controller: Option<&dyn crate::RuntimeEffectController>,
         scope_turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Result<crate::ProcessEffectOutcome, crate::PluginError> {
         let effect_id = command.effect_id();
-        let metadata = self.process_effect_metadata(current, &effect_id, parent_metadata)?;
+        let invocation = crate::runtime::causal::process_effect_invocation(
+            &current.session_id,
+            parent_invocation,
+            &effect_id,
+        );
         let envelope = crate::RuntimeEffectEnvelope::new(
-            metadata,
+            invocation,
             crate::RuntimeEffectCommand::Process { command },
         );
         let controller = effect_controller.unwrap_or(current.host.core.effect_controller.as_ref());
@@ -389,42 +393,5 @@ impl ProcessCapability {
         )
         .await?;
         outcome.into_process().map_err(crate::PluginError::from)
-    }
-
-    fn process_effect_metadata(
-        &self,
-        current: &CurrentSessionCapability,
-        effect_id: &str,
-        parent_metadata: Option<crate::EffectInvocationMetadata>,
-    ) -> Result<crate::EffectInvocationMetadata, crate::PluginError> {
-        if let Some(parent) = parent_metadata {
-            let Some(turn_id) = parent.turn_id.clone() else {
-                return Err(crate::PluginError::Session(format!(
-                    "process effect `{effect_id}` requires active turn metadata"
-                )));
-            };
-            return Ok(crate::EffectInvocationMetadata {
-                session_id: current.session_id.clone(),
-                origin: parent.origin,
-                turn_id: Some(turn_id),
-                turn_index: parent.turn_index,
-                protocol_iteration: parent.protocol_iteration,
-                effect_id: effect_id.to_string(),
-                effect_kind: crate::RuntimeEffectKind::Process,
-                idempotency_key: format!("{}:{effect_id}", parent.idempotency_key),
-                turn_checkpoint_hash: parent.turn_checkpoint_hash,
-            });
-        }
-        Ok(crate::EffectInvocationMetadata {
-            session_id: current.session_id.clone(),
-            origin: crate::EffectOrigin::Turn,
-            turn_id: None,
-            turn_index: None,
-            protocol_iteration: None,
-            effect_id: effect_id.to_string(),
-            effect_kind: crate::RuntimeEffectKind::Process,
-            idempotency_key: format!("{}:{effect_id}", current.session_id),
-            turn_checkpoint_hash: None,
-        })
     }
 }

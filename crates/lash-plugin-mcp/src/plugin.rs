@@ -266,8 +266,15 @@ mod tests {
         let defs = factory.pool().advertised_tools().await;
         assert_eq!(defs.len(), 1, "expected one imported tool, got {defs:?}");
         assert_eq!(defs[0].name, "mcp__docs__search_docs");
-        assert_eq!(defs[0].discovery.namespace.as_deref(), Some("docs"));
-        assert_eq!(defs[0].discovery.aliases, vec!["search-docs".to_string()]);
+        assert_eq!(defs[0].agent_surface.module_path, vec!["docs".to_string()]);
+        assert_eq!(
+            defs[0].agent_surface.operation.as_deref(),
+            Some("search_docs")
+        );
+        assert_eq!(
+            defs[0].agent_surface.aliases,
+            vec!["search-docs".to_string()]
+        );
         assert_eq!(
             defs[0]
                 .input_schema

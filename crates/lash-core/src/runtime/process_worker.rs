@@ -109,17 +109,13 @@ impl DurableProcessWorker {
                 control: None,
             });
         }
-        let session_id = registration
-            .created_by_scope
-            .as_ref()
-            .filter(|scope| !scope.is_empty())
-            .map(|scope| scope.session_id.as_str())
-            .ok_or_else(|| {
-                PluginError::Session(format!(
-                    "process `{}` is missing a structured creator scope",
-                    registration.id
-                ))
-            })?;
+        let session_id = registration.provenance.owner_scope.session_id.as_str();
+        if session_id.is_empty() {
+            return Err(PluginError::Session(format!(
+                "process `{}` is missing a structured owner scope",
+                registration.id
+            )));
+        }
         let runtime = self.rebuild_runtime(session_id).await?;
         let manager = RuntimeSessionManager::new(&runtime, true, None, None).map_err(|err| {
             PluginError::Session(format!(
@@ -187,7 +183,7 @@ impl DurableProcessWorker {
         &self,
         registration: &ProcessRegistration,
     ) -> Result<(), PluginError> {
-        let actual = registration.host_profile_id.as_str();
+        let actual = registration.provenance.host_profile_id.as_str();
         let expected = self.config.runtime_core.host_profile_id.as_str();
         if actual.is_empty() || actual == expected {
             return Ok(());
