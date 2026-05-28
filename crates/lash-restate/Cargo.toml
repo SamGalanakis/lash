@@ -12,7 +12,7 @@ description = "Restate durable execution adapter for Lash runtime effects"
 
 [dependencies]
 async-trait = { workspace = true }
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.11" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12" }
 restate-sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -25,7 +25,7 @@ tracing = { workspace = true }
 bytes = { workspace = true }
 http = "1"
 http-body-util = "0.1"
-lashlang = { path = "../lashlang", version = "=0.1.0-alpha.11" }
-lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.11" }
-lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.11" }
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.12" }
+lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.12" }
+lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.12" }
 tempfile = { workspace = true }
