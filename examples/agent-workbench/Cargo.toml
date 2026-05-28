@@ -18,13 +18,13 @@ axum = "0.8"
 bytes = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 dotenvy = "0.15"
-lash = { package = "lash-runtime", path = "../../crates/lash", version = "=0.1.0-alpha.11" }
-lashlang = { path = "../../crates/lashlang", version = "=0.1.0-alpha.11" }
-lash-plugin-process-controls = { path = "../../crates/lash-plugin-process-controls", version = "=0.1.0-alpha.11" }
-lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.11" }
-lash-sqlite-store = { path = "../../crates/lash-sqlite-store", version = "=0.1.0-alpha.11" }
-lash-subagents = { path = "../../crates/lash-subagents", version = "=0.1.0-alpha.11" }
-lash-tool-web = { path = "../../crates/lash-tool-web", version = "=0.1.0-alpha.11" }
+lash = { package = "lash-runtime", path = "../../crates/lash", version = "=0.1.0-alpha.12" }
+lashlang = { path = "../../crates/lashlang", version = "=0.1.0-alpha.12" }
+lash-plugin-process-controls = { path = "../../crates/lash-plugin-process-controls", version = "=0.1.0-alpha.12" }
+lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.12" }
+lash-sqlite-store = { path = "../../crates/lash-sqlite-store", version = "=0.1.0-alpha.12" }
+lash-subagents = { path = "../../crates/lash-subagents", version = "=0.1.0-alpha.12" }
+lash-tool-web = { path = "../../crates/lash-tool-web", version = "=0.1.0-alpha.12" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }

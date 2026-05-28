@@ -14,14 +14,14 @@ keywords = ["lash", "agent", "history", "plugin", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.11" }
-lash-plugin-tool-output-budget = { path = "../lash-plugin-tool-output-budget", version = "=0.1.0-alpha.11" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12" }
+lash-plugin-tool-output-budget = { path = "../lash-plugin-tool-output-budget", version = "=0.1.0-alpha.12" }
 async-trait = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.11", features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12", features = ["testing"] }
 tokio = { workspace = true, features = ["full"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

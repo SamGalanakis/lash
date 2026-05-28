@@ -21,13 +21,13 @@ path = "src/lib.rs"
 
 [dependencies]
 async-trait = { workspace = true }
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.11" }
-lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.11" }
-lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.11" }
-lash-local-store = { path = "../lash-local-store", version = "=0.1.0-alpha.11" }
-lash-plugin-tool-output-budget = { path = "../lash-plugin-tool-output-budget", version = "=0.1.0-alpha.11" }
-lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.11" }
-lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.11" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12" }
+lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.12" }
+lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.12" }
+lash-local-store = { path = "../lash-local-store", version = "=0.1.0-alpha.12" }
+lash-plugin-tool-output-budget = { path = "../lash-plugin-tool-output-budget", version = "=0.1.0-alpha.12" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.12" }
+lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.12" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -35,6 +35,6 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.11", features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 trybuild = "1"
