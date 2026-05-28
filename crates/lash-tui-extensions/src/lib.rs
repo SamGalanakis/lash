@@ -136,9 +136,6 @@ pub enum TuiHostEffect {
         display_text: String,
         effective_text: String,
     },
-    WakeSession {
-        input: String,
-    },
     MountSurface {
         spec: TuiSurfaceSpec,
     },

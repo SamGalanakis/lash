@@ -53,7 +53,9 @@ impl LashRuntime {
                 ));
             host.core = host.core.with_attachment_store(scoped);
         }
-        let services = services.with_attachment_store(Arc::clone(&host.core.attachment_store));
+        let services = services
+            .with_attachment_store(Arc::clone(&host.core.attachment_store))
+            .with_lashlang_artifact_store(Arc::clone(&host.core.lashlang_artifact_store));
         let mut session = Session::new(services.clone(), &state.session_id).await?;
         if let Some(tool_state) = state.tool_state_snapshot.clone()
             && let Err(err) = session.plugins().tool_registry().apply_state(tool_state)

@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -505,6 +506,53 @@ pub(crate) async fn execute_effect_with_journal(
         .await
         .map_err(RuntimeEffectControllerError::from)?;
     Ok(outcome)
+}
+
+pub(crate) struct JournaledEffectInvocation<'a> {
+    store: Option<&'a (dyn crate::RuntimePersistence + 'a)>,
+    lease: Option<&'a crate::RuntimeTurnLease>,
+    controller: &'a dyn RuntimeEffectController,
+    envelope: RuntimeEffectEnvelope,
+    local_executor: RuntimeEffectLocalExecutor<'a>,
+}
+
+impl<'a> JournaledEffectInvocation<'a> {
+    pub(crate) fn new(
+        store: Option<&'a (dyn crate::RuntimePersistence + 'a)>,
+        lease: Option<&'a crate::RuntimeTurnLease>,
+        controller: &'a dyn RuntimeEffectController,
+        envelope: RuntimeEffectEnvelope,
+        local_executor: RuntimeEffectLocalExecutor<'a>,
+    ) -> Self {
+        Self {
+            store,
+            lease,
+            controller,
+            envelope,
+            local_executor,
+        }
+    }
+}
+
+pub(crate) async fn invoke_journaled_effect<T, E, F, Fut>(
+    invocation: JournaledEffectInvocation<'_>,
+    apply_outcome: F,
+) -> Result<T, E>
+where
+    E: From<RuntimeEffectControllerError>,
+    F: FnOnce(RuntimeEffectOutcome) -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let outcome = execute_effect_with_journal(
+        invocation.store,
+        invocation.lease,
+        invocation.controller,
+        invocation.envelope,
+        invocation.local_executor,
+    )
+    .await
+    .map_err(E::from)?;
+    apply_outcome(outcome).await
 }
 
 async fn execute_pending_effect_with_lease_renewal(

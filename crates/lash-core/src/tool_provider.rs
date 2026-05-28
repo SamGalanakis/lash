@@ -3,13 +3,22 @@ use std::sync::Arc;
 use lash_sansio::llm::types::ProviderReplayMeta;
 use serde::{Deserialize, Serialize};
 
-use crate::plugin::{
-    DirectCompletion, PluginError, RuntimeSessionHost, SessionHandle, SessionSnapshot,
-};
-use crate::{
-    AttachmentCreateMeta, AttachmentRef, AttachmentStore, AttachmentStoreError, ProcessRecord,
-    ToolContract, ToolInvocation, ToolInvocationReply, ToolManifest, ToolResult,
-};
+use crate::plugin::{PluginError, RuntimeSessionHost, SessionSnapshot};
+use crate::{AttachmentStore, ToolContract, ToolManifest, ToolResult};
+
+mod attachments;
+mod direct_completion;
+mod dispatch;
+mod process;
+mod process_events;
+mod session;
+
+pub use attachments::ToolAttachmentControl;
+pub use direct_completion::ToolDirectCompletionControl;
+pub use dispatch::ToolDispatchControl;
+pub use process::ToolProcessControl;
+pub use process_events::ToolProcessEventControl;
+pub use session::{ToolSessionControl, ToolSessionModel};
 
 /// A message sent from the sandbox to the host during execution.
 #[derive(Clone, Debug)]
@@ -52,297 +61,131 @@ pub struct ToolContext<'run> {
 pub(crate) struct ToolProcessEventContext {
     process_id: String,
     registry: Arc<dyn crate::ProcessRegistry>,
-    wake_target_scope_key: Option<String>,
+    wake_target_scope: Option<crate::ProcessScope>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ToolSessionModel {
-    pub model: String,
-    pub model_variant: Option<String>,
-}
-
-#[derive(Clone)]
-pub struct ToolSessionControl {
+pub(crate) struct ToolContextBuilder<'run> {
     session_id: String,
     host: Arc<dyn RuntimeSessionHost>,
-}
-
-impl ToolSessionControl {
-    pub async fn model(&self) -> Result<ToolSessionModel, PluginError> {
-        let snapshot = self.snapshot_current().await?;
-        Ok(ToolSessionModel {
-            model: snapshot.policy.model.id,
-            model_variant: snapshot.policy.model.variant,
-        })
-    }
-
-    pub async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
-        self.snapshot(&self.session_id).await
-    }
-
-    pub async fn snapshot(
-        &self,
-        session_id: impl AsRef<str>,
-    ) -> Result<SessionSnapshot, PluginError> {
-        self.host.snapshot_session(session_id.as_ref()).await
-    }
-
-    pub async fn create_session(
-        &self,
-        request: crate::SessionCreateRequest,
-    ) -> Result<SessionHandle, PluginError> {
-        self.host.create_session(request).await
-    }
-
-    pub async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
-        self.host.close_session(session_id).await
-    }
-
-    pub async fn start_turn(
-        &self,
-        session_id: &str,
-        input: crate::TurnInput,
-    ) -> Result<crate::AssembledTurn, PluginError> {
-        self.host.start_turn(session_id, input).await
-    }
-
-    pub async fn tool_catalog(&self) -> Result<Vec<serde_json::Value>, PluginError> {
-        self.host.tool_catalog(&self.session_id).await
-    }
-
-    pub async fn set_tools_availability(
-        &self,
-        names: &[String],
-        availability: Option<crate::ToolAvailability>,
-    ) -> Result<u64, PluginError> {
-        self.host
-            .set_tools_availability(&self.session_id, names, availability)
-            .await
-    }
-}
-
-#[async_trait::async_trait]
-impl RuntimeSessionHost for ToolSessionControl {
-    async fn create_session(
-        &self,
-        request: crate::SessionCreateRequest,
-    ) -> Result<SessionHandle, PluginError> {
-        ToolSessionControl::create_session(self, request).await
-    }
-
-    async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
-        ToolSessionControl::close_session(self, session_id).await
-    }
-
-    async fn start_turn(
-        &self,
-        session_id: &str,
-        input: crate::TurnInput,
-    ) -> Result<crate::AssembledTurn, PluginError> {
-        ToolSessionControl::start_turn(self, session_id, input).await
-    }
-}
-
-#[derive(Clone)]
-pub struct ToolDispatchControl<'run> {
-    context: ToolContext<'run>,
-}
-
-impl<'run> ToolDispatchControl<'run> {
-    pub async fn batch(&self, calls: Vec<ToolInvocation>) -> Vec<ToolInvocationReply> {
-        let Some(dispatch) = self.context.runtime_dispatch.clone() else {
-            return calls
-                .into_iter()
-                .map(|_| {
-                    ToolInvocationReply::error(serde_json::json!(
-                        "tool batch dispatch is unavailable outside runtime tool execution"
-                    ))
-                })
-                .collect();
-        };
-        let indexed_calls = calls.into_iter().enumerate().collect::<Vec<_>>();
-        crate::tool_dispatch::schedule_tool_batch(
-            indexed_calls,
-            |(index, _)| *index,
-            {
-                let dispatch = Arc::clone(&dispatch);
-                move |(_, call)| {
-                    crate::tool_dispatch::resolve_tool_scheduling(&dispatch, &call.name)
-                }
-            },
-            |(_, call)| {
-                let dispatch = Arc::clone(&dispatch);
-                let mut child_context = self.context.clone();
-                async move {
-                    child_context.tool_call_id = Some(call.id.clone());
-                    child_context.prepared_payload = serde_json::Value::Null;
-                    let outcome = crate::tool_dispatch::dispatch_tool_call_with_execution_context(
-                        dispatch.as_ref(),
-                        call.name,
-                        call.args,
-                        None,
-                        child_context,
-                    )
-                    .await;
-                    let mut record = outcome.record;
-                    record.call_id = Some(call.id);
-                    ToolInvocationReply::from_output(record.output.clone()).with_record(record)
-                }
-            },
-        )
-        .await
-    }
-}
-
-#[derive(Clone)]
-pub struct ToolProcessControl<'run> {
-    session_id: String,
     processes: Arc<dyn crate::ProcessService>,
     effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
-    effect_metadata: Option<crate::EffectInvocationMetadata>,
-}
-
-impl ToolProcessControl<'_> {
-    fn process_scope(&self) -> crate::ProcessOpScope<'_> {
-        crate::ProcessOpScope::new()
-            .with_effect_metadata(self.effect_metadata.clone())
-            .with_effect_controller(self.effect_controller.as_controller())
-    }
-
-    pub async fn list_handles(&self) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
-        self.processes
-            .list_visible(&self.session_id, self.process_scope())
-            .await
-    }
-
-    pub async fn validate_handles(&self, handle_ids: &[String]) -> Result<(), PluginError> {
-        self.processes
-            .validate_visible(&self.session_id, handle_ids)
-            .await
-    }
-
-    pub async fn cancel(&self, process_id: &str) -> Result<ProcessRecord, PluginError> {
-        self.processes
-            .cancel(&self.session_id, process_id, self.process_scope())
-            .await
-    }
-
-    pub async fn cancel_all(&self) -> Result<Vec<ProcessRecord>, PluginError> {
-        self.processes
-            .cancel_all(&self.session_id, self.process_scope())
-            .await
-    }
-
-    pub async fn transfer_handles(
-        &self,
-        to_session_id: &str,
-        process_ids: Vec<String>,
-    ) -> Result<(), PluginError> {
-        self.processes
-            .transfer(
-                &self.session_id,
-                to_session_id,
-                process_ids,
-                self.process_scope(),
-            )
-            .await
-    }
-
-    pub async fn cancel_unreferenced_handles(
-        &self,
-        keep_process_ids: Vec<String>,
-    ) -> Result<Vec<ProcessRecord>, PluginError> {
-        self.processes
-            .cancel_unreferenced(&self.session_id, keep_process_ids, self.process_scope())
-            .await
-    }
-}
-
-#[derive(Clone)]
-pub struct ToolDirectCompletionControl<'run> {
-    session_id: String,
-    tool_call_id: Option<String>,
+    runtime_dispatch: Option<Arc<crate::tool_dispatch::ToolDispatchContext<'run>>>,
+    cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    async_process_id: Option<String>,
+    process_events: Option<ToolProcessEventContext>,
+    attachment_store: Arc<dyn AttachmentStore>,
     direct_completions: crate::DirectCompletionClient<'run>,
+    prepared_payload: serde_json::Value,
+    tool_call_id: Option<String>,
+    tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
 }
 
-impl ToolDirectCompletionControl<'_> {
-    pub async fn complete(
-        &self,
-        mut request: crate::DirectRequest,
-        usage_source: &str,
-    ) -> Result<DirectCompletion, PluginError> {
-        if request.session_id.is_none() {
-            request.session_id = Some(self.session_id.clone());
+impl<'run> ToolContextBuilder<'run> {
+    pub(crate) fn from_dispatch(
+        dispatch: Arc<crate::tool_dispatch::ToolDispatchContext<'run>>,
+    ) -> Self {
+        Self {
+            session_id: dispatch.session_id.clone(),
+            host: Arc::clone(&dispatch.host),
+            processes: Arc::clone(&dispatch.processes),
+            effect_controller: dispatch.effect_controller.clone(),
+            runtime_dispatch: Some(Arc::clone(&dispatch)),
+            cancellation_token: None,
+            async_process_id: None,
+            process_events: None,
+            attachment_store: Arc::clone(&dispatch.attachment_store),
+            direct_completions: dispatch.direct_completions.clone(),
+            prepared_payload: serde_json::Value::Null,
+            tool_call_id: None,
+            tool_effect_metadata: dispatch.tool_effect_metadata.clone(),
         }
-        if request.originating_tool_call_id.is_none() {
-            request.originating_tool_call_id = self.tool_call_id.clone();
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn tool_call_id(mut self, tool_call_id: impl Into<Option<String>>) -> Self {
+        self.tool_call_id = tool_call_id.into();
+        self
+    }
+
+    pub(crate) fn prepared_call(mut self, call: &PreparedToolCall) -> Self {
+        self.tool_call_id = Some(call.call_id.clone());
+        self.prepared_payload = call.prepared_payload.clone();
+        self
+    }
+
+    pub(crate) fn cancellation_token(
+        mut self,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Self {
+        self.cancellation_token = cancellation_token;
+        self
+    }
+
+    pub(crate) fn async_process(
+        mut self,
+        process_id: impl Into<String>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        self.async_process_id = Some(process_id.into());
+        self.cancellation_token = Some(cancellation_token);
+        self
+    }
+
+    pub(crate) fn process_events(
+        mut self,
+        process_id: impl Into<String>,
+        registry: Arc<dyn crate::ProcessRegistry>,
+        wake_target_scope: Option<crate::ProcessScope>,
+    ) -> Self {
+        self.process_events = Some(ToolProcessEventContext {
+            process_id: process_id.into(),
+            registry,
+            wake_target_scope,
+        });
+        self
+    }
+
+    pub(crate) fn tool_effect_metadata(
+        mut self,
+        metadata: Option<crate::EffectInvocationMetadata>,
+    ) -> Self {
+        self.tool_effect_metadata = metadata;
+        self
+    }
+
+    pub(crate) fn build(self) -> ToolContext<'run> {
+        ToolContext {
+            session_id: self.session_id,
+            host: self.host,
+            processes: self.processes,
+            effect_controller: self.effect_controller,
+            runtime_dispatch: self.runtime_dispatch,
+            cancellation_token: self.cancellation_token,
+            async_process_id: self.async_process_id,
+            process_events: self.process_events,
+            attachment_store: self.attachment_store,
+            direct_completions: self.direct_completions,
+            prepared_payload: self.prepared_payload,
+            tool_call_id: self.tool_call_id,
+            attempt_number: 1,
+            max_attempts: 1,
+            idempotency_key: None,
+            tool_effect_metadata: self.tool_effect_metadata,
         }
-        self.direct_completions
-            .direct_completion(request, usage_source)
-            .await
-    }
-}
-
-#[derive(Clone)]
-pub struct ToolAttachmentControl {
-    store: Arc<dyn AttachmentStore>,
-}
-
-impl ToolAttachmentControl {
-    pub fn put(
-        &self,
-        data: Vec<u8>,
-        meta: AttachmentCreateMeta,
-    ) -> Result<AttachmentRef, AttachmentStoreError> {
-        self.store.put(data, meta)
-    }
-}
-
-#[derive(Clone)]
-pub struct ToolProcessEventControl {
-    context: Option<ToolProcessEventContext>,
-}
-
-impl ToolProcessEventControl {
-    pub async fn emit(
-        &self,
-        event_type: impl Into<String>,
-        payload: serde_json::Value,
-    ) -> Result<crate::ProcessEvent, PluginError> {
-        self.emit_request(crate::ProcessEventAppendRequest::new(event_type, payload))
-            .await
-    }
-
-    pub async fn emit_request(
-        &self,
-        request: crate::ProcessEventAppendRequest,
-    ) -> Result<crate::ProcessEvent, PluginError> {
-        let Some(process) = self.context.as_ref() else {
-            return Err(PluginError::Session(
-                "process event emission is unavailable outside a durable process".to_string(),
-            ));
-        };
-        process
-            .registry
-            .append_event(
-                &process.process_id,
-                request.with_optional_wake_target_scope_key(process.wake_target_scope_key.clone()),
-            )
-            .await
     }
 }
 
 impl<'run> ToolContext<'run> {
-    pub(crate) fn new(
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn builder(
         session_id: String,
         host: Arc<dyn RuntimeSessionHost>,
         processes: Arc<dyn crate::ProcessService>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         attachment_store: Arc<dyn AttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'run>,
-        tool_call_id: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> ToolContextBuilder<'run> {
+        ToolContextBuilder {
             session_id,
             host,
             processes,
@@ -354,12 +197,15 @@ impl<'run> ToolContext<'run> {
             attachment_store,
             direct_completions,
             prepared_payload: serde_json::Value::Null,
-            tool_call_id,
-            attempt_number: 1,
-            max_attempts: 1,
-            idempotency_key: None,
+            tool_call_id: None,
             tool_effect_metadata: None,
         }
+    }
+
+    pub(crate) fn from_dispatch(
+        dispatch: Arc<crate::tool_dispatch::ToolDispatchContext<'run>>,
+    ) -> ToolContextBuilder<'run> {
+        ToolContextBuilder::from_dispatch(dispatch)
     }
 
     pub fn session_id(&self) -> &str {
@@ -453,36 +299,6 @@ impl<'run> ToolContext<'run> {
         self
     }
 
-    pub(crate) fn with_cancellation_token(
-        mut self,
-        cancellation_token: Option<tokio_util::sync::CancellationToken>,
-    ) -> Self {
-        self.cancellation_token = cancellation_token;
-        self
-    }
-
-    pub(crate) fn with_runtime_dispatch(
-        mut self,
-        dispatch: Arc<crate::tool_dispatch::ToolDispatchContext<'run>>,
-    ) -> Self {
-        self.runtime_dispatch = Some(dispatch);
-        self
-    }
-
-    pub(crate) fn with_process_events(
-        mut self,
-        process_id: impl Into<String>,
-        registry: Arc<dyn crate::ProcessRegistry>,
-        wake_target_scope_key: Option<String>,
-    ) -> Self {
-        self.process_events = Some(ToolProcessEventContext {
-            process_id: process_id.into(),
-            registry,
-            wake_target_scope_key,
-        });
-        self
-    }
-
     pub(crate) fn with_retry_context(
         mut self,
         tool_name: &str,
@@ -495,14 +311,6 @@ impl<'run> ToolContext<'run> {
             .tool_call_id
             .as_ref()
             .map(|call_id| format!("lash-tool:{}:{call_id}:{tool_name}", self.session_id));
-        self
-    }
-
-    pub(crate) fn with_tool_effect_metadata(
-        mut self,
-        metadata: Option<crate::EffectInvocationMetadata>,
-    ) -> Self {
-        self.tool_effect_metadata = metadata;
         self
     }
 
@@ -523,7 +331,7 @@ impl<'run> ToolContext<'run> {
         direct_completions: crate::DirectCompletionClient<'static>,
         tool_call_id: Option<String>,
     ) -> ToolContext<'static> {
-        ToolContext::new(
+        ToolContext::builder(
             session_id,
             host,
             processes,
@@ -532,8 +340,9 @@ impl<'run> ToolContext<'run> {
             )),
             attachment_store,
             direct_completions,
-            tool_call_id,
         )
+        .tool_call_id(tool_call_id)
+        .build()
     }
 }
 
@@ -674,4 +483,47 @@ pub trait ToolProvider: Send + Sync + 'static {
         Ok(PreparedToolCall::identity(call.pending))
     }
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_context_builder_carries_call_payload_and_cancellation_state() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let prepared = PreparedToolCall::from_parts(
+            "call-1",
+            "demo_tool",
+            serde_json::json!({ "input": true }),
+            None,
+            serde_json::json!({ "prepared": true }),
+        );
+
+        let context = ToolContext::builder(
+            "session-1".to_string(),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::UnavailableProcessService),
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            Arc::new(crate::InMemoryAttachmentStore::new()),
+            crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
+        )
+        .prepared_call(&prepared)
+        .cancellation_token(Some(cancellation.clone()))
+        .async_process("process-1", cancellation.clone())
+        .build();
+
+        assert_eq!(context.session_id(), "session-1");
+        assert_eq!(context.tool_call_id(), Some("call-1"));
+        assert_eq!(
+            context.prepared_payload(),
+            &serde_json::json!({ "prepared": true })
+        );
+        assert_eq!(context.async_process_id(), Some("process-1"));
+        assert!(context.cancellation_token().is_some());
+    }
 }

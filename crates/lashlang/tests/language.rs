@@ -37,7 +37,7 @@ impl ExecutionHost for TestHost {
                     .map(AbilityResult::Value)
             }
             AbilityOp::StartProcess(start) => self
-                .call_tool(&start.process, &start.args)
+                .call_tool(&start.process_name, &start.args)
                 .await
                 .map(AbilityResult::Value),
             AbilityOp::Await(handle) => Ok(AbilityResult::Value(handle)),
@@ -125,10 +125,95 @@ async fn execute<H: ExecutionHost>(
     state: &mut State,
     host: &H,
 ) -> Result<ExecutionOutcome, ExecuteError> {
-    let compiled = lashlang::compile(source)?;
+    let program = parse(source)?;
+    let compiled = if program_contains_start_process(&program.main) {
+        let linked = lashlang::LinkedModule::link(program, test_surface()).map_err(|err| {
+            ExecuteError::Runtime(RuntimeError::ValueError {
+                message: err.to_string(),
+            })
+        })?;
+        lashlang::compile_linked(&linked)
+    } else {
+        lashlang::compile(source)?
+    };
     lashlang::execute(&compiled, state, host)
         .await
         .map_err(ExecuteError::Runtime)
+}
+
+fn test_surface() -> lashlang::LashlangSurface {
+    lashlang::LashlangSurface::new(
+        lashlang::ResourceCatalog::tool_default(["read_file", "glob", "spawn_agent"]),
+        lashlang::LashlangAbilities::all(),
+    )
+}
+
+fn program_contains_start_process(expr: &lashlang::Expr) -> bool {
+    match expr {
+        lashlang::Expr::StartProcess(_) => true,
+        lashlang::Expr::Block(expressions) | lashlang::Expr::List(expressions) => {
+            expressions.iter().any(program_contains_start_process)
+        }
+        lashlang::Expr::Record(entries) => entries
+            .iter()
+            .any(|(_, expr)| program_contains_start_process(expr)),
+        lashlang::Expr::Assign { target, expr } => {
+            target.steps.iter().any(|step| match step {
+                lashlang::AssignPathStep::Field(_) => false,
+                lashlang::AssignPathStep::Index(index) => program_contains_start_process(index),
+            }) || program_contains_start_process(expr)
+        }
+        lashlang::Expr::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            program_contains_start_process(condition)
+                || program_contains_start_process(then_block)
+                || program_contains_start_process(else_block)
+        }
+        lashlang::Expr::For { iterable, body, .. } => {
+            program_contains_start_process(iterable) || program_contains_start_process(body)
+        }
+        lashlang::Expr::ReceiverCall { receiver, args, .. } => {
+            program_contains_start_process(receiver)
+                || args.iter().any(program_contains_start_process)
+        }
+        lashlang::Expr::Await(expr)
+        | lashlang::Expr::SleepFor(expr)
+        | lashlang::Expr::SleepUntil(expr)
+        | lashlang::Expr::ResultUnwrap(expr)
+        | lashlang::Expr::Cancel(expr)
+        | lashlang::Expr::Print(expr)
+        | lashlang::Expr::Yield(expr)
+        | lashlang::Expr::Wake(expr)
+        | lashlang::Expr::Fail(expr)
+        | lashlang::Expr::Unary { expr, .. } => program_contains_start_process(expr),
+        lashlang::Expr::Submit(expr) | lashlang::Expr::Finish(expr) => {
+            expr.as_deref().is_some_and(program_contains_start_process)
+        }
+        lashlang::Expr::SignalRun { run, payload } => {
+            program_contains_start_process(run) || program_contains_start_process(payload)
+        }
+        lashlang::Expr::BuiltinCall { args, .. } => args.iter().any(program_contains_start_process),
+        lashlang::Expr::Field { target, .. } => program_contains_start_process(target),
+        lashlang::Expr::Index { target, index } => {
+            program_contains_start_process(target) || program_contains_start_process(index)
+        }
+        lashlang::Expr::Binary { left, right, .. } => {
+            program_contains_start_process(left) || program_contains_start_process(right)
+        }
+        lashlang::Expr::Null
+        | lashlang::Expr::Bool(_)
+        | lashlang::Expr::Number(_)
+        | lashlang::Expr::String(_)
+        | lashlang::Expr::Variable(_)
+        | lashlang::Expr::Break
+        | lashlang::Expr::Continue
+        | lashlang::Expr::ResourceRef(_)
+        | lashlang::Expr::WaitSignal
+        | lashlang::Expr::TypeLiteral(_) => false,
+    }
 }
 
 fn program_len(program: &lashlang::Program) -> usize {
@@ -208,6 +293,7 @@ async fn start_is_contextual_not_reserved() {
     let value = finished(
         execute(
             r#"
+            process read_file(path: str) { finish path }
             start = 1
             for start in range(3) {
               last = start
@@ -1335,6 +1421,7 @@ async fn explicit_start_and_await_merges_distinct_results() {
     let value = finished(
         execute(
             r#"
+        process sleep_echo(value: str) { finish value }
         left = start sleep_echo(value: "a")
         right = start sleep_echo(value: "b")
         results = await { left: left, right: right }
@@ -1362,6 +1449,7 @@ async fn await_list_returns_branch_results_in_order() {
     let value = finished(
         execute(
             r#"
+        process sleep_echo(value: str) { finish value }
         results = await [
           start sleep_echo(value: "a"),
           start sleep_echo(value: "b")
@@ -1397,6 +1485,7 @@ async fn await_record_returns_record_results() {
     let value = finished(
         execute(
             r#"
+        process sleep_echo(value: str) { finish value }
         results = await {
           first: start sleep_echo(value: "a"),
           second: start sleep_echo(value: "b")
@@ -1912,6 +2001,7 @@ async fn await_record_accepts_commas_and_keyword_record_keys_execute() {
     let value = finished(
         execute(
             r#"
+        process sleep_echo(value: str) { finish value }
         result = await {
           fanout: start sleep_echo(value: "ok"),
           "with space": start sleep_echo(value: "quoted"),

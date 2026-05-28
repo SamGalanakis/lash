@@ -8,7 +8,7 @@ impl RuntimeTurnDriver<'_> {
         checkpoint: CheckpointKind,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
-    ) -> Result<(Vec<PluginMessage>, Vec<PluginMessage>), RuntimeError> {
+    ) -> Result<crate::CheckpointDelivery, RuntimeError> {
         let metadata = self
             .turn_effect_metadata(machine, id, RuntimeEffectKind::Checkpoint)
             .map_err(RuntimeEffectControllerError::into_runtime_error)?;
@@ -76,7 +76,7 @@ impl RuntimeTurnDriver<'_> {
         machine: &mut TurnMachine,
         checkpoint: CheckpointKind,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
-    ) -> Result<(Vec<PluginMessage>, Vec<PluginMessage>), RuntimeError> {
+    ) -> Result<crate::CheckpointDelivery, RuntimeError> {
         let mut committed = self
             .session
             .turn_injection_bridge()
@@ -88,9 +88,9 @@ impl RuntimeTurnDriver<'_> {
             .drain()
             .map_err(|err| RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err))?;
         let durable_wakes = if let Some(registry) = self.session_manager.process_registry() {
-            let scope_key = self.session_manager.process_scope_key(&self.session_id);
+            let scope_id = self.session_manager.process_scope_id(&self.session_id);
             registry
-                .drain_wake_inputs(&scope_key, 256)
+                .drain_wake_inputs(&scope_id, 256)
                 .await
                 .map_err(|err| {
                     RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err.to_string())
@@ -98,14 +98,13 @@ impl RuntimeTurnDriver<'_> {
         } else {
             Vec::new()
         };
-        let mut injected = injected;
-        injected.extend(durable_wakes.iter().map(|wake| crate::InjectedTurnInput {
-            id: Some(wake.wake_id.clone()),
-            message: crate::PluginMessage::text(crate::MessageRole::System, wake.input.clone()),
-        }));
         let injected_messages = injected
             .iter()
             .map(|item| item.message.clone())
+            .collect::<Vec<_>>();
+        let turn_causes = durable_wakes
+            .iter()
+            .map(crate::process_wake_turn_cause)
             .collect::<Vec<_>>();
         let plugins = Arc::clone(self.session.plugins());
         let applied = plugins
@@ -138,19 +137,6 @@ impl RuntimeTurnDriver<'_> {
                 },
             )
             .await;
-            if let Some(registry) = self.session_manager.process_registry() {
-                for wake in durable_wakes {
-                    registry
-                        .ack_wake_input(&wake.wake_id)
-                        .await
-                        .map_err(|err| {
-                            RuntimeError::new(
-                                RuntimeErrorCode::TurnInputInjectionBridge,
-                                err.to_string(),
-                            )
-                        })?;
-                }
-            }
         }
         committed.extend(applied.messages);
         emit_session_events(event_tx, applied.events).await;
@@ -169,25 +155,11 @@ impl RuntimeTurnDriver<'_> {
             .await;
         }
 
-        Ok((committed, injected_messages))
-    }
-
-    pub(super) async fn prepare_provider(
-        &mut self,
-        policy: &mut SessionPolicy,
-    ) -> Result<String, SessionEvent> {
-        let model = policy.model.id.clone();
-        if let Some(variant) = policy.model.variant.as_deref()
-            && let Err(message) = policy.provider.validate_variant(&model, variant)
-        {
-            return Err(make_error_event(
-                "llm_provider",
-                Some("invalid_model_variant"),
-                message.clone(),
-                Some(message),
-            ));
-        }
-        Ok(model)
+        Ok(crate::CheckpointDelivery {
+            messages: committed,
+            transient_messages: injected_messages,
+            turn_causes,
+        })
     }
 
     pub(in crate::runtime) async fn run_exec_code(

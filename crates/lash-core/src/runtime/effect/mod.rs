@@ -14,11 +14,11 @@ pub use executor::{
 
 pub(crate) use executor::{ProcessRunner, RuntimeEffectControllerHandle};
 pub(crate) use journal::{
-    LlmTraceFailure, apply_direct_completion_outcome, apply_direct_llm_completion_outcome,
-    direct_effect_metadata, direct_request_discriminator, emit_llm_trace_completed,
-    emit_llm_trace_failed, emit_llm_trace_started, execute_effect_with_journal,
-    renew_runtime_turn_lease_for_effect, token_usage_from_llm, tool_retry_sleep_metadata,
-    turn_idempotency_key,
+    JournaledEffectInvocation, LlmTraceFailure, apply_direct_completion_outcome,
+    apply_direct_llm_completion_outcome, direct_effect_metadata, direct_request_discriminator,
+    emit_llm_trace_completed, emit_llm_trace_failed, emit_llm_trace_started,
+    execute_effect_with_journal, invoke_journaled_effect, renew_runtime_turn_lease_for_effect,
+    token_usage_from_llm, tool_retry_sleep_metadata, turn_idempotency_key,
 };
 
 #[cfg(test)]

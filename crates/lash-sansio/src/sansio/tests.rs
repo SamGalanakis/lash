@@ -284,6 +284,80 @@ impl ProtocolDriverHandle for ProseDriver {
     }
 }
 
+#[test]
+fn chat_context_projector_projects_event_context_as_user_messages() {
+    fn message_text(message: &crate::llm::types::LlmMessage) -> String {
+        message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                crate::llm::types::LlmContentBlock::Text { text, .. } => Some(text.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    let cause = TurnCause {
+        id: "wake:abc".to_string(),
+        event_type: "process.wake".to_string(),
+        origin: crate::MessageOrigin::Process {
+            process_id: "process-1".to_string(),
+            event_type: "process.wake".to_string(),
+            sequence: 7,
+            wake_id: Some("wake:abc".to_string()),
+        },
+        text: "Background process wake\nProcess: process-1\nEvent: process.wake #7\nWake input:\nblue button pressed".to_string(),
+    };
+    let messages = MessageSequence::from(vec![cause.to_event_message()]);
+    let config = test_config(Arc::new(ProseDriver));
+
+    let active_request = ChatContextProjector.project(ProjectorContext {
+        config: &config,
+        messages: &messages,
+        events: &[],
+        turn_causes: std::slice::from_ref(&cause),
+        protocol_iteration: 0,
+        use_tools: false,
+    });
+    assert!(active_request.messages.iter().any(|message| {
+        message.role == crate::llm::types::LlmRole::User
+            && message_text(message).contains("=== TURN EVENTS ===")
+            && message_text(message).contains("blue button pressed")
+    }));
+    assert!(active_request.messages.iter().all(|message| {
+        message.role != crate::llm::types::LlmRole::System
+            || !message_text(message).contains("blue button pressed")
+    }));
+    let active_mentions = active_request
+        .messages
+        .iter()
+        .filter(|message| message_text(message).contains("blue button pressed"))
+        .count();
+    assert_eq!(
+        active_mentions, 1,
+        "active turn events must not duplicate history"
+    );
+
+    let history_request = ChatContextProjector.project(ProjectorContext {
+        config: &config,
+        messages: &messages,
+        events: &[],
+        turn_causes: &[],
+        protocol_iteration: 1,
+        use_tools: false,
+    });
+    assert!(history_request.messages.iter().any(|message| {
+        message.role == crate::llm::types::LlmRole::User
+            && message_text(message).contains("Runtime event:")
+            && message_text(message).contains("blue button pressed")
+    }));
+    assert!(history_request.messages.iter().all(|message| {
+        message.role != crate::llm::types::LlmRole::System
+            || !message_text(message).contains("blue button pressed")
+    }));
+}
+
 struct ExecDriver;
 
 impl ProtocolDriverHandle for ExecDriver {
@@ -611,8 +685,7 @@ fn driver_can_finish_via_checkpoint() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -670,8 +743,7 @@ fn checkpoint_after_llm_result_replays_checkpoint_without_second_llm() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     restored.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: CheckpointDelivery::default(),
     });
     let effects = drain_effects(&mut restored);
     assert!(find_done(&effects).is_some());
@@ -790,8 +862,10 @@ fn checkpoint_messages_resume_prepare_protocol_iteration() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: vec![PluginMessage::text(MessageRole::User, "one more thing")],
-        transient_messages: Vec::new(),
+        delivery: CheckpointDelivery {
+            messages: vec![PluginMessage::text(MessageRole::User, "one more thing")],
+            ..CheckpointDelivery::default()
+        },
     });
 
     let effects = drain_effects(&mut machine);
@@ -947,8 +1021,7 @@ fn checkpoint_after_mixed_tool_batch_results_replays_model_feedback_once() {
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
     restored.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: CheckpointDelivery::default(),
     });
     let effects = drain_effects(&mut restored);
     assert!(find_llm_call(&effects).is_some());
@@ -975,8 +1048,7 @@ fn exec_driver_state_round_trip() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -1012,8 +1084,7 @@ fn checkpoint_round_trips_waiting_exec_driver_state() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     restored.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: CheckpointDelivery::default(),
     });
     let effects = drain_effects(&mut restored);
     let (messages, _) = find_done(&effects).expect("done");
@@ -1173,8 +1244,7 @@ fn iteration_execution_surface_sync_can_refresh_prompt_and_tools() {
     let (checkpoint_id, _) = find_checkpoint(&effects).expect("checkpoint");
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);

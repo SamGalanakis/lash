@@ -757,9 +757,6 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<TuiHostEffect>) 
                 ));
                 app.dirty = true;
             }
-            TuiHostEffect::WakeSession { input } => {
-                app.queue_process_wake(input);
-            }
             TuiHostEffect::MountSurface { .. }
             | TuiHostEffect::UpdateSurface { .. }
             | TuiHostEffect::UnmountSurface { .. }

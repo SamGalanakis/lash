@@ -44,6 +44,7 @@ members = [
     "crates/lash-file-index",
     "crates/lashlang",
     "examples/agent-service",
+    "examples/agent-workbench",
 ]
 # `cargo build` from the repo root compiles only the publishable SDK surface.
 # Internal bins/benches/examples build with `cargo build --workspace` or `-p <name>`.

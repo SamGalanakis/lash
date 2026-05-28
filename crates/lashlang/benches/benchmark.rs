@@ -1,9 +1,14 @@
 #[path = "../examples/bench_support/mod.rs"]
 mod bench_support;
 
-use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state_for};
+use bench_support::{
+    BenchHost, Scenario, benchmark_program, linked_benchmark_program, projected_bindings,
+    seeded_state_for,
+};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use lashlang::{ExecutionEnvironment, ExecutionOutcome, State, Value, compile, execute, prewarm};
+use lashlang::{
+    ExecutionEnvironment, ExecutionOutcome, State, Value, compile_linked, execute, prewarm,
+};
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -32,13 +37,15 @@ fn benchmark_one_shot_modes(
     scenario: Scenario,
 ) {
     let source = benchmark_program(scenario);
-    let compiled = compile(source).expect("benchmark program should compile");
+    let linked = linked_benchmark_program(source.as_str());
+    let compiled = compile_linked(&linked);
     let projected = projected_bindings(scenario);
 
     group.bench_function(BenchmarkId::new("one_shot", scenario), |b| {
         b.iter(|| {
             let mut state = seeded_state_for(scenario);
-            let compiled = compile(black_box(source)).expect("benchmark program should compile");
+            let linked = linked_benchmark_program(black_box(source.as_str()));
+            let compiled = compile_linked(&linked);
             let env = ExecutionEnvironment::new(host).with_projected_bindings(projected.clone());
             let outcome = rt
                 .block_on(execute(&compiled, &mut state, &env))
@@ -51,7 +58,8 @@ fn benchmark_one_shot_modes(
         prewarm();
         b.iter(|| {
             let mut state = seeded_state_for(scenario);
-            let compiled = compile(black_box(source)).expect("benchmark program should compile");
+            let linked = linked_benchmark_program(black_box(source.as_str()));
+            let compiled = compile_linked(&linked);
             let env = ExecutionEnvironment::new(host).with_projected_bindings(projected.clone());
             let outcome = rt
                 .block_on(execute(&compiled, &mut state, &env))

@@ -533,6 +533,12 @@ fn append_transcript_items(
                 timeline.push(UiTimelineItem::SystemMessage(text));
             }
         }
+        MessageRole::Event => {
+            let text = rendered_message_text(message);
+            if !text.is_empty() {
+                timeline.push(UiTimelineItem::SystemMessage(format!("Event\n{text}")));
+            }
+        }
     }
 }
 
@@ -550,7 +556,7 @@ fn is_internal_rlm_message(message: &Message) -> bool {
         MessageRole::System => {
             rendered_message_text(message).contains("Plain text outside a fence is not delivered.")
         }
-        MessageRole::User => false,
+        MessageRole::User | MessageRole::Event => false,
     }
 }
 

@@ -312,40 +312,6 @@ fn take_last_queued_turn_restores_explicit_queue_only() {
 }
 
 #[test]
-fn wake_session_effect_uses_hidden_process_queue() {
-    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-
-    crate::apply_ui_host_effects(
-        &mut app,
-        vec![TuiHostEffect::WakeSession {
-            input: "Process wake \"build\": done".into(),
-        }],
-    );
-
-    assert!(!app.has_queued_messages());
-    assert_eq!(
-        app.take_pending_process_wakes(),
-        vec!["Process wake \"build\": done".to_string()]
-    );
-}
-
-#[test]
-fn acknowledged_process_wakes_do_not_requeue() {
-    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.queue_process_wake("Process wake \"build\": done".into());
-    let wakes = app.take_pending_process_wakes();
-    app.mark_process_wakes_in_flight(&wakes);
-
-    app.acknowledge_process_wakes(&[PluginMessage::text(
-        MessageRole::System,
-        "Process wake \"build\": done",
-    )]);
-    app.recycle_unaccepted_process_wakes();
-
-    assert!(app.take_pending_process_wakes().is_empty());
-}
-
-#[test]
 fn accepted_injected_turn_input_renders_matching_pending_steer() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::new("follow up".into(), Vec::new());
@@ -405,6 +371,7 @@ fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
             message: PluginMessage {
                 role: MessageRole::User,
                 content: "runtime content".into(),
+                origin: None,
                 parts: Vec::new(),
                 images: Vec::new(),
             },
@@ -416,6 +383,7 @@ fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
         messages: vec![PluginMessage {
             role: MessageRole::User,
             content: "runtime content".into(),
+            origin: None,
             parts: Vec::new(),
             images: Vec::new(),
         }],

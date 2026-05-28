@@ -125,9 +125,11 @@ pub(crate) fn plugin_message_to_message(plugin_message: &PluginMessage) -> Messa
         id: message_id,
         role: plugin_message.role,
         parts: Arc::new(parts),
-        origin: Some(crate::MessageOrigin::Plugin {
-            plugin_id: "plugin".to_string(),
-            transient: false,
+        origin: plugin_message.origin.clone().or_else(|| {
+            Some(crate::MessageOrigin::Plugin {
+                plugin_id: "plugin".to_string(),
+                transient: false,
+            })
         }),
     }
 }

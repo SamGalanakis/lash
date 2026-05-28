@@ -411,6 +411,7 @@ pub(crate) fn render_message(
         MessageRole::User => ("user", "user", "●"),
         MessageRole::Assistant => ("assistant", "assistant", "■"),
         MessageRole::System => ("system", "system", "◇"),
+        MessageRole::Event => ("event", "event", "◆"),
     };
 
     let user_text = if matches!(message.role, MessageRole::User) {

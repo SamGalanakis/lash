@@ -7,13 +7,12 @@ use crate::llm::types::{
     LlmAttachment, LlmEventSender, LlmMessage, LlmOutputSpec, LlmProviderTraceSender,
     LlmToolChoice, LlmToolSpec,
 };
-use crate::plugin::PluginMessage;
 use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
 use crate::{
-    AttachmentCreateMeta, AttachmentRef, AttachmentStore, DirectMessage, DirectOutputSpec,
-    DirectRequest, ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse, MediaType,
-    ProcessAwaitOutput, ProcessExecutionContext, ProcessHandleGrantEntry, ProcessRecord,
-    ProcessRegistration, ProcessStartGrant,
+    AttachmentCreateMeta, AttachmentRef, AttachmentStore, CheckpointDelivery, DirectMessage,
+    DirectOutputSpec, DirectRequest, ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse,
+    MediaType, ProcessAwaitOutput, ProcessExecutionContext, ProcessHandleGrantEntry, ProcessRecord,
+    ProcessRegistration, ProcessScope, ProcessStartGrant,
 };
 
 use super::executor::RuntimeEffectControllerError;
@@ -163,12 +162,15 @@ pub enum ProcessCommand {
         execution_context: Box<ProcessExecutionContext>,
     },
     List {
-        session_id: String,
+        owner_scope: ProcessScope,
     },
     Transfer {
-        from_session_id: String,
-        to_session_id: String,
+        from_scope: ProcessScope,
+        to_scope: ProcessScope,
         process_ids: Vec<String>,
+    },
+    DeleteSession {
+        session_id: String,
     },
     Await {
         process_id: String,
@@ -183,23 +185,27 @@ fn boxed_process_execution_context_is_empty(context: &ProcessExecutionContext) -
     context.is_empty()
 }
 
-type CheckpointMessageDeltas = (Vec<PluginMessage>, Vec<PluginMessage>);
-type CheckpointOutcome = Result<CheckpointMessageDeltas, RuntimeEffectControllerError>;
+type CheckpointOutcome = Result<CheckpointDelivery, RuntimeEffectControllerError>;
 
 impl ProcessCommand {
     pub fn effect_id(&self) -> String {
         match self {
             Self::Start { registration, .. } => format!("process:start:{}", registration.id),
-            Self::List { session_id } => format!("process:list:{session_id}"),
+            Self::List { owner_scope } => format!("process:list:{}", owner_scope.id()),
             Self::Transfer {
-                from_session_id,
-                to_session_id,
+                from_scope,
+                to_scope,
                 process_ids,
             } => {
                 let digest = crate::stable_hash::stable_json_sha256_hex(process_ids)
                     .unwrap_or_else(|_| "unhashable".to_string());
-                format!("process:transfer:{from_session_id}:{to_session_id}:{digest}")
+                format!(
+                    "process:transfer:{}:{}:{digest}",
+                    from_scope.id(),
+                    to_scope.id()
+                )
             }
+            Self::DeleteSession { session_id } => format!("process:delete-session:{session_id}"),
             Self::Await { process_id } => format!("process:await:{process_id}"),
             Self::Cancel { process_id, .. } => format!("process:cancel:{process_id}"),
         }
@@ -217,6 +223,9 @@ pub enum ProcessEffectOutcome {
         entries: Vec<ProcessHandleGrantEntry>,
     },
     Transfer,
+    DeleteSession {
+        report: crate::ProcessSessionDeleteReport,
+    },
     Await {
         output: ProcessAwaitOutput,
     },
@@ -249,7 +258,7 @@ pub enum RuntimeEffectOutcome {
         result: Result<ExecResponse, String>,
     },
     Checkpoint {
-        result: Result<(Vec<PluginMessage>, Vec<PluginMessage>), RuntimeEffectControllerError>,
+        result: CheckpointOutcome,
     },
     SyncExecutionSurface {
         result: Result<Option<ExecutionSurfaceSync>, String>,

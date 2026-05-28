@@ -16,6 +16,10 @@ pub enum EmbedError {
     StoreSessionMismatch { loaded: String, requested: String },
     #[error("durable process worker requires a LashCore store factory")]
     MissingProcessWorkerStoreFactory,
+    #[error("session deletion requires a LashCore store factory")]
+    MissingSessionStoreFactory,
+    #[error("failed to delete process state for session `{session_id}`: {message}")]
+    SessionDeleteProcess { session_id: String, message: String },
     #[error("missing required turn input for plugin `{plugin_id}`")]
     MissingPluginTurnInput { plugin_id: &'static str },
     #[error("runtime session error: {0}")]

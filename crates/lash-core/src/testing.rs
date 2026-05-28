@@ -293,9 +293,20 @@ impl crate::ToolProvider for EmptyCodeExecutionTools {
 pub fn code_execution_context_with_lashlang_abilities(
     abilities: lashlang::LashlangAbilities,
 ) -> crate::RuntimeExecutionContext<'static> {
+    code_execution_context_with_lashlang_abilities_and_resources(
+        abilities,
+        lashlang::ResourceCatalog::new(),
+    )
+}
+
+pub fn code_execution_context_with_lashlang_abilities_and_resources(
+    abilities: lashlang::LashlangAbilities,
+    resources: lashlang::ResourceCatalog,
+) -> crate::RuntimeExecutionContext<'static> {
     let session_id = "test-session".to_string();
     let plugins = crate::PluginHost::new(test_rlm_protocol_factories())
         .with_lashlang_abilities(abilities)
+        .with_lashlang_resources(resources)
         .build_session(session_id.clone(), None)
         .expect("test plugin session");
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
@@ -327,6 +338,7 @@ pub fn code_execution_context_with_lashlang_abilities(
         session_id,
         dispatch,
         abilities,
+        Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
         attachment_store,
         Arc::new(crate::ChronologicalProjection::default()),
         None,
@@ -500,8 +512,9 @@ impl crate::ProcessService for MockSessionManager {
         let id = registration.id.clone();
         self.process_registry.register_process(registration).await?;
         if let Some(descriptor) = options.descriptor {
+            let owner_scope = crate::ProcessScope::new(session_id);
             self.process_registry
-                .grant_handle(session_id, &id, descriptor)
+                .grant_handle(&owner_scope, &id, descriptor)
                 .await?;
         }
         self.process_registry
@@ -529,7 +542,8 @@ impl crate::ProcessService for MockSessionManager {
         session_id: &str,
         _scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
-        self.process_registry.list_handle_grants(session_id).await
+        let owner_scope = crate::ProcessScope::new(session_id);
+        self.process_registry.list_handle_grants(&owner_scope).await
     }
 
     async fn validate_visible(
@@ -537,9 +551,10 @@ impl crate::ProcessService for MockSessionManager {
         session_id: &str,
         handle_ids: &[String],
     ) -> Result<(), PluginError> {
+        let owner_scope = crate::ProcessScope::new(session_id);
         let visible = self
             .process_registry
-            .list_handle_grants(session_id)
+            .list_handle_grants(&owner_scope)
             .await?
             .into_iter()
             .map(|(grant, _)| grant.process_id)
@@ -593,8 +608,10 @@ impl crate::ProcessService for MockSessionManager {
         process_ids: Vec<String>,
         _scope: crate::ProcessOpScope<'_>,
     ) -> Result<(), PluginError> {
+        let from_scope = crate::ProcessScope::new(from_session_id);
+        let to_scope = crate::ProcessScope::new(to_session_id);
         self.process_registry
-            .transfer_handle_grants(from_session_id, to_session_id, &process_ids)
+            .transfer_handle_grants(&from_scope, &to_scope, &process_ids)
             .await
     }
 
@@ -608,7 +625,11 @@ impl crate::ProcessService for MockSessionManager {
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
-        let grants = self.process_registry.list_handle_grants(session_id).await?;
+        let owner_scope = crate::ProcessScope::new(session_id);
+        let grants = self
+            .process_registry
+            .list_handle_grants(&owner_scope)
+            .await?;
         let mut cancelled = Vec::new();
 
         for (grant, record) in grants {
@@ -616,7 +637,7 @@ impl crate::ProcessService for MockSessionManager {
                 continue;
             }
             self.process_registry
-                .revoke_handle(session_id, &grant.process_id)
+                .revoke_handle(&owner_scope, &grant.process_id)
                 .await?;
             if record.is_terminal()
                 || !self

@@ -18,8 +18,8 @@ pub(crate) use lash_core::TestLocalProcessRegistry;
 pub(crate) use lash_core::plugin::runtime_host::RuntimeSessionHost;
 pub(crate) use lash_core::{
     AssembledTurn, AttachmentStore, EventSink, ExecutionSummary, Message, PluginFactory,
-    PluginMessage, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistry, ProtocolTurnOptions,
-    ProviderHandle, Residency, RewriteTrigger, RuntimeEffectController,
+    PluginMessage, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistry, ProcessScope,
+    ProtocolTurnOptions, ProviderHandle, Residency, RewriteTrigger, RuntimeEffectController,
     RuntimeEffectControllerScope, RuntimeErrorCode, RuntimePersistence, SessionCreateRequest,
     SessionError, SessionHandle, SessionReadView, SessionStateEnvelope, SessionStoreCreateRequest,
     SessionStoreFactory, SessionUsageReport, TerminationPolicy, ToolAvailability, ToolCallRecord,

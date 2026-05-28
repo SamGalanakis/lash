@@ -45,6 +45,10 @@ impl SessionStoreFactory for RuntimePerfStoreFactory {
     ) -> Result<Arc<dyn RuntimePersistence>, String> {
         Ok(Arc::clone(&self.store) as Arc<dyn RuntimePersistence>)
     }
+
+    fn delete_session(&self, _session_id: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 lash_core::impl_noop_attachment_manifest!(RuntimePerfStore);

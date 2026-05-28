@@ -7,20 +7,6 @@ use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_acti
 use lash::{TurnActivity, TurnActivityId, TurnActivitySink};
 use lash_core::SessionPolicy;
 
-async fn process_test_session() -> lash::LashSession {
-    lash::LashCore::standard()
-        .model(
-            lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
-                .expect("valid model spec"),
-        )
-        .build()
-        .expect("core")
-        .session("test-session-id")
-        .open()
-        .await
-        .expect("session")
-}
-
 #[tokio::test]
 async fn runtime_event_bridge_coalesces_text_before_structural_event() {
     let mut pump = crate::event::AppEventPump::new();
@@ -193,45 +179,6 @@ fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
         app.timeline.last(),
         Some(UiTimelineItem::UserInput(text)) if text == "(I want future migrations to work though!)"
     ));
-}
-
-#[tokio::test]
-async fn pending_process_wakes_inject_as_hidden_system_messages() {
-    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let session = process_test_session().await;
-    app.queue_process_wake("Process wake \"build\": done".into());
-
-    let injected = enqueue_pending_process_wakes(&mut app, &session)
-        .await
-        .expect("inject wakes");
-    assert_eq!(injected, 1);
-    assert!(!app.has_pending_process_wakes());
-
-    app.recycle_unaccepted_process_wakes();
-    assert_eq!(
-        app.take_pending_process_wakes(),
-        vec!["Process wake \"build\": done".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn accepted_process_wake_is_not_requeued_after_bridge_delivery() {
-    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let session = process_test_session().await;
-    app.queue_process_wake("Process wake \"build\": done".into());
-
-    let injected = enqueue_pending_process_wakes(&mut app, &session)
-        .await
-        .expect("inject wakes");
-    assert_eq!(injected, 1);
-    let messages = vec![super::helpers::process_wake_message(
-        "Process wake \"build\": done",
-    )];
-
-    app.acknowledge_process_wakes(&messages);
-    app.recycle_unaccepted_process_wakes();
-
-    assert!(app.take_pending_process_wakes().is_empty());
 }
 
 #[test]

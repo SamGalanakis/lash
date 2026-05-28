@@ -9,8 +9,11 @@ use crate::{TurnActivity, TurnActivityId, TurnEvent};
 pub(crate) fn lashlang_surface_from_tool_surface(
     surface: &crate::ToolSurface,
     abilities: lashlang::LashlangAbilities,
+    host_resources: lashlang::ResourceCatalog,
 ) -> lashlang::LashlangSurface {
-    lashlang::LashlangSurface::new(lashlang_resources_from_tool_surface(surface), abilities)
+    let mut resources = lashlang_resources_from_tool_surface(surface);
+    resources.extend(host_resources);
+    lashlang::LashlangSurface::new(resources, abilities)
 }
 
 pub(crate) fn lashlang_resources_from_tool_surface(
@@ -35,6 +38,7 @@ pub struct RuntimeExecutionContext<'run> {
     pub(super) session_id: String,
     pub(super) dispatch: Arc<ToolDispatchContext<'run>>,
     lashlang_abilities: lashlang::LashlangAbilities,
+    lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     attachment_store: Arc<dyn crate::AttachmentStore>,
     chronological_projection: Arc<crate::ChronologicalProjection>,
     protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
@@ -64,6 +68,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         session_id: String,
         dispatch: Arc<ToolDispatchContext<'run>>,
         lashlang_abilities: lashlang::LashlangAbilities,
+        lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
         attachment_store: Arc<dyn crate::AttachmentStore>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
@@ -73,6 +78,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             session_id,
             dispatch,
             lashlang_abilities,
+            lashlang_artifact_store,
             attachment_store,
             chronological_projection,
             protocol_extension,
@@ -90,6 +96,15 @@ impl<'run> RuntimeExecutionContext<'run> {
 
     pub fn attachment_store(&self) -> Arc<dyn crate::AttachmentStore> {
         Arc::clone(&self.attachment_store)
+    }
+
+    pub fn put_lashlang_module_artifact(
+        &self,
+        artifact: &lashlang::ModuleArtifact,
+    ) -> Result<(), String> {
+        self.lashlang_artifact_store
+            .put_module_artifact(artifact)
+            .map_err(|err| err.to_string())
     }
 
     pub fn chronological_projection(&self) -> Arc<crate::ChronologicalProjection> {
@@ -155,12 +170,29 @@ impl<'run> RuntimeExecutionContext<'run> {
         &self,
         start: lashlang::ProcessStart,
     ) -> Result<(crate::ProcessRegistration, Option<String>), String> {
-        let display_name = Some(start.process.clone());
-        let linked_module = match start.linked_module {
-            Some(linked_module) => linked_module,
-            None => self.link_lashlang_module(start.module)?,
-        };
-        let module_version = linked_module.module_version.clone();
+        let display_name = Some(start.process_name.clone());
+        let artifact = self
+            .lashlang_artifact_store
+            .get_module_artifact(&start.module_ref)
+            .map_err(|err| format!("failed to load lashlang module artifact: {err}"))?
+            .ok_or_else(|| {
+                format!(
+                    "missing lashlang module artifact `{}` for process `{}`",
+                    start.module_ref, start.process_name
+                )
+            })?;
+        if artifact.required_surface_ref != start.required_surface_ref {
+            return Err(format!(
+                "lashlang module artifact `{}` required surface mismatch: process requested {}, artifact has {}",
+                start.module_ref, start.required_surface_ref, artifact.required_surface_ref
+            ));
+        }
+        if artifact.process_ref(&start.process_name) != Some(&start.process_ref) {
+            return Err(format!(
+                "lashlang module artifact `{}` does not export process `{}` as requested ref {:?}",
+                start.module_ref, start.process_name, start.process_ref
+            ));
+        }
         let args = match serde_json::to_value(&lashlang::Value::Record(Arc::new(start.args)))
             .map_err(|err| format!("failed to serialize process args: {err}"))?
         {
@@ -171,9 +203,10 @@ impl<'run> RuntimeExecutionContext<'run> {
         let registration = crate::ProcessRegistration::new(
             process_id,
             crate::ProcessInput::LashlangProcess {
-                module_version,
-                linked_module,
-                process_name: start.process,
+                module_ref: start.module_ref,
+                process_ref: start.process_ref,
+                required_surface_ref: start.required_surface_ref,
+                process_name: start.process_name,
                 args,
             },
         )
@@ -182,7 +215,11 @@ impl<'run> RuntimeExecutionContext<'run> {
     }
 
     pub fn lashlang_surface(&self) -> lashlang::LashlangSurface {
-        lashlang_surface_from_tool_surface(&self.dispatch.surface, self.lashlang_abilities)
+        lashlang_surface_from_tool_surface(
+            &self.dispatch.surface,
+            self.lashlang_abilities,
+            self.dispatch.plugins.lashlang_resources(),
+        )
     }
 
     pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
@@ -194,6 +231,27 @@ impl<'run> RuntimeExecutionContext<'run> {
         program: lashlang::Program,
     ) -> Result<lashlang::LinkedModule, String> {
         lashlang::LinkedModule::link(program, self.lashlang_surface())
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn install_lashlang_trigger_source(
+        &self,
+        source: &str,
+    ) -> Result<crate::SessionTriggerInstallReport, String> {
+        self.dispatch
+            .plugins
+            .install_lashlang_trigger_source(source, self.lashlang_surface())
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn install_linked_lashlang_trigger_source(
+        &self,
+        source: &str,
+        linked: &lashlang::LinkedModule,
+    ) -> Result<crate::SessionTriggerInstallReport, String> {
+        self.dispatch
+            .plugins
+            .install_linked_lashlang_trigger_source(source, linked)
             .map_err(|err| err.to_string())
     }
 
@@ -356,6 +414,7 @@ mod tests {
             "session".to_string(),
             dispatch,
             Default::default(),
+            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -411,6 +470,7 @@ mod tests {
             "session".to_string(),
             dispatch,
             lashlang::LashlangAbilities::default().with_processes(),
+            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -418,12 +478,24 @@ mod tests {
         );
         let mut input = lashlang::Record::new();
         input.insert("root".to_string(), lashlang::Value::String(".".into()));
+        let linked = ctx
+            .link_lashlang_module(
+                lashlang::parse("process scan(root: str) { finish root }").expect("process module"),
+            )
+            .expect("link process module");
+        ctx.put_lashlang_module_artifact(&linked.artifact)
+            .expect("store module artifact");
+        let process_ref = linked
+            .artifact
+            .process_ref("scan")
+            .expect("scan process ref")
+            .clone();
         let (registration, label) = ctx
             .prepare_lashlang_process_start(lashlang::ProcessStart {
-                module: lashlang::parse("process scan(root: str) { finish root }")
-                    .expect("process module"),
-                linked_module: None,
-                process: "scan".to_string(),
+                module_ref: linked.module_ref.clone(),
+                process_ref,
+                required_surface_ref: linked.required_surface_ref.clone(),
+                process_name: "scan".to_string(),
                 args: input,
             })
             .expect("process start should prepare");
@@ -486,6 +558,7 @@ mod tests {
             lashlang::LashlangAbilities::default()
                 .with_processes()
                 .with_process_lifecycle(),
+            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -505,5 +578,75 @@ mod tests {
                 .resolve_operation("TOOL", "alpha")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn lashlang_surface_reflects_host_resource_contributions() {
+        let mut resources = lashlang::ResourceCatalog::new();
+        resources.add_alias("TRIGGER", "button");
+        resources.add_trigger_event("TRIGGER", "pressed", lashlang::TypeExpr::Any);
+        let plugins = crate::plugin::PluginHost::empty()
+            .with_lashlang_resources(resources)
+            .build_session("session", None)
+            .expect("plugin session");
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+        let dispatch = Arc::new(ToolDispatchContext {
+            plugins,
+            tools: Arc::new(NoopTools),
+            surface: Arc::new(crate::ToolSurface::from_tools(
+                Vec::new(),
+                std::collections::BTreeMap::new(),
+            )),
+            host: Arc::new(crate::testing::MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
+            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
+            tool_effect_metadata: None,
+            session_id: "session".to_string(),
+            event_tx,
+            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
+        });
+        let ctx = RuntimeExecutionContext::new(
+            "session".to_string(),
+            dispatch,
+            lashlang::LashlangAbilities::default()
+                .with_processes()
+                .with_triggers(),
+            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
+            Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(crate::ChronologicalProjection::default()),
+            None,
+            crate::TurnContext::default(),
+        );
+
+        let surface = ctx.lashlang_surface();
+
+        assert!(
+            surface
+                .resources
+                .trigger_event("TRIGGER", "pressed")
+                .is_some()
+        );
+        lashlang::LinkedModule::link(
+            lashlang::parse(
+                r#"
+                process remember(event: any) {
+                  finish event
+                }
+
+                trigger remembered on TRIGGER.button.pressed as event
+                  -> remember(event: event)
+                "#,
+            )
+            .expect("parse trigger module"),
+            surface,
+        )
+        .expect("host resource contribution should be linkable");
     }
 }

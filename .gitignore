@@ -37,6 +37,7 @@ Thumbs.db
 /.lash/
 /.openrouter-chat-ui/
 /.agent-service/
+/.agent-workbench/
 /.claude/
 /.tmp/
 /tmp/

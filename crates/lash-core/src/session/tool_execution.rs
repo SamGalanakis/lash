@@ -137,20 +137,15 @@ impl RuntimeExecutionContext<'_> {
         let mut outcome =
             match prepare_tool_call_with_context(&dispatch, pending, Some(call_id.clone())).await {
                 ToolPreparationOutcome::Prepared(prepared) => {
-                    let tool_context = crate::ToolContext::new(
-                        self.session_id.clone(),
-                        std::sync::Arc::clone(&dispatch.host),
-                        std::sync::Arc::clone(&dispatch.processes),
-                        dispatch.effect_controller.clone(),
-                        std::sync::Arc::clone(&dispatch.attachment_store),
-                        dispatch.direct_completions.clone(),
-                        Some(call_id.clone()),
-                    )
-                    .with_runtime_dispatch(std::sync::Arc::new(dispatch.clone()))
-                    .with_cancellation_token(self.cancellation_token.clone())
-                    .with_tool_effect_metadata(effect_metadata.clone());
+                    let dispatch_context = std::sync::Arc::new(dispatch.clone());
+                    let tool_context =
+                        crate::ToolContext::from_dispatch(std::sync::Arc::clone(&dispatch_context))
+                            .prepared_call(&prepared)
+                            .cancellation_token(self.cancellation_token.clone())
+                            .tool_effect_metadata(effect_metadata.clone())
+                            .build();
                     dispatch_prepared_tool_call_with_execution_context(
-                        &dispatch,
+                        dispatch_context.as_ref(),
                         prepared,
                         None,
                         tool_context,
@@ -216,18 +211,11 @@ impl RuntimeExecutionContext<'_> {
         )
         .await;
 
-        let tool_context = crate::ToolContext::new(
-            self.session_id.clone(),
-            std::sync::Arc::clone(&self.dispatch.host),
-            std::sync::Arc::clone(&self.dispatch.processes),
-            self.dispatch.effect_controller.clone(),
-            std::sync::Arc::clone(&self.dispatch.attachment_store),
-            self.dispatch.direct_completions.clone(),
-            Some(call_id.clone()),
-        )
-        .with_runtime_dispatch(std::sync::Arc::clone(&self.dispatch))
-        .with_cancellation_token(self.cancellation_token.clone())
-        .with_tool_effect_metadata(run.effect_metadata.clone());
+        let tool_context = crate::ToolContext::from_dispatch(std::sync::Arc::clone(&self.dispatch))
+            .prepared_call(&prepared)
+            .cancellation_token(self.cancellation_token.clone())
+            .tool_effect_metadata(run.effect_metadata.clone())
+            .build();
         let mut outcome = dispatch_prepared_tool_call_with_execution_context(
             self.dispatch.as_ref(),
             prepared,

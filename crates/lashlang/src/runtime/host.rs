@@ -1,5 +1,4 @@
-use crate::LinkedModule;
-use crate::ast::Program;
+use crate::{ModuleRef, ProcessRef, RequiredSurfaceRef};
 
 use super::{ExecutionScratch, ProfileReport, ProjectedBindings, Record, RuntimeFailure, Value};
 use std::future::Future;
@@ -39,9 +38,10 @@ impl AbilityResult {
 
 #[derive(Clone, Debug)]
 pub struct ProcessStart {
-    pub module: Program,
-    pub linked_module: Option<LinkedModule>,
-    pub process: String,
+    pub module_ref: ModuleRef,
+    pub process_ref: ProcessRef,
+    pub required_surface_ref: RequiredSurfaceRef,
+    pub process_name: String,
     pub args: Record,
 }
 

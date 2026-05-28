@@ -18,7 +18,7 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionManager {
                     Arc::clone(&registry),
                     call.clone(),
                     execution_context.tool_effect_metadata,
-                    execution_context.wake_target_scope_key,
+                    execution_context.wake_target_scope,
                     cancellation,
                 )
                 .await
@@ -37,7 +37,9 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionManager {
                 .await
             }
             crate::ProcessInput::LashlangProcess {
-                linked_module,
+                module_ref,
+                process_ref,
+                required_surface_ref,
                 process_name,
                 args,
                 ..
@@ -45,7 +47,9 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionManager {
                 self.run_lashlang_process(
                     registration,
                     registry,
-                    linked_module.clone(),
+                    module_ref.clone(),
+                    process_ref.clone(),
+                    required_surface_ref.clone(),
                     process_name.clone(),
                     args.clone(),
                     execution_context,

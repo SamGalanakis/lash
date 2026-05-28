@@ -19,6 +19,7 @@ impl LashRuntime {
         let mut state = state;
         normalize_session_graph(&mut state);
         if let Some(session) = self.session.as_ref() {
+            session.invalidate_runtime_caches();
             let snapshot = state.plugin_snapshot.clone().unwrap_or_default();
             if let Err(err) = session.plugins().restore(&snapshot) {
                 tracing::warn!("failed to restore plugin snapshot in set_state: {err}");
@@ -164,16 +165,6 @@ impl LashRuntime {
         Ok(())
     }
 
-    /// Reset the RLM session on the underlying session runtime.
-    pub async fn reset_session(&mut self) -> Result<(), SessionError> {
-        let Some(session) = self.session.as_mut() else {
-            return Err(SessionError::Protocol(
-                "runtime session not available".to_string(),
-            ));
-        };
-        session.reset().await
-    }
-
     /// Explicitly snapshot protocol-local execution state, if any.
     pub async fn snapshot_execution_state(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
         let Some(session) = self.session.as_mut() else {
@@ -216,6 +207,69 @@ impl LashRuntime {
             .await?;
         self.state.execution_state_snapshot = Some(snapshot.to_vec());
         Ok(())
+    }
+
+    pub fn install_lashlang_trigger_source(
+        &mut self,
+        source: &str,
+    ) -> Result<crate::SessionTriggerInstallReport, SessionError> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(SessionError::Protocol(
+                "runtime session not available".to_string(),
+            ));
+        };
+        let tool_surface = session
+            .tool_surface(&self.state.session_id)
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        let surface = crate::session::lashlang_surface_from_tool_surface(
+            &tool_surface,
+            session.plugins().lashlang_abilities(),
+            session.plugins().lashlang_resources(),
+        );
+        let report = session
+            .plugins()
+            .install_lashlang_trigger_source(source, surface)
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        self.stamp_live_plugin_state();
+        Ok(report)
+    }
+
+    pub async fn emit_host_event(
+        &self,
+        resource_type: &str,
+        alias: &str,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> Result<crate::HostEventEmitReport, SessionError> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(SessionError::Protocol(
+                "runtime session not available".to_string(),
+            ));
+        };
+        let tool_surface = session
+            .tool_surface(&self.state.session_id)
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        let surface = crate::session::lashlang_surface_from_tool_surface(
+            &tool_surface,
+            session.plugins().lashlang_abilities(),
+            session.plugins().lashlang_resources(),
+        );
+        let manager = self
+            .runtime_session_manager()
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        crate::session::triggers::emit_host_event(
+            &self.state.session_id,
+            Arc::clone(session.plugins()),
+            Arc::clone(&self.host.core.lashlang_artifact_store),
+            manager as Arc<dyn crate::ProcessService>,
+            surface,
+            resource_type,
+            alias,
+            event,
+            payload,
+        )
+        .await
+        .map_err(|err| SessionError::Protocol(err.to_string()))
     }
 
     pub async fn invoke_plugin_action(

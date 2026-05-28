@@ -422,11 +422,6 @@ pub struct App {
     pub pending_steers: std::collections::VecDeque<PreparedTurn>,
     /// FIFO drafts explicitly queued for later turns.
     pub queued_turns: std::collections::VecDeque<PreparedTurn>,
-    /// Hidden process-origin wake requests awaiting injection or dispatch.
-    pending_process_wakes: std::collections::VecDeque<String>,
-    /// Hidden process wake requests already handed to the runtime bridge and
-    /// awaiting checkpoint acceptance.
-    in_flight_process_wakes: std::collections::VecDeque<String>,
     /// Most recent selection-style prompt response, held briefly so the next
     /// tool result can render it inline if it exposes a question-panel artifact.
     pending_option_prompt_response: Option<String>,
@@ -613,8 +608,6 @@ impl App {
             skills: SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
             pending_steers: std::collections::VecDeque::new(),
             queued_turns: std::collections::VecDeque::new(),
-            pending_process_wakes: std::collections::VecDeque::new(),
-            in_flight_process_wakes: std::collections::VecDeque::new(),
             pending_option_prompt_response: None,
             overlay: None,
             focused: true,

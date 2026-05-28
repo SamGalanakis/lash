@@ -92,6 +92,7 @@ pub(crate) fn compute_stats(session: &LoadedSession) -> SessionStats {
                     MessageRole::User => s.user_messages += 1,
                     MessageRole::Assistant => s.assistant_messages += 1,
                     MessageRole::System => s.system_messages += 1,
+                    MessageRole::Event => s.system_messages += 1,
                 }
                 for part in message.parts.iter() {
                     s.total_chars = s.total_chars.saturating_add(part.content.chars().count());

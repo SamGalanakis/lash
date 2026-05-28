@@ -1,6 +1,7 @@
 pub mod attachments;
 pub mod chronological;
 pub mod direct;
+pub mod host_events;
 pub mod lashlang_bridge;
 pub mod llm;
 mod model;
@@ -42,29 +43,33 @@ pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
 };
+pub use host_events::{
+    HostEvent, HostEventCatalog, HostEventEmitReport, HostEventKey, SessionTriggerInstallReport,
+};
 pub use lash_sansio::llm::types::{
     GenerationOptions, LlmOutputPart, LlmRequest, LlmResponse, LlmTerminalReason,
 };
 pub use lash_sansio::{
     AcceptedInjectedTurnInput, AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef,
-    BaseRenderCache, CheckpointKind, CompactToolContract, EffectId, ErrorEnvelope, ExecImage,
-    ExecResponse, ImageMediaType, LlmCallError, MediaType, Message, MessageOrigin, MessageRole,
-    MessageSequence, ModelToolReturn, ModelToolReturnPart, Part, PartKind, PluginMessage,
-    PluginRuntimeEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin, PromptContext,
-    PromptContribution, PromptContributionGate, PromptContributionSet, PromptFingerprint,
-    PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer, Response,
-    SchemaProjectionOverride, SessionEvent, TextProjectionMetadata, TokenUsage, ToolActivation,
-    ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolCallOutcome,
-    ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation, ToolContract, ToolControl,
-    ToolDefinition, ToolDiscoveryMetadata, ToolFailure, ToolFailureClass, ToolFailureSource,
-    ToolId, ToolManifest, ToolOutputContract, ToolRetryDisposition, ToolRetryPolicy,
-    ToolScheduling, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride,
-    ToolValue, TurnFinish, TurnLimitFinalMessage, TurnOutcome, TurnStop,
-    append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
-    default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
+    BaseRenderCache, CheckpointDelivery, CheckpointKind, CompactToolContract, EffectId,
+    ErrorEnvelope, ExecImage, ExecResponse, ImageMediaType, LlmCallError, MediaType, Message,
+    MessageOrigin, MessageRole, MessageSequence, ModelToolReturn, ModelToolReturnPart, Part,
+    PartKind, PluginMessage, PluginRuntimeEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin,
+    PromptContext, PromptContribution, PromptContributionGate, PromptContributionSet,
+    PromptFingerprint, PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer,
+    Response, SchemaProjectionOverride, SessionEvent, TextProjectionMetadata, TokenUsage,
+    ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig,
+    ToolCallOutcome, ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation,
+    ToolContract, ToolControl, ToolDefinition, ToolDiscoveryMetadata, ToolFailure,
+    ToolFailureClass, ToolFailureSource, ToolId, ToolManifest, ToolOutputContract,
+    ToolRetryDisposition, ToolRetryPolicy, ToolScheduling, ToolSurface, ToolSurfaceBuildInput,
+    ToolSurfaceEntry, ToolSurfaceOverride, ToolValue, TurnCause, TurnFinish, TurnLimitFinalMessage,
+    TurnOutcome, TurnStop, append_assistant_text_part, build_prompt, build_tool_surface,
+    build_turn, default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
     normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
-    prompt_tool_names_fingerprint, reasoning_part, resolve_prompt_layers, shared_parts,
+    prompt_tool_names_fingerprint, reasoning_part, render_turn_causes_prompt,
+    resolve_prompt_layers, shared_parts,
 };
 pub use protocol_build::ProtocolBuildInput;
 pub use tool_registry::{
@@ -168,15 +173,16 @@ pub use plugin::{
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
     CheckpointHookContext, DirectCompletion, DirectLlmCompletion, HistoryError,
     HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState,
-    PersistentRuntimeServices, PluginAction, PluginActionContext, PluginActionDef,
-    PluginActionFailure, PluginActionInvokeError, PluginActionKind, PluginDirective, PluginError,
-    PluginFactory, PluginHost, PluginLifecycleEvent, PluginLifecycleEventHook, PluginOptions,
-    PluginOwned, PluginRegistrar, PluginSession, PluginSessionContext, PluginSessionSnapshot,
-    PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory,
-    PromptHookContext, ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RewriteContext,
-    RewriteTrigger, RuntimeServices, SessionAppendNode, SessionConfigChangedContext,
-    SessionContextSurface, SessionCreateRequest, SessionHandle, SessionParam, SessionPlugin,
-    SessionPluginSource, SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
+    HostEventRegistrations, PersistentRuntimeServices, PluginAction, PluginActionContext,
+    PluginActionDef, PluginActionFailure, PluginActionInvokeError, PluginActionKind,
+    PluginDirective, PluginError, PluginFactory, PluginHost, PluginLifecycleEvent,
+    PluginLifecycleEventHook, PluginOptions, PluginOwned, PluginRegistrar, PluginSession,
+    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
+    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
+    ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RewriteContext, RewriteTrigger,
+    RuntimeServices, SessionAppendNode, SessionConfigChangedContext, SessionContextSurface,
+    SessionCreateRequest, SessionHandle, SessionParam, SessionPlugin, SessionPluginSource,
+    SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
     SessionStateChangedContext, SessionToolAccess, SnapshotReader, SnapshotWriter,
     SubagentSessionContext, ToolDiscoveryContext, ToolDiscoveryContribution,
     ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolResultProjectionContext,
@@ -198,14 +204,15 @@ pub use runtime::{
     EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary, FollowedTurn,
     InlineRuntimeEffectController, InputItem, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
     NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionSnapshot,
-    ProcessAwaitOutput, ProcessCommand, ProcessCreatorScope, ProcessEffectOutcome, ProcessEvent,
+    ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome, ProcessEvent,
     ProcessEventAppendRequest, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
     ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
     ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessOpScope, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, ProcessRuntimeHost, ProcessService, ProcessStartGrant,
-    ProcessStartOptions, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
-    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
-    PromptUsage, ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
+    ProcessRegistration, ProcessRegistry, ProcessRuntimeHost, ProcessScope, ProcessScopeId,
+    ProcessService, ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions,
+    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
+    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, PromptUsage,
+    ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
     ProtocolTurnExtensionHandle, Residency, RuntimeCoreConfig, RuntimeEffectCommand,
     RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
@@ -216,7 +223,8 @@ pub use runtime::{
     UnavailableProcessService, UsageReportRow, UsageTotals, current_epoch_ms, diff_token_ledger,
     diff_usage_reports, epoch_ms_from_system_time, lashlang_process_event_types,
     materialize_process_event_semantics, prepare_process_registration, process_event_payload_hash,
-    process_wake_delivery, require_event_idempotency, system_time_from_epoch_ms,
+    process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
+    process_wake_turn_text, require_event_idempotency, system_time_from_epoch_ms,
 };
 pub use schemars::JsonSchema;
 pub use session::{

@@ -150,7 +150,7 @@ impl RuntimeEffectController for RecordingEffectController {
                 "recording effect controller does not execute processes",
             )),
             RuntimeEffectCommand::Checkpoint { .. } => Ok(RuntimeEffectOutcome::Checkpoint {
-                result: Ok((Vec::new(), Vec::new())),
+                result: Ok(crate::CheckpointDelivery::default()),
             }),
             RuntimeEffectCommand::SyncExecutionSurface { .. } => {
                 Ok(RuntimeEffectOutcome::SyncExecutionSurface { result: Ok(None) })
@@ -239,6 +239,14 @@ impl RuntimeEffectController for ProcessJournalController {
                 }),
                 ProcessCommand::Transfer { .. } => Ok(RuntimeEffectOutcome::Process {
                     result: ProcessEffectOutcome::Transfer,
+                }),
+                ProcessCommand::DeleteSession { session_id } => Ok(RuntimeEffectOutcome::Process {
+                    result: ProcessEffectOutcome::DeleteSession {
+                        report: crate::ProcessSessionDeleteReport {
+                            session_id,
+                            ..Default::default()
+                        },
+                    },
                 }),
                 ProcessCommand::Start { registration, .. } => Ok(RuntimeEffectOutcome::Process {
                     result: ProcessEffectOutcome::Start {
@@ -752,7 +760,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         metadata.clone(),
         RuntimeEffectCommand::Process {
             command: ProcessCommand::List {
-                session_id: "scope-a".to_string(),
+                owner_scope: ProcessScope::new("scope-a"),
             },
         },
     );
@@ -798,7 +806,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
             metadata,
             RuntimeEffectCommand::Process {
                 command: ProcessCommand::List {
-                    session_id: "scope-b".to_string(),
+                    owner_scope: ProcessScope::new("scope-b"),
                 },
             },
         ),

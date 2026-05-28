@@ -140,20 +140,6 @@ impl HostBridge<'_> {
     }
 
     async fn start_process(&self, start: ProcessStart) -> Result<FlowValue, ExecutionHostError> {
-        if start.module.process(&start.process).is_none()
-            && let Some(manifest) = self.ctx.callable_tool_manifest(&start.process)
-        {
-            let payload = flow_record_json(&start.args).await;
-            let reply = self
-                .ctx
-                .start_tool_call(
-                    uuid::Uuid::new_v4().to_string(),
-                    manifest.name.clone(),
-                    payload,
-                )
-                .await;
-            return self.consume_reply(&manifest.name, reply);
-        }
         let (registration, label) = self
             .ctx
             .prepare_lashlang_process_start(start)

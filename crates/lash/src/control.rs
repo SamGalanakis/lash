@@ -21,6 +21,18 @@ impl SessionControl {
         }
     }
 
+    pub fn triggers(&self) -> TriggersControl {
+        TriggersControl {
+            control: self.clone(),
+        }
+    }
+
+    pub fn host_events(&self) -> HostEventsControl {
+        HostEventsControl {
+            control: self.clone(),
+        }
+    }
+
     pub fn state(&self) -> StateControl {
         StateControl {
             control: self.clone(),
@@ -107,14 +119,6 @@ impl SessionControl {
         let mut runtime = writer.lock().await;
         runtime.set_persisted_state(state);
         self.runtime.publish_from(&runtime);
-    }
-
-    async fn reset_session(&self) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        runtime.reset_session().await?;
-        self.runtime.publish_from(&runtime);
-        Ok(())
     }
 
     async fn set_prompt_template(&self, template: PromptTemplate) -> Result<()> {
@@ -205,6 +209,36 @@ impl SessionControl {
         Ok(())
     }
 
+    async fn install_lashlang_trigger_source(
+        &self,
+        source: &str,
+    ) -> Result<lash_core::SessionTriggerInstallReport> {
+        let writer = self.runtime.writer();
+        let mut runtime = writer.lock().await;
+        let result = runtime
+            .install_lashlang_trigger_source(source)
+            .map_err(Into::into);
+        self.runtime.publish_from(&runtime);
+        result
+    }
+
+    async fn emit_host_event(
+        &self,
+        resource_type: &str,
+        alias: &str,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        let writer = self.runtime.writer();
+        let runtime = writer.lock().await;
+        let result = runtime
+            .emit_host_event(resource_type, alias, event, payload)
+            .await
+            .map_err(Into::into);
+        self.runtime.publish_from(&runtime);
+        result
+    }
+
     async fn invoke_plugin_action(
         &self,
         name: &str,
@@ -269,6 +303,26 @@ impl SessionControl {
 
     async fn list_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
         Ok(self.runtime.observe().list_process_handles().await)
+    }
+
+    async fn start_process(
+        &self,
+        registration: lash_core::ProcessRegistration,
+        options: lash_core::ProcessStartOptions,
+    ) -> Result<ProcessRecord> {
+        let writer = self.runtime.writer();
+        let runtime = writer.lock().await;
+        let session_id = runtime.session_id().to_string();
+        let processes = runtime.process_service()?;
+        processes
+            .start(
+                &session_id,
+                registration,
+                options,
+                lash_core::ProcessOpScope::new(),
+            )
+            .await
+            .map_err(Into::into)
     }
 
     async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {
@@ -596,6 +650,50 @@ impl AdvancedToolsControl {
 }
 
 #[derive(Clone)]
+pub struct TriggersControl {
+    control: SessionControl,
+}
+
+impl TriggersControl {
+    /// Register trigger declarations from a Lashlang module.
+    ///
+    /// Foreground expressions in the module are ignored by this installer; they
+    /// are only executed when the same Lashlang source is run through a turn.
+    pub async fn install_lashlang_source(
+        &self,
+        source: impl AsRef<str>,
+    ) -> Result<lash_core::SessionTriggerInstallReport> {
+        self.control
+            .install_lashlang_trigger_source(source.as_ref())
+            .await
+    }
+}
+
+#[derive(Clone)]
+pub struct HostEventsControl {
+    control: SessionControl,
+}
+
+impl HostEventsControl {
+    pub async fn emit(
+        &self,
+        resource_type: impl AsRef<str>,
+        alias: impl AsRef<str>,
+        event: impl AsRef<str>,
+        payload: serde_json::Value,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        self.control
+            .emit_host_event(
+                resource_type.as_ref(),
+                alias.as_ref(),
+                event.as_ref(),
+                payload,
+            )
+            .await
+    }
+}
+
+#[derive(Clone)]
 pub struct ProcessControl {
     control: SessionControl,
 }
@@ -603,6 +701,14 @@ pub struct ProcessControl {
 impl ProcessControl {
     pub(crate) fn new(control: SessionControl) -> Self {
         Self { control }
+    }
+
+    pub async fn start(
+        &self,
+        registration: lash_core::ProcessRegistration,
+        options: lash_core::ProcessStartOptions,
+    ) -> Result<ProcessRecord> {
+        self.control.start_process(registration, options).await
     }
 
     pub async fn list(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
@@ -661,10 +767,6 @@ impl StateControl {
 
     pub async fn set_persisted(&self, state: RuntimeSessionState) {
         self.control.set_persisted_state(state).await
-    }
-
-    pub async fn reset(&self) -> Result<()> {
-        self.control.reset_session().await
     }
 
     pub async fn branch_to_node(

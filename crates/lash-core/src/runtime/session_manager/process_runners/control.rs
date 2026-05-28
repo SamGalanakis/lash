@@ -7,15 +7,15 @@ impl ProcessCapability {
     pub(in crate::runtime::session_manager) fn process_scope(
         &self,
         session_id: &str,
-    ) -> crate::ProcessCreatorScope {
-        crate::ProcessCreatorScope::new(self.runtime_scope_id.as_ref(), session_id)
+    ) -> crate::ProcessScope {
+        crate::ProcessScope::new(session_id)
     }
 
-    pub(in crate::runtime::session_manager) fn process_scope_key(
+    pub(in crate::runtime::session_manager) fn process_scope_id(
         &self,
         session_id: &str,
-    ) -> String {
-        self.process_scope(session_id).scope_key()
+    ) -> crate::ProcessScopeId {
+        self.process_scope(session_id).id()
     }
 
     pub(in crate::runtime::session_manager) async fn start_process(
@@ -37,18 +37,18 @@ impl ProcessCapability {
         };
         self.mark_current_process_sync_needed(current, session_id);
         let creator_scope = self.process_scope(session_id);
-        let creator_scope_key = creator_scope.scope_key();
-        let registration =
-            registration.with_provenance(creator_scope, current.host.core.host_profile_id.clone());
-        let mut execution_context = options.execution_context(&scope);
-        if execution_context.wake_target_scope_key.is_none() {
-            let wake_scope_key = execution_context
-                .wake_session_id
-                .as_deref()
-                .map(|session_id| self.process_scope_key(session_id))
-                .unwrap_or_else(|| creator_scope_key.clone());
-            execution_context = execution_context.with_wake_target_scope_key(wake_scope_key);
-        }
+        let registration = registration.with_provenance(
+            creator_scope.clone(),
+            current.host.core.host_profile_id.clone(),
+        );
+        let wake_target_scope = options
+            .wake_session_id
+            .as_deref()
+            .map(|session_id| self.process_scope(session_id))
+            .unwrap_or_else(|| creator_scope.clone());
+        let execution_context = options
+            .execution_context(&scope)
+            .with_wake_target_scope(wake_target_scope);
         let outcome = self
             .execute_process_effect(
                 current,
@@ -58,7 +58,7 @@ impl ProcessCapability {
                     grant: options
                         .descriptor
                         .map(|descriptor| crate::ProcessStartGrant {
-                            session_id: creator_scope_key,
+                            owner_scope: creator_scope,
                             descriptor,
                         }),
                     execution_context: Box::new(execution_context),
@@ -125,7 +125,7 @@ impl ProcessCapability {
                 current,
                 Arc::clone(registry),
                 crate::ProcessCommand::List {
-                    session_id: self.process_scope_key(session_id),
+                    owner_scope: self.process_scope(session_id),
                 },
                 None,
                 scope.effect_metadata,
@@ -231,8 +231,8 @@ impl ProcessCapability {
                 "process registry is unavailable in this runtime".to_string(),
             ));
         };
-        let scope_key = self.process_scope_key(session_id);
-        for (grant, _record) in registry.list_handle_grants(&scope_key).await? {
+        let owner_scope = self.process_scope(session_id);
+        for (grant, _record) in registry.list_handle_grants(&owner_scope).await? {
             visible.insert(grant.process_id);
         }
         if let Some(missing) = requested.iter().find(|id| !visible.contains(*id)) {
@@ -265,8 +265,8 @@ impl ProcessCapability {
                 current,
                 Arc::clone(registry),
                 crate::ProcessCommand::Transfer {
-                    from_session_id: self.process_scope_key(from_session_id),
-                    to_session_id: self.process_scope_key(to_session_id),
+                    from_scope: self.process_scope(from_session_id),
+                    to_scope: self.process_scope(to_session_id),
                     process_ids,
                 },
                 None,
@@ -298,15 +298,15 @@ impl ProcessCapability {
                 "process registry is unavailable in this runtime".to_string(),
             ));
         };
-        let scope_key = self.process_scope_key(session_id);
-        let tasks = registry.list_handle_grants(&scope_key).await?;
+        let owner_scope = self.process_scope(session_id);
+        let tasks = registry.list_handle_grants(&owner_scope).await?;
         let mut cancelled = Vec::new();
         for (grant, record) in tasks {
             if keep.contains(&grant.process_id) {
                 continue;
             }
             registry
-                .revoke_handle(&scope_key, &grant.process_id)
+                .revoke_handle(&owner_scope, &grant.process_id)
                 .await?;
             if record.is_terminal() {
                 continue;

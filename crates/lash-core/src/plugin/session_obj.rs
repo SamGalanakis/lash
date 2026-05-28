@@ -5,7 +5,9 @@ use sha2::{Digest, Sha256};
 use tokio::task::JoinSet;
 
 use super::*;
-use crate::session_model::plugin_message_to_message;
+
+mod directives;
+mod tools;
 
 async fn collect_owned_async<C, O, H, F>(
     hooks: &[RegisteredHook<H>],
@@ -47,74 +49,6 @@ where
     Ok(out)
 }
 
-fn merge_string_array(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    key: &str,
-    values: Vec<String>,
-) {
-    let mut existing = obj
-        .remove(key)
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|value| value.as_str().map(str::to_string))
-        .collect::<BTreeSet<_>>();
-    existing.extend(
-        values
-            .into_iter()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-    );
-    if !existing.is_empty() {
-        obj.insert(key.to_string(), serde_json::json!(existing));
-    }
-}
-
-fn apply_tool_discovery_contributions(
-    catalog: &mut [serde_json::Value],
-    contributions: impl IntoIterator<Item = ToolDiscoveryContribution>,
-) {
-    let mut by_name = BTreeMap::new();
-    for (idx, tool) in catalog.iter().enumerate() {
-        if let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) {
-            by_name.insert(name.to_string(), idx);
-        }
-    }
-
-    for contribution in contributions {
-        for patch in contribution.tools {
-            let Some(idx) = by_name.get(&patch.tool_name).copied() else {
-                continue;
-            };
-            let Some(obj) = catalog[idx].as_object_mut() else {
-                continue;
-            };
-            if let Some(namespace) = patch
-                .namespace
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-            {
-                obj.insert("namespace".to_string(), serde_json::json!(namespace));
-            }
-            merge_string_array(obj, "aliases", patch.aliases);
-        }
-    }
-}
-
-fn append_plugin_messages(
-    messages: &mut crate::MessageSequence,
-    plugin_messages: &[PluginMessage],
-) {
-    let new_messages = plugin_messages
-        .iter()
-        .filter(|message| matches!(message.role, MessageRole::User | MessageRole::System))
-        .map(plugin_message_to_message)
-        .collect::<Vec<_>>();
-    if !new_messages.is_empty() {
-        messages.extend(new_messages);
-    }
-}
-
 struct EmptySnapshotReader;
 
 impl SnapshotReader for EmptySnapshotReader {
@@ -133,6 +67,9 @@ pub struct PluginSession {
     pub(super) tool_access: SessionToolAccess,
     pub(super) subagent: Option<SubagentSessionContext>,
     pub(super) lashlang_abilities: lashlang::LashlangAbilities,
+    pub(super) lashlang_resources: lashlang::ResourceCatalog,
+    pub(super) host_events: crate::HostEventCatalog,
+    pub(super) trigger_registry: Arc<SessionTriggerRegistry>,
     pub(super) contributions: PluginContributions,
 }
 impl PluginSession {
@@ -150,6 +87,38 @@ impl PluginSession {
 
     pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
         self.lashlang_abilities
+    }
+
+    pub fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
+        self.lashlang_resources.clone()
+    }
+
+    pub fn host_events(&self) -> &crate::HostEventCatalog {
+        &self.host_events
+    }
+
+    pub fn install_lashlang_trigger_source(
+        &self,
+        source: &str,
+        surface: lashlang::LashlangSurface,
+    ) -> Result<crate::SessionTriggerInstallReport, PluginError> {
+        self.trigger_registry
+            .install_lashlang_source(source, surface)
+    }
+
+    pub fn install_linked_lashlang_trigger_source(
+        &self,
+        source: &str,
+        linked: &lashlang::LinkedModule,
+    ) -> Result<crate::SessionTriggerInstallReport, PluginError> {
+        self.trigger_registry
+            .install_linked_lashlang_source(source, linked)
+    }
+
+    pub(crate) fn installed_lashlang_triggers(
+        &self,
+    ) -> Result<Vec<InstalledSessionTrigger>, PluginError> {
+        self.trigger_registry.installed_triggers()
     }
 
     pub fn host(&self) -> &PluginHost {
@@ -195,107 +164,6 @@ impl PluginSession {
             .as_ref()
             .map(|entry| Arc::clone(&entry.hook))
             .expect("plugin session must have a protocol driver")
-    }
-
-    pub fn tool_surface(&self, session_id: &str) -> Result<Arc<crate::ToolSurface>, PluginError> {
-        let tools = self.tools.tool_manifests();
-        let contract_provider = Arc::clone(&self.tools);
-        let resolve_contract: lash_sansio::ToolContractResolver =
-            Arc::new(move |name: &str| contract_provider.resolve_contract(name));
-        Ok(Arc::new(self.resolve_tool_surface(ToolSurfaceContext {
-            session_id: session_id.to_string(),
-            tools,
-            resolve_contract: Some(Arc::clone(&resolve_contract)),
-            tool_access: self.tool_access.clone(),
-            subagent: self.subagent.clone(),
-            lashlang_abilities: self.lashlang_abilities,
-        })?))
-    }
-
-    pub fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
-        let surface = self.tool_surface(session_id)?;
-        let mut catalog =
-            crate::tool_registry::project_tool_catalog(surface.searchable_tools_iter().cloned());
-        let contributions = collect_owned_sync(
-            &self.contributions.tool_discovery_contributors,
-            ToolDiscoveryContext {
-                session_id: session_id.to_string(),
-                catalog: catalog.clone(),
-            },
-            |hook, ctx| hook(ctx),
-        )
-        .unwrap_or_else(|err| {
-            tracing::warn!("failed to resolve tool discovery metadata: {err}");
-            Vec::new()
-        });
-        apply_tool_discovery_contributions(
-            &mut catalog,
-            contributions.into_iter().map(|owned| owned.value),
-        );
-        Ok(catalog)
-    }
-
-    pub fn resolve_tool_surface(
-        &self,
-        ctx: ToolSurfaceContext,
-    ) -> Result<crate::ToolSurface, PluginError> {
-        let mut contributions = collect_owned_sync(
-            &self.contributions.tool_surface_contributors,
-            ToolSurfaceContext {
-                session_id: ctx.session_id.clone(),
-                tools: ctx.tools.clone(),
-                resolve_contract: ctx.resolve_contract.clone(),
-                tool_access: ctx.tool_access.clone(),
-                subagent: ctx.subagent.clone(),
-                lashlang_abilities: ctx.lashlang_abilities,
-            },
-            |hook, ctx| hook(ctx),
-        )?
-        .into_iter()
-        .map(|owned| owned.value)
-        .collect::<Vec<_>>();
-        contributions.push(self.tool_surface_overlay.clone());
-        let (tools, resolve_contract) = if ctx.tool_access.tools.is_empty() {
-            (ctx.tools, ctx.resolve_contract)
-        } else {
-            let contracts = ctx
-                .tool_access
-                .tools
-                .iter()
-                .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
-                .collect::<BTreeMap<_, _>>();
-            (
-                ctx.tool_access
-                    .tools
-                    .iter()
-                    .map(|tool| tool.manifest())
-                    .collect(),
-                Some(Arc::new(move |name: &str| contracts.get(name).cloned())
-                    as lash_sansio::ToolContractResolver),
-            )
-        };
-        let authority_hidden_tools = tools
-            .iter()
-            .filter(|tool| ctx.tool_access.hides(&tool.name))
-            .map(|tool| tool.name.clone())
-            .collect::<BTreeSet<_>>();
-        if !authority_hidden_tools.is_empty() {
-            contributions.push(ToolSurfaceContribution {
-                overrides: authority_hidden_tools
-                    .into_iter()
-                    .map(|tool_name| ToolSurfaceOverride {
-                        tool_name,
-                        availability: Some(crate::ToolAvailability::Off),
-                    })
-                    .collect(),
-                ..Default::default()
-            });
-        }
-        Ok(crate::build_tool_surface(crate::ToolSurfaceBuildInput {
-            tools,
-            resolve_contract,
-            contributions,
-        }))
     }
 
     pub fn plugin_actions(&self) -> Vec<PluginActionDef> {
@@ -367,163 +235,6 @@ impl PluginSession {
                 .then(a.priority.cmp(&b.priority))
         });
         Ok(out)
-    }
-
-    async fn apply_turn_directives(
-        &self,
-        directives: Vec<PluginOwned<PluginDirective>>,
-        mut messages: crate::MessageSequence,
-        host: Arc<dyn RuntimeSessionHost>,
-        allow_abort: bool,
-        invalid_context: &'static str,
-    ) -> Result<TurnPreparation, PluginError> {
-        let mut events = Vec::new();
-        let mut abort = None;
-
-        for emitted in directives {
-            match emitted.value {
-                PluginDirective::AbortTurn { code, message } => {
-                    if !allow_abort {
-                        return Err(PluginError::Session(invalid_context.to_string()));
-                    }
-                    abort = Some(PluginAbort { code, message });
-                }
-                PluginDirective::EnqueueMessages {
-                    messages: plugin_messages,
-                } => append_plugin_messages(&mut messages, &plugin_messages),
-                PluginDirective::CreateSession { request } => {
-                    host.create_session(*request)
-                        .await
-                        .map_err(|err| PluginError::Session(err.to_string()))?;
-                }
-                PluginDirective::HandoffSession { .. } => {
-                    return Err(PluginError::Session(invalid_context.to_string()));
-                }
-                PluginDirective::EmitRuntimeEvents { events: surface } => {
-                    events.extend(crate::plugin::plugin_runtime_session_events(
-                        &emitted.plugin_id,
-                        surface,
-                    ));
-                }
-                PluginDirective::EmitTrace {
-                    name,
-                    payload,
-                    context,
-                } => {
-                    host.emit_trace_event(
-                        *context,
-                        lash_trace::TraceEvent::Custom {
-                            name: format!("plugin.{}.{}", emitted.plugin_id, name),
-                            payload,
-                        },
-                    )
-                    .await?;
-                }
-                PluginDirective::ReplaceToolArgs { .. }
-                | PluginDirective::ShortCircuitTool { .. } => {
-                    return Err(PluginError::Session(invalid_context.to_string()));
-                }
-            }
-        }
-
-        Ok(TurnPreparation {
-            messages,
-            events,
-            abort,
-        })
-    }
-
-    pub async fn prepare_turn(
-        &self,
-        request: PrepareTurnRequest,
-    ) -> Result<TurnPreparation, PluginError> {
-        let PrepareTurnRequest {
-            session_id,
-            state,
-            messages,
-            host,
-            turn_context,
-        } = request;
-        let directives = self
-            .before_turn(TurnHookContext {
-                session_id,
-                state,
-                host: host.clone(),
-                turn_context,
-            })
-            .await?;
-        self.apply_turn_directives(
-            directives,
-            messages,
-            host,
-            true,
-            "tool directives are not valid in before_turn",
-        )
-        .await
-    }
-
-    pub async fn apply_checkpoint(
-        &self,
-        ctx: CheckpointHookContext,
-    ) -> Result<CheckpointApplication, PluginError> {
-        let directives = self.at_checkpoint(ctx.clone()).await?;
-        let mut messages = Vec::new();
-        let mut events = Vec::new();
-        let mut abort = None;
-
-        for emitted in directives {
-            match emitted.value {
-                PluginDirective::EnqueueMessages { messages: queued } => messages.extend(queued),
-                PluginDirective::CreateSession { request } => {
-                    ctx.host
-                        .create_session(*request)
-                        .await
-                        .map_err(|err| PluginError::Session(err.to_string()))?;
-                }
-                PluginDirective::HandoffSession { .. } => {
-                    return Err(PluginError::Session(
-                        "checkpoint hooks do not support session handoff".to_string(),
-                    ));
-                }
-                PluginDirective::AbortTurn { code, message } => {
-                    abort = Some(PluginAbort { code, message });
-                }
-                PluginDirective::EmitRuntimeEvents { events: surface } => {
-                    events.extend(crate::plugin::plugin_runtime_session_events(
-                        &emitted.plugin_id,
-                        surface,
-                    ));
-                }
-                PluginDirective::EmitTrace {
-                    name,
-                    payload,
-                    context,
-                } => {
-                    ctx.host
-                        .emit_trace_event(
-                            *context,
-                            lash_trace::TraceEvent::Custom {
-                                name: format!("plugin.{}.{}", emitted.plugin_id, name),
-                                payload,
-                            },
-                        )
-                        .await?;
-                }
-                PluginDirective::ReplaceToolArgs { .. }
-                | PluginDirective::ShortCircuitTool { .. } => {
-                    return Err(PluginError::Session(
-                        "checkpoint hooks only support abort, message enqueue, session creation, events, and trace events"
-                            .to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(CheckpointApplication {
-            messages,
-            events,
-            abort,
-        })
     }
 
     pub async fn before_turn(
@@ -671,95 +382,6 @@ impl PluginSession {
             }
         }
         policy
-    }
-
-    pub async fn finalize_turn(
-        &self,
-        mut turn: AssembledTurn,
-        host: Arc<dyn RuntimeSessionHost>,
-    ) -> Result<TurnFinalization, PluginError> {
-        let session_id = turn.state.session_id.clone();
-        let directives = if self.contributions.after_turn_hooks.is_empty() {
-            Vec::new()
-        } else {
-            self.after_turn(TurnResultHookContext {
-                session_id: session_id.clone(),
-                turn: Arc::new(crate::plugin::TurnResultSummary::from_assembled(&turn)),
-                host: host.clone(),
-            })
-            .await?
-        };
-        let mut events = Vec::new();
-        let mut updated_messages: Option<crate::MessageSequence> = None;
-        for emitted in directives {
-            match emitted.value {
-                PluginDirective::AbortTurn { .. } => {
-                    return Err(PluginError::Session(
-                        "only message enqueue and session creation are valid in after_turn"
-                            .to_string(),
-                    ));
-                }
-                PluginDirective::EnqueueMessages {
-                    messages: plugin_messages,
-                } => {
-                    let messages = updated_messages.get_or_insert_with(|| {
-                        crate::MessageSequence::from_base(
-                            turn.state.read_view().messages().to_vec().into(),
-                        )
-                    });
-                    append_plugin_messages(messages, &plugin_messages);
-                }
-                PluginDirective::CreateSession { request } => {
-                    host.create_session(*request)
-                        .await
-                        .map_err(|err| PluginError::Session(err.to_string()))?;
-                }
-                PluginDirective::HandoffSession { .. } => {
-                    return Err(PluginError::Session(
-                        "after_turn hooks do not support session handoff".to_string(),
-                    ));
-                }
-                PluginDirective::EmitRuntimeEvents { events: surface } => {
-                    events.extend(crate::plugin::plugin_runtime_session_events(
-                        &emitted.plugin_id,
-                        surface,
-                    ));
-                }
-                PluginDirective::EmitTrace {
-                    name,
-                    payload,
-                    context,
-                } => {
-                    host.emit_trace_event(
-                        *context,
-                        lash_trace::TraceEvent::Custom {
-                            name: format!("plugin.{}.{}", emitted.plugin_id, name),
-                            payload,
-                        },
-                    )
-                    .await?;
-                }
-                PluginDirective::ReplaceToolArgs { .. }
-                | PluginDirective::ShortCircuitTool { .. } => {
-                    return Err(PluginError::Session(
-                        "only message enqueue, session creation, events, and trace events are valid in after_turn"
-                            .to_string(),
-                    ));
-                }
-            }
-        }
-        if let Some(messages) = updated_messages.as_ref() {
-            let tool_calls = turn.state.read_view().tool_calls().to_vec();
-            turn.state
-                .replace_active_read_state(messages.as_slice(), &tool_calls);
-        }
-
-        if self.has_runtime_event_hooks() {
-            self.emit_runtime_event(PluginLifecycleEvent::TurnFinalized(Arc::new(turn.clone())))
-                .await;
-        }
-
-        Ok(TurnFinalization { turn, events })
     }
 
     pub fn snapshot(&self) -> Result<PluginSessionSnapshot, PluginError> {

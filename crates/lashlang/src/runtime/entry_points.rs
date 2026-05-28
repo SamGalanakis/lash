@@ -1,7 +1,7 @@
 //! Public compile/execute entry points for lashlang programs.
 
-use crate::LinkedModule;
 use crate::ast::Program;
+use crate::{LinkedModule, ModuleArtifact, ProcessRef};
 
 use super::record::intern_symbol;
 use super::{
@@ -39,7 +39,8 @@ pub(crate) fn compile_program_internal(program: &Program) -> CompiledProgram {
 }
 
 pub fn compile_linked(linked: &LinkedModule) -> CompiledProgram {
-    let (chunk, compile_stats) = Compiler::compile_linked_program(&linked.program, linked);
+    let (chunk, compile_stats) =
+        Compiler::compile_linked_program(&linked.artifact.canonical_ir, (&linked.artifact).into());
     CompiledProgram {
         chunk,
         compile_stats,
@@ -69,18 +70,57 @@ pub fn compile_linked_process(
     process_name: &str,
 ) -> Result<CompiledProgram, RuntimeError> {
     let process = linked
-        .program
+        .artifact
+        .canonical_ir
         .process(process_name)
         .ok_or_else(|| RuntimeError::ValueError {
             message: format!("unknown process `{process_name}`"),
         })?;
     let process_program = Program {
-        declarations: linked.program.declarations.clone(),
+        declarations: linked.artifact.canonical_ir.declarations.clone(),
         main: process.body.clone(),
-        declaration_spans: linked.program.declaration_spans.clone(),
+        declaration_spans: linked.artifact.canonical_ir.declaration_spans.clone(),
         expression_spans: Vec::new(),
     };
-    let (chunk, compile_stats) = Compiler::compile_linked_program(&process_program, linked);
+    let (chunk, compile_stats) =
+        Compiler::compile_linked_program(&process_program, (&linked.artifact).into());
+    Ok(CompiledProgram {
+        chunk,
+        compile_stats,
+    })
+}
+
+pub fn compile_module_artifact_process(
+    artifact: &ModuleArtifact,
+    process_ref: &ProcessRef,
+) -> Result<CompiledProgram, RuntimeError> {
+    let process_name =
+        artifact
+            .process_name_for_ref(process_ref)
+            .ok_or_else(|| RuntimeError::ValueError {
+                message: format!(
+                    "module artifact `{}` does not export process ref {:?}",
+                    artifact.module_ref, process_ref
+                ),
+            })?;
+    let process =
+        artifact
+            .canonical_ir
+            .process(process_name)
+            .ok_or_else(|| RuntimeError::ValueError {
+                message: format!(
+                    "module artifact `{}` is missing process `{process_name}`",
+                    artifact.module_ref
+                ),
+            })?;
+    let process_program = Program {
+        declarations: artifact.canonical_ir.declarations.clone(),
+        main: process.body.clone(),
+        declaration_spans: artifact.canonical_ir.declaration_spans.clone(),
+        expression_spans: Vec::new(),
+    };
+    let (chunk, compile_stats) =
+        Compiler::compile_linked_program(&process_program, artifact.into());
     Ok(CompiledProgram {
         chunk,
         compile_stats,

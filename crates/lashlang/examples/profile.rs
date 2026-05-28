@@ -1,12 +1,23 @@
 mod bench_support;
 
-use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state_for};
+use bench_support::{
+    BenchHost, Scenario, benchmark_program, linked_benchmark_program, projected_bindings,
+    seeded_state_for,
+};
 use lashlang::{
-    ExecutionEnvironment, ExecutionOutcome, ExecutionScratch, ProfileReport, compile, execute,
+    ExecutionEnvironment, ExecutionOutcome, ExecutionScratch, ProfileReport, compile_linked,
+    execute,
 };
 use std::env;
 
 fn main() {
+    let mut args = env::args().skip(1);
+    if matches!(args.next().as_deref(), Some("--list-scenarios")) {
+        for scenario in Scenario::ALL {
+            println!("{scenario}");
+        }
+        return;
+    }
     let mut args = env::args().skip(1);
     let first = args.next();
     let second = args.next();
@@ -43,7 +54,8 @@ fn main() {
     for scenario in &scenarios {
         let source = benchmark_program(*scenario);
         program_bytes += source.len();
-        let compiled = compile(source).expect("benchmark program should compile");
+        let linked = linked_benchmark_program(source.as_str());
+        let compiled = compile_linked(&linked);
 
         for _ in 0..iterations {
             let mut state = seeded_state_for(*scenario);

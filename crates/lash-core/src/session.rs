@@ -10,8 +10,10 @@ use crate::{PromptContribution, RuntimeServices, SandboxMessage, SessionEvent, T
 mod execution_context;
 pub(crate) mod process_handles;
 mod tool_execution;
+pub(crate) mod triggers;
 
 pub use execution_context::RuntimeExecutionContext;
+pub(crate) use execution_context::lashlang_surface_from_tool_surface;
 pub use tool_execution::{ToolInvocation, ToolInvocationReply};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -287,6 +289,7 @@ impl Session {
             lashlang_surface: execution_context::lashlang_surface_from_tool_surface(
                 &surface,
                 self.plugins().lashlang_abilities(),
+                self.plugins().lashlang_resources(),
             ),
             extra_prompt_contributions: self.protocol_extra_prompt_contributions(),
         };
@@ -379,6 +382,7 @@ impl Session {
             session_id.to_string(),
             dispatch,
             self.plugins().lashlang_abilities(),
+            Arc::clone(&self.services.lashlang_artifact_store),
             Arc::clone(&self.services.attachment_store),
             chronological_projection,
             protocol_extension,
@@ -404,12 +408,12 @@ impl Session {
         self.message_tx = None;
     }
 
-    pub async fn reset(&mut self) -> Result<(), SessionError> {
+    pub fn invalidate_runtime_caches(&self) {
         self.tool_surface_cache
             .lock()
             .expect("tool surface cache lock")
             .clear();
-        Ok(())
+        self.prompt_cache.clear();
     }
 
     pub async fn refresh_tool_surface(&mut self) -> Result<(), SessionError> {

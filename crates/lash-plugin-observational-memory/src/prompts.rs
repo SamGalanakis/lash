@@ -115,6 +115,7 @@ pub(crate) fn format_message_for_observer(node: &impl ObservedMessageNode) -> St
         MessageRole::User => "USER",
         MessageRole::Assistant => "ASSISTANT",
         MessageRole::System => "SYSTEM",
+        MessageRole::Event => "EVENT",
     };
     let content = node
         .message()

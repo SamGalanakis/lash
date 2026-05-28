@@ -374,6 +374,10 @@ impl lash_core::SessionStoreFactory for ReusableStoreFactory {
     ) -> std::result::Result<Arc<dyn lash_core::RuntimePersistence>, String> {
         Ok(Arc::clone(&self.store))
     }
+
+    fn delete_session(&self, _session_id: &str) -> std::result::Result<(), String> {
+        Ok(())
+    }
 }
 
 struct BoundSessionStore {
@@ -547,6 +551,39 @@ impl lash_core::SessionStoreFactory for RecordingStoreFactory {
             .expect("recording factory lock")
             .push(request.clone());
         Ok(Arc::new(SnapshotStore::default()))
+    }
+
+    fn delete_session(&self, _session_id: &str) -> std::result::Result<(), String> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct DeletingStoreFactory {
+    stores: std::sync::Mutex<std::collections::HashMap<String, Arc<SnapshotStore>>>,
+}
+
+impl lash_core::SessionStoreFactory for DeletingStoreFactory {
+    fn create_store(
+        &self,
+        request: &lash_core::SessionStoreCreateRequest,
+    ) -> std::result::Result<Arc<dyn lash_core::RuntimePersistence>, String> {
+        let store = self
+            .stores
+            .lock()
+            .expect("deleting factory lock")
+            .entry(request.session_id.clone())
+            .or_insert_with(|| Arc::new(SnapshotStore::default()))
+            .clone();
+        Ok(store as Arc<dyn lash_core::RuntimePersistence>)
+    }
+
+    fn delete_session(&self, session_id: &str) -> std::result::Result<(), String> {
+        self.stores
+            .lock()
+            .expect("deleting factory lock")
+            .remove(session_id);
+        Ok(())
     }
 }
 

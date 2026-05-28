@@ -552,12 +552,20 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
 }
 
 #[tokio::test]
-async fn process_control_lists_started_ordinary_tool_until_awaited() -> Result<()> {
+async fn process_control_lists_started_lashlang_process_until_awaited() -> Result<()> {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let core = LashCore::rlm()
         .provider(queued_text_provider(vec![
-            "```lashlang\nh = start app_lookup()\nvalue = await h\nsubmit value\n```",
+            r#"```lashlang
+process lookup(tool: TOOL) {
+  value = await tool.app_lookup({})?
+  finish value
+}
+h = start lookup(tool: TOOL.default)
+value = await h
+submit value
+```"#,
         ]))
         .model(mock_model_spec())
         .tools(Arc::new(BlockingAppTools::new(entered_tx, release_rx)))
@@ -575,13 +583,13 @@ async fn process_control_lists_started_ordinary_tool_until_awaited() -> Result<(
 
     let processes = session.process_control().list().await?;
     let running_app_lookup = processes.iter().any(|(grant, record)| {
-        grant.descriptor.kind.as_deref() == Some("tool")
-            && grant.descriptor.label.as_deref() == Some("app_lookup")
+        grant.descriptor.kind.as_deref() == Some("lashlang")
+            && grant.descriptor.label.as_deref() == Some("lookup")
             && record.terminal.is_none()
     });
     assert!(
         running_app_lookup,
-        "expected running app_lookup tool process, got {processes:?}"
+        "expected running lookup lashlang process, got {processes:?}"
     );
 
     release_tx.send(()).expect("release tool provider");
