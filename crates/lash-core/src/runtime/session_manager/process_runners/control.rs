@@ -8,7 +8,7 @@ impl ProcessCapability {
         &self,
         session_id: &str,
     ) -> crate::ProcessScope {
-        crate::ProcessScope::new(self.runtime_scope_id.as_ref(), session_id)
+        crate::ProcessScope::new(session_id)
     }
 
     pub(in crate::runtime::session_manager) fn process_scope_id(

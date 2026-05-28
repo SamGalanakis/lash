@@ -443,6 +443,7 @@ fn is_user_visible_message(message: &Message) -> bool {
             })
         }
         MessageRole::System => false,
+        MessageRole::Event => true,
     }
 }
 

@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use lash::{
     TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput, advanced::ExecutionMode,
 };
-use lash_core::{MessageRole, PluginMessage, SessionPolicy, SessionStateEnvelope};
+use lash_core::{SessionPolicy, SessionStateEnvelope};
 use lash_tui_extensions::{
     KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers,
 };
@@ -314,10 +314,6 @@ pub(super) fn key_chord_from_event(key: crossterm::event::KeyEvent) -> Option<Ui
             alt: key.modifiers.contains(KeyModifiers::ALT),
         },
     })
-}
-
-pub(super) fn process_wake_message(input: &str) -> PluginMessage {
-    PluginMessage::text(MessageRole::System, input)
 }
 
 pub(super) fn queued_turn_edit_matches(key: crossterm::event::KeyEvent) -> bool {

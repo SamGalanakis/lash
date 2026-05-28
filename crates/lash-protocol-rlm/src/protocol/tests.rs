@@ -93,7 +93,7 @@ fn execution_section_hides_trigger_language_without_processes() {
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 
     assert!(!section.contains("trigger name"));
-    assert!(!section.contains("declaration-only resource-event activation"));
+    assert!(!section.contains("resource-event declarations"));
 }
 
 #[test]

@@ -51,24 +51,25 @@ pub use lash_sansio::llm::types::{
 };
 pub use lash_sansio::{
     AcceptedInjectedTurnInput, AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef,
-    BaseRenderCache, CheckpointKind, CompactToolContract, EffectId, ErrorEnvelope, ExecImage,
-    ExecResponse, ImageMediaType, LlmCallError, MediaType, Message, MessageOrigin, MessageRole,
-    MessageSequence, ModelToolReturn, ModelToolReturnPart, Part, PartKind, PluginMessage,
-    PluginRuntimeEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin, PromptContext,
-    PromptContribution, PromptContributionGate, PromptContributionSet, PromptFingerprint,
-    PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer, Response,
-    SchemaProjectionOverride, SessionEvent, TextProjectionMetadata, TokenUsage, ToolActivation,
-    ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolCallOutcome,
-    ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation, ToolContract, ToolControl,
-    ToolDefinition, ToolDiscoveryMetadata, ToolFailure, ToolFailureClass, ToolFailureSource,
-    ToolId, ToolManifest, ToolOutputContract, ToolRetryDisposition, ToolRetryPolicy,
-    ToolScheduling, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride,
-    ToolValue, TurnFinish, TurnLimitFinalMessage, TurnOutcome, TurnStop,
-    append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
-    default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
+    BaseRenderCache, CheckpointDelivery, CheckpointKind, CompactToolContract, EffectId,
+    ErrorEnvelope, ExecImage, ExecResponse, ImageMediaType, LlmCallError, MediaType, Message,
+    MessageOrigin, MessageRole, MessageSequence, ModelToolReturn, ModelToolReturnPart, Part,
+    PartKind, PluginMessage, PluginRuntimeEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin,
+    PromptContext, PromptContribution, PromptContributionGate, PromptContributionSet,
+    PromptFingerprint, PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer,
+    Response, SchemaProjectionOverride, SessionEvent, TextProjectionMetadata, TokenUsage,
+    ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig,
+    ToolCallOutcome, ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation,
+    ToolContract, ToolControl, ToolDefinition, ToolDiscoveryMetadata, ToolFailure,
+    ToolFailureClass, ToolFailureSource, ToolId, ToolManifest, ToolOutputContract,
+    ToolRetryDisposition, ToolRetryPolicy, ToolScheduling, ToolSurface, ToolSurfaceBuildInput,
+    ToolSurfaceEntry, ToolSurfaceOverride, ToolValue, TurnCause, TurnFinish, TurnLimitFinalMessage,
+    TurnOutcome, TurnStop, append_assistant_text_part, build_prompt, build_tool_surface,
+    build_turn, default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
     normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
-    prompt_tool_names_fingerprint, reasoning_part, resolve_prompt_layers, shared_parts,
+    prompt_tool_names_fingerprint, reasoning_part, render_turn_causes_prompt,
+    resolve_prompt_layers, shared_parts,
 };
 pub use protocol_build::ProtocolBuildInput;
 pub use tool_registry::{
@@ -222,7 +223,8 @@ pub use runtime::{
     UnavailableProcessService, UsageReportRow, UsageTotals, current_epoch_ms, diff_token_ledger,
     diff_usage_reports, epoch_ms_from_system_time, lashlang_process_event_types,
     materialize_process_event_semantics, prepare_process_registration, process_event_payload_hash,
-    process_wake_delivery, require_event_idempotency, system_time_from_epoch_ms,
+    process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
+    process_wake_turn_text, require_event_idempotency, system_time_from_epoch_ms,
 };
 pub use schemars::JsonSchema;
 pub use session::{

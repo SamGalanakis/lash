@@ -79,7 +79,7 @@ pub(super) fn validate_process_registration(
     if let Some(scope) = &registration.created_by_scope {
         if scope.is_empty() {
             return Err(PluginError::Session(format!(
-                "process `{}` creator scope must include runtime scope and session id",
+                "process `{}` creator scope must include a session id",
                 registration.id
             )));
         }

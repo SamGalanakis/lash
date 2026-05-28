@@ -150,7 +150,7 @@ impl RuntimeEffectController for RecordingEffectController {
                 "recording effect controller does not execute processes",
             )),
             RuntimeEffectCommand::Checkpoint { .. } => Ok(RuntimeEffectOutcome::Checkpoint {
-                result: Ok((Vec::new(), Vec::new())),
+                result: Ok(crate::CheckpointDelivery::default()),
             }),
             RuntimeEffectCommand::SyncExecutionSurface { .. } => {
                 Ok(RuntimeEffectOutcome::SyncExecutionSurface { result: Ok(None) })
@@ -760,7 +760,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         metadata.clone(),
         RuntimeEffectCommand::Process {
             command: ProcessCommand::List {
-                owner_scope: ProcessScope::new("runtime", "scope-a"),
+                owner_scope: ProcessScope::new("scope-a"),
             },
         },
     );
@@ -806,7 +806,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
             metadata,
             RuntimeEffectCommand::Process {
                 command: ProcessCommand::List {
-                    owner_scope: ProcessScope::new("runtime", "scope-b"),
+                    owner_scope: ProcessScope::new("scope-b"),
                 },
             },
         ),

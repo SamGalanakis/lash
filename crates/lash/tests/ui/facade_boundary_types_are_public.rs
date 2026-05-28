@@ -240,6 +240,7 @@ fn message_role_type_is_nameable(role: MessageRole) -> &'static str {
         MessageRole::User => "user",
         MessageRole::Assistant => "assistant",
         MessageRole::System => "system",
+        MessageRole::Event => "event",
     }
 }
 

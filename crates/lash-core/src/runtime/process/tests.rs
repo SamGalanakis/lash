@@ -29,6 +29,101 @@ fn wake_event_type() -> ProcessEventType {
 }
 
 #[test]
+fn process_wake_input_from_event_payload_prefers_text_field() {
+    let payload = serde_json::json!({
+        "text": "ready",
+        "value": "ignored"
+    });
+
+    assert_eq!(process_wake_input_from_event_payload(&payload), "ready");
+}
+
+#[test]
+fn process_wake_input_from_event_payload_falls_back_to_value_field() {
+    let payload = serde_json::json!({
+        "value": { "status": "ready" }
+    });
+
+    assert_eq!(
+        process_wake_input_from_event_payload(&payload),
+        r#"{"status":"ready"}"#
+    );
+}
+
+#[test]
+fn process_wake_input_from_event_payload_renders_malformed_payload_as_json() {
+    let payload = serde_json::json!({
+        "unexpected": true
+    });
+
+    assert_eq!(
+        process_wake_input_from_event_payload(&payload),
+        r#"{"unexpected":true}"#
+    );
+}
+
+#[test]
+fn process_wake_input_from_event_payload_renders_plain_scalar_payload_as_json() {
+    let payload = serde_json::json!(42);
+
+    assert_eq!(process_wake_input_from_event_payload(&payload), "42");
+}
+
+#[test]
+fn process_wake_turn_text_frames_process_id_sequence_and_input() {
+    let wake = ProcessWakeDelivery {
+        wake_id: "wake:abc".to_string(),
+        target_session_id: "target".to_string(),
+        target_scope_id: ProcessScope::new("target").id(),
+        process_id: "process-1".to_string(),
+        sequence: 7,
+        dedupe_key: "process-1:7".to_string(),
+        input: "line one\nline two".to_string(),
+        created_at_ms: 123,
+    };
+
+    assert_eq!(
+        process_wake_turn_text(&wake),
+        "Background process wake\nProcess: process-1\nEvent: process.wake #7\nWake input:\nline one\nline two"
+    );
+}
+
+#[test]
+fn process_wake_turn_cause_preserves_process_origin() {
+    let wake = ProcessWakeDelivery {
+        wake_id: "wake:abc".to_string(),
+        target_session_id: "target".to_string(),
+        target_scope_id: ProcessScope::new("target").id(),
+        process_id: "process-1".to_string(),
+        sequence: 7,
+        dedupe_key: "process-1:7".to_string(),
+        input: "line one\nline two".to_string(),
+        created_at_ms: 123,
+    };
+
+    let cause = process_wake_turn_cause(&wake);
+
+    assert_eq!(cause.id, "wake:abc");
+    assert_eq!(cause.event_type, "process.wake");
+    assert_eq!(
+        cause.text,
+        "Background process wake\nProcess: process-1\nEvent: process.wake #7\nWake input:\nline one\nline two"
+    );
+    assert!(matches!(
+        cause.origin,
+        crate::MessageOrigin::Process {
+            process_id,
+            event_type,
+            sequence,
+            wake_id,
+        } if process_id == "process-1"
+            && event_type == "process.wake"
+            && sequence == 7
+            && wake_id.as_deref() == Some("wake:abc")
+    ));
+}
+
+#[test]
 fn selector_extracts_payload_pointer_const_template_and_present() {
     let payload = serde_json::json!({
         "line": "done",
@@ -82,7 +177,7 @@ fn selector_extracts_payload_pointer_const_template_and_present() {
 #[tokio::test]
 async fn process_registry_validates_custom_events_and_materializes_wakes() {
     let registry = TestLocalProcessRegistry::default();
-    let target_scope = ProcessScope::new("runtime", "s1");
+    let target_scope = ProcessScope::new("s1");
     let mut properties = serde_json::Map::new();
     properties.insert("line".to_string(), serde_json::json!({ "type": "string" }));
     properties.insert(
@@ -200,8 +295,8 @@ async fn await_process_reads_terminal_event_materialized_output() {
 #[tokio::test]
 async fn transfer_handle_grants_moves_addressability_without_process_events() {
     let registry = TestLocalProcessRegistry::default();
-    let s1 = ProcessScope::new("runtime", "s1");
-    let s2 = ProcessScope::new("runtime", "s2");
+    let s1 = ProcessScope::new("s1");
+    let s2 = ProcessScope::new("s2");
     registry
         .register_process(registration("proc-3"))
         .await
@@ -247,9 +342,9 @@ async fn transfer_handle_grants_moves_addressability_without_process_events() {
 #[tokio::test]
 async fn multiple_sessions_can_hold_grants_to_one_process() {
     let registry = TestLocalProcessRegistry::default();
-    let s1 = ProcessScope::new("runtime", "s1");
-    let s2 = ProcessScope::new("runtime", "s2");
-    let s3 = ProcessScope::new("runtime", "s3");
+    let s1 = ProcessScope::new("s1");
+    let s2 = ProcessScope::new("s2");
+    let s3 = ProcessScope::new("s3");
     registry
         .register_process(registration("proc-5"))
         .await
@@ -304,7 +399,7 @@ async fn multiple_sessions_can_hold_grants_to_one_process() {
 #[tokio::test]
 async fn processes_can_exist_with_zero_grants() {
     let registry = TestLocalProcessRegistry::default();
-    let s1 = ProcessScope::new("runtime", "s1");
+    let s1 = ProcessScope::new("s1");
     registry
         .register_process(registration("proc-4"))
         .await
@@ -321,9 +416,9 @@ async fn processes_can_exist_with_zero_grants() {
 #[tokio::test]
 async fn delete_session_process_state_revokes_handles_and_deletes_wakes_by_session_id() {
     let registry = TestLocalProcessRegistry::default();
-    let deleted_scope = ProcessScope::new("runtime", "deleted");
+    let deleted_scope = ProcessScope::new("deleted");
     let deleted_scope_id = deleted_scope.id();
-    let remaining_scope = ProcessScope::new("runtime", "remaining");
+    let remaining_scope = ProcessScope::new("remaining");
     for process_id in ["sole", "shared", "terminal"] {
         registry
             .register_process(registration(process_id).with_extra_event_types([wake_event_type()]))
@@ -405,8 +500,8 @@ async fn delete_session_process_state_revokes_handles_and_deletes_wakes_by_sessi
 async fn delete_session_process_command_requests_cancel_only_for_unshared_active_processes() {
     let registry = Arc::new(TestLocalProcessRegistry::default());
     let registry_dyn = Arc::clone(&registry) as Arc<dyn ProcessRegistry>;
-    let deleted_scope = ProcessScope::new("runtime", "deleted");
-    let remaining_scope = ProcessScope::new("runtime", "remaining");
+    let deleted_scope = ProcessScope::new("deleted");
+    let remaining_scope = ProcessScope::new("remaining");
     for process_id in ["sole", "shared"] {
         registry
             .register_process(registration(process_id))

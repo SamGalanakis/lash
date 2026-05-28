@@ -32,4 +32,7 @@ pub use time::{current_epoch_ms, epoch_ms_from_system_time, system_time_from_epo
 pub use validation::{
     prepare_process_registration, process_event_payload_hash, require_event_idempotency,
 };
-pub use wake::process_wake_delivery;
+pub use wake::{
+    process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
+    process_wake_turn_text,
+};

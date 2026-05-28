@@ -4,9 +4,9 @@ use std::sync::atomic::AtomicBool;
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
-use lash::{LashSession, TurnInput, advanced::ExecutionMode, provider::ProviderHandle};
+use lash::{LashSession, advanced::ExecutionMode, provider::ProviderHandle};
+use lash_core::ToolState;
 use lash_core::session_model::Message;
-use lash_core::{InjectedTurnInput, ToolState};
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiInputOutcome, TuiSurfaceSlot};
 use tokio::task;
@@ -32,9 +32,8 @@ use super::commands::{
     switch_to_session_identifier,
 };
 use super::helpers::{
-    TurnReplayPayload, is_copy_shortcut, key_chord_from_event, process_wake_message,
-    queued_turn_edit_matches, record_queue_pending_steer, record_queue_turn,
-    should_preserve_selection_for_key,
+    TurnReplayPayload, is_copy_shortcut, key_chord_from_event, queued_turn_edit_matches,
+    record_queue_pending_steer, record_queue_turn, should_preserve_selection_for_key,
 };
 use super::runtime::{
     apply_pending_reconfigure, copy_selected_text_or_last_response, make_injected_plugin_message,
@@ -250,78 +249,6 @@ pub(super) async fn activate_foreground_session_handoff(
     }
 
     true
-}
-
-pub(super) async fn enqueue_pending_process_wakes(
-    app: &mut App,
-    session: &LashSession,
-) -> Result<usize, String> {
-    let wakes = app.take_pending_process_wakes();
-    if wakes.is_empty() {
-        return Ok(0);
-    }
-    let messages = wakes
-        .iter()
-        .map(|input| InjectedTurnInput {
-            id: None,
-            message: process_wake_message(input),
-        })
-        .collect::<Vec<_>>();
-    session
-        .control()
-        .injection()
-        .inject_turn_inputs(messages)
-        .await
-        .map_err(|err| err.to_string())?;
-    app.mark_process_wakes_in_flight(&wakes);
-    Ok(wakes.len())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn process_pending_process_wakes(
-    app: &mut App,
-    ui_trace: &mut Option<UiTraceRecorder>,
-    logger: &mut SessionLogger,
-    runtime: &mut Option<LashSession>,
-    history: &mut Vec<lash_core::session_model::Message>,
-    runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
-    cancel_token: &mut Option<CancellationToken>,
-    active_stream_id: &mut u64,
-    app_tx: &crate::event::AppEventTx,
-    desired_tool_state: &ToolState,
-) -> Result<bool, String> {
-    if !app.running && runtime_return_rx.is_none() && runtime.is_none() {
-        return Ok(false);
-    }
-    let Some(session) = runtime.as_ref() else {
-        return Ok(false);
-    };
-    let injected = enqueue_pending_process_wakes(app, session).await?;
-    if injected == 0 {
-        return Ok(false);
-    }
-    if app.running || runtime_return_rx.is_some() || app.has_queued_messages() {
-        return Ok(false);
-    }
-
-    let prepared_turn = PreparedTurn::prepare(String::new(), Vec::new(), &app.skills);
-    let turn_input = TurnInput::empty();
-    send_user_message(
-        prepared_turn,
-        turn_input,
-        app,
-        ui_trace.as_mut(),
-        logger,
-        runtime,
-        history,
-        runtime_return_rx,
-        cancel_token,
-        active_stream_id,
-        app_tx,
-        desired_tool_state,
-    )
-    .await;
-    Ok(true)
 }
 
 pub(super) fn handle_mouse_event(

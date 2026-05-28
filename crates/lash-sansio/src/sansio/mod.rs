@@ -4,7 +4,7 @@
 //! lives behind `ProtocolDriverHandle`, which returns declarative
 //! `DriverAction`s that the machine applies.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ use crate::session_model::message::MessageOrigin;
 use crate::session_model::{
     Message, MessageRole, MessageSequence, Part, PartKind, PruneState, SessionEvent,
     SessionEventRecord, TokenUsage, ToolEvent, TurnTerminationPolicyState, make_error_event,
-    reassign_part_ids,
+    reassign_part_ids, render_prompt,
 };
 use crate::{
     CheckpointKind, ModelToolReturn, PluginMessage, ToolCallOutput, TurnOutcome, TurnStop,
@@ -66,6 +66,89 @@ pub struct CompletedToolCall {
     pub duration_ms: u64,
     /// See [`PendingToolCall::replay`].
     pub replay: Option<ProviderReplayMeta>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct TurnCause {
+    pub id: String,
+    pub event_type: String,
+    pub origin: MessageOrigin,
+    pub text: String,
+}
+
+impl TurnCause {
+    pub fn to_event_message(&self) -> Message {
+        Message {
+            id: self.id.clone(),
+            role: MessageRole::Event,
+            parts: Arc::new(vec![Part {
+                id: format!("{}.p0", self.id),
+                kind: PartKind::Text,
+                content: self.text.clone(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_replay: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }]),
+            origin: Some(self.origin.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, serde::Deserialize)]
+pub struct CheckpointDelivery {
+    pub messages: Vec<PluginMessage>,
+    pub transient_messages: Vec<PluginMessage>,
+    pub turn_causes: Vec<TurnCause>,
+}
+
+pub fn render_turn_causes_prompt(causes: &[TurnCause]) -> Option<String> {
+    if causes.is_empty() {
+        return None;
+    }
+
+    let mut rendered = String::from("=== TURN EVENTS ===");
+    for (index, cause) in causes.iter().enumerate() {
+        rendered.push_str("\n\n");
+        rendered.push_str(&format!(
+            "--- event[{index}] · {} · {} ---\n",
+            cause.event_type, cause.id
+        ));
+        rendered.push_str("Origin: ");
+        rendered.push_str(&render_message_origin(&cause.origin));
+        rendered.push_str("\n\n");
+        rendered.push_str(cause.text.trim());
+    }
+    Some(rendered)
+}
+
+fn render_message_origin(origin: &MessageOrigin) -> String {
+    match origin {
+        MessageOrigin::Plugin {
+            plugin_id,
+            transient,
+        } => {
+            if *transient {
+                format!("plugin {plugin_id} (transient)")
+            } else {
+                format!("plugin {plugin_id}")
+            }
+        }
+        MessageOrigin::Process {
+            process_id,
+            event_type,
+            sequence,
+            wake_id,
+        } => match wake_id {
+            Some(wake_id) => {
+                format!("process {process_id} {event_type} #{sequence} ({wake_id})")
+            }
+            None => format!("process {process_id} {event_type} #{sequence}"),
+        },
+    }
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
@@ -242,8 +325,7 @@ pub enum Response {
     /// Checkpoint result with optional injected messages.
     Checkpoint {
         id: EffectId,
-        messages: Vec<PluginMessage>,
-        transient_messages: Vec<PluginMessage>,
+        delivery: CheckpointDelivery,
     },
 }
 
@@ -310,6 +392,7 @@ pub struct DriverContextView<'a, M: TurnProtocol = UnitTurnProtocol> {
     config: &'a TurnMachineConfig<M>,
     messages: &'a MessageSequence,
     events: &'a [SessionEventRecord<M::Event>],
+    turn_causes: &'a [TurnCause],
     protocol_iteration: usize,
     protocol_run_offset: usize,
     termination: &'a TurnTerminationPolicyState,
@@ -321,6 +404,7 @@ impl<'a, M: TurnProtocol> DriverContextView<'a, M> {
             config: self.config,
             messages: self.messages,
             events: self.events,
+            turn_causes: self.turn_causes,
             protocol_iteration: self.protocol_iteration,
             use_tools,
         })
@@ -365,12 +449,17 @@ impl<'a, M: TurnProtocol> DriverContextView<'a, M> {
     pub fn events(&self) -> &[SessionEventRecord<M::Event>] {
         self.events
     }
+
+    pub fn turn_causes(&self) -> &[TurnCause] {
+        self.turn_causes
+    }
 }
 
 pub struct ProjectorContext<'a, M: TurnProtocol = UnitTurnProtocol> {
     pub config: &'a TurnMachineConfig<M>,
     pub messages: &'a MessageSequence,
     pub events: &'a [SessionEventRecord<M::Event>],
+    pub turn_causes: &'a [TurnCause],
     pub protocol_iteration: usize,
     pub use_tools: bool,
 }
@@ -384,9 +473,15 @@ pub struct ChatContextProjector;
 
 impl<M: TurnProtocol> ContextProjector<M> for ChatContextProjector {
     fn project(&self, ctx: ProjectorContext<'_, M>) -> Arc<LlmRequest> {
-        let rendered_prompt = ctx.messages.render_prompt();
+        let rendered_prompt = render_messages_for_projector(ctx.messages, ctx.turn_causes);
         let attachments: Vec<LlmAttachment> = rendered_prompt.attachments;
         let mut messages = rendered_prompt.messages;
+        if let Some(turn_events) = render_turn_causes_prompt(ctx.turn_causes) {
+            messages.push(crate::llm::types::LlmMessage::text(
+                crate::llm::types::LlmRole::User,
+                Arc::from(turn_events),
+            ));
+        }
         if !ctx.config.system_prompt.trim().is_empty() {
             messages.insert(
                 0,
@@ -419,6 +514,29 @@ impl<M: TurnProtocol> ContextProjector<M> for ChatContextProjector {
             provider_trace: None,
         })
     }
+}
+
+fn render_messages_for_projector(
+    messages: &MessageSequence,
+    turn_causes: &[TurnCause],
+) -> crate::RenderedPrompt {
+    if turn_causes.is_empty() {
+        return messages.render_prompt();
+    }
+
+    let active_cause_ids = turn_causes
+        .iter()
+        .map(|cause| cause.id.as_str())
+        .collect::<HashSet<_>>();
+    let filtered = messages
+        .iter()
+        .filter(|message| {
+            !(matches!(message.role, MessageRole::Event)
+                && active_cause_ids.contains(message.id.as_str()))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    render_prompt(filtered.as_slice())
 }
 
 pub trait ProtocolDriverHandle<M: TurnProtocol = UnitTurnProtocol>: Send + Sync {
@@ -503,6 +621,8 @@ pub struct TurnCheckpoint<M: TurnProtocol = UnitTurnProtocol> {
     next_synthetic_message_id: u64,
     messages: Vec<Message>,
     events: Vec<SessionEventRecord<M::Event>>,
+    #[serde(default)]
+    turn_causes: Vec<TurnCause>,
     #[serde(default)]
     progress_event_cursor: usize,
     protocol_iteration: usize,
@@ -710,6 +830,7 @@ pub struct TurnMachine<M: TurnProtocol = UnitTurnProtocol> {
     next_synthetic_message_id: u64,
     messages: MessageSequence,
     events: Arc<Vec<SessionEventRecord<M::Event>>>,
+    turn_causes: Vec<TurnCause>,
     progress_event_cursor: usize,
     protocol_iteration: usize,
     protocol_run_offset: usize,
@@ -740,6 +861,16 @@ impl<M: TurnProtocol> TurnMachine<M> {
         events: Arc<Vec<SessionEventRecord<M::Event>>>,
         protocol_run_offset: usize,
     ) -> Self {
+        Self::new_shared_with_turn_causes(config, messages, events, protocol_run_offset, Vec::new())
+    }
+
+    pub fn new_shared_with_turn_causes(
+        config: TurnMachineConfig<M>,
+        messages: MessageSequence,
+        events: Arc<Vec<SessionEventRecord<M::Event>>>,
+        protocol_run_offset: usize,
+        turn_causes: Vec<TurnCause>,
+    ) -> Self {
         let next_synthetic_message_id = messages.len() as u64;
         Self {
             config,
@@ -751,6 +882,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
             messages,
             progress_event_cursor: events.len(),
             events,
+            turn_causes,
             protocol_iteration: protocol_run_offset,
             protocol_run_offset,
             cumulative_usage: TokenUsage::default(),
@@ -795,6 +927,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
             next_synthetic_message_id: self.next_synthetic_message_id,
             messages: self.messages.iter().cloned().collect(),
             events: self.events.as_ref().clone(),
+            turn_causes: self.turn_causes.clone(),
             progress_event_cursor: self.progress_event_cursor,
             protocol_iteration: self.protocol_iteration,
             protocol_run_offset: self.protocol_run_offset,
@@ -827,6 +960,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
             next_synthetic_message_id: checkpoint.next_synthetic_message_id,
             messages: MessageSequence::from_owned(checkpoint.messages),
             events: Arc::new(checkpoint.events),
+            turn_causes: checkpoint.turn_causes,
             progress_event_cursor: checkpoint.progress_event_cursor,
             protocol_iteration: checkpoint.protocol_iteration,
             protocol_run_offset: checkpoint.protocol_run_offset,
@@ -841,6 +975,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
             config: &self.config,
             messages: &self.messages,
             events: self.events.as_slice(),
+            turn_causes: &self.turn_causes,
             protocol_iteration: self.protocol_iteration,
             protocol_run_offset: self.protocol_run_offset,
             termination: &self.termination,
@@ -1141,11 +1276,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
             } => self.handle_llm_complete(id, result, text_streamed),
             Response::ToolResults { id, results } => self.handle_tool_results(id, results),
             Response::ExecResult { id, result } => self.handle_exec_result(id, result),
-            Response::Checkpoint {
-                id,
-                messages,
-                transient_messages,
-            } => self.handle_checkpoint(id, messages, transient_messages),
+            Response::Checkpoint { id, delivery } => self.handle_checkpoint(id, delivery),
         }
     }
 
@@ -1232,9 +1363,11 @@ impl<M: TurnProtocol> TurnMachine<M> {
                 id: message_id.clone(),
                 role: message.role,
                 parts: Arc::new(parts),
-                origin: Some(MessageOrigin::Plugin {
-                    plugin_id: "plugin".to_string(),
-                    transient,
+                origin: message.origin.clone().or_else(|| {
+                    Some(MessageOrigin::Plugin {
+                        plugin_id: "plugin".to_string(),
+                        transient,
+                    })
                 }),
             });
         }
@@ -1243,12 +1376,25 @@ impl<M: TurnProtocol> TurnMachine<M> {
         }
     }
 
-    fn handle_checkpoint(
-        &mut self,
-        id: EffectId,
-        messages: Vec<PluginMessage>,
-        transient_messages: Vec<PluginMessage>,
-    ) {
+    fn append_turn_causes(&mut self, causes: Vec<TurnCause>) {
+        if causes.is_empty() {
+            return;
+        }
+        let mut existing_ids = self
+            .turn_causes
+            .iter()
+            .map(|cause| cause.id.clone())
+            .collect::<HashSet<_>>();
+        for cause in causes {
+            if !existing_ids.insert(cause.id.clone()) {
+                continue;
+            }
+            self.messages.push(cause.to_event_message());
+            self.turn_causes.push(cause);
+        }
+    }
+
+    fn handle_checkpoint(&mut self, id: EffectId, delivery: CheckpointDelivery) {
         let (effect_id, checkpoint, on_empty) =
             match std::mem::replace(&mut self.state, MachineState::Finished) {
                 MachineState::WaitingCheckpoint {
@@ -1270,9 +1416,13 @@ impl<M: TurnProtocol> TurnMachine<M> {
             return;
         }
 
-        if !messages.is_empty() || !transient_messages.is_empty() {
-            self.append_checkpoint_messages(&messages, false);
-            self.append_checkpoint_messages(&transient_messages, true);
+        if !delivery.messages.is_empty()
+            || !delivery.transient_messages.is_empty()
+            || !delivery.turn_causes.is_empty()
+        {
+            self.append_checkpoint_messages(&delivery.messages, false);
+            self.append_checkpoint_messages(&delivery.transient_messages, true);
+            self.append_turn_causes(delivery.turn_causes);
             if matches!(checkpoint, CheckpointKind::BeforeCompletion) {
                 self.protocol_iteration += 1;
                 if self.termination.should_force_exit_after_grace_turn() {

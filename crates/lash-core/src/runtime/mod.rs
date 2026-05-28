@@ -98,6 +98,7 @@ pub use process::{
     UnavailableProcessService, current_epoch_ms, epoch_ms_from_system_time,
     lashlang_process_event_types, materialize_process_event_semantics,
     prepare_process_registration, process_event_payload_hash, process_wake_delivery,
+    process_wake_input_from_event_payload, process_wake_turn_cause, process_wake_turn_text,
     require_event_idempotency, system_time_from_epoch_ms,
 };
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};

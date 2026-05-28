@@ -106,6 +106,15 @@ impl PluginSession {
             .install_lashlang_source(source, surface)
     }
 
+    pub fn install_linked_lashlang_trigger_source(
+        &self,
+        source: &str,
+        linked: &lashlang::LinkedModule,
+    ) -> Result<crate::SessionTriggerInstallReport, PluginError> {
+        self.trigger_registry
+            .install_linked_lashlang_source(source, linked)
+    }
+
     pub(crate) fn installed_lashlang_triggers(
         &self,
     ) -> Result<Vec<InstalledSessionTrigger>, PluginError> {

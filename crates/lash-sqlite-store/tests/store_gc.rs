@@ -679,6 +679,7 @@ fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckp
         model: "mock-model".to_string(),
         messages: lash_core::MessageSequence::default(),
         events: Arc::new(Vec::new()),
+        turn_causes: Vec::new(),
         protocol_run_offset: 0,
         turn_driver_preamble: Arc::clone(&turn_driver_preamble),
         prepared_prompt: PreparedPrompt {

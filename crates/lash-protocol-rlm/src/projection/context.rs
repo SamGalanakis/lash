@@ -321,6 +321,7 @@ fn history_role(role: MessageRole) -> RlmHistoryRole {
         MessageRole::User => RlmHistoryRole::User,
         MessageRole::System => RlmHistoryRole::System,
         MessageRole::Assistant => RlmHistoryRole::Assistant,
+        MessageRole::Event => RlmHistoryRole::Event,
     }
 }
 

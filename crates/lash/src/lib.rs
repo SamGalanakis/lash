@@ -139,14 +139,15 @@ pub mod advanced {
         ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessInput,
         ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
         ProcessScopeId, ProcessService, ProcessSessionDeleteReport, ProcessStartOptions,
-        ProtocolSessionExtensionHandle, ProtocolTurnOptions, Residency, RewriteTrigger,
-        RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
+        ProcessWakeDelivery, ProtocolSessionExtensionHandle, ProtocolTurnOptions, Residency,
+        RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
         RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
         RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
         RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
         RuntimeObservation, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionEvent, SessionHandle,
-        SessionPolicy, SessionStateEnvelope, TerminationPolicy, TurnContext, TurnFinish,
-        TurnOutcome, TurnStop, lashlang_process_event_types,
+        SessionPolicy, SessionStateEnvelope, TerminationPolicy, TurnCause, TurnContext, TurnFinish,
+        TurnOutcome, TurnStop, lashlang_process_event_types, process_wake_input_from_event_payload,
+        process_wake_turn_cause, process_wake_turn_text, render_turn_causes_prompt,
     };
 }
 

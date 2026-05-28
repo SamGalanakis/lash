@@ -503,6 +503,7 @@ fn queued_input_message(input: TurnInput) -> Result<PluginMessage> {
     Ok(PluginMessage {
         role: MessageRole::User,
         content,
+        origin: None,
         parts: Vec::new(),
         images,
     })

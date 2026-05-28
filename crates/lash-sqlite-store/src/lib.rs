@@ -2990,10 +2990,7 @@ mod tests {
                 metadata: serde_json::Value::Null,
             },
         )
-        .with_provenance(
-            lash_core::ProcessScope::new("runtime", "session"),
-            "test-host",
-        )
+        .with_provenance(lash_core::ProcessScope::new("session"), "test-host")
     }
 
     fn process_wake_event_type() -> lash_core::ProcessEventType {
@@ -3057,7 +3054,7 @@ mod tests {
         let path = dir.path().join("processes.db");
         {
             let registry = SqliteProcessRegistry::open(&path).expect("open registry");
-            let owner_scope = lash_core::ProcessScope::new("runtime", "session");
+            let owner_scope = lash_core::ProcessScope::new("session");
             registry
                 .register_process(registration("proc-persist"))
                 .await
@@ -3083,7 +3080,7 @@ mod tests {
         }
 
         let registry = SqliteProcessRegistry::open(&path).expect("reopen registry");
-        let owner_scope = lash_core::ProcessScope::new("runtime", "session");
+        let owner_scope = lash_core::ProcessScope::new("session");
         let record = registry
             .get_process("proc-persist")
             .await
@@ -3144,7 +3141,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_process_keyed_events_and_wake_inbox_are_durable() {
         let registry = SqliteProcessRegistry::memory().expect("registry");
-        let target_scope = lash_core::ProcessScope::new("runtime", "session");
+        let target_scope = lash_core::ProcessScope::new("session");
         let target_scope_id = target_scope.id();
         registry
             .register_process(

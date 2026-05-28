@@ -7,12 +7,11 @@ use crate::llm::types::{
     LlmAttachment, LlmEventSender, LlmMessage, LlmOutputSpec, LlmProviderTraceSender,
     LlmToolChoice, LlmToolSpec,
 };
-use crate::plugin::PluginMessage;
 use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
 use crate::{
-    AttachmentCreateMeta, AttachmentRef, AttachmentStore, DirectMessage, DirectOutputSpec,
-    DirectRequest, ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse, MediaType,
-    ProcessAwaitOutput, ProcessExecutionContext, ProcessHandleGrantEntry, ProcessRecord,
+    AttachmentCreateMeta, AttachmentRef, AttachmentStore, CheckpointDelivery, DirectMessage,
+    DirectOutputSpec, DirectRequest, ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse,
+    MediaType, ProcessAwaitOutput, ProcessExecutionContext, ProcessHandleGrantEntry, ProcessRecord,
     ProcessRegistration, ProcessScope, ProcessStartGrant,
 };
 
@@ -186,8 +185,7 @@ fn boxed_process_execution_context_is_empty(context: &ProcessExecutionContext) -
     context.is_empty()
 }
 
-type CheckpointMessageDeltas = (Vec<PluginMessage>, Vec<PluginMessage>);
-type CheckpointOutcome = Result<CheckpointMessageDeltas, RuntimeEffectControllerError>;
+type CheckpointOutcome = Result<CheckpointDelivery, RuntimeEffectControllerError>;
 
 impl ProcessCommand {
     pub fn effect_id(&self) -> String {
@@ -260,7 +258,7 @@ pub enum RuntimeEffectOutcome {
         result: Result<ExecResponse, String>,
     },
     Checkpoint {
-        result: Result<(Vec<PluginMessage>, Vec<PluginMessage>), RuntimeEffectControllerError>,
+        result: CheckpointOutcome,
     },
     SyncExecutionSurface {
         result: Result<Option<ExecutionSurfaceSync>, String>,

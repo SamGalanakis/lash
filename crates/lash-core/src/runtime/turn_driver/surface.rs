@@ -194,6 +194,7 @@ impl RuntimeTurnDriver<'_> {
             model,
             messages,
             events: self.turn_pipeline.active_events(),
+            turn_causes: self.turn_causes.clone(),
             protocol_run_offset: run_offset,
             turn_driver_preamble: execution_surface.turn_driver_preamble,
             prepared_prompt,

@@ -171,7 +171,7 @@ fn render_host_events_section(surface: &lashlang::LashlangSurface) -> Option<Str
         return None;
     }
     Some(format!(
-        "### Host Events\n\nHosts may emit these typed events. Register declaration-only `trigger` modules against them; host events are not tools and cannot be called directly.\n\n{}",
+        "### Host Events\n\nHosts may emit these typed events. Declare `trigger` bindings against them; host events are not tools and cannot be called directly.\n\n{}",
         lines.join("\n")
     ))
 }
@@ -288,7 +288,7 @@ fn render_language_section(
         ));
     }
     if abilities.triggers && abilities.processes {
-        bullets.push("- Triggers: declaration-only resource-event activation. Use `trigger name on RESOURCE.alias.event as event -> process_name(param: event, tool: RESOURCE.alias)` or `trigger name on each RESOURCE.event as resource, event -> process_name(resource_param: resource, event_param: event)`. Bind every target process parameter explicitly. Trigger args may only be the whole event payload, a concrete catalog resource alias, or the resource handle from `on each`; triggers cannot contain code, `await`, `print`, `submit`, loops, assignments, resource operations, or computed records.".to_string());
+        bullets.push("- Triggers: resource-event declarations that may appear alongside normal foreground code. Use `trigger name on RESOURCE.alias.event as event -> process_name(param: event, tool: RESOURCE.alias)` or `trigger name on each RESOURCE.event as resource, event -> process_name(resource_param: resource, event_param: event)`. Bind every target process parameter explicitly. Trigger args may only be the whole event payload, a concrete catalog resource alias, or the resource handle from `on each`; trigger declarations cannot contain code, `await`, `print`, `submit`, loops, assignments, resource operations, or computed records.".to_string());
     }
     if abilities.schedules.cron {
         bullets.push("- Schedules: declare cron activation with `schedule name every cron(\"0 * * * *\") as tick { ... }`.".to_string());

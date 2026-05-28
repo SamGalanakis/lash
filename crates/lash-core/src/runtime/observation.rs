@@ -15,7 +15,6 @@ pub struct RuntimeObservation {
     pub tool_state: Option<crate::ToolState>,
     pub tool_catalog: Arc<Vec<serde_json::Value>>,
     pub tool_catalog_error: Option<String>,
-    pub runtime_scope_id: Arc<str>,
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
 }
 
@@ -48,7 +47,6 @@ impl RuntimeObservation {
             tool_state,
             tool_catalog,
             tool_catalog_error,
-            runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
             process_registry: runtime.host.process_registry.clone(),
         }
     }
@@ -58,7 +56,7 @@ impl RuntimeObservation {
     }
 
     pub fn process_scope(&self) -> crate::ProcessScope {
-        crate::ProcessScope::new(self.runtime_scope_id.as_ref(), self.session_id.as_ref())
+        crate::ProcessScope::new(self.session_id.as_ref())
     }
 
     pub fn process_scope_id(&self) -> crate::ProcessScopeId {

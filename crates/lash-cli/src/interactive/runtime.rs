@@ -77,6 +77,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
     PluginMessage {
         role: MessageRole::User,
         content: turn.effective_text.clone(),
+        origin: None,
         parts,
         images: Vec::new(),
     }

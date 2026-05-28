@@ -26,10 +26,11 @@ pub use prompt::{
     prompt_text_fingerprint, prompt_tool_names_fingerprint,
 };
 pub use sansio::{
-    ChatContextProjector, CheckpointResumeAction, CompletedToolCall, ContextProjector,
-    DriverAction, DriverContextView, Effect, EffectId, LlmCallError, PendingToolCall,
-    ProjectorContext, ProtocolDriverHandle, Response, TurnCheckpoint, TurnMachine,
-    TurnMachineConfig, TurnProtocol, UnitTurnProtocol, WaitingExecState, WaitingLlmState,
+    ChatContextProjector, CheckpointDelivery, CheckpointResumeAction, CompletedToolCall,
+    ContextProjector, DriverAction, DriverContextView, Effect, EffectId, LlmCallError,
+    PendingToolCall, ProjectorContext, ProtocolDriverHandle, Response, TurnCause, TurnCheckpoint,
+    TurnMachine, TurnMachineConfig, TurnProtocol, UnitTurnProtocol, WaitingExecState,
+    WaitingLlmState, render_turn_causes_prompt,
 };
 pub use session::{
     CompletedTurn, ExecImage, ExecResponse, PromptUsage, SansIoSessionState,

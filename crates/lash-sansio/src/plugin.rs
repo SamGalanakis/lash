@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
-use crate::{MessageRole, Part};
+use crate::{MessageOrigin, MessageRole, Part};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginMessage {
     pub role: MessageRole,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<MessageOrigin>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<Part>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -18,9 +20,15 @@ impl PluginMessage {
         Self {
             role,
             content: content.into(),
+            origin: None,
             parts: Vec::new(),
             images: Vec::new(),
         }
+    }
+
+    pub fn with_origin(mut self, origin: MessageOrigin) -> Self {
+        self.origin = Some(origin);
+        self
     }
 
     pub fn first_text(&self) -> Option<&str> {

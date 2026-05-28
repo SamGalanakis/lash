@@ -227,6 +227,7 @@ impl ContextProjector<lash_core::HostTurnProtocol> for RlmContextProjector {
             RlmHistoryRenderInput {
                 events: ctx.events,
                 turn_messages: ctx.messages,
+                turn_causes: ctx.turn_causes,
                 max_output_chars: self.max_output_chars,
                 protocol_iteration: ctx.protocol_iteration + 1,
                 finalization,
@@ -507,6 +508,108 @@ mod tests {
         assert!(history.contains("synthetic plugin message"));
         assert!(!history.contains("from plugin"));
         assert!(!history.contains("test"));
+    }
+
+    #[test]
+    fn process_wake_history_renders_as_chronological_event_context() {
+        let projector = projector(1000);
+        let event = SessionEventRecord::Conversation(ConversationRecord {
+            id: "wake:abc".to_string(),
+            role: MessageRole::Event,
+            parts: vec![Part {
+                id: "wake:abc.p0".to_string(),
+                kind: PartKind::Text,
+                content: "Background process wake\nProcess: process-1\nEvent: process.wake #7\nWake input:\nblue button pressed".to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_replay: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }]
+            .into(),
+            origin: Some(lash_core::MessageOrigin::Process {
+                process_id: "process-1".to_string(),
+                event_type: "process.wake".to_string(),
+                sequence: 7,
+                wake_id: Some("wake:abc".to_string()),
+            }),
+        });
+        let projection = projection_from_events(&[event]);
+        let mut attachments = Vec::new();
+
+        let messages = build_rlm_history_messages(
+            &projection,
+            1000,
+            1,
+            rlm_finalization_prompt(&RlmTermination::default()),
+            None,
+            None,
+            &mut attachments,
+        );
+        let history = projector.format_history(&projection);
+
+        assert!(history.contains("--- history[0] · event message"));
+        assert!(history.contains("Background process wake"));
+        assert!(history.contains("blue button pressed"));
+        assert!(!history.contains("system message"));
+        assert!(matches!(messages[0].role, LlmRole::User));
+    }
+
+    #[test]
+    fn active_turn_causes_render_in_current_turn_events_without_history_duplication() {
+        let cause = lash_core::TurnCause {
+            id: "wake:abc".to_string(),
+            event_type: "process.wake".to_string(),
+            origin: lash_core::MessageOrigin::Process {
+                process_id: "process-1".to_string(),
+                event_type: "process.wake".to_string(),
+                sequence: 7,
+                wake_id: Some("wake:abc".to_string()),
+            },
+            text: "Background process wake\nProcess: process-1\nEvent: process.wake #7\nWake input:\nblue button pressed".to_string(),
+        };
+        let event_message = cause.to_event_message();
+        let messages = lash_core::MessageSequence::from(vec![event_message]);
+        let mut attachments = Vec::new();
+
+        let rendered = build_rlm_history_messages_from_turn(
+            RlmHistoryRenderInput {
+                events: &[],
+                turn_messages: &messages,
+                turn_causes: std::slice::from_ref(&cause),
+                max_output_chars: 1000,
+                protocol_iteration: 0,
+                finalization: rlm_finalization_prompt(&RlmTermination::default()),
+                required_output: None,
+                budget_suffix: None,
+            },
+            &mut attachments,
+        );
+
+        let combined = rendered
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .filter_map(|block| match block {
+                LlmContentBlock::Text { text, .. } => Some(text.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(combined.contains("=== TURN EVENTS ==="));
+        assert!(combined.contains("blue button pressed"));
+        assert!(!combined.contains("--- history[0] · event message"));
+        assert!(rendered.iter().any(|message| {
+            message.role == LlmRole::User
+                && message.blocks.iter().any(|block| {
+                    matches!(
+                        block,
+                        LlmContentBlock::Text { text, .. }
+                            if text.contains("=== TURN EVENTS ===")
+                    )
+                })
+        }));
     }
 
     #[test]

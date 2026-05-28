@@ -316,6 +316,7 @@ async fn bridge_checkpoint_injection_preserves_images() {
         .enqueue(vec![crate::PluginMessage {
             role: crate::MessageRole::User,
             content: "see image".to_string(),
+            origin: None,
             parts: vec![
                 crate::Part {
                     id: String::new(),
@@ -501,6 +502,7 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
             message: crate::PluginMessage {
                 role: crate::MessageRole::User,
                 content: "follow up".to_string(),
+                origin: None,
                 parts: Vec::new(),
                 images: Vec::new(),
             },
@@ -568,6 +570,263 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
         message.role == crate::MessageRole::User
             && message.parts.iter().any(|part| part.content == "hello")
     }));
+}
+
+#[tokio::test]
+async fn pending_process_wake_drains_into_first_prompt_as_turn_event() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_requests = Arc::clone(&requests);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |req| {
+            let captured_requests = Arc::clone(&captured_requests);
+            async move {
+                captured_requests
+                    .lock()
+                    .expect("request capture lock")
+                    .push(req);
+                Ok(LlmResponse {
+                    full_text: "saw event".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "saw event".to_string(),
+                        response_meta: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build();
+    let mut runtime = standard_runtime_with_transport(transport).await;
+    let registry = runtime
+        .host
+        .process_registry
+        .as_ref()
+        .expect("process registry")
+        .clone();
+    let target_scope = crate::ProcessScope::new("root");
+    registry
+        .register_process(
+            crate::ProcessRegistration::new(
+                "wake-proc",
+                crate::ProcessInput::External {
+                    metadata: serde_json::Value::Null,
+                },
+            )
+            .with_extra_event_types(crate::lashlang_process_event_types()),
+        )
+        .await
+        .expect("register wake process");
+    registry
+        .append_event(
+            "wake-proc",
+            crate::ProcessEventAppendRequest::new(
+                "process.wake",
+                json!({
+                    "text": "deploy complete",
+                    "value": {
+                        "status": "deploy complete"
+                    }
+                }),
+            )
+            .with_wake_target_scope(target_scope.clone()),
+        )
+        .await
+        .expect("append wake");
+
+    runtime
+        .stream_turn(
+            TurnInput::empty(),
+            TurnOptions::new(CancellationToken::new()),
+        )
+        .await
+        .expect("turn");
+
+    let requests = requests.lock().expect("request capture lock");
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    let message_text = |message: &crate::llm::types::LlmMessage| {
+        message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                crate::llm::types::LlmContentBlock::Text { text, .. } => Some(text.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let turn_event_user_messages = request
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == crate::llm::types::LlmRole::User
+                && message_text(message).contains("=== TURN EVENTS ===")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(turn_event_user_messages.len(), 1);
+    let turn_event_text = message_text(turn_event_user_messages[0]);
+    assert!(turn_event_text.contains("Background process wake"));
+    assert!(turn_event_text.contains("deploy complete"));
+    assert!(request.messages.iter().all(|message| {
+        message.role != crate::llm::types::LlmRole::System
+            || !message_text(message).contains("deploy complete")
+    }));
+    assert!(request.messages.iter().all(|message| {
+        message.role != crate::llm::types::LlmRole::User || !message.is_blank()
+    }));
+    assert!(
+        active_conversation_messages(&runtime.state)
+            .iter()
+            .all(|message| {
+                !(message.role == crate::MessageRole::User
+                    && message
+                        .parts
+                        .iter()
+                        .all(|part| part.content.trim().is_empty()))
+            }),
+        "empty wake turns must not synthesize blank user history"
+    );
+    assert!(
+        registry
+            .drain_wake_inputs(&target_scope.id(), 10)
+            .await
+            .expect("wakes after ack")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges() {
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "first answer".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "first answer".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "acknowledged".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "acknowledged".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let mut runtime = standard_runtime_with_transport(transport).await;
+    let registry = runtime
+        .host
+        .process_registry
+        .as_ref()
+        .expect("process registry")
+        .clone();
+    let target_scope = crate::ProcessScope::new("root");
+    registry
+        .register_process(
+            crate::ProcessRegistration::new(
+                "wake-proc",
+                crate::ProcessInput::External {
+                    metadata: serde_json::Value::Null,
+                },
+            )
+            .with_extra_event_types(crate::lashlang_process_event_types()),
+        )
+        .await
+        .expect("register wake process");
+    registry
+        .append_event(
+            "wake-proc",
+            crate::ProcessEventAppendRequest::new(
+                "process.wake",
+                json!({
+                    "text": "deploy complete",
+                    "value": {
+                        "status": "deploy complete"
+                    }
+                }),
+            )
+            .with_wake_target_scope(target_scope.clone()),
+        )
+        .await
+        .expect("append wake");
+    let pending_wakes = registry
+        .drain_wake_inputs(&target_scope.id(), 10)
+        .await
+        .expect("pending wakes");
+    assert_eq!(pending_wakes.len(), 1);
+    let expected_wake_id = pending_wakes[0].wake_id.clone();
+    let expected_text = "Background process wake\nProcess: wake-proc\nEvent: process.wake #1\nWake input:\ndeploy complete";
+
+    let sink = RecordingSink::default();
+    runtime
+        .stream_turn(
+            TurnInput::text("hello"),
+            TurnOptions::new(CancellationToken::new()).with_events(&sink),
+        )
+        .await
+        .expect("turn");
+
+    assert!(
+        sink.snapshot().into_iter().all(|event| {
+            !matches!(
+                event,
+                crate::SessionEvent::InjectedMessagesCommitted { messages, .. }
+                    if messages.iter().any(|message| message.content == expected_text)
+            )
+        }),
+        "durable wake events must not be bridged as injected plugin messages"
+    );
+    assert!(
+        registry
+            .drain_wake_inputs(&target_scope.id(), 10)
+            .await
+            .expect("wakes after ack")
+            .is_empty()
+    );
+    let wake_history = active_conversation_messages(&runtime.state)
+        .into_iter()
+        .find(|message| {
+            message.role == crate::MessageRole::Event
+                && message
+                    .parts
+                    .iter()
+                    .any(|part| part.content == expected_text)
+        })
+        .expect("wake history message");
+    assert!(matches!(
+        wake_history.origin,
+        Some(crate::MessageOrigin::Process {
+            process_id,
+            event_type,
+            sequence,
+            wake_id,
+        }) if process_id == "wake-proc"
+            && event_type == "process.wake"
+            && sequence == 1
+            && wake_id.as_deref() == Some(expected_wake_id.as_str())
+    ));
+    assert!(
+        active_conversation_messages(&runtime.state)
+            .iter()
+            .all(|message| {
+                !((message.role == crate::MessageRole::System
+                    || message.role == crate::MessageRole::User)
+                    && message
+                        .parts
+                        .iter()
+                        .any(|part| part.content == expected_text))
+            }),
+        "durable wake must not enter history as provider system text"
+    );
 }
 
 #[tokio::test]

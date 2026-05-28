@@ -42,13 +42,22 @@ impl SessionTriggerRegistry {
                 lashlang::format_parse_diagnostic(source, &err)
             ))
         })?;
-        validate_trigger_module_shape(source, &program)?;
+        validate_trigger_module_shape(&program)?;
         let linked = lashlang::LinkedModule::link(program, surface).map_err(|err| {
             PluginError::Registration(format!(
                 "link trigger lashlang module: {}",
                 lashlang::format_link_diagnostic(source, &err)
             ))
         })?;
+        self.install_linked_lashlang_source(source, &linked)
+    }
+
+    pub(crate) fn install_linked_lashlang_source(
+        &self,
+        source: &str,
+        linked: &lashlang::LinkedModule,
+    ) -> Result<SessionTriggerInstallReport, PluginError> {
+        validate_trigger_module_shape(&linked.artifact.canonical_ir)?;
         let trigger_names = linked
             .artifact
             .canonical_ir
@@ -193,10 +202,7 @@ impl SessionPlugin for SessionTriggerPlugin {
     }
 }
 
-fn validate_trigger_module_shape(
-    source: &str,
-    program: &lashlang::Program,
-) -> Result<(), PluginError> {
+fn validate_trigger_module_shape(program: &lashlang::Program) -> Result<(), PluginError> {
     let mut trigger_count = 0usize;
     for declaration in &program.declarations {
         match declaration {
@@ -214,17 +220,5 @@ fn validate_trigger_module_shape(
             "trigger module must declare at least one trigger".to_string(),
         ));
     }
-    if has_foreground_expressions(program) {
-        return Err(PluginError::Registration(format!(
-            "trigger module must be declaration-only; remove foreground expressions from:\n{source}"
-        )));
-    }
     Ok(())
-}
-
-fn has_foreground_expressions(program: &lashlang::Program) -> bool {
-    match &program.main {
-        lashlang::Expr::Block(expressions) => !expressions.is_empty(),
-        _ => true,
-    }
 }

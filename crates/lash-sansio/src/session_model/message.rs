@@ -37,6 +37,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    Event,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -46,6 +47,13 @@ pub enum MessageOrigin {
         plugin_id: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         transient: bool,
+    },
+    Process {
+        process_id: String,
+        event_type: String,
+        sequence: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wake_id: Option<String>,
     },
 }
 
@@ -200,7 +208,7 @@ fn render_part_for_chat(role: MessageRole, part: &Part) -> String {
             PartKind::Reasoning => rendered,
             _ => rendered,
         },
-        MessageRole::User => rendered,
+        MessageRole::User | MessageRole::Event => rendered,
     }
 }
 
@@ -567,13 +575,19 @@ pub fn render_transcript_prompt(msgs: &[Message]) -> RenderedPrompt {
         let text = render_message_for_transcript(msg, &mut attachments);
         let has_text = !text.trim().is_empty();
         match msg.role {
-            MessageRole::User => {
+            MessageRole::User | MessageRole::Event => {
                 if has_current && (!current.user.is_empty() || !current.assistant.is_empty()) {
                     turns.push(current);
                     current = TranscriptTurn::default();
                 }
                 if has_text {
-                    current.user.push(text);
+                    current
+                        .user
+                        .push(if matches!(msg.role, MessageRole::Event) {
+                            format!("Event:\n{text}")
+                        } else {
+                            text
+                        });
                 }
                 has_current = true;
             }
@@ -688,8 +702,12 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
                         continue;
                     }
 
-                    if matches!(msg.role, MessageRole::System) {
-                        text = format!("Runtime note:\n{text}");
+                    if matches!(msg.role, MessageRole::System | MessageRole::Event) {
+                        text = if matches!(msg.role, MessageRole::Event) {
+                            format!("Runtime event:\n{text}")
+                        } else {
+                            format!("Runtime note:\n{text}")
+                        };
                     }
 
                     blocks.push(LlmContentBlock::Text {
@@ -718,6 +736,7 @@ fn llm_role_for_message(role: MessageRole) -> LlmRole {
         MessageRole::User => LlmRole::User,
         MessageRole::Assistant => LlmRole::Assistant,
         MessageRole::System => LlmRole::System,
+        MessageRole::Event => LlmRole::User,
     }
 }
 

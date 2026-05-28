@@ -24,6 +24,5 @@ The browser UI has three work areas: the left rail contains red and blue host
 event buttons plus per-turn model controls, the center pane is a chat/event
 stream, and the right rail polls the process registry for visible background
 work. The two buttons emit the declared host event `TRIGGER.button.pressed`.
-The agent installs behavior by writing a declaration-only Lashlang module with
-a `trigger` on that event; started Lashlang background processes appear in the
-right rail.
+The agent installs behavior by declaring a Lashlang `trigger` on that event;
+started Lashlang background processes appear in the right rail.

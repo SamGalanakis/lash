@@ -179,10 +179,7 @@ mod tests {
     }
 
     fn worker_registration(registration: crate::ProcessRegistration) -> crate::ProcessRegistration {
-        registration.with_provenance(
-            crate::ProcessScope::new("worker-runtime", "root"),
-            "worker-profile",
-        )
+        registration.with_provenance(crate::ProcessScope::new("root"), "worker-profile")
     }
 
     fn process_worker(

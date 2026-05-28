@@ -30,6 +30,8 @@ pub(super) struct RuntimeTurnDriver<'a> {
     pub(super) protocol_turn_options: crate::ProtocolTurnOptions,
     pub(super) protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
     pub(super) turn_context: crate::TurnContext,
+    pub(super) turn_causes: Vec<crate::TurnCause>,
+    pub(super) pending_process_wake_acks: Vec<String>,
     pub(super) turn_lease: Option<crate::RuntimeTurnLease>,
     pub(super) machine_config_snapshot: Option<crate::RuntimeTurnMachineConfigSnapshot>,
     pub(super) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,

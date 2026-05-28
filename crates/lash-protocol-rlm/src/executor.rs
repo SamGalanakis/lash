@@ -98,35 +98,26 @@ async fn execute_code_inner(
             };
         }
     };
-    if declares_triggers(&linked.artifact.canonical_ir) {
-        return match ctx.install_lashlang_trigger_source(code) {
-            Ok(report) => ExecResponse {
-                output: String::new(),
-                observations: vec![format!(
-                    "installed trigger declarations: {}",
-                    report.trigger_names().join(", ")
-                )],
-                observation_truncation: Vec::new(),
-                tool_calls: Vec::new(),
-                images: Vec::new(),
-                printed_images: Vec::new(),
-                error: None,
-                duration_ms: start.elapsed().as_millis() as u64,
-                terminal_finish: None,
-            },
-            Err(err) => ExecResponse {
-                output: String::new(),
-                observations: Vec::new(),
-                observation_truncation: Vec::new(),
-                tool_calls: Vec::new(),
-                images: Vec::new(),
-                printed_images: Vec::new(),
-                error: Some(err),
-                duration_ms: start.elapsed().as_millis() as u64,
-                terminal_finish: None,
-            },
-        };
-    }
+    let trigger_observation = if declares_triggers(&linked.artifact.canonical_ir) {
+        match ctx.install_linked_lashlang_trigger_source(code, &linked) {
+            Ok(report) => Some(format_trigger_install_observation(&report)),
+            Err(err) => {
+                return ExecResponse {
+                    output: String::new(),
+                    observations: Vec::new(),
+                    observation_truncation: Vec::new(),
+                    tool_calls: Vec::new(),
+                    images: Vec::new(),
+                    printed_images: Vec::new(),
+                    error: Some(err),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    terminal_finish: None,
+                };
+            }
+        }
+    } else {
+        None
+    };
     if let Err(err) = ctx.put_lashlang_module_artifact(&linked.artifact) {
         return ExecResponse {
             output: String::new(),
@@ -140,6 +131,21 @@ async fn execute_code_inner(
             terminal_finish: None,
         };
     }
+    if !has_foreground_expressions(&linked.artifact.canonical_ir)
+        && let Some(observation) = trigger_observation.clone()
+    {
+        return ExecResponse {
+            output: String::new(),
+            observations: vec![observation],
+            observation_truncation: Vec::new(),
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            printed_images: Vec::new(),
+            error: None,
+            duration_ms: start.elapsed().as_millis() as u64,
+            terminal_finish: None,
+        };
+    }
     let compiled = Arc::new(lashlang::compile_linked(&linked));
 
     if let Err(err) =
@@ -147,7 +153,7 @@ async fn execute_code_inner(
     {
         return ExecResponse {
             output: String::new(),
-            observations: Vec::new(),
+            observations: trigger_observation.into_iter().collect(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
@@ -164,7 +170,7 @@ async fn execute_code_inner(
             Err(err) => {
                 return ExecResponse {
                     output: String::new(),
-                    observations: Vec::new(),
+                    observations: trigger_observation.into_iter().collect(),
                     observation_truncation: Vec::new(),
                     tool_calls: Vec::new(),
                     images: Vec::new(),
@@ -195,7 +201,10 @@ async fn execute_code_inner(
         Ok(ExecutionOutcome::Finished(value)) => Some(flow_to_json_value(&value).await),
         Ok(ExecutionOutcome::Continued) => None,
         Ok(ExecutionOutcome::Failed(value)) => {
-            let collected = host.into_collected();
+            let mut collected = host.into_collected();
+            if let Some(observation) = trigger_observation {
+                collected.observations.insert(0, observation);
+            }
             return ExecResponse {
                 output: String::new(),
                 observations: collected.observations,
@@ -210,7 +219,10 @@ async fn execute_code_inner(
         }
         Err(error) => {
             let failure = runtime_failure.unwrap_or(lashlang::RuntimeFailure { error, span: None });
-            let collected = host.into_collected();
+            let mut collected = host.into_collected();
+            if let Some(observation) = trigger_observation {
+                collected.observations.insert(0, observation);
+            }
             return ExecResponse {
                 output: String::new(),
                 observations: collected.observations,
@@ -228,7 +240,10 @@ async fn execute_code_inner(
             };
         }
     };
-    let collected = host.into_collected();
+    let mut collected = host.into_collected();
+    if let Some(observation) = trigger_observation {
+        collected.observations.insert(0, observation);
+    }
     ExecResponse {
         output: String::new(),
         observations: collected.observations,
@@ -247,6 +262,20 @@ fn declares_triggers(program: &lashlang::Program) -> bool {
         .declarations
         .iter()
         .any(|declaration| matches!(declaration, lashlang::Declaration::Trigger(_)))
+}
+
+fn has_foreground_expressions(program: &lashlang::Program) -> bool {
+    match &program.main {
+        lashlang::Expr::Block(expressions) => !expressions.is_empty(),
+        _ => true,
+    }
+}
+
+fn format_trigger_install_observation(report: &lash_core::SessionTriggerInstallReport) -> String {
+    format!(
+        "installed trigger declarations: {}",
+        report.trigger_names().join(", ")
+    )
 }
 
 fn tool_result_projectors(ctx: &RuntimeExecutionContext<'_>) -> Vec<crate::RlmToolResultProjector> {
@@ -431,6 +460,145 @@ mod tests {
         .await
         .expect("execute code");
         response
+    }
+
+    fn trigger_resources() -> lashlang::ResourceCatalog {
+        let mut resources = lashlang::ResourceCatalog::new();
+        resources.add_alias("TRIGGER", "button");
+        resources.add_trigger_event("TRIGGER", "pressed", lashlang::TypeExpr::Any);
+        resources
+    }
+
+    async fn execute_with_trigger_surface(code: &str) -> ExecResponse {
+        let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+        let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
+            lashlang::LashlangAbilities::default()
+                .with_processes()
+                .with_triggers(),
+            trigger_resources(),
+        );
+        let (_, response) = execute_code(
+            state,
+            ctx,
+            ExecRequest {
+                code: code.to_string(),
+                accept_finish: true,
+            },
+            RlmProjectedBindings::default(),
+            Arc::new(ProjectionRegistry::new()),
+        )
+        .await
+        .expect("execute code");
+        response
+    }
+
+    #[test]
+    fn mixed_trigger_declarations_execute_foreground_code() {
+        block_on(async {
+            let response = execute_with_trigger_surface(
+                r#"
+                process remember(event: any) {
+                  finish event
+                }
+
+                trigger remembered on TRIGGER.button.pressed as event
+                  -> remember(event: event)
+
+                submit { answer: "foreground ran" }
+                "#,
+            )
+            .await;
+
+            assert!(response.error.is_none(), "{:?}", response.error);
+            assert_eq!(
+                response.observations,
+                vec!["installed trigger declarations: remembered"]
+            );
+            assert_eq!(
+                response.terminal_finish,
+                Some(serde_json::json!({ "answer": "foreground ran" }))
+            );
+        });
+    }
+
+    #[test]
+    fn declaration_only_trigger_modules_still_report_installation() {
+        block_on(async {
+            let response = execute_with_trigger_surface(
+                r#"
+                process remember(event: any) {
+                  finish event
+                }
+
+                trigger remembered on TRIGGER.button.pressed as event
+                  -> remember(event: event)
+                "#,
+            )
+            .await;
+
+            assert!(response.error.is_none(), "{:?}", response.error);
+            assert_eq!(
+                response.observations,
+                vec!["installed trigger declarations: remembered"]
+            );
+            assert!(response.terminal_finish.is_none());
+        });
+    }
+
+    #[test]
+    fn direct_trigger_install_accepts_mixed_module_without_running_foreground() {
+        let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
+            lashlang::LashlangAbilities::default()
+                .with_processes()
+                .with_triggers(),
+            trigger_resources(),
+        );
+        let report = ctx
+            .install_lashlang_trigger_source(
+                r#"
+                process remember(event: any) {
+                  finish event
+                }
+
+                trigger remembered on TRIGGER.button.pressed as event
+                  -> remember(event: event)
+
+                submit len(1)
+                "#,
+            )
+            .expect("mixed trigger source should install without executing foreground");
+
+        assert_eq!(report.installed, vec!["remembered"]);
+    }
+
+    #[test]
+    fn trigger_install_failure_prevents_foreground_execution() {
+        block_on(async {
+            let response = execute_with_trigger_surface(
+                r#"
+                process remember(event: any) {
+                  finish event
+                }
+
+                trigger remembered on TRIGGER.button.missing as event
+                  -> remember(event: event)
+
+                submit "should not run"
+                "#,
+            )
+            .await;
+
+            let error = response
+                .error
+                .as_deref()
+                .expect("unknown host event should fail");
+            assert!(
+                error.contains("does not declare trigger event `missing`"),
+                "{error}"
+            );
+            assert!(response.observations.is_empty());
+            assert!(response.terminal_finish.is_none());
+        });
     }
 
     #[test]

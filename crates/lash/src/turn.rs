@@ -777,5 +777,6 @@ pub fn message_role(message: &Message) -> &'static str {
         MessageRole::User => "user",
         MessageRole::Assistant => "assistant",
         MessageRole::System => "system",
+        MessageRole::Event => "event",
     }
 }

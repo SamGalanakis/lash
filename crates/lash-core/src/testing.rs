@@ -293,9 +293,20 @@ impl crate::ToolProvider for EmptyCodeExecutionTools {
 pub fn code_execution_context_with_lashlang_abilities(
     abilities: lashlang::LashlangAbilities,
 ) -> crate::RuntimeExecutionContext<'static> {
+    code_execution_context_with_lashlang_abilities_and_resources(
+        abilities,
+        lashlang::ResourceCatalog::new(),
+    )
+}
+
+pub fn code_execution_context_with_lashlang_abilities_and_resources(
+    abilities: lashlang::LashlangAbilities,
+    resources: lashlang::ResourceCatalog,
+) -> crate::RuntimeExecutionContext<'static> {
     let session_id = "test-session".to_string();
     let plugins = crate::PluginHost::new(test_rlm_protocol_factories())
         .with_lashlang_abilities(abilities)
+        .with_lashlang_resources(resources)
         .build_session(session_id.clone(), None)
         .expect("test plugin session");
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
@@ -501,7 +512,7 @@ impl crate::ProcessService for MockSessionManager {
         let id = registration.id.clone();
         self.process_registry.register_process(registration).await?;
         if let Some(descriptor) = options.descriptor {
-            let owner_scope = crate::ProcessScope::new("mock-runtime", session_id);
+            let owner_scope = crate::ProcessScope::new(session_id);
             self.process_registry
                 .grant_handle(&owner_scope, &id, descriptor)
                 .await?;
@@ -531,7 +542,7 @@ impl crate::ProcessService for MockSessionManager {
         session_id: &str,
         _scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
-        let owner_scope = crate::ProcessScope::new("mock-runtime", session_id);
+        let owner_scope = crate::ProcessScope::new(session_id);
         self.process_registry.list_handle_grants(&owner_scope).await
     }
 
@@ -540,7 +551,7 @@ impl crate::ProcessService for MockSessionManager {
         session_id: &str,
         handle_ids: &[String],
     ) -> Result<(), PluginError> {
-        let owner_scope = crate::ProcessScope::new("mock-runtime", session_id);
+        let owner_scope = crate::ProcessScope::new(session_id);
         let visible = self
             .process_registry
             .list_handle_grants(&owner_scope)
@@ -597,8 +608,8 @@ impl crate::ProcessService for MockSessionManager {
         process_ids: Vec<String>,
         _scope: crate::ProcessOpScope<'_>,
     ) -> Result<(), PluginError> {
-        let from_scope = crate::ProcessScope::new("mock-runtime", from_session_id);
-        let to_scope = crate::ProcessScope::new("mock-runtime", to_session_id);
+        let from_scope = crate::ProcessScope::new(from_session_id);
+        let to_scope = crate::ProcessScope::new(to_session_id);
         self.process_registry
             .transfer_handle_grants(&from_scope, &to_scope, &process_ids)
             .await
@@ -614,7 +625,7 @@ impl crate::ProcessService for MockSessionManager {
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
-        let owner_scope = crate::ProcessScope::new("mock-runtime", session_id);
+        let owner_scope = crate::ProcessScope::new(session_id);
         let grants = self
             .process_registry
             .list_handle_grants(&owner_scope)

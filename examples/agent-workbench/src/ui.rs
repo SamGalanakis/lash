@@ -128,7 +128,6 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     }
 
     .host-trigger {
-      --p: 0;
       --trigger-color: var(--error);
       --trigger-line: var(--line-danger);
       position: relative;
@@ -141,7 +140,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       cursor: pointer;
       display: grid;
       place-items: center;
-      touch-action: none;
+      touch-action: manipulation;
       -webkit-user-select: none;
       user-select: none;
     }
@@ -149,16 +148,6 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     .host-trigger[data-button="Blue"] {
       --trigger-color: var(--info);
       --trigger-line: oklch(0.68 0.040 245 / 0.58);
-    }
-
-    .host-trigger::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      border-radius: 50%;
-      background: conic-gradient(from -90deg, var(--trigger-color) calc(var(--p) * 3.6deg), var(--ash) 0);
-      -webkit-mask: radial-gradient(transparent 60%, black 61%);
-      mask: radial-gradient(transparent 60%, black 61%);
     }
 
     .trigger-face {
@@ -188,10 +177,8 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       color: var(--ash-text);
     }
 
-    .host-trigger:active .trigger-face,
-    .host-trigger.arming .trigger-face { transform: scale(0.97); border-color: var(--sodium); }
-    .host-trigger.armed .trigger-face { border-color: var(--trigger-color); animation: pulse 0.6s ease-in-out infinite; }
-    .host-trigger.armed strong { color: var(--trigger-color); }
+    .host-trigger:active .trigger-face { transform: scale(0.97); border-color: var(--sodium); }
+    .host-trigger:focus-visible .trigger-face { border-color: var(--sodium); }
     .host-trigger[aria-disabled="true"] { cursor: not-allowed; filter: saturate(0.4) brightness(0.7); }
 
     .trigger-caption {
@@ -385,8 +372,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
     @media (prefers-reduced-motion: reduce) {
       .pill.run .dot,
-      .work-card.running .work-dot,
-      .host-trigger.armed .trigger-face { animation: none; }
+      .work-card.running .work-dot { animation: none; }
     }
 
     .stop {
@@ -450,6 +436,20 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     .message.trigger .msg-role,
     .message.error .msg-role { color: var(--error); }
 
+    .message.event {
+      display: block;
+      padding: var(--space-xs) 0;
+    }
+    .message.event .msg-role { display: none; }
+    .message.event .msg-body {
+      max-width: none;
+      text-align: center;
+      font-family: var(--font-ui);
+      font-size: 0.75rem;
+      letter-spacing: 0.04em;
+      color: var(--ash-text);
+    }
+
     .msg-body {
       max-width: 68ch;
       white-space: pre-wrap;
@@ -481,15 +481,6 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       color: var(--ash-text);
       text-align: center;
     }
-
-    .arm-note {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: var(--space-sm);
-      color: var(--error);
-    }
-    .arm-note .retry { margin-top: 0; }
 
     /* machine-activity panels — restrained, mono, collapsible */
 
@@ -638,7 +629,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       border-bottom: 1px solid var(--line);
     }
 
-    .work-top { display: flex; align-items: center; gap: var(--space-xs); }
+    .work-top { display: flex; align-items: center; gap: var(--space-xs); min-width: 0; }
 
     .work-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ash-mid); flex: none; }
     .work-card.running .work-dot { background: var(--sodium); animation: pulse 1.6s ease-in-out infinite; }
@@ -717,23 +708,23 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       <div class="trigger-bay">
         <div class="trigger-buttons">
           <button class="host-trigger" type="button" data-trigger-button data-button="Red"
-                  aria-label="Hold to fire the red button event"
-                  title="Press and hold for 0.75s to emit the host-owned button event.">
+                  aria-label="Fire the red button event"
+                  title="Emit the host-owned button event.">
             <span class="trigger-face">
               <strong>RED</strong>
-              <span>hold</span>
+              <span>fire</span>
             </span>
           </button>
           <button class="host-trigger" type="button" data-trigger-button data-button="Blue"
-                  aria-label="Hold to fire the blue button event"
-                  title="Press and hold for 0.75s to emit the host-owned button event.">
+                  aria-label="Fire the blue button event"
+                  title="Emit the host-owned button event.">
             <span class="trigger-face">
               <strong>BLUE</strong>
-              <span>hold</span>
+              <span>fire</span>
             </span>
           </button>
         </div>
-        <p class="trigger-caption">hold a dial to emit its button event</p>
+        <p class="trigger-caption">click a dial to emit its button event</p>
       </div>
 
       <form class="model-config" id="modelConfig">
@@ -776,9 +767,9 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
             <dl>
               <dt>enter</dt><dd>send the turn</dd>
               <dt>shift + enter</dt><dd>insert a newline</dd>
-              <dt>esc</dt><dd>stop the running turn (or cancel the armed trigger)</dd>
+              <dt>esc</dt><dd>stop the running turn</dd>
               <dt>↑ (empty composer)</dt><dd>recall your last prompt</dd>
-              <dt>hold the dial · space/enter</dt><dd>emit the host event</dd>
+              <dt>click a dial</dt><dd>emit the host event</dd>
             </dl>
             <h2>what's what</h2>
             <dl>
@@ -792,7 +783,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
       <section id="timeline" class="timeline" aria-busy="false">
         <div id="timelineEmpty" class="empty">
-          no turns yet. ask the agent something below, or hold the trigger to fire the host event.
+          no turns yet. ask the agent something below, or click a dial to fire the host event.
         </div>
       </section>
 
@@ -879,6 +870,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       if (role === "user") return "you";
       if (role === "assistant") return "agent";
       if (role === "trigger") return "trigger";
+      if (role === "event") return "event";
       return role;
     }
 
@@ -1257,7 +1249,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       const empty = document.createElement("div");
       empty.id = "timelineEmpty";
       empty.className = "empty";
-      empty.textContent = "no turns yet. ask the agent something below, or hold a dial to fire the host event.";
+      empty.textContent = "no turns yet. ask the agent something below, or click a dial to fire the host event.";
       timeline.appendChild(empty);
     }
 
@@ -1307,7 +1299,6 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     window.addEventListener("keydown", event => {
       if (event.key !== "Escape") return;
       if (!helpPanel.hidden) { setHelp(false); helpBtn.focus(); return; }
-      if (armTimer) { event.preventDefault(); cancelArm(); return; }
       if (busy) { event.preventDefault(); stopTurn(); }
     });
 
@@ -1335,123 +1326,14 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       }
     });
 
-    /* hold-to-fire — guards the irreversible host event without a modal */
-    const HOLD_MS = 750;
-    let holdStart = 0;
-    let holdRaf = 0;
-    let holdButton = null;
-
-    const ARM_MS = 2000;
-    let armTimer = 0;
-    let armNote = null;
-    let armedButton = null;
-
-    function triggerStrong(button) {
-      return button?.querySelector("strong");
-    }
-
-    function holdTick(now) {
-      if (!holdButton) return;
-      const progress = Math.min(1, (now - holdStart) / HOLD_MS);
-      holdButton.style.setProperty("--p", (progress * 100).toFixed(1));
-      if (progress >= 1) { armTrigger(); return; }
-      holdRaf = requestAnimationFrame(holdTick);
-    }
-
-    function startHold(event) {
+    function fireTrigger(event) {
       const button = event.currentTarget;
-      if (busy || armTimer || button.getAttribute("aria-disabled") === "true") return;
-      event.preventDefault();
-      if (event.pointerId !== undefined && button.setPointerCapture) {
-        try { button.setPointerCapture(event.pointerId); } catch (_) {}
-      }
-      holdStart = performance.now();
-      holdButton = button;
-      button.classList.add("arming");
-      triggerStrong(button).textContent = "HOLD";
-      holdRaf = requestAnimationFrame(holdTick);
-    }
-
-    function cancelHold() {
-      if (!holdRaf) return;
-      cancelAnimationFrame(holdRaf);
-      holdRaf = 0;
-      if (holdButton) {
-        holdButton.classList.remove("arming");
-        holdButton.style.setProperty("--p", "0");
-        triggerStrong(holdButton).textContent = holdButton.dataset.button.toUpperCase();
-      }
-      holdButton = null;
-    }
-
-    /* armed → fires after a short cancelable window, so a completed hold is still reversible */
-    function armTrigger() {
-      const button = holdButton;
-      cancelHold();
-      if (!button || busy || armTimer) return;
-      armedButton = button;
-      button.classList.add("armed");
-      triggerStrong(button).textContent = "FIRE";
-      armNote = renderArmNote(button.dataset.button);
-      armTimer = setTimeout(() => {
-        armTimer = 0;
-        armNote = null;
-        const firedButton = armedButton?.dataset.button;
-        disarm();
-        stream("/api/button-trigger", { button: firedButton });
-      }, ARM_MS);
-    }
-
-    function disarm() {
-      if (!armedButton) return;
-      armedButton.classList.remove("armed");
-      triggerStrong(armedButton).textContent = armedButton.dataset.button.toUpperCase();
-      armedButton = null;
-    }
-
-    function cancelArm() {
-      if (!armTimer) return;
-      clearTimeout(armTimer);
-      armTimer = 0;
-      if (armNote) { armNote.remove(); armNote = null; }
-      disarm();
-      renderNote("trigger cancelled");
-    }
-
-    function renderArmNote(button) {
-      clearEmpty();
-      const node = document.createElement("div");
-      node.className = "note arm-note";
-      const text = document.createElement("span");
-      text.textContent = `${button.toLowerCase()} event armed — firing in 2s.`;
-      const cancel = document.createElement("button");
-      cancel.type = "button";
-      cancel.className = "retry";
-      cancel.textContent = "cancel";
-      cancel.addEventListener("click", cancelArm);
-      node.append(text, cancel);
-      timeline.appendChild(node);
-      scrollToEnd();
-      cancel.focus();
-      return node;
+      if (busy || button.getAttribute("aria-disabled") === "true") return;
+      stream("/api/button-trigger", { button: button.dataset.button });
     }
 
     for (const button of triggerButtons) {
-      button.addEventListener("pointerdown", startHold);
-      button.addEventListener("pointerup", cancelHold);
-      button.addEventListener("pointercancel", cancelHold);
-
-      /* keyboard parity — hold Space/Enter to arm, release to cancel */
-      button.addEventListener("keydown", event => {
-        if (event.key !== " " && event.key !== "Enter") return;
-        event.preventDefault();
-        if (event.repeat) return;
-        startHold(event);
-      });
-      button.addEventListener("keyup", event => {
-        if (event.key === " " || event.key === "Enter") cancelHold();
-      });
-      button.addEventListener("blur", cancelHold);
+      button.addEventListener("click", fireTrigger);
     }
 
     const knownModels = new Set();

@@ -12,6 +12,7 @@ pub struct SansIoTurnInput<M: TurnProtocol = UnitTurnProtocol> {
     pub model: String,
     pub messages: MessageSequence,
     pub events: Arc<Vec<crate::SessionEventRecord<M::Event>>>,
+    pub turn_causes: Vec<crate::TurnCause>,
     pub protocol_run_offset: usize,
     pub turn_driver_preamble: Arc<TurnDriverPreamble<M>>,
     pub prepared_prompt: PreparedPrompt,
@@ -29,7 +30,7 @@ pub struct PreparedTurnMachine<M: TurnProtocol = UnitTurnProtocol> {
 }
 
 pub fn build_turn<M: TurnProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMachine<M> {
-    let machine = TurnMachine::new_shared(
+    let machine = TurnMachine::new_shared_with_turn_causes(
         TurnMachineConfig {
             protocol_driver: input.turn_driver_preamble.config.protocol.clone(),
             projector: input.turn_driver_preamble.config.projector.clone(),
@@ -54,6 +55,7 @@ pub fn build_turn<M: TurnProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMac
         input.messages,
         input.events,
         input.protocol_run_offset,
+        input.turn_causes,
     );
 
     PreparedTurnMachine {
@@ -173,6 +175,7 @@ mod tests {
             model: "gpt-5".to_string(),
             messages: crate::MessageSequence::default(),
             events: Arc::new(Vec::new()),
+            turn_causes: Vec::new(),
             protocol_run_offset: 2,
             turn_driver_preamble,
             prepared_prompt,

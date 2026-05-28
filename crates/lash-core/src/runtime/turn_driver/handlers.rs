@@ -76,16 +76,35 @@ impl RuntimeTurnDriver<'_> {
             .invoke_turn_checkpoint_effect(machine, id, checkpoint, event_tx, cancel)
             .await;
         match result {
-            Ok((messages, transient_messages)) => {
-                machine.handle_response(Response::Checkpoint {
-                    id,
-                    messages,
-                    transient_messages,
-                });
+            Ok(delivery) => {
+                self.pending_process_wake_acks
+                    .extend(process_wake_ids_from_turn_causes(&delivery.turn_causes));
+                machine.handle_response(Response::Checkpoint { id, delivery });
             }
             Err(err) => {
                 self.fail_or_abort_runtime_effect_controller(machine, err.into())?;
             }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn ack_committed_process_wakes(
+        &self,
+        wake_ids: Vec<String>,
+    ) -> Result<(), RuntimeError> {
+        if wake_ids.is_empty() {
+            return Ok(());
+        }
+        let Some(registry) = self.session_manager.process_registry() else {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::TurnInputInjectionBridge,
+                "committed process wake message without process registry".to_string(),
+            ));
+        };
+        for wake_id in wake_ids {
+            registry.ack_wake_input(&wake_id).await.map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err.to_string())
+            })?;
         }
         Ok(())
     }
@@ -310,4 +329,18 @@ impl RuntimeTurnDriver<'_> {
         });
         Ok(())
     }
+}
+
+pub(super) fn process_wake_ids_from_turn_causes(causes: &[crate::TurnCause]) -> Vec<String> {
+    causes
+        .iter()
+        .filter_map(|cause| match &cause.origin {
+            crate::MessageOrigin::Process {
+                event_type,
+                wake_id: Some(wake_id),
+                ..
+            } if event_type == "process.wake" => Some(wake_id.clone()),
+            _ => None,
+        })
+        .collect()
 }

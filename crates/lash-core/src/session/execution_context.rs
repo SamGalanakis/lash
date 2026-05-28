@@ -244,6 +244,17 @@ impl<'run> RuntimeExecutionContext<'run> {
             .map_err(|err| err.to_string())
     }
 
+    pub fn install_linked_lashlang_trigger_source(
+        &self,
+        source: &str,
+        linked: &lashlang::LinkedModule,
+    ) -> Result<crate::SessionTriggerInstallReport, String> {
+        self.dispatch
+            .plugins
+            .install_linked_lashlang_trigger_source(source, linked)
+            .map_err(|err| err.to_string())
+    }
+
     pub fn tool_argument_projection_policy(
         &self,
         name: &str,

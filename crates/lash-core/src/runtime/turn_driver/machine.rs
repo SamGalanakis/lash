@@ -65,7 +65,7 @@ impl RuntimeTurnDriver<'_> {
                     protocol_iteration,
                 } => {
                     self.persist_progress_boundary(messages, event_delta, protocol_iteration)
-                        .await
+                        .await?
                 }
                 Effect::Done {
                     messages,
@@ -117,10 +117,11 @@ impl RuntimeTurnDriver<'_> {
         messages: crate::MessageSequence,
         event_delta: Vec<crate::SessionEventRecord>,
         protocol_iteration: usize,
-    ) {
+    ) -> Result<(), RuntimeError> {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
-            return;
+            return Ok(());
         }
+        let has_store = self.session.history_store().is_some();
         let boundary = self
             .turn_pipeline
             .progress_boundary(
@@ -136,5 +137,10 @@ impl RuntimeTurnDriver<'_> {
                 self.emit_trace(protocol_iteration, protocol_step_trace_event(event));
             }
         }
+        if !has_store || boundary.persisted {
+            let wake_ids = std::mem::take(&mut self.pending_process_wake_acks);
+            self.ack_committed_process_wakes(wake_ids).await?;
+        }
+        Ok(())
     }
 }

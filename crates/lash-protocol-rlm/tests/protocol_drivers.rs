@@ -240,8 +240,7 @@ fn standard_prose_only_response_emits_done() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -316,8 +315,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -501,8 +499,7 @@ fn standard_empty_final_after_tool_result_finishes_without_error() {
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -524,8 +521,7 @@ fn standard_empty_final_after_tool_result_finishes_without_error() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -618,8 +614,7 @@ fn rlm_prose_only_response_requests_submit_by_default() {
     }));
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -659,8 +654,7 @@ fn typed_rlm_prose_only_response_requests_submit() {
     }));
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -812,8 +806,7 @@ fn prose_or_submit_response_finishes_with_assistant_message() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -893,8 +886,7 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -953,8 +945,7 @@ fn rlm_empty_turn_options_use_submit_required_default() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -1349,8 +1340,7 @@ fn rlm_exec_any_tool_control_handoff_is_terminal() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -1430,8 +1420,7 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -1506,8 +1495,7 @@ fn typed_rlm_finish_emits_turn_outcome_and_done() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -1571,8 +1559,7 @@ fn prose_or_submit_allows_submit_value() {
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);
@@ -1729,8 +1716,7 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
     }));
     machine.handle_response(Response::Checkpoint {
         id: checkpoint_id,
-        messages: Vec::new(),
-        transient_messages: Vec::new(),
+        delivery: sansio::CheckpointDelivery::default(),
     });
 
     let effects = drain_effects(&mut machine);

@@ -37,6 +37,7 @@ pub enum RlmHistoryRole {
     User,
     System,
     Assistant,
+    Event,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

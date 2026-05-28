@@ -201,29 +201,22 @@ impl ProcessStartOptions {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessScope {
-    pub runtime_scope_id: String,
     pub session_id: String,
 }
 
 impl ProcessScope {
-    pub fn new(runtime_scope_id: impl Into<String>, session_id: impl Into<String>) -> Self {
+    pub fn new(session_id: impl Into<String>) -> Self {
         Self {
-            runtime_scope_id: runtime_scope_id.into(),
             session_id: session_id.into(),
         }
     }
 
     pub fn id(&self) -> ProcessScopeId {
-        ProcessScopeId::new(format!(
-            "{}:{}:{}",
-            self.runtime_scope_id.len(),
-            self.runtime_scope_id,
-            self.session_id
-        ))
+        ProcessScopeId::new(format!("session:{}", self.session_id))
     }
 
     pub fn is_empty(&self) -> bool {
-        self.runtime_scope_id.is_empty() || self.session_id.is_empty()
+        self.session_id.is_empty()
     }
 }
 

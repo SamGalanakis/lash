@@ -274,7 +274,7 @@ async fn rlm_mode_config_lashlang_abilities_drive_prompt_surface() -> Result<()>
         .await?;
 
     let prompts = seen.lock().expect("seen prompts");
-    assert!(prompts[0].contains("Triggers: declaration-only resource-event activation"));
+    assert!(prompts[0].contains("Triggers: resource-event declarations"));
     assert!(!prompts[0].contains("TRIGGER.button.pressed"));
     Ok(())
 }

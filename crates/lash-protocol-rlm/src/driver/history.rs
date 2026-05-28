@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::{fmt::Write as _, sync::Arc};
 
 use lash_core::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole};
@@ -13,6 +14,7 @@ use crate::projection::decode_rlm_protocol_event;
 pub(super) struct RlmHistoryRenderInput<'a> {
     pub(super) events: &'a [lash_core::SessionEventRecord],
     pub(super) turn_messages: &'a lash_core::MessageSequence,
+    pub(super) turn_causes: &'a [lash_core::TurnCause],
     pub(super) max_output_chars: usize,
     pub(super) protocol_iteration: usize,
     pub(super) finalization: &'a str,
@@ -26,7 +28,15 @@ pub(super) fn build_rlm_history_messages_from_turn(
 ) -> Vec<LlmMessage> {
     let mut messages = Vec::new();
     let mut saw_history = false;
+    let active_cause_ids = input
+        .turn_causes
+        .iter()
+        .map(|cause| cause.id.as_str())
+        .collect::<HashSet<_>>();
     lash_core::visit_turn_view(input.events, input.turn_messages, &[], |entry| {
+        if borrowed_entry_is_active_cause(entry, &active_cause_ids) {
+            return;
+        }
         saw_history = true;
         let mut blocks = vec![text_block(
             render_borrowed_history_entry(entry, input.max_output_chars),
@@ -42,6 +52,7 @@ pub(super) fn build_rlm_history_messages_from_turn(
         &mut messages,
         saw_history,
         input.protocol_iteration,
+        input.turn_causes,
         input.finalization,
         input.required_output,
         input.budget_suffix,
@@ -75,6 +86,7 @@ pub(super) fn build_rlm_history_messages(
         &mut messages,
         !projection.entries().is_empty(),
         protocol_iteration,
+        &[],
         finalization,
         required_output,
         budget_suffix,
@@ -86,6 +98,7 @@ fn append_current_iteration_message(
     messages: &mut Vec<LlmMessage>,
     saw_history: bool,
     protocol_iteration: usize,
+    turn_causes: &[lash_core::TurnCause],
     finalization: &str,
     required_output: Option<&str>,
     budget_suffix: Option<&str>,
@@ -101,9 +114,13 @@ fn append_current_iteration_message(
     } else {
         mark_last_history_text_cache_breakpoint(messages);
     }
-    let mut current_prompt = format!(
-        "\n\n\n=== CURRENT ITERATION: {protocol_iteration} ===\n\n\n=== FINALIZATION ===\n\n{finalization}",
-    );
+    let mut current_prompt = format!("\n\n\n=== CURRENT ITERATION: {protocol_iteration} ===");
+    if let Some(turn_events) = lash_core::render_turn_causes_prompt(turn_causes) {
+        current_prompt.push_str("\n\n");
+        current_prompt.push_str(&turn_events);
+    }
+    current_prompt.push_str("\n\n\n=== FINALIZATION ===\n\n");
+    current_prompt.push_str(finalization);
     if let Some(block) = required_output {
         current_prompt.push_str("\n\n=== REQUIRED OUTPUT ===\n\n");
         current_prompt.push_str(block);
@@ -116,6 +133,18 @@ fn append_current_iteration_message(
         LlmRole::User,
         vec![text_block(current_prompt, false)],
     ));
+}
+
+fn borrowed_entry_is_active_cause(
+    entry: BorrowedChronologicalEntry<'_>,
+    active_cause_ids: &HashSet<&str>,
+) -> bool {
+    matches!(
+        entry.payload,
+        BorrowedChronologicalPayload::Message(message)
+            if matches!(message.role, lash_core::MessageRole::Event)
+                && active_cause_ids.contains(message.id)
+    )
 }
 
 fn text_block(text: impl Into<Arc<str>>, cache_breakpoint: bool) -> LlmContentBlock {
@@ -133,6 +162,7 @@ fn history_entry_llm_role(entry: &ChronologicalEntry) -> LlmRole {
             lash_core::MessageRole::User => LlmRole::User,
             lash_core::MessageRole::Assistant => LlmRole::Assistant,
             lash_core::MessageRole::System => LlmRole::System,
+            lash_core::MessageRole::Event => LlmRole::User,
         },
         ChronologicalPayload::ToolCall(_) => LlmRole::User,
         ChronologicalPayload::ProtocolEvent(_) => LlmRole::Assistant,
@@ -145,6 +175,7 @@ fn borrowed_history_entry_llm_role(entry: BorrowedChronologicalEntry<'_>) -> Llm
             lash_core::MessageRole::User => LlmRole::User,
             lash_core::MessageRole::Assistant => LlmRole::Assistant,
             lash_core::MessageRole::System => LlmRole::System,
+            lash_core::MessageRole::Event => LlmRole::User,
         },
         BorrowedChronologicalPayload::ToolCall(_) => LlmRole::User,
         BorrowedChronologicalPayload::ProtocolEvent(_) => LlmRole::Assistant,
@@ -577,6 +608,7 @@ fn history_role(role: lash_core::MessageRole) -> RlmHistoryRole {
         lash_core::MessageRole::User => RlmHistoryRole::User,
         lash_core::MessageRole::System => RlmHistoryRole::System,
         lash_core::MessageRole::Assistant => RlmHistoryRole::Assistant,
+        lash_core::MessageRole::Event => RlmHistoryRole::Event,
     }
 }
 
@@ -585,6 +617,7 @@ fn message_role_label(role: &RlmHistoryRole) -> &'static str {
         RlmHistoryRole::User => "User",
         RlmHistoryRole::Assistant => "Assistant",
         RlmHistoryRole::System => "System",
+        RlmHistoryRole::Event => "Event",
     }
 }
 

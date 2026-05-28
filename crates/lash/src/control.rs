@@ -655,6 +655,10 @@ pub struct TriggersControl {
 }
 
 impl TriggersControl {
+    /// Register trigger declarations from a Lashlang module.
+    ///
+    /// Foreground expressions in the module are ignored by this installer; they
+    /// are only executed when the same Lashlang source is run through a turn.
     pub async fn install_lashlang_source(
         &self,
         source: impl AsRef<str>,

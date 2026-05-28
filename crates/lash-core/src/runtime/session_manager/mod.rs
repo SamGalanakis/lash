@@ -95,7 +95,6 @@ pub(in crate::runtime) struct UsageCapability {
 
 #[derive(Clone)]
 struct ProcessCapability {
-    runtime_scope_id: Arc<str>,
     sync_needed: Arc<AtomicBool>,
 }
 
@@ -177,7 +176,6 @@ impl ManagedSessionCapability {
 impl ProcessCapability {
     fn new(runtime: &LashRuntime) -> Self {
         Self {
-            runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
             sync_needed: Arc::clone(&runtime.process_sync_needed),
         }
     }

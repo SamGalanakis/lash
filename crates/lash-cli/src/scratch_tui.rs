@@ -1116,6 +1116,7 @@ fn draw_tree(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
                 lash_core::MessageRole::User => "user",
                 lash_core::MessageRole::Assistant => "assistant",
                 lash_core::MessageRole::System => "system",
+                lash_core::MessageRole::Event => "event",
             };
             let preview = crate::overlay::tree_message_preview(&row.message);
             let active_marker = if row.active { " *" } else { "" };

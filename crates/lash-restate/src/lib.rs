@@ -1225,7 +1225,7 @@ mod tests {
                         command: ProcessCommand::Start {
                             registration,
                             grant: Some(lash_core::ProcessStartGrant {
-                                owner_scope: lash_core::ProcessScope::new("runtime", "session"),
+                                owner_scope: lash_core::ProcessScope::new("session"),
                                 descriptor: lash_core::ProcessHandleDescriptor::new(
                                     Some("tool"),
                                     Some("task"),
@@ -1263,7 +1263,7 @@ mod tests {
                 .map(|external| external.id.as_str()),
             Some("LashProcessWorkflow/task-1")
         );
-        let owner_scope = lash_core::ProcessScope::new("runtime", "session");
+        let owner_scope = lash_core::ProcessScope::new("session");
         assert_eq!(
             registry
                 .list_handle_grants(&owner_scope)
@@ -1341,7 +1341,7 @@ mod tests {
                             grant: None,
                             execution_context: Box::new(
                                 ProcessExecutionContext::default().with_wake_target_scope(
-                                    lash_core::ProcessScope::new("runtime", "session"),
+                                    lash_core::ProcessScope::new("session"),
                                 ),
                             ),
                         },
@@ -1415,8 +1415,8 @@ mod tests {
         let context = Arc::new(RecordingContext::default());
         let host = RestateRuntimeEffectController::new(context.clone());
         let registry = process_registry();
-        let s1 = lash_core::ProcessScope::new("runtime", "s1");
-        let s2 = lash_core::ProcessScope::new("runtime", "s2");
+        let s1 = lash_core::ProcessScope::new("s1");
+        let s2 = lash_core::ProcessScope::new("s2");
         registry
             .register_process(external_registration("task-list"))
             .await
@@ -1593,7 +1593,7 @@ mod tests {
         let host = RestateRuntimeEffectController::new(context.clone());
         let registration = external_registration("task-smoke");
         let execution_context = ProcessExecutionContext::default()
-            .with_wake_target_scope(lash_core::ProcessScope::new("runtime", "wake-smoke"))
+            .with_wake_target_scope(lash_core::ProcessScope::new("wake-smoke"))
             .with_tool_effect_metadata(Some(effect_metadata(
                 RuntimeEffectKind::ToolCall,
                 "tool-smoke",
@@ -1607,7 +1607,7 @@ mod tests {
                         command: ProcessCommand::Start {
                             registration,
                             grant: Some(lash_core::ProcessStartGrant {
-                                owner_scope: lash_core::ProcessScope::new("runtime", "session"),
+                                owner_scope: lash_core::ProcessScope::new("session"),
                                 descriptor: lash_core::ProcessHandleDescriptor::new(
                                     Some("tool"),
                                     Some("task-smoke"),
@@ -1639,7 +1639,7 @@ mod tests {
             Some(&serde_json::json!("invocation-task-smoke"))
         );
 
-        let owner_scope = lash_core::ProcessScope::new("runtime", "session");
+        let owner_scope = lash_core::ProcessScope::new("session");
         let grants = registry
             .list_handle_grants(&owner_scope)
             .await
@@ -1846,7 +1846,7 @@ mod tests {
             .build();
         let context_a = Arc::new(RecordingContext::with_endpoint(endpoint_a));
         let host_a = RestateRuntimeEffectController::new(context_a);
-        let creator_scope = lash_core::ProcessScope::new("recovery-runtime", "root");
+        let creator_scope = lash_core::ProcessScope::new("root");
         let scope_id = creator_scope.id();
         let registration = ProcessRegistration::new(
             "recover-tool",
@@ -2057,7 +2057,7 @@ mod tests {
             .await
             .expect("register workflow process");
         let execution_context = ProcessExecutionContext::default()
-            .with_wake_target_scope(lash_core::ProcessScope::new("runtime", "wake-session"))
+            .with_wake_target_scope(lash_core::ProcessScope::new("wake-session"))
             .with_tool_effect_metadata(Some(effect_metadata(
                 RuntimeEffectKind::ToolCall,
                 "tool-effect",
