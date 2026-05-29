@@ -1,93 +1,11 @@
 use super::create_plan::SessionCreatePlan;
 use super::*;
-use crate::runtime::host::{EmbeddedRuntimeHost, ProcessRuntimeHost};
+use crate::runtime::host::EmbeddedRuntimeHost;
 
 pub(in crate::runtime::session_manager) struct MaterializedSession {
     pub(in crate::runtime::session_manager) runtime: LashRuntime,
     pub(in crate::runtime::session_manager) store_binding:
         Option<Arc<dyn crate::store::RuntimePersistence>>,
-}
-
-enum RuntimeMaterializationBinding {
-    ProcessPersistent {
-        host: ProcessRuntimeHost,
-        services: crate::PersistentRuntimeServices,
-    },
-    ProcessEphemeral {
-        host: ProcessRuntimeHost,
-        services: RuntimeServices,
-    },
-    EmbeddedPersistent {
-        host: EmbeddedRuntimeHost,
-        services: crate::PersistentRuntimeServices,
-    },
-    EmbeddedEphemeral {
-        host: EmbeddedRuntimeHost,
-        services: RuntimeServices,
-    },
-}
-
-impl RuntimeMaterializationBinding {
-    fn resolve(
-        current: &CurrentSessionCapability,
-        plugins: Arc<crate::PluginSession>,
-        store_binding: Option<Arc<dyn crate::store::RuntimePersistence>>,
-    ) -> Self {
-        let embedded = embedded_host(current);
-        match (current.host.process_registry.clone(), store_binding) {
-            (Some(process_registry), Some(store)) => Self::ProcessPersistent {
-                host: ProcessRuntimeHost::new(embedded, process_registry),
-                services: crate::PersistentRuntimeServices::new(plugins, store),
-            },
-            (Some(process_registry), None) => Self::ProcessEphemeral {
-                host: ProcessRuntimeHost::new(embedded, process_registry),
-                services: RuntimeServices::new(plugins),
-            },
-            (None, Some(store)) => Self::EmbeddedPersistent {
-                host: embedded,
-                services: crate::PersistentRuntimeServices::new(plugins, store),
-            },
-            (None, None) => Self::EmbeddedEphemeral {
-                host: embedded,
-                services: RuntimeServices::new(plugins),
-            },
-        }
-    }
-
-    async fn materialize(
-        self,
-        policy: SessionPolicy,
-        initial_runtime_state: SessionSnapshot,
-    ) -> Result<LashRuntime, SessionError> {
-        match self {
-            Self::ProcessPersistent { host, services } => {
-                LashRuntime::from_persistent_background_state(
-                    policy,
-                    host,
-                    services,
-                    initial_runtime_state,
-                )
-                .await
-            }
-            Self::ProcessEphemeral { host, services } => {
-                LashRuntime::from_background_state(policy, host, services, initial_runtime_state)
-                    .await
-            }
-            Self::EmbeddedPersistent { host, services } => {
-                LashRuntime::from_persistent_embedded_state(
-                    policy,
-                    host,
-                    services,
-                    initial_runtime_state,
-                )
-                .await
-            }
-            Self::EmbeddedEphemeral { host, services } => {
-                LashRuntime::from_embedded_state(policy, host, services, initial_runtime_state)
-                    .await
-            }
-        }
-    }
 }
 
 pub(in crate::runtime::session_manager) async fn materialize_session_create_plan(
@@ -96,11 +14,20 @@ pub(in crate::runtime::session_manager) async fn materialize_session_create_plan
 ) -> Result<MaterializedSession, crate::PluginError> {
     let plugins = build_session_plugins(current, plan)?;
     let store_binding = bind_session_store(current, plan).await?;
-    let binding = RuntimeMaterializationBinding::resolve(current, plugins, store_binding.clone());
-    let mut runtime = binding
-        .materialize(plan.policy.clone(), plan.initial_runtime_state.clone())
-        .await
-        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+    // Child-session creation routes through the same assembler as the live open
+    // and worker-rebuild paths. A freshly created session has a single path, so
+    // it materializes under KeepAll (residency trimming is an open-time concern).
+    let mut runtime = LashRuntime::assemble_runtime(
+        plan.policy.clone(),
+        embedded_host(current),
+        plugins,
+        store_binding.clone(),
+        current.host.process_registry.clone(),
+        plan.initial_runtime_state.clone(),
+        crate::Residency::default(),
+    )
+    .await
+    .map_err(|err| crate::PluginError::Session(err.to_string()))?;
 
     configure_protocol_runtime(&mut runtime, &plan.protocol_request)?;
     if let Some(session) = runtime.session.as_mut() {
