@@ -55,10 +55,11 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use lash_core::{
     AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef,
-    DeliveryPolicy, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, MergeKey,
-    PersistedSessionRead, ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest,
-    ProcessEventAppendResult, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
+    DeliveryPolicy, DurabilityTier, GcReport, GraphCommitDelta, HydratedSessionCheckpoint,
+    MergeKey, PROCESS_LEASE_SCHEMA_VERSION, PersistedSessionRead, ProcessAwaitOutput, ProcessEvent,
+    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessLease,
+    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
     QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
     QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
     RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
@@ -264,6 +265,10 @@ impl SqliteSessionStoreFactory {
 }
 
 impl SessionStoreFactory for SqliteSessionStoreFactory {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
     fn create_store(
         &self,
         request: &SessionStoreCreateRequest,

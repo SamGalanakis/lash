@@ -11,7 +11,6 @@ use lash_rlm_types::RlmTermination;
 use serde_json::{Value, json};
 
 use crate::capability::{CapabilityContext, CapabilityRegistry, CapabilityResolution};
-use crate::{SubagentSessionConfigurator, SubagentSpawnContext};
 
 #[cfg(test)]
 pub(crate) fn build_session_policy(
@@ -46,7 +45,6 @@ pub(crate) struct SpawnCreateRequestInput<'a> {
     pub(crate) seed: lash_protocol_rlm::RlmSeed,
     pub(crate) parent_subagent: Option<&'a SubagentSessionContext>,
     pub(crate) caused_by: Option<CausalRef>,
-    pub(crate) configurator: &'a dyn SubagentSessionConfigurator,
 }
 
 pub(crate) async fn build_spawn_create_request(
@@ -62,7 +60,6 @@ pub(crate) async fn build_spawn_create_request(
         seed,
         parent_subagent,
         caused_by,
-        configurator,
     } = input;
     let mut policy = session_spec.resolve_against(&current_snapshot.policy);
     let capability_resolution = resolve_capability_spec(registry, &policy, capability_name)?;
@@ -80,7 +77,7 @@ pub(crate) async fn build_spawn_create_request(
     .map_err(|err| format!("failed to encode rlm plugin options: {err}"))?;
 
     let initial_nodes = lash_protocol_rlm::rlm_seed_initial_nodes(seed);
-    let mut request = SessionCreateRequest::child(
+    let request = SessionCreateRequest::child(
         parent_session_id,
         SessionStartPoint::Empty,
         policy,
@@ -89,16 +86,6 @@ pub(crate) async fn build_spawn_create_request(
     )
     .with_plugin_source(capability_resolution.plugin_source)
     .with_initial_nodes(initial_nodes);
-    let child_policy = request.policy.as_ref().expect("child policy set").clone();
-    configurator.configure(
-        &SubagentSpawnContext {
-            parent_session_id,
-            capability: capability_name,
-            parent_policy: &current_snapshot.policy,
-            child_policy: &child_policy,
-        },
-        &mut request,
-    )?;
     finalize_subagent_create_request(
         request,
         parent_session_id,

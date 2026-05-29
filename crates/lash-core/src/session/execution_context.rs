@@ -292,7 +292,6 @@ impl<'run> RuntimeExecutionContext<'run> {
                 &self.session_id,
                 registration,
                 crate::ProcessStartOptions::new()
-                    .with_wake_session_id(self.session_id.clone())
                     .with_descriptor(crate::ProcessHandleDescriptor::new(Some("lashlang"), label)),
                 self.process_scope(self.parent_invocation.clone()),
             )

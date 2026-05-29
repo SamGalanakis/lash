@@ -4,10 +4,20 @@ impl RuntimeSessionManager {
     pub(in crate::runtime::session_manager::process_runners) async fn run_process_session_turn(
         &self,
         registration: crate::ProcessRegistration,
-        create_request: crate::SessionCreateRequest,
+        mut create_request: crate::SessionCreateRequest,
         turn_input: crate::TurnInput,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
+        // `ProcessInput::SessionTurn` is a durable input: its `create_request` is
+        // serialized into the process registry, and `SessionPolicy` persists only
+        // the provider *id* — the live `ProviderHandle` is dropped on the wire by
+        // design. Re-supply it from this worker/runtime's live provider before the
+        // child session is built, the deployment-level binding that lets a child
+        // session turn (subagent spawn, deferred work, durable recovery) run its
+        // LLM calls. Mirrors `RuntimeSessionState::rebind_provider`: only fill a
+        // child whose recorded provider matches ours (or is unset), never override
+        // a child that explicitly named a different provider.
+        self.resupply_session_turn_provider(&mut create_request);
         let child = match self
             .managed
             .create_session(&self.current, &self.usage, create_request)
@@ -64,6 +74,26 @@ impl RuntimeSessionManager {
                     err.to_string(),
                 )),
             ),
+        }
+    }
+
+    /// Re-bind the live provider handle onto a serialized session-turn
+    /// `create_request` from this runtime's live provider. The wire shape of
+    /// `SessionPolicy` carries only the provider *id*, so a request that round-
+    /// tripped through the process registry arrives with an unconfigured handle;
+    /// install ours when the recorded id agrees (or is unset). A request that
+    /// already names a configured provider is left untouched.
+    fn resupply_session_turn_provider(&self, create_request: &mut crate::SessionCreateRequest) {
+        let Some(policy) = create_request.policy.as_mut() else {
+            return;
+        };
+        if policy.provider.kind() != "unconfigured" {
+            return;
+        }
+        let live = &self.current.policy.provider;
+        let recorded = policy.recorded_provider_id().trim();
+        if recorded.is_empty() || recorded == "unconfigured" || recorded == live.kind() {
+            policy.install_provider(live.clone());
         }
     }
 }

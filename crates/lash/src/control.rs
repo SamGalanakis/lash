@@ -128,9 +128,9 @@ impl SessionControl {
         .await
     }
 
-    async fn set_persisted_state(&self, state: RuntimeSessionState) {
+    async fn set_persisted_state(&self, state: RuntimeSessionState) -> Result<()> {
         self.with_writer(async |runtime: &mut LashRuntime| {
-            runtime.set_persisted_state(state);
+            runtime.set_persisted_state(state).map_err(Into::into)
         })
         .await
     }
@@ -395,6 +395,16 @@ impl SessionControl {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
                 .apply_tool_state(state)
+                .await
+                .map_err(EmbedError::from)
+        })
+        .await
+    }
+
+    async fn restore_tool_state(&self, state: ToolState) -> Result<u64> {
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .restore_tool_state(state)
                 .await
                 .map_err(EmbedError::from)
         })
@@ -680,6 +690,17 @@ impl AdvancedToolsControl {
     pub async fn apply_state(&self, state: ToolState) -> Result<u64> {
         self.control.apply_tool_state(state).await
     }
+
+    /// Restore a persisted tool-state snapshot, adopting its generation.
+    ///
+    /// Use this when re-applying a snapshot read from durable storage (session
+    /// resume), not an edited delta: it reconstructs the exact persisted surface
+    /// idempotently rather than requiring the snapshot to match the current
+    /// generation. A cold resume of a session whose surface reached generation
+    /// ≥ 2 needs this — [`apply_state`](Self::apply_state) would reject it.
+    pub async fn restore_state(&self, state: ToolState) -> Result<u64> {
+        self.control.restore_tool_state(state).await
+    }
 }
 
 #[derive(Clone)]
@@ -783,7 +804,7 @@ impl StateControl {
         self.control.append_plugin_body(plugin_type, body).await
     }
 
-    pub async fn set_persisted(&self, state: RuntimeSessionState) {
+    pub async fn set_persisted(&self, state: RuntimeSessionState) -> Result<()> {
         self.control.set_persisted_state(state).await
     }
 

@@ -103,7 +103,6 @@ impl crate::ProcessService for RuntimeSessionManager {
             .start_process(
                 &self.current,
                 &self.managed,
-                Arc::new(self.clone()),
                 session_id,
                 registration,
                 options,

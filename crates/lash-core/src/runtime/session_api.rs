@@ -66,8 +66,11 @@ impl LashRuntime {
         self.state.clone()
     }
 
-    pub fn apply_persistence_state(&mut self, state: RuntimeSessionState) {
-        self.set_persisted_state(state);
+    pub fn apply_persistence_state(
+        &mut self,
+        state: RuntimeSessionState,
+    ) -> Result<(), SessionError> {
+        self.set_persisted_state(state)
     }
 
     pub(crate) fn export_graph_first_state(&self) -> RuntimeSessionState {
@@ -105,18 +108,18 @@ impl LashRuntime {
 
     pub async fn await_background_work(&mut self) -> Result<(), SessionError> {
         if self.process_sync_needed.swap(false, Ordering::AcqRel) {
-            self.refresh_session_graph_from_store().await;
+            self.refresh_session_graph_from_store().await?;
         }
         Ok(())
     }
 
-    pub(super) async fn refresh_session_graph_from_store(&mut self) {
+    pub(super) async fn refresh_session_graph_from_store(&mut self) -> Result<(), SessionError> {
         let Some(store) = self
             .session
             .as_ref()
             .and_then(|session| session.history_store())
         else {
-            return;
+            return Ok(());
         };
         let scope = match self.residency {
             crate::Residency::KeepAll => crate::store::SessionReadScope::FullGraph,
@@ -124,19 +127,17 @@ impl LashRuntime {
                 leaf_node_id: self.state.session_graph.leaf_node_id.clone(),
             },
         };
-        let read = match store.load_session(scope).await {
-            Ok(Some(read)) => read,
-            Ok(None) => return,
-            Err(err) => {
-                tracing::warn!("failed to refresh session graph from store: {err}");
-                return;
-            }
+        let Some(read) = store.load_session(scope).await.map_err(|err| {
+            SessionError::Protocol(format!("failed to refresh session graph from store: {err}"))
+        })?
+        else {
+            return Ok(());
         };
         let has_newer_graph = self.state.head_revision != Some(read.head_revision)
             || read.graph.leaf_node_id != self.state.session_graph.leaf_node_id
             || read.checkpoint_ref != self.state.checkpoint_ref;
         if !has_newer_graph {
-            return;
+            return Ok(());
         }
         let head = crate::store::SessionHead {
             session_id: read.session_id.clone(),
@@ -148,8 +149,11 @@ impl LashRuntime {
             checkpoint_ref: read.checkpoint_ref.clone(),
             token_ledger: merge_usage_delta_entries(read.token_ledger),
         };
-        apply_session_head(&mut self.state, &head);
+        apply_session_head(&mut self.state, &head, &self.policy.provider)?;
         apply_session_checkpoint(&mut self.state, read.checkpoint);
+        self.policy = self.state.effective_policy().clone();
+        self.protocol_turn_options = self.state.effective_protocol_turn_options().clone();
+        Ok(())
     }
 
     pub(super) fn runtime_session_manager(

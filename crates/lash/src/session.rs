@@ -117,7 +117,9 @@ impl SessionBuilder {
                 requested: self.session_id,
             });
         }
+        let recorded_provider_id = state.policy.recorded_provider_id().to_string();
         state.policy = policy.clone();
+        state.policy.provider_id = recorded_provider_id;
         Self::normalize_tool_state(&mut state);
         self.open_resolved(policy, mode, state, store).await
     }
@@ -154,7 +156,9 @@ impl SessionBuilder {
                         requested: self.session_id.clone(),
                     });
                 }
+                let recorded_provider_id = state.policy.recorded_provider_id().to_string();
                 state.policy = policy.clone();
+                state.policy.provider_id = recorded_provider_id;
                 Self::normalize_tool_state(&mut state);
                 state
             }
@@ -231,6 +235,11 @@ impl SessionBuilder {
             env.process_registry.is_some(),
         )?;
         env.plugin_host = Some(Arc::new(plugin_host));
+        // Lazily spawn the default process work runner (Decision 3: deferred to
+        // the first open so a tokio runtime is guaranteed; idempotent via the
+        // shared once-guard) and thread its poke onto this session's host so the
+        // process control seam can wake the runner after a successful start.
+        env.process_work_poke = self.core.process_work_runner.poke().await;
         let runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
         let handle = RuntimeHandle::new(runtime);
         Ok(LashSession {

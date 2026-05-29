@@ -20,6 +20,37 @@ impl ToolProcessControl<'_> {
             .with_agent_frame_id(Some(self.agent_frame_id.clone()))
     }
 
+    /// Start a process owned by this session and registered to wake it,
+    /// returning its durable record. Routes through the same
+    /// [`crate::ProcessService::start`] path the runtime uses for every other
+    /// process start, so the child is provider-re-supplied, durable, and
+    /// recoverable through the worker.
+    pub async fn start(
+        &self,
+        registration: crate::ProcessRegistration,
+        descriptor: crate::ProcessHandleDescriptor,
+    ) -> Result<crate::ProcessRecord, PluginError> {
+        self.processes
+            .start(
+                &self.session_id,
+                registration,
+                crate::ProcessStartOptions::new()
+                    .with_descriptor(descriptor),
+                self.process_scope(),
+            )
+            .await
+    }
+
+    /// Await a process started from this session to its terminal output.
+    pub async fn await_process(
+        &self,
+        process_id: &str,
+    ) -> Result<crate::ProcessAwaitOutput, PluginError> {
+        self.processes
+            .await_process(process_id, self.process_scope())
+            .await
+    }
+
     pub async fn list_handles(&self) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
         self.processes
             .list_visible(&self.session_id, self.process_scope())

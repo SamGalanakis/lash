@@ -35,6 +35,9 @@ pub use attachments::{
     AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, InMemoryAttachmentStore,
     SessionScopedAttachmentStore, StoredAttachment,
 };
+// The Lashlang artifact store is a host-owned durability dependency of
+// `RuntimeCoreConfig`; re-export it so the `lash` facade can name it without a
+// direct `lashlang` dependency.
 pub use chronological::{
     BorrowedChronologicalEntry, BorrowedChronologicalMessage, BorrowedChronologicalPayload,
     ChronologicalEntry, ChronologicalPayload, ChronologicalProjection, visit_turn_view,
@@ -71,6 +74,7 @@ pub use lash_sansio::{
     prompt_tool_names_fingerprint, reasoning_part, render_turn_causes_prompt,
     resolve_prompt_layers, shared_parts,
 };
+pub use lashlang::{DurabilityTier, InMemoryLashlangArtifactStore, LashlangArtifactStore};
 pub use protocol_build::ProtocolBuildInput;
 pub use tool_registry::{
     ReconfigureError, ToolRegistry, ToolSourceHandle, ToolState, ToolStateEntry,
@@ -193,26 +197,30 @@ pub use plugin::{
 pub use plugin_stack::PluginStack;
 pub use provider::{
     CacheRetention, LlmTimeouts, Provider, ProviderComponents, ProviderFactory, ProviderHandle,
-    ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec, ProviderThinkingPolicy,
-    RequestTimeout, StaticModelPolicy, build_provider, provider_factory, register_provider_factory,
+    ProviderModelPolicy, ProviderOptions, ProviderSpec, ProviderThinkingPolicy, RequestTimeout,
+    StaticModelPolicy,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use runtime::TestLocalProcessRegistry;
 pub use runtime::{
     AgentFrameRun, AssembledTurn, AssistantOutput, CausalRef, CodeOutputRecord, DeliveryPolicy,
     DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig,
-    EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary,
-    InlineRuntimeEffectController, InputItem, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
-    MergeKey, NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession,
-    PersistedSessionSnapshot, PreparedProcessEventAppend, ProcessAwaitOutput, ProcessCommand,
-    ProcessEffectOutcome, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessId, ProcessInput, ProcessOpScope, ProcessProvenance, ProcessRecord, ProcessRegistration,
-    ProcessRegistry, ProcessRuntimeHost, ProcessScope, ProcessScopeId, ProcessService,
-    ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions, ProcessTerminalSemantics,
-    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
-    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, PromptUsage,
+    DurableSubstrateFacet, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink,
+    ExecutionSummary, InMemorySessionStore, InMemorySessionStoreFactory, InlineProcessRunHandle,
+    InlineRuntimeEffectController, InputItem, LashRuntime,
+    LlmAttachmentSpec,
+    LlmRequestSpec, MergeKey, NoopEventSink, NoopTurnActivitySink, OutputState,
+    PROCESS_LEASE_SCHEMA_VERSION, ParkedSession, PersistedSessionSnapshot,
+    PreparedProcessEventAppend, ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome,
+    ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSemantics,
+    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
+    ProcessLease, ProcessLeaseCompletion, ProcessOpScope, ProcessProvenance, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost, ProcessScope,
+    ProcessScopeId, ProcessService, ProcessSessionDeleteReport, ProcessStartGrant,
+    ProcessStartOptions, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
+    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
+    ProcessWorkPoke, ProcessWorkRunner, PromptUsage,
     ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
     ProtocolTurnExtensionHandle, QUEUED_WORK_CLAIM_TTL_MS, QueuedCheckpointWork, QueuedTurnWork,
     QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,

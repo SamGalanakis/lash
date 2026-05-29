@@ -10,6 +10,7 @@ async fn main() -> lash::Result<()> {
             lash::ModelSpec::from_token_limits("example-model", None, 200_000, None, None)
                 .expect("valid model spec"),
         )
+        .in_memory_stores()
         .build()?;
 
     let parent = core.session("main").standard().open().await?;

@@ -180,7 +180,6 @@ impl<'scope> ProcessOpScope<'scope> {
 #[derive(Clone, Debug, Default)]
 pub struct ProcessStartOptions {
     pub descriptor: Option<ProcessHandleDescriptor>,
-    pub wake_session_id: Option<String>,
 }
 
 impl ProcessStartOptions {
@@ -195,11 +194,6 @@ impl ProcessStartOptions {
 
     pub fn with_optional_descriptor(mut self, descriptor: Option<ProcessHandleDescriptor>) -> Self {
         self.descriptor = descriptor;
-        self
-    }
-
-    pub fn with_wake_session_id(mut self, session_id: impl Into<String>) -> Self {
-        self.wake_session_id = Some(session_id.into());
         self
     }
 
@@ -384,6 +378,55 @@ impl ProcessRecord {
 
     pub fn host_profile_id(&self) -> &str {
         &self.provenance.host_profile_id
+    }
+}
+
+/// Wire-format version stamped on every persisted [`ProcessLease`].
+///
+/// Bump when the on-wire shape of `ProcessLease` changes in a way that older
+/// code cannot safely deserialize. Mirrors
+/// [`RUNTIME_TURN_LEASE_SCHEMA_VERSION`](crate::RUNTIME_TURN_LEASE_SCHEMA_VERSION)
+/// and follows the same upgrade semantics.
+pub const PROCESS_LEASE_SCHEMA_VERSION: u32 = 1;
+
+/// Durable lease over a non-terminal background process.
+///
+/// This is the process-domain analogue of
+/// [`RuntimeTurnLease`](crate::RuntimeTurnLease): the lease pair
+/// `(owner_id, lease_token)` plus `fencing_token` are how lash guarantees that
+/// one non-terminal process is re-executed by exactly one worker at a time —
+/// even after a crash, even across two workers that both sweep the same
+/// registry for recoverable work. The durable backend
+/// (`lash-sqlite-store`) uses these to serialize concurrent claims on the same
+/// `process_id`; future distributed durable backends use the *same* fields to
+/// coordinate workers that don't share a file system.
+///
+/// **This is not single-process theatre.** The owner / fencing-token /
+/// lease-token triple is the public contract that lets any backend detect and
+/// reject stale writers. Treat it as load-bearing, not defensive.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcessLease {
+    pub schema_version: u32,
+    pub process_id: ProcessId,
+    pub owner_id: String,
+    pub lease_token: String,
+    pub fencing_token: u64,
+    pub claimed_at_epoch_ms: u64,
+    pub expires_at_epoch_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcessLeaseCompletion {
+    pub process_id: ProcessId,
+    pub lease_token: String,
+}
+
+impl ProcessLeaseCompletion {
+    pub fn from_lease(lease: &ProcessLease) -> Self {
+        Self {
+            process_id: lease.process_id.clone(),
+            lease_token: lease.lease_token.clone(),
+        }
     }
 }
 

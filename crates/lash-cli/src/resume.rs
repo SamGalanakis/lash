@@ -163,11 +163,14 @@ async fn apply_graph_resume_state(
         .and_then(|checkpoint| checkpoint.tool_state.clone())
         && let Some(session) = runtime.as_ref()
     {
+        // Cold resume restores the persisted snapshot verbatim (adopting its
+        // generation), not a generation-checked delta — a session whose tool
+        // surface reached generation ≥ 2 would be rejected by `apply_state`.
         let _ = session
             .control()
             .tools()
             .advanced()
-            .apply_state(tool_state)
+            .restore_state(tool_state)
             .await;
         if let Ok(state) = session.control().tools().state().await {
             *desired_tool_state = state;

@@ -12,8 +12,9 @@ use super::events::{
     ProcessTerminalState,
 };
 use super::model::{
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessRecord, ProcessRegistration, ProcessScope, ProcessScopeId, ProcessSessionDeleteReport,
+    PROCESS_LEASE_SCHEMA_VERSION, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessHandleGrantEntry, ProcessLease, ProcessLeaseCompletion, ProcessRecord,
+    ProcessRegistration, ProcessScope, ProcessScopeId, ProcessSessionDeleteReport,
 };
 use super::registry::ProcessRegistry;
 use super::time::current_epoch_ms;
@@ -26,6 +27,7 @@ use super::validation::{
 pub struct TestLocalProcessRegistry {
     managed: Arc<Mutex<ManagedProcessMap>>,
     grants: Arc<Mutex<ManagedGrantMap>>,
+    leases: Arc<Mutex<ManagedLeaseMap>>,
 }
 
 impl Default for TestLocalProcessRegistry {
@@ -33,12 +35,14 @@ impl Default for TestLocalProcessRegistry {
         Self {
             managed: Arc::new(Mutex::new(HashMap::new())),
             grants: Arc::new(Mutex::new(HashMap::new())),
+            leases: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 type ManagedProcessMap = HashMap<String, ManagedProcessRecord>;
 type ManagedGrantMap = HashMap<ProcessScopeId, HashMap<String, ProcessHandleGrant>>;
+type ManagedLeaseMap = HashMap<String, ProcessLease>;
 
 struct ManagedProcessRecord {
     record: ProcessRecord,
@@ -454,4 +458,110 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         record.acked_wakes.insert(sequence);
         Ok(())
     }
+
+    async fn list_non_terminal(&self) -> Result<Vec<ProcessRecord>, PluginError> {
+        let managed = self.managed.lock().await;
+        let mut records: Vec<ProcessRecord> = managed
+            .values()
+            .filter(|record| !record.record.is_terminal())
+            .map(|record| record.record.clone())
+            .collect();
+        records.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(records)
+    }
+
+    async fn claim_process_lease(
+        &self,
+        process_id: &str,
+        owner_id: &str,
+        lease_ttl_ms: u64,
+    ) -> Result<ProcessLease, PluginError> {
+        let mut leases = self.leases.lock().await;
+        let now = current_epoch_ms();
+        if let Some(current) = leases.get(process_id)
+            && !current.owner_id.is_empty()
+            && current.expires_at_epoch_ms > now
+            && current.owner_id != owner_id
+        {
+            return Err(process_lease_conflict(process_id, current));
+        }
+        // The fencing token increases monotonically even across completion: a
+        // released lease retains its `fencing_token` so a re-claim never reuses
+        // a stale writer's token (mirrors `SqliteProcessRegistry`).
+        let fencing_token = leases
+            .get(process_id)
+            .map_or(0, |current| current.fencing_token)
+            .saturating_add(1);
+        let lease = ProcessLease {
+            schema_version: PROCESS_LEASE_SCHEMA_VERSION,
+            process_id: process_id.to_string(),
+            owner_id: owner_id.to_string(),
+            lease_token: format!("{process_id}:{owner_id}:{now}:{fencing_token}"),
+            fencing_token,
+            claimed_at_epoch_ms: now,
+            expires_at_epoch_ms: now.saturating_add(lease_ttl_ms),
+        };
+        leases.insert(process_id.to_string(), lease.clone());
+        Ok(lease)
+    }
+
+    async fn renew_process_lease(
+        &self,
+        lease: &ProcessLease,
+        lease_ttl_ms: u64,
+    ) -> Result<ProcessLease, PluginError> {
+        let mut leases = self.leases.lock().await;
+        let now = current_epoch_ms();
+        let live = leases.get(&lease.process_id).filter(|current| {
+            !current.owner_id.is_empty()
+                && current.lease_token == lease.lease_token
+                && current.expires_at_epoch_ms > now
+        });
+        if live.is_none() {
+            return Err(process_lease_expired(&lease.process_id));
+        }
+        let renewed = ProcessLease {
+            expires_at_epoch_ms: now.saturating_add(lease_ttl_ms),
+            ..lease.clone()
+        };
+        leases.insert(lease.process_id.clone(), renewed.clone());
+        Ok(renewed)
+    }
+
+    async fn complete_process_lease(
+        &self,
+        completion: &ProcessLeaseCompletion,
+    ) -> Result<(), PluginError> {
+        let mut leases = self.leases.lock().await;
+        // Release (don't drop) the lease, fenced by the completion token, so a
+        // stale completion cannot release a newer owner's lease and the
+        // `fencing_token` is preserved for the next claim.
+        if let Some(current) = leases.get_mut(&completion.process_id)
+            && current.lease_token == completion.lease_token
+        {
+            current.owner_id = String::new();
+            current.lease_token = String::new();
+            current.claimed_at_epoch_ms = 0;
+            current.expires_at_epoch_ms = 0;
+        }
+        Ok(())
+    }
+}
+
+/// Loud, stable error for a fenced process-lease claim. Mirrors
+/// [`StoreError::RuntimeTurnLeaseConflict`](crate::StoreError) on the
+/// `PluginError` channel the [`ProcessRegistry`] trait returns.
+fn process_lease_conflict(process_id: &str, current: &ProcessLease) -> PluginError {
+    PluginError::Session(format!(
+        "process `{process_id}` is already leased by `{}` until {}",
+        current.owner_id, current.expires_at_epoch_ms
+    ))
+}
+
+/// Loud, stable error for a superseded or expired process lease. Mirrors
+/// [`StoreError::RuntimeTurnLeaseExpired`](crate::StoreError).
+fn process_lease_expired(process_id: &str) -> PluginError {
+    PluginError::Session(format!(
+        "process lease for `{process_id}` is missing or expired"
+    ))
 }

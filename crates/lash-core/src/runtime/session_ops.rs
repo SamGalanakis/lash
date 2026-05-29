@@ -15,28 +15,31 @@ use super::state::{
 
 impl LashRuntime {
     /// Replace the host-owned state envelope.
-    pub fn set_persisted_state(&mut self, state: RuntimeSessionState) {
+    pub fn set_persisted_state(&mut self, state: RuntimeSessionState) -> Result<(), SessionError> {
         let mut state = state;
+        state.rebind_provider(&self.policy.provider)?;
         normalize_session_graph(&mut state);
         if let Some(session) = self.session.as_ref() {
             session.invalidate_runtime_caches();
             let snapshot = state.plugin_snapshot.clone().unwrap_or_default();
-            if let Err(err) = session.plugins().restore(&snapshot) {
-                tracing::warn!("failed to restore plugin snapshot in set_state: {err}");
-            }
+            session
+                .plugins()
+                .restore(&snapshot)
+                .map_err(|err| SessionError::Protocol(err.to_string()))?;
             state.plugin_snapshot_revision =
                 Some(session.plugins().snapshot_revision_fingerprint());
         }
         self.policy = state.policy.clone();
         self.protocol_turn_options = state.protocol_turn_options.clone();
         self.state = state;
+        Ok(())
     }
 
     pub async fn append_session_nodes(
         &mut self,
         request: crate::AppendSessionNodesRequest,
     ) -> Result<crate::AppendSessionNodesResult, SessionError> {
-        self.refresh_session_graph_from_store().await;
+        self.refresh_session_graph_from_store().await?;
         if let Some(required) = request.requires_ancestor_node_id.as_deref()
             && !self.state.session_graph.active_path_contains(required)
         {

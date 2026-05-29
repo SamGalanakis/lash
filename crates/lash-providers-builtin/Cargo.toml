@@ -9,7 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "Built-in provider registry for lash: OpenAI-compatible, Anthropic, Google, Codex."
+description = "Built-in provider metadata for lash: OpenAI-compatible, Anthropic, Google, Codex."
 keywords = ["lash", "agent", "llm", "openai", "anthropic"]
 categories = ["api-bindings", "asynchronous"]
 

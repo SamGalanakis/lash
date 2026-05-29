@@ -19,9 +19,10 @@ pub use events::{
 };
 pub use materialization::materialize_process_event_semantics;
 pub use model::{
-    ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessOpScope, ProcessProvenance,
-    ProcessRecord, ProcessRegistration, ProcessScope, ProcessScopeId, ProcessSessionDeleteReport,
+    PROCESS_LEASE_SCHEMA_VERSION, ProcessExecutionContext, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
+    ProcessLease, ProcessLeaseCompletion, ProcessOpScope, ProcessProvenance, ProcessRecord,
+    ProcessRegistration, ProcessScope, ProcessScopeId, ProcessSessionDeleteReport,
     ProcessStartGrant, ProcessStartOptions,
 };
 pub use registry::ProcessRegistry;

@@ -21,10 +21,15 @@ impl LashRuntime {
 
     /// Update provider on the runtime config.
     pub fn set_provider(&mut self, provider: ProviderHandle) {
-        self.policy.provider = provider;
-        self.state.policy.provider = self.policy.provider.clone();
+        self.policy.install_provider(provider);
+        self.state
+            .policy
+            .install_provider(self.policy.provider.clone());
         if let Some(frame) = self.state.current_agent_frame_mut() {
-            frame.assignment.policy.provider = self.policy.provider.clone();
+            frame
+                .assignment
+                .policy
+                .install_provider(self.policy.provider.clone());
         }
     }
 
@@ -45,7 +50,7 @@ impl LashRuntime {
     ) {
         let previous = self.session_policy();
         if let Some(provider) = provider {
-            self.policy.provider = provider;
+            self.policy.install_provider(provider);
         }
         if let Some(model) = model {
             self.policy.model = model;
@@ -129,6 +134,32 @@ impl LashRuntime {
             .tool_registry()
             .apply_state(snapshot)
             .map_err(|err| SessionError::Protocol(format!("tool reconfigure failed: {err}")))?;
+        session.refresh_tool_surface().await?;
+        self.stamp_live_plugin_state();
+        Ok(generation)
+    }
+
+    /// Restore a persisted tool-state snapshot, adopting its generation.
+    ///
+    /// Unlike [`apply_tool_state`](Self::apply_tool_state) — a generation-checked
+    /// delta that requires the snapshot to match the current generation and
+    /// bumps it — this restores the exact persisted surface idempotently, so a
+    /// cold resume of a session whose surface reached generation ≥ 2 succeeds
+    /// (a delta-apply onto a fresh base-1 registry would be rejected).
+    pub async fn restore_tool_state(
+        &mut self,
+        snapshot: crate::ToolState,
+    ) -> Result<u64, SessionError> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(SessionError::Protocol(
+                "runtime session not available".to_string(),
+            ));
+        };
+        let generation = session
+            .plugins()
+            .tool_registry()
+            .restore_state(snapshot)
+            .map_err(|err| SessionError::Protocol(format!("tool restore failed: {err}")))?;
         session.refresh_tool_surface().await?;
         self.stamp_live_plugin_state();
         Ok(generation)

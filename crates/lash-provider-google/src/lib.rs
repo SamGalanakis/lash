@@ -1291,12 +1291,6 @@ struct GoogleProviderConfig {
 
 pub struct GoogleOAuthProviderFactory;
 
-impl GoogleOAuthProviderFactory {
-    pub fn register() {
-        lash_core::register_provider_factory(std::sync::Arc::new(Self));
-    }
-}
-
 impl ProviderFactory for GoogleOAuthProviderFactory {
     fn kind(&self) -> &'static str {
         "google_oauth"

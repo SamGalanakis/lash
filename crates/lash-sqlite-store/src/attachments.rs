@@ -1,6 +1,10 @@
 use super::*;
 
 impl lashlang::LashlangArtifactStore for Store {
+    fn durability_tier(&self) -> lashlang::DurabilityTier {
+        lashlang::DurabilityTier::Durable
+    }
+
     fn put_module_artifact(
         &self,
         artifact: &lashlang::ModuleArtifact,

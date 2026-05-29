@@ -5,12 +5,19 @@ use super::events::{
 };
 use super::model::{
     ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessRecord, ProcessRegistration, ProcessScope, ProcessSessionDeleteReport,
+    ProcessLease, ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessScope,
+    ProcessSessionDeleteReport,
 };
 
 /// Durability-neutral process registry.
 #[async_trait::async_trait]
 pub trait ProcessRegistry: Send + Sync {
+    /// Durability tier this process registry provides; defaults to
+    /// [`DurabilityTier`](crate::DurabilityTier)`::Inline`.
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        crate::DurabilityTier::Inline
+    }
+
     async fn register_process(
         &self,
         registration: ProcessRegistration,
@@ -93,4 +100,53 @@ pub trait ProcessRegistry: Send + Sync {
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord>;
 
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError>;
+
+    /// All non-terminal process records, in stable `process_id` order.
+    ///
+    /// This is the recovery sweep's worklist: every process that was started
+    /// but has not reached a terminal event is a candidate for re-execution by
+    /// a [`DurableProcessWorker`](crate::DurableProcessWorker) after a crash.
+    /// Terminal processes are excluded — they are already done and idempotent by
+    /// `process_id`, so re-running them would be wasted work.
+    async fn list_non_terminal(&self) -> Result<Vec<ProcessRecord>, PluginError>;
+
+    /// Claim the durable single-owner lease over a non-terminal process.
+    ///
+    /// Mirrors [`claim_runtime_turn_lease`](crate::RuntimePersistence::claim_runtime_turn_lease):
+    /// an unexpired lease held by a *different* owner fences the claim (returns
+    /// an error); claiming a free, expired, or own lease succeeds and bumps the
+    /// `fencing_token`. The returned [`ProcessLease`]'s
+    /// `(owner_id, lease_token)` plus `fencing_token` are the contract a worker
+    /// presents on every subsequent renew/complete — a stale writer is rejected.
+    async fn claim_process_lease(
+        &self,
+        process_id: &str,
+        owner_id: &str,
+        lease_ttl_ms: u64,
+    ) -> Result<ProcessLease, PluginError>;
+
+    /// Extend the expiry of a live lease the caller still owns.
+    ///
+    /// Mirrors [`renew_runtime_turn_lease`](crate::RuntimePersistence::renew_runtime_turn_lease):
+    /// the lease must match the persisted `(owner, lease_token, fencing_token)`
+    /// and be unexpired, else the renewal is rejected (the lease was superseded
+    /// or expired). Workers renew across long-running effects so a healthy
+    /// process is not swept out from under its live owner.
+    async fn renew_process_lease(
+        &self,
+        lease: &ProcessLease,
+        lease_ttl_ms: u64,
+    ) -> Result<ProcessLease, PluginError>;
+
+    /// Release a lease the caller owns, fenced by the completion's
+    /// `(process_id, lease_token)`.
+    ///
+    /// Mirrors clearing a runtime turn lease: a stale completion (whose token no
+    /// longer matches the live lease) is a no-op so it cannot release a lease a
+    /// newer owner now holds. Idempotent — completing an already-released lease
+    /// succeeds.
+    async fn complete_process_lease(
+        &self,
+        completion: &ProcessLeaseCompletion,
+    ) -> Result<(), PluginError>;
 }

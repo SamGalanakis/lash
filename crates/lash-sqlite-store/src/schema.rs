@@ -203,9 +203,19 @@ CREATE INDEX IF NOT EXISTS idx_process_handle_grants_session
 CREATE INDEX IF NOT EXISTS idx_process_handle_grants_process
     ON process_handle_grants(process_id);
 
+CREATE TABLE IF NOT EXISTS process_leases (
+    process_id       TEXT PRIMARY KEY,
+    lease_owner_id   TEXT,
+    lease_token      TEXT,
+    lease_fencing_token  INTEGER NOT NULL DEFAULT 0,
+    lease_claimed_at_ms  INTEGER NOT NULL DEFAULT 0,
+    lease_expires_at_ms  INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (process_id) REFERENCES processes(process_id) ON DELETE CASCADE
+);
+
 ";
 
-pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 3;
+pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StoreBacking {

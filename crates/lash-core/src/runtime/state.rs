@@ -8,8 +8,9 @@
 
 use lash_sansio::PromptUsage;
 
+use crate::provider::ProviderHandle;
 use crate::session_model::{Message, SessionPolicy, TokenUsage, plugin_message_to_message};
-use crate::{PersistedTurnState, ToolCallRecord};
+use crate::{PersistedTurnState, SessionError, ToolCallRecord};
 
 use super::usage::TokenLedgerEntry;
 
@@ -226,6 +227,23 @@ impl RuntimeSessionState {
         };
         state.ensure_agent_frame_initialized();
         state
+    }
+
+    pub(crate) fn rebind_provider(
+        &mut self,
+        live_provider: &ProviderHandle,
+    ) -> Result<(), SessionError> {
+        let session_id = if self.session_id.is_empty() {
+            "root"
+        } else {
+            &self.session_id
+        }
+        .to_string();
+        rebind_policy_provider(&session_id, &mut self.policy, live_provider)?;
+        for frame in &mut self.agent_frames {
+            rebind_policy_provider(&session_id, &mut frame.assignment.policy, live_provider)?;
+        }
+        Ok(())
     }
 
     /// Return the persistable subset of this runtime state as a
@@ -462,6 +480,34 @@ impl RuntimeSessionState {
     }
 }
 
+fn rebind_policy_provider(
+    session_id: &str,
+    policy: &mut SessionPolicy,
+    live_provider: &ProviderHandle,
+) -> Result<(), SessionError> {
+    let expected = policy.recorded_provider_id().trim().to_string();
+    let actual = live_provider.kind();
+    // Lazy provider validation: install an unconfigured live handle rather than
+    // rejecting it — a process-only runtime (durable-worker recovery of a
+    // tool/lashlang process) needs no provider, and a real LLM call against an
+    // unconfigured provider fails clearly at the call site. Only a configured
+    // live provider whose kind disagrees with the persisted id is a genuine
+    // mismatch.
+    if actual == "unconfigured" || expected.is_empty() || expected == "unconfigured" {
+        policy.install_provider(live_provider.clone());
+        return Ok(());
+    }
+    if expected != actual {
+        return Err(SessionError::ProviderMismatch {
+            expected,
+            actual: actual.to_string(),
+            session_id: session_id.to_string(),
+        });
+    }
+    policy.install_provider(live_provider.clone());
+    Ok(())
+}
+
 impl RuntimeSessionState {
     pub fn current_agent_frame(&self) -> Option<&crate::AgentFrameRecord> {
         self.agent_frames
@@ -586,6 +632,7 @@ pub(super) fn apply_persisted_session_config(
     config: &crate::PersistedSessionConfig,
 ) {
     policy.model = config.model.clone();
+    policy.provider_id = config.provider_id.clone();
 }
 
 pub(super) fn apply_session_checkpoint(
@@ -629,7 +676,8 @@ pub(super) fn apply_session_checkpoint(
 pub(super) fn apply_session_head(
     state: &mut RuntimeSessionState,
     head: &crate::store::SessionHead,
-) {
+    live_provider: &ProviderHandle,
+) -> Result<(), SessionError> {
     state.session_graph = head.graph.clone();
     state.agent_frames = head.agent_frames.clone();
     state.current_agent_frame_id = head.current_agent_frame_id.clone();
@@ -647,6 +695,8 @@ pub(super) fn apply_session_head(
     state.head_revision = Some(head.head_revision);
     state.graph_replace_required = false;
     apply_persisted_session_config(&mut state.policy, &head.config);
+    state.rebind_provider(live_provider)?;
+    Ok(())
 }
 
 pub(super) fn append_session_nodes_to_state(

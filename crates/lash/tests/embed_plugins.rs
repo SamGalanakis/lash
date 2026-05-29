@@ -199,14 +199,17 @@ fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
         })
         .build()
         .into_handle();
+    // These plugin/typed-input tests never start a process, so they wire no
+    // process registry (and thus no store factory) and run non-persistent turns
+    // — which the live `TurnContext` plugin input path requires.
     LashCore::builder()
         .install_mode(ModePreset::standard())
         .provider(provider)
-        .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default()))
         .model(
             lash::ModelSpec::from_token_limits("mock-model", None, 16_000, None, None)
                 .expect("valid model spec"),
         )
+        .in_memory_stores()
         .build()
         .expect("core")
 }

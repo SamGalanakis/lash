@@ -41,6 +41,13 @@ fn trace_stop_reason(stop: &TurnStop) -> &'static str {
     }
 }
 
+fn session_head_refresh_error(err: SessionError) -> RuntimeError {
+    RuntimeError::new(
+        RuntimeErrorCode::Other("session_head_refresh".to_string()),
+        err.to_string(),
+    )
+}
+
 fn queued_work_payload_type(payload: &crate::QueuedWorkPayload) -> &'static str {
     match payload {
         crate::QueuedWorkPayload::TurnInput { .. } => "turn_input",
@@ -501,6 +508,52 @@ impl LashRuntime {
         .map(Some)
     }
 
+    /// Enforce the durable-first wiring invariant at a turn-scope boundary: when
+    /// the host wired a durable effect controller, every store reachable from
+    /// this scope must also be durable. A durable controller running against any
+    /// ephemeral store fails loudly here rather than silently degrading.
+    ///
+    /// Inline controllers (the default tier) impose no requirement, so
+    /// inline/in-memory hosts pass unchanged.
+    fn ensure_durable_substrate_for_scope(
+        &self,
+        effect_scope: &RuntimeEffectControllerScope<'_>,
+    ) -> Result<(), RuntimeError> {
+        if effect_scope.controller().durability_tier() != crate::DurabilityTier::Durable {
+            return Ok(());
+        }
+        if self
+            .host
+            .core
+            .attachment_store
+            .persistence()
+            .durability_tier()
+            != crate::DurabilityTier::Durable
+        {
+            return Err(RuntimeError::durable_substrate_required(
+                crate::DurableSubstrateFacet::AttachmentStore,
+            ));
+        }
+        if self.host.core.lashlang_artifact_store.durability_tier()
+            != crate::DurabilityTier::Durable
+        {
+            return Err(RuntimeError::durable_substrate_required(
+                crate::DurableSubstrateFacet::ArtifactStore,
+            ));
+        }
+        if let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+            && store.durability_tier() != crate::DurabilityTier::Durable
+        {
+            return Err(RuntimeError::durable_substrate_required(
+                crate::DurableSubstrateFacet::SessionStore,
+            ));
+        }
+        Ok(())
+    }
+
     /// Resume an in-flight (durably checkpointed) turn.
     pub async fn resume_turn(
         &mut self,
@@ -537,18 +590,10 @@ impl LashRuntime {
                 ),
             ));
         }
-        if effect_scope
-            .controller()
-            .requires_durable_attachment_store()
-            && self.host.core.attachment_store.persistence()
-                != crate::AttachmentStorePersistence::Durable
-        {
-            return Err(RuntimeError::new(
-                RuntimeErrorCode::DurableAttachmentStoreRequired,
-                "durable effect controllers require a durable attachment store",
-            ));
-        }
-        self.refresh_session_graph_from_store().await;
+        self.ensure_durable_substrate_for_scope(&effect_scope)?;
+        self.refresh_session_graph_from_store()
+            .await
+            .map_err(session_head_refresh_error)?;
         let store = self
             .session
             .as_ref()
@@ -741,17 +786,7 @@ impl LashRuntime {
                 ),
             ));
         }
-        if effect_scope
-            .controller()
-            .requires_durable_attachment_store()
-            && self.host.core.attachment_store.persistence()
-                != crate::AttachmentStorePersistence::Durable
-        {
-            return Err(RuntimeError::new(
-                RuntimeErrorCode::DurableAttachmentStoreRequired,
-                "durable effect controllers require a durable attachment store",
-            ));
-        }
+        self.ensure_durable_substrate_for_scope(&effect_scope)?;
         input.trace_turn_id = Some(effect_scope.turn_id().to_string());
         self.stream_turn_inner(
             input.clone(),
@@ -864,7 +899,9 @@ impl LashRuntime {
         cancel: CancellationToken,
         queued_claim: Option<crate::QueuedWorkClaim>,
     ) -> Result<AssembledTurn, RuntimeError> {
-        self.refresh_session_graph_from_store().await;
+        self.refresh_session_graph_from_store()
+            .await
+            .map_err(session_head_refresh_error)?;
         let input_trace_turn_id = input.trace_turn_id.clone();
         let queued_turn_work = queued_claim
             .as_ref()
@@ -1153,7 +1190,7 @@ impl LashRuntime {
         let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
         let mut turn_policy = self.state.effective_policy().clone();
         if let Some(provider) = turn_context.provider().cloned() {
-            turn_policy.provider = provider;
+            turn_policy.install_provider(provider);
         }
         if let Some(model) = turn_context.model_spec() {
             turn_policy.model = model.clone();

@@ -6,10 +6,12 @@ mod effect;
 mod environment;
 mod error;
 mod host;
+mod in_memory_store;
 mod io;
 mod lifecycle;
 mod observation;
 mod process;
+mod process_work_runner;
 mod process_worker;
 mod session_api;
 mod session_manager;
@@ -85,27 +87,32 @@ pub use effect::{
     RuntimeReplay, RuntimeScope, RuntimeSubject,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
-pub use error::{RuntimeError, RuntimeErrorCode};
+pub use error::{DurableSubstrateFacet, RuntimeError, RuntimeErrorCode};
 pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeCoreConfig};
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};
 #[cfg(any(test, feature = "testing"))]
 pub use process::TestLocalProcessRegistry;
 pub use process::{
-    PreparedProcessEventAppend, ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest,
-    ProcessEventAppendResult, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
-    ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessOpScope, ProcessProvenance,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope, ProcessScopeId,
-    ProcessService, ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions,
-    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
-    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
-    UnavailableProcessService, current_epoch_ms, epoch_ms_from_system_time,
-    lashlang_process_event_types, materialize_process_event_semantics,
-    prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
-    process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
-    process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
+    PROCESS_LEASE_SCHEMA_VERSION, PreparedProcessEventAppend, ProcessAwaitOutput, ProcessEvent,
+    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSemantics,
+    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
+    ProcessLease, ProcessLeaseCompletion, ProcessOpScope, ProcessProvenance, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessScope, ProcessScopeId, ProcessService,
+    ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions, ProcessTerminalSemantics,
+    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
+    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, UnavailableProcessService,
+    current_epoch_ms, epoch_ms_from_system_time, lashlang_process_event_types,
+    materialize_process_event_semantics, prepare_process_event_append,
+    prepare_process_registration, process_event_payload_hash, process_wake_delivery,
+    process_wake_input_from_event_payload, process_wake_turn_cause, process_wake_turn_text,
+    require_event_replay, system_time_from_epoch_ms,
 };
+pub use process_work_runner::{
+    InlineProcessRunHandle, ProcessRunHandle, ProcessWorkPoke, ProcessWorkRunner,
+};
+pub use in_memory_store::{InMemorySessionStore, InMemorySessionStoreFactory};
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
 pub use session_manager::DirectCompletionClient;
 pub use state::{PersistedSessionSnapshot, RuntimeSessionState, SessionStateEnvelope};
@@ -817,6 +824,12 @@ impl SessionStoreCreateRequest {
 }
 
 pub trait SessionStoreFactory: Send + Sync {
+    /// Durability tier the stores produced by this factory provide; defaults to
+    /// [`DurabilityTier::Inline`].
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        crate::DurabilityTier::Inline
+    }
+
     fn create_store(
         &self,
         request: &SessionStoreCreateRequest,

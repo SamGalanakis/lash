@@ -8,8 +8,10 @@
 //!
 //! Three embedder patterns this enables:
 //!
-//! * **CLI interactive (single runtime, default):** `RuntimeEnvironment::default()`.
-//!   Behaviour byte-identical to the pre-environment world.
+//! * **CLI interactive (single runtime, default):**
+//!   `RuntimeEnvironment::builder().build()`. The builder seeds an explicit
+//!   in-memory core (`RuntimeCoreConfig::in_memory`); override it with
+//!   `with_runtime_core_config` for durable stores.
 //! * **Long autonomous agent:** set `residency` to `ActivePathOnly`,
 //!   then have the host periodically call
 //!   `runtime.orphaned_node_ids()` + `store.tombstone_nodes(...)` +
@@ -58,7 +60,7 @@ pub enum Residency {
 /// Default values build an embedded runtime without process lifecycle
 /// support. Hosts that want long-running tools, async handles, subagents,
 /// or process controls must provide a process registry explicitly.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RuntimeEnvironment {
     // Shared plugin infrastructure. Created once; every session's
     // `PluginSession` is built from it via `PluginHost::build_session`.
@@ -77,6 +79,12 @@ pub struct RuntimeEnvironment {
     // Store factory used by managed child sessions created from runtimes
     // built with this environment.
     pub session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
+
+    // Wakes the host's `ProcessWorkRunner` so a successful process start is
+    // consumed promptly. Threaded onto every `RuntimeHost` built from this
+    // environment (see `LashRuntime::from_environment`); `None` when no work
+    // runner is wired, in which case poking is a no-op.
+    pub process_work_poke: Option<super::ProcessWorkPoke>,
 
     pub core: RuntimeCoreConfig,
 }
@@ -104,9 +112,27 @@ impl ParkedSession {
 }
 
 /// Fluent builder for `RuntimeEnvironment`.
-#[derive(Default)]
 pub struct RuntimeEnvironmentBuilder {
     env: RuntimeEnvironment,
+}
+
+impl Default for RuntimeEnvironmentBuilder {
+    fn default() -> Self {
+        // `RuntimeCoreConfig` has no `Default`; the builder starts from an
+        // explicitly named in-memory core so the choice is visible in source.
+        // The `lash` facade always overrides this via `with_runtime_core_config`
+        // and rejects builds that never named their stores.
+        Self {
+            env: RuntimeEnvironment {
+                plugin_host: None,
+                residency: Residency::default(),
+                process_registry: None,
+                session_store_factory: None,
+                process_work_poke: None,
+                core: RuntimeCoreConfig::in_memory(),
+            },
+        }
+    }
 }
 
 impl RuntimeEnvironmentBuilder {
@@ -139,6 +165,14 @@ impl RuntimeEnvironmentBuilder {
         factory: Arc<dyn crate::SessionStoreFactory>,
     ) -> Self {
         self.env.session_store_factory = Some(factory);
+        self
+    }
+
+    /// Set the poke handle that wakes the host's `ProcessWorkRunner`. Every
+    /// `RuntimeHost` built from this environment carries the poke, so the
+    /// process control seam can make consumption prompt after a start.
+    pub fn with_process_work_poke(mut self, poke: super::ProcessWorkPoke) -> Self {
+        self.env.process_work_poke = Some(poke);
         self
     }
 
@@ -255,7 +289,7 @@ mod tests {
 
     #[test]
     fn runtime_core_config_replaces_core_config() {
-        let core = RuntimeCoreConfig::default()
+        let core = RuntimeCoreConfig::in_memory()
             .with_trace_level(TraceLevel::Extended)
             .with_termination(TerminationPolicy {
                 treat_missing_done_as_failure: false,

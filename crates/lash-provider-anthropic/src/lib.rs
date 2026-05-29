@@ -1076,16 +1076,9 @@ struct AnthropicProviderConfig {
     options: ProviderOptions,
 }
 
-/// Factory that registers [`AnthropicProvider`] with lash's global
-/// provider registry. Hosts call [`register`] once at startup.
+/// Factory that materializes [`AnthropicProvider`] from a host-owned
+/// [`ProviderSpec`](lash_core::ProviderSpec).
 pub struct AnthropicProviderFactory;
-
-impl AnthropicProviderFactory {
-    /// Convenience: install this factory into lash's global registry.
-    pub fn register() {
-        lash_core::register_provider_factory(std::sync::Arc::new(Self));
-    }
-}
 
 impl ProviderFactory for AnthropicProviderFactory {
     fn kind(&self) -> &'static str {

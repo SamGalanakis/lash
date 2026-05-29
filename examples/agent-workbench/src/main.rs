@@ -30,9 +30,7 @@ use lash::{
         TraceRecord, TraceSink,
     },
 };
-use lash_provider_openai::{
-    OPENROUTER_BASE_URL, OpenAiCompatibleProvider, OpenAiCompatibleProviderFactory,
-};
+use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc};
@@ -48,7 +46,6 @@ const BUTTON_TRIGGER_EVENT: &str = "pressed";
 #[tokio::main]
 async fn main() -> AnyhowResult<()> {
     let _ = dotenvy::dotenv();
-    OpenAiCompatibleProviderFactory::register();
 
     let addr: SocketAddr = std::env::var("AGENT_WORKBENCH_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3030".to_string())
@@ -105,6 +102,13 @@ async fn main() -> AnyhowResult<()> {
         lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
             .context("open process registry")?,
     ) as Arc<dyn lash::advanced::ProcessRegistry>;
+    // Deployment-level Lashlang artifact store (compiled trigger/process
+    // modules), shared across the session tree. SQLite keeps installed triggers
+    // durable across restarts.
+    let artifact_store = Arc::new(
+        lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
+            .context("open lashlang artifact store")?,
+    ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
     let subagent_registry = Arc::new(lash_subagents::default_registry(&BTreeMap::new()));
     let session_ids = WorkbenchSessionIds::fresh();
     let (queue_runner, runner_rx) = SessionQueueRunner::channel();
@@ -122,6 +126,7 @@ async fn main() -> AnyhowResult<()> {
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )))
+        .lashlang_artifact_store(artifact_store)
         .trace_sink(Some(Arc::clone(&trace_sink)))
         .trace_level(TraceLevel::Extended)
         .configure_plugins(|plugins| {
@@ -1163,39 +1168,6 @@ mod tests {
     use lash::persistence::RuntimePersistence;
     use lashlang::LashlangArtifactStore;
 
-    struct WorkbenchTestProviderFactory;
-
-    impl lash::provider::ProviderFactory for WorkbenchTestProviderFactory {
-        fn kind(&self) -> &'static str {
-            "workbench-test"
-        }
-
-        fn deserialize(
-            &self,
-            _config: Value,
-        ) -> Result<lash::provider::ProviderComponents, String> {
-            let provider = lash::testing::TestProvider::builder()
-                .kind("workbench-test")
-                .complete(|_| async {
-                    Ok(text_response(
-                        "```lashlang\nsubmit \"blue button joke delivered\"\n```",
-                    ))
-                })
-                .build();
-            let model_policy: Arc<dyn lash::provider::ProviderModelPolicy> =
-                Arc::new(provider.clone());
-            Ok(lash::provider::ProviderComponents::new(
-                Box::new(provider),
-                model_policy,
-            ))
-        }
-    }
-
-    fn register_test_provider_factories() {
-        OpenAiCompatibleProviderFactory::register();
-        lash::provider::register_provider_factory(Arc::new(WorkbenchTestProviderFactory));
-    }
-
     #[test]
     fn reset_session_rotation_replaces_workbench_session_id() {
         let ids = WorkbenchSessionIds::fresh();
@@ -1234,7 +1206,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn button_host_event_starts_visible_lashlang_process() {
-        register_test_provider_factories();
         let data_dir = std::env::temp_dir().join(format!(
             "agent-workbench-processes-{}",
             uuid::Uuid::new_v4()
@@ -1265,6 +1236,7 @@ mod tests {
             .provider(provider)
             .model(model)
             .store_factory(core_store_factory)
+            .in_memory_stores()
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .advanced()
             .effect_controller(Arc::new(
@@ -1390,7 +1362,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn button_host_event_wake_is_consumed_by_session_queue_runner() {
-        register_test_provider_factories();
         let data_dir = std::env::temp_dir().join(format!(
             "agent-workbench-queue-runner-{}",
             uuid::Uuid::new_v4()
@@ -1437,7 +1408,7 @@ mod tests {
                 .plugin(Arc::new(WorkbenchPluginFactory::new("")))
                 .advanced()
                 .runtime_core_config(
-                    lash::advanced::RuntimeCoreConfig::default()
+                    lash::advanced::RuntimeCoreConfig::in_memory()
                         .with_lashlang_artifact_store(artifact_store_for_core)
                         .with_effect_controller(Arc::new(
                             lash::advanced::InlineRuntimeEffectController::default(),
@@ -1531,7 +1502,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn reset_chat_deletes_old_session_and_clears_trigger_started_work() {
-        register_test_provider_factories();
         let data_dir =
             std::env::temp_dir().join(format!("agent-workbench-reset-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
@@ -1558,6 +1528,7 @@ mod tests {
             .provider(provider)
             .model(model)
             .store_factory(core_store_factory)
+            .in_memory_stores()
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .advanced()
             .effect_controller(Arc::new(
@@ -1653,7 +1624,6 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn persisted_trigger_route_fires_after_reopening_sqlite_artifact_store() {
-        register_test_provider_factories();
         let data_dir =
             std::env::temp_dir().join(format!("agent-workbench-trigger-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
@@ -1764,7 +1734,6 @@ mod tests {
         process_registry: Arc<dyn lash::advanced::ProcessRegistry>,
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     ) -> LashCore {
-        register_test_provider_factories();
         let provider = ProviderHandle::new(
             OpenAiCompatibleProvider::new(String::new(), OPENROUTER_BASE_URL).into_components(),
         );
@@ -1782,7 +1751,7 @@ mod tests {
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .advanced()
             .runtime_core_config(
-                lash::advanced::RuntimeCoreConfig::default()
+                lash::advanced::RuntimeCoreConfig::in_memory()
                     .with_lashlang_artifact_store(artifact_store)
                     .with_effect_controller(Arc::new(
                         lash::advanced::InlineRuntimeEffectController::default(),

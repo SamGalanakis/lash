@@ -7,11 +7,11 @@ mod parser;
 mod runtime;
 
 pub use artifact::{
-    ArtifactStoreError, ContentHash, InMemoryLashlangArtifactStore, LASHLANG_COMPILER_VERSION,
-    LASHLANG_SEMANTIC_HASH_VERSION, LASHLANG_VM_ABI_VERSION, LashlangArtifactStore, ModuleArtifact,
-    ModuleArtifactError, ModuleExports, ModuleRef, ProcessRef, RequiredSurfaceRef,
-    SurfaceRequirements, canonical_program_ir, global_in_memory_lashlang_artifact_store,
-    surface_requirements_for_program,
+    ArtifactStoreError, ContentHash, DurabilityTier, InMemoryLashlangArtifactStore,
+    LASHLANG_COMPILER_VERSION, LASHLANG_SEMANTIC_HASH_VERSION, LASHLANG_VM_ABI_VERSION,
+    LashlangArtifactStore, ModuleArtifact, ModuleArtifactError, ModuleExports, ModuleRef,
+    ProcessRef, RequiredSurfaceRef, SurfaceRequirements, canonical_program_ir,
+    global_in_memory_lashlang_artifact_store, surface_requirements_for_program,
 };
 pub use ast::{
     AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ProcessDecl, ProcessParam,

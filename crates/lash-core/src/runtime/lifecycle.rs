@@ -20,38 +20,49 @@ impl LashRuntime {
         if state.session_id.is_empty() {
             state.session_id = uuid::Uuid::new_v4().to_string();
         }
+        // Provider configuration is validated lazily, not at construction: a
+        // runtime rebuilt only to run a tool/lashlang process makes no LLM call
+        // and needs no provider, and an unconfigured provider used for a real
+        // turn fails clearly at the call site (the default `ProviderHandle`
+        // `complete` returns "no provider configured"). Rejecting unconfigured
+        // here breaks durable-worker recovery of non-LLM processes.
+        let live_provider = policy.provider.clone();
         // Defaulted state (e.g. `RuntimeSessionState::default()` used
         // by fresh-session constructors) carries an unconfigured policy.
         // Fill it in from the caller's policy so tests and hosts that
         // pass a real policy alongside default state don't trip the
         // explicit model-spec guard below.
-        let state_policy_was_unconfigured = state.policy.provider.kind() == "unconfigured";
+        let state_policy_was_unconfigured = state.policy.recorded_provider_id() == "unconfigured"
+            && state.policy.model.id.trim().is_empty();
         if state_policy_was_unconfigured {
             state.policy = policy.clone();
         }
         state.ensure_agent_frame_initialized();
-        if policy.provider.kind() != "unconfigured"
-            && let Some(frame) = state.current_agent_frame_mut()
-            && frame.assignment.policy.provider.kind() == "unconfigured"
+        let state_policy = state.policy.clone();
+        if let Some(frame) = state.current_agent_frame_mut()
+            && frame.assignment.policy.recorded_provider_id() == "unconfigured"
+            && frame.assignment.policy.model.id.trim().is_empty()
         {
-            frame.assignment.policy = policy.clone();
+            frame.assignment.policy = state_policy;
         }
+        state.rebind_provider(&live_provider)?;
         state.policy = state.effective_policy().clone();
         state.protocol_turn_options = state.effective_protocol_turn_options().clone();
         normalize_session_graph(&mut state);
+        let policy = state.effective_policy().clone();
         if policy.model.id.trim().is_empty() {
             return Err(SessionError::Protocol(
                 "session policy missing model spec; hosts must supply explicit model metadata"
                     .to_string(),
             ));
         }
+        let mut host = host;
         // When a persistent backend is wired in, wrap the attachment
         // store so every `put` records a write-ahead intent row first.
         // Crashes between put and the next turn commit then surface as
         // uncommitted manifest rows that GC can reconcile. Ephemeral
         // (no-store) runtimes use the inner store directly — there's
         // nothing to reconcile against.
-        let mut host = host;
         if let Some(store) = services.store.clone() {
             let manifest: Arc<dyn crate::AttachmentManifest> =
                 Arc::new(crate::attachments::PersistenceManifestAdapter(store));
@@ -67,10 +78,17 @@ impl LashRuntime {
             .with_attachment_store(Arc::clone(&host.core.attachment_store))
             .with_lashlang_artifact_store(Arc::clone(&host.core.lashlang_artifact_store));
         let mut session = Session::new(services.clone(), &state.session_id).await?;
-        if let Some(tool_state) = state.tool_state_snapshot.clone()
-            && let Err(err) = session.plugins().tool_registry().apply_state(tool_state)
-        {
-            tracing::warn!("failed to restore tool state from checkpoint: {err}");
+        if let Some(tool_state) = state.tool_state_snapshot.clone() {
+            // Cold rebuild restores the exact persisted tool surface, adopting
+            // the snapshot's generation. `apply_state` (a delta-apply that
+            // requires `snapshot.generation == base` and bumps) would reject a
+            // session whose surface reached generation ≥ 2 onto a fresh base-1
+            // registry — the worker-rebuild / restart divergence.
+            session
+                .plugins()
+                .tool_registry()
+                .restore_state(tool_state)
+                .map_err(|err| SessionError::Protocol(err.to_string()))?;
         }
         session.refresh_tool_surface().await?;
         if let Some(snapshot) = state.plugin_snapshot.clone() {
@@ -228,6 +246,9 @@ impl LashRuntime {
             }
         };
         runtime.residency = env.residency;
+        // Thread the host's process-work poke onto this session's host so the
+        // process control seam can wake the runner after a successful start.
+        runtime.host.process_work_poke = env.process_work_poke.clone();
         Ok(runtime)
     }
 

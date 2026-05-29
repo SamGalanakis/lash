@@ -108,7 +108,12 @@ impl RuntimeTurnDriver<'_> {
                     self.host.core.attachment_store.as_ref(),
                 )
                 .map_err(|err| {
-                    RuntimeError::new(RuntimeErrorCode::DurableAttachmentStoreRequired, err)
+                    RuntimeError::new(
+                        RuntimeErrorCode::DurableSubstrateRequired {
+                            facet: crate::DurableSubstrateFacet::AttachmentStore,
+                        },
+                        err,
+                    )
                 })?;
             send_queued_work_started_event(
                 event_tx,

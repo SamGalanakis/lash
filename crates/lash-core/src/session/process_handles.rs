@@ -78,7 +78,6 @@ impl RuntimeExecutionContext<'_> {
                 &self.session_id,
                 registration,
                 crate::ProcessStartOptions::new()
-                    .with_wake_session_id(self.session_id.clone())
                     .with_descriptor(ProcessHandleDescriptor::new(
                         Some("tool"),
                         Some(tool_name.clone()),

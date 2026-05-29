@@ -394,7 +394,7 @@ pub(crate) async fn run_app(
                                 .set_persisted(lash_core::RuntimeSessionState::from_state(
                                     cleared_session_state(preserved_policy),
                                 ))
-                                .await;
+                                .await?;
                         }
                         history.clear();
                         turn_counter = 0;

@@ -36,7 +36,7 @@ impl CurrentSessionCapability {
         };
 
         let mut state = if usage.persist_to_store {
-            self.current_snapshot_for_store_write().await
+            self.current_snapshot_for_store_write().await?
         } else {
             let mut state = self.snapshot.to_snapshot();
             super::normalize_session_graph(&mut state);

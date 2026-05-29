@@ -49,6 +49,7 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .advanced()
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
@@ -137,6 +138,7 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
     let core = LashCore::standard()
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
         .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .advanced()
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;

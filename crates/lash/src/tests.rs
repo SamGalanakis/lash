@@ -39,7 +39,7 @@ impl SnapshotStore {
     fn with_state(state: RuntimeSessionState) -> Self {
         let turn_state = state.turn_state();
         let config = lash_core::PersistedSessionConfig {
-            provider_id: state.policy.provider.kind().to_string(),
+            provider_id: state.policy.recorded_provider_id().to_string(),
             model: state.policy.model.clone(),
         };
         Self {
@@ -67,6 +67,15 @@ impl SnapshotStore {
 
     fn scopes(&self) -> Vec<lash_core::SessionReadScope> {
         self.scopes.lock().expect("snapshot scopes lock").clone()
+    }
+
+    fn set_head_provider_id(&self, provider_id: impl Into<String>) {
+        let mut read = self.read.lock().expect("snapshot store lock");
+        let Some(read) = read.as_mut() else {
+            panic!("snapshot store has no session head");
+        };
+        read.config.provider_id = provider_id.into();
+        read.head_revision += 1;
     }
 
     fn ensure_lease(
@@ -1088,39 +1097,6 @@ fn checkpoint_gated_provider(
         .into_handle()
 }
 
-struct CheckpointGatedProviderFactory;
-
-impl lash_core::provider::ProviderFactory for CheckpointGatedProviderFactory {
-    fn kind(&self) -> &'static str {
-        "checkpoint-gated"
-    }
-
-    fn deserialize(
-        &self,
-        _config: serde_json::Value,
-    ) -> std::result::Result<lash_core::provider::ProviderComponents, String> {
-        let provider = crate::testing::TestProvider::builder()
-            .kind("checkpoint-gated")
-            .complete(|request| async move {
-                Ok(text_response(&format!(
-                    "after {}",
-                    last_user_text(&request)
-                )))
-            })
-            .build();
-        let model_policy: Arc<dyn lash_core::provider::ProviderModelPolicy> =
-            Arc::new(provider.clone());
-        Ok(lash_core::provider::ProviderComponents::new(
-            Box::new(provider),
-            model_policy,
-        ))
-    }
-}
-
-fn register_checkpoint_gated_provider_factory() {
-    lash_core::provider::register_provider_factory(Arc::new(CheckpointGatedProviderFactory));
-}
-
 fn standard_core() -> LashCore {
     LashCore::standard()
         .provider(mock_provider())
@@ -1153,4 +1129,5 @@ fn text_message(role: lash_core::MessageRole, text: &str) -> lash_core::Message 
 mod control_admin;
 mod core_session_builder;
 mod plugin_stack;
+mod rebuild_conformance;
 mod turn_streaming;

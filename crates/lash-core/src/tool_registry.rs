@@ -485,6 +485,35 @@ impl ToolRegistry {
         Ok(state.generation)
     }
 
+    /// Restore a persisted [`ToolState`] snapshot onto a freshly-built registry,
+    /// adopting the snapshot's generation verbatim.
+    ///
+    /// Unlike [`apply_state`](Self::apply_state) — which applies an incremental
+    /// *delta* expected at the current generation and bumps it by one — a
+    /// restore reconstructs the exact persisted state regardless of the fresh
+    /// registry's base generation, and does **not** bump. This is idempotent: a
+    /// snapshot exported at generation `G` restores to generation `G`, so a
+    /// re-export round-trips. Cold rebuilds (the durable process worker, session
+    /// resume) restore a session whose tool surface reached generation `G ≥ 2`
+    /// onto a base registry at generation 1 — `apply_state` would reject that
+    /// (`expected G, actual 1`); `restore_state` adopts `G`. Entries are still
+    /// rebound to the live sources, so source identity is reconnected.
+    pub fn restore_state(&self, snapshot: ToolState) -> Result<u64, ReconfigureError> {
+        validate_unique_manifest_entries(snapshot.entries().values())?;
+        let rebound_tools = {
+            let sources = self.sources.read().expect("tool source lock poisoned");
+            rebind_tool_state_entries(snapshot.entries(), &sources)?
+        };
+
+        let mut state = self
+            .state
+            .write()
+            .expect("tool registry state lock poisoned");
+        state.tools = rebound_tools;
+        state.generation = snapshot.generation();
+        Ok(state.generation)
+    }
+
     pub fn add_tool_provider(
         &self,
         provider: Arc<dyn ToolProvider>,

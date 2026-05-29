@@ -18,7 +18,6 @@ use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
 use super::openai_compat::OpenAiCompatBenchServer;
 use super::providers::{
     BenchmarkEchoTool, BenchmarkLargeToolSurface, benchmark_provider, benchmark_stream_profile,
-    register_benchmark_provider_factory,
 };
 use super::scenarios::RuntimePerfScenario;
 use super::store::{RuntimePerfStore, RuntimePerfStoreFactory};
@@ -400,7 +399,6 @@ pub(crate) async fn build_runtime_with_store(
     scenario: RuntimePerfScenario,
     store: Option<Arc<RuntimePerfStore>>,
 ) -> anyhow::Result<BenchmarkRuntime> {
-    register_benchmark_provider_factory();
     let execution_mode = scenario.execution_mode();
     let standard_context_approach = scenario.standard_context_approach();
     let openai_compat_server = if matches!(scenario, RuntimePerfScenario::OpenAiCompatStream) {
@@ -451,6 +449,7 @@ pub(crate) async fn build_runtime_with_store(
         .default_mode(mode_id.clone())
         .provider(provider)
         .model(benchmark_model_spec())
+        .in_memory_stores()
         .process_registry(Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::memory()
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
@@ -491,7 +490,6 @@ pub(crate) async fn build_runtime_with_sqlite_store(
     scenario: RuntimePerfScenario,
     root: PathBuf,
 ) -> anyhow::Result<BenchmarkRuntime> {
-    register_benchmark_provider_factory();
     let mode_id = scenario.execution_mode();
     let provider = benchmark_provider(scenario).into_handle();
     let mut plugin_stack = standard_tool_stack(StandardToolStackOptions {
@@ -511,6 +509,7 @@ pub(crate) async fn build_runtime_with_sqlite_store(
         .default_mode(mode_id.clone())
         .provider(provider)
         .model(benchmark_model_spec())
+        .in_memory_stores()
         .process_registry(Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,

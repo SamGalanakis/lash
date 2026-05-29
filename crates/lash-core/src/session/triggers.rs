@@ -76,7 +76,6 @@ pub(crate) async fn emit_host_event(
                 session_id,
                 registration,
                 crate::ProcessStartOptions::new()
-                    .with_wake_session_id(session_id.to_string())
                     .with_descriptor(crate::ProcessHandleDescriptor::new(
                         Some("lashlang"),
                         Some(route.process_name.as_str()),

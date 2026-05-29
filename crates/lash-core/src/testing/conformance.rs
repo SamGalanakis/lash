@@ -21,9 +21,9 @@ use crate::{
 };
 use crate::{
     LashSchema, ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventSemanticsSpec,
-    ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessRegistration, ProcessRegistry,
-    ProcessScope, ProcessTerminalState, ProcessValueSelector, ProcessWakeDedupeKey,
-    ProcessWakeSpec,
+    ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessLeaseCompletion,
+    ProcessRegistration, ProcessRegistry, ProcessScope, ProcessTerminalState, ProcessValueSelector,
+    ProcessWakeDedupeKey, ProcessWakeSpec,
 };
 
 /// Run the full [`ProcessRegistry`] conformance suite against the backend
@@ -41,6 +41,12 @@ where
     multiple_sessions_can_hold_grants(make()).await;
     processes_can_exist_with_zero_grants(make()).await;
     delete_session_revokes_handles_by_session(make()).await;
+    list_non_terminal_excludes_terminal_processes(make()).await;
+    active_process_lease_fences_competing_owner(make()).await;
+    superseded_process_lease_cannot_renew(make()).await;
+    renewed_process_lease_survives_original_expiry(make()).await;
+    completed_lease_releases_and_reclaim_bumps_fencing(make()).await;
+    stale_lease_completion_cannot_release_live_lease(make()).await;
 }
 
 fn registration(id: &str) -> ProcessRegistration {
@@ -502,6 +508,166 @@ async fn delete_session_revokes_handles_by_session(registry: Arc<dyn ProcessRegi
             .len(),
         1
     );
+}
+
+async fn list_non_terminal_excludes_terminal_processes(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-live"))
+        .await
+        .expect("register live");
+    registry
+        .register_process(registration("proc-done"))
+        .await
+        .expect("register done");
+    registry
+        .complete_process(
+            "proc-done",
+            ProcessAwaitOutput::Success {
+                value: serde_json::Value::Null,
+                control: None,
+            },
+        )
+        .await
+        .expect("complete done");
+
+    let ids = registry
+        .list_non_terminal()
+        .await
+        .expect("list non-terminal")
+        .into_iter()
+        .map(|record| record.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec!["proc-live".to_string()],
+        "list_non_terminal must exclude terminal processes and be process_id ordered"
+    );
+}
+
+async fn active_process_lease_fences_competing_owner(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-lease-active"))
+        .await
+        .expect("register");
+    registry
+        .claim_process_lease("proc-lease-active", "owner-a", 60_000)
+        .await
+        .expect("first claim");
+    let conflict = registry
+        .claim_process_lease("proc-lease-active", "owner-b", 60_000)
+        .await;
+    assert!(
+        conflict
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains("already leased")),
+        "an active lease must fence a competing owner, got {conflict:?}"
+    );
+    // The original owner may re-claim its own live lease (idempotent ownership).
+    registry
+        .claim_process_lease("proc-lease-active", "owner-a", 60_000)
+        .await
+        .expect("owner re-claims its own live lease");
+}
+
+async fn superseded_process_lease_cannot_renew(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-lease-superseded"))
+        .await
+        .expect("register");
+    let old = registry
+        .claim_process_lease("proc-lease-superseded", "owner-a", 0)
+        .await
+        .expect("old lease");
+    registry
+        .claim_process_lease("proc-lease-superseded", "owner-b", 60_000)
+        .await
+        .expect("new owner claims the expired lease");
+    let stale = registry.renew_process_lease(&old, 60_000).await;
+    assert!(
+        stale
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains("missing or expired")),
+        "a superseded lease must not renew, got {stale:?}"
+    );
+}
+
+async fn renewed_process_lease_survives_original_expiry(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-lease-renew"))
+        .await
+        .expect("register");
+    let lease = registry
+        .claim_process_lease("proc-lease-renew", "owner-a", 20)
+        .await
+        .expect("lease");
+    let renewed = registry
+        .renew_process_lease(&lease, 60_000)
+        .await
+        .expect("renew");
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    registry
+        .renew_process_lease(&renewed, 60_000)
+        .await
+        .expect("a renewed lease survives the original TTL");
+}
+
+async fn completed_lease_releases_and_reclaim_bumps_fencing(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-lease-complete"))
+        .await
+        .expect("register");
+    let first = registry
+        .claim_process_lease("proc-lease-complete", "owner-a", 60_000)
+        .await
+        .expect("first claim");
+    registry
+        .complete_process_lease(&ProcessLeaseCompletion::from_lease(&first))
+        .await
+        .expect("complete lease");
+    let second = registry
+        .claim_process_lease("proc-lease-complete", "owner-b", 60_000)
+        .await
+        .expect("a new owner can claim a released lease");
+    assert!(
+        second.fencing_token > first.fencing_token,
+        "a re-claim must bump the fencing token (was {}, now {})",
+        first.fencing_token,
+        second.fencing_token
+    );
+}
+
+async fn stale_lease_completion_cannot_release_live_lease(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-lease-stale-complete"))
+        .await
+        .expect("register");
+    let old = registry
+        .claim_process_lease("proc-lease-stale-complete", "owner-a", 0)
+        .await
+        .expect("old lease");
+    let current = registry
+        .claim_process_lease("proc-lease-stale-complete", "owner-b", 60_000)
+        .await
+        .expect("new live lease");
+    // A stale completion (old token) must not release the live lease.
+    registry
+        .complete_process_lease(&ProcessLeaseCompletion::from_lease(&old))
+        .await
+        .expect("stale completion is ignored");
+    let conflict = registry
+        .claim_process_lease("proc-lease-stale-complete", "owner-c", 60_000)
+        .await;
+    assert!(
+        conflict
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains("already leased")),
+        "a stale completion must not release the live lease, got {conflict:?}"
+    );
+    // The live owner can still renew.
+    registry
+        .renew_process_lease(&current, 60_000)
+        .await
+        .expect("the live owner can still renew");
 }
 
 /// Run the [`RuntimePersistence`] durability conformance suite against the

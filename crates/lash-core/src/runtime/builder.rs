@@ -45,7 +45,10 @@ impl Default for EmbeddedRuntimeBuilder {
             policy: None,
             initial_state: None,
             plugin_source: PluginSource::Host(PluginHost::empty()),
-            core: RuntimeCoreConfig::default(),
+            // `RuntimeCoreConfig` has no `Default`; start from an explicitly
+            // named in-memory core. Callers that need durable stores override
+            // it with `with_runtime_core`.
+            core: RuntimeCoreConfig::in_memory(),
             session_store_factory: None,
             store: None,
             process_registry: None,
@@ -213,7 +216,13 @@ impl EmbeddedRuntimeBuilder {
                     state.session_id = session_id.clone();
                 }
                 if let Some(policy) = &self.policy {
-                    state.policy = policy.clone();
+                    let recorded_provider_id = state.policy.recorded_provider_id().to_string();
+                    state.policy.provider = policy.provider.clone();
+                    state.policy.provider_id = recorded_provider_id;
+                    state.policy.session_id = policy.session_id.clone();
+                    if state.policy.model.id.trim().is_empty() {
+                        state.policy.model = policy.model.clone();
+                    }
                 }
                 state
             });
@@ -232,7 +241,13 @@ impl EmbeddedRuntimeBuilder {
                     )));
                 }
                 if let Some(policy) = &self.policy {
-                    state.policy = policy.clone();
+                    let recorded_provider_id = state.policy.recorded_provider_id().to_string();
+                    state.policy.provider = policy.provider.clone();
+                    state.policy.provider_id = recorded_provider_id;
+                    state.policy.session_id = policy.session_id.clone();
+                    if state.policy.model.id.trim().is_empty() {
+                        state.policy.model = policy.model.clone();
+                    }
                 }
                 return Ok(state);
             }

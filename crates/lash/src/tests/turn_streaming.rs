@@ -154,7 +154,6 @@ async fn control_turn_accepts_prebuilt_turn_input() -> Result<()> {
 
 #[tokio::test]
 async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
-    register_checkpoint_gated_provider_factory();
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let core = LashCore::standard()
@@ -342,6 +341,7 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
         .provider(tool_roundtrip_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("fanout-tool-events").open().await?;
@@ -413,6 +413,7 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
         .provider(tool_roundtrip_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("tool-events").open().await?;
@@ -464,6 +465,7 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
         ]))
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("rlm-live-tool-events").open().await?;
@@ -581,6 +583,10 @@ submit value
         ]))
         .model(mock_model_spec())
         .tools(Arc::new(BlockingAppTools::new(entered_tx, release_rx)))
+        // A started (`start lookup(...)`) process runs in the lease-protected
+        // worker's rebuilt runtime, which needs a session store factory; the
+        // explicit in-memory factory backs ephemeral process execution.
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("rlm-process-control-tool").open().await?;

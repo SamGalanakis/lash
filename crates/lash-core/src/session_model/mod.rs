@@ -136,23 +136,36 @@ pub(crate) fn plugin_message_to_message(plugin_message: &PluginMessage) -> Messa
 
 /// Resolved session policy for a running session.
 ///
-/// `provider` is a [`ProviderHandle`] — serializes through
-/// [`crate::provider::ProviderSpec`], rebuilt via the global
-/// [`crate::provider::ProviderRegistry`] on load. Hosts register the
-/// concrete provider types they support at startup.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// `provider` is the live transport handle supplied by the host. Serde paths
+/// persist only `provider_id`; decoded state carries an unconfigured placeholder
+/// until the session-open path binds it to the host-supplied live handle.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionPolicy {
     pub model: ModelSpec,
     pub provider: ProviderHandle,
+    #[doc(hidden)]
+    pub provider_id: String,
     pub session_id: Option<String>,
-    #[serde(default)]
     pub autonomous: bool,
     pub max_turns: Option<usize>,
-    #[serde(default, skip_serializing_if = "crate::PromptLayer::is_empty")]
     pub prompt: crate::PromptLayer,
 }
 
 impl SessionPolicy {
+    pub fn install_provider(&mut self, provider: ProviderHandle) {
+        self.provider_id = provider.kind().to_string();
+        self.provider = provider;
+    }
+
+    pub fn recorded_provider_id(&self) -> &str {
+        let configured = self.provider_id.trim();
+        if configured.is_empty() {
+            self.provider.kind()
+        } else {
+            configured
+        }
+    }
+
     pub fn model_id(&self) -> &str {
         &self.model.id
     }
@@ -163,6 +176,74 @@ impl SessionPolicy {
 
     pub fn context_window_tokens(&self) -> usize {
         self.model.context_window_tokens()
+    }
+}
+
+impl serde::Serialize for SessionPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut fields = 5;
+        if !self.prompt.is_empty() {
+            fields += 1;
+        }
+        let mut state = serializer.serialize_struct("SessionPolicy", fields)?;
+        state.serialize_field("model", &self.model)?;
+        state.serialize_field("provider_id", self.recorded_provider_id())?;
+        state.serialize_field("session_id", &self.session_id)?;
+        state.serialize_field("autonomous", &self.autonomous)?;
+        state.serialize_field("max_turns", &self.max_turns)?;
+        if !self.prompt.is_empty() {
+            state.serialize_field("prompt", &self.prompt)?;
+        }
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SessionPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(default)]
+            model: ModelSpec,
+            #[serde(default)]
+            provider_id: String,
+            #[serde(default)]
+            session_id: Option<String>,
+            #[serde(default)]
+            autonomous: bool,
+            #[serde(default)]
+            max_turns: Option<usize>,
+            #[serde(default)]
+            prompt: crate::PromptLayer,
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value
+            .as_object()
+            .is_some_and(|object| object.contains_key("provider"))
+        {
+            return Err(serde::de::Error::custom(
+                "legacy serialized provider config is not supported in session state; persist provider_id only",
+            ));
+        }
+        let wire = Wire::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            model: wire.model,
+            provider: ProviderHandle::default(),
+            provider_id: wire.provider_id,
+            session_id: wire.session_id,
+            autonomous: wire.autonomous,
+            max_turns: wire.max_turns,
+            prompt: wire.prompt,
+        })
     }
 }
 
@@ -234,7 +315,7 @@ impl SessionSpec {
     pub fn resolve_against(&self, base: &SessionPolicy) -> SessionPolicy {
         let mut policy = base.clone();
         if let Some(provider) = self.provider.as_ref() {
-            policy.provider = provider.clone();
+            policy.install_provider(provider.clone());
         }
         if let Some(model) = self.model.as_ref() {
             policy.model = model.clone();
@@ -291,5 +372,22 @@ mod tests {
         let serialized = serde_json::to_value(event).expect("serialize");
         assert_eq!(serialized["plugin_id"], "test_protocol");
         assert!(serialized.get("payload").is_some());
+    }
+
+    #[test]
+    fn session_policy_rejects_legacy_provider_config() {
+        let err = serde_json::from_value::<SessionPolicy>(serde_json::json!({
+            "model": {},
+            "provider": {
+                "type": "openai",
+                "api_key": "must-not-load"
+            }
+        }))
+        .expect_err("legacy provider config must fail");
+
+        assert!(
+            err.to_string()
+                .contains("legacy serialized provider config is not supported")
+        );
     }
 }

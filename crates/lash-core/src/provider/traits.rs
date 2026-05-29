@@ -1,10 +1,8 @@
 use super::support::*;
 use crate::LlmTerminalReason;
 
-/// A configured LLM backend: its identity and serialized config, its
-/// generation options, and the request transport. Every provider is a
-/// single type — there is no provider whose persisted state differs from
-/// its transport — so configuration and completion live on one trait.
+/// A configured LLM backend: its identity, host-config serialization, its
+/// generation options, and the request transport.
 #[async_trait]
 pub trait Provider: Send + Sync + std::fmt::Debug {
     fn kind(&self) -> &'static str;

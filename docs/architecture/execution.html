@@ -37,7 +37,7 @@ flowchart TD
   Export -->|yes| ExportRun["lash-export<br/>session DB + trace JSONL"]
   Export -->|no| Bootstrap["bootstrap::run"]
   Bootstrap --> SessionBootstrap["SessionBootstrap<br/>new/resume/fork"]
-  Bootstrap --> Providers["lash-providers-builtin::register_all"]
+  Bootstrap --> Providers["CLI provider spec materialization"]
   Bootstrap --> Plugins["PluginHost + plugin factories"]
   Bootstrap --> Dynamic["DynamicToolProvider + MCP"]
   Bootstrap --> Runtime["CliSessionOpener -> LashSession"]

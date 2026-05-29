@@ -1,16 +1,21 @@
 use super::*;
 
 impl CurrentSessionCapability {
-    pub(in crate::runtime) async fn current_snapshot_for_store_write(&self) -> SessionSnapshot {
+    pub(in crate::runtime) async fn current_snapshot_for_store_write(
+        &self,
+    ) -> Result<SessionSnapshot, crate::PluginError> {
         let mut state = self.snapshot.to_snapshot();
-        if let Some(store) = &self.store
-            && let Err(err) =
-                crate::store::refresh_persisted_session_state(store.as_ref(), &mut state).await
-        {
-            tracing::warn!("failed to refresh persisted session state: {err}");
+        if let Some(store) = &self.store {
+            crate::store::refresh_persisted_session_state(store.as_ref(), &mut state)
+                .await
+                .map_err(|err| {
+                    crate::PluginError::Session(format!(
+                        "failed to refresh persisted session state: {err}"
+                    ))
+                })?;
         }
         super::normalize_session_graph(&mut state);
-        state
+        Ok(state)
     }
 
     pub(in crate::runtime::session_manager) async fn snapshot_by_id(

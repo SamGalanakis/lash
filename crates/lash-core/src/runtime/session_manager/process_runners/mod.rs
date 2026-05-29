@@ -211,7 +211,7 @@ mod tests {
         process_worker_with_core(
             registry,
             factory,
-            crate::RuntimeCoreConfig::default().with_host_profile_id("worker-profile"),
+            crate::RuntimeCoreConfig::in_memory().with_host_profile_id("worker-profile"),
         )
     }
 
@@ -248,6 +248,44 @@ mod tests {
         }
     }
 
+    /// A `SessionStoreFactory` that hands every rebuilt worker runtime the same
+    /// shared store, so a worker-run process enqueues its wakes into the store
+    /// the test inspects (the inline spawn used the live runtime's own store).
+    struct SharedSessionStoreFactory {
+        store: Arc<RecordingStore>,
+    }
+
+    impl crate::SessionStoreFactory for SharedSessionStoreFactory {
+        fn create_store(
+            &self,
+            _request: &crate::SessionStoreCreateRequest,
+        ) -> Result<Arc<dyn crate::RuntimePersistence>, String> {
+            Ok(Arc::clone(&self.store) as Arc<dyn crate::RuntimePersistence>)
+        }
+
+        fn delete_session(&self, _session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Spawn `count` independent inline [`ProcessWorkRunner`]s over the same
+    /// registry, returning their pokes.
+    ///
+    /// The detached per-start spawn this replaces ran each process in its own
+    /// task, so a parent blocked awaiting a child still let the child run. The
+    /// runner's per-drive sweep is sequential, so a single runner blocked on a
+    /// nested-process await would starve the child; running more than one
+    /// lease-fenced runner restores that concurrency without double-execution
+    /// (a process already leased by one runner is skipped by the others).
+    fn spawn_inline_process_runners(
+        worker: &crate::DurableProcessWorker,
+        count: usize,
+    ) -> Vec<crate::ProcessWorkPoke> {
+        (0..count)
+            .map(|_| crate::ProcessWorkRunner::inline(worker.clone()).spawn())
+            .collect()
+    }
+
     #[test]
     fn lashlang_process_registration_serializes_refs_only() {
         let registration = lashlang_process_registration(
@@ -276,7 +314,7 @@ mod tests {
         let worker = process_worker_with_core(
             Arc::clone(&registry_dyn),
             factory as Arc<dyn crate::SessionStoreFactory>,
-            crate::RuntimeCoreConfig::default()
+            crate::RuntimeCoreConfig::in_memory()
                 .with_host_profile_id("worker-profile")
                 .with_lashlang_artifact_store(empty_artifact_store),
         );
@@ -339,6 +377,202 @@ mod tests {
         assert!(
             err.to_string().contains("missing a structured owner scope"),
             "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_process_worker_rejects_empty_process_id_on_execution() {
+        // Process execution identity is the persisted process_id; a retry/
+        // recovery that presents an empty (fresh, non-persisted) id has lost its
+        // idempotency anchor and must fail loudly, mirroring the empty-turn-id
+        // rejection in `RuntimeEffectControllerScope::new`.
+        let registry = Arc::new(crate::TestLocalProcessRegistry::default());
+        let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
+        let factory =
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
+        let worker = process_worker(
+            Arc::clone(&registry_dyn),
+            factory as Arc<dyn crate::SessionStoreFactory>,
+        );
+        let registration = worker_registration(crate::ProcessRegistration::new(
+            "",
+            crate::ProcessInput::ToolCall {
+                call: crate::PreparedToolCall::from_parts(
+                    "tool-call-empty-id",
+                    "process_echo",
+                    serde_json::json!({ "value": "tool" }),
+                    None,
+                    serde_json::Value::Null,
+                ),
+            },
+        ));
+
+        let err = worker
+            .run_process(
+                registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("worker should reject an empty/fresh process id on execution");
+
+        assert!(
+            err.to_string()
+                .contains(crate::RuntimeErrorCode::MissingProcessExecutionId.as_str()),
+            "{err}"
+        );
+    }
+
+    /// Echo tool that also counts its invocations, so a test can witness how
+    /// many times a process body actually ran (exactly-once vs. double-run).
+    struct CountingEchoTool {
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ToolProvider for CountingEchoTool {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            vec![process_echo_tool_definition().manifest()]
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            (name == "process_echo").then(|| Arc::new(process_echo_tool_definition().contract()))
+        }
+
+        async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+            self.runs
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let value = call
+                .args
+                .get("value")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            crate::ToolResult::ok(serde_json::json!({ "payload": format!("raw:{value}") }))
+        }
+    }
+
+    /// A worker whose only tool counts its runs into the shared counter. Two
+    /// such workers over one registry are distinct owners sharing one witness.
+    fn counting_worker(
+        registry: Arc<dyn crate::ProcessRegistry>,
+        factory: Arc<dyn crate::SessionStoreFactory>,
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> crate::DurableProcessWorker {
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(CountingEchoTool { runs });
+        let plugin_host =
+            crate::PluginHost::new(vec![Arc::new(crate::plugin::StaticPluginFactory::new(
+                "worker-counting-tools",
+                crate::PluginSpec::new().with_tool_provider(tools),
+            ))]);
+        crate::DurableProcessWorker::new(
+            crate::DurableProcessWorkerConfig::new(
+                Arc::new(plugin_host),
+                crate::RuntimeCoreConfig::in_memory().with_host_profile_id("worker-profile"),
+                factory,
+                registry,
+            )
+            .with_session_policy(standard_test_policy()),
+        )
+    }
+
+    /// A trigger/cron-shaped registry row: a tool process written straight to
+    /// the registry with no turn lease and no manager-driven start.
+    fn counting_registration(process_id: &str) -> crate::ProcessRegistration {
+        worker_registration(crate::ProcessRegistration::new(
+            process_id,
+            crate::ProcessInput::ToolCall {
+                call: crate::PreparedToolCall::from_parts(
+                    process_id,
+                    "process_echo",
+                    serde_json::json!({ "value": "out-of-turn" }),
+                    None,
+                    serde_json::Value::Null,
+                ),
+            },
+        ))
+    }
+
+    #[tokio::test]
+    async fn process_work_runner_drives_directly_registered_process_to_terminal_on_poke() {
+        // Out-of-turn execution: a process is registered straight into the
+        // registry (the trigger/cron shape — no turn, no manager) and reaches
+        // terminal promptly because the control seam's poke wakes the runner,
+        // not because a separate boot-time recovery sweep eventually finds it.
+        let registry: Arc<dyn crate::ProcessRegistry> =
+            Arc::new(crate::TestLocalProcessRegistry::default());
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker = counting_worker(
+            Arc::clone(&registry),
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
+            Arc::clone(&runs),
+        );
+        let poke = crate::ProcessWorkRunner::inline(worker).spawn();
+
+        registry
+            .register_process(counting_registration("proc-poke"))
+            .await
+            .expect("register out-of-turn process");
+        poke.poke();
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            registry.await_process("proc-poke"),
+        )
+        .await
+        .expect("process reaches terminal promptly via the poke")
+        .expect("await terminal output");
+        assert!(matches!(output, crate::ProcessAwaitOutput::Success { .. }));
+        assert_eq!(
+            runs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the lease-protected runner runs the process exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_workers_run_a_directly_registered_process_exactly_once() {
+        // Two independent workers (two lease owners) over the SAME registry, each
+        // with its own runtime but a shared run counter. The `ProcessLease`
+        // single-owner contract must fence them: exactly one claims and runs; the
+        // other skips on claim conflict (or finds the row already terminal). This
+        // is the no-double-execution guarantee at the worker layer — the registry
+        // lease primitive itself is covered by the conformance suite
+        // (`active_process_lease_fences_competing_owner`).
+        let registry: Arc<dyn crate::ProcessRegistry> =
+            Arc::new(crate::TestLocalProcessRegistry::default());
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_a = counting_worker(
+            Arc::clone(&registry),
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
+            Arc::clone(&runs),
+        );
+        let worker_b = counting_worker(
+            Arc::clone(&registry),
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
+            Arc::clone(&runs),
+        );
+
+        registry
+            .register_process(counting_registration("proc-race"))
+            .await
+            .expect("register out-of-turn process");
+
+        let (a, b) = tokio::join!(
+            worker_a.drive_pending_processes(),
+            worker_b.drive_pending_processes(),
+        );
+        a.expect("worker a drive");
+        b.expect("worker b drive");
+
+        let output = registry
+            .await_process("proc-race")
+            .await
+            .expect("await terminal output");
+        assert!(matches!(output, crate::ProcessAwaitOutput::Success { .. }));
+        assert_eq!(
+            runs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the process must run exactly once across competing lease owners"
         );
     }
 
@@ -511,22 +745,25 @@ mod tests {
     async fn lashlang_process_runs_with_input_events_wake_and_receiver_operation() {
         let (runtime, store) =
             runtime_with_processes_and_tools_and_store(Vec::new(), Arc::new(ProcessEchoTool)).await;
+        let registry = runtime
+            .host
+            .process_registry
+            .as_ref()
+            .expect("process registry")
+            .clone();
+        // The runner is the sole executor now that the inline per-start spawn is
+        // gone. Run its worker against the live runtime's own store so a
+        // worker-run process enqueues its wake into the store this test inspects.
+        let worker = process_worker_with_core(
+            Arc::clone(&registry),
+            Arc::new(SharedSessionStoreFactory {
+                store: Arc::clone(&store),
+            }),
+            crate::RuntimeCoreConfig::in_memory(),
+        );
+        let poke = spawn_inline_process_runners(&worker, 1);
         let manager = RuntimeSessionManager::new(&runtime, true, None, None)
             .expect("runtime session manager");
-        let wake_target = manager
-            .managed
-            .create_session(
-                &manager.current,
-                &manager.usage,
-                crate::SessionCreateRequest::root(
-                    crate::SessionStartPoint::Empty,
-                    crate::PluginOptions::default(),
-                )
-                .with_session_id("wake-target")
-                .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
-            )
-            .await
-            .expect("wake target session");
         let mut input = serde_json::Map::new();
         input.insert("root".to_string(), serde_json::json!("seed"));
         input.insert(
@@ -555,19 +792,16 @@ mod tests {
             .start_process(
                 &manager.current,
                 &manager.managed,
-                Arc::new(manager.clone()),
                 "root",
                 registration,
-                crate::ProcessStartOptions::new()
-                    .with_wake_session_id(wake_target.session_id.clone())
-                    .with_descriptor(crate::ProcessHandleDescriptor::new(
-                        Some("lashlang"),
-                        Some("block"),
-                    )),
+                crate::ProcessStartOptions::new().with_descriptor(
+                    crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("block")),
+                ),
                 crate::ProcessOpScope::new(),
             )
             .await
             .expect("start process");
+        poke[0].poke();
         let output = manager
             .processes
             .await_process(&manager.current, "process-1", crate::ProcessOpScope::new())
@@ -610,12 +844,15 @@ mod tests {
             wake_sequence < completed_sequence,
             "process.wake should be committed before process completion"
         );
-        let queued = crate::store::RuntimePersistence::list_queued_work(
-            store.as_ref(),
-            &wake_target.session_id,
-        )
-        .await
-        .expect("queued wake");
+        // The runner is the sole executor and reconstructs a process's wake
+        // target from its persisted provenance (the creator scope), so a
+        // runner-driven process wakes its creator session `root`. (The registry
+        // record does not persist a start-time custom wake target, so wake
+        // delivery follows provenance, matching the durable recovery path.)
+        let queued =
+            crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+                .await
+                .expect("queued wake");
         assert_eq!(queued.len(), 1);
         assert_eq!(
             queued[0].delivery_policy,
@@ -631,6 +868,22 @@ mod tests {
     #[tokio::test]
     async fn lashlang_process_uses_artifact_refs_for_nested_starts() {
         let runtime = runtime_with_processes(Vec::new()).await;
+        let registry = runtime
+            .host
+            .process_registry
+            .as_ref()
+            .expect("process registry")
+            .clone();
+        // The parent process blocks awaiting its nested child, so a single
+        // sequential runner drive would starve the child. Two lease-fenced
+        // runners restore the per-process concurrency the deleted detached spawn
+        // provided without double-running either process.
+        let worker = process_worker_with_core(
+            Arc::clone(&registry),
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
+            crate::RuntimeCoreConfig::in_memory(),
+        );
+        let pokes = spawn_inline_process_runners(&worker, 2);
         let manager = RuntimeSessionManager::new(&runtime, true, None, None)
             .expect("runtime session manager");
         assert!(
@@ -682,7 +935,6 @@ mod tests {
             .start_process(
                 &manager.current,
                 &manager.managed,
-                Arc::new(manager.clone()),
                 "root",
                 registration,
                 crate::ProcessStartOptions::new().with_descriptor(
@@ -692,6 +944,7 @@ mod tests {
             )
             .await
             .expect("start process");
+        pokes[0].poke();
         let output = manager
             .processes
             .await_process(
@@ -722,6 +975,17 @@ mod tests {
             .as_ref()
             .expect("process registry")
             .clone();
+        // The runner is the sole executor; run its worker against the recording
+        // controller so the signaler's sleep effect is observed exactly as the
+        // inline run observed it. Two lease-fenced runners run the target (which
+        // blocks on `wait signal`) and the signaler concurrently.
+        let worker = process_worker_with_core(
+            Arc::clone(&registry),
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
+            crate::RuntimeCoreConfig::in_memory()
+                .with_effect_controller(Arc::new(controller.clone())),
+        );
+        let pokes = spawn_inline_process_runners(&worker, 2);
 
         let target = lashlang_process_registration(
             "signal-target",
@@ -741,7 +1005,6 @@ mod tests {
             .start_process(
                 &manager.current,
                 &manager.managed,
-                Arc::new(manager.clone()),
                 "root",
                 target,
                 crate::ProcessStartOptions::new().with_descriptor(
@@ -751,6 +1014,7 @@ mod tests {
             )
             .await
             .expect("start target");
+        pokes[0].poke();
 
         let mut signaler_args = serde_json::Map::new();
         signaler_args.insert(
@@ -776,7 +1040,6 @@ mod tests {
             .start_process(
                 &manager.current,
                 &manager.managed,
-                Arc::new(manager.clone()),
                 "root",
                 signaler,
                 crate::ProcessStartOptions::new().with_descriptor(
@@ -786,6 +1049,7 @@ mod tests {
             )
             .await
             .expect("start signaler");
+        pokes[0].poke();
 
         let signaler_output = manager
             .processes
@@ -841,6 +1105,18 @@ mod tests {
     #[tokio::test]
     async fn lashlang_process_failure_retains_raw_value() {
         let runtime = runtime_with_processes_and_tools(Vec::new(), Arc::new(ProcessEchoTool)).await;
+        let registry = runtime
+            .host
+            .process_registry
+            .as_ref()
+            .expect("process registry")
+            .clone();
+        let worker = process_worker_with_core(
+            Arc::clone(&registry),
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
+            crate::RuntimeCoreConfig::in_memory(),
+        );
+        let pokes = spawn_inline_process_runners(&worker, 1);
         let manager = RuntimeSessionManager::new(&runtime, true, None, None)
             .expect("runtime session manager");
         let program = ::lashlang::Program::block(vec![::lashlang::Expr::Fail(Box::new(
@@ -857,7 +1133,6 @@ mod tests {
             .start_process(
                 &manager.current,
                 &manager.managed,
-                Arc::new(manager.clone()),
                 "root",
                 registration,
                 crate::ProcessStartOptions::new().with_descriptor(
@@ -867,6 +1142,7 @@ mod tests {
             )
             .await
             .expect("start process");
+        pokes[0].poke();
         let output = manager
             .processes
             .await_process(

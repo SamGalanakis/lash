@@ -693,15 +693,9 @@ fn default_codex_options() -> ProviderOptions {
     }
 }
 
-/// Factory that registers [`CodexProvider`] with lash's global
-/// provider registry.
+/// Factory that materializes [`CodexProvider`] from a host-owned
+/// [`ProviderSpec`](lash_core::ProviderSpec).
 pub struct CodexProviderFactory;
-
-impl CodexProviderFactory {
-    pub fn register() {
-        lash_core::register_provider_factory(std::sync::Arc::new(Self));
-    }
-}
 
 impl ProviderFactory for CodexProviderFactory {
     fn kind(&self) -> &'static str {

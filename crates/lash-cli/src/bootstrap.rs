@@ -274,7 +274,6 @@ fn cli_prompt_config(autonomous: bool, execution_mode: &ModeId) -> PromptLayer {
 }
 
 pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
-    lash_providers_builtin::register_all();
     // Handle --reset before any TUI/provider setup
     if args.reset {
         use std::io::Write;

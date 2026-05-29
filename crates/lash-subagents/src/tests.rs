@@ -1,7 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex, Once};
+use std::sync::Mutex;
 
 use crate::rlm_support::{
     SpawnCreateRequestInput, build_session_policy, build_spawn_create_request,
@@ -24,49 +23,9 @@ fn model_spec(
         .expect("valid model spec")
 }
 
-static SEED_PROBE_FACTORY: Once = Once::new();
-static SEED_PROBE_NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-static SEED_PROBE_STATES: LazyLock<Mutex<BTreeMap<String, Arc<SeedProbeState>>>> =
-    LazyLock::new(|| Mutex::new(BTreeMap::new()));
-
 struct SeedProbeState {
     parent_response: String,
     captured_child_prompt: Arc<Mutex<Option<String>>>,
-}
-
-struct SeedProbeProviderFactory;
-
-impl lash_core::ProviderFactory for SeedProbeProviderFactory {
-    fn kind(&self) -> &'static str {
-        "seed-probe"
-    }
-
-    fn deserialize(
-        &self,
-        config: serde_json::Value,
-    ) -> Result<lash_core::ProviderComponents, String> {
-        let id = config
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "seed-probe provider config missing `id`".to_string())?
-            .to_string();
-        let state = SEED_PROBE_STATES
-            .lock()
-            .expect("seed probe states")
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| format!("unknown seed-probe provider state `{id}`"))?;
-        Ok(seed_probe_provider(id, state)
-            .into_handle()
-            .components()
-            .clone())
-    }
-}
-
-fn ensure_seed_probe_provider_factory() {
-    SEED_PROBE_FACTORY.call_once(|| {
-        lash_core::register_provider_factory(Arc::new(SeedProbeProviderFactory));
-    });
 }
 
 #[test]
@@ -266,7 +225,6 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         ..RuntimeSessionState::default()
     };
 
-    let noop = NoopSubagentSessionConfigurator;
     let request = build_spawn_create_request(SpawnCreateRequestInput {
         registry: &registry,
         parent_session_id: "root",
@@ -277,7 +235,6 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         seed: Default::default(),
         parent_subagent: None,
         caused_by: None,
-        configurator: &noop,
     })
     .await
     .expect("spawn request");
@@ -313,7 +270,6 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         seed: Default::default(),
         parent_subagent: None,
         caused_by: None,
-        configurator: &noop,
     })
     .await
     .expect("structured spawn request");
@@ -471,11 +427,12 @@ submit result
     );
 }
 
-fn seed_probe_provider(id: String, state: Arc<SeedProbeState>) -> lash_core::testing::TestProvider {
-    let config_id = id.clone();
+fn seed_probe_provider(state: Arc<SeedProbeState>) -> lash_core::testing::TestProvider {
+    // The child subagent inherits the parent's live provider handle through the
+    // runtime (deployment-level binding); there is no factory rematerialization,
+    // so this provider needs no serializable config.
     lash_core::testing::TestProvider::builder()
         .kind("seed-probe")
-        .serialize_config(move || json!({ "id": config_id.clone() }))
         .complete(move |request| {
             let state = Arc::clone(&state);
             async move { complete_seed_probe_request(state, request).await }
@@ -516,21 +473,12 @@ async fn run_seed_probe(
     parent_response: &'static str,
     input: TurnInput,
 ) -> (lash_core::TurnOutcome, String) {
-    ensure_seed_probe_provider_factory();
     let captured_child_prompt: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let state = Arc::new(SeedProbeState {
         parent_response: parent_response.to_string(),
         captured_child_prompt: Arc::clone(&captured_child_prompt),
     });
-    let provider_id = format!(
-        "seed-probe-{}",
-        SEED_PROBE_NEXT_ID.fetch_add(1, Ordering::SeqCst)
-    );
-    SEED_PROBE_STATES
-        .lock()
-        .expect("seed probe states")
-        .insert(provider_id.clone(), Arc::clone(&state));
-    let provider = seed_probe_provider(provider_id.clone(), Arc::clone(&state));
+    let provider = seed_probe_provider(Arc::clone(&state));
 
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::default()),
@@ -541,18 +489,19 @@ async fn run_seed_probe(
             ))),
         ))),
     ];
-    let host = PluginHost::new(factories);
-    let process_abilities = host
+    let registry = Arc::new(TestLocalProcessRegistry::default());
+    let host_plugins = PluginHost::new(factories.clone());
+    let process_abilities = host_plugins
         .lashlang_abilities()
         .with_processes()
         .with_process_lifecycle();
-    let plugins = host
+    let plugins = host_plugins
         .with_lashlang_abilities(process_abilities)
         .build_session("root", None)
         .expect("plugin session");
     let host = ProcessRuntimeHost::new(
-        lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
-        Arc::new(TestLocalProcessRegistry::default()),
+        lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        Arc::clone(&registry) as Arc<dyn lash_core::ProcessRegistry>,
     );
     let policy = SessionPolicy {
         provider: provider.into_handle(),
@@ -560,6 +509,25 @@ async fn run_seed_probe(
         max_turns: Some(4),
         ..SessionPolicy::default()
     };
+    // `agents.spawn(...)` starts a SessionTurn (subagent) process that the
+    // lease-protected worker executes — not inline. Spawn inline runners over the
+    // same registry + an explicit in-memory store factory so the subagent runs
+    // and provider re-supply reaches the child. Several lease-fenced runners are
+    // spawned so a parent process that blocks awaiting a nested child (e.g.
+    // `start spawn_child` → `await agents.spawn`) does not deadlock a single
+    // sequential drive (each process is run by exactly one owner via the lease).
+    let worker = lash_core::DurableProcessWorker::new(
+        lash_core::DurableProcessWorkerConfig::from_plugin_factories(
+            factories,
+            RuntimeCoreConfig::in_memory(),
+            Arc::new(lash_core::InMemorySessionStoreFactory::new()),
+            Arc::clone(&registry) as Arc<dyn lash_core::ProcessRegistry>,
+        )
+        .with_session_policy(policy.clone()),
+    );
+    let _pokes: Vec<_> = (0..3)
+        .map(|_| lash_core::ProcessWorkRunner::inline(worker.clone()).spawn())
+        .collect();
     let mut runtime = LashRuntime::from_background_state(
         policy.clone(),
         host,
@@ -583,10 +551,6 @@ async fn run_seed_probe(
         .expect("captured prompt")
         .clone()
         .expect("child prompt was captured");
-    SEED_PROBE_STATES
-        .lock()
-        .expect("seed probe states")
-        .remove(&provider_id);
     (turn.outcome, prompt)
 }
 

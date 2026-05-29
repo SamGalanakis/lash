@@ -70,6 +70,7 @@ fn policy_with_persisted_config(
 ) -> SessionPolicy {
     if let Some(config) = config {
         policy.model = config.model.clone();
+        policy.provider_id = config.provider_id.clone();
     }
     policy.session_id = Some(session_id);
     policy
@@ -289,6 +290,10 @@ impl CliSessionOpener {
             )))
             .plugins(self.plugin_stack.clone())
             .prompt_layer(self.prompt_layer.clone())
+            // In-process CLI: inline effect controller + in-memory Lashlang
+            // artifact store. The explicit attachment store below overrides the
+            // in-memory one.
+            .in_memory_stores()
             .attachment_store(Arc::clone(&self.attachment_store))
             .trace_jsonl_path(self.trace_jsonl_path.clone())
             .trace_level(self.trace_level)

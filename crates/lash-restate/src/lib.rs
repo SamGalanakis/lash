@@ -65,9 +65,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lash_core::{
-    DurableProcessWorker, PluginError, ProcessAwaitOutput, ProcessCommand, ProcessEffectOutcome,
-    ProcessExecutionContext, ProcessExternalRef, ProcessRecord, ProcessRegistration,
-    ProcessRegistry, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    DurabilityTier, DurableProcessWorker, PluginError, ProcessAwaitOutput, ProcessCommand,
+    ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef, ProcessLease,
+    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
     RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimeInvocation,
 };
@@ -143,6 +144,18 @@ impl RestateCoreProcessRunner {
     pub fn worker(&self) -> &DurableProcessWorker {
         &self.worker
     }
+
+    /// Re-execute every non-terminal process this worker's registry still
+    /// holds, claiming a single-owner lease per process so a crashed
+    /// deployment's trigger/host-event/cron-started processes are driven to a
+    /// terminal state when the endpoint comes back up.
+    ///
+    /// Call this once at the serve path, after binding the process workflow,
+    /// so durable background work survives a restart the same way a
+    /// turn-started process does.
+    pub async fn recover_non_terminal(&self) -> Result<(), PluginError> {
+        self.worker.drive_pending_processes().await
+    }
 }
 
 #[async_trait::async_trait]
@@ -168,6 +181,152 @@ impl RestateProcessRunner for RestateCoreProcessRunner {
         self.worker
             .request_process_cancel(&request.process_id, request.reason)
             .await
+    }
+}
+
+/// Short TTL for the fence lease the ingress runner holds across a single
+/// `LashProcessWorkflow` submit.
+///
+/// The lease only fences *the submit* — Restate owns the durable execution once
+/// the workflow is keyed and accepted — so it is released immediately after the
+/// ingress POST. A short window keeps a runner that crashed mid-submit from
+/// fencing the record for long.
+const INGRESS_SUBMIT_FENCE_TTL_MS: u64 = 30_000;
+
+/// [`ProcessRunHandle`] that drives pending processes by submitting their
+/// `LashProcessWorkflow` through the Restate ingress instead of running them
+/// in-process.
+///
+/// This is the durable tier's run handle: a [`ProcessWorkRunner`](lash_core::ProcessWorkRunner)
+/// over this handle pokes/polls the registry's non-terminal rows and, per row,
+/// claims a short single-owner [`ProcessLease`] to fence the submit, POSTs
+/// `LashProcessWorkflow/{process_id}/run/send` to the ingress (idempotent by the
+/// `lash-process:{process_id}:run` key, mirroring the in-handler
+/// [`schedule_restate_process`] submit), records the durable `external_ref`, and
+/// releases the lease. The submitted workflow runs on the Restate-bound
+/// [`RestateCoreProcessRunner`], which claims the run-time lease and writes the
+/// terminal outcome — so the single coordination point stays the
+/// [`ProcessLease`] and a process runs exactly once.
+pub struct RestateProcessIngressRunner {
+    http: reqwest::Client,
+    ingress_url: String,
+    registry: Arc<dyn ProcessRegistry>,
+}
+
+impl RestateProcessIngressRunner {
+    /// Build an ingress-client run handle over the given ingress base URL and
+    /// process registry.
+    pub fn new(ingress_url: impl Into<String>, registry: Arc<dyn ProcessRegistry>) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            ingress_url: ingress_url.into(),
+            registry,
+        }
+    }
+
+    async fn submit_record(&self, owner_id: &str, record: ProcessRecord) -> Result<(), PluginError> {
+        let process_id = record.id.clone();
+        // Fence the submit: a claim conflict means another runner is already
+        // submitting this process, so skip it. Treat any claim failure as
+        // "fenced elsewhere" — the keyed-idempotent submit makes a missed one a
+        // no-op on the next poll tick anyway.
+        let Ok(lease) = self
+            .registry
+            .claim_process_lease(&process_id, owner_id, INGRESS_SUBMIT_FENCE_TTL_MS)
+            .await
+        else {
+            return Ok(());
+        };
+        let outcome = self.submit_under_lease(record).await;
+        // Release the fence lease before propagating any submit error so a
+        // transient ingress failure does not pin the record until the lease
+        // expires; the next poll/poke re-submits (keyed-idempotent).
+        self.release_lease(&lease).await?;
+        outcome
+    }
+
+    async fn submit_under_lease(&self, record: ProcessRecord) -> Result<(), PluginError> {
+        let process_id = record.id.clone();
+        // The record may have reached a terminal state between the list and the
+        // claim. Idempotent by process_id: never re-submit a finished process.
+        if self
+            .registry
+            .get_process(&process_id)
+            .await
+            .is_some_and(|current| current.is_terminal())
+        {
+            return Ok(());
+        }
+        let registration = ProcessRegistration {
+            id: record.id,
+            input: record.input,
+            event_types: record.event_types,
+            provenance: record.provenance.clone(),
+        };
+        // Wakes route to the creator scope; the owner scope persisted in
+        // provenance is that creator scope, mirroring the inline worker sweep.
+        let execution_context = ProcessExecutionContext::default()
+            .with_wake_target_scope(record.provenance.owner_scope);
+        let url = format!(
+            "{}/LashProcessWorkflow/{}/run/send",
+            self.ingress_url.trim_end_matches('/'),
+            process_id
+        );
+        let response = self
+            .http
+            .post(url)
+            // Idempotency key matches the in-handler submit so a re-submit (from
+            // a poll racing the original poke, or another runner) coalesces.
+            .header("idempotency-key", format!("lash-process:{process_id}:run"))
+            .json(&RestateProcessWorkflowInput {
+                registration,
+                execution_context,
+            })
+            .send()
+            .await
+            .map_err(|err| {
+                RestateEffectError::BackgroundScheduler(format!(
+                    "ingress submit for process `{process_id}` failed: {err}"
+                ))
+                .into_plugin_error()
+            })?;
+        if !response.status().is_success() {
+            return Err(RestateEffectError::BackgroundScheduler(format!(
+                "ingress submit for process `{process_id}` returned status {}",
+                response.status()
+            ))
+            .into_plugin_error());
+        }
+        // Record the durable backend reference so the process is observably
+        // owned by Restate, mirroring `schedule_restate_process`.
+        self.registry
+            .set_external_ref(
+                &process_id,
+                ProcessExternalRef {
+                    backend: "restate".to_string(),
+                    id: format!("LashProcessWorkflow/{process_id}"),
+                    metadata: None,
+                },
+            )
+            .await
+            .map(|_| ())
+    }
+
+    async fn release_lease(&self, lease: &ProcessLease) -> Result<(), PluginError> {
+        self.registry
+            .complete_process_lease(&ProcessLeaseCompletion::from_lease(lease))
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl ProcessRunHandle for RestateProcessIngressRunner {
+    async fn claim_and_run_pending(&self) -> Result<(), PluginError> {
+        let owner_id = format!("restate-ingress-{}", uuid::Uuid::new_v4());
+        for record in self.registry.list_non_terminal().await? {
+            self.submit_record(&owner_id, record).await?;
+        }
+        Ok(())
     }
 }
 
@@ -534,6 +693,10 @@ impl<'ctx, C> RuntimeEffectController for RestateRuntimeEffectController<'ctx, C
 where
     C: RestateControllerContext<'ctx>,
 {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
     fn requires_durable_attachment_store(&self) -> bool {
         true
     }
@@ -1752,7 +1915,7 @@ mod tests {
         DurableProcessWorker::new(
             lash_core::DurableProcessWorkerConfig::new(
                 Arc::new(plugin_host),
-                lash_core::RuntimeCoreConfig::default().with_host_profile_id("recovery-host"),
+                lash_core::RuntimeCoreConfig::in_memory().with_host_profile_id("recovery-host"),
                 store_factory,
                 registry,
             )
@@ -1943,6 +2106,207 @@ mod tests {
                 .expect("events after cancel")
                 .iter()
                 .any(|event| event.event_type == "process.cancel_requested")
+        );
+    }
+
+    /// Build a durable registration for a trigger-started lashlang process.
+    ///
+    /// A trigger/host-event-started process carries a [`ProcessInput::LashlangProcess`]
+    /// (the trigger route's process body) and provenance whose `caused_by` is the
+    /// host event that fired it — distinct from a turn-started process, whose
+    /// provenance traces to a live turn/tool call. The module artifact is stored
+    /// in the process-global in-memory artifact store, mirroring how a trigger
+    /// route's linked module is published before the process runs; that store
+    /// survives the registry/worker reopen within a single test process.
+    fn trigger_lashlang_registration(process_id: &str, resource: &str) -> ProcessRegistration {
+        let module = lashlang::parse("process notify(resource: str) { finish { triggered: resource } }")
+            .expect("lashlang trigger module");
+        let linked_module = lashlang::LinkedModule::link(
+            module,
+            lashlang::LashlangSurface::new(
+                lashlang::ResourceCatalog::new(),
+                lashlang::LashlangAbilities::all(),
+            ),
+        )
+        .expect("link lashlang trigger module");
+        lashlang::LashlangArtifactStore::put_module_artifact(
+            lashlang::global_in_memory_lashlang_artifact_store().as_ref(),
+            &linked_module.artifact,
+        )
+        .expect("store lashlang trigger module artifact");
+        let process_ref = linked_module
+            .artifact
+            .process_ref("notify")
+            .expect("notify process ref")
+            .clone();
+        let mut args = serde_json::Map::new();
+        args.insert("resource".to_string(), serde_json::json!(resource));
+        ProcessRegistration::new(
+            process_id,
+            ProcessInput::LashlangProcess {
+                module_ref: linked_module.module_ref,
+                process_ref,
+                required_surface_ref: linked_module.required_surface_ref,
+                process_name: "notify".to_string(),
+                args,
+            },
+        )
+        .with_process_provenance(
+            // Trigger-started: owner scope is the session that installed the
+            // trigger route; `caused_by` is the host event node, not a turn.
+            lash_core::ProcessProvenance::new(
+                lash_core::ProcessScope::new("root"),
+                "recovery-host",
+            )
+            .with_caused_by(Some(lash_core::CausalRef::SessionNode {
+                session_id: "root".to_string(),
+                node_id: "host-event:resource.updated".to_string(),
+            })),
+        )
+        .with_extra_event_types(lash_core::lashlang_process_event_types())
+    }
+
+    /// Phase-B recovery: a TRIGGER-started process whose worker died mid-flight is
+    /// left non-terminal in the durable registry; a subsequent worker reopening
+    /// that registry must drive it to completion via the recovery sweep — the same
+    /// durable re-execution guarantee a turn-started process has (invariant 3).
+    ///
+    /// Mirrors `sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`
+    /// but the process is started by a trigger/host event (a `LashlangProcess` row
+    /// with host-event provenance), not by a live turn's tool call. It also pins
+    /// the lease single-owner / fencing contract: an active lease fences a
+    /// competing owner and a superseded (stale) writer is rejected (invariant 4).
+    #[tokio::test]
+    async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let process_db = temp.path().join("processes.db");
+        let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            temp.path().join("sessions"),
+        )) as Arc<dyn lash_core::SessionStoreFactory>;
+
+        // A worker started the trigger process and crashed before it could run:
+        // the durable row exists and is non-terminal. We register it directly to
+        // model exactly that mid-flight crash state.
+        let registry_a = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&process_db).expect("open registry"),
+        ) as Arc<dyn ProcessRegistry>;
+        registry_a
+            .register_process(trigger_lashlang_registration("trigger-notify", "issue-42"))
+            .await
+            .expect("register trigger-started process");
+        assert!(
+            registry_a
+                .get_process("trigger-notify")
+                .await
+                .is_some_and(|record| !record.is_terminal()),
+            "freshly trigger-started process must be non-terminal before recovery"
+        );
+        drop(registry_a);
+
+        // Reopen the registry and stand up a fresh worker over it: the crash
+        // recovery counterpart. The recovery sweep claims the non-terminal lease,
+        // runs the process on the worker's wired controller, and writes its
+        // terminal outcome — idempotent by process_id.
+        let registry_b = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&process_db).expect("reopen registry"),
+        ) as Arc<dyn ProcessRegistry>;
+        assert_eq!(
+            registry_b
+                .list_non_terminal()
+                .await
+                .expect("list non-terminal after reopen")
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["trigger-notify"],
+            "the trigger-started process must be on the recovery worklist after reopen"
+        );
+
+        let worker_b = recovery_worker(Arc::clone(&registry_b), Arc::clone(&store_factory));
+        worker_b
+            .drive_pending_processes()
+            .await
+            .expect("recover non-terminal trigger-started process");
+
+        assert_eq!(
+            registry_b
+                .await_process("trigger-notify")
+                .await
+                .expect("await recovered trigger-started process"),
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!({ "triggered": "issue-42" }),
+                control: None,
+            },
+            "the trigger-started process must run to its terminal value on recovery"
+        );
+        assert!(
+            registry_b
+                .list_non_terminal()
+                .await
+                .expect("list non-terminal after recovery")
+                .is_empty(),
+            "recovery must drive the trigger-started process to terminal"
+        );
+
+        // Idempotent by process_id: re-running the sweep over an already-terminal
+        // process is a no-op and never double-executes it.
+        worker_b
+            .drive_pending_processes()
+            .await
+            .expect("second recovery sweep is idempotent");
+        assert_eq!(
+            registry_b
+                .await_process("trigger-notify")
+                .await
+                .expect("await after idempotent re-sweep"),
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!({ "triggered": "issue-42" }),
+                control: None,
+            }
+        );
+
+        // Lease single-owner / fencing: a non-terminal process is re-run by
+        // exactly one owner. An active lease fences a competing owner, and a
+        // superseded (stale) writer cannot renew once a new owner has claimed.
+        registry_b
+            .register_process(trigger_lashlang_registration("trigger-lease", "issue-7"))
+            .await
+            .expect("register lease-probe process");
+        let owner_a = registry_b
+            .claim_process_lease("trigger-lease", "owner-a", 60_000)
+            .await
+            .expect("owner-a claims the non-terminal lease");
+        let fenced = registry_b
+            .claim_process_lease("trigger-lease", "owner-b", 60_000)
+            .await;
+        assert!(
+            fenced
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("already leased")),
+            "an active lease must fence a competing owner, got {fenced:?}"
+        );
+
+        // Expire owner-a's lease (ttl 0) so owner-b can take over; owner-a is now
+        // the stale writer and its renewal must be rejected (fencing).
+        let stale = registry_b
+            .renew_process_lease(&owner_a, 0)
+            .await
+            .expect("owner-a renews to a zero TTL, expiring its own lease");
+        let owner_b = registry_b
+            .claim_process_lease("trigger-lease", "owner-b", 60_000)
+            .await
+            .expect("owner-b reclaims the expired lease");
+        assert!(
+            owner_b.fencing_token > owner_a.fencing_token,
+            "a re-claim must bump the fencing token (was {}, now {})",
+            owner_a.fencing_token,
+            owner_b.fencing_token
+        );
+        let stale_renew = registry_b.renew_process_lease(&stale, 60_000).await;
+        assert!(
+            stale_renew.is_err(),
+            "a superseded (stale) writer must not renew the live lease, got {stale_renew:?}"
         );
     }
 

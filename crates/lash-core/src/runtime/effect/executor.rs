@@ -1,10 +1,6 @@
-use std::collections::HashMap;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -16,7 +12,7 @@ use crate::provider::ProviderHandle;
 use crate::runtime::{RuntimeStreamEvent, RuntimeTurnDriver};
 use crate::sansio::LlmCallError;
 use crate::{PluginError, RuntimeError, RuntimeErrorCode};
-use crate::{ProcessAwaitOutput, ProcessRecord};
+use crate::ProcessRecord;
 
 use super::envelope::{
     ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectEnvelope,
@@ -31,6 +27,12 @@ use super::journal::llm_call_error_from_transport;
 /// Boundary for nondeterministic runtime work.
 #[async_trait::async_trait]
 pub trait RuntimeEffectController: Send + Sync {
+    /// Durability tier this controller provides; defaults to
+    /// [`DurabilityTier::Inline`].
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        crate::DurabilityTier::Inline
+    }
+
     fn requires_durable_attachment_store(&self) -> bool {
         false
     }
@@ -175,7 +177,6 @@ pub(crate) trait ProcessRunner: Send + Sync {
 
 pub struct ProcessLocalExecution {
     pub registry: Arc<dyn ProcessRegistry>,
-    pub(crate) runner: Option<Arc<dyn ProcessRunner>>,
 }
 
 pub(super) struct LocalTurnEffectRunner<'a, 'run> {
@@ -227,24 +228,9 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         }
     }
 
-    pub(crate) fn process(
-        registry: Arc<dyn ProcessRegistry>,
-        runner: Option<Arc<dyn ProcessRunner>>,
-    ) -> Self {
-        Self {
-            state: RuntimeEffectLocalExecutorState::Process(ProcessLocalExecution {
-                registry,
-                runner,
-            }),
-        }
-    }
-
     pub fn process_control(registry: Arc<dyn ProcessRegistry>) -> Self {
         Self {
-            state: RuntimeEffectLocalExecutorState::Process(ProcessLocalExecution {
-                registry,
-                runner: None,
-            }),
+            state: RuntimeEffectLocalExecutorState::Process(ProcessLocalExecution { registry }),
         }
     }
 
@@ -498,10 +484,12 @@ async fn sleep_with_cancellation(
 // =============================================================================
 
 /// Default in-process effect controller.
+///
+/// Stateless: the inline controller only registers process rows; the
+/// lease-protected [`ProcessWorkRunner`](crate::ProcessWorkRunner) is the sole
+/// executor.
 #[derive(Clone, Default)]
-pub struct InlineRuntimeEffectController {
-    processes: Arc<Mutex<HashMap<String, LocalProcessExecution>>>,
-}
+pub struct InlineRuntimeEffectController;
 
 #[async_trait::async_trait]
 impl RuntimeEffectController for InlineRuntimeEffectController {
@@ -523,15 +511,19 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
 }
 
 impl InlineRuntimeEffectController {
+    /// Register the process (and any handle grant) into the durable registry.
+    ///
+    /// The inline controller no longer runs the process here: the registry's
+    /// non-terminal row *is* the durable work queue, and the lease-protected
+    /// [`ProcessWorkRunner`](crate::ProcessWorkRunner) is the sole executor. The
+    /// control seam pokes that runner after a successful start, so registering
+    /// the row is all this path does.
     pub(crate) async fn start_process(
         &self,
         registry: Arc<dyn crate::ProcessRegistry>,
         registration: crate::ProcessRegistration,
         grant: Option<crate::ProcessStartGrant>,
-        execution_context: crate::ProcessExecutionContext,
-        runner: Arc<dyn ProcessRunner>,
     ) -> Result<ProcessRecord, PluginError> {
-        let already_registered = registry.get_process(&registration.id).await.is_some();
         let registration_for_record = registration.clone();
         let record = registry.register_process(registration_for_record).await?;
         if let Some(grant) = grant {
@@ -539,43 +531,6 @@ impl InlineRuntimeEffectController {
                 .grant_handle(&grant.owner_scope, &registration.id, grant.descriptor)
                 .await?;
         }
-        if already_registered {
-            return Ok(record);
-        }
-        let process_id = registration.id.clone();
-        let cancellation = CancellationToken::new();
-        let task_cancellation = cancellation.clone();
-        let registry_for_task = Arc::clone(&registry);
-        let processes = Arc::clone(&self.processes);
-        let process_id_for_task = process_id.clone();
-        let handle = tokio::spawn(Box::pin(async move {
-            let future = runner.run_process(
-                registration,
-                execution_context,
-                Arc::clone(&registry_for_task),
-                task_cancellation,
-            );
-            let output = AssertUnwindSafe(future).catch_unwind().await;
-            let output = match output {
-                Ok(output) => output,
-                Err(_) => ProcessAwaitOutput::from_tool_output(crate::ToolCallOutput::failure(
-                    crate::ToolFailure::runtime(
-                        crate::ToolFailureClass::Internal,
-                        "process_panicked",
-                        "process panicked",
-                    ),
-                )),
-            };
-            let _ = registry_for_task
-                .complete_process(&process_id_for_task, output)
-                .await;
-            processes.lock().await.remove(&process_id_for_task);
-        }));
-        self.processes
-            .lock()
-            .await
-            .insert(process_id, LocalProcessExecution { cancellation });
-        drop(handle);
         Ok(record)
     }
 
@@ -585,21 +540,19 @@ impl InlineRuntimeEffectController {
         process_id: &str,
         reason: Option<String>,
     ) -> Result<ProcessRecord, PluginError> {
+        // Cancellation is a durable signal: the cancel event is what the
+        // runner-run process observes, so the inline controller appends it and
+        // no longer tracks an in-process cancellation token.
         registry
             .append_event(
                 process_id,
                 crate::ProcessEventAppendRequest::cancel_requested(process_id, reason.clone()),
             )
             .await?;
-        let record = registry
+        registry
             .get_process(process_id)
             .await
-            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
-        let execution = self.processes.lock().await.get(process_id).cloned();
-        if let Some(execution) = execution {
-            execution.cancellation.cancel();
-        }
-        Ok(record)
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))
     }
 
     async fn execute_process_command(
@@ -613,20 +566,9 @@ impl InlineRuntimeEffectController {
             ProcessCommand::Start {
                 registration,
                 grant,
-                execution_context,
+                execution_context: _,
             } => {
-                let Some(runner) = execution.runner else {
-                    return Err(RuntimeEffectControllerError::new(
-                        "process_runner_required",
-                        format!(
-                            "process `{}` cannot be started without a runtime runner",
-                            registration.id
-                        ),
-                    ));
-                };
-                let record = self
-                    .start_process(registry, registration, grant, *execution_context, runner)
-                    .await?;
+                let record = self.start_process(registry, registration, grant).await?;
                 Ok(ProcessEffectOutcome::Start { record })
             }
             ProcessCommand::List { owner_scope } => {
@@ -646,9 +588,6 @@ impl InlineRuntimeEffectController {
             ProcessCommand::DeleteSession { session_id } => {
                 let report = registry.delete_session_process_state(&session_id).await?;
                 for process_id in &report.cancel_process_ids {
-                    if let Some(execution) = self.processes.lock().await.get(process_id).cloned() {
-                        execution.cancellation.cancel();
-                    }
                     registry
                         .append_event(
                             process_id,
@@ -675,14 +614,8 @@ impl InlineRuntimeEffectController {
     }
 }
 
-#[derive(Clone)]
-struct LocalProcessExecution {
-    cancellation: CancellationToken,
-}
-
 impl std::fmt::Debug for InlineRuntimeEffectController {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InlineRuntimeEffectController")
-            .finish_non_exhaustive()
+        f.debug_struct("InlineRuntimeEffectController").finish()
     }
 }
