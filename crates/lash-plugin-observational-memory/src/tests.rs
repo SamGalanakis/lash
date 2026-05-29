@@ -135,7 +135,10 @@ async fn maintenance_uses_post_persist_leaf_as_append_cas_ancestor() {
         Some(committed_leaf.as_str())
     );
     assert_eq!(request.nodes.len(), 1);
-    let SessionAppendNode::Plugin { plugin_type, body } = &request.nodes[0] else {
+    let SessionAppendNode::Plugin {
+        plugin_type, body, ..
+    } = &request.nodes[0]
+    else {
         panic!("expected OM maintenance to append a plugin node");
     };
     assert_eq!(plugin_type, BUFFERED_OBSERVATION_PLUGIN_TYPE);

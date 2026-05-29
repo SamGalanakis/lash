@@ -10,10 +10,12 @@ default = []
 dhat-heap = ["dep:dhat"]
 fff-zlob = ["lash-standard-plugins/fff-zlob"]
 semantic-tool-search = ["lash-standard-plugins/semantic-tool-search"]
-# Hidden `--runtime-perf-benchmark` self-benchmark mode. Requires
-# `lash-core/testing` fixtures and is intended for CI / dev profiling,
-# not user-facing builds.
-runtime-perf = ["dep:lash-plugin-observational-memory", "lash-core/testing"]
+# Hidden self-benchmark apparatus (`--ui-perf-benchmark` and
+# `--runtime-perf-benchmark`). Gates the `runtime_perf`, `ui_perf`, and
+# `perf_support` modules plus their CLI flags so none compile into the
+# default user-facing build. Requires `lash-core/testing` fixtures and is
+# intended for CI / dev profiling only.
+bench = ["dep:lash-plugin-observational-memory", "lash-core/testing"]
 
 [lib]
 name = "lash_cli"

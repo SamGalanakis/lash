@@ -33,20 +33,16 @@ impl LlmTerminalReason {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResponseTextPhase {
-    Commentary,
-    FinalAnswer,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResponseTextMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Opaque provider replay phase tag. Provider crates own the wire
+    /// vocabulary (e.g. OpenAI Responses `"commentary"`/`"final_answer"`);
+    /// the kernel treats it as an opaque string and round-trips it verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<ResponseTextPhase>,
+    pub phase: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

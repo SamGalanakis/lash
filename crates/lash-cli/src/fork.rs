@@ -564,6 +564,8 @@ fn materialize_child_from_graph(
     child_store.save_session_head(lash_core::SessionHead {
         session_id: child_session_id.to_string(),
         head_revision: 0,
+        agent_frames: Vec::new(),
+        current_agent_frame_id: String::new(),
         graph: child_graph.clone(),
         config: config.clone(),
         checkpoint_ref: child_checkpoint_ref.clone(),
@@ -609,6 +611,8 @@ pub async fn fork_current_session(
         lash_core::SessionHead {
             session_id: child_meta.session_id.clone(),
             head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
             graph: lash_core::SessionGraph::default(),
             config: lash_core::PersistedSessionConfig {
                 provider_id: _provider.kind().to_string(),
@@ -693,6 +697,8 @@ mod fork_tests {
         store.save_session_head(lash_core::SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
             graph,
             config: lash_core::PersistedSessionConfig {
                 provider_id: dummy_provider().kind().to_string(),

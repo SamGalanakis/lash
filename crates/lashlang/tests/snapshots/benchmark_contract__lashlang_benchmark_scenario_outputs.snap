@@ -7,6 +7,7 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
   "baseline": "user=sam;attempt=3;active=alpha:1,gamma:3;total=6;count=3;seen=3;indexes=4",
   "cache_pressure": "alpha:3|beta:3|gamma:7|delta:6|epsilon:7|zeta:7",
   "continue_as_seed_surface": {
+    "frame_id": "frame:bench",
     "global_count": 4,
     "handle_count": 2,
     "projected_count": 1,
@@ -17,7 +18,6 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
       "live_agent",
       "started_agent"
     ],
-    "session_id": "handoff:bench",
     "task": "continue from compact state"
   },
   "direct_unwrap": "alpha,alpha:beta",

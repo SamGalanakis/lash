@@ -22,5 +22,6 @@ mod persistence;
 mod projection;
 mod stream_accumulator;
 mod tracing;
+mod triggers;
 mod turns;
 mod usage;

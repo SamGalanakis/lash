@@ -843,7 +843,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     function setBusy(next, label) {
       busy = next;
       sendButton.disabled = next || modelEmpty();
-      stopButton.hidden = !next;
+      stopButton.hidden = true;
       for (const button of triggerButtons) button.setAttribute("aria-disabled", String(next));
       busyPill.classList.toggle("run", next);
       busyText.textContent = next ? "running" : "idle";
@@ -855,7 +855,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         streamState.textContent = label || "turn running";
         turnTimer = setInterval(() => {
           const secs = Math.floor((performance.now() - turnStart) / 1000);
-          streamState.textContent = "running · " + secs + "s · esc to stop";
+          streamState.textContent = "running · " + secs + "s";
         }, 1000);
       } else {
         streamState.textContent = label || "ready";
@@ -917,7 +917,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         retry.className = "retry";
         retry.type = "button";
         retry.textContent = "retry turn";
-        retry.addEventListener("click", () => stream(lastRequest.url, lastRequest.payload));
+        retry.addEventListener("click", () => postCommand(lastRequest.url, lastRequest.payload));
         body.append(document.createElement("br"), retry);
       }
       node.append(role, body);
@@ -971,6 +971,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     const EVENT_LABELS = {
       reasoning_delta: "thinking",
       assistant_prose_delta: "writing reply",
+      queued_work_started: "queued work started",
       tool_call_started: "tool started",
       tool_call_completed: "tool finished",
       code_block_started: "code started",
@@ -1040,13 +1041,20 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       };
     }
 
+    function displayToolName(name) {
+      if (name === "search_web") return "web.search";
+      if (name === "fetch_url") return "web.fetch";
+      if (name === "spawn_agent") return "agents.spawn";
+      return name || "tool";
+    }
+
     function appendTool(event, parent = timeline) {
       if (parent === timeline) clearEmpty();
       const ok = toolSucceeded(event);
       const el = document.createElement("div");
       el.className = "tool" + (ok ? "" : " fail");
       el.innerHTML = `<div class="tool-head"><strong></strong><span class="badge"></span><span></span></div><div class="tool-summary"></div><details><summary>JSON payload</summary><pre></pre></details>`;
-      el.querySelector("strong").textContent = event.name || "tool";
+      el.querySelector("strong").textContent = displayToolName(event.name);
       el.querySelector(".badge").textContent = ok ? "completed" : "failed";
       el.querySelector(".tool-head span:last-child").textContent = `${ok ? "ok" : "failed"} in ${event.duration_ms || 0}ms`;
       const result = toolResult(event);
@@ -1133,6 +1141,33 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       scrollToEnd();
     }
 
+    function renderEventRow(label, detail) {
+      clearEmpty();
+      const node = document.createElement("div");
+      node.className = "message event";
+      const role = document.createElement("div");
+      role.className = "msg-role";
+      role.textContent = "event";
+      const body = document.createElement("div");
+      body.className = "msg-body";
+      body.textContent = detail ? `${label} · ${detail}` : label;
+      node.append(role, body);
+      timeline.appendChild(node);
+      scrollToEnd();
+    }
+
+    function renderQueuedWorkStarted(event) {
+      const causes = event.causes || [];
+      const wake = causes.find(cause => cause.event_type === "process.wake");
+      if (wake) {
+        renderEventRow("agent woken", wake.text || "process.wake");
+      } else {
+        const count = (event.batch_ids || []).length;
+        renderEventRow("queued turn started", count ? `${count} batch${count === 1 ? "" : "es"}` : "");
+      }
+      setBusy(true, "agent running");
+    }
+
     function finishTransientRows() {
       for (const tool of pendingTools) appendTool(tool);
       pendingCodeBlock = null;
@@ -1141,6 +1176,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     }
 
     function handleTurnEvent(event) {
+      if (event.type === "queued_work_started") renderQueuedWorkStarted(event);
       if (event.type === "assistant_prose_delta") appendAssistantText(event.text);
       if (event.type === "reasoning_delta") appendReasoning(event.text);
       if (event.type === "code_block_started") pendingCodeBlock = event;
@@ -1151,7 +1187,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       if (event.type === "error") renderError(event.message, { retry: true });
     }
 
-    async function stream(url, payload) {
+    async function postCommand(url, payload) {
       if (busy) return;
       lastRequest = { url, payload };
       controller = new AbortController();
@@ -1167,36 +1203,46 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
           body: payload ? JSON.stringify(payload) : "{}",
           signal: controller.signal
         });
-        if (!response.ok || !response.body) {
+        if (!response.ok) {
           const text = await response.text();
           renderError(text || "request failed", { retry: true });
+          setBusy(false, "ready");
           return;
         }
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          for (const line of lines) handleStreamLine(line);
-        }
-        handleStreamLine(buffer);
       } catch (error) {
         if (error.name === "AbortError") {
           renderNote("turn stopped");
         } else {
           renderError(error.message || String(error), { retry: true });
         }
+        setBusy(false, "ready");
       } finally {
         controller = null;
-        if (busy) {
-          finishTransientRows();
-          setBusy(false, "ready");
-        }
         refreshWork();
+      }
+    }
+
+    async function connectEvents() {
+      while (true) {
+        try {
+          const response = await fetch("/api/events", { cache: "no-store" });
+          if (!response.ok || !response.body) throw new Error("event stream failed (" + response.status + ")");
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+            for (const line of lines) handleStreamLine(line);
+          }
+          handleStreamLine(buffer);
+        } catch (error) {
+          renderNote("event stream reconnecting");
+        }
+        await new Promise(resolve => setTimeout(resolve, 900));
       }
     }
 
@@ -1311,7 +1357,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       if (modelEmpty()) { validateModel(); modelInput.focus(); return; }
       lastUserText = text;
       promptInput.value = "";
-      stream("/api/turn", { text, ...selectedModelPayload() });
+      postCommand("/api/turn", { text, ...selectedModelPayload() });
     });
 
     promptInput.addEventListener("keydown", event => {
@@ -1329,7 +1375,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     function fireTrigger(event) {
       const button = event.currentTarget;
       if (busy || button.getAttribute("aria-disabled") === "true") return;
-      stream("/api/button-trigger", { button: button.dataset.button });
+      postCommand("/api/button-trigger", { button: button.dataset.button });
     }
 
     for (const button of triggerButtons) {
@@ -1461,7 +1507,10 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
     workCount.addEventListener("click", () => { if (workStale) refreshWork(); });
 
-    loadState().catch(() => {}).finally(refreshWork);
+    loadState().catch(() => {}).finally(() => {
+      refreshWork();
+      connectEvents();
+    });
     setInterval(refreshWork, 1400);
   </script>
 </body>

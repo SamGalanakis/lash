@@ -316,8 +316,44 @@ pub struct ProcessStartExpr {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceRefExpr {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<AstString>,
     pub resource_type: AstString,
     pub alias: AstString,
+}
+
+impl ResourceRefExpr {
+    pub fn unresolved(path: Vec<AstString>) -> Self {
+        Self {
+            path,
+            resource_type: AstString::default(),
+            alias: AstString::default(),
+        }
+    }
+
+    pub fn resolved(
+        path: Vec<AstString>,
+        resource_type: impl Into<AstString>,
+        alias: impl Into<AstString>,
+    ) -> Self {
+        Self {
+            path,
+            resource_type: resource_type.into(),
+            alias: alias.into(),
+        }
+    }
+
+    pub fn path_string(&self) -> String {
+        if self.path.is_empty() {
+            format!("{}.{}", self.resource_type, self.alias)
+        } else {
+            self.path
+                .iter()
+                .map(AstString::as_str)
+                .collect::<Vec<_>>()
+                .join(".")
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

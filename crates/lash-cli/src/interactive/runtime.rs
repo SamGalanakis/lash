@@ -12,7 +12,9 @@ use super::helpers::TurnActivityBridge;
 use super::*;
 use crate::event::AppEventTx;
 use crate::input_items::build_items_from_editor_input;
-use crate::turn_runner::{RuntimeRunResult, spawn_session_turn};
+use crate::turn_runner::{
+    RuntimeRunResult, make_turn_input, spawn_session_queued_turn, spawn_session_turn,
+};
 
 pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
     let (items, image_blobs) =
@@ -148,6 +150,22 @@ pub(super) async fn sync_runtime_tool_surface(
     Ok(())
 }
 
+pub(super) async fn enqueue_prepared_turn(
+    session: &LashSession,
+    turn: &PreparedTurn,
+    delivery_policy: lash_core::DeliveryPolicy,
+    slot_policy: lash_core::SlotPolicy,
+) -> Result<(), String> {
+    session
+        .queue(make_turn_input(turn))
+        .id(turn.draft_id.clone())
+        .delivery_policy(delivery_policy)
+        .slot_policy(slot_policy)
+        .send()
+        .await
+        .map_err(|err| err.to_string())
+}
+
 /// Send a user message to the runtime: push display block and spawn turn run.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_user_message(
@@ -184,8 +202,8 @@ pub(super) async fn send_user_message(
         runtime_present_before_take = runtime.is_some(),
         runtime_return_rx_present_before_take = runtime_return_rx.is_some(),
         cancel_token_present_before_take = cancel_token.is_some(),
-        queued_turns = app.queued_turns.len(),
-        pending_steers = app.pending_steers.len(),
+        queued_turns = app.queues.queued_turns.len(),
+        pending_steers = app.queues.pending_steers.len(),
         "send_user_message taking runtime for dispatch"
     );
 
@@ -211,6 +229,54 @@ pub(super) async fn send_user_message(
 
     let sink = TurnActivityBridge::spawn(stream_id, app_tx.clone());
     let (cancel, return_rx) = spawn_session_turn(session, turn_input, sink, stream_id);
+    *cancel_token = Some(cancel);
+    *runtime_return_rx = Some(return_rx);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn send_queued_work(
+    prepared_turns: Vec<PreparedTurn>,
+    app: &mut App,
+    ui_trace: Option<&mut UiTraceRecorder>,
+    logger: &mut SessionLogger,
+    runtime: &mut Option<LashSession>,
+    runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
+    cancel_token: &mut Option<CancellationToken>,
+    active_stream_id: &mut u64,
+    app_tx: &AppEventTx,
+) {
+    let mut ui_trace = ui_trace;
+    for prepared_turn in &prepared_turns {
+        if prepared_turn.display_text.is_empty() {
+            continue;
+        }
+        if let Some(recorder) = ui_trace.as_deref_mut() {
+            recorder.record_user_turn(prepared_turn);
+        }
+        let _ = logger.record_host_input(prepared_turn);
+        app.push_prepared_user_input(prepared_turn);
+    }
+    if let Some(recorder) = ui_trace {
+        recorder.record_start_turn();
+    }
+    app.start_turn();
+    app.resume_contextual_follow_output();
+    app.keep_latest_user_block_visible();
+
+    let session = runtime
+        .as_ref()
+        .cloned()
+        .expect("runtime should be available when dispatching queued work");
+    *active_stream_id = active_stream_id.wrapping_add(1);
+    let stream_id = *active_stream_id;
+    tracing::info!(
+        stream_id,
+        prepared_turns = prepared_turns.len(),
+        "dispatching durable queued runtime turn"
+    );
+
+    let sink = TurnActivityBridge::spawn(stream_id, app_tx.clone());
+    let (cancel, return_rx) = spawn_session_queued_turn(session, sink, stream_id);
     *cancel_token = Some(cancel);
     *runtime_return_rx = Some(return_rx);
 }

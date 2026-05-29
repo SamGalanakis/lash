@@ -20,6 +20,7 @@ impl<'run> RuntimeTurnDriver<'run> {
         );
         self.session.code_execution_context(
             &self.session_id,
+            &self.turn_pipeline.state().current_agent_frame_id,
             manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
             manager as Arc<dyn crate::ProcessService>,
             effect_controller,
@@ -28,6 +29,7 @@ impl<'run> RuntimeTurnDriver<'run> {
             chronological_projection,
             self.protocol_extension.clone(),
             self.turn_context.clone(),
+            self.checkpoint_messages.clone(),
         )
     }
 }

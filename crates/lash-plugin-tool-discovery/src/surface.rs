@@ -44,7 +44,7 @@ fn has_catalogued_tools(ctx: &ToolSurfaceContext) -> bool {
     })
 }
 
-const CATALOGUE_NAMESPACE_LIMIT: usize = 100;
+const CATALOGUE_MODULE_LIMIT: usize = 100;
 const CATALOGUE_TOOL_NAME_LIMIT: usize = 50;
 
 fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<String> {
@@ -52,7 +52,7 @@ fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<
         return Vec::new();
     }
 
-    let mut by_namespace: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut by_module: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut omitted_tool_count = 0usize;
     for tool in &ctx.tools {
         if tool.name == "search_tools" {
@@ -63,48 +63,44 @@ fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<
             continue;
         }
         omitted_tool_count += 1;
-        let namespace = tool
-            .discovery
-            .namespace
-            .as_deref()
-            .filter(|namespace| !namespace.trim().is_empty())
-            .unwrap_or("default");
-        by_namespace
-            .entry(namespace)
+        let agent_surface = tool.agent_surface.executable_for(&tool.name);
+        let module = agent_surface.module_path.join(".");
+        by_module
+            .entry(module)
             .or_default()
-            .push(tool.name.as_str());
+            .push(agent_surface.call_path());
     }
-    for names in by_namespace.values_mut() {
+    for names in by_module.values_mut() {
         names.sort_unstable();
     }
 
     let mut rendered = format!(
-        "Catalogued tools: {omitted_tool_count} other tools are searchable through `search_tools`.\n\
-         When a task needs a tool not showcased here, run `search_tools(query=...)` and call the relevant result by name. \
-         Results use the same compact contract shape as showcased tools: signature, description, and capped examples."
+        "Catalogued capabilities: {omitted_tool_count} other capabilities are searchable through `tools.search(...)`.\n\
+         When a task needs a capability not showcased here, run `await tools.search({{ query: \"...\" }})?` and call the returned module path directly. \
+         Results use the same compact contract shape as showcased capabilities: call path, signature, description, and capped examples."
     );
 
-    if by_namespace.len() <= CATALOGUE_NAMESPACE_LIMIT {
-        rendered.push_str("\n\nNamespaces: ");
-        for (index, (namespace, names)) in by_namespace.iter().enumerate() {
+    if by_module.len() <= CATALOGUE_MODULE_LIMIT {
+        rendered.push_str("\n\nModules: ");
+        for (index, (module, names)) in by_module.iter().enumerate() {
             if index > 0 {
                 rendered.push_str(", ");
             }
-            let _ = write!(rendered, "{namespace}({})", names.len());
+            let _ = write!(rendered, "{module}({})", names.len());
         }
     } else {
         let _ = write!(
             rendered,
-            "\n\nNamespaces: {} total; use `search_tools` to narrow them.",
-            by_namespace.len()
+            "\n\nModules: {} total; use `tools.search` to narrow them.",
+            by_module.len()
         );
     }
 
     if omitted_tool_count <= CATALOGUE_TOOL_NAME_LIMIT {
-        rendered.push_str("\n\nCatalogued names:");
-        for (namespace, names) in by_namespace {
+        rendered.push_str("\n\nCatalogued calls:");
+        for (module, names) in by_module {
             rendered.push('\n');
-            let _ = write!(rendered, "{namespace}: {}", names.join(", "));
+            let _ = write!(rendered, "{module}: {}", names.join(", "));
         }
     }
 
@@ -137,7 +133,7 @@ mod tests {
         ];
         let contracts: std::collections::BTreeMap<_, _> = tools
             .iter()
-            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect();
         let manifests = tools.iter().map(|tool| tool.manifest()).collect::<Vec<_>>();
         let contribution = rlm_tool_surface(ToolSurfaceContext {
@@ -159,7 +155,11 @@ mod tests {
         });
 
         assert!(surface.has_callable_tool("fetch_url"));
-        assert!(surface.prompt_tool_docs().contains("Catalogued tools:"));
+        assert!(
+            surface
+                .prompt_tool_docs()
+                .contains("Catalogued capabilities:")
+        );
     }
 
     #[test]

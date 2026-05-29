@@ -14,12 +14,6 @@ impl App {
         self.editor.history_up();
     }
 
-    /// Navigate input history with down arrow.
-    /// In multi-line mode, if cursor is not on the last line, moves cursor down instead.
-    pub fn history_down(&mut self) {
-        self.editor.history_down();
-    }
-
     /// Insert a character at cursor position.
     pub fn insert_char(&mut self, c: char) {
         self.editor.insert_char(c);
@@ -32,40 +26,6 @@ impl App {
 
     pub fn insert_pasted_text(&mut self, text: &str) {
         self.editor.insert_pasted_text(text);
-    }
-
-    /// Delete character before cursor.
-    pub fn backspace(&mut self) {
-        self.editor.backspace();
-    }
-
-    /// Delete character at cursor.
-    pub fn delete(&mut self) {
-        self.editor.delete();
-    }
-
-    pub fn move_cursor_left(&mut self) {
-        self.editor.move_cursor_left();
-    }
-
-    pub fn move_cursor_right(&mut self) {
-        self.editor.move_cursor_right();
-    }
-
-    pub fn move_cursor_word_left(&mut self) {
-        self.editor.move_cursor_word_left();
-    }
-
-    pub fn move_cursor_word_right(&mut self) {
-        self.editor.move_cursor_word_right();
-    }
-
-    pub fn move_cursor_home(&mut self) {
-        self.editor.move_cursor_home();
-    }
-
-    pub fn move_cursor_end(&mut self) {
-        self.editor.move_cursor_end();
     }
 
     pub fn clear_input_selection(&mut self) {
@@ -122,16 +82,6 @@ impl App {
     /// Whether the suggestion popup is active.
     pub fn has_suggestions(&self) -> bool {
         self.editor.has_suggestions()
-    }
-
-    /// Move suggestion selection up.
-    pub fn suggestion_up(&mut self) {
-        self.editor.suggestion_up();
-    }
-
-    /// Move suggestion selection down.
-    pub fn suggestion_down(&mut self) {
-        self.editor.suggestion_down();
     }
 
     /// Accept the selected suggestion.
@@ -370,7 +320,7 @@ impl App {
                     if p.request.is_freeform() {
                         self.push_prompt_response_user_block(display.clone());
                     } else {
-                        self.pending_option_prompt_response = Some(display.clone());
+                        self.queues.pending_option_prompt_response = Some(display.clone());
                     }
                     return Some(display);
                 }

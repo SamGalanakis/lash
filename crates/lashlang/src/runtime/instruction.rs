@@ -1,7 +1,7 @@
 //! Bytecode instruction set + the inert data types that flow from the
 //! compiler to the VM: `Chunk`, `Name`, `Instruction`, `IntrinsicOp`, the
 //! profile-tag enums and accumulator, and the format-template / assign-path
-//! shapes. Optimizer-only lowered-loop IR lives with the VM implementation.
+//! shapes.
 //!
 //! Everything here is internal to the runtime crate — the visibility is
 //! `pub(crate)` because compiler.rs produces these structures and vm.rs
@@ -15,7 +15,7 @@ use crate::lexer::Span;
 
 use super::record::{Symbol, intern_symbol, symbol_name};
 use super::schema::ValidationPlan;
-use super::{CompileStats, LoweredLoop, ProfileReport, ProfileStat, Value};
+use super::{CompileStats, ProfileReport, ProfileStat, Value};
 
 #[derive(Clone)]
 pub(crate) struct Chunk {
@@ -29,7 +29,6 @@ pub(crate) struct Chunk {
     pub(crate) format_templates: Vec<CompiledFormatTemplate>,
     pub(crate) compiled_schemas: Vec<ValidationPlan>,
     pub(crate) assign_paths: Vec<CompiledAssignPath>,
-    pub(crate) lowered_loops: Vec<LoweredLoop>,
 }
 
 #[derive(Clone)]
@@ -213,7 +212,6 @@ pub(crate) enum Instruction {
         binding: usize,
         argc: usize,
     },
-    LoweredLoop(usize),
     IterNext {
         jump_to: usize,
     },
@@ -333,7 +331,6 @@ impl Instruction {
             Instruction::BeginIter(_) | Instruction::BeginRangeIter { .. } => {
                 InstructionProfileTag::BeginIter
             }
-            Instruction::LoweredLoop(_) => InstructionProfileTag::LoweredLoop,
             Instruction::IterNext { .. } => InstructionProfileTag::IterNext,
             Instruction::EndIter => InstructionProfileTag::EndIter,
             Instruction::ResolveTypeRef(_) => InstructionProfileTag::ResolveTypeRef,
@@ -442,7 +439,6 @@ pub(crate) enum InstructionProfileTag {
     ProcessControl,
     Pop,
     BeginIter,
-    LoweredLoop,
     IterNext,
     EndIter,
     ResolveTypeRef,
@@ -545,7 +541,6 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "process_control",
     "pop",
     "begin_iter",
-    "lowered_loop",
     "iter_next",
     "end_iter",
     "resolve_type_ref",

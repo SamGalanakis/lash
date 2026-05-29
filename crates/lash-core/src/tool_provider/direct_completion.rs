@@ -16,8 +16,13 @@ impl ToolDirectCompletionControl<'_> {
         if request.session_id.is_none() {
             request.session_id = Some(self.session_id.clone());
         }
-        if request.originating_tool_call_id.is_none() {
-            request.originating_tool_call_id = self.tool_call_id.clone();
+        if request.caused_by.is_none()
+            && let Some(call_id) = self.tool_call_id.clone()
+        {
+            request.caused_by = Some(crate::CausalRef::ToolCall {
+                session_id: self.session_id.clone(),
+                call_id,
+            });
         }
         self.direct_completions
             .direct_completion(request, usage_source)

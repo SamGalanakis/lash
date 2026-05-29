@@ -10,7 +10,7 @@ mod attachments;
 mod direct_completion;
 mod dispatch;
 mod process;
-mod process_events;
+pub(crate) mod process_events;
 mod session;
 
 pub use attachments::ToolAttachmentControl;
@@ -36,6 +36,7 @@ pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 #[derive(Clone)]
 pub struct ToolContext<'run> {
     pub(crate) session_id: String,
+    pub(crate) agent_frame_id: crate::AgentFrameId,
     pub(crate) host: Arc<dyn RuntimeSessionHost>,
     pub(crate) processes: Arc<dyn crate::ProcessService>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
@@ -46,15 +47,12 @@ pub struct ToolContext<'run> {
     pub(crate) attachment_store: Arc<dyn AttachmentStore>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub(crate) prepared_payload: serde_json::Value,
-    /// The id of the in-flight tool call that is invoking this tool. Set by
-    /// the runtime tool dispatcher; tools should propagate it onto any
-    /// `DirectRequest::originating_tool_call_id` they issue so the trace
-    /// renderer can group fan-out LLM calls under the parent tool entry.
+    /// The id of the in-flight tool call that is invoking this tool.
     pub(crate) tool_call_id: Option<String>,
     pub(crate) attempt_number: u32,
     pub(crate) max_attempts: u32,
-    pub(crate) idempotency_key: Option<String>,
-    pub(crate) tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+    pub(crate) replay_key: Option<String>,
+    pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
 }
 
 #[derive(Clone)]
@@ -62,10 +60,13 @@ pub(crate) struct ToolProcessEventContext {
     process_id: String,
     registry: Arc<dyn crate::ProcessRegistry>,
     wake_target_scope: Option<crate::ProcessScope>,
+    store: Option<Arc<dyn crate::RuntimePersistence>>,
+    host: Arc<dyn RuntimeSessionHost>,
 }
 
 pub(crate) struct ToolContextBuilder<'run> {
     session_id: String,
+    agent_frame_id: crate::AgentFrameId,
     host: Arc<dyn RuntimeSessionHost>,
     processes: Arc<dyn crate::ProcessService>,
     effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
@@ -77,7 +78,7 @@ pub(crate) struct ToolContextBuilder<'run> {
     direct_completions: crate::DirectCompletionClient<'run>,
     prepared_payload: serde_json::Value,
     tool_call_id: Option<String>,
-    tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+    parent_invocation: Option<crate::RuntimeInvocation>,
 }
 
 impl<'run> ToolContextBuilder<'run> {
@@ -86,6 +87,7 @@ impl<'run> ToolContextBuilder<'run> {
     ) -> Self {
         Self {
             session_id: dispatch.session_id.clone(),
+            agent_frame_id: dispatch.agent_frame_id.clone(),
             host: Arc::clone(&dispatch.host),
             processes: Arc::clone(&dispatch.processes),
             effect_controller: dispatch.effect_controller.clone(),
@@ -97,7 +99,7 @@ impl<'run> ToolContextBuilder<'run> {
             direct_completions: dispatch.direct_completions.clone(),
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
-            tool_effect_metadata: dispatch.tool_effect_metadata.clone(),
+            parent_invocation: dispatch.parent_invocation.clone(),
         }
     }
 
@@ -136,26 +138,27 @@ impl<'run> ToolContextBuilder<'run> {
         process_id: impl Into<String>,
         registry: Arc<dyn crate::ProcessRegistry>,
         wake_target_scope: Option<crate::ProcessScope>,
+        store: Option<Arc<dyn crate::RuntimePersistence>>,
     ) -> Self {
         self.process_events = Some(ToolProcessEventContext {
             process_id: process_id.into(),
             registry,
             wake_target_scope,
+            store,
+            host: Arc::clone(&self.host),
         });
         self
     }
 
-    pub(crate) fn tool_effect_metadata(
-        mut self,
-        metadata: Option<crate::EffectInvocationMetadata>,
-    ) -> Self {
-        self.tool_effect_metadata = metadata;
+    pub(crate) fn parent_invocation(mut self, metadata: Option<crate::RuntimeInvocation>) -> Self {
+        self.parent_invocation = metadata;
         self
     }
 
     pub(crate) fn build(self) -> ToolContext<'run> {
         ToolContext {
             session_id: self.session_id,
+            agent_frame_id: self.agent_frame_id,
             host: self.host,
             processes: self.processes,
             effect_controller: self.effect_controller,
@@ -169,8 +172,8 @@ impl<'run> ToolContextBuilder<'run> {
             tool_call_id: self.tool_call_id,
             attempt_number: 1,
             max_attempts: 1,
-            idempotency_key: None,
-            tool_effect_metadata: self.tool_effect_metadata,
+            replay_key: None,
+            parent_invocation: self.parent_invocation,
         }
     }
 }
@@ -187,6 +190,7 @@ impl<'run> ToolContext<'run> {
     ) -> ToolContextBuilder<'run> {
         ToolContextBuilder {
             session_id,
+            agent_frame_id: String::new(),
             host,
             processes,
             effect_controller,
@@ -198,7 +202,7 @@ impl<'run> ToolContext<'run> {
             direct_completions,
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
-            tool_effect_metadata: None,
+            parent_invocation: None,
         }
     }
 
@@ -210,6 +214,10 @@ impl<'run> ToolContext<'run> {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn agent_frame_id(&self) -> &str {
+        &self.agent_frame_id
     }
 
     pub fn sessions(&self) -> ToolSessionControl {
@@ -228,9 +236,10 @@ impl<'run> ToolContext<'run> {
     pub fn processes(&self) -> ToolProcessControl<'run> {
         ToolProcessControl {
             session_id: self.session_id.clone(),
+            agent_frame_id: self.agent_frame_id.clone(),
             processes: Arc::clone(&self.processes),
             effect_controller: self.effect_controller.clone(),
-            effect_metadata: self.tool_effect_metadata.clone(),
+            parent_invocation: self.parent_invocation.clone(),
         }
     }
 
@@ -285,8 +294,8 @@ impl<'run> ToolContext<'run> {
         self.max_attempts
     }
 
-    pub fn idempotency_key(&self) -> Option<&str> {
-        self.idempotency_key.as_deref()
+    pub fn replay_key(&self) -> Option<&str> {
+        self.replay_key.as_deref()
     }
 
     pub fn with_async_process(
@@ -307,7 +316,7 @@ impl<'run> ToolContext<'run> {
     ) -> Self {
         self.attempt_number = attempt_number.max(1);
         self.max_attempts = max_attempts.max(1);
-        self.idempotency_key = self
+        self.replay_key = self
             .tool_call_id
             .as_ref()
             .map(|call_id| format!("lash-tool:{}:{call_id}:{tool_name}", self.session_id));
@@ -438,6 +447,12 @@ impl ToolPrepareContext {
 
     pub async fn tool_catalog(&self) -> Result<Vec<serde_json::Value>, PluginError> {
         self.host.tool_catalog(&self.session_id).await
+    }
+
+    pub async fn shared_tool_catalog(
+        &self,
+    ) -> Result<std::sync::Arc<Vec<serde_json::Value>>, PluginError> {
+        self.host.shared_tool_catalog(&self.session_id).await
     }
 }
 

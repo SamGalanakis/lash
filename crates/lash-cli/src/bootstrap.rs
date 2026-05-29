@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::config::LashConfig;
 use crate::prompt_context_plugin::{PromptContextPluginConfig, PromptContextPluginFactory};
-use lash::advanced::ExecutionMode;
+use lash::ModeId;
 use lash::persistence::FileAttachmentStore;
 use lash::plugins::PluginFactory;
 use lash::prompt::{
@@ -76,7 +76,7 @@ fn resolve_agent_model_specs(
 
 struct PluginFactorySurfaceInput<'a> {
     autonomous: bool,
-    execution_mode: ExecutionMode,
+    execution_mode: ModeId,
     standard_context_approach: Option<StandardContextApproach>,
     tavily_key: String,
     instruction_source: Arc<dyn InstructionSource>,
@@ -100,7 +100,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
 
     let runtime_options = StandardToolStackOptions {
         standard_context_approach: standard_context_approach.clone(),
-        include_cancel_process: execution_mode == ExecutionMode::standard(),
+        include_cancel_process: execution_mode == ModeId::standard(),
         tavily_api_key: if tavily_key.is_empty() {
             None
         } else {
@@ -132,7 +132,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
         plugin_stack.push(Arc::new(UpdatePlanPluginFactory));
     }
     plugin_stack.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
-    if execution_mode == ExecutionMode::rlm() {
+    if execution_mode == ModeId::rlm() {
         plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
         plugin_stack.push(Arc::new(
             SubagentsPluginFactory::new(capability_registry)
@@ -220,7 +220,7 @@ fn resolve_rlm_projected_bindings(
     Ok(Some(bindings))
 }
 
-fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode) -> PromptLayer {
+fn cli_prompt_config(autonomous: bool, execution_mode: &ModeId) -> PromptLayer {
     let mut intro_entries = vec![PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro)];
     intro_entries.push(PromptTemplateEntry::slot(PromptSlot::Intro));
 
@@ -260,7 +260,7 @@ fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode) -> Prompt
                 .with_priority(100),
         );
     }
-    if *execution_mode == ExecutionMode::rlm() {
+    if *execution_mode == ModeId::rlm() {
         layer.add_contribution(
             PromptContribution::new(
                 PromptSlot::Execution,
@@ -350,7 +350,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         let execution_mode =
             ensure_supported_execution_mode(match args.execution_mode.as_deref() {
                 Some(raw) => parse_execution_mode(raw).map_err(anyhow::Error::msg)?,
-                None => ExecutionMode::standard(),
+                None => ModeId::standard(),
             })
             .map_err(anyhow::Error::msg)?;
         let cwd = std::env::current_dir()
@@ -514,7 +514,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             .as_ref()
             .map(|config| config.execution_mode.clone())
             .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
-            .unwrap_or(ExecutionMode::standard()),
+            .unwrap_or(ModeId::standard()),
     };
     let has_om_overrides = args.om_observation_message_tokens.is_some()
         || args.om_observation_buffer_tokens.is_some()
@@ -524,14 +524,14 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         || args.om_reflection_observation_tokens.is_some()
         || args.om_reflection_buffer_activation_percent.is_some()
         || args.om_reflection_block_after_tokens.is_some();
-    if execution_mode != ExecutionMode::standard()
+    if execution_mode != ModeId::standard()
         && (args.standard_context_approach.is_some() || has_om_overrides)
     {
         return Err(anyhow::anyhow!(
             "`--context-approach` and OM tuning flags only apply to `--execution-mode standard`."
         ));
     }
-    let configured_standard_context_approach = if execution_mode == ExecutionMode::standard() {
+    let configured_standard_context_approach = if execution_mode == ModeId::standard() {
         let approach = match args.standard_context_approach.as_deref() {
             Some(raw) => parse_standard_context_approach(raw).map_err(anyhow::Error::msg)?,
             None => persisted_host_config
@@ -558,7 +558,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     };
     let rlm_projected_bindings =
         resolve_rlm_projected_bindings(&args).map_err(anyhow::Error::msg)?;
-    let rlm_globals_supported = execution_mode == ExecutionMode::rlm();
+    let rlm_globals_supported = execution_mode == ModeId::rlm();
     if rlm_projected_bindings.is_some() && !rlm_globals_supported {
         return Err(anyhow::anyhow!(
             "`--rlm-var` and `--rlm-vars-file` require `--execution-mode rlm`."
@@ -740,7 +740,7 @@ mod tests {
         fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
             dummy_tools()
                 .into_iter()
-                .find(|tool| tool.name == name)
+                .find(|tool| tool.name() == name)
                 .map(|tool| std::sync::Arc::new(tool.contract()))
         }
 
@@ -762,7 +762,7 @@ mod tests {
         let agent_model_specs = BTreeMap::new();
         plugin_factories_for_surface(PluginFactorySurfaceInput {
             autonomous,
-            execution_mode: ExecutionMode::standard(),
+            execution_mode: ModeId::standard(),
             standard_context_approach: None,
             tavily_key: String::new(),
             instruction_source: Arc::new(FsInstructionSource::default()),
@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn rlm_prompt_config_uses_execution_slot_and_contribution() {
-        let layer = cli_prompt_config(false, &ExecutionMode::rlm());
+        let layer = cli_prompt_config(false, &ModeId::rlm());
         let template = layer.template.as_ref().expect("cli prompt template");
         let contributions = layer
             .slots
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn standard_prompt_config_omits_rlm_contribution() {
-        let layer = cli_prompt_config(false, &ExecutionMode::standard());
+        let layer = cli_prompt_config(false, &ModeId::standard());
         let contributions = layer
             .slots
             .values()
@@ -841,7 +841,7 @@ mod tests {
 
     #[test]
     fn autonomous_prompt_config_uses_neutral_slots() {
-        let layer = cli_prompt_config(true, &ExecutionMode::standard());
+        let layer = cli_prompt_config(true, &ModeId::standard());
         let template = layer.template.as_ref().expect("cli prompt template");
         let contributions = layer
             .slots

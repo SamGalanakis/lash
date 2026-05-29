@@ -1,32 +1,27 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
-    ToolRetryPolicy, ToolScheduling,
-};
+use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
 
 use lash_tool_support::{
-    FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
-    parse_optional_bool, parse_optional_usize_arg, require_str, rg_file_list, run_blocking,
+    FS_DEFAULTS_PREAMBLE, StaticToolExecute, StaticToolProvider, build_path_entry,
+    filesystem_entries_result, object_schema, parse_optional_bool, parse_optional_usize_arg,
+    require_str, rg_file_list, run_blocking,
 };
 
 /// Find files by glob pattern.
 #[derive(Default)]
 pub struct Glob;
 
+/// Build the cached `glob` tool provider.
+pub fn glob_provider() -> StaticToolProvider<Glob> {
+    StaticToolProvider::new(vec![glob_tool_definition()], Glob)
+}
+
 const MAX_RESULTS: usize = 100;
 
 #[async_trait::async_trait]
-impl ToolProvider for Glob {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![glob_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
-        (name == "glob").then(|| std::sync::Arc::new(glob_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for Glob {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let args = call.args;
         let pattern = match require_str(args, "pattern") {
@@ -167,10 +162,14 @@ fn glob_tool_definition() -> ToolDefinition {
                 serde_json::json!({ "type": "object", "additionalProperties": true }),
             )
             .with_examples(vec![
-                r#"glob(pattern="**/*.rs", path="crates/lash/src", limit=50)"#.into(),
-                r#"glob(pattern="**/Cargo.toml", path=".")"#.into(),
+                r#"await files.glob({ pattern: "**/*.rs", path: "crates/lash/src", limit: 50 })?"#.into(),
+                r#"await files.glob({ pattern: "**/Cargo.toml", path: "." })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["find_files"]))
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["files"],
+                "glob",
+                &["find_files"],
+            ))
             .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
@@ -201,7 +200,7 @@ mod tests {
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Glob,
+            &glob_provider(),
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
         )
@@ -234,7 +233,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Glob,
+            &glob_provider(),
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
         )
@@ -249,7 +248,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("sub/deep")).unwrap();
         std::fs::write(dir.path().join("sub/deep/file.rs"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Glob,
+            &glob_provider(),
             "glob",
             &json!({"pattern": "**/*.rs", "path": dir.path().to_str().unwrap()}),
         )
@@ -270,7 +269,7 @@ mod tests {
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.rs"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Glob,
+            &glob_provider(),
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "limit": 2}),
         )
@@ -292,7 +291,7 @@ mod tests {
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.rs"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Glob,
+            &glob_provider(),
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "limit": null}),
         )
@@ -314,7 +313,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.rs"), "line1\nline2\nline3\n").unwrap();
         let result = lash_core::testing::run_tool(
-            &Glob,
+            &glob_provider(),
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "with_lines": true}),
         )
@@ -330,7 +329,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".hidden.rs"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Glob,
+            &glob_provider(),
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
         )
@@ -354,7 +353,7 @@ mod tests {
         std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
         std::fs::write(dir.path().join("ignored.rs"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Glob,
+            &glob_provider(),
             "glob",
             &json!({
                 "pattern": "*.rs",
@@ -382,7 +381,7 @@ mod tests {
         std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
         std::fs::write(dir.path().join("ignored.rs"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Glob,
+            &glob_provider(),
             "glob",
             &json!({
                 "pattern": "*.rs",
@@ -407,7 +406,7 @@ mod tests {
             .status()
             .unwrap();
         let result = lash_core::testing::run_tool(
-            &Glob,
+            &glob_provider(),
             "glob",
             &json!({"pattern": ".git/**", "path": dir.path().to_str().unwrap()}),
         )

@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -56,66 +55,10 @@ impl ToolSurfaceHandle {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct TurnInjectionBridge {
-    queue: std::sync::Arc<std::sync::Mutex<VecDeque<PluginMessage>>>,
-}
-
 #[derive(Clone, Debug)]
 pub struct InjectedTurnInput {
     pub id: Option<String>,
     pub message: PluginMessage,
-}
-
-#[derive(Clone, Default)]
-pub struct TurnInputInjectionBridge {
-    queue: std::sync::Arc<std::sync::Mutex<VecDeque<InjectedTurnInput>>>,
-}
-
-impl TurnInjectionBridge {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn enqueue(&self, messages: Vec<PluginMessage>) -> Result<(), String> {
-        let mut queue = self
-            .queue
-            .lock()
-            .map_err(|_| "turn injection bridge poisoned".to_string())?;
-        queue.extend(messages);
-        Ok(())
-    }
-
-    pub fn drain(&self) -> Result<Vec<PluginMessage>, String> {
-        let mut queue = self
-            .queue
-            .lock()
-            .map_err(|_| "turn injection bridge poisoned".to_string())?;
-        Ok(queue.drain(..).collect())
-    }
-}
-
-impl TurnInputInjectionBridge {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn enqueue(&self, messages: Vec<InjectedTurnInput>) -> Result<(), String> {
-        let mut queue = self
-            .queue
-            .lock()
-            .map_err(|_| "turn injection bridge poisoned".to_string())?;
-        queue.extend(messages);
-        Ok(())
-    }
-
-    pub fn drain(&self) -> Result<Vec<InjectedTurnInput>, String> {
-        let mut queue = self
-            .queue
-            .lock()
-            .map_err(|_| "turn input injection bridge poisoned".to_string())?;
-        Ok(queue.drain(..).collect())
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -354,6 +297,7 @@ impl Session {
     pub(crate) fn code_execution_context<'run>(
         &self,
         session_id: &str,
+        agent_frame_id: &str,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         processes: Arc<dyn crate::ProcessService>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
@@ -362,6 +306,7 @@ impl Session {
         chronological_projection: Arc<crate::ChronologicalProjection>,
         protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
         turn_context: crate::TurnContext,
+        checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer,
     ) -> Result<RuntimeExecutionContext<'run>, crate::PluginError> {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
@@ -371,10 +316,11 @@ impl Session {
             processes,
             effect_controller,
             direct_completions: direct_completions.clone(),
-            tool_effect_metadata: None,
+            parent_invocation: None,
             session_id: session_id.to_string(),
+            agent_frame_id: agent_frame_id.to_string(),
             event_tx,
-            turn_injection_bridge: self.turn_injection_bridge().clone(),
+            checkpoint_messages,
             attachment_store: Arc::clone(&self.services.attachment_store),
             turn_context: turn_context.clone(),
         });
@@ -388,14 +334,6 @@ impl Session {
             protocol_extension,
             turn_context,
         ))
-    }
-
-    pub fn turn_injection_bridge(&self) -> &TurnInjectionBridge {
-        &self.services.turn_injection_bridge
-    }
-
-    pub fn turn_input_injection_bridge(&self) -> &TurnInputInjectionBridge {
-        &self.services.turn_input_injection_bridge
     }
 
     /// Set the message sender for streaming messages during execution.

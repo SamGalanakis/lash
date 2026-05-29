@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "restate")]
+use std::sync::Mutex;
 
 use axum::Router;
 use axum::routing::get;
@@ -10,7 +12,7 @@ use lash::{
     LashCore, ModeId, ModePreset,
     advanced::InlineRuntimeEffectController,
     provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
-    tracing::{JsonlTraceSink, TraceLevel, TraceRecord, TraceSink, TraceSinkError},
+    tracing::{JsonlTraceSink, StderrTraceSink, TeeTraceSink, TraceLevel, TraceSink},
 };
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
@@ -34,33 +36,6 @@ use crate::routes::{
 use crate::state::{AgentServiceDurability, AppStateData, anyhow_like};
 #[cfg(feature = "restate")]
 use lash_restate::{LashProcessWorkflow, LashProcessWorkflowImpl, RestateCoreProcessRunner};
-
-#[derive(Default)]
-struct StderrTraceSink {
-    lock: Mutex<()>,
-}
-
-impl TraceSink for StderrTraceSink {
-    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
-        let line = serde_json::to_string(record)?;
-        let _guard = self.lock.lock().map_err(|_| TraceSinkError::LockPoisoned)?;
-        eprintln!("{line}");
-        Ok(())
-    }
-}
-
-struct FanoutTraceSink {
-    sinks: Vec<Arc<dyn TraceSink>>,
-}
-
-impl TraceSink for FanoutTraceSink {
-    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
-        for sink in &self.sinks {
-            sink.append(record)?;
-        }
-        Ok(())
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow_like::Result<()> {
@@ -129,12 +104,10 @@ async fn main() -> anyhow_like::Result<()> {
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )))
-        .trace_sink(Some(Arc::new(FanoutTraceSink {
-            sinks: vec![
-                Arc::new(StderrTraceSink::default()),
-                Arc::new(JsonlTraceSink::new(trace_path)),
-            ],
-        })))
+        .trace_sink(Some(Arc::new(TeeTraceSink::new([
+            Arc::new(StderrTraceSink::default()) as Arc<dyn TraceSink>,
+            Arc::new(JsonlTraceSink::new(trace_path)),
+        ]))))
         .trace_level(TraceLevel::Extended);
     let process_registry = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))

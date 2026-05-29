@@ -1,25 +1,41 @@
 use super::*;
 
-type DirectCompletionFuture<'a, T> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, crate::PluginError>> + Send + 'a>>;
+/// Runtime-backed direct completion source.
+///
+/// Carries everything needed to plan and journal a direct LLM effect against
+/// the owning session manager.
+#[derive(Clone)]
+struct RuntimeDirectSource<'run> {
+    manager: Arc<RuntimeSessionManager>,
+    effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
+    turn_id: Option<String>,
+    turn_lease: Option<crate::RuntimeTurnLease>,
+}
 
-trait DirectCompletionInvoker: Send + Sync {
-    fn direct_completion<'a>(
-        &'a self,
-        request: crate::DirectRequest,
-        usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectCompletion>;
+#[cfg(any(test, feature = "testing"))]
+type TestDirectFn = Arc<
+    dyn Fn(crate::DirectRequest, String) -> Result<crate::DirectCompletion, crate::PluginError>
+        + Send
+        + Sync,
+>;
 
-    fn direct_llm_completion<'a>(
-        &'a self,
-        request: crate::LlmRequest,
-        usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectLlmCompletion>;
+/// Source of direct (single-shot) LLM completions for plugins and tools.
+///
+/// In production this is always backed by the runtime session manager; the
+/// test/testing variants exist only so that out-of-runtime test harnesses can
+/// inject a canned completion without standing up a full runtime.
+#[derive(Clone)]
+enum DirectCompletionSource<'run> {
+    Runtime(RuntimeDirectSource<'run>),
+    #[cfg(any(test, feature = "testing"))]
+    Unavailable(String),
+    #[cfg(any(test, feature = "testing"))]
+    TestFn(TestDirectFn),
 }
 
 #[derive(Clone)]
 pub struct DirectCompletionClient<'run> {
-    inner: Arc<dyn DirectCompletionInvoker + 'run>,
+    source: DirectCompletionSource<'run>,
 }
 
 impl<'run> DirectCompletionClient<'run> {
@@ -30,7 +46,7 @@ impl<'run> DirectCompletionClient<'run> {
         turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Self {
         Self {
-            inner: Arc::new(RuntimeDirectCompletionInvoker {
+            source: DirectCompletionSource::Runtime(RuntimeDirectSource {
                 manager,
                 effect_controller,
                 turn_id,
@@ -44,7 +60,21 @@ impl<'run> DirectCompletionClient<'run> {
         request: crate::DirectRequest,
         usage_source: &str,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
-        self.inner.direct_completion(request, usage_source).await
+        match &self.source {
+            DirectCompletionSource::Runtime(source) => {
+                source
+                    .manager
+                    .direct
+                    .invoke_direct_completion(source.invocation_context(), request, usage_source)
+                    .await
+            }
+            #[cfg(any(test, feature = "testing"))]
+            DirectCompletionSource::Unavailable(message) => {
+                Err(crate::PluginError::Session(message.clone()))
+            }
+            #[cfg(any(test, feature = "testing"))]
+            DirectCompletionSource::TestFn(invoke) => invoke(request, usage_source.to_string()),
+        }
     }
 
     pub async fn direct_llm_completion(
@@ -52,17 +82,33 @@ impl<'run> DirectCompletionClient<'run> {
         request: crate::LlmRequest,
         usage_source: &str,
     ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
-        self.inner
-            .direct_llm_completion(request, usage_source)
-            .await
+        match &self.source {
+            DirectCompletionSource::Runtime(source) => {
+                source
+                    .manager
+                    .direct
+                    .invoke_direct_llm_completion(
+                        source.invocation_context(),
+                        request,
+                        usage_source,
+                    )
+                    .await
+            }
+            #[cfg(any(test, feature = "testing"))]
+            DirectCompletionSource::Unavailable(message) => {
+                Err(crate::PluginError::Session(message.clone()))
+            }
+            #[cfg(any(test, feature = "testing"))]
+            DirectCompletionSource::TestFn(_) => Err(crate::PluginError::Session(
+                "direct LLM completions are unavailable in this test context".to_string(),
+            )),
+        }
     }
 
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn unavailable(message: impl Into<String>) -> Self {
         Self {
-            inner: Arc::new(UnavailableDirectCompletionInvoker {
-                message: message.into(),
-            }),
+            source: DirectCompletionSource::Unavailable(message.into()),
         }
     }
 
@@ -75,18 +121,21 @@ impl<'run> DirectCompletionClient<'run> {
             + 'static,
     {
         Self {
-            inner: Arc::new(TestDirectCompletionInvoker {
-                invoke: Arc::new(invoke),
-            }),
+            source: DirectCompletionSource::TestFn(Arc::new(invoke)),
         }
     }
 }
 
-struct RuntimeDirectCompletionInvoker<'run> {
-    manager: Arc<RuntimeSessionManager>,
-    effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
-    turn_id: Option<String>,
-    turn_lease: Option<crate::RuntimeTurnLease>,
+impl<'run> RuntimeDirectSource<'run> {
+    fn invocation_context(&self) -> DirectInvocationContext<'_> {
+        DirectInvocationContext {
+            current: &self.manager.current,
+            usage_capability: &self.manager.usage,
+            effect_controller: self.effect_controller.as_controller(),
+            turn_id: self.turn_id.as_deref(),
+            turn_lease: self.turn_lease.as_ref(),
+        }
+    }
 }
 
 pub(in crate::runtime::session_manager) struct DirectInvocationContext<'a> {
@@ -97,159 +146,73 @@ pub(in crate::runtime::session_manager) struct DirectInvocationContext<'a> {
     turn_lease: Option<&'a crate::RuntimeTurnLease>,
 }
 
-impl DirectCompletionInvoker for RuntimeDirectCompletionInvoker<'_> {
-    fn direct_completion<'a>(
-        &'a self,
-        request: crate::DirectRequest,
-        usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectCompletion> {
-        Box::pin(async move {
-            self.manager
-                .direct
-                .invoke_direct_completion(
-                    DirectInvocationContext {
-                        current: &self.manager.current,
-                        usage_capability: &self.manager.usage,
-                        effect_controller: self.effect_controller.as_controller(),
-                        turn_id: self.turn_id.as_deref(),
-                        turn_lease: self.turn_lease.as_ref(),
-                    },
-                    request,
-                    usage_source,
-                )
-                .await
-        })
-    }
-
-    fn direct_llm_completion<'a>(
-        &'a self,
-        request: crate::LlmRequest,
-        usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectLlmCompletion> {
-        Box::pin(async move {
-            self.manager
-                .direct
-                .invoke_direct_llm_completion(
-                    DirectInvocationContext {
-                        current: &self.manager.current,
-                        usage_capability: &self.manager.usage,
-                        effect_controller: self.effect_controller.as_controller(),
-                        turn_id: self.turn_id.as_deref(),
-                        turn_lease: self.turn_lease.as_ref(),
-                    },
-                    request,
-                    usage_source,
-                )
-                .await
-        })
-    }
-}
-
-#[cfg(any(test, feature = "testing"))]
-struct UnavailableDirectCompletionInvoker {
-    message: String,
-}
-
-#[cfg(any(test, feature = "testing"))]
-impl DirectCompletionInvoker for UnavailableDirectCompletionInvoker {
-    fn direct_completion<'a>(
-        &'a self,
-        _request: crate::DirectRequest,
-        _usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectCompletion> {
-        Box::pin(async move { Err(crate::PluginError::Session(self.message.clone())) })
-    }
-
-    fn direct_llm_completion<'a>(
-        &'a self,
-        _request: crate::LlmRequest,
-        _usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectLlmCompletion> {
-        Box::pin(async move { Err(crate::PluginError::Session(self.message.clone())) })
-    }
-}
-
-#[cfg(any(test, feature = "testing"))]
-struct TestDirectCompletionInvoker {
-    invoke: Arc<
-        dyn Fn(crate::DirectRequest, String) -> Result<crate::DirectCompletion, crate::PluginError>
-            + Send
-            + Sync,
-    >,
-}
-
-#[cfg(any(test, feature = "testing"))]
-impl DirectCompletionInvoker for TestDirectCompletionInvoker {
-    fn direct_completion<'a>(
-        &'a self,
-        request: crate::DirectRequest,
-        usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectCompletion> {
-        let invoke = Arc::clone(&self.invoke);
-        let usage_source = usage_source.to_string();
-        Box::pin(async move { invoke(request, usage_source) })
-    }
-
-    fn direct_llm_completion<'a>(
-        &'a self,
-        _request: crate::LlmRequest,
-        _usage_source: &'a str,
-    ) -> DirectCompletionFuture<'a, crate::DirectLlmCompletion> {
-        Box::pin(async {
-            Err(crate::PluginError::Session(
-                "direct LLM completions are unavailable in this test context".to_string(),
-            ))
-        })
-    }
+struct DirectEffectPlan {
+    provider: crate::ProviderHandle,
+    envelope: crate::RuntimeEffectEnvelope,
+    request: Box<crate::LlmRequest>,
+    usage_source: String,
 }
 
 impl DirectCompletionCapability {
-    pub(in crate::runtime::session_manager) async fn invoke_direct_completion(
+    /// Plans a single direct LLM effect from a normalized [`crate::LlmRequest`].
+    ///
+    /// Both the text-only (`DirectRequest`) and full-output entry points feed
+    /// the same effect lane; they differ only in how the caller projects the
+    /// resulting [`crate::LlmResponse`].
+    fn plan_direct_effect(
         &self,
-        context: DirectInvocationContext<'_>,
-        request: crate::DirectRequest,
+        context: &DirectInvocationContext<'_>,
+        request: crate::LlmRequest,
         usage_source: &str,
-    ) -> Result<crate::DirectCompletion, crate::PluginError> {
+        replay: Option<&crate::RuntimeReplay>,
+        caused_by: Option<&crate::CausalRef>,
+    ) -> Result<DirectEffectPlan, crate::PluginError> {
         let current = context.current;
         let provider = current.policy.provider.clone();
-        let model = request.model.clone();
-        if let Some(variant) = request.model_variant.as_deref() {
-            provider
-                .validate_variant(&model, variant)
-                .map_err(crate::PluginError::Session)?;
-        }
-        let llm_request =
-            crate::direct::build_llm_request(&provider, request.clone(), model.clone());
-        let request_spec = crate::DirectRequestSpec::from_request(
+        let usage_source = usage_source.to_string();
+        let request_spec = crate::LlmRequestSpec::from_request(
             &request,
             current.host.core.attachment_store.as_ref(),
         )?;
-        let normalized_spec = crate::LlmRequestSpec::from_request(
-            &llm_request,
-            current.host.core.attachment_store.as_ref(),
-        )?;
-        let discriminator = crate::runtime::effect::direct_request_discriminator(
-            &request_spec,
-            request.idempotency_key.as_deref(),
-            request.originating_tool_call_id.as_deref(),
-        )?;
-        let metadata = crate::runtime::effect::direct_effect_metadata(
+        let discriminator =
+            crate::runtime::causal::direct_request_discriminator(&request_spec, replay, caused_by)?;
+        let invocation = crate::runtime::causal::direct_effect_invocation(
             &current.session_id,
-            usage_source,
-            crate::RuntimeEffectKind::DirectCompletion,
+            &usage_source,
             discriminator,
             context.turn_id,
+            caused_by.cloned(),
         );
-        let usage_source = usage_source.to_string();
         let envelope = crate::RuntimeEffectEnvelope::new(
-            metadata,
-            crate::RuntimeEffectCommand::DirectCompletion {
+            invocation,
+            crate::RuntimeEffectCommand::Direct {
                 request: Box::new(request_spec),
-                normalized_request: Box::new(normalized_spec),
-                model: model.clone(),
                 usage_source: usage_source.clone(),
             },
         );
+        Ok(DirectEffectPlan {
+            provider,
+            envelope,
+            request: Box::new(request),
+            usage_source,
+        })
+    }
+
+    /// Runs a planned direct effect across the journal/controller boundary and
+    /// applies usage/trace bookkeeping, yielding the raw provider response.
+    async fn run_direct_effect(
+        &self,
+        context: DirectInvocationContext<'_>,
+        plan: DirectEffectPlan,
+        caused_by: Option<crate::CausalRef>,
+    ) -> Result<(crate::LlmResponse, crate::TokenUsage), crate::PluginError> {
+        let current = context.current;
+        let DirectEffectPlan {
+            provider,
+            envelope,
+            request,
+            usage_source,
+        } = plan;
         crate::runtime::effect::invoke_journaled_effect(
             crate::runtime::effect::JournaledEffectInvocation::new(
                 current.store.as_ref().map(|store| store.as_ref()),
@@ -262,19 +225,48 @@ impl DirectCompletionCapability {
                 ),
             ),
             |outcome| async move {
-                crate::runtime::effect::apply_direct_completion_outcome(
+                crate::runtime::effect::apply_direct_outcome(
                     current,
                     context.usage_capability,
                     &request,
-                    &llm_request,
-                    &model,
                     &usage_source,
+                    caused_by.as_ref(),
                     outcome,
                 )
                 .await
             },
         )
         .await
+    }
+
+    pub(in crate::runtime::session_manager) async fn invoke_direct_completion(
+        &self,
+        context: DirectInvocationContext<'_>,
+        request: crate::DirectRequest,
+        usage_source: &str,
+    ) -> Result<crate::DirectCompletion, crate::PluginError> {
+        let provider = &context.current.policy.provider;
+        let model = request.model.clone();
+        if let Some(variant) = request.model_variant.as_deref() {
+            provider
+                .validate_variant(&model, variant)
+                .map_err(crate::PluginError::Session)?;
+        }
+        let replay = request.replay.clone();
+        let caused_by = request.caused_by.clone();
+        let normalized = crate::direct::build_llm_request(provider, request, model);
+        let plan = self.plan_direct_effect(
+            &context,
+            normalized,
+            usage_source,
+            replay.as_ref(),
+            caused_by.as_ref(),
+        )?;
+        let (response, usage) = self.run_direct_effect(context, plan, caused_by).await?;
+        Ok(crate::DirectCompletion {
+            text: response.full_text,
+            usage,
+        })
     }
 
     pub(in crate::runtime::session_manager) async fn invoke_direct_llm_completion(
@@ -283,51 +275,8 @@ impl DirectCompletionCapability {
         request: crate::LlmRequest,
         usage_source: &str,
     ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
-        let current = context.current;
-        let provider = current.policy.provider.clone();
-        let request_spec = crate::LlmRequestSpec::from_request(
-            &request,
-            current.host.core.attachment_store.as_ref(),
-        )?;
-        let discriminator =
-            crate::runtime::effect::direct_request_discriminator(&request_spec, None, None)?;
-        let metadata = crate::runtime::effect::direct_effect_metadata(
-            &current.session_id,
-            usage_source,
-            crate::RuntimeEffectKind::DirectLlmCompletion,
-            discriminator,
-            context.turn_id,
-        );
-        let usage_source = usage_source.to_string();
-        let envelope = crate::RuntimeEffectEnvelope::new(
-            metadata,
-            crate::RuntimeEffectCommand::DirectLlmCompletion {
-                request: Box::new(request_spec),
-                usage_source: usage_source.clone(),
-            },
-        );
-        crate::runtime::effect::invoke_journaled_effect(
-            crate::runtime::effect::JournaledEffectInvocation::new(
-                current.store.as_ref().map(|store| store.as_ref()),
-                context.turn_lease,
-                context.effect_controller,
-                envelope,
-                crate::RuntimeEffectLocalExecutor::direct(
-                    provider,
-                    Arc::clone(&current.host.core.attachment_store),
-                ),
-            ),
-            |outcome| async move {
-                crate::runtime::effect::apply_direct_llm_completion_outcome(
-                    current,
-                    context.usage_capability,
-                    &request,
-                    &usage_source,
-                    outcome,
-                )
-                .await
-            },
-        )
-        .await
+        let plan = self.plan_direct_effect(&context, request, usage_source, None, None)?;
+        let (response, usage) = self.run_direct_effect(context, plan, None).await?;
+        Ok(crate::DirectLlmCompletion { response, usage })
     }
 }

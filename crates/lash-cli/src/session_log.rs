@@ -145,7 +145,7 @@ impl SessionLogger {
             cwd: meta.cwd,
             relation: lash_core::SessionRelation::Child {
                 parent_session_id: parent_session_id.to_string(),
-                originating_tool_call_id: None,
+                caused_by: None,
             },
         });
         Ok(())
@@ -409,6 +409,8 @@ mod tests {
         store.save_session_head(lash_core::SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
             graph,
             config: lash_core::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),
@@ -629,7 +631,7 @@ mod tests {
                     .and_then(|path| path.to_str().map(str::to_string)),
                 relation: lash_core::SessionRelation::Child {
                     parent_session_id: "parent".to_string(),
-                    originating_tool_call_id: None,
+                    caused_by: None,
                 },
             });
             persist_root_snapshot(
@@ -670,7 +672,7 @@ mod tests {
                 cwd: None,
                 relation: lash_core::SessionRelation::Child {
                     parent_session_id: "parent-id".to_string(),
-                    originating_tool_call_id: None,
+                    caused_by: None,
                 },
             });
 

@@ -55,8 +55,8 @@ pub async fn switch_to_tree_selection(
 
     app.stop_turn();
     app.timeline = timeline_from_read_view(&read_view, &app.ui_projection_state());
-    app.token_usage = state.token_usage.clone();
-    app.last_prompt_usage = state.last_prompt_usage.clone();
+    app.usage.token_usage = state.token_usage.clone();
+    app.usage.last_prompt_usage = state.last_prompt_usage.clone();
     // Branching to a different leaf means the handle maps from the
     // old path (shell sessions, subagent tasks) are no longer valid
     // — reset them so a stale id from the abandoned branch doesn't

@@ -2,7 +2,11 @@ use super::*;
 
 fn trace_fields_from_outcome(
     outcome: &TurnOutcome,
-) -> (&'static str, &'static str, Option<lash_trace::TraceHandoff>) {
+) -> (
+    &'static str,
+    &'static str,
+    Option<lash_trace::TraceAgentFrameSwitch>,
+) {
     match outcome {
         TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => {
             ("completed", "assistant_message", None)
@@ -11,11 +15,11 @@ fn trace_fields_from_outcome(
             ("completed", "submitted_value", None)
         }
         TurnOutcome::Finished(TurnFinish::ToolValue { .. }) => ("completed", "tool_value", None),
-        TurnOutcome::Handoff { session_id } => (
+        TurnOutcome::AgentFrameSwitch { frame_id } => (
             "completed",
-            "handoff",
-            Some(lash_trace::TraceHandoff {
-                successor_session_id: session_id.clone(),
+            "agent_frame_switch",
+            Some(lash_trace::TraceAgentFrameSwitch {
+                frame_id: frame_id.clone(),
             }),
         ),
         TurnOutcome::Stopped(stop) => ("failed", trace_stop_reason(stop), None),
@@ -37,6 +41,91 @@ fn trace_stop_reason(stop: &TurnStop) -> &'static str {
     }
 }
 
+fn queued_work_payload_type(payload: &crate::QueuedWorkPayload) -> &'static str {
+    match payload {
+        crate::QueuedWorkPayload::TurnInput { .. } => "turn_input",
+        crate::QueuedWorkPayload::ProcessWake { .. } => "process_wake",
+        crate::QueuedWorkPayload::HostEvent { .. } => "host_event",
+        crate::QueuedWorkPayload::Timer { .. } => "timer",
+        crate::QueuedWorkPayload::Resume { .. } => "resume",
+    }
+}
+
+fn queued_work_batch_ids(claim: &crate::QueuedWorkClaim) -> Vec<String> {
+    claim
+        .batches
+        .iter()
+        .map(|batch| batch.batch_id.clone())
+        .collect()
+}
+
+pub(in crate::runtime) fn queued_work_trace_payload(
+    boundary: crate::QueuedWorkClaimBoundary,
+    claim: &crate::QueuedWorkClaim,
+    causes: &[crate::TurnCause],
+) -> serde_json::Value {
+    serde_json::json!({
+        "boundary": boundary,
+        "claim_id": claim.claim_id,
+        "owner_id": claim.owner_id,
+        "batch_ids": queued_work_batch_ids(claim),
+        "payload_types": claim.batches.iter()
+            .flat_map(|batch| batch.items.iter())
+            .map(|item| queued_work_payload_type(&item.payload))
+            .collect::<Vec<_>>(),
+        "causes": causes,
+    })
+}
+
+pub(in crate::runtime) fn queued_work_completion_trace_payload(
+    completions: &[crate::QueuedWorkCompletion],
+) -> serde_json::Value {
+    serde_json::json!({
+        "claims": completions.iter().map(|completion| {
+            serde_json::json!({
+                "session_id": completion.session_id,
+                "claim_id": completion.claim_id,
+                "batch_ids": completion.batch_ids,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+async fn emit_queued_work_started_to_sink(
+    events: &dyn TurnActivitySink,
+    boundary: crate::QueuedWorkClaimBoundary,
+    claim: &crate::QueuedWorkClaim,
+    causes: Vec<crate::TurnCause>,
+) {
+    emit_turn_activity_to_sink(
+        events,
+        TurnActivity::independent(TurnEvent::QueuedWorkStarted {
+            boundary,
+            batch_ids: queued_work_batch_ids(claim),
+            causes,
+        }),
+    )
+    .await;
+}
+
+pub(in crate::runtime) async fn send_queued_work_started_event(
+    event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+    boundary: crate::QueuedWorkClaimBoundary,
+    claim: &crate::QueuedWorkClaim,
+    causes: Vec<crate::TurnCause>,
+) {
+    send_turn_activity(
+        event_tx,
+        TurnActivityId::fresh(),
+        TurnEvent::QueuedWorkStarted {
+            boundary,
+            batch_ids: queued_work_batch_ids(claim),
+            causes,
+        },
+    )
+    .await;
+}
+
 async fn abandon_runtime_turn_lease_best_effort(
     store: Option<&(dyn crate::RuntimePersistence + '_)>,
     lease: Option<&crate::RuntimeTurnLease>,
@@ -55,20 +144,6 @@ async fn abandon_runtime_turn_lease_best_effort(
     }
 }
 
-fn process_wake_ids_from_turn_causes(causes: &[crate::TurnCause]) -> Vec<String> {
-    causes
-        .iter()
-        .filter_map(|cause| match &cause.origin {
-            crate::MessageOrigin::Process {
-                event_type,
-                wake_id: Some(wake_id),
-                ..
-            } if event_type == "process.wake" => Some(wake_id.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 struct LeasedTurnFinish {
     turn_pipeline: TurnCommitPipeline,
     assembler: TurnAssembler,
@@ -76,13 +151,14 @@ struct LeasedTurnFinish {
     policy: SessionPolicy,
     turn_index: usize,
     turn_lease: Option<crate::RuntimeTurnLease>,
+    queued_work_completions: Vec<crate::QueuedWorkCompletion>,
     trace_turn_id: String,
     abandon_context: &'static str,
 }
 
 impl LashRuntime {
     fn max_context_tokens(&self) -> usize {
-        self.policy.context_window_tokens()
+        self.state.effective_policy().context_window_tokens()
     }
     #[doc(hidden)]
     pub fn set_turn_phase_probe(&mut self, probe: Arc<dyn RuntimeTurnPhaseProbe>) {
@@ -101,44 +177,6 @@ impl LashRuntime {
         }
     }
 
-    async fn drain_pending_process_turn_causes(
-        &self,
-    ) -> Result<Vec<crate::TurnCause>, RuntimeError> {
-        let Some(registry) = self.host.process_registry.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let scope_id = crate::ProcessScope::new(&self.state.session_id).id();
-        let wakes = registry
-            .drain_wake_inputs(&scope_id, 256)
-            .await
-            .map_err(|err| {
-                RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err.to_string())
-            })?;
-        Ok(wakes.iter().map(crate::process_wake_turn_cause).collect())
-    }
-
-    async fn ack_process_turn_causes(
-        &self,
-        causes: &[crate::TurnCause],
-    ) -> Result<(), RuntimeError> {
-        let wake_ids = process_wake_ids_from_turn_causes(causes);
-        if wake_ids.is_empty() {
-            return Ok(());
-        }
-        let Some(registry) = self.host.process_registry.as_ref() else {
-            return Err(RuntimeError::new(
-                RuntimeErrorCode::TurnInputInjectionBridge,
-                "committed process wake event without process registry".to_string(),
-            ));
-        };
-        for wake_id in wake_ids {
-            registry.ack_wake_input(&wake_id).await.map_err(|err| {
-                RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err.to_string())
-            })?;
-        }
-        Ok(())
-    }
-
     async fn finish_leased_turn(
         &mut self,
         finish: LeasedTurnFinish,
@@ -152,6 +190,7 @@ impl LashRuntime {
             policy,
             turn_index,
             turn_lease,
+            queued_work_completions,
             trace_turn_id,
             abandon_context,
         } = finish;
@@ -159,7 +198,7 @@ impl LashRuntime {
             .session
             .as_ref()
             .and_then(|session| session.history_store());
-        self.policy = self.state.policy.clone();
+        self.policy = self.state.effective_policy().clone();
         turn_pipeline.state_mut().policy = self.policy.clone();
         turn_pipeline.state_mut().turn_index = turn_index;
 
@@ -241,6 +280,7 @@ impl LashRuntime {
 
         let mut returned_turn = finalized.turn;
         self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
+        let queued_work_completion_trace = queued_work_completions.clone();
         if let Err(err) = turn_pipeline
             .final_commit(
                 &mut returned_turn,
@@ -249,6 +289,7 @@ impl LashRuntime {
                 turn_lease
                     .as_ref()
                     .map(crate::RuntimeTurnCompletion::from_lease),
+                queued_work_completions,
             )
             .await
         {
@@ -265,6 +306,38 @@ impl LashRuntime {
 
         emit_session_events_to_sink(events, finalized.events).await;
         self.state = turn_pipeline.into_final_state();
+        if matches!(returned_turn.outcome, TurnOutcome::AgentFrameSwitch { .. })
+            && let Some(session) = self.session.as_mut()
+        {
+            let protocol_session = Arc::clone(session.plugins().protocol_session());
+            let session_id = self.state.session_id.clone();
+            protocol_session
+                .restore_session(
+                    crate::plugin::ProtocolSessionContext::new(session, &session_id),
+                    &self.state,
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::Other("protocol_restore_session".to_string()),
+                        err.to_string(),
+                    )
+                })?;
+        }
+        if !queued_work_completion_trace.is_empty() {
+            crate::trace::emit_trace(
+                &self.host.core.trace_sink,
+                &self.host.core.trace_context,
+                lash_trace::TraceContext::default()
+                    .for_session(returned_turn.state.session_id.clone())
+                    .for_turn_index(returned_turn.state.turn_index)
+                    .for_turn(trace_turn_id.clone()),
+                lash_trace::TraceEvent::Custom {
+                    name: "queued_work.completed".to_string(),
+                    payload: queued_work_completion_trace_payload(&queued_work_completion_trace),
+                },
+            );
+        }
         self.emit_turn_persisted_event(&returned_turn).await;
         self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
 
@@ -286,7 +359,7 @@ impl LashRuntime {
             return;
         }
 
-        let (status, done_reason, handoff) = trace_fields_from_outcome(outcome);
+        let (status, done_reason, agent_frame_switch) = trace_fields_from_outcome(outcome);
         crate::trace::emit_trace(
             &self.host.core.trace_sink,
             &self.host.core.trace_context,
@@ -297,7 +370,7 @@ impl LashRuntime {
             lash_trace::TraceEvent::TurnCompleted {
                 status: status.to_string(),
                 done_reason: done_reason.to_string(),
-                handoff,
+                agent_frame_switch,
             },
         );
     }
@@ -351,8 +424,81 @@ impl LashRuntime {
             opts.turn_events_or_noop(),
             effect_scope,
             cancel,
+            None,
         )
         .await
+    }
+
+    pub async fn stream_next_queued_work(
+        &mut self,
+        opts: TurnOptions<'_>,
+    ) -> Result<Option<AssembledTurn>, RuntimeError> {
+        let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        else {
+            return Ok(None);
+        };
+        let claim = store
+            .claim_ready_queued_work(
+                &self.state.session_id,
+                &self.runtime_scope_id,
+                crate::QueuedWorkClaimBoundary::Idle,
+                crate::QUEUED_WORK_CLAIM_TTL_MS,
+                64,
+            )
+            .await
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
+            })?;
+        let Some(claim) = claim else {
+            return Ok(None);
+        };
+        let mut work = claim.materialize_for_turn();
+        let turn_id = work
+            .input
+            .trace_turn_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        work.input.trace_turn_id = Some(turn_id.clone());
+        let causes = work.turn_causes.clone();
+        emit_queued_work_started_to_sink(
+            opts.turn_events_or_noop(),
+            crate::QueuedWorkClaimBoundary::Idle,
+            &claim,
+            causes.clone(),
+        )
+        .await;
+        crate::trace::emit_trace(
+            &self.host.core.trace_sink,
+            &self.host.core.trace_context,
+            lash_trace::TraceContext::default()
+                .for_session(self.state.session_id.clone())
+                .for_turn_index(self.state.turn_index + 1)
+                .for_turn(turn_id.clone()),
+            lash_trace::TraceEvent::Custom {
+                name: "queued_work.claimed".to_string(),
+                payload: queued_work_trace_payload(
+                    crate::QueuedWorkClaimBoundary::Idle,
+                    &claim,
+                    &causes,
+                ),
+            },
+        );
+        let cancel = opts.cancel.clone();
+        let effect_controller = Arc::clone(&self.host.core.effect_controller);
+        let effect_scope = opts.resolve_effect_scope(effect_controller.as_ref(), &turn_id)?;
+        self.stream_turn_with_effect_scope_inner(
+            work.input,
+            opts.events_or_noop(),
+            opts.turn_events_or_noop(),
+            effect_scope,
+            cancel,
+            Some(claim),
+        )
+        .await
+        .map(Some)
     }
 
     /// Resume an in-flight (durably checkpointed) turn.
@@ -456,7 +602,7 @@ impl LashRuntime {
             .map_err(|err| {
                 RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
             })?;
-        let mut turn_policy = self.policy.clone();
+        let mut turn_policy = self.state.effective_policy().clone();
         turn_policy.model = checkpoint_record.model.clone();
         turn_policy.max_turns = checkpoint_record.machine_config.max_turns;
         self.protocol_turn_options = checkpoint_record.protocol_turn_options.clone();
@@ -488,7 +634,8 @@ impl LashRuntime {
                 context
             },
             turn_causes: Vec::new(),
-            pending_process_wake_acks: Vec::new(),
+            pending_queue_claims: Vec::new(),
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             turn_lease: Some(turn_lease.clone()),
             machine_config_snapshot: Some(checkpoint_record.machine_config.clone()),
             turn_phase_probe: self.turn_phase_probe.clone(),
@@ -509,34 +656,20 @@ impl LashRuntime {
         };
         let mut assembler = TurnAssembler::new();
         self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
-        let run_result = {
-            let run_future = driver.run_restored(
+        let run_result = drive_turn_to_completion(
+            driver.run_restored(
                 restored_machine,
                 event_tx,
                 cancel,
                 resume_protocol_iteration,
-            );
-            tokio::pin!(run_future);
-            loop {
-                tokio::select! {
-                    maybe_event = event_rx.recv() => {
-                        if let Some(event) = maybe_event {
-                            emit_runtime_stream_event_to_sinks(
-                                events,
-                                turn_events,
-                                event,
-                                &mut assembler,
-                            )
-                            .await;
-                        }
-                    }
-                    completed = &mut run_future => {
-                        child_usage_event_relay.clear();
-                        break completed;
-                    }
-                }
-            }
-        };
+            ),
+            &mut event_rx,
+            &mut assembler,
+            &child_usage_event_relay,
+            events,
+            turn_events,
+        )
+        .await;
         let (new_messages, _new_protocol_iteration) = match run_result {
             Ok(result) => result,
             Err(err) => {
@@ -556,15 +689,13 @@ impl LashRuntime {
                 return Err(err);
             }
         };
-        while let Some(event) = event_rx.recv().await {
-            emit_runtime_stream_event_to_sinks(events, turn_events, event, &mut assembler).await;
-        }
         self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
         let RuntimeTurnDriver {
             session,
             policy,
             turn_pipeline,
             turn_lease: current_turn_lease,
+            pending_queue_claims,
             ..
         } = driver;
         let turn_lease = current_turn_lease.unwrap_or(turn_lease);
@@ -577,6 +708,10 @@ impl LashRuntime {
                 policy,
                 turn_index: resume_turn_index,
                 turn_lease: Some(turn_lease),
+                queued_work_completions: pending_queue_claims
+                    .iter()
+                    .map(crate::QueuedWorkClaim::completion)
+                    .collect(),
                 trace_turn_id: turn_id.to_string(),
                 abandon_context: "resume",
             },
@@ -593,6 +728,7 @@ impl LashRuntime {
         turn_events: &dyn TurnActivitySink,
         effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
+        queued_claim: Option<crate::QueuedWorkClaim>,
     ) -> Result<AssembledTurn, RuntimeError> {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
             && input_turn_id != effect_scope.turn_id()
@@ -617,87 +753,29 @@ impl LashRuntime {
             ));
         }
         input.trace_turn_id = Some(effect_scope.turn_id().to_string());
-        if let Some(execution_session_id) = self
-            .active_handoff_leaf(&self.state.session_id)
-            .await
-            .filter(|session_id| session_id != &self.state.session_id)
-        {
-            return self
-                .stream_turn_on_handoff_successor(
-                    execution_session_id,
-                    input,
-                    events,
-                    turn_events,
-                    effect_scope,
-                    cancel,
-                )
-                .await;
-        }
         self.stream_turn_inner(
             input.clone(),
             events,
             turn_events,
             effect_scope,
             cancel.clone(),
+            queued_claim,
         )
         .await
     }
 
-    async fn active_handoff_leaf(&self, session_id: &str) -> Option<String> {
-        let continuations = self.active_handoff_continuations.lock().await;
-        let mut current = session_id.to_string();
-        let mut seen = std::collections::HashSet::new();
-        while seen.insert(current.clone()) {
-            let Some(next) = continuations.get(&current).cloned() else {
-                return (current != session_id).then_some(current);
-            };
-            current = next;
-        }
-        None
-    }
-
-    async fn stream_turn_on_handoff_successor(
-        &mut self,
-        execution_session_id: String,
-        input: TurnInput,
-        events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectControllerScope<'_>,
-        cancel: CancellationToken,
-    ) -> Result<AssembledTurn, RuntimeError> {
-        let runtime_handle = {
-            let registry = self.managed_sessions.lock().await;
-            registry.get(&execution_session_id).cloned()
-        }
-        .ok_or_else(|| {
-            RuntimeError::new(
-                RuntimeErrorCode::HandoffSuccessorMissing,
-                format!("active handoff session `{execution_session_id}` is unavailable"),
-            )
-        })?;
-        let mut runtime = runtime_handle.runtime.lock().await;
-        runtime.state.turn_index = self.state.turn_index;
-        let turn = runtime
-            .stream_turn_inner(input, events, turn_events, effect_scope, cancel)
-            .await?;
-        runtime_handle.publish_from(&runtime);
-        self.state.turn_index = turn.state.turn_index;
-        Ok(turn)
-    }
-
-    /// Stream one logical host turn, following foreground handoffs until a
-    /// non-handoff outcome is reached.
+    /// Stream one logical host turn, following foreground AgentFrame switches
+    /// until a terminal outcome is reached.
     ///
-    /// RLM `continue_as` creates a successor session with queued first-turn
-    /// input. Hosts that only care about the benchmark/app answer should not
-    /// need to special-case that intermediate outcome; this helper activates
-    /// each successor and drives its queued first turn with the normal runtime
-    /// turn guards.
-    pub async fn stream_turn_following_handoffs(
+    /// RLM `continue_as` creates a new frame in the same session. Hosts that
+    /// only care about the benchmark/app answer should not need to special-case
+    /// that intermediate outcome; this helper keeps driving the same session
+    /// through each frame's task with the normal runtime turn guards.
+    pub async fn stream_turn_with_agent_frames(
         &mut self,
         input: TurnInput,
         opts: TurnOptions<'_>,
-    ) -> Result<FollowedTurn, RuntimeError> {
+    ) -> Result<AgentFrameRun, RuntimeError> {
         let follow_trace_turn_id = input
             .trace_turn_id
             .clone()
@@ -706,7 +784,7 @@ impl LashRuntime {
         let effect_controller = Arc::clone(&self.host.core.effect_controller);
         let effect_scope =
             opts.resolve_effect_scope(effect_controller.as_ref(), &follow_trace_turn_id)?;
-        self.stream_turn_following_handoffs_inner(
+        self.stream_turn_with_agent_frames_inner(
             input,
             opts.events_or_noop(),
             opts.turn_events_or_noop(),
@@ -716,14 +794,14 @@ impl LashRuntime {
         .await
     }
 
-    async fn stream_turn_following_handoffs_inner(
+    async fn stream_turn_with_agent_frames_inner(
         &mut self,
         mut input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
         effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
-    ) -> Result<FollowedTurn, RuntimeError> {
+    ) -> Result<AgentFrameRun, RuntimeError> {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
             && input_turn_id != effect_scope.turn_id()
         {
@@ -748,57 +826,58 @@ impl LashRuntime {
                     turn_events,
                     effect_scope,
                     cancel.clone(),
+                    None,
                 )
                 .await?;
-            let successor_session_id = match &turn.outcome {
-                TurnOutcome::Handoff { session_id } => Some(session_id.clone()),
+            let switched_frame_id = match &turn.outcome {
+                TurnOutcome::AgentFrameSwitch { frame_id } => Some(frame_id.clone()),
                 _ => None,
             };
+            let next_task = switched_frame_id
+                .as_ref()
+                .and_then(|frame_id| frame_switch_task(&turn, frame_id));
             turns.push(turn);
 
-            let Some(successor_session_id) = successor_session_id else {
-                return Ok(FollowedTurn { turns });
+            let Some(_frame_id) = switched_frame_id else {
+                return Ok(AgentFrameRun { turns });
             };
 
-            let seed = self
-                .pending_first_turn_inputs
-                .lock()
-                .expect("pending first turn inputs lock")
-                .remove(&successor_session_id)
-                .ok_or_else(|| {
-                    RuntimeError::new(
-                        RuntimeErrorCode::HandoffMissingFirstTurn,
-                        format!(
-                            "handoff session `{successor_session_id}` did not provide a first turn"
-                        ),
-                    )
-                })?;
-            input = turn_input_from_plugin_message(seed);
+            let task = next_task.ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::Other("agent_frame_missing_task".to_string()),
+                    "agent frame switch did not provide a task",
+                )
+            })?;
+            input = turn_input_from_text(task);
             input.protocol_turn_options = follow_protocol_turn_options.clone();
             input.trace_turn_id = Some(follow_trace_turn_id.clone());
             input.turn_context = follow_turn_context.clone();
-            if let Some(successor_handle) = {
-                let registry = self.managed_sessions.lock().await;
-                registry.get(&successor_session_id).cloned()
-            } {
-                let mut successor = successor_handle.runtime.lock().await;
-                successor.state.turn_index = self.state.turn_index.saturating_sub(1);
-                // Keep observers aligned if a handoff successor has not
-                // started its own streamed turn yet.
-                successor_handle.publish_from(&successor);
-            }
         }
     }
 
     async fn stream_turn_inner(
         &mut self,
-        input: TurnInput,
+        mut input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
         effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
+        queued_claim: Option<crate::QueuedWorkClaim>,
     ) -> Result<AssembledTurn, RuntimeError> {
         self.refresh_session_graph_from_store().await;
+        let input_trace_turn_id = input.trace_turn_id.clone();
+        let queued_turn_work = queued_claim
+            .as_ref()
+            .map(crate::QueuedWorkClaim::materialize_for_turn);
+        if let Some(work) = queued_turn_work.as_ref()
+            && input.items.is_empty()
+            && input.image_blobs.is_empty()
+        {
+            input = work.input.clone();
+            if input.trace_turn_id.is_none() {
+                input.trace_turn_id = input_trace_turn_id;
+            }
+        }
         if self
             .session
             .as_ref()
@@ -884,7 +963,10 @@ impl LashRuntime {
         let base_messages = base_read_model.messages;
         let base_render_cache = base_read_model.prompt_render_cache;
         let mut turn_delta = Vec::new();
-        let initial_turn_causes = self.drain_pending_process_turn_causes().await?;
+        let initial_turn_causes = queued_turn_work
+            .as_ref()
+            .map(|work| work.turn_causes.clone())
+            .unwrap_or_default();
         turn_delta.extend(
             initial_turn_causes
                 .iter()
@@ -1035,6 +1117,7 @@ impl LashRuntime {
             turn_events,
             effect_scope,
             cancel,
+            queued_claim,
         )
         .await
     }
@@ -1064,10 +1147,11 @@ impl LashRuntime {
         turn_events: &dyn TurnActivitySink,
         effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
+        initial_queue_claim: Option<crate::QueuedWorkClaim>,
     ) -> Result<AssembledTurn, RuntimeError> {
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
         let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
-        let mut turn_policy = self.policy.clone();
+        let mut turn_policy = self.state.effective_policy().clone();
         if let Some(provider) = turn_context.provider().cloned() {
             turn_policy.provider = provider;
         }
@@ -1076,7 +1160,7 @@ impl LashRuntime {
         }
         let effective_protocol_turn_options = protocol_turn_options
             .clone()
-            .unwrap_or_else(|| self.protocol_turn_options.clone());
+            .unwrap_or_else(|| self.state.effective_protocol_turn_options().clone());
         let manager = self
             .runtime_session_manager_for_turn(Some(child_usage_event_relay.clone()))
             .map_err(|err| {
@@ -1200,7 +1284,6 @@ impl LashRuntime {
             .map_err(|err| {
                 RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
             })?;
-        self.ack_process_turn_causes(&initial_turn_causes).await?;
         let turn_lease = if let Some(store) = store.as_ref() {
             Some(
                 store
@@ -1247,36 +1330,23 @@ impl LashRuntime {
             protocol_extension,
             turn_context,
             turn_causes: initial_turn_causes,
-            pending_process_wake_acks: Vec::new(),
+            pending_queue_claims: initial_queue_claim.into_iter().collect(),
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             turn_lease: turn_lease.clone(),
             machine_config_snapshot: None,
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let protocol_run_offset = 0;
         self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
-        let run_result = {
-            let run_future = driver.run(prepared.messages, event_tx, cancel, protocol_run_offset);
-            tokio::pin!(run_future);
-            loop {
-                tokio::select! {
-                    maybe_event = event_rx.recv() => {
-                        if let Some(event) = maybe_event {
-                            emit_runtime_stream_event_to_sinks(
-                                events,
-                                turn_events,
-                                event,
-                                &mut assembler,
-                            )
-                            .await;
-                        }
-                    }
-                    completed = &mut run_future => {
-                        child_usage_event_relay.clear();
-                        break completed;
-                    }
-                }
-            }
-        };
+        let run_result = drive_turn_to_completion(
+            driver.run(prepared.messages, event_tx, cancel, protocol_run_offset),
+            &mut event_rx,
+            &mut assembler,
+            &child_usage_event_relay,
+            events,
+            turn_events,
+        )
+        .await;
         let (new_messages, _new_protocol_iteration) = match run_result {
             Ok(result) => result,
             Err(err) => {
@@ -1296,9 +1366,6 @@ impl LashRuntime {
                 return Err(err);
             }
         };
-        while let Some(event) = event_rx.recv().await {
-            emit_runtime_stream_event_to_sinks(events, turn_events, event, &mut assembler).await;
-        }
         self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
         tracing::debug!(
             new_message_count = new_messages.len(),
@@ -1311,6 +1378,7 @@ impl LashRuntime {
             policy,
             turn_pipeline,
             turn_lease: current_turn_lease,
+            pending_queue_claims,
             ..
         } = driver;
         let turn_lease = current_turn_lease.or(turn_lease);
@@ -1323,6 +1391,10 @@ impl LashRuntime {
                 policy,
                 turn_index,
                 turn_lease,
+                queued_work_completions: pending_queue_claims
+                    .iter()
+                    .map(crate::QueuedWorkClaim::completion)
+                    .collect(),
                 trace_turn_id,
                 abandon_context: "fresh",
             },
@@ -1340,22 +1412,23 @@ impl LashRuntime {
     }
 }
 
-fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
-    let mut items = Vec::new();
-    if !message.content.is_empty() {
-        items.push(InputItem::Text {
-            text: message.content,
-        });
-    }
-    let mut image_blobs = HashMap::new();
-    for (index, bytes) in message.images.into_iter().enumerate() {
-        let id = format!("handoff-seed-image-{index}");
-        image_blobs.insert(id.clone(), bytes);
-        items.push(InputItem::ImageRef { id });
-    }
+fn frame_switch_task(turn: &AssembledTurn, frame_id: &str) -> Option<String> {
+    turn.tool_calls
+        .iter()
+        .find_map(|record| match &record.output.control {
+            Some(crate::ToolControl::SwitchAgentFrame {
+                frame_id: control_frame_id,
+                task: Some(task),
+                ..
+            }) if control_frame_id == frame_id => Some(task.clone()),
+            _ => None,
+        })
+}
+
+fn turn_input_from_text(text: String) -> TurnInput {
     TurnInput {
-        items,
-        image_blobs,
+        items: vec![InputItem::Text { text }],
+        image_blobs: HashMap::new(),
         protocol_turn_options: None,
         trace_turn_id: None,
         protocol_extension: None,
@@ -1363,19 +1436,17 @@ fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
     }
 }
 
-fn ensure_durable_turn_input(input: &TurnInput) -> Result<(), RuntimeError> {
+pub fn ensure_durable_turn_input(input: &TurnInput) -> Result<(), RuntimeError> {
     if input.protocol_extension.is_some() {
         return Err(RuntimeError::new(
             RuntimeErrorCode::DurableTurnLiveProtocolExtension,
             "durable turn resume does not support live protocol_extension inputs; encode resumable data in protocol_turn_options or persisted plugin state",
         ));
     }
-    if input.turn_context.has_plugin_inputs() {
-        return Err(RuntimeError::new(
-            RuntimeErrorCode::DurableTurnLivePluginInput,
-            "durable turn resume does not support live TurnContext plugin inputs; encode resumable data in protocol_turn_options or persisted plugin state",
-        ));
-    }
+    input
+        .turn_context
+        .live_plugin_inputs()
+        .durable_rejection()?;
     Ok(())
 }
 
@@ -1383,6 +1454,54 @@ async fn emit_turn_activity_to_sink(events: &dyn TurnActivitySink, activity: Tur
     if !events.is_noop() {
         events.emit(activity).await;
     }
+}
+
+/// Pump the turn driver's event channel into the host sinks while the run
+/// future executes, then drain any events emitted between completion and the
+/// sender dropping.
+///
+/// Both the fresh and resumed turn entry points construct a
+/// `RuntimeTurnDriver`, kick off its run future, and need identical
+/// event-pump/drain behavior before tearing the driver down. Only the driver
+/// construction and post-run teardown differ, so each caller owns those and
+/// shares this loop.
+async fn drive_turn_to_completion<F>(
+    run_future: F,
+    event_rx: &mut mpsc::Receiver<RuntimeStreamEvent>,
+    assembler: &mut TurnAssembler,
+    child_usage_event_relay: &ChildUsageEventRelay,
+    events: &dyn EventSink,
+    turn_events: &dyn TurnActivitySink,
+) -> Result<(crate::MessageSequence, usize), RuntimeError>
+where
+    F: std::future::Future<Output = Result<(crate::MessageSequence, usize), RuntimeError>>,
+{
+    let run_result = {
+        tokio::pin!(run_future);
+        loop {
+            tokio::select! {
+                maybe_event = event_rx.recv() => {
+                    if let Some(event) = maybe_event {
+                        emit_runtime_stream_event_to_sinks(
+                            events,
+                            turn_events,
+                            event,
+                            assembler,
+                        )
+                        .await;
+                    }
+                }
+                completed = &mut run_future => {
+                    child_usage_event_relay.clear();
+                    break completed;
+                }
+            }
+        }
+    };
+    while let Some(event) = event_rx.recv().await {
+        emit_runtime_stream_event_to_sinks(events, turn_events, event, assembler).await;
+    }
+    run_result
 }
 
 async fn emit_runtime_stream_event_to_sinks(

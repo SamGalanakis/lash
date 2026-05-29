@@ -1,64 +1,61 @@
-use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::{
-    Arc, Mutex as StdMutex,
-    atomic::{AtomicBool, AtomicI32, Ordering},
-};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+//! Built-in shell tool surface (`shell.exec` / `shell.start` /
+//! `shell.write`).
+//!
+//! This module is the *surface* layer: tool definitions, argument parsing,
+//! the [`StandardShell`] executor, prompt contributions, and the plugin
+//! factory. The process-lifecycle machinery lives in [`runtime`] and the
+//! output-buffer plumbing in [`output`].
 
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+mod output;
+mod runtime;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use serde_json::json;
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command as TokioCommand;
-use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use lash_core::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, PluginSpecFactory, SessionPlugin,
 };
 use lash_core::{
-    ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolCall, ToolContract,
-    ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
+    ProgressSender, PromptContribution, SessionToolAccess, ToolCall, ToolDefinition, ToolProvider,
+    ToolResult, ToolScheduling,
 };
 
-use lash_tool_support::{object_schema, require_str};
+use lash_tool_support::{
+    StaticToolExecute, StaticToolProvider, object_schema, parse_optional_bool,
+    parse_optional_usize_arg, require_str,
+};
 
-struct ShellProcess {
-    _master: Box<dyn MasterPty + Send>,
-    writer: Arc<StdMutex<Option<Box<dyn Write + Send>>>>,
-    buffer: Arc<StdMutex<Vec<u8>>>,
-    buffer_start: Arc<StdMutex<usize>>,
-    truncated: Arc<AtomicBool>,
-    read_cursor: Arc<StdMutex<usize>>,
-    exit_code: Arc<StdMutex<Option<i32>>>,
-    exit_notify: Arc<Notify>,
-    output_notify: Arc<Notify>,
-    spill: Arc<StdMutex<Option<ShellOutputSpill>>>,
-    killer: Arc<StdMutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
-}
+use crate::output::{
+    PollOutcome, shell_io_result, standard_shell_io_record, timed_out_shell_io_result,
+};
+use crate::runtime::{
+    CommonCommandParams, DEFAULT_EXEC_COMMAND_TIMEOUT_MS, DEFAULT_START_COMMAND_POLL_MS,
+    DEFAULT_WRITE_STDIN_POLL_MS, ExecCommandParams, PipeExecProcessRequest, ShellRuntime,
+    StartCommandParams, WaitBehavior,
+};
 
 pub fn shell_prompt_contributions() -> Vec<PromptContribution> {
     shell_prompt_contributions_for_access(&SessionToolAccess::default())
 }
 
-/// Returns the shell prompt contributions, gating the `write_stdin`
+/// Returns the shell prompt contributions, gating the `shell.write`
 /// reference on whether that tool is actually callable in the current
 /// session.
 pub fn shell_prompt_contributions_for_access(
     access: &SessionToolAccess,
 ) -> Vec<PromptContribution> {
     let mut command_execution = String::from(
-        "Use `exec_command` for one-shot commands; it returns only after the process exits and successful results include `status: \"completed\"`, `done: true`, and `exit_code`. Use `start_command` only for interactive or intentionally long-lived processes; it may return `status: \"running\"`, `done: false`, and `session_id`, which means the output is partial and must not be treated as completion.",
+        "Use `shell.exec` for one-shot commands; it returns only after the process exits and successful results include `status: \"completed\"`, `done: true`, and `exit_code`. Use `shell.start` only for interactive or intentionally long-lived processes; it may return `status: \"running\"`, `done: false`, and `session_id`, which means the output is partial and must not be treated as completion.",
     );
     if tool_callable_from_authority(access, "write_stdin") {
-        command_execution.push_str(" Continue running sessions with `write_stdin`.");
+        command_execution.push_str(" Continue running sessions with `shell.write`.");
     }
     command_execution.push_str(
-        " For builds, installs, tests, migrations, service setup, and verification commands, use `exec_command` and wait for completion before concluding.",
+        " For builds, installs, tests, migrations, service setup, and verification commands, use `shell.exec` and wait for completion before concluding.",
     );
     vec![
         PromptContribution::guidance("Command Execution", command_execution),
@@ -73,837 +70,7 @@ fn tool_callable_from_authority(access: &SessionToolAccess, name: &str) -> bool 
     if access.hides(name) {
         return false;
     }
-    access.tools.is_empty() || access.tools.iter().any(|tool| tool.name == name)
-}
-
-#[derive(Clone)]
-struct ProcessState {
-    buffer: Arc<StdMutex<Vec<u8>>>,
-    buffer_start: Arc<StdMutex<usize>>,
-    exit_code: Arc<StdMutex<Option<i32>>>,
-    exit_notify: Arc<Notify>,
-    output_notify: Arc<Notify>,
-    killer: Arc<StdMutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
-}
-
-struct ShellOutputSpill {
-    path: PathBuf,
-    file: File,
-}
-
-struct PipeExecProcessRequest<'a> {
-    id: &'a str,
-    command: &'a str,
-    workdir: &'a Path,
-    login: bool,
-    shell_path: &'a str,
-    timeout: Option<Duration>,
-    progress: Option<&'a ProgressSender>,
-    max_output_tokens: Option<usize>,
-    cancel: Option<CancellationToken>,
-}
-
-const MAX_OUTPUT: usize = 512_000;
-const SPILL_OUTPUT_THRESHOLD: usize = 50 * 1024;
-const DEFAULT_EXEC_COMMAND_TIMEOUT_MS: u64 = 10 * 60 * 1000;
-const DEFAULT_START_COMMAND_POLL_MS: u64 = 250;
-const DEFAULT_WRITE_STDIN_POLL_MS: u64 = 250;
-const OUTPUT_QUIET_PERIOD_MS: u64 = 75;
-const DEFAULT_PTY_SIZE: PtySize = PtySize {
-    rows: 24,
-    cols: 80,
-    pixel_width: 0,
-    pixel_height: 0,
-};
-
-#[derive(Clone, Debug)]
-struct CommonCommandParams {
-    cmd: String,
-    workdir: PathBuf,
-    shell_path: String,
-    login: bool,
-    allow_nonzero_exit: bool,
-    max_output_tokens: Option<usize>,
-}
-
-#[derive(Clone, Debug)]
-struct ExecCommandParams {
-    cmd: String,
-    workdir: PathBuf,
-    shell_path: String,
-    login: bool,
-    allow_nonzero_exit: bool,
-    timeout_ms: u64,
-    max_output_tokens: Option<usize>,
-}
-
-#[derive(Clone, Debug)]
-struct StartCommandParams {
-    cmd: String,
-    workdir: PathBuf,
-    shell_path: String,
-    login: bool,
-    allow_nonzero_exit: bool,
-    poll_ms: u64,
-    max_output_tokens: Option<usize>,
-}
-
-#[derive(Clone)]
-struct ShellRuntime {
-    shell_path: String,
-    cwd: PathBuf,
-    processes: Arc<StdMutex<HashMap<String, ShellProcess>>>,
-    next_session_id: Arc<AtomicI32>,
-}
-
-#[derive(Clone, Copy)]
-struct WaitBehavior {
-    baseline_len: usize,
-}
-
-impl ShellRuntime {
-    fn new() -> Self {
-        let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "bash".into());
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self {
-            shell_path,
-            cwd,
-            processes: Arc::new(StdMutex::new(HashMap::new())),
-            next_session_id: Arc::new(AtomicI32::new(1)),
-        }
-    }
-
-    fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
-        self.cwd = cwd.into();
-        self
-    }
-
-    fn shell_name(shell_path: &str) -> &str {
-        shell_path.rsplit('/').next().unwrap_or(shell_path)
-    }
-
-    fn resolve_workdir(&self, workdir: Option<&str>) -> PathBuf {
-        match workdir {
-            None => self.cwd.clone(),
-            Some(path) => {
-                let path = PathBuf::from(path);
-                if path.is_absolute() {
-                    path
-                } else {
-                    self.cwd.join(path)
-                }
-            }
-        }
-    }
-
-    fn command_for_spawn(&self, command: &str, shell_path: &str, pty: bool) -> String {
-        let shell_name = Self::shell_name(shell_path);
-        let echo_off = if pty {
-            // Disable terminal echo so bytes delivered via `write_stdin`
-            // don't appear in the captured output stream. The PTY allocates
-            // with `ECHO` on by default (matching interactive terminals),
-            // but agents drive these sessions programmatically and the echo
-            // is pure noise. `stty -echo || true` keeps the prefix
-            // harmless on environments where `stty` isn't available.
-            "stty -echo 2>/dev/null || true\n"
-        } else {
-            ""
-        };
-        let pipefail_prefix = if command.contains('|') && shell_supports_pipefail(shell_name) {
-            "set -o pipefail\n"
-        } else {
-            ""
-        };
-        format!("{echo_off}{pipefail_prefix}{command}")
-    }
-
-    fn shell_args(
-        &self,
-        command: &str,
-        login: bool,
-        shell_path: &str,
-        pty: bool,
-    ) -> Result<Vec<String>, String> {
-        let command = self.command_for_spawn(command, shell_path, pty);
-        if login {
-            if !shell_supports_login(Self::shell_name(shell_path)) {
-                return Err(format!(
-                    "Login shell mode is not supported for {}",
-                    Self::shell_name(shell_path)
-                ));
-            }
-            Ok(vec!["-l".to_string(), "-c".to_string(), command])
-        } else {
-            Ok(vec!["-c".to_string(), command])
-        }
-    }
-
-    fn spawn_process(
-        &self,
-        id: String,
-        command: &str,
-        workdir: &Path,
-        login: bool,
-        shell_path: &str,
-    ) -> Result<(), String> {
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(DEFAULT_PTY_SIZE)
-            .map_err(|err| format!("Failed to open PTY: {err}"))?;
-
-        let mut cmd = CommandBuilder::new(shell_path);
-        for arg in self.shell_args(command, login, shell_path, true)? {
-            cmd.arg(arg);
-        }
-        cmd.cwd(workdir.as_os_str());
-
-        let child = pair.slave.spawn_command(cmd).map_err(|err| {
-            format!(
-                "Failed to spawn PTY command with shell `{}` in `{}`: {err}",
-                shell_path,
-                workdir.display()
-            )
-        })?;
-        let killer = child.clone_killer();
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|err| format!("Failed to clone PTY reader: {err}"))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|err| format!("Failed to take PTY writer: {err}"))?;
-        drop(pair.slave);
-
-        let buffer = Arc::new(StdMutex::new(Vec::new()));
-        let buffer_start = Arc::new(StdMutex::new(0usize));
-        let truncated = Arc::new(AtomicBool::new(false));
-        let read_cursor = Arc::new(StdMutex::new(0usize));
-        let exit_code = Arc::new(StdMutex::new(None));
-        let exit_notify = Arc::new(Notify::new());
-        let output_notify = Arc::new(Notify::new());
-        let spill = Arc::new(StdMutex::new(None));
-        let killer = Arc::new(StdMutex::new(Some(killer)));
-
-        spawn_reader_thread(
-            id.clone(),
-            reader,
-            Arc::clone(&buffer),
-            Arc::clone(&buffer_start),
-            Arc::clone(&truncated),
-            Arc::clone(&spill),
-            Arc::clone(&output_notify),
-        );
-        spawn_wait_thread(
-            child,
-            Arc::clone(&exit_code),
-            Arc::clone(&exit_notify),
-            Arc::clone(&output_notify),
-        );
-
-        let process = ShellProcess {
-            _master: pair.master,
-            writer: Arc::new(StdMutex::new(Some(writer))),
-            buffer,
-            buffer_start,
-            truncated,
-            read_cursor,
-            exit_code,
-            exit_notify,
-            output_notify,
-            spill,
-            killer,
-        };
-        self.processes.lock().unwrap().insert(id, process);
-        Ok(())
-    }
-
-    fn allocate_handle_id(&self) -> String {
-        self.next_session_id
-            .fetch_add(1, Ordering::SeqCst)
-            .to_string()
-    }
-
-    fn process_state(&self, id: &str) -> Result<ProcessState, String> {
-        let procs = self.processes.lock().unwrap();
-        let proc = procs
-            .get(id)
-            .ok_or_else(|| format!("No process with id: {id}"))?;
-        Ok(ProcessState {
-            buffer: Arc::clone(&proc.buffer),
-            buffer_start: Arc::clone(&proc.buffer_start),
-            exit_code: Arc::clone(&proc.exit_code),
-            exit_notify: Arc::clone(&proc.exit_notify),
-            output_notify: Arc::clone(&proc.output_notify),
-            killer: Arc::clone(&proc.killer),
-        })
-    }
-
-    fn output_state(&self, id: &str) -> Result<(usize, usize), String> {
-        let procs = self.processes.lock().unwrap();
-        let proc = procs
-            .get(id)
-            .ok_or_else(|| format!("No process with id: {id}"))?;
-        let buffer_len = proc.buffer.lock().unwrap().len();
-        let buffer_start = *proc.buffer_start.lock().unwrap();
-        let read_cursor = *proc.read_cursor.lock().unwrap();
-        Ok((buffer_start + buffer_len, read_cursor))
-    }
-
-    fn take_incremental_output(
-        &self,
-        id: &str,
-        max_output_tokens: Option<usize>,
-    ) -> Result<(String, Option<usize>, Option<PathBuf>), String> {
-        let (buffer, buffer_start, truncated, read_cursor, spill) = {
-            let procs = self.processes.lock().unwrap();
-            let proc = procs
-                .get(id)
-                .ok_or_else(|| format!("Unknown session id {id}"))?;
-            (
-                Arc::clone(&proc.buffer),
-                Arc::clone(&proc.buffer_start),
-                Arc::clone(&proc.truncated),
-                Arc::clone(&proc.read_cursor),
-                Arc::clone(&proc.spill),
-            )
-        };
-
-        let buf = buffer.lock().unwrap();
-        let start_offset = *buffer_start.lock().unwrap();
-        let end_offset = start_offset + buf.len();
-        let mut cursor = read_cursor.lock().unwrap();
-        let had_gap = *cursor < start_offset;
-        let start = (*cursor).max(start_offset);
-        let mut rendered =
-            String::from_utf8_lossy(&buf[start.saturating_sub(start_offset)..]).to_string();
-        *cursor = end_offset;
-        if !rendered.is_empty()
-            && (had_gap || truncated.load(Ordering::SeqCst) && *cursor == end_offset)
-        {
-            if !rendered.ends_with('\n') {
-                rendered.push('\n');
-            }
-            rendered.push_str("[truncated]");
-        }
-        let rendered = clean_terminal_output(&rendered);
-        let (rendered, original_token_count, token_truncated) =
-            truncate_exec_output(rendered, max_output_tokens);
-        let mut spill_guard = spill.lock().unwrap();
-        let mut full_output_path = spill_guard.as_ref().map(|spill| spill.path.clone());
-        if token_truncated && full_output_path.is_none() {
-            full_output_path = activate_spill(id, &buf, &mut spill_guard);
-        }
-        Ok((rendered, original_token_count, full_output_path))
-    }
-
-    async fn wait_until_exit_or_timeout(
-        &self,
-        id: &str,
-        timeout: Option<Duration>,
-        progress: Option<&ProgressSender>,
-        max_output_tokens: Option<usize>,
-        behavior: WaitBehavior,
-        cancel: Option<CancellationToken>,
-    ) -> Result<PollOutcome, String> {
-        let state = self.process_state(id)?;
-        let deadline = timeout.map(|value| tokio::time::Instant::now() + value);
-        let mut sent_len = behavior.baseline_len;
-
-        loop {
-            if let Some(token) = cancel.as_ref()
-                && token.is_cancelled()
-            {
-                kill_child(&state);
-                wait_for_child_exit(&state, Duration::from_millis(500)).await;
-                return Ok(PollOutcome::Cancelled);
-            }
-
-            if let Some(tx) = progress {
-                let new_chunk = {
-                    let buf = state.buffer.lock().unwrap();
-                    let buffer_start = *state.buffer_start.lock().unwrap();
-                    let buffer_end = buffer_start + buf.len();
-                    if buffer_end > sent_len {
-                        let start = sent_len.max(buffer_start);
-                        let mut chunk =
-                            String::from_utf8_lossy(&buf[start.saturating_sub(buffer_start)..])
-                                .to_string();
-                        if sent_len < buffer_start && !chunk.is_empty() {
-                            if !chunk.ends_with('\n') {
-                                chunk.push('\n');
-                            }
-                            chunk.push_str("[truncated]");
-                        }
-                        sent_len = buffer_end;
-                        Some(clean_terminal_output(&chunk))
-                    } else {
-                        None
-                    }
-                };
-                if let Some(chunk) = new_chunk
-                    && !chunk.is_empty()
-                {
-                    let _ = tx.send(SandboxMessage {
-                        text: chunk,
-                        kind: "tool_output".into(),
-                    });
-                }
-            }
-
-            let exited = state.exit_code.lock().unwrap().is_some();
-            if exited {
-                wait_for_buffer_settle(&state, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)).await;
-                let (output, original_token_count, full_output_path) =
-                    self.take_incremental_output(id, max_output_tokens)?;
-                let exit_code = state.exit_code.lock().unwrap().unwrap_or(-1);
-                return Ok(PollOutcome::Exited {
-                    output,
-                    original_token_count,
-                    exit_code,
-                    full_output_path,
-                });
-            }
-
-            if let Some(dl) = deadline
-                && tokio::time::Instant::now() >= dl
-            {
-                let exit_code = *state.exit_code.lock().unwrap();
-                if let Some(exit_code) = exit_code {
-                    wait_for_buffer_settle(&state, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS))
-                        .await;
-                    let (output, original_token_count, full_output_path) =
-                        self.take_incremental_output(id, max_output_tokens)?;
-                    return Ok(PollOutcome::Exited {
-                        output,
-                        original_token_count,
-                        exit_code,
-                        full_output_path,
-                    });
-                }
-                let (output, original_token_count, full_output_path) =
-                    self.take_incremental_output(id, max_output_tokens)?;
-                return Ok(PollOutcome::Running {
-                    output,
-                    original_token_count,
-                    full_output_path,
-                });
-            }
-
-            let cancel_future = async {
-                match cancel.as_ref() {
-                    Some(token) => token.cancelled().await,
-                    None => std::future::pending::<()>().await,
-                }
-            };
-
-            if let Some(wake_at) = deadline {
-                tokio::select! {
-                    _ = state.exit_notify.notified() => {}
-                    _ = state.output_notify.notified() => {}
-                    _ = tokio::time::sleep_until(wake_at) => {}
-                    _ = cancel_future => {}
-                }
-            } else {
-                tokio::select! {
-                    _ = state.exit_notify.notified() => {}
-                    _ = state.output_notify.notified() => {}
-                    _ = cancel_future => {}
-                }
-            }
-        }
-    }
-
-    fn remove_process(&self, id: &str) {
-        if let Some(proc) = self.processes.lock().unwrap().remove(id)
-            && let Some(mut spill) = proc.spill.lock().unwrap().take()
-        {
-            let _ = spill.file.flush();
-        }
-    }
-
-    async fn write_stdin(&self, id: &str, input: &str) -> Result<(), String> {
-        let writer = {
-            let procs = self.processes.lock().unwrap();
-            let proc = procs
-                .get(id)
-                .ok_or_else(|| format!("Unknown session id {id}"))?;
-            Arc::clone(&proc.writer)
-        };
-        let input = input.to_string();
-        tokio::task::spawn_blocking(move || {
-            let mut writer = writer.lock().unwrap();
-            let writer = writer
-                .as_mut()
-                .ok_or_else(|| "Process stdin not available".to_string())?;
-            writer
-                .write_all(input.as_bytes())
-                .map_err(|err| format!("Write failed: {err}"))?;
-            writer.flush().map_err(|err| format!("Flush failed: {err}"))
-        })
-        .await
-        .map_err(|err| format!("Write task failed: {err}"))?
-    }
-
-    async fn close_stdin(&self, id: &str) -> Result<(), String> {
-        let writer = {
-            let procs = self.processes.lock().unwrap();
-            let proc = procs
-                .get(id)
-                .ok_or_else(|| format!("Unknown session id {id}"))?;
-            Arc::clone(&proc.writer)
-        };
-        tokio::task::spawn_blocking(move || {
-            let mut writer = writer.lock().unwrap();
-            writer.take();
-            Ok(())
-        })
-        .await
-        .map_err(|err| format!("Close stdin task failed: {err}"))?
-    }
-
-    async fn exec_pipe_process(
-        &self,
-        request: PipeExecProcessRequest<'_>,
-    ) -> Result<PollOutcome, String> {
-        let PipeExecProcessRequest {
-            id,
-            command,
-            workdir,
-            login,
-            shell_path,
-            timeout,
-            progress,
-            max_output_tokens,
-            cancel,
-        } = request;
-        let mut cmd = TokioCommand::new(shell_path);
-        for arg in self.shell_args(command, login, shell_path, false)? {
-            cmd.arg(arg);
-        }
-        cmd.current_dir(workdir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        #[cfg(unix)]
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-
-        let mut child = cmd.spawn().map_err(|err| {
-            format!(
-                "Failed to spawn command with shell `{}` in `{}`: {err}",
-                shell_path,
-                workdir.display()
-            )
-        })?;
-        let child_pid = child.id();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        let buffer = Arc::new(StdMutex::new(Vec::new()));
-        let buffer_start = Arc::new(StdMutex::new(0usize));
-        let truncated = Arc::new(AtomicBool::new(false));
-        let spill = Arc::new(StdMutex::new(None));
-        let output_notify = Arc::new(Notify::new());
-
-        if let Some(stdout) = stdout {
-            spawn_async_reader(
-                id.to_string(),
-                stdout,
-                Arc::clone(&buffer),
-                Arc::clone(&buffer_start),
-                Arc::clone(&truncated),
-                Arc::clone(&spill),
-                Arc::clone(&output_notify),
-            );
-        }
-        if let Some(stderr) = stderr {
-            spawn_async_reader(
-                id.to_string(),
-                stderr,
-                Arc::clone(&buffer),
-                Arc::clone(&buffer_start),
-                Arc::clone(&truncated),
-                Arc::clone(&spill),
-                Arc::clone(&output_notify),
-            );
-        }
-
-        let deadline = timeout.map(|value| tokio::time::Instant::now() + value);
-        let wait_handle = tokio::spawn(async move { child.wait().await });
-        tokio::pin!(wait_handle);
-        let mut sent_len = 0usize;
-
-        loop {
-            if let Some(token) = cancel.as_ref()
-                && token.is_cancelled()
-            {
-                terminate_pipe_process(child_pid);
-                let _ = tokio::time::timeout(Duration::from_millis(500), &mut wait_handle).await;
-                return Ok(PollOutcome::Cancelled);
-            }
-
-            if let Some(tx) = progress
-                && let Some(chunk) = progress_chunk(&buffer, &buffer_start, &mut sent_len)
-                && !chunk.is_empty()
-            {
-                let _ = tx.send(SandboxMessage {
-                    text: chunk,
-                    kind: "tool_output".into(),
-                });
-            }
-
-            if let Some(dl) = deadline
-                && tokio::time::Instant::now() >= dl
-            {
-                terminate_pipe_process(child_pid);
-                let _ = tokio::time::timeout(Duration::from_millis(500), &mut wait_handle).await;
-                wait_for_pipe_buffer_settle(
-                    &buffer,
-                    &output_notify,
-                    Duration::from_millis(OUTPUT_QUIET_PERIOD_MS),
-                )
-                .await;
-                let (output, original_token_count, full_output_path) = render_buffer_output(
-                    id,
-                    &buffer,
-                    &buffer_start,
-                    Arc::as_ref(&truncated),
-                    &spill,
-                    max_output_tokens,
-                );
-                return Ok(PollOutcome::Running {
-                    output,
-                    original_token_count,
-                    full_output_path,
-                });
-            }
-
-            let cancel_future = async {
-                match cancel.as_ref() {
-                    Some(token) => token.cancelled().await,
-                    None => std::future::pending::<()>().await,
-                }
-            };
-
-            if let Some(wake_at) = deadline {
-                tokio::select! {
-                    status = &mut wait_handle => {
-                        let exit_code = status
-                            .map_err(|err| format!("Wait task failed: {err}"))?
-                            .map(exit_status_code)
-                            .unwrap_or(-1);
-                        wait_for_pipe_buffer_settle(&buffer, &output_notify, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)).await;
-                        let (output, original_token_count, full_output_path) = render_buffer_output(
-                            id,
-                            &buffer,
-                            &buffer_start,
-                            Arc::as_ref(&truncated),
-                            &spill,
-                            max_output_tokens,
-                        );
-                        return Ok(PollOutcome::Exited {
-                            output,
-                            original_token_count,
-                            exit_code,
-                            full_output_path,
-                        });
-                    }
-                    _ = output_notify.notified() => {}
-                    _ = tokio::time::sleep_until(wake_at) => {}
-                    _ = cancel_future => {}
-                }
-            } else {
-                tokio::select! {
-                    status = &mut wait_handle => {
-                        let exit_code = status
-                            .map_err(|err| format!("Wait task failed: {err}"))?
-                            .map(exit_status_code)
-                            .unwrap_or(-1);
-                        wait_for_pipe_buffer_settle(&buffer, &output_notify, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)).await;
-                        let (output, original_token_count, full_output_path) = render_buffer_output(
-                            id,
-                            &buffer,
-                            &buffer_start,
-                            Arc::as_ref(&truncated),
-                            &spill,
-                            max_output_tokens,
-                        );
-                        return Ok(PollOutcome::Exited {
-                            output,
-                            original_token_count,
-                            exit_code,
-                            full_output_path,
-                        });
-                    }
-                    _ = output_notify.notified() => {}
-                    _ = cancel_future => {}
-                }
-            }
-        }
-    }
-}
-
-fn kill_child(state: &ProcessState) {
-    if let Some(mut killer) = state.killer.lock().unwrap().take() {
-        let _ = killer.kill();
-    }
-}
-
-#[cfg(unix)]
-fn terminate_pipe_process(pid: Option<u32>) {
-    let Some(pid) = pid else {
-        return;
-    };
-    let pgid = -(pid as i32);
-    unsafe {
-        if libc::kill(pgid, libc::SIGKILL) == -1 {
-            let _ = libc::kill(pid as i32, libc::SIGKILL);
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn terminate_pipe_process(_pid: Option<u32>) {}
-
-fn exit_status_code(status: std::process::ExitStatus) -> i32 {
-    status.code().unwrap_or(-1)
-}
-
-fn progress_chunk(
-    buffer: &Arc<StdMutex<Vec<u8>>>,
-    buffer_start: &Arc<StdMutex<usize>>,
-    sent_len: &mut usize,
-) -> Option<String> {
-    let buf = buffer.lock().unwrap();
-    let start_offset = *buffer_start.lock().unwrap();
-    let buffer_end = start_offset + buf.len();
-    if buffer_end <= *sent_len {
-        return None;
-    }
-    let start = (*sent_len).max(start_offset);
-    let mut chunk = String::from_utf8_lossy(&buf[start.saturating_sub(start_offset)..]).to_string();
-    if *sent_len < start_offset && !chunk.is_empty() {
-        if !chunk.ends_with('\n') {
-            chunk.push('\n');
-        }
-        chunk.push_str("[truncated]");
-    }
-    *sent_len = buffer_end;
-    Some(clean_terminal_output(&chunk))
-}
-
-async fn wait_for_child_exit(state: &ProcessState, timeout: Duration) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if state.exit_code.lock().unwrap().is_some() {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return;
-        }
-        tokio::select! {
-            _ = state.exit_notify.notified() => {
-                if state.exit_code.lock().unwrap().is_some() {
-                    return;
-                }
-            }
-            _ = tokio::time::sleep_until(deadline) => return,
-        }
-    }
-}
-
-async fn wait_for_pipe_buffer_settle(
-    buffer: &Arc<StdMutex<Vec<u8>>>,
-    output_notify: &Arc<Notify>,
-    quiet_period: Duration,
-) {
-    let mut last_len = buffer.lock().unwrap().len();
-    let mut quiet_until = tokio::time::Instant::now() + quiet_period;
-
-    loop {
-        tokio::select! {
-            _ = output_notify.notified() => {
-                let buffer_len = buffer.lock().unwrap().len();
-                if buffer_len != last_len {
-                    last_len = buffer_len;
-                    quiet_until = tokio::time::Instant::now() + quiet_period;
-                }
-            }
-            _ = tokio::time::sleep_until(quiet_until) => break,
-        }
-    }
-}
-
-fn render_buffer_output(
-    id: &str,
-    buffer: &Arc<StdMutex<Vec<u8>>>,
-    buffer_start: &Arc<StdMutex<usize>>,
-    truncated: &AtomicBool,
-    spill: &Arc<StdMutex<Option<ShellOutputSpill>>>,
-    max_output_tokens: Option<usize>,
-) -> (String, Option<usize>, Option<PathBuf>) {
-    let buf = buffer.lock().unwrap();
-    let start_offset = *buffer_start.lock().unwrap();
-    let mut rendered = String::from_utf8_lossy(&buf).to_string();
-    if truncated.load(Ordering::SeqCst) || start_offset > 0 {
-        if !rendered.ends_with('\n') {
-            rendered.push('\n');
-        }
-        rendered.push_str("[truncated]");
-    }
-    let rendered = clean_terminal_output(&rendered);
-    let (rendered, original_token_count, token_truncated) =
-        truncate_exec_output(rendered, max_output_tokens);
-    let mut spill_guard = spill.lock().unwrap();
-    let mut full_output_path = spill_guard.as_ref().map(|spill| spill.path.clone());
-    if token_truncated && full_output_path.is_none() {
-        full_output_path = activate_spill(id, &buf, &mut spill_guard);
-    }
-    if let Some(spill) = spill_guard.as_mut() {
-        let _ = spill.file.flush();
-    }
-    (rendered, original_token_count, full_output_path)
-}
-
-async fn wait_for_buffer_settle(state: &ProcessState, quiet_period: Duration) {
-    let mut last_len = state.buffer.lock().unwrap().len();
-    let mut quiet_until = tokio::time::Instant::now() + quiet_period;
-
-    loop {
-        tokio::select! {
-            _ = state.output_notify.notified() => {
-                let buffer_len = state.buffer.lock().unwrap().len();
-                if buffer_len != last_len {
-                    last_len = buffer_len;
-                    quiet_until = tokio::time::Instant::now() + quiet_period;
-                }
-            }
-            _ = tokio::time::sleep_until(quiet_until) => break,
-        }
-    }
-}
-
-enum PollOutcome {
-    Running {
-        output: String,
-        original_token_count: Option<usize>,
-        full_output_path: Option<PathBuf>,
-    },
-    Exited {
-        output: String,
-        original_token_count: Option<usize>,
-        exit_code: i32,
-        full_output_path: Option<PathBuf>,
-    },
-    Cancelled,
+    access.tools.is_empty() || access.tools.iter().any(|tool| tool.name() == name)
 }
 
 pub struct StandardShell {
@@ -938,18 +105,9 @@ impl StandardShell {
             .filter(|value| !value.is_empty())
             .unwrap_or(&self.runtime.shell_path)
             .to_string();
-        let login = args
-            .get("login")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let allow_nonzero_exit = args
-            .get("allow_nonzero_exit")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let max_output_tokens = args
-            .get("max_output_tokens")
-            .and_then(|value| value.as_u64())
-            .map(|value| value as usize);
+        let login = parse_optional_bool(args, "login", false)?;
+        let allow_nonzero_exit = parse_optional_bool(args, "allow_nonzero_exit", false)?;
+        let max_output_tokens = parse_optional_usize_arg(args, "max_output_tokens", None, true, 1)?;
 
         Ok(CommonCommandParams {
             cmd,
@@ -966,10 +124,8 @@ impl StandardShell {
         args: &serde_json::Value,
     ) -> Result<ExecCommandParams, ToolResult> {
         let common = self.parse_common_command_params(args)?;
-        let timeout_ms = args
-            .get("timeout_ms")
-            .and_then(|value| value.as_u64())
-            .filter(|value| *value > 0)
+        let timeout_ms = parse_optional_usize_arg(args, "timeout_ms", None, false, 1)?
+            .map(|value| value as u64)
             .unwrap_or(DEFAULT_EXEC_COMMAND_TIMEOUT_MS);
 
         Ok(ExecCommandParams {
@@ -988,9 +144,8 @@ impl StandardShell {
         args: &serde_json::Value,
     ) -> Result<StartCommandParams, ToolResult> {
         let common = self.parse_common_command_params(args)?;
-        let poll_ms = args
-            .get("poll_ms")
-            .and_then(|value| value.as_u64())
+        let poll_ms = parse_optional_usize_arg(args, "poll_ms", None, false, 1)?
+            .map(|value| value as u64)
             .unwrap_or(DEFAULT_START_COMMAND_POLL_MS);
 
         Ok(StartCommandParams {
@@ -1147,22 +302,25 @@ impl StandardShell {
             .get("chars")
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        let poll_ms = args
-            .get("poll_ms")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(DEFAULT_WRITE_STDIN_POLL_MS);
-        let close_stdin = args
-            .get("close_stdin")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let allow_nonzero_exit = args
-            .get("allow_nonzero_exit")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let max_output_tokens = args
-            .get("max_output_tokens")
-            .and_then(|value| value.as_u64())
-            .map(|value| value as usize);
+        let poll_ms = match parse_optional_usize_arg(args, "poll_ms", None, false, 1) {
+            Ok(value) => value
+                .map(|value| value as u64)
+                .unwrap_or(DEFAULT_WRITE_STDIN_POLL_MS),
+            Err(err) => return err,
+        };
+        let close_stdin = match parse_optional_bool(args, "close_stdin", false) {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
+        let allow_nonzero_exit = match parse_optional_bool(args, "allow_nonzero_exit", false) {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
+        let max_output_tokens =
+            match parse_optional_usize_arg(args, "max_output_tokens", None, true, 1) {
+                Ok(value) => value,
+                Err(err) => return err,
+            };
         let started = Instant::now();
         let (baseline_len, _) = match self.runtime.output_state(&id) {
             Ok(state) => state,
@@ -1233,22 +391,14 @@ impl Default for StandardShell {
     }
 }
 
+/// Build the cached shell tool provider (`shell.exec` / `shell.start`).
+pub fn shell_provider(shell: StandardShell) -> StaticToolProvider<StandardShell> {
+    let definitions = shell.tool_definitions();
+    StaticToolProvider::new(definitions, shell)
+}
+
 #[async_trait::async_trait]
-impl ToolProvider for StandardShell {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        self.tool_definitions()
-            .into_iter()
-            .map(|tool| tool.manifest())
-            .collect()
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        self.tool_definitions()
-            .into_iter()
-            .find(|tool| tool.name == name)
-            .map(|tool| Arc::new(tool.contract()))
-    }
-
+impl StaticToolExecute for StandardShell {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let cancellation_token = call.context.cancellation_token().cloned();
         self.dispatch(
@@ -1264,8 +414,8 @@ impl ToolProvider for StandardShell {
 
 impl StandardShell {
     fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        let exec_command_description = "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and the result has `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`; by default this fails the tool. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes (including SIGPIPE 141 from `cmd | head`-style pipelines) fail the tool by default. Pass `allow_nonzero_exit: true` to receive the result without failure on either nonzero exit or timeout, then inspect `exit_code` and `timed_out`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.";
-        let start_command_description = "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. Use `poll_ms` only to choose the initial observation window; use `exec_command.timeout_ms` for bounded one-shot commands. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.";
+        let exec_command_description = "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and the result has `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`; by default this fails the tool. Use `shell.start` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes (including SIGPIPE 141 from `cmd | head`-style pipelines) fail the tool by default. Pass `allow_nonzero_exit: true` to receive the result without failure on either nonzero exit or timeout, then inspect `exit_code` and `timed_out`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.";
+        let start_command_description = "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. Use `poll_ms` only to choose the initial observation window; use `shell.exec.timeout_ms` for bounded one-shot commands. Use `shell.exec` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.";
         let command_common = |command_description: &str| {
             json!({
                 "cmd": {
@@ -1316,10 +466,14 @@ impl StandardShell {
                 output_schema.clone(),
             )
             .with_examples(vec![
-                r#"exec_command(cmd="cargo test -p lash-protocol-rlm", timeout_ms=600000)"#.into(),
-                r#"exec_command(cmd="test -f Cargo.lock", allow_nonzero_exit=true)"#.into(),
+                r#"await shell.exec({ cmd: "cargo test -p lash-protocol-rlm", timeout_ms: 600000 })?"#.into(),
+                r#"await shell.exec({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata("shell", &["shell", "bash"]))
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["shell"],
+                "exec",
+                &["shell", "bash"],
+            ))
             .with_scheduling(ToolScheduling::Serial),
             ToolDefinition::raw(
                 "tool:start_command",
@@ -1338,17 +492,18 @@ impl StandardShell {
                 output_schema.clone(),
             )
             .with_examples(vec![
-                r#"start_command(cmd="python -m http.server 8000", poll_ms=1000)"#.into(),
+                r#"await shell.start({ cmd: "python -m http.server 8000", poll_ms: 1000 })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata(
-                "shell",
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["shell"],
+                "start",
                 &["long_running_command", "pty"],
             ))
             .with_scheduling(ToolScheduling::Serial),
             ToolDefinition::raw(
                 "tool:write_stdin",
                 "write_stdin",
-                "Write bytes to a running command handle from `start_command` and poll for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. Results with `status: \"running\"`, `done: false`, and `session_id` are partial; continue polling or writing until a completed result with `exit_code` if command completion matters. If the process exits, nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
+                "Write bytes to a running command handle from `shell.start` and poll for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. Results with `status: \"running\"`, `done: false`, and `session_id` are partial; continue polling or writing until a completed result with `exit_code` if command completion matters. If the process exits, nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
                 object_schema(
                     json!({
                         "session_id": {
@@ -1387,11 +542,12 @@ impl StandardShell {
                 output_schema,
             )
             .with_examples(vec![
-                r#"write_stdin(session_id=1, chars="status\n", poll_ms=1000)"#.into(),
-                r#"write_stdin(session_id=1, chars="", close_stdin=true)"#.into(),
+                r#"await shell.write({ session_id: 1, chars: "status\n", poll_ms: 1000 })?"#.into(),
+                r#"await shell.write({ session_id: 1, chars: "", close_stdin: true })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata(
-                "shell",
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["shell"],
+                "write",
                 &["send_stdin", "poll_command"],
             ))
             .with_scheduling(ToolScheduling::Serial),
@@ -1428,341 +584,6 @@ impl StandardShell {
     }
 }
 
-fn spawn_reader_thread(
-    id: String,
-    mut reader: Box<dyn Read + Send>,
-    buffer: Arc<StdMutex<Vec<u8>>>,
-    buffer_start: Arc<StdMutex<usize>>,
-    truncated: Arc<AtomicBool>,
-    spill: Arc<StdMutex<Option<ShellOutputSpill>>>,
-    output_notify: Arc<Notify>,
-) {
-    thread::spawn(move || {
-        let mut chunk = [0u8; 4096];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    {
-                        let mut buf = buffer.lock().unwrap();
-                        let mut spill = spill.lock().unwrap();
-                        if buf.len() + n > SPILL_OUTPUT_THRESHOLD {
-                            let _ = activate_spill(&id, &buf, &mut spill);
-                        }
-                        let mut clear_spill = false;
-                        if let Some(spill_file) = spill.as_mut()
-                            && spill_file.file.write_all(&chunk[..n]).is_err()
-                        {
-                            clear_spill = true;
-                        }
-                        if clear_spill {
-                            *spill = None;
-                        }
-
-                        buf.extend_from_slice(&chunk[..n]);
-                        if buf.len() > MAX_OUTPUT {
-                            let to_drop = buf.len() - MAX_OUTPUT;
-                            buf.drain(..to_drop);
-                            *buffer_start.lock().unwrap() += to_drop;
-                            truncated.store(true, Ordering::SeqCst);
-                        }
-                    }
-                    output_notify.notify_waiters();
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-        output_notify.notify_waiters();
-    });
-}
-
-fn spawn_async_reader<R>(
-    id: String,
-    mut reader: R,
-    buffer: Arc<StdMutex<Vec<u8>>>,
-    buffer_start: Arc<StdMutex<usize>>,
-    truncated: Arc<AtomicBool>,
-    spill: Arc<StdMutex<Option<ShellOutputSpill>>>,
-    output_notify: Arc<Notify>,
-) where
-    R: AsyncRead + Unpin + Send + 'static,
-{
-    tokio::spawn(async move {
-        let mut chunk = [0u8; 4096];
-        loop {
-            match reader.read(&mut chunk).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    {
-                        let mut buf = buffer.lock().unwrap();
-                        let mut spill = spill.lock().unwrap();
-                        if buf.len() + n > SPILL_OUTPUT_THRESHOLD {
-                            let _ = activate_spill(&id, &buf, &mut spill);
-                        }
-                        let mut clear_spill = false;
-                        if let Some(spill_file) = spill.as_mut()
-                            && spill_file.file.write_all(&chunk[..n]).is_err()
-                        {
-                            clear_spill = true;
-                        }
-                        if clear_spill {
-                            *spill = None;
-                        }
-
-                        buf.extend_from_slice(&chunk[..n]);
-                        if buf.len() > MAX_OUTPUT {
-                            let to_drop = buf.len() - MAX_OUTPUT;
-                            buf.drain(..to_drop);
-                            *buffer_start.lock().unwrap() += to_drop;
-                            truncated.store(true, Ordering::SeqCst);
-                        }
-                    }
-                    output_notify.notify_waiters();
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-        output_notify.notify_waiters();
-    });
-}
-
-fn spawn_wait_thread(
-    mut child: Box<dyn portable_pty::Child + Send + Sync>,
-    exit_code: Arc<StdMutex<Option<i32>>>,
-    exit_notify: Arc<Notify>,
-    output_notify: Arc<Notify>,
-) {
-    thread::spawn(move || {
-        let code = child
-            .wait()
-            .map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX))
-            .unwrap_or(-1);
-        *exit_code.lock().unwrap() = Some(code);
-        exit_notify.notify_waiters();
-        output_notify.notify_waiters();
-    });
-}
-
-fn shell_supports_pipefail(shell_name: &str) -> bool {
-    matches!(shell_name, "bash" | "zsh" | "ksh" | "mksh")
-}
-
-fn shell_supports_login(shell_name: &str) -> bool {
-    matches!(shell_name, "bash" | "zsh" | "ksh" | "mksh" | "fish")
-}
-
-fn shell_output_dir() -> std::io::Result<PathBuf> {
-    let dir = std::env::temp_dir().join("lash-tool-output");
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
-fn shell_output_path(id: &str) -> std::io::Result<PathBuf> {
-    let dir = shell_output_dir()?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    Ok(dir.join(format!("exec_command-{id}-{nonce}.log")))
-}
-
-fn activate_spill(
-    id: &str,
-    existing_output: &[u8],
-    spill: &mut Option<ShellOutputSpill>,
-) -> Option<PathBuf> {
-    if let Some(spill) = spill.as_ref() {
-        return Some(spill.path.clone());
-    }
-
-    let path = shell_output_path(id).ok()?;
-    let mut file = File::create(&path).ok()?;
-    if file.write_all(existing_output).is_err() {
-        let _ = fs::remove_file(&path);
-        return None;
-    }
-    *spill = Some(ShellOutputSpill {
-        path: path.clone(),
-        file,
-    });
-    Some(path)
-}
-
-fn clean_terminal_output(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            match chars.peek().copied() {
-                Some('[') => {
-                    chars.next();
-                    for next in chars.by_ref() {
-                        if ('@'..='~').contains(&next) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    chars.next();
-                    let mut previous_was_escape = false;
-                    for next in chars.by_ref() {
-                        if next == '\x07' || (previous_was_escape && next == '\\') {
-                            break;
-                        }
-                        previous_was_escape = next == '\x1b';
-                    }
-                }
-                Some(_) => {
-                    chars.next();
-                }
-                None => {}
-            }
-            continue;
-        }
-        match ch {
-            '\r' => {
-                if !matches!(chars.peek(), Some('\n')) {
-                    out.push('\n');
-                }
-            }
-            '\x08' => {
-                out.pop();
-            }
-            ch if ch.is_control() && ch != '\n' && ch != '\t' => {}
-            ch => out.push(ch),
-        }
-    }
-    out
-}
-
-fn truncate_exec_output(
-    output: String,
-    max_output_tokens: Option<usize>,
-) -> (String, Option<usize>, bool) {
-    let original_token_count = max_output_tokens.map(|_| estimate_token_count(&output));
-    let Some(limit) = max_output_tokens else {
-        return (output, original_token_count, false);
-    };
-    let max_chars = limit.saturating_mul(4);
-    let char_count = output.chars().count();
-    if char_count <= max_chars {
-        return (output, original_token_count, false);
-    }
-    let truncated = output.chars().take(max_chars).collect::<String>() + "\n[truncated]";
-    (truncated, original_token_count, true)
-}
-
-fn estimate_token_count(text: &str) -> usize {
-    text.chars().count().div_ceil(4)
-}
-
-fn standard_shell_io_record(
-    id: &str,
-    output: String,
-    exit_code: Option<i32>,
-    original_token_count: Option<usize>,
-    full_output_path: Option<&Path>,
-    wall_time_seconds: f64,
-) -> serde_json::Value {
-    let running = exit_code.is_none();
-    let status = if running { "running" } else { "completed" };
-    let session_id = exit_code
-        .is_none()
-        .then(|| id.parse::<i64>().ok())
-        .flatten();
-    let mut record = serde_json::Map::new();
-    record.insert("output".into(), json!(output));
-    record.insert("status".into(), json!(status));
-    record.insert("done".into(), json!(!running));
-    record.insert("running".into(), json!(running));
-    record.insert("wall_time_seconds".into(), json!(wall_time_seconds));
-    if let Some(exit_code) = exit_code {
-        record.insert("exit_code".into(), json!(exit_code));
-    }
-    if let Some(session_id) = session_id {
-        record.insert("session_id".into(), json!(session_id));
-    }
-    if let Some(original_token_count) = original_token_count {
-        record.insert("original_token_count".into(), json!(original_token_count));
-    }
-    if let Some(path) = full_output_path {
-        record.insert(
-            "full_output_path".into(),
-            json!(path.to_string_lossy().to_string()),
-        );
-    }
-    serde_json::Value::Object(record)
-}
-
-fn shell_io_result(
-    id: &str,
-    output: String,
-    exit_code: Option<i32>,
-    original_token_count: Option<usize>,
-    full_output_path: Option<&Path>,
-    wall_time_seconds: f64,
-    allow_nonzero_exit: bool,
-) -> ToolResult {
-    let mut record = standard_shell_io_record(
-        id,
-        output,
-        exit_code,
-        original_token_count,
-        full_output_path,
-        wall_time_seconds,
-    );
-    if let Some(code) = exit_code
-        && code != 0
-        && !allow_nonzero_exit
-    {
-        if let Some(object) = record.as_object_mut() {
-            object.insert(
-                "error".into(),
-                json!(format!("Command exited with code {code}")),
-            );
-        }
-        return ToolResult::err(record);
-    }
-    ToolResult::ok(record)
-}
-
-fn timed_out_shell_io_result(
-    id: &str,
-    output: String,
-    original_token_count: Option<usize>,
-    full_output_path: Option<&Path>,
-    wall_time_seconds: f64,
-    timeout_ms: u64,
-    allow_nonzero_exit: bool,
-) -> ToolResult {
-    let mut record = standard_shell_io_record(
-        id,
-        output,
-        None,
-        original_token_count,
-        full_output_path,
-        wall_time_seconds,
-    );
-    if let Some(object) = record.as_object_mut() {
-        object.insert("status".into(), json!("timed_out"));
-        object.insert("done".into(), json!(true));
-        object.insert("running".into(), json!(false));
-        object.remove("session_id");
-        object.insert("timed_out".into(), json!(true));
-        object.insert(
-            "error".into(),
-            json!(format!("Command timed out after {timeout_ms} ms")),
-        );
-    }
-    if allow_nonzero_exit {
-        ToolResult::ok(record)
-    } else {
-        ToolResult::err(record)
-    }
-}
-
 fn parse_standard_session_id(args: &serde_json::Value) -> Result<String, ToolResult> {
     if let Some(value) = args.get("session_id") {
         if let Some(id) = value.as_i64() {
@@ -1782,7 +603,7 @@ fn parse_standard_session_id(args: &serde_json::Value) -> Result<String, ToolRes
 /// PluginFactory for the built-in shell tool surface.
 ///
 /// Wires `StandardShell` into the active session with the access-gated
-/// `write_stdin` mention in the prompt contribution so the model only
+/// `shell.write` mention in the prompt contribution so the model only
 /// sees that bullet when the tool is actually callable.
 #[derive(Default)]
 pub struct StandardShellPluginFactory;
@@ -1800,7 +621,7 @@ impl PluginFactory for StandardShellPluginFactory {
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         let tool_access = ctx.tool_access.clone();
-        let provider = Arc::new(StandardShell::new()) as Arc<dyn ToolProvider>;
+        let provider = Arc::new(shell_provider(StandardShell::new())) as Arc<dyn ToolProvider>;
         PluginSpecFactory::new(
             "shell",
             Arc::new(move |_ctx| {
@@ -1823,14 +644,20 @@ impl PluginFactory for StandardShellPluginFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::{MAX_OUTPUT, SPILL_OUTPUT_THRESHOLD, clean_terminal_output};
     use serde_json::json;
     use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn test_shell() -> StandardShell {
-        StandardShell::new().with_cwd("/")
+    fn test_shell() -> StaticToolProvider<StandardShell> {
+        shell_provider(StandardShell::new().with_cwd("/"))
     }
 
-    async fn run(shell: &StandardShell, name: &str, args: &serde_json::Value) -> ToolResult {
+    async fn run(
+        shell: &StaticToolProvider<StandardShell>,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> ToolResult {
         lash_core::testing::run_tool(shell, name, args).await
     }
 
@@ -1859,7 +686,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_waits_for_process_exit() {
-        let shell = StandardShell::new().with_cwd("/");
+        let shell = shell_provider(StandardShell::new().with_cwd("/"));
         let result = run(
             &shell,
             "exec_command",
@@ -1960,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_timeout_kills_and_fails_running_process() {
-        let shell = StandardShell::new().with_cwd("/");
+        let shell = shell_provider(StandardShell::new().with_cwd("/"));
         let result = run(
             &shell,
             "exec_command",
@@ -2011,7 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_command_returns_handle_id_for_running_process() {
-        let shell = StandardShell::new().with_cwd("/");
+        let shell = shell_provider(StandardShell::new().with_cwd("/"));
         let result = run(
             &shell,
             "start_command",
@@ -2128,7 +955,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_honors_workdir() {
-        let shell = StandardShell::new().with_cwd("/");
+        let shell = shell_provider(StandardShell::new().with_cwd("/"));
         let result = run(
             &shell,
             "exec_command",
@@ -2291,7 +1118,7 @@ mod tests {
         let shell = StandardShell::default();
         let defs = shell.tool_definitions();
         assert_eq!(defs.len(), 3);
-        assert!(defs.iter().all(|def| !def.description.is_empty()));
+        assert!(defs.iter().all(|def| !def.description().is_empty()));
     }
 
     #[test]
@@ -2300,9 +1127,10 @@ mod tests {
         let definition = shell
             .tool_definitions()
             .into_iter()
-            .find(|definition| definition.name == "start_command")
+            .find(|definition| definition.name() == "start_command")
             .expect("start_command definition");
         let properties = definition
+            .contract
             .input_schema
             .get("properties")
             .and_then(serde_json::Value::as_object)
@@ -2310,7 +1138,7 @@ mod tests {
 
         assert!(properties.contains_key("poll_ms"));
         assert!(!properties.contains_key("timeout_ms"));
-        assert!(definition.description.contains("exec_command.timeout_ms"));
+        assert!(definition.description().contains("shell.exec.timeout_ms"));
         assert!(
             properties["poll_ms"]["description"]
                 .as_str()
@@ -2345,9 +1173,10 @@ mod tests {
         let definition = shell
             .tool_definitions()
             .into_iter()
-            .find(|definition| definition.name == "exec_command")
+            .find(|definition| definition.name() == "exec_command")
             .expect("exec_command definition");
         let properties = definition
+            .contract
             .input_schema
             .get("properties")
             .and_then(serde_json::Value::as_object)
@@ -2359,7 +1188,7 @@ mod tests {
         );
         assert!(
             definition
-                .description
+                .description()
                 .contains("Commands time out after 600000 ms by default")
         );
     }

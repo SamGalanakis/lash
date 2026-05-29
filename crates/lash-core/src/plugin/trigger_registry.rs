@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, PluginSnapshotMeta,
@@ -11,18 +12,48 @@ use crate::SessionTriggerInstallReport;
 
 pub(crate) const SESSION_TRIGGER_PLUGIN_ID: &str = "lash.session_triggers";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct InstalledSessionTrigger {
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SessionTriggerRoute {
     pub(crate) name: String,
-    pub(crate) source: String,
+    pub(crate) matcher: SessionTriggerMatcher,
+    pub(crate) module_ref: lashlang::ModuleRef,
+    pub(crate) required_surface_ref: lashlang::RequiredSurfaceRef,
+    pub(crate) process_ref: lashlang::ProcessRef,
+    pub(crate) process_name: String,
+    pub(crate) event_binding: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) args: Vec<SessionTriggerArgBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_sha256: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum SessionTriggerMatcher {
+    Resource {
+        resource_type: String,
+        alias: String,
+        event: String,
+    },
+    AnyResource {
+        resource_type: String,
+        event: String,
+        resource_binding: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SessionTriggerArgBinding {
+    pub(crate) name: String,
+    pub(crate) value: lashlang::TriggerArg,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct SessionTriggerRegistryState {
     #[serde(default)]
     revision: u64,
     #[serde(default)]
-    triggers: BTreeMap<String, String>,
+    routes: BTreeMap<String, SessionTriggerRoute>,
 }
 
 #[derive(Default)]
@@ -35,6 +66,7 @@ impl SessionTriggerRegistry {
         &self,
         source: &str,
         surface: lashlang::LashlangSurface,
+        artifact_store: &dyn lashlang::LashlangArtifactStore,
     ) -> Result<SessionTriggerInstallReport, PluginError> {
         let program = lashlang::parse(source).map_err(|err| {
             PluginError::Registration(format!(
@@ -49,43 +81,51 @@ impl SessionTriggerRegistry {
                 lashlang::format_link_diagnostic(source, &err)
             ))
         })?;
-        self.install_linked_lashlang_source(source, &linked)
+        self.install_linked_lashlang_source(source, &linked, artifact_store)
     }
 
     pub(crate) fn install_linked_lashlang_source(
         &self,
         source: &str,
         linked: &lashlang::LinkedModule,
+        artifact_store: &dyn lashlang::LashlangArtifactStore,
     ) -> Result<SessionTriggerInstallReport, PluginError> {
         validate_trigger_module_shape(&linked.artifact.canonical_ir)?;
-        let trigger_names = linked
+        artifact_store
+            .put_module_artifact(&linked.artifact)
+            .map_err(|err| {
+                PluginError::Registration(format!("store trigger module artifact: {err}"))
+            })?;
+        let source_sha256 = source_sha256(source);
+        let routes = linked
             .artifact
             .canonical_ir
             .declarations
             .iter()
             .filter_map(|declaration| match declaration {
-                lashlang::Declaration::Trigger(trigger) => Some(trigger.name.to_string()),
+                lashlang::Declaration::Trigger(trigger) => Some(trigger),
                 _ => None,
             })
-            .collect::<Vec<_>>();
+            .map(|trigger| route_from_trigger(trigger, linked, source_sha256.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let source = source.to_string();
         let mut state = self
             .state
             .lock()
             .map_err(|_| PluginError::Session("trigger registry lock poisoned".to_string()))?;
         let mut report = SessionTriggerInstallReport::default();
         let mut changed = false;
-        for name in trigger_names {
-            match state.triggers.get(&name) {
-                Some(existing) if existing == &source => report.unchanged.push(name),
+        for route in routes {
+            let name = route.name.clone();
+            match state.routes.get(&name) {
+                Some(existing) if existing == &route => report.unchanged.push(name),
                 Some(_) => {
-                    state.triggers.insert(name.clone(), source.clone());
+                    state.routes.insert(name.clone(), route);
                     report.replaced.push(name);
                     changed = true;
                 }
                 None => {
-                    state.triggers.insert(name.clone(), source.clone());
+                    state.routes.insert(name.clone(), route);
                     report.installed.push(name);
                     changed = true;
                 }
@@ -97,19 +137,12 @@ impl SessionTriggerRegistry {
         Ok(report)
     }
 
-    pub(crate) fn installed_triggers(&self) -> Result<Vec<InstalledSessionTrigger>, PluginError> {
+    pub(crate) fn installed_routes(&self) -> Result<Vec<SessionTriggerRoute>, PluginError> {
         let state = self
             .state
             .lock()
             .map_err(|_| PluginError::Session("trigger registry lock poisoned".to_string()))?;
-        Ok(state
-            .triggers
-            .iter()
-            .map(|(name, source)| InstalledSessionTrigger {
-                name: name.clone(),
-                source: source.clone(),
-            })
-            .collect())
+        Ok(state.routes.values().cloned().collect())
     }
 
     fn snapshot_state(&self) -> Result<SessionTriggerRegistryState, PluginError> {
@@ -195,7 +228,7 @@ impl SessionPlugin for SessionTriggerPlugin {
                 .registry
                 .restore_state(SessionTriggerRegistryState::default());
         };
-        let state = serde_json::from_value(value).map_err(|err| {
+        let state: SessionTriggerRegistryState = serde_json::from_value(value).map_err(|err| {
             PluginError::Session(format!("failed to decode trigger registry snapshot: {err}"))
         })?;
         self.registry.restore_state(state)
@@ -221,4 +254,67 @@ fn validate_trigger_module_shape(program: &lashlang::Program) -> Result<(), Plug
         ));
     }
     Ok(())
+}
+
+fn route_from_trigger(
+    trigger: &lashlang::TriggerDecl,
+    linked: &lashlang::LinkedModule,
+    source_sha256: Option<String>,
+) -> Result<SessionTriggerRoute, PluginError> {
+    let process_ref = linked
+        .artifact
+        .process_ref(trigger.process_name.as_str())
+        .cloned()
+        .ok_or_else(|| {
+            PluginError::Registration(format!(
+                "trigger `{}` target process `{}` is not exported",
+                trigger.name, trigger.process_name
+            ))
+        })?;
+    Ok(SessionTriggerRoute {
+        name: trigger.name.to_string(),
+        matcher: matcher_from_trigger_source(&trigger.source),
+        module_ref: linked.module_ref.clone(),
+        required_surface_ref: linked.required_surface_ref.clone(),
+        process_ref,
+        process_name: trigger.process_name.to_string(),
+        event_binding: trigger.event_binding.to_string(),
+        args: trigger
+            .args
+            .iter()
+            .map(|(name, value)| SessionTriggerArgBinding {
+                name: name.to_string(),
+                value: value.clone(),
+            })
+            .collect(),
+        source_sha256,
+    })
+}
+
+fn matcher_from_trigger_source(source: &lashlang::TriggerSource) -> SessionTriggerMatcher {
+    match source {
+        lashlang::TriggerSource::Binding { resource, event } => SessionTriggerMatcher::Resource {
+            resource_type: resource.resource_type.to_string(),
+            alias: resource.alias.to_string(),
+            event: event.to_string(),
+        },
+        lashlang::TriggerSource::Each {
+            resource_type,
+            event,
+            resource_binding,
+        } => SessionTriggerMatcher::AnyResource {
+            resource_type: resource_type.to_string(),
+            event: event.to_string(),
+            resource_binding: resource_binding.to_string(),
+        },
+    }
+}
+
+fn source_sha256(source: &str) -> Option<String> {
+    if source.is_empty() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(source.as_bytes());
+    Some(format!("{:x}", hasher.finalize()))
 }

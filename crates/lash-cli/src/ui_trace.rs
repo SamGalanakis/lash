@@ -244,6 +244,7 @@ impl TraceSessionEvent {
                 event: TracePluginRuntimeEvent::from_event(event),
             }),
             TurnEvent::ToolCallStarted { .. }
+            | TurnEvent::QueuedWorkStarted { .. }
             | TurnEvent::Usage { .. }
             | TurnEvent::ChildUsage { .. }
             | TurnEvent::RetryStatus { .. }

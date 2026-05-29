@@ -3,9 +3,9 @@ mod executor;
 mod journal;
 
 pub use envelope::{
-    DirectRequestSpec, EffectInvocationMetadata, EffectOrigin, LlmAttachmentSpec, LlmRequestSpec,
-    ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectOutcome,
+    CausalRef, LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome,
+    RuntimeEffectCommand, RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome,
+    RuntimeInvocation, RuntimeReplay, RuntimeScope, RuntimeSubject,
 };
 pub use executor::{
     InlineRuntimeEffectController, RuntimeEffectController, RuntimeEffectControllerError,
@@ -14,17 +14,14 @@ pub use executor::{
 
 pub(crate) use executor::{ProcessRunner, RuntimeEffectControllerHandle};
 pub(crate) use journal::{
-    JournaledEffectInvocation, LlmTraceFailure, apply_direct_completion_outcome,
-    apply_direct_llm_completion_outcome, direct_effect_metadata, direct_request_discriminator,
-    emit_llm_trace_completed, emit_llm_trace_failed, emit_llm_trace_started,
-    execute_effect_with_journal, invoke_journaled_effect, renew_runtime_turn_lease_for_effect,
-    token_usage_from_llm, tool_retry_sleep_metadata, turn_idempotency_key,
+    JournaledEffectInvocation, LlmTraceFailure, apply_direct_outcome, emit_llm_trace_completed,
+    emit_llm_trace_failed, emit_llm_trace_started, execute_effect_with_journal,
+    invoke_journaled_effect, renew_runtime_turn_lease_for_effect, token_usage_from_llm,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DirectRequest;
     use crate::LlmRequest as CoreLlmRequest;
     use crate::llm::types::{
         LlmAttachment, LlmEventSender, LlmMessage, LlmProviderTraceSender, LlmToolChoice,
@@ -61,25 +58,20 @@ mod tests {
         assert!(live.stream_events.is_none());
         assert!(live.provider_trace.is_none());
 
-        let direct_request = DirectRequest::text("model", "direct");
-        let direct_spec = DirectRequestSpec::from_request(&direct_request, &attachment_store)
-            .expect("direct spec");
-        let metadata = direct_effect_metadata(
+        let invocation = crate::runtime::causal::direct_effect_invocation(
             "session",
             "test",
-            RuntimeEffectKind::DirectCompletion,
             "request:direct".to_string(),
             Some("turn"),
+            None,
         );
         let envelope = RuntimeEffectEnvelope::new(
-            metadata,
-            RuntimeEffectCommand::DirectCompletion {
-                request: Box::new(direct_spec),
-                normalized_request: Box::new(
+            invocation,
+            RuntimeEffectCommand::Direct {
+                request: Box::new(
                     LlmRequestSpec::from_request(&llm_request, &attachment_store)
                         .expect("normalized spec"),
                 ),
-                model: "model".to_string(),
                 usage_source: "test".to_string(),
             },
         );
@@ -89,10 +81,10 @@ mod tests {
         let decoded: RuntimeEffectEnvelope =
             serde_json::from_str(&encoded).expect("decode envelope");
         assert_eq!(
-            decoded.metadata.idempotency_key,
-            envelope.metadata.idempotency_key
+            decoded.invocation.replay_key(),
+            envelope.invocation.replay_key()
         );
-        assert_eq!(decoded.command.kind(), RuntimeEffectKind::DirectCompletion);
+        assert_eq!(decoded.command.kind(), RuntimeEffectKind::Direct);
     }
 
     #[test]
@@ -109,19 +101,15 @@ mod tests {
                 },
             },
         );
-        let metadata = EffectInvocationMetadata {
-            session_id: "session".to_string(),
-            origin: EffectOrigin::Turn,
-            turn_id: Some("turn".to_string()),
-            turn_index: Some(0),
-            protocol_iteration: Some(0),
-            effect_id: "process:start:call-123".to_string(),
-            effect_kind: RuntimeEffectKind::Process,
-            idempotency_key: "session:turn:process:start:call-123".to_string(),
-            turn_checkpoint_hash: Some("0".repeat(64)),
-        };
+        let invocation = RuntimeInvocation::effect(
+            RuntimeScope::for_turn("session", "turn", 0, 0),
+            "process:start:call-123",
+            RuntimeEffectKind::Process,
+            "session:turn:process:start:call-123",
+            Some("0".repeat(64)),
+        );
         let envelope = RuntimeEffectEnvelope::new(
-            metadata,
+            invocation,
             RuntimeEffectCommand::Process {
                 command: ProcessCommand::Start {
                     registration,

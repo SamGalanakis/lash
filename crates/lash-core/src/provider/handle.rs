@@ -1,125 +1,31 @@
 use super::support::*;
 
-#[derive(Debug)]
-struct SharedProviderComponent<T> {
-    inner: Arc<Mutex<T>>,
-}
-
-impl<T> Clone for SharedProviderComponent<T> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-}
-
-impl<T> SharedProviderComponent<T> {
-    fn new(inner: Arc<Mutex<T>>) -> Self {
-        Self { inner }
-    }
-}
-
-impl<T> ProviderState for SharedProviderComponent<T>
-where
-    T: ProviderState + Clone + Send + Sync + std::fmt::Debug + 'static,
-{
-    fn kind(&self) -> &'static str {
-        self.inner.lock().expect("provider state lock").kind()
-    }
-
-    fn options(&self) -> ProviderOptions {
-        self.inner.lock().expect("provider state lock").options()
-    }
-
-    fn set_options(&mut self, options: ProviderOptions) {
-        self.inner
-            .lock()
-            .expect("provider state lock")
-            .set_options(options);
-    }
-
-    fn serialize_config(&self) -> serde_json::Value {
-        self.inner
-            .lock()
-            .expect("provider state lock")
-            .serialize_config()
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderState> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
-impl<T> ProviderTransport for SharedProviderComponent<T>
-where
-    T: ProviderTransport + Clone + Send + Sync + std::fmt::Debug + 'static,
-{
-    async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
-        let mut provider = self.inner.lock().expect("provider transport lock").clone();
-        let result = provider.complete(request).await;
-        *self.inner.lock().expect("provider transport lock") = provider;
-        result
-    }
-
-    fn requires_streaming(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("provider transport lock")
-            .requires_streaming()
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
-        Box::new(self.clone())
-    }
-}
-
 /// Component bundle returned by provider factories.
 #[derive(Debug)]
 pub struct ProviderComponents {
-    pub state: Box<dyn ProviderState>,
-    pub transport: Box<dyn ProviderTransport>,
+    pub provider: Box<dyn Provider>,
     pub model_policy: Arc<dyn ProviderModelPolicy>,
     pub failure_classifier: Arc<dyn ProviderFailureClassifier>,
     pub rate_limiter: Arc<ProviderRateLimiter>,
 }
 
 impl ProviderComponents {
-    pub fn new(
-        state: Box<dyn ProviderState>,
-        transport: Box<dyn ProviderTransport>,
-        model_policy: Arc<dyn ProviderModelPolicy>,
-    ) -> Self {
-        let options = state.options();
+    pub fn new(provider: Box<dyn Provider>, model_policy: Arc<dyn ProviderModelPolicy>) -> Self {
+        let options = provider.options();
         Self {
-            state,
-            transport,
+            provider,
             model_policy,
             failure_classifier: Arc::new(DefaultProviderFailureClassifier),
             rate_limiter: Arc::new(ProviderRateLimiter::new(options.reliability.rate_limits)),
         }
     }
 
-    pub fn shared<T>(provider: T, model_policy: Arc<dyn ProviderModelPolicy>) -> Self
-    where
-        T: ProviderState + ProviderTransport + Clone + Send + Sync + std::fmt::Debug + 'static,
-    {
-        let inner = Arc::new(Mutex::new(provider));
-        let options = inner.lock().expect("provider state lock").options();
-        Self {
-            state: Box::new(SharedProviderComponent::new(Arc::clone(&inner))),
-            transport: Box::new(SharedProviderComponent::new(inner)),
-            model_policy,
-            failure_classifier: Arc::new(DefaultProviderFailureClassifier),
-            rate_limiter: Arc::new(ProviderRateLimiter::new(options.reliability.rate_limits)),
-        }
-    }
-
-    pub fn map_transport(
+    /// Install a transport-level decorator that wraps the provider.
+    pub fn map_provider(
         mut self,
-        map: impl FnOnce(Box<dyn ProviderTransport>) -> Box<dyn ProviderTransport>,
+        map: impl FnOnce(Box<dyn Provider>) -> Box<dyn Provider>,
     ) -> Self {
-        self.transport = map(self.transport);
+        self.provider = map(self.provider);
         self
     }
 
@@ -135,8 +41,7 @@ impl ProviderComponents {
 impl Clone for ProviderComponents {
     fn clone(&self) -> Self {
         Self {
-            state: self.state.clone_boxed(),
-            transport: self.transport.clone_boxed(),
+            provider: self.provider.clone_boxed(),
             model_policy: Arc::clone(&self.model_policy),
             failure_classifier: Arc::clone(&self.failure_classifier),
             rate_limiter: Arc::clone(&self.rate_limiter),
@@ -165,7 +70,7 @@ impl ProviderHandle {
     }
 
     pub fn kind(&self) -> &'static str {
-        self.components.state.kind()
+        self.components.provider.kind()
     }
 
     pub fn supported_variants(&self, model: &str) -> &'static [&'static str] {
@@ -200,18 +105,18 @@ impl ProviderHandle {
     }
 
     pub fn options(&self) -> ProviderOptions {
-        self.components.state.options()
+        self.components.provider.options()
     }
 
     pub fn set_options(&mut self, options: ProviderOptions) {
         self.components
             .rate_limiter
             .configure(options.reliability.rate_limits.clone());
-        self.components.state.set_options(options)
+        self.components.provider.set_options(options)
     }
 
     pub fn requires_streaming(&self) -> bool {
-        self.components.transport.requires_streaming()
+        self.components.provider.requires_streaming()
     }
 
     pub async fn complete(
@@ -223,7 +128,7 @@ impl ProviderHandle {
         let mut attempt = 0;
         loop {
             let _permit = self.components.rate_limiter.admit(&request).await;
-            let result = self.components.transport.complete(request.clone()).await;
+            let result = self.components.provider.complete(request.clone()).await;
             match result {
                 Ok(response) => return Ok(response),
                 Err(failure) => {
@@ -261,7 +166,7 @@ impl ProviderHandle {
     pub fn to_spec(&self) -> ProviderSpec {
         ProviderSpec {
             kind: self.kind().to_string(),
-            config: self.components.state.serialize_config(),
+            config: self.components.provider.serialize_config(),
         }
     }
 
@@ -309,6 +214,9 @@ impl Serialize for ProviderHandle {
 impl<'de> Deserialize<'de> for ProviderHandle {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let spec = ProviderSpec::deserialize(deserializer)?;
+        if spec.kind == "unconfigured" {
+            return Ok(ProviderHandle::default());
+        }
         build_provider(&spec)
             .map(ProviderHandle::new)
             .map_err(serde::de::Error::custom)
@@ -333,11 +241,12 @@ pub struct UnconfiguredProvider {
 
 impl UnconfiguredProvider {
     fn into_components(self) -> ProviderComponents {
-        ProviderComponents::shared(self, Arc::new(StaticModelPolicy::new()))
+        ProviderComponents::new(Box::new(self), Arc::new(StaticModelPolicy::new()))
     }
 }
 
-impl ProviderState for UnconfiguredProvider {
+#[async_trait]
+impl Provider for UnconfiguredProvider {
     fn kind(&self) -> &'static str {
         "unconfigured"
     }
@@ -354,20 +263,13 @@ impl ProviderState for UnconfiguredProvider {
         serde_json::Value::Object(Default::default())
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderState> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
-impl ProviderTransport for UnconfiguredProvider {
     async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         Err(LlmTransportError::new(
             "no provider configured: host must install a provider factory and set SessionPolicy.provider before running a turn",
         ))
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+    fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
 }

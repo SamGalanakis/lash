@@ -53,13 +53,16 @@ impl ManagedSessionCapability {
                 .refresh_session_tool_surface()
                 .await
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-            let turn = runtime
-                .stream_turn(
+            let run = runtime
+                .stream_turn_with_agent_frames(
                     input,
                     crate::runtime::TurnOptions::new(cancel_clone).with_events(&sink),
                 )
                 .await
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+            let turn = run.into_final_turn().ok_or_else(|| {
+                crate::PluginError::Session("agent frame run completed without a turn".to_string())
+            })?;
             runtime_clone.publish_from(&runtime);
             Ok(turn)
         });

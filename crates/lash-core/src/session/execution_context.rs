@@ -20,12 +20,19 @@ pub(crate) fn lashlang_resources_from_tool_surface(
     surface: &crate::ToolSurface,
 ) -> lashlang::ResourceCatalog {
     let mut catalog = lashlang::ResourceCatalog::new();
-    catalog.add_alias("TOOL", "default");
     for entry in surface.tools.iter() {
         if entry.availability.is_callable() {
+            let agent_surface = entry
+                .manifest
+                .agent_surface
+                .executable_for(&entry.manifest.name);
+            catalog.add_module_instance(
+                agent_surface.module_path.iter().map(String::as_str),
+                agent_surface.authority_type.clone(),
+            );
             catalog.add_operation(
-                "TOOL",
-                entry.manifest.name.clone(),
+                agent_surface.authority_type,
+                agent_surface.operation,
                 entry.manifest.name.clone(),
             );
         }
@@ -43,7 +50,7 @@ pub struct RuntimeExecutionContext<'run> {
     chronological_projection: Arc<crate::ChronologicalProjection>,
     protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
     turn_context: crate::TurnContext,
-    pub(super) effect_metadata: Option<crate::EffectInvocationMetadata>,
+    pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
     pub(super) turn_lease: Option<crate::RuntimeTurnLease>,
     pub(super) turn_event_tx: Option<Sender<TurnActivity>>,
     pub(super) cancellation_token: Option<CancellationToken>,
@@ -52,12 +59,13 @@ pub struct RuntimeExecutionContext<'run> {
 impl<'run> RuntimeExecutionContext<'run> {
     pub(super) fn process_scope(
         &self,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
     ) -> crate::ProcessOpScope<'_> {
         crate::ProcessOpScope::new()
-            .with_effect_metadata(effect_metadata)
+            .with_parent_invocation(parent_invocation)
             .with_effect_controller(self.dispatch.effect_controller.as_controller())
             .with_turn_lease(self.turn_lease.clone())
+            .with_agent_frame_id(Some(self.dispatch.agent_frame_id.clone()))
     }
 
     #[allow(
@@ -83,7 +91,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             chronological_projection,
             protocol_extension,
             turn_context,
-            effect_metadata: None,
+            parent_invocation: None,
             turn_lease: None,
             turn_event_tx: None,
             cancellation_token: None,
@@ -121,6 +129,10 @@ impl<'run> RuntimeExecutionContext<'run> {
         &self.turn_context
     }
 
+    pub(crate) fn runtime_host(&self) -> &dyn crate::plugin::RuntimeSessionHost {
+        self.dispatch.host.as_ref()
+    }
+
     pub(super) async fn emit_turn_activity(
         &self,
         correlation_id: TurnActivityId,
@@ -136,11 +148,8 @@ impl<'run> RuntimeExecutionContext<'run> {
         self
     }
 
-    pub(crate) fn with_effect_metadata(
-        mut self,
-        metadata: crate::EffectInvocationMetadata,
-    ) -> Self {
-        self.effect_metadata = Some(metadata);
+    pub(crate) fn with_parent_invocation(mut self, metadata: crate::RuntimeInvocation) -> Self {
+        self.parent_invocation = Some(metadata);
         self
     }
 
@@ -193,7 +202,7 @@ impl<'run> RuntimeExecutionContext<'run> {
                 start.module_ref, start.process_name, start.process_ref
             ));
         }
-        let args = match serde_json::to_value(&lashlang::Value::Record(Arc::new(start.args)))
+        let args = match serde_json::to_value(lashlang::Value::Record(Arc::new(start.args)))
             .map_err(|err| format!("failed to serialize process args: {err}"))?
         {
             serde_json::Value::Object(map) => map,
@@ -240,7 +249,11 @@ impl<'run> RuntimeExecutionContext<'run> {
     ) -> Result<crate::SessionTriggerInstallReport, String> {
         self.dispatch
             .plugins
-            .install_lashlang_trigger_source(source, self.lashlang_surface())
+            .install_lashlang_trigger_source(
+                source,
+                self.lashlang_surface(),
+                self.lashlang_artifact_store.as_ref(),
+            )
             .map_err(|err| err.to_string())
     }
 
@@ -251,7 +264,11 @@ impl<'run> RuntimeExecutionContext<'run> {
     ) -> Result<crate::SessionTriggerInstallReport, String> {
         self.dispatch
             .plugins
-            .install_linked_lashlang_trigger_source(source, linked)
+            .install_linked_lashlang_trigger_source(
+                source,
+                linked,
+                self.lashlang_artifact_store.as_ref(),
+            )
             .map_err(|err| err.to_string())
     }
 
@@ -277,7 +294,7 @@ impl<'run> RuntimeExecutionContext<'run> {
                 crate::ProcessStartOptions::new()
                     .with_wake_session_id(self.session_id.clone())
                     .with_descriptor(crate::ProcessHandleDescriptor::new(Some("lashlang"), label)),
-                self.process_scope(self.effect_metadata.clone()),
+                self.process_scope(self.parent_invocation.clone()),
             )
             .await
         {
@@ -294,46 +311,20 @@ impl<'run> RuntimeExecutionContext<'run> {
         sequence: u64,
         duration_ms: u64,
     ) -> Result<(), crate::RuntimeEffectControllerError> {
-        let cancellation = self
-            .cancellation_token
-            .clone()
-            .unwrap_or_else(CancellationToken::new);
-        let metadata = if let Some(parent) = self.effect_metadata.as_ref() {
-            crate::EffectInvocationMetadata {
-                session_id: parent.session_id.clone(),
-                origin: parent.origin.clone(),
-                turn_id: parent.turn_id.clone(),
-                turn_index: parent.turn_index,
-                protocol_iteration: parent.protocol_iteration,
-                effect_id: format!("{}:process:{process_id}:sleep:{sequence}", parent.effect_id),
-                effect_kind: crate::RuntimeEffectKind::Sleep,
-                idempotency_key: format!(
-                    "{}:process:{process_id}:sleep:{sequence}",
-                    parent.idempotency_key
-                ),
-                turn_checkpoint_hash: parent.turn_checkpoint_hash.clone(),
-            }
-        } else {
-            let effect_id = format!("process:{process_id}:sleep:{sequence}");
-            crate::EffectInvocationMetadata {
-                session_id: self.session_id.clone(),
-                origin: crate::EffectOrigin::Turn,
-                turn_id: None,
-                turn_index: None,
-                protocol_iteration: None,
-                effect_id: effect_id.clone(),
-                effect_kind: crate::RuntimeEffectKind::Sleep,
-                idempotency_key: effect_id,
-                turn_checkpoint_hash: None,
-            }
-        };
+        let cancellation = self.cancellation_token.clone().unwrap_or_default();
+        let invocation = crate::runtime::causal::process_sleep_invocation(
+            &self.session_id,
+            self.parent_invocation.as_ref(),
+            process_id,
+            sequence,
+        );
         let outcome = self
             .dispatch
             .effect_controller
             .as_controller()
             .execute_effect(
                 crate::RuntimeEffectEnvelope::new(
-                    metadata,
+                    invocation,
                     crate::RuntimeEffectCommand::Sleep { duration_ms },
                 ),
                 crate::RuntimeEffectLocalExecutor::sleep(cancellation),
@@ -403,10 +394,11 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
-            tool_effect_metadata: None,
+            parent_invocation: None,
             session_id: "session".to_string(),
+            agent_frame_id: String::new(),
             event_tx,
-            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -459,10 +451,11 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
-            tool_effect_metadata: None,
+            parent_invocation: None,
             session_id: "session".to_string(),
+            agent_frame_id: String::new(),
             event_tx,
-            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -545,10 +538,11 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
-            tool_effect_metadata: None,
+            parent_invocation: None,
             session_id: "session".to_string(),
+            agent_frame_id: String::new(),
             event_tx,
-            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -575,7 +569,7 @@ mod tests {
         assert!(
             surface
                 .resources
-                .resolve_operation("TOOL", "alpha")
+                .resolve_operation("Tools", "alpha")
                 .is_some()
         );
     }
@@ -583,8 +577,8 @@ mod tests {
     #[test]
     fn lashlang_surface_reflects_host_resource_contributions() {
         let mut resources = lashlang::ResourceCatalog::new();
-        resources.add_alias("TRIGGER", "button");
-        resources.add_trigger_event("TRIGGER", "pressed", lashlang::TypeExpr::Any);
+        resources.add_module_instance(["ui", "button"], "Button");
+        resources.add_trigger_event("Button", "pressed", lashlang::TypeExpr::Any);
         let plugins = crate::plugin::PluginHost::empty()
             .with_lashlang_resources(resources)
             .build_session("session", None)
@@ -605,10 +599,11 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
-            tool_effect_metadata: None,
+            parent_invocation: None,
             session_id: "session".to_string(),
+            agent_frame_id: String::new(),
             event_tx,
-            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -630,7 +625,7 @@ mod tests {
         assert!(
             surface
                 .resources
-                .trigger_event("TRIGGER", "pressed")
+                .trigger_event("Button", "pressed")
                 .is_some()
         );
         lashlang::LinkedModule::link(
@@ -640,7 +635,7 @@ mod tests {
                   finish event
                 }
 
-                trigger remembered on TRIGGER.button.pressed as event
+                trigger remembered on ui.button.pressed as event
                   -> remember(event: event)
                 "#,
             )

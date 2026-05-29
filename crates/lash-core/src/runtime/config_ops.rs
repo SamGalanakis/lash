@@ -14,18 +14,27 @@ impl LashRuntime {
     pub fn set_model(&mut self, model: crate::ModelSpec) {
         self.policy.model = model;
         self.state.policy.model = self.policy.model.clone();
+        if let Some(frame) = self.state.current_agent_frame_mut() {
+            frame.assignment.policy.model = self.policy.model.clone();
+        }
     }
 
     /// Update provider on the runtime config.
     pub fn set_provider(&mut self, provider: ProviderHandle) {
         self.policy.provider = provider;
         self.state.policy.provider = self.policy.provider.clone();
+        if let Some(frame) = self.state.current_agent_frame_mut() {
+            frame.assignment.policy.provider = self.policy.provider.clone();
+        }
     }
 
     /// Update session ID metadata on the runtime config.
     pub fn set_session_id(&mut self, session_id: Option<String>) {
         self.policy.session_id = session_id;
         self.state.policy.session_id = self.policy.session_id.clone();
+        if let Some(frame) = self.state.current_agent_frame_mut() {
+            frame.assignment.policy.session_id = self.policy.session_id.clone();
+        }
     }
 
     pub async fn update_session_config(
@@ -45,6 +54,9 @@ impl LashRuntime {
             self.policy.prompt = prompt;
         }
         self.state.policy = self.policy.clone();
+        if let Some(frame) = self.state.current_agent_frame_mut() {
+            frame.assignment.policy = self.policy.clone();
+        }
         // Eagerly compact messages if the context window shrunk.
         let new_max = Some(self.policy.context_window_tokens());
         let old_max = Some(previous.context_window_tokens());

@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
-use lash::{LashSession, advanced::ExecutionMode, provider::ProviderHandle};
+use lash::{LashSession, ModeId, provider::ProviderHandle};
 use lash_core::ToolState;
 use lash_core::session_model::Message;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
@@ -19,8 +19,7 @@ use crate::input_items::insert_inline_marker;
 use crate::model_catalog::CachedModelCatalog;
 use crate::render;
 use crate::session_log::SessionLogger;
-use crate::turn_runner::{RuntimeRunResult, make_turn_input};
-use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_action};
+use crate::turn_runner::RuntimeRunResult;
 use crate::ui_trace::UiTraceRecorder;
 use crate::{
     Args, apply_ui_host_effects, hash12, normalize_prepared_turn_for_dispatch, push_system_message,
@@ -36,9 +35,39 @@ use super::helpers::{
     record_queue_pending_steer, record_queue_turn, should_preserve_selection_for_key,
 };
 use super::runtime::{
-    apply_pending_reconfigure, copy_selected_text_or_last_response, make_injected_plugin_message,
-    send_user_message,
+    apply_pending_reconfigure, copy_selected_text_or_last_response, enqueue_prepared_turn,
+    make_injected_plugin_message,
 };
+
+async fn enqueue_prepared_turn_for_cli(
+    queued: PreparedTurn,
+    app: &mut App,
+    ui_trace: &mut Option<UiTraceRecorder>,
+    runtime: &Option<LashSession>,
+    delivery_policy: lash_core::DeliveryPolicy,
+    slot_policy: lash_core::SlotPolicy,
+) -> bool {
+    let Some(session) = runtime.as_ref() else {
+        push_system_message(
+            app,
+            "Cannot queue this input while the session is switching.".to_string(),
+        );
+        app.restore_prepared_turn(queued);
+        return false;
+    };
+    match enqueue_prepared_turn(session, &queued, delivery_policy, slot_policy).await {
+        Ok(()) => {
+            record_queue_turn(ui_trace, &queued);
+            app.queue_turn(queued);
+            true
+        }
+        Err(err) => {
+            push_system_message(app, format!("Failed to queue input durably: {err}"));
+            app.restore_prepared_turn(queued);
+            false
+        }
+    }
+}
 
 pub(super) fn handle_surface_input(
     ui_extensions: &TuiExtensions,
@@ -64,9 +93,17 @@ pub(super) fn handle_surface_input(
     }
 }
 
-pub(super) fn current_ui_action_context(app: &App, terminal: &Terminal) -> UiActionContext {
+/// Viewport-derived measurements the scroll handlers need; computed from
+/// the current terminal size against the live layout.
+struct ViewportMetrics {
+    width: usize,
+    history_height: usize,
+    prompt_max_scroll: usize,
+}
+
+fn viewport_metrics(app: &App, terminal: &Terminal) -> ViewportMetrics {
     let (width, height) = terminal.size().unwrap_or((80, 24));
-    let viewport_height = render::history_viewport_height(app, width, height);
+    let history_height = render::history_viewport_height(app, width, height);
     let prompt_max_scroll = if let Some(prompt) = app.prompt_state() {
         let prompt_area = render::input_area(app, width, height);
         let visible_height = prompt_area.height as usize;
@@ -75,11 +112,18 @@ pub(super) fn current_ui_action_context(app: &App, terminal: &Terminal) -> UiAct
     } else {
         0
     };
-    UiActionContext {
-        viewport_width: width as usize,
-        viewport_height,
+    ViewportMetrics {
+        width: width as usize,
+        history_height,
         prompt_max_scroll,
     }
+}
+
+/// Scroll the history viewport down by `amount`, clamped against the
+/// current layout.
+fn scroll_history_down(app: &mut App, terminal: &Terminal, amount: usize) {
+    let metrics = viewport_metrics(app, terminal);
+    app.scroll_down(amount, metrics.history_height, metrics.width);
 }
 
 pub(super) fn selected_slash_command_suggestion(
@@ -97,22 +141,16 @@ pub(super) fn selected_slash_command_suggestion(
         .map(|command| (command_text, command))
 }
 
-pub(super) fn apply_terminal_action(
-    app: &mut App,
-    terminal: &Terminal,
-    action: UiAction,
-) -> UiActionOutcome {
-    let context = current_ui_action_context(app, terminal);
-    apply_ui_action(app, action, context)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// An always-on scroll keypress, resolved to a direction and amount. These
+/// keys (Ctrl+U/D, PageUp/Down, and bare Up/Down in a review-only prompt)
+/// scroll either the prompt review pane or the history viewport in every
+/// mode, so they are classified before modal routing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScrollInputAction {
-    Prompt(UiAction),
-    History {
-        action: UiAction,
-        trace_amount: usize,
-    },
+    PromptUp(usize),
+    PromptDown(usize),
+    HistoryUp(usize),
+    HistoryDown(usize),
 }
 
 fn classify_always_on_scroll_key(
@@ -125,58 +163,38 @@ fn classify_always_on_scroll_key(
 
     if app.has_prompt() {
         if ctrl && key.code == KeyCode::Char('u') {
-            return Some(ScrollInputAction::Prompt(UiAction::PromptScrollUp(
-                half_page,
-            )));
+            return Some(ScrollInputAction::PromptUp(half_page));
         }
         if ctrl && key.code == KeyCode::Char('d') {
-            return Some(ScrollInputAction::Prompt(UiAction::PromptScrollDown(
-                half_page,
-            )));
+            return Some(ScrollInputAction::PromptDown(half_page));
         }
         if key.code == KeyCode::PageUp {
-            return Some(ScrollInputAction::Prompt(UiAction::PromptScrollUp(
-                viewport_height,
-            )));
+            return Some(ScrollInputAction::PromptUp(viewport_height));
         }
         if key.code == KeyCode::PageDown {
-            return Some(ScrollInputAction::Prompt(UiAction::PromptScrollDown(
-                viewport_height,
-            )));
+            return Some(ScrollInputAction::PromptDown(viewport_height));
         }
         if !app.is_prompt_text_entry() && !app.prompt_has_options() {
             if key.code == KeyCode::Up {
-                return Some(ScrollInputAction::Prompt(UiAction::PromptScrollUp(1)));
+                return Some(ScrollInputAction::PromptUp(1));
             }
             if key.code == KeyCode::Down {
-                return Some(ScrollInputAction::Prompt(UiAction::PromptScrollDown(1)));
+                return Some(ScrollInputAction::PromptDown(1));
             }
         }
     }
 
     if ctrl && key.code == KeyCode::Char('u') {
-        return Some(ScrollInputAction::History {
-            action: UiAction::ScrollUp(half_page),
-            trace_amount: half_page,
-        });
+        return Some(ScrollInputAction::HistoryUp(half_page));
     }
     if ctrl && key.code == KeyCode::Char('d') {
-        return Some(ScrollInputAction::History {
-            action: UiAction::ScrollDown(half_page),
-            trace_amount: half_page,
-        });
+        return Some(ScrollInputAction::HistoryDown(half_page));
     }
     if key.code == KeyCode::PageUp {
-        return Some(ScrollInputAction::History {
-            action: UiAction::ScrollUp(viewport_height),
-            trace_amount: viewport_height,
-        });
+        return Some(ScrollInputAction::HistoryUp(viewport_height));
     }
     if key.code == KeyCode::PageDown {
-        return Some(ScrollInputAction::History {
-            action: UiAction::ScrollDown(viewport_height),
-            trace_amount: viewport_height,
-        });
+        return Some(ScrollInputAction::HistoryDown(viewport_height));
     }
 
     None
@@ -189,66 +207,25 @@ fn apply_scroll_input_action(
     action: ScrollInputAction,
 ) {
     match action {
-        ScrollInputAction::Prompt(action) => {
-            let _ = apply_terminal_action(app, terminal, action);
+        ScrollInputAction::PromptUp(amount) => app.prompt_scroll_up(amount),
+        ScrollInputAction::PromptDown(amount) => {
+            let max_scroll = viewport_metrics(app, terminal).prompt_max_scroll;
+            app.prompt_scroll_down(amount, max_scroll);
         }
-        ScrollInputAction::History {
-            action,
-            trace_amount,
-        } => {
+        ScrollInputAction::HistoryUp(amount) => {
             if let Some(recorder) = ui_trace.as_mut() {
-                match action {
-                    UiAction::ScrollUp(_) => recorder.record_scroll_up(trace_amount),
-                    UiAction::ScrollDown(_) => recorder.record_scroll_down(trace_amount),
-                    _ => {}
-                }
+                recorder.record_scroll_up(amount);
             }
-            let _ = apply_terminal_action(app, terminal, action);
+            app.scroll_up(amount);
+        }
+        ScrollInputAction::HistoryDown(amount) => {
+            if let Some(recorder) = ui_trace.as_mut() {
+                recorder.record_scroll_down(amount);
+            }
+            scroll_history_down(app, terminal, amount);
         }
     }
     app.dirty = true;
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn activate_foreground_session_handoff(
-    app: &mut App,
-    session_id: String,
-    _history: &mut Vec<lash_core::session_model::Message>,
-    runtime: &mut Option<LashSession>,
-    _turn_counter: &mut usize,
-    _current_execution_mode: &mut ExecutionMode,
-    _current_model_variant: &mut Option<String>,
-    _ui_extensions: &TuiExtensions,
-) -> bool {
-    let Some(session) = runtime.as_ref() else {
-        push_system_message(app, "No active session for handoff.".to_string());
-        return false;
-    };
-    let queued_turn = match session.handoffs().take_first_turn_input(&session_id).await {
-        Ok(Some(seed)) if !seed.content.trim().is_empty() => {
-            Some(PreparedTurn::prepare_with_effective_text(
-                seed.content.clone(),
-                seed.content,
-                Vec::new(),
-            ))
-        }
-        Ok(_) => None,
-        Err(err) => {
-            push_system_message(
-                app,
-                format!("Failed to read first turn for session `{session_id}`: {err}"),
-            );
-            None
-        }
-    };
-
-    app.dirty = true;
-
-    if let Some(turn) = queued_turn {
-        app.queue_turn(turn);
-    }
-
-    true
 }
 
 pub(super) fn handle_mouse_event(
@@ -297,12 +274,13 @@ pub(super) fn handle_mouse_event(
             && mouse.column < prompt_area.x + prompt_area.width;
         match mouse.kind {
             MouseEventKind::ScrollUp if !app.prompt_uses_split_layout() || in_prompt_review => {
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptScrollUp(3));
+                app.prompt_scroll_up(3);
                 app.dirty = true;
                 return Ok(());
             }
             MouseEventKind::ScrollDown if !app.prompt_uses_split_layout() || in_prompt_review => {
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptScrollDown(3));
+                let max_scroll = viewport_metrics(app, terminal).prompt_max_scroll;
+                app.prompt_scroll_down(3, max_scroll);
                 app.dirty = true;
                 return Ok(());
             }
@@ -462,40 +440,154 @@ pub(super) fn handle_mouse_event(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_key_event(
+/// Bundle of the long-lived interactive-loop state every key handler
+/// needs. The run loop borrows its locals into this once per key event
+/// and hands `&mut SessionCtx` to [`dispatch_key_event`]; the per-mode
+/// handlers reach through `ctx.field` directly rather than re-exploding
+/// the bag into locals.
+pub(super) struct SessionCtx<'a> {
+    pub app: &'a mut App,
+    pub terminal: &'a mut Terminal,
+    pub ui_trace: &'a mut Option<UiTraceRecorder>,
+    pub logger: &'a mut SessionLogger,
+    pub args: &'a Args,
+    pub paused: &'a Arc<AtomicBool>,
+    pub ui_extensions: &'a TuiExtensions,
+    pub runtime_factory: &'a crate::session_bootstrap::CliSessionOpener,
+    pub lash_config: &'a crate::config::LashConfig,
+    pub runtime: &'a mut Option<LashSession>,
+    pub history: &'a mut Vec<Message>,
+    pub turn_counter: &'a mut usize,
+    pub last_turn: &'a mut Option<TurnReplayPayload>,
+    pub runtime_return_rx: &'a mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
+    pub cancel_token: &'a mut Option<CancellationToken>,
+    pub active_stream_id: &'a mut u64,
+    pub provider: &'a mut ProviderHandle,
+    pub current_model_variant: &'a mut Option<String>,
+    pub current_execution_mode: &'a mut ModeId,
+    pub desired_tool_state: &'a mut ToolState,
+    pub pending_reconfigure: &'a mut bool,
+    pub model_catalog: &'a CachedModelCatalog,
+    pub toolset_hash: &'a mut String,
+    pub app_tx: &'a crate::event::AppEventTx,
+    pub pending_clear_after_return: &'a mut bool,
+}
+
+/// The modal overlay that currently owns keyboard focus, derived once from
+/// `app.overlay` so modal precedence lives in data instead of a duplicated
+/// `if app.has_X()` ladder. Empty pickers/trees collapse to `None` so they
+/// fall through to the input composer, matching the old `has_*` guards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveModal {
+    None,
+    SkillPicker,
+    SessionPicker,
+    Tree,
+    Prompt,
+}
+
+fn active_modal(app: &App) -> ActiveModal {
+    if app.has_skill_picker() {
+        ActiveModal::SkillPicker
+    } else if app.has_session_picker() {
+        ActiveModal::SessionPicker
+    } else if app.has_tree() {
+        ActiveModal::Tree
+    } else if app.has_prompt() {
+        ActiveModal::Prompt
+    } else {
+        ActiveModal::None
+    }
+}
+
+/// Route a key press to the handler for the active mode. Order matters and
+/// mirrors the historical fall-through: global shortcuts win first, then
+/// always-on scrolling, then the modal overlays (skill/session pickers,
+/// tree, prompt), surface/shortcut routing, and finally the default input
+/// dispatch.
+pub(super) async fn dispatch_key_event(
     key: KeyEvent,
-    app: &mut App,
-    terminal: &mut Terminal,
-    ui_trace: &mut Option<UiTraceRecorder>,
-    logger: &mut SessionLogger,
-    args: &Args,
-    paused: &Arc<AtomicBool>,
-    ui_extensions: &TuiExtensions,
-    runtime_factory: &crate::session_bootstrap::CliSessionOpener,
-    lash_config: &crate::config::LashConfig,
-    runtime: &mut Option<LashSession>,
-    history: &mut Vec<Message>,
-    turn_counter: &mut usize,
-    last_turn: &mut Option<TurnReplayPayload>,
-    runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
-    cancel_token: &mut Option<CancellationToken>,
-    active_stream_id: &mut u64,
-    provider: &mut ProviderHandle,
-    current_model_variant: &mut Option<String>,
-    current_execution_mode: &mut ExecutionMode,
-    desired_tool_state: &mut ToolState,
-    pending_reconfigure: &mut bool,
-    model_catalog: &CachedModelCatalog,
-    toolset_hash: &mut String,
-    app_tx: &crate::event::AppEventTx,
-    pending_clear_after_return: &mut bool,
+    ctx: &mut SessionCtx<'_>,
 ) -> anyhow::Result<bool> {
     // With kitty keyboard protocol, ignore Release/Repeat events
     if key.kind != KeyEventKind::Press {
         return Ok(false);
     }
-    app.dirty = true;
+    ctx.app.dirty = true;
+
+    if let Some(result) = handle_global_shortcut_key(key, ctx) {
+        return Ok(result);
+    }
+
+    // ── Always-on scroll keys (work in all states) ──
+    {
+        let (width, height) = ctx.terminal.size()?;
+        let vh = render::history_viewport_height(ctx.app, width, height);
+        if let Some(action) = classify_always_on_scroll_key(key, ctx.app, vh) {
+            apply_scroll_input_action(ctx.app, ctx.terminal, ctx.ui_trace, action);
+            return Ok(false);
+        }
+    }
+
+    match active_modal(ctx.app) {
+        ActiveModal::SkillPicker => {
+            handle_skill_picker_key(key, ctx);
+            return Ok(false);
+        }
+        ActiveModal::SessionPicker => {
+            handle_session_picker_key(key, ctx).await;
+            return Ok(false);
+        }
+        ActiveModal::Tree => return handle_tree_key(key, ctx).await,
+        ActiveModal::Prompt => {
+            handle_prompt_key(key, ctx);
+            return Ok(false);
+        }
+        ActiveModal::None => {}
+    }
+
+    if let Some(event) = normalize_event(&TermEvent::Key(key))
+        && handle_surface_input(ctx.ui_extensions, &event, ctx.runtime.as_ref(), ctx.app)
+    {
+        return Ok(false);
+    }
+
+    if let Some(chord) = key_chord_from_event(key)
+        && let Some(shortcut) = ctx.ui_extensions.shortcut_for(chord)
+    {
+        let Some(session) = ctx.runtime.as_ref() else {
+            push_system_message(ctx.app, "No active session for UI shortcut.".to_string());
+            return Ok(false);
+        };
+        match ctx
+            .ui_extensions
+            .invoke_shortcut(
+                &shortcut,
+                TuiExtensionContext {
+                    actions: &session.plugin_actions(),
+                },
+            )
+            .await
+        {
+            Ok(effects) => apply_ui_host_effects(ctx.app, effects),
+            Err(err) => push_system_message(ctx.app, err),
+        }
+        return Ok(false);
+    }
+
+    handle_input_mode_key(key, ctx).await
+}
+
+/// Global shortcuts that fire regardless of the active mode (selection
+/// copy, Ctrl+C dismiss/quit, expand toggles, undo/redo, paste, Esc).
+/// Returns `Some(ret)` when the key was fully handled here, where `ret`
+/// is the `dispatch_key_event` return value; `None` to fall through.
+fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option<bool> {
+    let app = &mut *ctx.app;
+    let terminal = &*ctx.terminal;
+    let ui_trace = &mut *ctx.ui_trace;
+    let app_tx = ctx.app_tx;
+    let cancel_token = &mut *ctx.cancel_token;
     let copy_shortcut = is_copy_shortcut(key);
     tracing::debug!(
         code = ?key.code,
@@ -513,14 +605,14 @@ pub(super) async fn handle_key_event(
     // Clear any active history selection on plain keypress.
     if app.selection.visible && !should_preserve_selection_for_key(key) {
         tracing::debug!("clearing selection on plain keypress");
-        let _ = apply_terminal_action(app, terminal, UiAction::ClearSelection);
+        app.clear_selection();
     }
 
     // Active selection copy should win before generic Ctrl+C handling.
     if (app.selection.visible || app.has_input_selection()) && copy_shortcut {
         tracing::debug!("selection copy took precedence over generic key handling");
         copy_selected_text_or_last_response(app, terminal.size().ok());
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+C: dismiss prompt if active, else quit
@@ -536,10 +628,10 @@ pub(super) async fn handle_key_event(
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_prompt_dismiss();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::DismissPrompt);
-            return Ok(false);
+            app.dismiss_prompt();
+            return Some(false);
         }
-        return Ok(true);
+        return Some(true);
     }
 
     // ALT+O: reliable full expand toggle across most terminals.
@@ -547,7 +639,7 @@ pub(super) async fn handle_key_event(
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'o'))
     {
         app.toggle_full_expand();
-        return Ok(false);
+        return Some(false);
     }
 
     if queued_turn_edit_matches(key) {
@@ -555,7 +647,7 @@ pub(super) async fn handle_key_event(
             app.restore_prepared_turn(turn);
             app.update_suggestions();
         }
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+O: cycle expand (0↔1)
@@ -563,7 +655,7 @@ pub(super) async fn handle_key_event(
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'o'))
     {
         app.cycle_expand();
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+SHIFT+Z: redo the most recently undone edit.
@@ -574,7 +666,7 @@ pub(super) async fn handle_key_event(
         if app.editor_redo() {
             app.update_suggestions();
         }
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+Z: undo the most recent edit to the input draft.
@@ -585,7 +677,7 @@ pub(super) async fn handle_key_event(
         if app.editor_undo() {
             app.update_suggestions();
         }
-        return Ok(false);
+        return Some(false);
     }
 
     // ALT+Z: redo fallback for terminals that swallow CTRL+SHIFT+Z.
@@ -595,7 +687,7 @@ pub(super) async fn handle_key_event(
         if app.editor_redo() {
             app.update_suggestions();
         }
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+Y / CTRL+SHIFT+C: copy current selection when present,
@@ -603,7 +695,7 @@ pub(super) async fn handle_key_event(
     if copy_shortcut {
         tracing::debug!("copy shortcut matched without active selection precedence");
         copy_selected_text_or_last_response(app, terminal.size().ok());
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+SHIFT+V: always paste text from clipboard
@@ -617,7 +709,7 @@ pub(super) async fn handle_key_event(
             app.insert_pasted_text(&text);
             app.update_suggestions();
         }
-        return Ok(false);
+        return Some(false);
     }
 
     // CTRL+V: paste image from clipboard (no text fallback)
@@ -650,257 +742,243 @@ pub(super) async fn handle_key_event(
                 let _ = app_tx.send(AppEvent::ClipboardImageReady { id: image_id, png });
             });
         }
-        return Ok(false);
+        return Some(false);
     }
 
-    // Escape key behavior depends on state
+    // Escape dismisses the active modal (precedence resolved once via
+    // `active_modal`), otherwise interrupts a running turn.
     if key.code == KeyCode::Esc {
-        if app.has_prompt() {
-            if let Some(recorder) = ui_trace.as_mut() {
-                recorder.record_prompt_dismiss();
-            }
-            app.dismiss_prompt();
-        } else if app.has_tree() {
-            let _ = apply_terminal_action(app, terminal, UiAction::DismissTree);
-        } else if app.has_skill_picker() {
-            let _ = apply_terminal_action(app, terminal, UiAction::DismissSkillPicker);
-        } else if app.has_session_picker() {
-            let _ = apply_terminal_action(app, terminal, UiAction::DismissSessionPicker);
-        } else if app.running {
-            // Interrupt running session
-            app.note_manual_interrupt_requested();
-            if let Some(token) = cancel_token.take() {
-                token.cancel();
-            }
-        }
-        // When idle with no dialog: no-op
-        return Ok(false);
-    }
-
-    // ── Always-on scroll keys (work in all states) ──
-    {
-        let (width, height) = terminal.size()?;
-        let vh = render::history_viewport_height(app, width, height);
-        if let Some(action) = classify_always_on_scroll_key(key, app, vh) {
-            apply_scroll_input_action(app, terminal, ui_trace, action);
-            return Ok(false);
-        }
-    }
-
-    // ── Skill picker key handling ──
-    if app.has_skill_picker() {
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                let _ = apply_terminal_action(app, terminal, UiAction::SkillPickerUp);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let _ = apply_terminal_action(app, terminal, UiAction::SkillPickerDown);
-            }
-            KeyCode::Enter => {
-                if let UiActionOutcome::SkillPicked(Some(name)) =
-                    apply_terminal_action(app, terminal, UiAction::SubmitSkillPicker)
-                {
-                    app.set_input(format!("${} ", name));
+        match active_modal(app) {
+            ActiveModal::Prompt => {
+                if let Some(recorder) = ui_trace.as_mut() {
+                    recorder.record_prompt_dismiss();
                 }
+                app.dismiss_prompt();
             }
-            _ => {}
-        }
-        return Ok(false);
-    }
-
-    // ── Session picker key handling ──
-    if app.has_session_picker() {
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                let _ = apply_terminal_action(app, terminal, UiAction::SessionPickerUp);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let _ = apply_terminal_action(app, terminal, UiAction::SessionPickerDown);
-            }
-            KeyCode::Enter => {
-                if let UiActionOutcome::SessionPicked(Some(filename)) =
-                    apply_terminal_action(app, terminal, UiAction::SubmitSessionPicker)
-                {
-                    match switch_to_session_identifier(
-                        &filename,
-                        app,
-                        logger,
-                        runtime_factory,
-                        runtime,
-                        history,
-                        turn_counter,
-                        provider,
-                        current_model_variant,
-                        current_execution_mode,
-                        desired_tool_state,
-                        model_catalog,
-                        toolset_hash,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            app.dirty = true;
-                        }
-                        Err(err) => {
-                            app.timeline
-                                .push(UiTimelineItem::SystemMessage(err.to_string()));
-                            app.invalidate_height_cache();
-                            app.scroll_to_bottom();
-                        }
+            ActiveModal::Tree => app.dismiss_tree(),
+            ActiveModal::SkillPicker => app.dismiss_skill_picker(),
+            ActiveModal::SessionPicker => app.dismiss_session_picker(),
+            ActiveModal::None => {
+                if app.running {
+                    // Interrupt running session
+                    app.note_manual_interrupt_requested();
+                    if let Some(token) = cancel_token.take() {
+                        token.cancel();
                     }
                 }
+                // When idle with no dialog: no-op
             }
-            _ => {} // ignore other keys while picker is open
         }
-        return Ok(false);
+        return Some(false);
     }
 
-    // ── Tree overlay key handling ──
-    if app.has_tree() {
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                let _ = apply_terminal_action(app, terminal, UiAction::TreeUp);
+    None
+}
+
+/// Skill-picker overlay navigation: up/down move the highlight, Enter
+/// inserts the chosen skill as a `$name ` draft.
+fn handle_skill_picker_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) {
+    let app = &mut *ctx.app;
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => app.skill_picker_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.skill_picker_down(),
+        KeyCode::Enter => {
+            if let Some(name) = app.take_skill_pick() {
+                app.set_input(format!("${} ", name));
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let _ = apply_terminal_action(app, terminal, UiAction::TreeDown);
-            }
-            KeyCode::Left | KeyCode::Right
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                let action = if key.code == KeyCode::Left {
-                    UiAction::TreePrevBranch
-                } else {
-                    UiAction::TreeNextBranch
-                };
-                let _ = apply_terminal_action(app, terminal, action);
-            }
-            KeyCode::Enter => {
-                if let UiActionOutcome::TreePicked(Some(selection)) =
-                    apply_terminal_action(app, terminal, UiAction::SubmitTree)
-                {
-                    let current_tool_state = desired_tool_state.clone();
-                    let Some(rt) = runtime.as_ref() else {
-                        push_system_message(
-                            app,
-                            "Branch navigation is unavailable while a turn is running.",
-                        );
-                        return Ok(false);
-                    };
-                    match crate::tree::switch_to_tree_selection(
-                        rt,
-                        logger,
-                        app,
-                        history,
-                        selection,
-                        &current_tool_state,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            app.dirty = true;
-                        }
-                        Err(err) => {
-                            push_system_message(app, format!("Branch switch failed: {err}"));
-                        }
-                    }
-                }
-            }
-            _ => {}
         }
-        return Ok(false);
+        _ => {}
     }
+}
 
-    // ── Prompt (ask dialog) key handling ──
-    if app.has_prompt() {
-        let editing_text = app.is_prompt_text_entry();
-        match key.code {
-            KeyCode::Tab if app.prompt_supports_note() => {
-                if let Some(recorder) = ui_trace.as_mut() {
-                    recorder.record_prompt_toggle_note_focus();
-                }
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptToggleNoteFocus);
-            }
-            KeyCode::Up if !editing_text => {
-                if let Some(recorder) = ui_trace.as_mut() {
-                    recorder.record_prompt_up();
-                }
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptUp);
-            }
-            KeyCode::Down if !editing_text => {
-                if let Some(recorder) = ui_trace.as_mut() {
-                    recorder.record_prompt_down();
-                }
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptDown);
-            }
-            KeyCode::Char(' ') if app.is_prompt_multi_select() && !editing_text => {
-                if let Some(recorder) = ui_trace.as_mut() {
-                    recorder.record_prompt_toggle_current_option();
-                }
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptToggleCurrentOption);
-            }
-            KeyCode::BackTab if editing_text => {
-                if let Some(recorder) = ui_trace.as_mut() {
-                    recorder.record_prompt_insert_text("\n");
-                }
-                let _ = apply_terminal_action(
-                    app,
-                    terminal,
-                    UiAction::PromptInsertText("\n".to_string()),
-                );
-            }
-            KeyCode::Enter => {
-                if let Some(recorder) = ui_trace.as_mut() {
-                    recorder.record_submit_prompt();
-                }
-                let _ = apply_terminal_action(app, terminal, UiAction::SubmitPrompt);
-            }
-            KeyCode::Char(c) if editing_text => {
-                if let Some(recorder) = ui_trace.as_mut() {
-                    recorder.record_prompt_insert_text(c.to_string());
-                }
-                let _ =
-                    apply_terminal_action(app, terminal, UiAction::PromptInsertText(c.to_string()));
-            }
-            KeyCode::Backspace if editing_text => {
-                if let Some(recorder) = ui_trace.as_mut() {
-                    recorder.record_prompt_backspace();
-                }
-                let _ = apply_terminal_action(app, terminal, UiAction::PromptBackspace);
-            }
-            _ => {}
-        }
-        return Ok(false);
-    }
-
-    if let Some(event) = normalize_event(&TermEvent::Key(key))
-        && handle_surface_input(ui_extensions, &event, runtime.as_ref(), app)
-    {
-        return Ok(false);
-    }
-
-    if let Some(chord) = key_chord_from_event(key)
-        && let Some(shortcut) = ui_extensions.shortcut_for(chord)
-    {
-        let Some(session) = runtime.as_ref() else {
-            push_system_message(app, "No active session for UI shortcut.".to_string());
-            return Ok(false);
-        };
-        match ui_extensions
-            .invoke_shortcut(
-                &shortcut,
-                TuiExtensionContext {
-                    actions: &session.plugin_actions(),
-                },
+/// Session-picker overlay navigation: up/down move the highlight, Enter
+/// switches to the selected session.
+async fn handle_session_picker_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => ctx.app.session_picker_up(),
+        KeyCode::Down | KeyCode::Char('j') => ctx.app.session_picker_down(),
+        KeyCode::Enter => {
+            let Some(filename) = ctx.app.take_session_pick() else {
+                return;
+            };
+            match switch_to_session_identifier(
+                &filename,
+                ctx.app,
+                ctx.logger,
+                ctx.runtime_factory,
+                ctx.runtime,
+                ctx.history,
+                ctx.turn_counter,
+                ctx.provider,
+                ctx.current_model_variant,
+                ctx.current_execution_mode,
+                ctx.desired_tool_state,
+                ctx.model_catalog,
+                ctx.toolset_hash,
             )
             .await
-        {
-            Ok(effects) => apply_ui_host_effects(app, effects),
-            Err(err) => push_system_message(app, err),
+            {
+                Ok(()) => {
+                    ctx.app.dirty = true;
+                }
+                Err(err) => {
+                    ctx.app
+                        .timeline
+                        .push(UiTimelineItem::SystemMessage(err.to_string()));
+                    ctx.app.invalidate_height_cache();
+                    ctx.app.scroll_to_bottom();
+                }
+            }
         }
-        return Ok(false);
+        _ => {} // ignore other keys while picker is open
     }
+}
+
+/// Tree (branch) overlay navigation: up/down move the highlight,
+/// Ctrl/Alt+Left/Right switch branches, Enter switches to the selected
+/// node. Returns the `dispatch_key_event` result (always `Ok(false)` today;
+/// the `Result` keeps the `?`/`.await` ergonomics of the switch call).
+async fn handle_tree_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyhow::Result<bool> {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => ctx.app.tree_up(),
+        KeyCode::Down | KeyCode::Char('j') => ctx.app.tree_down(),
+        KeyCode::Left
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            ctx.app.tree_prev_branch();
+        }
+        KeyCode::Right
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            ctx.app.tree_next_branch();
+        }
+        KeyCode::Enter => {
+            let Some(selection) = ctx.app.take_tree_pick() else {
+                return Ok(false);
+            };
+            let current_tool_state = ctx.desired_tool_state.clone();
+            let Some(rt) = ctx.runtime.as_ref() else {
+                push_system_message(
+                    ctx.app,
+                    "Branch navigation is unavailable while a turn is running.",
+                );
+                return Ok(false);
+            };
+            match crate::tree::switch_to_tree_selection(
+                rt,
+                ctx.logger,
+                ctx.app,
+                ctx.history,
+                selection,
+                &current_tool_state,
+            )
+            .await
+            {
+                Ok(()) => {
+                    ctx.app.dirty = true;
+                }
+                Err(err) => {
+                    push_system_message(ctx.app, format!("Branch switch failed: {err}"));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+/// Ask-dialog (prompt) key handling: navigation, multi-select toggles,
+/// note-field focus, and text entry.
+fn handle_prompt_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) {
+    let app = &mut *ctx.app;
+    let ui_trace = &mut *ctx.ui_trace;
+    let editing_text = app.is_prompt_text_entry();
+    match key.code {
+        KeyCode::Tab if app.prompt_supports_note() => {
+            if let Some(recorder) = ui_trace.as_mut() {
+                recorder.record_prompt_toggle_note_focus();
+            }
+            app.prompt_toggle_note_focus();
+        }
+        KeyCode::Up if !editing_text => {
+            if let Some(recorder) = ui_trace.as_mut() {
+                recorder.record_prompt_up();
+            }
+            app.prompt_up();
+        }
+        KeyCode::Down if !editing_text => {
+            if let Some(recorder) = ui_trace.as_mut() {
+                recorder.record_prompt_down();
+            }
+            app.prompt_down();
+        }
+        KeyCode::Char(' ') if app.is_prompt_multi_select() && !editing_text => {
+            if let Some(recorder) = ui_trace.as_mut() {
+                recorder.record_prompt_toggle_current_option();
+            }
+            app.prompt_toggle_current_option();
+        }
+        KeyCode::BackTab if editing_text => {
+            if let Some(recorder) = ui_trace.as_mut() {
+                recorder.record_prompt_insert_text("\n");
+            }
+            app.prompt_insert_text("\n");
+        }
+        KeyCode::Enter => {
+            if let Some(recorder) = ui_trace.as_mut() {
+                recorder.record_submit_prompt();
+            }
+            let _ = app.take_prompt_response();
+        }
+        KeyCode::Char(c) if editing_text => {
+            if let Some(recorder) = ui_trace.as_mut() {
+                recorder.record_prompt_insert_text(c.to_string());
+            }
+            app.prompt_insert_text(&c.to_string());
+        }
+        KeyCode::Backspace if editing_text => {
+            if let Some(recorder) = ui_trace.as_mut() {
+                recorder.record_prompt_backspace();
+            }
+            app.prompt_backspace();
+        }
+        _ => {}
+    }
+}
+
+/// Default input dispatch when no modal overlay is active: suggestion
+/// navigation/completion, Tab/Enter send-or-queue, shell escapes, slash
+/// commands, and raw editing keys.
+async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyhow::Result<bool> {
+    let app = &mut *ctx.app;
+    let terminal = &mut *ctx.terminal;
+    let ui_trace = &mut *ctx.ui_trace;
+    let logger = &mut *ctx.logger;
+    let args = ctx.args;
+    let paused = ctx.paused;
+    let ui_extensions = ctx.ui_extensions;
+    let runtime_factory = ctx.runtime_factory;
+    let lash_config = ctx.lash_config;
+    let runtime = &mut *ctx.runtime;
+    let history = &mut *ctx.history;
+    let turn_counter = &mut *ctx.turn_counter;
+    let last_turn = &mut *ctx.last_turn;
+    let runtime_return_rx = &mut *ctx.runtime_return_rx;
+    let cancel_token = &mut *ctx.cancel_token;
+    let active_stream_id = &mut *ctx.active_stream_id;
+    let provider = &mut *ctx.provider;
+    let current_model_variant = &mut *ctx.current_model_variant;
+    let current_execution_mode = &mut *ctx.current_execution_mode;
+    let desired_tool_state = &mut *ctx.desired_tool_state;
+    let pending_reconfigure = &mut *ctx.pending_reconfigure;
+    let model_catalog = ctx.model_catalog;
+    let toolset_hash = &mut *ctx.toolset_hash;
+    let app_tx = ctx.app_tx;
+    let pending_clear_after_return = &mut *ctx.pending_clear_after_return;
 
     match key.code {
         // Tab: complete selected suggestion
@@ -908,7 +986,8 @@ pub(super) async fn handle_key_event(
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_suggestion_complete();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::SuggestionComplete);
+            app.complete_suggestion();
+            app.update_suggestions();
         }
         KeyCode::Tab => {
             let Some(queued) = app.try_take_prepared_turn() else {
@@ -970,57 +1049,56 @@ pub(super) async fn handle_key_event(
                     }
                     return Ok(false);
                 }
-                record_queue_turn(ui_trace, &queued);
-                app.queue_turn(queued.clone());
+                if is_host_slash_command {
+                    push_system_message(
+                        app,
+                        "Slash commands cannot be queued as model turns. Wait for the current turn to finish or use an out-of-band command.",
+                    );
+                    app.restore_prepared_turn(queued);
+                    return Ok(false);
+                }
+                enqueue_prepared_turn_for_cli(
+                    queued,
+                    app,
+                    ui_trace,
+                    runtime,
+                    lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+                    lash_core::SlotPolicy::Exclusive,
+                )
+                .await;
                 return Ok(false);
             }
             if runtime.is_none() {
-                tracing::debug!(
-                    queued = queued.display_text,
-                    app_running = app.running,
-                    runtime_return_rx_present = runtime_return_rx.is_some(),
-                    "queueing turn because runtime handoff is still in progress"
+                push_system_message(
+                    app,
+                    "Cannot queue this input while the session is switching.".to_string(),
                 );
-                record_queue_turn(ui_trace, &queued);
-                app.queue_turn(queued);
+                app.restore_prepared_turn(queued);
                 return Ok(false);
             }
 
-            let turn_input = make_turn_input(&queued);
-            let current_tool_state = desired_tool_state.clone();
-            send_user_message(
-                queued.clone(),
-                turn_input.clone(),
+            enqueue_prepared_turn_for_cli(
+                queued,
                 app,
-                ui_trace.as_mut(),
-                logger,
+                ui_trace,
                 runtime,
-                history,
-                runtime_return_rx,
-                cancel_token,
-                active_stream_id,
-                app_tx,
-                &current_tool_state,
+                lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+                lash_core::SlotPolicy::Exclusive,
             )
             .await;
-            *last_turn = Some(TurnReplayPayload {
-                prepared_turn: queued,
-                turn_input,
-                execution_mode: current_execution_mode.clone(),
-            });
         }
         // Up/Down: navigate suggestions when popup is visible
         KeyCode::Up if app.has_suggestions() => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_suggestion_up();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::SuggestionUp);
+            app.editor.suggestion_up();
         }
         KeyCode::Down if app.has_suggestions() => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_suggestion_down();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::SuggestionDown);
+            app.editor.suggestion_down();
         }
         // Enter with the suggestion popup open accepts the highlighted entry,
         // matching Tab. Shift/Alt+Enter still falls through to insert a newline.
@@ -1073,10 +1151,10 @@ pub(super) async fn handle_key_event(
                         }
                         return Ok(false);
                     }
-                    let queued =
-                        PreparedTurn::prepare(command_text.clone(), Vec::new(), &app.skills);
-                    record_queue_turn(ui_trace, &queued);
-                    app.queue_turn(queued);
+                    push_system_message(
+                        app,
+                        "Slash commands cannot be queued as model turns. Wait for the current turn to finish or use an out-of-band command.",
+                    );
                     return Ok(false);
                 }
                 if handle_parsed_slash_command(
@@ -1115,7 +1193,8 @@ pub(super) async fn handle_key_event(
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_suggestion_complete();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::SuggestionComplete);
+            app.complete_suggestion();
+            app.update_suggestions();
         }
         KeyCode::Enter => {
             // Shift+Enter or Alt+Enter → insert newline
@@ -1185,8 +1264,11 @@ pub(super) async fn handle_key_event(
                     return Ok(false);
                 }
                 if is_host_slash_command {
-                    record_queue_turn(ui_trace, &queued);
-                    app.queue_turn(queued.clone());
+                    push_system_message(
+                        app,
+                        "Slash commands cannot be queued as model turns. Wait for the current turn to finish or use an out-of-band command.",
+                    );
+                    app.restore_prepared_turn(queued);
                     return Ok(false);
                 }
                 if shell_escape_command(&queued.display_text).is_some() {
@@ -1198,7 +1280,7 @@ pub(super) async fn handle_key_event(
                     return Ok(false);
                 }
                 let injection = lash_core::InjectedTurnInput {
-                    id: None,
+                    id: Some(queued.draft_id.clone()),
                     message: make_injected_plugin_message(&queued),
                 };
                 let Some(session) = runtime.as_ref() else {
@@ -1230,14 +1312,11 @@ pub(super) async fn handle_key_event(
                 return Ok(false);
             }
             if runtime.is_none() {
-                tracing::debug!(
-                    queued = queued.display_text,
-                    app_running = app.running,
-                    runtime_return_rx_present = runtime_return_rx.is_some(),
-                    "queueing turn because runtime handoff is still in progress"
+                push_system_message(
+                    app,
+                    "Cannot send this input while the session is switching.".to_string(),
                 );
-                record_queue_turn(ui_trace, &queued);
-                app.queue_turn(queued);
+                app.restore_prepared_turn(queued);
                 return Ok(false);
             }
 
@@ -1342,7 +1421,8 @@ pub(super) async fn handle_key_event(
                 return Ok(true);
             }
 
-            // Regular user message — send to the active session
+            // Regular user message: enqueue durably, then the idle dispatcher
+            // claims it at the next loop boundary.
             if let Err(e) =
                 apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
             {
@@ -1359,94 +1439,84 @@ pub(super) async fn handle_key_event(
                 &serde_json::to_vec(&desired_tool_state.tool_manifests())
                     .unwrap_or_else(|_| b"[]".to_vec()),
             );
-            let turn_input = make_turn_input(&queued);
-            let current_tool_state = desired_tool_state.clone();
-            send_user_message(
-                queued.clone(),
-                turn_input.clone(),
+            enqueue_prepared_turn_for_cli(
+                queued,
                 app,
-                ui_trace.as_mut(),
-                logger,
+                ui_trace,
                 runtime,
-                history,
-                runtime_return_rx,
-                cancel_token,
-                active_stream_id,
-                app_tx,
-                &current_tool_state,
+                lash_core::DeliveryPolicy::EarliestSafeBoundary,
+                lash_core::SlotPolicy::Join,
             )
             .await;
-            *last_turn = Some(TurnReplayPayload {
-                prepared_turn: queued,
-                turn_input,
-                execution_mode: current_execution_mode.clone(),
-            });
         }
         KeyCode::Backspace => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_input_backspace();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::InputBackspace);
+            app.editor.backspace();
+            app.update_suggestions();
         }
         KeyCode::Delete => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_input_delete();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::InputDelete);
+            app.editor.delete();
+            app.update_suggestions();
         }
         KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_move_cursor_left();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::MoveCursorWordLeft);
+            app.editor.move_cursor_word_left();
         }
         KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_move_cursor_right();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::MoveCursorWordRight);
+            app.editor.move_cursor_word_right();
         }
         KeyCode::Left => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_move_cursor_left();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::MoveCursorLeft);
+            app.editor.move_cursor_left();
         }
         KeyCode::Right => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_move_cursor_right();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::MoveCursorRight);
+            app.editor.move_cursor_right();
         }
         KeyCode::Home => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_move_cursor_home();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::MoveCursorHome);
+            app.editor.move_cursor_home();
         }
         KeyCode::End => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_move_cursor_end();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::MoveCursorEnd);
+            app.editor.move_cursor_end();
         }
         KeyCode::Up => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_history_up();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::HistoryUp);
+            app.history_up();
         }
         KeyCode::Down => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_history_down();
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::HistoryDown);
+            app.editor.history_down();
         }
         KeyCode::Char(c) => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_input_insert_text(c.to_string());
             }
-            let _ = apply_terminal_action(app, terminal, UiAction::InputInsertText(c.to_string()));
+            app.editor.insert_text(&c.to_string());
+            app.update_suggestions();
         }
         _ => {}
     }

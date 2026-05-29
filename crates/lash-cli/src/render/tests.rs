@@ -760,7 +760,7 @@ fn shell_activity_renders_live_output_inline_under_tool() {
     .into();
     let now = std::time::Instant::now();
     app.running = true;
-    app.live_turn = Some(crate::app::LiveTurnState {
+    app.live.turn = Some(crate::app::LiveTurnState {
         status_text: "shell".into(),
         status_detail: None,
         phase_started_at: now,
@@ -769,7 +769,7 @@ fn shell_activity_renders_live_output_inline_under_tool() {
         output_start_anchor_pending: false,
         transient_until: None,
     });
-    app.live_tool_output.lines = vec!["Compiling lash-cli".into(), "warning: unused import".into()];
+    app.live.tool_output.lines = vec!["Compiling lash-cli".into(), "warning: unused import".into()];
 
     let rendered = app
         .rendered_block_lines_cached(0, 64, 20)
@@ -813,8 +813,8 @@ fn live_tool_output_without_running_activity_renders_as_tail_block() {
         0,
     )))]
     .into();
-    app.live_tool_output.title = Some("cargo check -p lash-cli".into());
-    app.live_tool_output.lines = vec!["Checking lash v0.2.91".into()];
+    app.live.tool_output.title = Some("cargo check -p lash-cli".into());
+    app.live.tool_output.lines = vec!["Checking lash v0.2.91".into()];
 
     let completed_block = app
         .rendered_block_lines_cached(0, 64, 20)
@@ -1086,7 +1086,7 @@ fn snippet_preview_wraps_long_markdown_bullets_to_viewport_width() {
 #[test]
 fn lashlang_code_block_is_hidden_below_full_expand() {
     let blocks = vec![UiTimelineItem::LashlangCode(
-        "r = await TOOL.default.read_file({ path: \"a\" })\nsubmit r.value".to_string(),
+        "r = await tools.read_file({ path: \"a\" })\nsubmit r.value".to_string(),
     )];
     for level in [0u8, 1] {
         let rendered = render_block(&blocks, 0, level, 80, 24);
@@ -1401,7 +1401,7 @@ fn live_reasoning_compacts_after_turn_stops() {
 
 #[test]
 fn lashlang_code_block_renders_header_and_body_at_full_expand() {
-    let code = "r = await TOOL.default.read_file({ path: \"a\" })\nsubmit r.value";
+    let code = "r = await tools.read_file({ path: \"a\" })\nsubmit r.value";
     let blocks = vec![UiTimelineItem::LashlangCode(code.to_string())];
     let rendered = render_block(&blocks, 0, 2, 80, 24);
     let text: Vec<String> = rendered
@@ -1420,7 +1420,7 @@ fn lashlang_code_block_renders_header_and_body_at_full_expand() {
     );
     assert!(
         text.iter()
-            .any(|line| line.starts_with("╎ r = await TOOL.default.read_file")),
+            .any(|line| line.starts_with("╎ r = await tools.read_file")),
         "missing first code line in {text:?}",
     );
     assert!(

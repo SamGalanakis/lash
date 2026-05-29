@@ -19,6 +19,7 @@ semantic-tool-search = ["dep:model2vec-rs"]
 
 [dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12" }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.12" }
 async-trait = { workspace = true }
 model2vec-rs = { version = "0.1.4", optional = true }
 serde_json = { workspace = true }

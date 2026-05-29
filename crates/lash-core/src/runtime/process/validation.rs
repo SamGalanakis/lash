@@ -3,10 +3,132 @@ use std::collections::HashSet;
 use crate::plugin::PluginError;
 
 use super::events::{
-    ProcessEventAppendRequest, ProcessEventSemanticsSpec, ProcessTerminalState,
-    default_process_event_types,
+    ProcessEvent, ProcessEventAppendRequest, ProcessEventSemanticsSpec, ProcessTerminalSemantics,
+    ProcessTerminalState, ProcessWakeDelivery, default_process_event_types,
 };
-use super::model::ProcessRegistration;
+use super::materialization::materialize_process_event_semantics;
+use super::model::{ProcessRecord, ProcessRegistration};
+use super::time::system_time_from_epoch_ms;
+use super::wake::process_wake_delivery;
+
+#[derive(Clone, Debug)]
+pub struct PreparedProcessEventAppend {
+    pub event: ProcessEvent,
+    pub payload_hash: String,
+    pub terminal_update: Option<ProcessTerminalSemantics>,
+    pub wake_delivery: Option<ProcessWakeDelivery>,
+    pub occurred_at_ms: u64,
+    pub replayed: bool,
+}
+
+pub fn prepare_process_event_append(
+    record: &ProcessRecord,
+    request: ProcessEventAppendRequest,
+    sequence: u64,
+    replay_lookup: Option<(String, ProcessEvent)>,
+    occurred_at_ms: u64,
+) -> Result<PreparedProcessEventAppend, PluginError> {
+    let process_id = record.id.as_str();
+    let payload_hash = process_event_payload_hash(&request.event_type, &request.payload)?;
+    if let Some(replay_key) = request.replay.as_ref().map(|replay| replay.key.as_str())
+        && let Some((existing_hash, existing)) = replay_lookup
+    {
+        if existing_hash == payload_hash {
+            let wake_delivery = existing
+                .semantics
+                .wake
+                .clone()
+                .zip(request.wake_target_scope.clone())
+                .map(|(wake, target_scope)| {
+                    process_wake_delivery(
+                        target_scope,
+                        process_id.to_string(),
+                        existing.sequence,
+                        wake,
+                        existing.occurred_at,
+                    )
+                })
+                .transpose()?;
+            return Ok(PreparedProcessEventAppend {
+                event: existing,
+                payload_hash,
+                terminal_update: None,
+                wake_delivery,
+                occurred_at_ms,
+                replayed: true,
+            });
+        }
+        return Err(PluginError::Session(format!(
+            "process `{process_id}` event replay key `{replay_key}` conflicts with an existing event"
+        )));
+    }
+    let declared = record
+        .event_types
+        .iter()
+        .find(|declared| declared.name == request.event_type)
+        .ok_or_else(|| {
+            PluginError::Session(format!(
+                "process `{process_id}` emitted undeclared event type `{}`",
+                request.event_type
+            ))
+        })?;
+    require_event_replay(process_id, &request, &declared.semantics)?;
+    declared
+        .payload_schema
+        .validate(&request.payload)
+        .map_err(|err| {
+            PluginError::Session(format!("invalid `{}` payload: {err}", request.event_type))
+        })?;
+    let semantics = materialize_process_event_semantics(
+        process_id,
+        sequence,
+        &request.payload,
+        &declared.semantics,
+    )?;
+    if semantics.terminal.is_some() && record.terminal.is_some() {
+        return Err(PluginError::Session(format!(
+            "process `{process_id}` is already terminal"
+        )));
+    }
+    let occurred_at = system_time_from_epoch_ms(occurred_at_ms);
+    let wake_delivery = semantics
+        .wake
+        .clone()
+        .zip(request.wake_target_scope.clone())
+        .map(|(wake, target_scope)| {
+            process_wake_delivery(
+                target_scope,
+                process_id.to_string(),
+                sequence,
+                wake,
+                occurred_at,
+            )
+        })
+        .transpose()?;
+    let event = ProcessEvent {
+        process_id: process_id.to_string(),
+        sequence,
+        event_type: request.event_type,
+        payload: request.payload,
+        invocation: crate::runtime::causal::process_event_invocation(
+            &record.provenance.owner_scope.session_id,
+            process_id,
+            sequence,
+            declared.name.as_str(),
+            request.replay,
+        ),
+        semantics: semantics.clone(),
+        occurred_at,
+    };
+    Ok(PreparedProcessEventAppend {
+        event,
+        payload_hash,
+        terminal_update: semantics.terminal,
+        wake_delivery,
+        occurred_at_ms,
+        replayed: false,
+    })
+}
 
 pub fn prepare_process_registration(
     mut registration: ProcessRegistration,
@@ -39,16 +161,21 @@ pub fn process_event_payload_hash(
     })
 }
 
-pub fn require_event_idempotency(
+pub fn require_event_replay(
     process_id: &str,
     request: &ProcessEventAppendRequest,
     spec: &ProcessEventSemanticsSpec,
 ) -> Result<(), PluginError> {
     let requires_key =
         spec.terminal.is_some() || request.event_type.as_str() == "process.cancel_requested";
-    if requires_key && request.idempotency_key.as_deref().is_none_or(str::is_empty) {
+    if requires_key
+        && request
+            .replay
+            .as_ref()
+            .is_none_or(|replay| replay.key.is_empty())
+    {
         return Err(PluginError::Session(format!(
-            "process `{process_id}` event `{}` requires a deterministic idempotency key",
+            "process `{process_id}` event `{}` requires a deterministic replay key",
             request.event_type
         )));
     }
@@ -76,13 +203,17 @@ pub(super) fn validate_process_registration(
             "process id must be a non-empty string".to_string(),
         ));
     }
-    if let Some(scope) = &registration.created_by_scope {
-        if scope.is_empty() {
-            return Err(PluginError::Session(format!(
-                "process `{}` creator scope must include a session id",
-                registration.id
-            )));
-        }
+    if registration.provenance.owner_scope.is_empty() {
+        return Err(PluginError::Session(format!(
+            "process `{}` owner scope must include a session id",
+            registration.id
+        )));
+    }
+    if registration.provenance.host_profile_id.trim().is_empty() {
+        return Err(PluginError::Session(format!(
+            "process `{}` host profile id must be non-empty",
+            registration.id
+        )));
     }
     let mut names = HashSet::new();
     for event_type in &registration.event_types {

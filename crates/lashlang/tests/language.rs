@@ -126,7 +126,10 @@ async fn execute<H: ExecutionHost>(
     host: &H,
 ) -> Result<ExecutionOutcome, ExecuteError> {
     let program = parse(source)?;
-    let compiled = if program_contains_start_process(&program.main) {
+    let compiled = if let Ok(linked) = lashlang::LinkedModule::link(program.clone(), test_surface())
+    {
+        lashlang::compile_linked(&linked)
+    } else if program_contains_start_process(&program.main) {
         let linked = lashlang::LinkedModule::link(program, test_surface()).map_err(|err| {
             ExecuteError::Runtime(RuntimeError::ValueError {
                 message: err.to_string(),
@@ -142,10 +145,13 @@ async fn execute<H: ExecutionHost>(
 }
 
 fn test_surface() -> lashlang::LashlangSurface {
-    lashlang::LashlangSurface::new(
-        lashlang::ResourceCatalog::tool_default(["read_file", "glob", "spawn_agent"]),
-        lashlang::LashlangAbilities::all(),
-    )
+    let mut resources = lashlang::ResourceCatalog::new();
+    resources.add_module_instance(["files"], "Files");
+    resources.add_operation("Files", "read", "read_file");
+    resources.add_operation("Files", "glob", "glob");
+    resources.add_module_instance(["agents"], "Agents");
+    resources.add_operation("Agents", "spawn", "spawn_agent");
+    lashlang::LashlangSurface::new(resources, lashlang::LashlangAbilities::all())
 }
 
 fn program_contains_start_process(expr: &lashlang::Expr) -> bool {
@@ -1083,7 +1089,7 @@ async fn string_concatenation_stringifies_non_string_side() {
     let value = finished(
         execute(
             r#"
-        found = await TOOL.default.read_file({ path: "src/lib.rs" })
+        found = await files.read({ path: "src/lib.rs" })
         submit "status=" + found.ok + " value=" + found.value
         "#,
             &mut state,
@@ -1235,8 +1241,8 @@ async fn ternary_fixes_tool_result_formatting_pattern() {
     let value = finished(
         execute(
             r#"
-        found = await TOOL.default.read_file({ path: "src/lib.rs" })
-        missing = await TOOL.default.read_file({ path: "src/missing.rs" })
+        found = await files.read({ path: "src/lib.rs" })
+        missing = await files.read({ path: "src/missing.rs" })
         summary = format(
           "found={} missing={}",
           found.ok ? "ok" : format("failed: {}", found.error),
@@ -1389,8 +1395,8 @@ async fn tool_calls_return_result_records() {
     let value = finished(
         execute(
             r#"
-        found = await TOOL.default.read_file({ path: "src/lib.rs" })
-        missing = await TOOL.default.read_file({ path: "src/missing.rs" })
+        found = await files.read({ path: "src/lib.rs" })
+        missing = await files.read({ path: "src/missing.rs" })
         submit { found: found, missing: missing }
         "#,
             &mut state,
@@ -2242,18 +2248,17 @@ async fn type_is_usable_as_a_tool_call_argument() {
         }
     }
     let host = CaptureHost::default();
-    let program = parse(
+    execute(
         r#"
         Shape = Type { name: str, labels: list[enum["a","b"]] }
-        await TOOL.default.spawn_agent({ task: "find X", output: Shape })
+        await agents.spawn({ task: "find X", output: Shape })
         submit null
         "#,
+        &mut State::new(),
+        &host,
     )
-    .expect("should parse");
-    let mut state = State::new();
-    lashlang::execute(&program, &mut state, &host)
-        .await
-        .expect("should run");
+    .await
+    .expect("should run");
     let captured = host.captured.lock().unwrap().clone().expect("captured arg");
     let inner = lashlang::unwrap_type_value(&captured).expect("wrapped type");
     let schema = inner.as_record().expect("schema record");

@@ -42,7 +42,7 @@ fresh durable turn.
 
 The adapter journals Lash LLM calls, tool calls, direct completions,
 checkpoints, execution-surface syncs, and exec effects with Restate
-`ctx.run(...).name(envelope.metadata.idempotency_key)`, then runs the normal
+`ctx.run(...).name(envelope.invocation.replay.key)`, then runs the normal
 Lash local executor inside that journaled block. Runtime sleeps use Restate
 durable timers. Lash also saves the in-flight `RuntimeTurnCheckpoint` and
 runtime effect journal in its configured `RuntimePersistence` under a
@@ -85,5 +85,6 @@ The controller submits workflow `run` with workflow key
 `cancel` handler. The workflow runner should be built from the host's
 deployment config: plugin factories, runtime core config, session-store
 factory, process registry, attachment store, provider policy, and host profile.
-Process rows carry the process input plus structured creator scope and host
-profile only; workers do not parse grant keys to recover the creator session.
+Process rows carry the process input plus `ProcessProvenance`: owner scope,
+host profile id, and optional causal parent. Workers do not parse grant keys to
+recover the owner session.

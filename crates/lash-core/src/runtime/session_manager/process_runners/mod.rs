@@ -10,8 +10,9 @@ mod tool;
 mod tests {
     use super::*;
     use crate::runtime::tests::helpers::{
-        MockCall, mock_provider, runtime_with_plugins, runtime_with_plugins_and_tools,
-        standard_test_policy,
+        MockCall, RecordingStore, mock_provider, runtime_with_plugins,
+        runtime_with_plugins_and_tools, runtime_with_plugins_and_tools_and_host_and_store,
+        standard_test_policy, test_host_config,
     };
     use ::lashlang::LashlangArtifactStore;
     use std::sync::Arc;
@@ -24,6 +25,24 @@ mod tests {
             runtime_with_plugins_and_tools(plugins, tools, mock_provider(Vec::new())).await;
         runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
         runtime
+    }
+
+    async fn runtime_with_processes_and_tools_and_store(
+        plugins: Vec<Arc<dyn crate::PluginFactory>>,
+        tools: Arc<dyn crate::ToolProvider>,
+    ) -> (crate::LashRuntime, Arc<RecordingStore>) {
+        let store = Arc::new(RecordingStore::default());
+        let runtime_store: Arc<dyn crate::RuntimePersistence> = store.clone();
+        let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+            plugins,
+            tools,
+            mock_provider(Vec::new()),
+            test_host_config(),
+            runtime_store,
+        )
+        .await;
+        runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+        (runtime, store)
     }
 
     async fn runtime_with_processes(
@@ -82,8 +101,8 @@ mod tests {
             }
         };
         let mut resources = ::lashlang::ResourceCatalog::new();
-        resources.add_alias("TOOL", "default");
-        resources.add_operation("TOOL", "process_echo", "process_echo");
+        resources.add_module_instance(["tools"], "Tools");
+        resources.add_operation("Tools", "process_echo", "process_echo");
         let linked_module = ::lashlang::LinkedModule::link(
             module,
             ::lashlang::LashlangSurface::new(
@@ -179,7 +198,10 @@ mod tests {
     }
 
     fn worker_registration(registration: crate::ProcessRegistration) -> crate::ProcessRegistration {
-        registration.with_provenance(crate::ProcessScope::new("root"), "worker-profile")
+        registration.with_process_provenance(crate::ProcessProvenance::new(
+            crate::ProcessScope::new("root"),
+            "worker-profile",
+        ))
     }
 
     fn process_worker(
@@ -302,7 +324,8 @@ mod tests {
                 ),
             },
         );
-        registration.host_profile_id = "worker-profile".to_string();
+        registration.provenance =
+            crate::ProcessProvenance::new(crate::ProcessScope::new(""), "worker-profile");
 
         let err = worker
             .run_process(
@@ -314,19 +337,18 @@ mod tests {
             .expect_err("worker should require creator session provenance");
 
         assert!(
-            err.to_string()
-                .contains("missing a structured creator scope"),
+            err.to_string().contains("missing a structured owner scope"),
             "{err}"
         );
     }
 
     #[derive(Clone, Default)]
     struct RecordingProcessEffectController {
-        records: Arc<std::sync::Mutex<Vec<crate::EffectInvocationMetadata>>>,
+        records: Arc<std::sync::Mutex<Vec<crate::RuntimeInvocation>>>,
     }
 
     impl RecordingProcessEffectController {
-        fn records(&self) -> Vec<crate::EffectInvocationMetadata> {
+        fn records(&self) -> Vec<crate::RuntimeInvocation> {
             self.records.lock().expect("process effect records").clone()
         }
     }
@@ -341,7 +363,7 @@ mod tests {
             self.records
                 .lock()
                 .expect("process effect records")
-                .push(envelope.metadata.clone());
+                .push(envelope.invocation.clone());
             crate::InlineRuntimeEffectController::default()
                 .execute_effect(envelope, local_executor)
                 .await
@@ -487,7 +509,8 @@ mod tests {
 
     #[tokio::test]
     async fn lashlang_process_runs_with_input_events_wake_and_receiver_operation() {
-        let runtime = runtime_with_processes_and_tools(Vec::new(), Arc::new(ProcessEchoTool)).await;
+        let (runtime, store) =
+            runtime_with_processes_and_tools_and_store(Vec::new(), Arc::new(ProcessEchoTool)).await;
         let manager = RuntimeSessionManager::new(&runtime, true, None, None)
             .expect("runtime session manager");
         let wake_target = manager
@@ -509,13 +532,13 @@ mod tests {
         input.insert(
             "tool".to_string(),
             serde_json::to_value(::lashlang::Value::Resource(
-                ::lashlang::ResourceHandle::new("TOOL", "default"),
+                ::lashlang::ResourceHandle::new("Tools", "tools"),
             ))
             .expect("resource handle json"),
         );
         let program = ::lashlang::parse(
             r#"
-            process main(root: str, tool: TOOL) {
+            process main(root: str, tool: Tools) {
               yield root
               called = await tool.process_echo({ value: root })?
               wake called.payload
@@ -573,18 +596,36 @@ mod tests {
         );
         assert!(events.iter().any(|event| event.event_type == "process.wake"
             && event.payload["text"] == serde_json::json!("raw:seed")));
-        let wakes = registry
-            .drain_wake_inputs(
-                &manager
-                    .processes
-                    .process_scope(&wake_target.session_id)
-                    .id(),
-                10,
-            )
-            .await
-            .expect("durable wakes");
-        assert_eq!(wakes.len(), 1);
-        assert_eq!(wakes[0].input, "raw:seed");
+        let wake_sequence = events
+            .iter()
+            .find(|event| event.event_type == "process.wake")
+            .expect("wake event")
+            .sequence;
+        let completed_sequence = events
+            .iter()
+            .find(|event| event.event_type == "process.completed")
+            .expect("completed event")
+            .sequence;
+        assert!(
+            wake_sequence < completed_sequence,
+            "process.wake should be committed before process completion"
+        );
+        let queued = crate::store::RuntimePersistence::list_queued_work(
+            store.as_ref(),
+            &wake_target.session_id,
+        )
+        .await
+        .expect("queued wake");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(
+            queued[0].delivery_policy,
+            crate::DeliveryPolicy::EarliestSafeBoundary
+        );
+        assert_eq!(queued[0].items.len(), 1);
+        let crate::QueuedWorkPayload::ProcessWake { wake } = &queued[0].items[0].payload else {
+            panic!("expected process wake queue payload");
+        };
+        assert_eq!(wake.input, "raw:seed");
     }
 
     #[tokio::test]
@@ -786,10 +827,15 @@ mod tests {
         let sleep_records = controller
             .records()
             .into_iter()
-            .filter(|record| record.effect_kind == crate::RuntimeEffectKind::Sleep)
+            .filter(|record| record.effect_kind() == Some(crate::RuntimeEffectKind::Sleep))
             .collect::<Vec<_>>();
         assert_eq!(sleep_records.len(), 1);
-        assert!(sleep_records[0].idempotency_key.contains("signal-sender"));
+        assert!(
+            sleep_records[0]
+                .replay_key()
+                .expect("replay key")
+                .contains("signal-sender")
+        );
     }
 
     #[tokio::test]
@@ -866,7 +912,8 @@ mod tests {
         )
         .expect_err("bare operation-name fallback should be rejected by linker");
         assert!(
-            err.to_string().contains("unknown builtin `process_echo`"),
+            err.to_string()
+                .contains("tools must be called through module paths, e.g. `tools.process_echo`"),
             "{err}"
         );
     }
@@ -900,8 +947,8 @@ mod tests {
             .as_ref()
             .expect("process registry")
             .clone();
-        let current_scope = manager.processes.process_scope("root");
-        let other_scope = manager.processes.process_scope("other");
+        let current_scope = crate::ProcessScope::new("root");
+        let other_scope = crate::ProcessScope::new("other");
         let process_ids = ["keep", "sole", "shared"];
 
         for process_id in process_ids {
@@ -979,24 +1026,20 @@ mod tests {
             .expect("process registry")
             .clone();
         let controller = RecordingProcessEffectController::default();
-        let metadata = crate::EffectInvocationMetadata {
-            session_id: "root".to_string(),
-            origin: crate::EffectOrigin::Turn,
-            turn_id: Some("turn-process-scope".to_string()),
-            turn_index: Some(1),
-            protocol_iteration: Some(0),
-            effect_id: "parent-process-control".to_string(),
-            effect_kind: crate::RuntimeEffectKind::Process,
-            idempotency_key: "root:turn-process-scope:process-control".to_string(),
-            turn_checkpoint_hash: Some("0".repeat(64)),
-        };
+        let metadata = crate::RuntimeInvocation::effect(
+            crate::RuntimeScope::for_turn("root", "turn-process-scope", 1, 0),
+            "parent-process-control",
+            crate::RuntimeEffectKind::Process,
+            "root:turn-process-scope:process-control",
+            Some("0".repeat(64)),
+        );
         let scoped_request = || {
             crate::ProcessOpScope::new()
-                .with_effect_metadata(Some(metadata.clone()))
+                .with_parent_invocation(Some(metadata.clone()))
                 .with_effect_controller(&controller)
         };
-        let root_scope = manager.processes.process_scope("root");
-        let successor_scope = manager.processes.process_scope("successor");
+        let root_scope = crate::ProcessScope::new("root");
+        let target_scope = crate::ProcessScope::new("target");
 
         register_open_process(&registry, "transfer-me").await;
         grant_handle(&registry, &root_scope, "transfer-me").await;
@@ -1006,7 +1049,7 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 "root",
-                "successor",
+                "target",
                 vec!["transfer-me".to_string()],
                 scoped_request(),
             )
@@ -1014,9 +1057,9 @@ mod tests {
             .expect("transfer handles");
         assert!(
             registry
-                .list_handle_grants(&successor_scope)
+                .list_handle_grants(&target_scope)
                 .await
-                .expect("successor grants")
+                .expect("target grants")
                 .into_iter()
                 .any(|(grant, _)| { grant.process_id == "transfer-me" })
         );
@@ -1039,10 +1082,11 @@ mod tests {
         let records = controller.records();
         assert_eq!(records.len(), 2);
         assert!(records.iter().all(|record| {
-            record.effect_kind == crate::RuntimeEffectKind::Process
-                && record.turn_id.as_deref() == Some("turn-process-scope")
+            record.effect_kind() == Some(crate::RuntimeEffectKind::Process)
+                && record.scope.turn_id.as_deref() == Some("turn-process-scope")
                 && record
-                    .idempotency_key
+                    .replay_key()
+                    .expect("replay key")
                     .starts_with("root:turn-process-scope:process-control:process:")
         }));
     }
@@ -1060,7 +1104,7 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 "root",
-                "successor",
+                "target",
                 Vec::<String>::new(),
                 crate::ProcessOpScope::new(),
             )
@@ -1074,6 +1118,7 @@ mod tests {
                 &manager.managed,
                 "root",
                 &["missing".to_string()],
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect_err("validation should fail");
@@ -1089,7 +1134,7 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 "root",
-                "successor",
+                "target",
                 vec!["missing".to_string()],
                 crate::ProcessOpScope::new(),
             )

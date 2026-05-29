@@ -101,24 +101,26 @@ impl PluginSession {
         &self,
         source: &str,
         surface: lashlang::LashlangSurface,
+        artifact_store: &dyn lashlang::LashlangArtifactStore,
     ) -> Result<crate::SessionTriggerInstallReport, PluginError> {
         self.trigger_registry
-            .install_lashlang_source(source, surface)
+            .install_lashlang_source(source, surface, artifact_store)
     }
 
     pub fn install_linked_lashlang_trigger_source(
         &self,
         source: &str,
         linked: &lashlang::LinkedModule,
+        artifact_store: &dyn lashlang::LashlangArtifactStore,
     ) -> Result<crate::SessionTriggerInstallReport, PluginError> {
         self.trigger_registry
-            .install_linked_lashlang_source(source, linked)
+            .install_linked_lashlang_source(source, linked, artifact_store)
     }
 
-    pub(crate) fn installed_lashlang_triggers(
+    pub(crate) fn installed_lashlang_trigger_routes(
         &self,
-    ) -> Result<Vec<InstalledSessionTrigger>, PluginError> {
-        self.trigger_registry.installed_triggers()
+    ) -> Result<Vec<SessionTriggerRoute>, PluginError> {
+        self.trigger_registry.installed_routes()
     }
 
     pub fn host(&self) -> &PluginHost {

@@ -1,7 +1,85 @@
 use lash_core::ToolResult;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+mod static_provider;
+pub use static_provider::{StaticToolExecute, StaticToolProvider};
+
+/// Resolve a possibly-relative `path` against `base`, returning a lexically
+/// normalized [`PathBuf`].
+///
+/// Behavior:
+/// - Absolute `path` passes through unchanged (only normalized).
+/// - Relative `path` is joined onto `base`.
+/// - `.` and `..` components are collapsed *lexically* — purely by string
+///   manipulation, without touching the filesystem and without requiring the
+///   path (or its parents) to exist.
+///
+/// Lexical (rather than `std::fs::canonicalize`) resolution is the deliberate
+/// choice for tool path handling: write/patch tools must resolve targets that
+/// do not yet exist on disk, and canonicalization both fails for missing paths
+/// and silently rewrites symlinks. Tools that genuinely need symlink-real-path
+/// resolution for an existence/scope check should use [`canonicalize_under`]
+/// instead and accept that it requires the path to exist.
+pub fn resolve_under(base: &Path, path: &Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    normalize_lexical(&joined)
+}
+
+/// Lexically collapse `.` and `..` components in `path` without touching the
+/// filesystem. Leading `..` components (that would escape the root) are
+/// preserved verbatim, matching `Path::join` intuitions for relative roots.
+pub fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+/// Resolve `path` against `base` (via [`resolve_under`]) and then canonicalize
+/// it on disk, resolving symlinks to their real path. Fails if the path does
+/// not exist. Use this only when a tool needs a real, existence-checked path
+/// (e.g. a security/scope decision or distinguishing a file from a directory);
+/// prefer [`resolve_under`] for write/patch targets that may not exist yet.
+pub fn canonicalize_under(base: &Path, path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(resolve_under(base, path))
+}
+
+/// Render `path` relative to `base` for display, falling back to the file name
+/// (then the full path) when `path` is not under `base`. Backslashes are
+/// normalized to forward slashes so output is stable across platforms.
+pub fn display_relative(base: &Path, path: &Path) -> String {
+    let display = path
+        .strip_prefix(base)
+        .unwrap_or(path)
+        .display()
+        .to_string();
+    let display = if display.is_empty() {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(".")
+            .to_string()
+    } else {
+        display
+    };
+    display.replace('\\', "/")
+}
 
 /// Shared preamble describing default filesystem-listing behavior.
 /// Used by `ls` and `glob` so both tools document hidden-file and
@@ -119,15 +197,12 @@ pub fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_
     })
 }
 
-pub fn discovery_metadata(namespace: &str, aliases: &[&str]) -> lash_core::ToolDiscoveryMetadata {
-    lash_core::ToolDiscoveryMetadata {
-        namespace: if namespace.is_empty() {
-            None
-        } else {
-            Some(namespace.to_string())
-        },
-        aliases: aliases.iter().map(|value| value.to_string()).collect(),
-    }
+pub fn agent_surface(
+    module_path: impl IntoIterator<Item = impl Into<String>>,
+    operation: impl Into<String>,
+    aliases: &[&str],
+) -> lash_core::ToolAgentSurface {
+    lash_core::ToolAgentSurface::new(module_path, operation).with_aliases(aliases.iter().copied())
 }
 
 /// Run blocking filesystem work off the async runtime.

@@ -35,7 +35,13 @@ fn prompt_surface(
 }
 
 fn tool_resources() -> lashlang::ResourceCatalog {
-    lashlang::ResourceCatalog::tool_default(["tool_name", "tool_a", "tool_b"])
+    let mut resources = lashlang::ResourceCatalog::new();
+    resources.add_module_instance(["web"], "Web");
+    resources.add_operation("Web", "search", "search_web");
+    resources.add_operation("Web", "fetch", "fetch_url");
+    resources.add_module_instance(["files"], "Files");
+    resources.add_operation("Files", "read", "read_file");
+    resources
 }
 
 fn full_prompt_surface() -> lashlang::LashlangSurface {
@@ -93,15 +99,15 @@ fn execution_section_hides_trigger_language_without_processes() {
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 
     assert!(!section.contains("trigger name"));
-    assert!(!section.contains("resource-event declarations"));
+    assert!(!section.contains("module-event declarations"));
 }
 
 #[test]
 fn execution_section_lists_exposed_host_event_resources_with_formatted_payloads() {
     let mut resources = lashlang::ResourceCatalog::new();
-    resources.add_alias("TRIGGER", "button");
+    resources.add_module_instance(["ui", "button"], "Button");
     resources.add_trigger_event(
-        "TRIGGER",
+        "Button",
         "pressed",
         lashlang::TypeExpr::Object(vec![
             lashlang::TypeField {
@@ -126,23 +132,23 @@ fn execution_section_lists_exposed_host_event_resources_with_formatted_payloads(
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 
     assert!(section.contains("### Host Events"));
-    assert!(section.contains("`TRIGGER.button.pressed`"));
+    assert!(section.contains("`ui.button.pressed`"));
     assert!(section.contains(r#"{ button: enum["Red", "Blue"], pressed_at: str }"#));
     assert!(section.contains("host events are not tools"));
 }
 
 #[test]
-fn execution_section_hides_receiver_examples_without_resource_operations() {
+fn execution_section_hides_module_examples_without_module_operations() {
     let surface = prompt_surface(
         lashlang::ResourceCatalog::new(),
         lashlang::LashlangAbilities::default(),
     );
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 
-    assert!(!section.contains("TOOL.default"));
+    assert!(!section.contains("await tools."));
     assert!(!section.contains("Showcased Tools"));
-    assert!(!section.contains("Resource operations"));
-    assert!(section.contains("No receiver operations are available"));
+    assert!(!section.contains("Module operations"));
+    assert!(section.contains("No module operations are available"));
 }
 
 #[test]

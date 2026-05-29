@@ -4,12 +4,14 @@ use std::{
 };
 
 use lash_core::llm::types::{
-    LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage,
+    LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmStreamEvent,
+    LlmUsage,
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolManifest,
-    ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
+    ProviderComponents, ProviderFactory, ToolAgentSurface, ToolAvailabilityConfig, ToolContract,
+    ToolDefinition, ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
+    register_provider_factory,
 };
 
 use super::scenarios::RuntimePerfScenario;
@@ -26,6 +28,11 @@ pub(crate) struct BenchmarkStreamProfile {
 pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider {
     TestProvider::builder()
         .kind("benchmark")
+        .serialize_config(move || {
+            serde_json::json!({
+                "scenario": scenario.name(),
+            })
+        })
         .requires_streaming(true)
         .complete(move |req| async move {
             let profile = benchmark_stream_profile_for_request(scenario, &req);
@@ -69,6 +76,32 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
         .build()
 }
 
+pub(crate) fn register_benchmark_provider_factory() {
+    register_provider_factory(Arc::new(BenchmarkProviderFactory));
+}
+
+struct BenchmarkProviderFactory;
+
+impl ProviderFactory for BenchmarkProviderFactory {
+    fn kind(&self) -> &'static str {
+        "benchmark"
+    }
+
+    fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
+        let scenario_name = config
+            .get("scenario")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(RuntimePerfScenario::Standard.name());
+        let scenario = RuntimePerfScenario::parse(scenario_name).ok_or_else(|| {
+            format!("unknown runtime perf benchmark provider scenario `{scenario_name}`")
+        })?;
+        Ok(benchmark_provider(scenario)
+            .into_handle()
+            .components()
+            .clone())
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct BenchmarkEchoTool;
 
@@ -102,7 +135,7 @@ fn large_tool_surface_cache() -> &'static Arc<BenchmarkLargeToolSurfaceCache> {
             .iter()
             .map(|definition| {
                 (
-                    definition.name.clone(),
+                    definition.name().to_string(),
                     Arc::new(definition.contract()) as Arc<ToolContract>,
                 )
             })
@@ -258,18 +291,22 @@ fn gmail_like_tool_definition(index: usize, name: &str) -> ToolDefinition {
             r#"call {name} {{ user_id: "me", query: "from:alerts@example.com newer_than:7d", limit: 25 }}"#
         ),
     ])
-    .with_discovery(ToolDiscoveryMetadata {
-        namespace: Some("gmail".to_string()),
-        aliases: vec![
+    .with_agent_surface(
+        ToolAgentSurface::new(
+            ["gmail"],
             name.trim_start_matches("GMAIL_")
                 .to_ascii_lowercase()
-                .replace('_', " "),
-        ],
-    })
+                .replace('_', "_"),
+        )
+        .with_aliases([name
+            .trim_start_matches("GMAIL_")
+            .to_ascii_lowercase()
+            .replace('_', " ")]),
+    )
     .with_scheduling(ToolScheduling::Parallel);
 
     if index.is_multiple_of(7) {
-        definition.output_contract = ToolOutputContract::from_input_schema(
+        definition.contract.output_contract = ToolOutputContract::from_input_schema(
             "projection",
             Some(serde_json::json!({
                 "type": "object",
@@ -645,6 +682,21 @@ fn benchmark_stream_profile_for_request(
             .as_deref()
             .is_some_and(|id| id.ends_with("-llm-query"))
     {
+        if request.output_spec.as_ref().is_some_and(|spec| {
+            matches!(spec, LlmOutputSpec::JsonSchema(schema) if schema.name == "tool_search_rerank")
+        }) {
+            return text_profile(
+                serde_json::json!({
+                    "tool_names": [
+                        "GMAIL_SEND_EMAIL",
+                        "GMAIL_CREATE_EMAIL_DRAFT",
+                        "GMAIL_LIST_MESSAGES",
+                        "exec_command"
+                    ]
+                })
+                .to_string(),
+            );
+        }
         return text_profile(
             serde_json::json!({
                 "kind": "value",
@@ -712,6 +764,36 @@ fn benchmark_stream_profile_for_request(
                 )
             }
         }
+        RuntimePerfScenario::StandardShellOutput => {
+            if request_has_tool_result(request) {
+                text_profile("runtime perf benchmark ok")
+            } else {
+                tool_call_profile(
+                    "standard-shell-output-call",
+                    "exec_command",
+                    serde_json::json!({
+                        "cmd": "for i in $(seq 1 160); do printf 'runtime-perf-shell-line-%03d abcdefghijklmnopqrstuvwxyz0123456789\\n' \"$i\"; done",
+                        "timeout_ms": 5000,
+                        "max_output_tokens": 4096
+                    }),
+                )
+            }
+        }
+        RuntimePerfScenario::ToolDiscoverySearch => {
+            if request_has_tool_result(request) {
+                text_profile("runtime perf benchmark ok")
+            } else {
+                tool_call_profile(
+                    "standard-tool-discovery-call",
+                    "search_tools",
+                    serde_json::json!({
+                        "query": "gmail send email draft label message search",
+                        "module": "gmail",
+                        "limit": 8
+                    }),
+                )
+            }
+        }
         RuntimePerfScenario::Rlm
         | RuntimePerfScenario::RlmGlobals
         | RuntimePerfScenario::RlmLargeToolSurface
@@ -721,10 +803,10 @@ fn benchmark_stream_profile_for_request(
         }
         RuntimePerfScenario::RlmToolCalls => {
             let text = r#"```lashlang
-first = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 1 })?
-second = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 2 })?
-third = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 3 })?
-fourth = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 4 })?
+first = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 1 })?
+second = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 2 })?
+third = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 3 })?
+fourth = await tools.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 4 })?
 submit first.value
 ```"#
                 .to_string();
@@ -732,20 +814,20 @@ submit first.value
         }
         RuntimePerfScenario::RlmProcessHandles => {
             let text = r#"```lashlang
-process benchmark_echo_process(tool: TOOL, value: str, ordinal: int) {
+process benchmark_echo_process(tool: Tools, value: str, ordinal: int) {
   result = await tool.benchmark_echo({ value: value, ordinal: ordinal })?
   finish result
 }
 
-process benchmark_slow_process(tool: TOOL, value: str, delay_ms: int) {
+process benchmark_slow_process(tool: Tools, value: str, delay_ms: int) {
   result = await tool.benchmark_slow({ value: value, delay_ms: delay_ms })?
   finish result
 }
 
-first = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 1)
-second = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 2)
-slow = start benchmark_slow_process(tool: TOOL.default, value: "cancelled", delay_ms: 50)
-live = await TOOL.default.list_process_handles({})?
+first = start benchmark_echo_process(tool: tools, value: "runtime perf benchmark ok", ordinal: 1)
+second = start benchmark_echo_process(tool: tools, value: "runtime perf benchmark ok", ordinal: 2)
+slow = start benchmark_slow_process(tool: tools, value: "cancelled", delay_ms: 50)
+live = await processes.list({})?
 cancel slow
 first_result = (await first)?
 second_result = (await second)?
@@ -756,7 +838,7 @@ submit first_result.value
         }
         RuntimePerfScenario::RlmLlmQuery => {
             let text = r#"```lashlang
-result = await TOOL.default.llm_query({
+result = await llm.query({
   task: "Return the exact benchmark marker.",
   inputs: { marker: "runtime perf benchmark ok" }
 })?
@@ -832,32 +914,34 @@ mod tests {
         let defs = BenchmarkLargeToolSurface::build_tool_definitions();
         assert_eq!(defs.len(), 63);
         assert!(defs.iter().all(|def| {
-            def.availability.base == ToolAvailability::Callable
-                && def.discovery.namespace.as_deref() == Some("gmail")
-                && !def.input_schema["properties"]
+            def.manifest.availability.base == ToolAvailability::Callable
+                && def.manifest.agent_surface.module_path == vec!["gmail".to_string()]
+                && !def.contract.input_schema["properties"]
                     .as_object()
                     .expect("object schema")
                     .is_empty()
         }));
         assert!(
-            defs.iter().any(|def| !def.output_contract.is_static()),
+            defs.iter()
+                .any(|def| !def.contract.output_contract.is_static()),
             "fixture should cover dynamic output contracts"
         );
         let first = defs.first().expect("fixture tool");
         assert!(
-            first.input_schema["$defs"]["message_part"]["properties"]["parts"]["items"]["$ref"]
+            first.contract.input_schema["$defs"]["message_part"]["properties"]["parts"]["items"]
+                ["$ref"]
                 .as_str()
                 == Some("#/$defs/message_part"),
             "fixture should include recursive nested schema refs"
         );
         assert!(
-            first.input_schema["properties"]["payload"]["oneOf"]
+            first.contract.input_schema["properties"]["payload"]["oneOf"]
                 .as_array()
                 .is_some_and(|variants| variants.len() >= 4),
             "fixture should include provider-style payload unions"
         );
         assert!(
-            first.input_schema["properties"]["projection"]["anyOf"]
+            first.contract.input_schema["properties"]["projection"]["anyOf"]
                 .as_array()
                 .is_some_and(|variants| variants.len() >= 2),
             "fixture should include output projection unions"
@@ -880,7 +964,7 @@ mod tests {
                 resolver_count.fetch_add(1, Ordering::SeqCst);
                 definitions
                     .iter()
-                    .find(|definition| definition.name == name)
+                    .find(|definition| definition.name() == name)
                     .map(|definition| Arc::new(definition.contract()))
             })),
             contributions: Vec::new(),

@@ -119,6 +119,8 @@ impl SessionReadMeta {
         SessionStateEnvelope {
             session_id: self.session_id.clone(),
             policy: self.policy.clone(),
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
             session_graph,
             turn_index: self.turn_index,
             token_usage: self.token_usage.clone(),
@@ -143,9 +145,8 @@ impl SessionReadView {
         base_graph: Arc<crate::SessionGraph>,
         messages: crate::MessageSequence,
         tool_calls: Arc<Vec<crate::ToolCallRecord>>,
+        active_events: Arc<Vec<crate::SessionEventRecord>>,
     ) -> Self {
-        let base_read_model = base_graph.read_model();
-        let active_events = base_read_model.active_events;
         Self(Arc::new(SessionReadState {
             meta,
             graph: SessionReadGraph::Derived {
@@ -163,7 +164,7 @@ impl SessionReadView {
     }
 
     pub fn from_exported_state(state: &SessionStateEnvelope) -> Self {
-        let read_model = state.session_graph.read_model();
+        let read_model = state.read_model();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_ref(state),
             graph: SessionReadGraph::Owned(state.session_graph.clone()),
@@ -174,7 +175,7 @@ impl SessionReadView {
 
     pub fn from_persisted_state(state: &RuntimeSessionState) -> Self {
         let graph = state.session_graph.clone();
-        let read_model = graph.read_model();
+        let read_model = state.read_model();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_persisted_ref(state),
             graph: SessionReadGraph::Owned(graph),
@@ -189,7 +190,7 @@ impl SessionReadView {
         protocol_turn_options: crate::ProtocolTurnOptions,
     ) -> Self {
         let graph = state.session_graph.clone();
-        let read_model = graph.read_model();
+        let read_model = state.read_model();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_persisted_ref(state)
                 .with_policy(policy)
@@ -209,6 +210,15 @@ impl SessionReadView {
         messages: crate::MessageSequence,
         tool_calls: Arc<Vec<crate::ToolCallRecord>>,
     ) -> Self {
+        let active_events = base_graph
+            .read_model_for_agent_frame(
+                &state.current_agent_frame_id,
+                state
+                    .current_agent_frame()
+                    .map(|frame| frame.previous_frame_id.is_none())
+                    .unwrap_or(true),
+            )
+            .active_events;
         Self::from_graph_message_sequence_meta(
             SessionReadMeta::from_persisted_ref(state)
                 .with_policy(policy)
@@ -217,6 +227,7 @@ impl SessionReadView {
             base_graph,
             messages,
             tool_calls,
+            active_events,
         )
     }
 

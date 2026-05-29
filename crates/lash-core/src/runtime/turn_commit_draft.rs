@@ -17,8 +17,18 @@ pub(super) struct TurnCommitDraft {
 impl TurnCommitDraft {
     pub(super) fn from_state(mut state: RuntimeSessionState) -> Self {
         let base_graph = Arc::new(std::mem::take(&mut state.session_graph));
-        let base_read_model = base_graph.read_model();
-        let graph = TurnGraphEditor::new(base_graph, base_read_model);
+        let base_read_model = base_graph.read_model_for_agent_frame(
+            &state.current_agent_frame_id,
+            state
+                .current_agent_frame()
+                .map(|frame| frame.previous_frame_id.is_none())
+                .unwrap_or(true),
+        );
+        let graph = TurnGraphEditor::new(
+            base_graph,
+            base_read_model,
+            state.current_agent_frame_id.clone(),
+        );
         Self { graph, state }
     }
 

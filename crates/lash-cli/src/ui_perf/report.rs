@@ -323,6 +323,9 @@ fn evaluate_budgets(
                 16.0,
             );
         }
+        UiPerfScenario::HtmlExport => {
+            push_budget(&mut budgets, summary, "html_export_render_ms", "p95", 250.0);
+        }
     }
     budgets
 }

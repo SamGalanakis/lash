@@ -16,6 +16,7 @@ pub struct RuntimeObservation {
     pub tool_catalog: Arc<Vec<serde_json::Value>>,
     pub tool_catalog_error: Option<String>,
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
+    pub queue_store: Option<Arc<dyn crate::RuntimePersistence>>,
 }
 
 impl RuntimeObservation {
@@ -48,6 +49,10 @@ impl RuntimeObservation {
             tool_catalog,
             tool_catalog_error,
             process_registry: runtime.host.process_registry.clone(),
+            queue_store: runtime
+                .session
+                .as_ref()
+                .and_then(|session| session.history_store()),
         }
     }
 
@@ -67,11 +72,27 @@ impl RuntimeObservation {
         let Some(executor) = self.process_registry.as_ref() else {
             return Vec::new();
         };
-        let owner_scope = self.process_scope();
-        executor
-            .list_handle_grants(&owner_scope)
+        let root_scope = self.process_scope();
+        let mut entries = executor
+            .list_handle_grants(&root_scope)
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let agent_frame_id = self.persisted_state.current_agent_frame_id.as_str();
+        if !agent_frame_id.is_empty() {
+            let frame_scope =
+                crate::ProcessScope::for_agent_frame(self.session_id.as_ref(), agent_frame_id);
+            if frame_scope.id() != root_scope.id() {
+                entries.extend(
+                    executor
+                        .list_handle_grants(&frame_scope)
+                        .await
+                        .unwrap_or_default(),
+                );
+                entries.sort_by(|(left, _), (right, _)| left.process_id.cmp(&right.process_id));
+                entries.dedup_by(|(left, _), (right, _)| left.process_id == right.process_id);
+            }
+        }
+        entries
     }
 }
 

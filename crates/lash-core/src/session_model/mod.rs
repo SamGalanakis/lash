@@ -140,7 +140,7 @@ pub(crate) fn plugin_message_to_message(plugin_message: &PluginMessage) -> Messa
 /// [`crate::provider::ProviderSpec`], rebuilt via the global
 /// [`crate::provider::ProviderRegistry`] on load. Hosts register the
 /// concrete provider types they support at startup.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionPolicy {
     pub model: ModelSpec,
     pub provider: ProviderHandle,
@@ -252,19 +252,6 @@ impl SessionSpec {
 impl Default for SessionSpec {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Default for SessionPolicy {
-    fn default() -> Self {
-        Self {
-            model: ModelSpec::default(),
-            provider: ProviderHandle::default(),
-            session_id: None,
-            autonomous: false,
-            max_turns: None,
-            prompt: crate::PromptLayer::default(),
-        }
     }
 }
 

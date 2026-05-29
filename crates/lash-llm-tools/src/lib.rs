@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use lash_core::plugin::{PluginError, PluginFactory, PluginSessionContext};
 use lash_core::{
     DirectJsonSchema, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
-    PluginSpec, PluginSpecFactory, ToolCall, ToolContext, ToolContract, ToolDefinition,
-    ToolManifest, ToolProvider, ToolResult, ToolScheduling,
+    PluginSpec, PluginSpecFactory, ToolCall, ToolContext, ToolDefinition, ToolProvider, ToolResult,
+    ToolScheduling,
 };
+use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug, Default)]
@@ -37,10 +38,10 @@ impl PluginFactory for LlmToolsPluginFactory {
         &self,
         ctx: &PluginSessionContext,
     ) -> Result<Arc<dyn lash_core::SessionPlugin>, PluginError> {
-        let provider: Arc<dyn ToolProvider> = Arc::new(LlmToolsProvider {
-            model: self.model.clone(),
-            model_variant: self.model_variant.clone(),
-        });
+        let provider: Arc<dyn ToolProvider> = Arc::new(llm_query_provider(
+            self.model.clone(),
+            self.model_variant.clone(),
+        ));
 
         PluginSpecFactory::new(
             "llm_tools",
@@ -50,9 +51,23 @@ impl PluginFactory for LlmToolsPluginFactory {
     }
 }
 
-struct LlmToolsProvider {
+pub struct LlmToolsProvider {
     model: Option<String>,
     model_variant: Option<String>,
+}
+
+/// Build the `llm_query` tool provider for the given optional model override.
+pub fn llm_query_provider(
+    model: Option<String>,
+    model_variant: Option<String>,
+) -> StaticToolProvider<LlmToolsProvider> {
+    StaticToolProvider::new(
+        vec![llm_query_tool_definition()],
+        LlmToolsProvider {
+            model,
+            model_variant,
+        },
+    )
 }
 
 impl LlmToolsProvider {
@@ -100,8 +115,8 @@ impl LlmToolsProvider {
                     stream_events: None,
                     generation: lash_core::GenerationOptions::default(),
                     session_id: Some(format!("{}-llm-query", context.session_id())),
-                    originating_tool_call_id: None,
-                    idempotency_key: None,
+                    caused_by: None,
+                    replay: None,
                 },
                 "llm_query",
             )
@@ -113,15 +128,7 @@ impl LlmToolsProvider {
 }
 
 #[async_trait]
-impl ToolProvider for LlmToolsProvider {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![llm_query_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "llm_query").then(|| Arc::new(llm_query_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for LlmToolsProvider {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let result = match call.name {
             "llm_query" => self.llm_query(call.args, call.context).await,
@@ -137,11 +144,12 @@ pub fn llm_query_tool_definition() -> ToolDefinition {
         "Run a one-shot LLM prompt over supplied data and return its result. The `task` plus everything in `inputs` is rendered into that single prompt; the call cannot use tools, inspect files, or gather more context beyond what you pass it. Use this for extracting information, classification, summarization, judging, or transformation over data already in your variables. `inputs` can be any structured value. `output` is optional and defaults to a string; when present, it requests structured output using record descriptors or `Type { ... }` literals.",
         llm_query_input_schema(),
         vec![
-            r#"summary = await TOOL.default.llm_query({ task: "Summarize the supplied notes in three bullets", inputs: { notes: notes } })?"#.into(),
-            r#"claims = await TOOL.default.llm_query({ task: "Extract the key claim from each supplied chunk", inputs: { chunks: chunks }, output: { claims: "list[str]" } })?"#.into(),
+            r#"summary = await llm.query({ task: "Summarize the supplied notes in three bullets", inputs: { notes: notes } })?"#.into(),
+            r#"claims = await llm.query({ task: "Extract the key claim from each supplied chunk", inputs: { chunks: chunks }, output: { claims: "list[str]" } })?"#.into(),
         ],
         ToolScheduling::Parallel,
     )
+    .with_agent_surface(lash_core::ToolAgentSurface::new(["llm"], "query"))
     .with_output_from_input_schema("output", Some(json!({ "type": "string" })))
 }
 
@@ -440,10 +448,7 @@ mod tests {
 
     #[test]
     fn llm_definitions_include_llm_query_only() {
-        let provider = LlmToolsProvider {
-            model: None,
-            model_variant: None,
-        };
+        let provider = llm_query_provider(None, None);
         let manifests = provider.tool_manifests();
         let names = manifests
             .iter()
@@ -525,10 +530,7 @@ mod tests {
                 r#"{"kind":"value","value":{"root_cause":"missing config","confidence":0.8},"error":null}"#
                     .to_string(),
         });
-        let provider = LlmToolsProvider {
-            model: None,
-            model_variant: None,
-        };
+        let provider = llm_query_provider(None, None);
         let context = direct_completion_context(manager.clone());
 
         let args = json!({
@@ -589,10 +591,7 @@ mod tests {
             requests: Mutex::new(Vec::new()),
             response_text: r#"{"kind":"value","value":"done","error":null}"#.to_string(),
         });
-        let provider = LlmToolsProvider {
-            model: Some("gpt-5.5".to_string()),
-            model_variant: Some("low".to_string()),
-        };
+        let provider = llm_query_provider(Some("gpt-5.5".to_string()), Some("low".to_string()));
         let context = direct_completion_context(manager.clone());
 
         let args = json!({ "task": "answer directly" });
@@ -625,10 +624,7 @@ mod tests {
             response_text: r#"{"kind":"error","value":null,"error":"missing required evidence"}"#
                 .to_string(),
         });
-        let provider = LlmToolsProvider {
-            model: None,
-            model_variant: None,
-        };
+        let provider = llm_query_provider(None, None);
         let context = direct_completion_context(manager);
 
         let args = json!({ "task": "answer from missing evidence" });

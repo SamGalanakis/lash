@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use lash_core::ToolDiscoveryMetadata;
+use lash_core::ToolAgentSurface;
 
 /// Normalise a server name or raw MCP tool name to lowercase ASCII
 /// alphanumeric and underscore. Collapses runs of non-alphanumeric characters
@@ -58,18 +58,16 @@ pub fn build_prefixed_name(
     server_name: &str,
     original_tool_name: &str,
     used_names: &mut BTreeSet<String>,
-) -> (String, ToolDiscoveryMetadata) {
+) -> (String, ToolAgentSurface) {
     let server_prefix = normalize_identifier(server_name);
     let normalized_tool = normalize_identifier(original_tool_name);
     let prefixed = unique_prefixed_name(
         &format!("mcp__{server_prefix}__{normalized_tool}"),
         used_names,
     );
-    let discovery = ToolDiscoveryMetadata {
-        namespace: Some(server_name.to_string()),
-        aliases: vec![original_tool_name.to_string()],
-    };
-    (prefixed, discovery)
+    let agent_surface = ToolAgentSurface::new([server_prefix], normalized_tool)
+        .with_aliases([original_tool_name.to_string()]);
+    (prefixed, agent_surface)
 }
 
 #[cfg(test)]
@@ -95,11 +93,12 @@ mod tests {
     }
 
     #[test]
-    fn build_prefixed_name_keeps_server_namespace_and_original_alias() {
+    fn build_prefixed_name_keeps_module_path_and_original_alias() {
         let mut used = BTreeSet::new();
         let (name, meta) = build_prefixed_name("appworld", "spotify-search-songs", &mut used);
         assert_eq!(name, "mcp__appworld__spotify_search_songs");
-        assert_eq!(meta.namespace.as_deref(), Some("appworld"));
+        assert_eq!(meta.module_path, vec!["appworld".to_string()]);
+        assert_eq!(meta.operation.as_deref(), Some("spotify_search_songs"));
         assert_eq!(meta.aliases, vec!["spotify-search-songs".to_string()]);
     }
 }

@@ -327,7 +327,8 @@ pub(crate) fn build_benchmark_harness(
         | UiPerfScenario::SlowSnapshot
         | UiPerfScenario::FileIndexStorm
         | UiPerfScenario::TimelineProjection
-        | UiPerfScenario::ActivityProjection => None,
+        | UiPerfScenario::ActivityProjection
+        | UiPerfScenario::HtmlExport => None,
     };
 
     UiPerfHarness {
@@ -343,14 +344,14 @@ pub(crate) fn build_benchmark_app(turn_count: usize) -> App {
         "ui-perf".to_string(),
         "test-session-id".into(),
     );
-    app.timeline.clear();
-    app.token_usage = TokenUsage {
+    app.timeline.truncate(0);
+    app.usage.token_usage = TokenUsage {
         input_tokens: 208_000,
         output_tokens: 11_500,
         cached_input_tokens: 0,
         reasoning_tokens: 0,
     };
-    app.context_window = Some(1_100_000);
+    app.usage.context_window = Some(1_100_000);
     app.model_variant = Some("high".to_string());
 
     let skills = SkillCatalog::default();

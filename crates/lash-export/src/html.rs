@@ -53,7 +53,7 @@ mod tests {
             turn_index: Some(1),
             protocol_iteration: Some(protocol_iteration),
             llm_call_id: Some(format!("root:1:{protocol_iteration}:0")),
-            originating_tool_call_id: None,
+            caused_by: None,
             timestamp: None,
             model: Some("gpt-test".to_string()),
             model_variant: None,
@@ -271,7 +271,7 @@ mod tests {
                 ChronologicalEntry {
                     index: 1,
                     payload: rlm_payload(RlmTrajectoryEntry {
-                        code: "data = await TOOL.default.lookup({ q: \"x\" })?".to_string(),
+                        code: "data = await tools.lookup({ q: \"x\" })?".to_string(),
                         output: Vec::new(),
                         tool_call_ids: vec!["call_1".to_string()],
                         ..rlm_step(0, "rlm_step_0")

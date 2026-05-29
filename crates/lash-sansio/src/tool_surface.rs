@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 
 use crate::llm::types::LlmToolSpec;
@@ -111,7 +111,7 @@ impl ToolSurface {
     pub fn from_tool_definitions(tools: Vec<ToolDefinition>) -> Self {
         let contracts = tools
             .iter()
-            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect();
         Self::from_tools(
             tools.into_iter().map(|tool| tool.manifest()).collect(),
@@ -304,6 +304,7 @@ pub fn build_tool_surface(input: ToolSurfaceBuildInput) -> ToolSurface {
     for contribution in input.contributions {
         apply_contribution(&mut surface, contribution);
     }
+    validate_agent_surface(&surface.tools);
     surface
 }
 
@@ -328,6 +329,49 @@ fn apply_contribution(surface: &mut ToolSurface, contribution: ToolSurfaceContri
     );
 }
 
+fn validate_agent_surface(tools: &[ToolSurfaceEntry]) {
+    let mut seen = BTreeSet::new();
+    for tool in tools.iter().filter(|tool| tool.availability.is_callable()) {
+        let identity = tool
+            .manifest
+            .agent_surface
+            .executable_for(&tool.manifest.name);
+        validate_module_segments(&identity.module_path, &tool.manifest.name);
+        validate_module_segment(&identity.operation, &tool.manifest.name, "operation");
+        let key = format!("{}.{}", identity.module_path.join("."), identity.operation);
+        assert!(
+            seen.insert(key.clone()),
+            "duplicate agent module operation path `{key}`"
+        );
+    }
+}
+
+fn validate_module_segments(segments: &[String], tool_name: &str) {
+    assert!(
+        !segments.is_empty(),
+        "tool `{tool_name}` has empty agent module path"
+    );
+    for segment in segments {
+        validate_module_segment(segment, tool_name, "module path segment");
+    }
+}
+
+fn validate_module_segment(segment: &str, tool_name: &str, field: &str) {
+    assert!(
+        is_module_segment(segment),
+        "tool `{tool_name}` has invalid agent {field} `{segment}`"
+    );
+}
+
+fn is_module_segment(segment: &str) -> bool {
+    let segment = segment.trim();
+    !segment.is_empty()
+        && segment
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+        && segment.chars().any(|ch| ch.is_ascii_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,9 +390,9 @@ mod tests {
             }),
             serde_json::json!({ "type": "string" }),
         );
-        definition.availability = ToolAvailabilityConfig::same(availability);
-        definition.activation = ToolActivation::Always;
-        definition.scheduling = ToolScheduling::Parallel;
+        definition.manifest.availability = ToolAvailabilityConfig::same(availability);
+        definition.manifest.activation = ToolActivation::Always;
+        definition.manifest.scheduling = ToolScheduling::Parallel;
         definition
     }
 
@@ -358,7 +402,7 @@ mod tests {
     ) -> ToolSurfaceBuildInput {
         let contracts = tools
             .iter()
-            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
             .collect::<BTreeMap<_, _>>();
         ToolSurfaceBuildInput {
             tools: tools.into_iter().map(|tool| tool.manifest()).collect(),

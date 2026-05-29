@@ -150,15 +150,15 @@ impl App {
                     return;
                 }
                 self.mark_first_token_arrived();
-                if self.live_assistant.has_renderable_output()
+                if self.live.assistant.has_renderable_output()
                     && self.merge_into_trailing_reasoning_block(&text)
                 {
                     self.scroll_to_bottom();
                     return;
                 }
-                let had_output = self.live_reasoning.has_renderable_output();
-                self.live_reasoning.append(&text);
-                if !had_output && self.live_reasoning.has_renderable_output() {
+                let had_output = self.live.reasoning.has_renderable_output();
+                self.live.reasoning.append(&text);
+                if !had_output && self.live.reasoning.has_renderable_output() {
                     self.mark_visible_output();
                 }
                 self.mark_visible_output();
@@ -166,15 +166,15 @@ impl App {
             }
             TurnEvent::AssistantProseDelta { text } => {
                 self.mark_first_token_arrived();
-                self.live_output_chars_estimate += text.chars().count() as i64;
-                self.live_output_tokens_estimate =
-                    live::estimate_tokens_from_char_count(self.live_output_chars_estimate);
-                if self.live_reasoning.has_renderable_output() {
+                self.usage.live_output_chars_estimate += text.chars().count() as i64;
+                self.usage.live_output_tokens_estimate =
+                    live::estimate_tokens_from_char_count(self.usage.live_output_chars_estimate);
+                if self.live.reasoning.has_renderable_output() {
                     self.commit_live_reasoning_block();
                 }
-                let had_output = self.live_assistant.has_renderable_output();
-                self.live_assistant.append(&text);
-                if !had_output && self.live_assistant.has_renderable_output() {
+                let had_output = self.live.assistant.has_renderable_output();
+                self.live.assistant.append(&text);
+                if !had_output && self.live.assistant.has_renderable_output() {
                     self.mark_visible_output();
                 }
                 self.scroll_to_bottom();
@@ -184,9 +184,10 @@ impl App {
                 let text = self::projection::render_submitted_value(&value);
                 if push_assistant_text_block(&mut self.timeline, &text) {
                     self.mark_first_token_arrived();
-                    self.live_output_chars_estimate += text.chars().count() as i64;
-                    self.live_output_tokens_estimate =
-                        live::estimate_tokens_from_char_count(self.live_output_chars_estimate);
+                    self.usage.live_output_chars_estimate += text.chars().count() as i64;
+                    self.usage.live_output_tokens_estimate = live::estimate_tokens_from_char_count(
+                        self.usage.live_output_chars_estimate,
+                    );
                     self.mark_visible_output();
                     self.invalidate_height_cache();
                     self.scroll_to_bottom();
@@ -208,8 +209,8 @@ impl App {
                     .iter()
                     .any(Self::activity_renders_prompt_response_inline);
                 if renders_prompt_response_inline || name == "plan_exit" {
-                    self.pending_option_prompt_response = None;
-                } else if let Some(display) = self.pending_option_prompt_response.take() {
+                    self.queues.pending_option_prompt_response = None;
+                } else if let Some(display) = self.queues.pending_option_prompt_response.take() {
                     self.push_prompt_response_user_block(display);
                 }
                 if let Some(activity) = activities.last() {
@@ -233,7 +234,7 @@ impl App {
             } => {
                 self.finalize_live_markdown();
                 let title = live::live_tool_output_title(&name, &args);
-                self.live_tool_output.start(call_id, title);
+                self.live.tool_output.start(call_id, title);
                 self.invalidate_live_tool_output_cache();
             }
             TurnEvent::CodeBlockStarted { code, .. } => {
@@ -257,8 +258,8 @@ impl App {
                 } else {
                     self.set_status("thinking", None, true);
                 }
-                self.live_output_chars_estimate = 0;
-                self.live_output_tokens_estimate = 0;
+                self.usage.live_output_chars_estimate = 0;
+                self.usage.live_output_tokens_estimate = 0;
                 self.keep_latest_user_block_visible();
             }
             TurnEvent::RetryStatus {
@@ -317,12 +318,12 @@ impl App {
                 let should_clear_live_estimate = usage.output_tokens > 0
                     || usage.reasoning_tokens > 0
                     || usage.cached_input_tokens > 0;
-                self.last_response_usage = usage.clone();
-                self.parent_session_cumulative = cumulative;
+                self.usage.last_response_usage = usage.clone();
+                self.usage.parent_session_cumulative = cumulative;
                 self.recompute_session_token_usage();
                 if should_clear_live_estimate {
-                    self.live_output_chars_estimate = 0;
-                    self.live_output_tokens_estimate = 0;
+                    self.usage.live_output_chars_estimate = 0;
+                    self.usage.live_output_tokens_estimate = 0;
                 }
             }
             TurnEvent::ChildUsage {
@@ -330,7 +331,8 @@ impl App {
                 cumulative,
                 ..
             } => {
-                self.child_session_cumulatives
+                self.usage
+                    .child_session_cumulatives
                     .insert(session_id, cumulative);
                 self.recompute_session_token_usage();
             }
@@ -374,6 +376,16 @@ impl App {
             TurnEvent::QueuedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
             }
+            TurnEvent::QueuedWorkStarted { causes, .. } => {
+                if causes
+                    .iter()
+                    .any(|cause| cause.event_type == "process.wake")
+                {
+                    self.set_status("agent woken", None, true);
+                } else {
+                    self.set_status("queued work", None, true);
+                }
+            }
             TurnEvent::CodeBlockCompleted { .. } | TurnEvent::ToolValue { .. } => {}
         }
     }
@@ -388,7 +400,8 @@ impl App {
             && kind == "tool_output"
         {
             let current_status = self
-                .live_turn
+                .live
+                .turn
                 .as_ref()
                 .map(|turn| turn.status_text.as_str());
             let stream_active =

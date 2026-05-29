@@ -12,7 +12,6 @@ pub(in crate::runtime::session_manager) struct SessionCreatePlan {
     pub(in crate::runtime::session_manager) context_surface: crate::SessionContextSurface,
     pub(in crate::runtime::session_manager) protocol_request: SessionCreateRequest,
     pub(in crate::runtime::session_manager) usage_source: Option<String>,
-    pub(in crate::runtime::session_manager) first_turn_input: Option<crate::PluginMessage>,
 }
 
 pub(in crate::runtime::session_manager) async fn resolve_session_create_plan(
@@ -53,7 +52,6 @@ pub(in crate::runtime::session_manager) async fn resolve_session_create_plan(
         plugin_source: request.plugin_source,
         context_surface: request.context_surface.clone(),
         usage_source: request.usage_source.clone(),
-        first_turn_input: request.first_turn_input.clone(),
         protocol_request: request,
     })
 }
@@ -105,6 +103,10 @@ fn build_runtime_state(
     normalize_session_graph(&mut base);
     base.session_id = session_id;
     base.policy = policy.clone();
+    base.reset_initial_agent_frame(
+        crate::AgentFrameAssignment::from_session_request(request, policy.clone()),
+        base.protocol_turn_options.clone(),
+    );
     append_session_nodes_to_state(&mut base, &request.initial_nodes);
     normalize_session_graph(&mut base);
     base

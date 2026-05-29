@@ -64,9 +64,9 @@ hint: remove `?` and inspect `.ok` or `.error` when you need to handle failures
 ---
 
 runtime_failed_resource_operation_unwrap
-`?` unwrapped failed resource operation: boom
+`?` unwrapped failed module operation: boom
 --> line 1, column 1
-submit (await TOOL.default.err({})?)
+submit (await tools.err({})?)
 ^
 
 ---

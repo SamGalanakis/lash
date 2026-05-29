@@ -81,10 +81,48 @@ fn merge_context(base: &mut TraceContext, overlay: TraceContext) {
     if overlay.llm_call_id.is_some() {
         base.llm_call_id = overlay.llm_call_id;
     }
-    if overlay.originating_tool_call_id.is_some() {
-        base.originating_tool_call_id = overlay.originating_tool_call_id;
-    }
     base.metadata.extend(overlay.metadata);
+}
+
+pub(crate) fn trace_context_from_invocation(invocation: &crate::RuntimeInvocation) -> TraceContext {
+    let mut context = TraceContext::default().for_session(invocation.scope.session_id.clone());
+    if let Some(turn_id) = invocation.scope.turn_id.as_ref() {
+        context = context.for_turn(turn_id.clone());
+    }
+    if let Some(turn_index) = invocation.scope.turn_index {
+        context = context.for_turn_index(turn_index);
+    }
+    if let Some(protocol_iteration) = invocation.scope.protocol_iteration {
+        context = context.for_protocol_iteration(protocol_iteration);
+    }
+    if let Some(effect_id) = invocation.effect_id() {
+        context.effect_id = Some(effect_id.to_string());
+    }
+    if let Some(replay) = invocation.replay.as_ref() {
+        context
+            .metadata
+            .insert("replay_key".to_string(), serde_json::json!(replay.key));
+    }
+    if let Some(checkpoint_hash) = invocation.checkpoint_hash.as_ref() {
+        context.metadata.insert(
+            "checkpoint_hash".to_string(),
+            serde_json::json!(checkpoint_hash),
+        );
+    }
+    if let Some(caused_by) = invocation.caused_by.as_ref() {
+        context = trace_context_with_causal_ref(context, caused_by);
+    }
+    context
+}
+
+pub(crate) fn trace_context_with_causal_ref(
+    mut context: TraceContext,
+    caused_by: &crate::CausalRef,
+) -> TraceContext {
+    if let Ok(value) = serde_json::to_value(caused_by) {
+        context.metadata.insert("caused_by".to_string(), value);
+    }
+    context
 }
 
 pub(crate) fn trace_llm_request(req: &LlmRequest) -> TraceLlmRequest {

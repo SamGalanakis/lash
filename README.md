@@ -16,7 +16,7 @@ Every completed turn lands as one lease-fenced `RuntimeCommit` against a `Sessio
 
 ### Sans-IO state machine for workflow integration
 
-`lash-core::RuntimeEffectController` is the durable boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process control, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with stable invocation metadata, idempotency keys, checkpoint digests, and ref-only attachment specs. The default inline controller runs in process; workflow adapters pass a scoped controller with a stable turn id, while `LashRuntime::resume_turn(...)` / `LashSession::resume_turn(...)` reload the saved turn checkpoint and replay completed effects from the runtime journal. Process handles are explicit runtime support: install a deployment-level `ProcessRegistry` such as `lash-sqlite-store::SqliteProcessRegistry` when the host wants background process control; otherwise process start/list/await/cancel/transfer/cleanup fail loudly.
+`lash-core::RuntimeEffectController` is the durable boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process control, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with a typed `RuntimeInvocation`: scoped session/turn coordinates, a subject, optional causal parent, `replay.key`, checkpoint digest, and ref-only attachment specs. The default inline controller runs in process; workflow adapters pass a scoped controller with a stable turn id, while `LashRuntime::resume_turn(...)` / `LashSession::resume_turn(...)` reload the saved turn checkpoint and replay completed effects from the runtime journal. Process handles are explicit runtime support: install a deployment-level `ProcessRegistry` such as `lash-sqlite-store::SqliteProcessRegistry` when the host wants background process control; otherwise process start/list/await/cancel/transfer/cleanup fail loudly.
 
 ### Two execution modes, one commit unit
 
@@ -24,7 +24,7 @@ Every completed turn lands as one lease-fenced `RuntimeCommit` against a `Sessio
 
 ### Lashlang
 
-A small typed DSL the model can emit and the runtime can execute deterministically. Receiver-first resource operations and named background `process` declarations are host-provided abilities: unavailable abilities still parse, but fail during linking and are omitted from the RLM prompt. Linked modules are content-addressed as `ModuleRef`/`RequiredSurfaceRef` artifacts; durable Lashlang process rows store only module/process refs plus JSON args, and workers reload the artifact from the host/profile artifact store for nested starts. Trigger declarations are declaration-only typed bindings from resource events to named process starts, and cron schedule declarations are parsed and gated by the same host surface; runtime activation for resource events and cron ticks remains a follow-up.
+A small typed DSL the model can emit and the runtime can execute deterministically. Host capabilities are exposed as lowercase module operations such as `web.search(...)`, `files.read(...)`, and `agents.spawn(...)`; named background `process` declarations receive typed module authorities explicitly. Unavailable abilities still parse, but fail during linking and are omitted from the RLM prompt. Linked modules are content-addressed as `ModuleRef`/`RequiredSurfaceRef` artifacts; durable Lashlang process rows store only module/process refs plus JSON args, and workers reload the artifact from the host/profile artifact store for nested starts. Trigger declarations install activation routes from typed module events to named process starts; host event emits append causal session-history nodes and start the routed process from artifact refs. Cron schedule declarations are parsed and gated by the same host surface; runtime activation for cron ticks remains a follow-up.
 
 ### Plugin architecture
 
@@ -57,8 +57,8 @@ the explicit pre-release tag:
 
 ```toml
 [dependencies]
-lash-runtime         = "=0.1.0-alpha.4"
-lash-provider-openai = "=0.1.0-alpha.4"
+lash-runtime         = "=0.1.0-alpha.12"
+lash-provider-openai = "=0.1.0-alpha.12"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }
 ```

@@ -1,5 +1,6 @@
 mod assembly;
 mod builder;
+pub(crate) mod causal;
 mod config_ops;
 mod effect;
 mod environment;
@@ -21,6 +22,7 @@ mod turn_commit_pipeline;
 mod turn_driver;
 mod turn_graph_editor;
 mod turn_loop;
+mod turn_queue;
 mod usage;
 
 use std::any::Any;
@@ -39,8 +41,7 @@ use crate::llm::types::{
 };
 use crate::plugin::runtime_host::RuntimeSessionHost;
 use crate::plugin::{
-    CheckpointHookContext, PluginMessage, PrepareTurnRequest, SessionConfigChangedContext,
-    SessionRelation,
+    CheckpointHookContext, PrepareTurnRequest, SessionConfigChangedContext, SessionRelation,
 };
 use crate::sansio::{LlmCallError, Response};
 use crate::session_model::{
@@ -73,13 +74,16 @@ use assembly::{
 #[allow(unused_imports)]
 use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
+pub use causal::process_event_invocation;
+pub(crate) use causal::tool_retry_sleep_invocation;
+pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
-    DirectRequestSpec, EffectInvocationMetadata, EffectOrigin, InlineRuntimeEffectController,
-    LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    CausalRef, InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec, ProcessCommand,
+    ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
+    RuntimeReplay, RuntimeScope, RuntimeSubject,
 };
-pub(crate) use effect::{RuntimeEffectControllerHandle, tool_retry_sleep_metadata};
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{RuntimeError, RuntimeErrorCode};
 pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeCoreConfig};
@@ -88,18 +92,19 @@ pub use observation::{RuntimeHandle, RuntimeObservation};
 #[cfg(any(test, feature = "testing"))]
 pub use process::TestLocalProcessRegistry;
 pub use process::{
-    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventSemantics,
-    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
-    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
-    ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
-    ProcessScopeId, ProcessService, ProcessSessionDeleteReport, ProcessStartGrant,
-    ProcessStartOptions, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
-    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
+    PreparedProcessEventAppend, ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest,
+    ProcessEventAppendResult, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
+    ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessOpScope, ProcessProvenance,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope, ProcessScopeId,
+    ProcessService, ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions,
+    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
+    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
     UnavailableProcessService, current_epoch_ms, epoch_ms_from_system_time,
     lashlang_process_event_types, materialize_process_event_semantics,
-    prepare_process_registration, process_event_payload_hash, process_wake_delivery,
-    process_wake_input_from_event_payload, process_wake_turn_cause, process_wake_turn_text,
-    require_event_idempotency, system_time_from_epoch_ms,
+    prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
+    process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
+    process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
 };
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
 pub use session_manager::DirectCompletionClient;
@@ -107,6 +112,12 @@ pub use state::{PersistedSessionSnapshot, RuntimeSessionState, SessionStateEnvel
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
     apply_session_head, normalize_session_graph,
+};
+pub use turn_loop::ensure_durable_turn_input;
+pub use turn_queue::{
+    DeliveryPolicy, MergeKey, QUEUED_WORK_CLAIM_TTL_MS, QueuedCheckpointWork, QueuedTurnWork,
+    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
+    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, SlotPolicy, process_wake_batch_draft,
 };
 pub use usage::{
     SessionUsageReport, TokenLedgerEntry, UsageReportRow, UsageTotals, diff_token_ledger,
@@ -224,9 +235,65 @@ impl TurnInput {
     }
 }
 
+/// Per-turn, in-process side channel of typed plugin inputs.
+///
+/// This is an `Any`-keyed map of live Rust values handed to plugins for a
+/// single turn. It is deliberately **not** serializable: the values never
+/// survive a process boundary, so the durable runtime explicitly rejects a turn
+/// that carries any live inputs (see [`LiveTurnInputs::durable_rejection`]).
+/// Durable callers must instead encode resumable data in
+/// `protocol_turn_options` or persisted plugin state.
+#[derive(Clone, Default)]
+pub struct LiveTurnInputs {
+    inputs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
+}
+
+impl LiveTurnInputs {
+    fn insert<T>(&mut self, plugin_id: &'static str, input: T)
+    where
+        T: Send + Sync + 'static,
+    {
+        self.inputs.insert(plugin_id, Arc::new(input));
+    }
+
+    fn get<T>(&self, plugin_id: &'static str) -> Option<&T>
+    where
+        T: 'static,
+    {
+        self.inputs
+            .get(plugin_id)
+            .and_then(|input| input.downcast_ref::<T>())
+    }
+
+    fn contains(&self, plugin_id: &'static str) -> bool {
+        self.inputs.contains_key(plugin_id)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inputs.is_empty()
+    }
+
+    fn plugin_ids(&self) -> Vec<&'static str> {
+        self.inputs.keys().copied().collect()
+    }
+
+    /// Returns an error if any live input is present, with the reason a durable
+    /// turn cannot carry it. Returns `Ok(())` when the channel is empty and the
+    /// turn is safe for durable replay.
+    pub(crate) fn durable_rejection(&self) -> Result<(), RuntimeError> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        Err(RuntimeError::new(
+            RuntimeErrorCode::DurableTurnLivePluginInput,
+            "durable turn resume does not support live TurnContext plugin inputs; encode resumable data in protocol_turn_options or persisted plugin state",
+        ))
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct TurnContext {
-    plugin_inputs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
+    plugin_inputs: LiveTurnInputs,
     provider: Option<crate::ProviderHandle>,
     model: Option<crate::ModelSpec>,
     prompt: crate::PromptLayer,
@@ -241,7 +308,7 @@ impl TurnContext {
     where
         T: Send + Sync + 'static,
     {
-        self.plugin_inputs.insert(plugin_id, Arc::new(input));
+        self.plugin_inputs.insert(plugin_id, input);
     }
 
     pub fn set_provider(&mut self, provider: crate::ProviderHandle) {
@@ -264,17 +331,17 @@ impl TurnContext {
     where
         T: 'static,
     {
-        self.plugin_inputs
-            .get(plugin_id)
-            .and_then(|input| input.downcast_ref::<T>())
+        self.plugin_inputs.get(plugin_id)
     }
 
     pub fn has_plugin_input(&self, plugin_id: &'static str) -> bool {
-        self.plugin_inputs.contains_key(plugin_id)
+        self.plugin_inputs.contains(plugin_id)
     }
 
-    pub fn has_plugin_inputs(&self) -> bool {
-        !self.plugin_inputs.is_empty()
+    /// Live plugin inputs for this turn. The durable boundary inspects this to
+    /// reject turns carrying non-serializable live state.
+    pub(crate) fn live_plugin_inputs(&self) -> &LiveTurnInputs {
+        &self.plugin_inputs
     }
 
     pub fn set_prompt_template(&mut self, template: crate::PromptTemplate) {
@@ -309,10 +376,7 @@ impl TurnContext {
 impl fmt::Debug for TurnContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TurnContext")
-            .field(
-                "plugin_inputs",
-                &self.plugin_inputs.keys().collect::<Vec<_>>(),
-            )
+            .field("plugin_inputs", &self.plugin_inputs.plugin_ids())
             .field("has_provider", &self.provider.is_some())
             .field("has_model", &self.model.is_some())
             .field("has_prompt_layer", &(!self.prompt.is_empty()))
@@ -449,17 +513,17 @@ pub struct AssembledTurn {
     pub errors: Vec<TurnIssue>,
 }
 
-/// Result of driving one logical host turn through any foreground handoffs.
+/// Result of driving one logical host turn through any AgentFrame switches.
 ///
-/// A handoff is an internal runtime continuation, similar to compaction from a
-/// host's perspective. Callers that need a final answer can use
-/// [`LashRuntime::stream_turn_following_handoffs`] and inspect `final_turn()`.
+/// A frame switch is an internal runtime continuation, similar to compaction
+/// from a host's perspective. Callers that need a final answer can use
+/// [`LashRuntime::stream_turn_with_agent_frames`] and inspect `final_turn()`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct FollowedTurn {
+pub struct AgentFrameRun {
     pub turns: Vec<AssembledTurn>,
 }
 
-impl FollowedTurn {
+impl AgentFrameRun {
     pub fn final_turn(&self) -> Option<&AssembledTurn> {
         self.turns.last()
     }
@@ -468,10 +532,10 @@ impl FollowedTurn {
         self.turns.pop()
     }
 
-    pub fn handoff_count(&self) -> usize {
+    pub fn frame_switch_count(&self) -> usize {
         self.turns
             .iter()
-            .filter(|turn| matches!(turn.outcome, crate::TurnOutcome::Handoff { .. }))
+            .filter(|turn| matches!(turn.outcome, crate::TurnOutcome::AgentFrameSwitch { .. }))
             .count()
     }
 }
@@ -569,6 +633,11 @@ impl TurnActivity {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum TurnEvent {
+    QueuedWorkStarted {
+        boundary: crate::QueuedWorkClaimBoundary,
+        batch_ids: Vec<String>,
+        causes: Vec<crate::TurnCause>,
+    },
     ModelRequestStarted {
         protocol_iteration: usize,
     },
@@ -670,7 +739,7 @@ impl TurnActivitySink for NoopTurnActivitySink {
 
 /// Optional sinks and durable-effect scope passed to one of [`LashRuntime`]'s
 /// turn-driving entry points (`stream_turn`, `resume_turn`,
-/// `stream_turn_following_handoffs`).
+/// `stream_turn_with_agent_frames`).
 ///
 /// Construct via [`TurnOptions::new`] and chain `with_*` builders; defaults to
 /// no-op sinks and an inline effect scope derived from the runtime's own
@@ -765,7 +834,6 @@ pub struct LashRuntime {
     pub(in crate::runtime) state: RuntimeSessionState,
     pub(in crate::runtime) runtime_scope_id: Arc<str>,
     pub(in crate::runtime) managed_sessions: Arc<Mutex<HashMap<String, RuntimeHandle>>>,
-    pub(in crate::runtime) active_handoff_continuations: Arc<Mutex<HashMap<String, String>>>,
     pub(in crate::runtime) managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     /// Protocol-owned turn options for this session.
     pub(in crate::runtime) protocol_turn_options: crate::ProtocolTurnOptions,
@@ -775,13 +843,6 @@ pub struct LashRuntime {
     /// and are drained into `state.token_ledger` at turn-commit time.
     pub(in crate::runtime) shared_token_ledger: Arc<std::sync::Mutex<Vec<TokenLedgerEntry>>>,
     pub(in crate::runtime) process_sync_needed: Arc<AtomicBool>,
-    /// Seed `PluginMessage`s queued via
-    /// `SessionCreateRequest::first_turn_input` for child sessions.
-    /// Shared across `RuntimeSessionManager` instances built from this
-    /// runtime so the seed remains visible after the parent turn that
-    /// created the session has ended.
-    pub(in crate::runtime) pending_first_turn_inputs:
-        Arc<std::sync::Mutex<HashMap<String, crate::PluginMessage>>>,
     pub(in crate::runtime) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
     /// Resident-graph policy chosen by the host. Controls whether
     /// [`LashRuntime::refresh_session_graph_from_store`] reloads the full

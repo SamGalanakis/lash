@@ -324,7 +324,7 @@ fn import_tools(
             .as_ref()
             .map(|s| Value::Object((**s).clone()))
             .unwrap_or_else(|| json!({}));
-        let (prefixed, discovery) =
+        let (prefixed, agent_surface) =
             naming::build_prefixed_name(server_name, &original_name, &mut used_names);
 
         let description = if description.is_empty() {
@@ -344,7 +344,7 @@ fn import_tools(
                     input_schema,
                     output_schema,
                 )
-                .with_discovery(discovery)
+                .with_agent_surface(agent_surface)
                 .with_scheduling(ToolScheduling::Parallel),
             },
         );

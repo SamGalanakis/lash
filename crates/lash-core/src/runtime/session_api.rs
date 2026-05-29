@@ -20,11 +20,6 @@ impl LashRuntime {
             self.state.plugin_snapshot_revision = None;
         }
     }
-    pub(super) fn active_tool_catalog(&self) -> Result<Vec<serde_json::Value>, crate::PluginError> {
-        self.active_tool_catalog_shared()
-            .map(|catalog| catalog.as_ref().clone())
-    }
-
     pub(super) fn active_tool_catalog_shared(
         &self,
     ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {
@@ -45,6 +40,9 @@ impl LashRuntime {
     /// Override protocol-owned turn options for this session.
     pub fn set_protocol_turn_options(&mut self, options: crate::ProtocolTurnOptions) {
         self.state.protocol_turn_options = options.clone();
+        if let Some(frame) = self.state.current_agent_frame_mut() {
+            frame.protocol_turn_options = options.clone();
+        }
         self.protocol_turn_options = options;
     }
 
@@ -58,8 +56,8 @@ impl LashRuntime {
     pub fn read_view(&self) -> crate::SessionReadView {
         crate::SessionReadView::from_runtime_state(
             &self.state,
-            self.policy.clone(),
-            self.protocol_turn_options.clone(),
+            self.state.effective_policy().clone(),
+            self.state.effective_protocol_turn_options().clone(),
         )
     }
 
@@ -81,6 +79,9 @@ impl LashRuntime {
     pub fn export_persisted_state(&self) -> RuntimeSessionState {
         let mut state = self.state.clone();
         state.protocol_turn_options = self.protocol_turn_options.clone();
+        if let Some(frame) = state.current_agent_frame_mut() {
+            frame.protocol_turn_options = self.protocol_turn_options.clone();
+        }
         if let Some(session) = self.session.as_ref() {
             let snapshot = session.plugins().tool_registry().export_state();
             state.tool_state_generation = Some(snapshot.generation());
@@ -140,6 +141,8 @@ impl LashRuntime {
         let head = crate::store::SessionHead {
             session_id: read.session_id.clone(),
             head_revision: read.head_revision,
+            agent_frames: read.agent_frames.clone(),
+            current_agent_frame_id: read.current_agent_frame_id.clone(),
             graph: read.graph,
             config: read.config.clone(),
             checkpoint_ref: read.checkpoint_ref.clone(),
@@ -189,20 +192,40 @@ impl LashRuntime {
             .map(|manager| manager as Arc<dyn crate::ProcessService>)
     }
 
+    pub async fn enqueue_turn_input(
+        &self,
+        input: crate::TurnInput,
+        delivery_policy: crate::DeliveryPolicy,
+        slot_policy: crate::SlotPolicy,
+        source_key: Option<String>,
+    ) -> Result<crate::QueuedWorkBatch, RuntimeError> {
+        super::turn_loop::ensure_durable_turn_input(&input)?;
+        let store = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::StoreCommitFailed,
+                    "queued turn input requires a persistent runtime store",
+                )
+            })?;
+        let mut draft = crate::QueuedWorkBatchDraft::new(
+            self.state.session_id.clone(),
+            delivery_policy,
+            slot_policy,
+            vec![crate::QueuedWorkPayload::turn_input(input)],
+        );
+        draft.source_key = source_key;
+        store
+            .enqueue_queued_work(draft)
+            .await
+            .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))
+    }
+
     /// The plugin session bound to the currently active runtime session, if any.
     pub fn plugin_session(&self) -> Option<Arc<crate::PluginSession>> {
         self.session.as_ref().map(|s| Arc::clone(s.plugins()))
-    }
-
-    pub fn turn_input_injection_bridge(
-        &self,
-    ) -> Result<crate::TurnInputInjectionBridge, SessionError> {
-        let Some(session) = self.session.as_ref() else {
-            return Err(SessionError::Protocol(
-                "runtime session not available".to_string(),
-            ));
-        };
-        Ok(session.turn_input_injection_bridge().clone())
     }
 
     /// Run the registered history rewrite pipeline against the current

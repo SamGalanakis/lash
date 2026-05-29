@@ -64,12 +64,7 @@ pub(in crate::runtime) struct CurrentSessionCapability {
 #[derive(Clone)]
 struct ManagedSessionCapability {
     registry: Arc<Mutex<HashMap<String, RuntimeHandle>>>,
-    active_handoff_continuations: Arc<Mutex<HashMap<String, String>>>,
     turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
-    /// Maps child session_id → seed PluginMessage queued via
-    /// `SessionCreateRequest::first_turn_input`. Drained by
-    /// `take_first_turn_input` when a host claims it.
-    pending_first_turn_inputs: Arc<std::sync::Mutex<HashMap<String, crate::PluginMessage>>>,
 }
 
 #[derive(Clone)]
@@ -115,6 +110,8 @@ impl CurrentSessionCapability {
         SessionSnapshot {
             session_id: runtime.state.session_id.clone(),
             policy: runtime.state.policy.clone(),
+            agent_frames: runtime.state.agent_frames.clone(),
+            current_agent_frame_id: runtime.state.current_agent_frame_id.clone(),
             session_graph: crate::SessionGraph::default(),
             turn_index: runtime.state.turn_index,
             token_usage: runtime.state.token_usage.clone(),
@@ -166,9 +163,7 @@ impl ManagedSessionCapability {
     fn new(runtime: &LashRuntime) -> Self {
         Self {
             registry: Arc::clone(&runtime.managed_sessions),
-            active_handoff_continuations: Arc::clone(&runtime.active_handoff_continuations),
             turns: Arc::clone(&runtime.managed_turns),
-            pending_first_turn_inputs: Arc::clone(&runtime.pending_first_turn_inputs),
         }
     }
 }
@@ -198,14 +193,6 @@ impl UsageCapability {
 }
 
 impl RuntimeSessionManager {
-    pub(in crate::runtime) fn process_scope_id(&self, session_id: &str) -> crate::ProcessScopeId {
-        self.processes.process_scope_id(session_id)
-    }
-
-    pub(in crate::runtime) fn process_registry(&self) -> Option<Arc<dyn crate::ProcessRegistry>> {
-        self.current.host.process_registry.clone()
-    }
-
     pub(super) fn direct_completion_client<'run>(
         self: &Arc<Self>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,

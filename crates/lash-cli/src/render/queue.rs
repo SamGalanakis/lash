@@ -12,11 +12,17 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let inner_width = width as usize;
     let pending_previews: Vec<String> = app
+        .queues
         .pending_steers
         .iter()
         .map(PreparedTurn::preview)
         .collect();
-    let queued_previews: Vec<String> = app.queued_turns.iter().map(PreparedTurn::preview).collect();
+    let queued_previews: Vec<String> = app
+        .queues
+        .queued_turns
+        .iter()
+        .map(PreparedTurn::preview)
+        .collect();
 
     if !pending_previews.is_empty() {
         push_queue_section(

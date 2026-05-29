@@ -357,7 +357,7 @@ fn resource_to_json(handle: &ResourceHandle) -> serde_json::Value {
 pub(crate) fn resource_from_json_map(
     map: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<ResourceHandle> {
-    if map.get("__resource__")?.as_bool()? != true {
+    if !map.get("__resource__")?.as_bool()? {
         return None;
     }
     Some(ResourceHandle::new(

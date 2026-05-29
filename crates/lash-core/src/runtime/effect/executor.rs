@@ -331,6 +331,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                     .run_llm_call(
                         Arc::new((*request).into_request(None, None)),
                         protocol_iteration,
+                        envelope.invocation,
                         &runner.event_tx,
                         &runner.cancellation,
                     )
@@ -345,7 +346,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                 let mut results = runner
                     .driver
                     .run_tool_calls(
-                        vec![(call, envelope.metadata)],
+                        vec![(call, envelope.invocation)],
                         &runner.event_tx,
                         &runner.cancellation,
                     )
@@ -368,7 +369,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                             &code,
                             messages,
                             protocol_iteration,
-                            envelope.metadata,
+                            envelope.invocation,
                             &runner.event_tx,
                         )
                         .await,
@@ -414,20 +415,11 @@ impl RuntimeEffectLocalRunner for LocalDirectEffectRunner {
         envelope: RuntimeEffectEnvelope,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         match envelope.command {
-            RuntimeEffectCommand::DirectCompletion {
-                normalized_request, ..
-            } => Ok(RuntimeEffectOutcome::DirectCompletion {
+            RuntimeEffectCommand::Direct { request, .. } => Ok(RuntimeEffectOutcome::Direct {
                 result: self
-                    .run_direct_llm_request((*normalized_request).into_request(None, None))
+                    .run_direct_llm_request((*request).into_request(None, None))
                     .await,
             }),
-            RuntimeEffectCommand::DirectLlmCompletion { request, .. } => {
-                Ok(RuntimeEffectOutcome::DirectLlmCompletion {
-                    result: self
-                        .run_direct_llm_request((*request).into_request(None, None))
-                        .await,
-                })
-            }
             RuntimeEffectCommand::Sleep { duration_ms } => {
                 sleep_with_cancellation(duration_ms, &CancellationToken::new()).await?;
                 Ok(RuntimeEffectOutcome::Sleep)

@@ -15,7 +15,7 @@ pub(crate) fn turn_limit_final_message(message_id: String, max_turns: usize) -> 
                 1. Summary of what you accomplished\n\
                 2. List of remaining tasks not yet completed\n\
                 3. Recommended next steps\n\
-                Do NOT emit a lashlang code fence, invoke resource operations, or call submit/continue_as."
+                Do NOT emit a lashlang code fence, invoke module operations, or call submit/control.continue_as."
             ),
             attachment: None,
             tool_call_id: None,

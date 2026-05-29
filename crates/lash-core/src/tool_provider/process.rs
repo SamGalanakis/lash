@@ -6,16 +6,18 @@ use crate::plugin::PluginError;
 #[derive(Clone)]
 pub struct ToolProcessControl<'run> {
     pub(super) session_id: String,
+    pub(super) agent_frame_id: crate::AgentFrameId,
     pub(super) processes: Arc<dyn crate::ProcessService>,
     pub(super) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
-    pub(super) effect_metadata: Option<crate::EffectInvocationMetadata>,
+    pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
 }
 
 impl ToolProcessControl<'_> {
     fn process_scope(&self) -> crate::ProcessOpScope<'_> {
         crate::ProcessOpScope::new()
-            .with_effect_metadata(self.effect_metadata.clone())
+            .with_parent_invocation(self.parent_invocation.clone())
             .with_effect_controller(self.effect_controller.as_controller())
+            .with_agent_frame_id(Some(self.agent_frame_id.clone()))
     }
 
     pub async fn list_handles(&self) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
@@ -26,7 +28,7 @@ impl ToolProcessControl<'_> {
 
     pub async fn validate_handles(&self, handle_ids: &[String]) -> Result<(), PluginError> {
         self.processes
-            .validate_visible(&self.session_id, handle_ids)
+            .validate_visible(&self.session_id, handle_ids, self.process_scope())
             .await
     }
 
@@ -53,6 +55,22 @@ impl ToolProcessControl<'_> {
                 to_session_id,
                 process_ids,
                 self.process_scope(),
+            )
+            .await
+    }
+
+    pub async fn transfer_handles_to_frame(
+        &self,
+        to_agent_frame_id: &str,
+        process_ids: Vec<String>,
+    ) -> Result<(), PluginError> {
+        self.processes
+            .transfer(
+                &self.session_id,
+                &self.session_id,
+                process_ids,
+                self.process_scope()
+                    .with_target_agent_frame_id(Some(to_agent_frame_id.to_string())),
             )
             .await
     }

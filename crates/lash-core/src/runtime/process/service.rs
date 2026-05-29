@@ -32,6 +32,7 @@ pub trait ProcessService: Send + Sync {
         &self,
         session_id: &str,
         process_ids: &[String],
+        scope: ProcessOpScope<'_>,
     ) -> Result<(), PluginError>;
 
     async fn cancel(
@@ -103,6 +104,7 @@ impl ProcessService for UnavailableProcessService {
         &self,
         _session_id: &str,
         _process_ids: &[String],
+        _scope: ProcessOpScope<'_>,
     ) -> Result<(), PluginError> {
         Err(PluginError::Session(
             "process handle validation is unavailable in this runtime".to_string(),

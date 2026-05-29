@@ -115,7 +115,7 @@ impl ToolProvider for McpToolProvider {
         self.pool
             .advertised_tools_blocking()
             .into_iter()
-            .find(|tool| tool.name == name)
+            .find(|tool| tool.name() == name)
             .map(|tool| Arc::new(tool.contract()))
     }
 
@@ -164,7 +164,7 @@ mod tests {
             schema.clone(),
             json!({}),
         );
-        assert_eq!(definition.input_schema, schema);
+        assert_eq!(definition.contract.input_schema, schema);
         assert_eq!(definition.parameter_metadata().len(), 3);
     }
 
@@ -265,11 +265,22 @@ mod tests {
 
         let defs = factory.pool().advertised_tools().await;
         assert_eq!(defs.len(), 1, "expected one imported tool, got {defs:?}");
-        assert_eq!(defs[0].name, "mcp__docs__search_docs");
-        assert_eq!(defs[0].discovery.namespace.as_deref(), Some("docs"));
-        assert_eq!(defs[0].discovery.aliases, vec!["search-docs".to_string()]);
+        assert_eq!(defs[0].name(), "mcp__docs__search_docs");
+        assert_eq!(
+            defs[0].manifest.agent_surface.module_path,
+            vec!["docs".to_string()]
+        );
+        assert_eq!(
+            defs[0].manifest.agent_surface.operation.as_deref(),
+            Some("search_docs")
+        );
+        assert_eq!(
+            defs[0].manifest.agent_surface.aliases,
+            vec!["search-docs".to_string()]
+        );
         assert_eq!(
             defs[0]
+                .contract
                 .input_schema
                 .get("properties")
                 .and_then(Value::as_object)
@@ -279,7 +290,7 @@ mod tests {
             Some(json!("string"))
         );
         assert_eq!(
-            defs[0].output_schema,
+            defs[0].contract.output_schema,
             json!({
                 "type": "object",
                 "properties": {

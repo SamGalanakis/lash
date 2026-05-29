@@ -1,11 +1,12 @@
 use serde_json::json;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
+use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolScheduling};
+
+use lash_tool_support::{
+    StaticToolExecute, StaticToolProvider, compact_diff, display_relative, normalize_lexical,
+    object_schema, require_str, resolve_under, run_blocking,
 };
-
-use lash_tool_support::{compact_diff, object_schema, require_str, run_blocking};
 
 const BEGIN_PATCH_MARKER: &str = "*** Begin Patch";
 const END_PATCH_MARKER: &str = "*** End Patch";
@@ -16,7 +17,7 @@ const MOVE_TO_MARKER: &str = "*** Move to: ";
 const EOF_MARKER: &str = "*** End of File";
 const CHANGE_CONTEXT_MARKER: &str = "@@ ";
 const EMPTY_CHANGE_CONTEXT_MARKER: &str = "@@";
-const APPLY_PATCH_INSTRUCTIONS: &str = r#"Use the `apply_patch` tool to edit files. Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
+const APPLY_PATCH_INSTRUCTIONS: &str = r#"Use `files.patch(...)` to edit files. The patch body is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
 
 *** Begin Patch
 [ one or more file sections ]
@@ -89,10 +90,15 @@ It is important to remember:
 - You must include a header with your intended action (Add/Delete/Update)
 - You must prefix new lines with `+` even when creating a new file
 - File references can only be relative, NEVER ABSOLUTE.
-- Avoid re-reading a file just to confirm a successful patch; if `apply_patch` succeeds, trust it and move on to the next targeted check"#;
+- Avoid re-reading a file just to confirm a successful patch; if `files.patch` succeeds, trust it and move on to the next targeted check"#;
 
 #[derive(Default)]
 pub struct ApplyPatchTool;
+
+/// Build the cached `apply_patch` tool provider.
+pub fn apply_patch_provider() -> StaticToolProvider<ApplyPatchTool> {
+    StaticToolProvider::new(vec![apply_patch_tool_definition()], ApplyPatchTool)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchAction {
@@ -109,16 +115,7 @@ pub struct PatchFileOp {
 }
 
 #[async_trait::async_trait]
-impl ToolProvider for ApplyPatchTool {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![apply_patch_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
-        (name == "apply_patch")
-            .then(|| std::sync::Arc::new(apply_patch_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for ApplyPatchTool {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let input = match require_str(call.args, "input") {
             Ok(value) => value.to_string(),
@@ -144,7 +141,7 @@ fn apply_patch_tool_definition() -> ToolDefinition {
                     serde_json::json!({
                         "input": {
                             "type": "string",
-                            "description": "Patch body in apply_patch format"
+                            "description": "Patch body in the file patch format"
                         },
                         "workdir": {
                             "type": "string",
@@ -156,12 +153,16 @@ fn apply_patch_tool_definition() -> ToolDefinition {
                 serde_json::json!({ "type": "object", "additionalProperties": true }),
             )
             .with_examples(vec![
-                "apply_patch(input=\"*** Begin Patch\\n*** Add File: hello.txt\\n+hello\\n*** End Patch\")"
+                "await files.patch({ input: \"*** Begin Patch\\n*** Add File: hello.txt\\n+hello\\n*** End Patch\" })?"
                     .into(),
-                "apply_patch(input=\"*** Begin Patch\\n*** Update File: src/main.rs\\n@@ fn main() {\\n-    old();\\n+    new();\\n*** End Patch\")"
+                "await files.patch({ input: \"*** Begin Patch\\n*** Update File: src/main.rs\\n@@ fn main() {\\n-    old();\\n+    new();\\n*** End Patch\" })?"
                     .into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["patch", "edit_file"]))
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["files"],
+                "patch",
+                &["patch", "edit_file"],
+            ))
             .with_scheduling(ToolScheduling::Serial)
 }
 
@@ -171,7 +172,7 @@ mod description_tests {
 
     #[test]
     fn apply_patch_description_mentions_avoiding_rereads() {
-        let description = ApplyPatchTool.tool_manifests()[0].description.clone();
+        let description = apply_patch_tool_definition().manifest().description;
         assert!(description.contains("Avoid re-reading a file"));
     }
 }
@@ -240,20 +241,20 @@ pub fn inspect_patch_ops(input: &str, workdir: Option<&str>) -> Result<Vec<Patch
         .map(|hunk| match hunk {
             Hunk::Add { path, .. } => PatchFileOp {
                 action: PatchAction::Add,
-                path: resolve_path(&cwd, &path),
+                path: resolve_under(&cwd, &path),
                 move_path: None,
             },
             Hunk::Delete { path } => PatchFileOp {
                 action: PatchAction::Delete,
-                path: resolve_path(&cwd, &path),
+                path: resolve_under(&cwd, &path),
                 move_path: None,
             },
             Hunk::Update {
                 path, move_path, ..
             } => PatchFileOp {
                 action: PatchAction::Update,
-                path: resolve_path(&cwd, &path),
-                move_path: move_path.as_ref().map(|target| resolve_path(&cwd, target)),
+                path: resolve_under(&cwd, &path),
+                move_path: move_path.as_ref().map(|target| resolve_under(&cwd, target)),
             },
         })
         .collect())
@@ -358,18 +359,14 @@ fn strip_heredoc_wrapper(input: &str) -> Option<String> {
 }
 
 fn resolve_patch_workdir(workdir: Option<&str>) -> Result<PathBuf, String> {
-    let base = match workdir {
-        Some(path) => PathBuf::from(path),
-        None => std::env::current_dir().map_err(|err| format!("Failed to determine cwd: {err}"))?,
-    };
-    let cwd = if base.is_absolute() {
-        base
-    } else {
-        std::env::current_dir()
-            .map_err(|err| format!("Failed to determine cwd: {err}"))?
-            .join(base)
-    };
-    Ok(normalize_path(&cwd))
+    let here = std::env::current_dir().map_err(|err| format!("Failed to determine cwd: {err}"))?;
+    // `resolve_under` already passes absolute paths through (normalized) and
+    // joins relative ones onto `here`, so it covers both branches; an absent
+    // `workdir` is just the cwd itself.
+    Ok(match workdir {
+        Some(path) => resolve_under(&here, Path::new(path)),
+        None => normalize_lexical(&here),
+    })
 }
 
 fn parse_heredoc_start(line: &str) -> Option<&str> {
@@ -670,42 +667,10 @@ fn count_diff_delta(diff: &str) -> (usize, usize) {
     (added, removed)
 }
 
-fn normalize_display_path(cwd: &Path, path: &Path) -> String {
-    let display = path.strip_prefix(cwd).unwrap_or(path).display().to_string();
-    let display = if display.is_empty() {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(".")
-            .to_string()
-    } else {
-        display
-    };
-    display.replace('\\', "/")
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                let popped = normalized.pop();
-                if !popped {
-                    normalized.push(component.as_os_str());
-                }
-            }
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-        }
-    }
-    normalized
-}
-
 fn apply_hunk(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
     match hunk {
         Hunk::Add { path, contents } => {
-            let resolved = resolve_path(cwd, path);
+            let resolved = resolve_under(cwd, path);
             let original_contents = std::fs::read_to_string(&resolved).unwrap_or_default();
             if let Some(parent) = resolved.parent()
                 && !parent.as_os_str().is_empty()
@@ -719,16 +684,16 @@ fn apply_hunk(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
             }
             std::fs::write(&resolved, contents)
                 .map_err(|err| format!("Failed to write {}: {err}", resolved.display()))?;
-            let display_path = normalize_display_path(cwd, &resolved);
+            let display_path = display_relative(cwd, &resolved);
             let diff = compact_diff(&original_contents, contents, &display_path, 120);
             Ok(PreparedChange::Add { display_path, diff })
         }
         Hunk::Delete { path } => {
-            let resolved = resolve_path(cwd, path);
+            let resolved = resolve_under(cwd, path);
             let original = std::fs::read_to_string(&resolved).unwrap_or_default();
             std::fs::remove_file(&resolved)
                 .map_err(|err| format!("Failed to delete {}: {err}", resolved.display()))?;
-            let display_path = normalize_display_path(cwd, &resolved);
+            let display_path = display_relative(cwd, &resolved);
             let diff = compact_diff(&original, "", &display_path, 120);
             Ok(PreparedChange::Delete { display_path, diff })
         }
@@ -737,11 +702,11 @@ fn apply_hunk(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
             move_path,
             chunks,
         } => {
-            let resolved = resolve_path(cwd, path);
+            let resolved = resolve_under(cwd, path);
             let applied = derive_new_contents_from_chunks(&resolved, chunks)?;
             let target = move_path
                 .as_ref()
-                .map(|path| -> Result<PathBuf, String> { Ok(resolve_path(cwd, path)) })
+                .map(|path| -> Result<PathBuf, String> { Ok(resolve_under(cwd, path)) })
                 .transpose()?
                 .unwrap_or_else(|| resolved.clone());
             if let Some(parent) = target.parent()
@@ -761,7 +726,7 @@ fn apply_hunk(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
                     format!("Failed to remove original {}: {err}", resolved.display())
                 })?;
             }
-            let display_path = normalize_display_path(cwd, &target);
+            let display_path = display_relative(cwd, &target);
             let diff = compact_diff(
                 &applied.original_contents,
                 &applied.new_contents,
@@ -770,7 +735,7 @@ fn apply_hunk(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
             );
             if move_path.is_some() {
                 Ok(PreparedChange::Move {
-                    from_display_path: normalize_display_path(cwd, &resolved),
+                    from_display_path: display_relative(cwd, &resolved),
                     display_path,
                     diff,
                 })
@@ -779,15 +744,6 @@ fn apply_hunk(hunk: &Hunk, cwd: &Path) -> Result<PreparedChange, String> {
             }
         }
     }
-}
-
-fn resolve_path(cwd: &Path, path: &Path) -> PathBuf {
-    let resolved = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-    normalize_path(&resolved)
 }
 
 struct AppliedPatch {

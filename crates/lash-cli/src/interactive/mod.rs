@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::Event as TermEvent;
-use lash::{LashSession, TurnEvent, advanced::ExecutionMode, provider::ProviderHandle};
+use lash::{LashSession, ModeId, TurnEvent, provider::ProviderHandle};
 use lash_core::session_model::Message;
 use lash_core::{TokenUsage, ToolState};
 use lash_sqlite_store::Store;
@@ -27,21 +27,19 @@ use crate::resume;
 use crate::session_bootstrap::CliSessionOpener;
 use crate::session_log::{self, SessionLogger};
 use crate::turn_runner::{RuntimeRunResult, make_turn_input};
-use crate::ui_action::UiAction;
 use crate::ui_trace::{
     UiTraceRecorder, disable_aux_op_recording, enable_aux_op_recording, render_screen_text,
 };
 use crate::update;
 use crate::{Args, scratch_tui};
 use crate::{
-    apply_ui_host_effects, controls_text, hash12, help_text, info_text,
-    normalize_prepared_turn_for_dispatch, push_system_message, turn_has_visible_output,
-    version_text,
+    apply_ui_host_effects, controls_text, hash12, help_text, info_text, push_system_message,
+    turn_has_visible_output, version_text,
 };
 
 use self::helpers::{
     TurnReplayPayload, UiSnapshotWorker, cleared_session_state, drain_aux_trace_ops,
-    log_runtime_handoff, record_queue_turn,
+    log_runtime_transition, record_queue_turn,
 };
 
 use self::commands::{dispatch_next_queued_turn, promote_pending_steers_to_queue};
@@ -53,8 +51,7 @@ use self::runtime::{apply_pending_reconfigure, send_user_message, sync_runtime_t
 pub(crate) use self::runtime::{generate_session_name, notify_desktop};
 
 use self::input_handling::{
-    activate_foreground_session_handoff, apply_terminal_action, handle_key_event,
-    handle_mouse_event, handle_surface_input,
+    SessionCtx, dispatch_key_event, handle_mouse_event, handle_surface_input,
 };
 
 // Items used only by tests via `use super::*;` in tests.rs.
@@ -89,7 +86,7 @@ pub(crate) async fn run_app(
     _store: Arc<Store>,
     mut toolset_hash: String,
     initial_model_variant: Option<String>,
-    initial_execution_mode: ExecutionMode,
+    initial_execution_mode: ModeId,
     startup_system_message: Option<String>,
 ) -> anyhow::Result<()> {
     let initial_session_id = session.session_id();
@@ -105,8 +102,8 @@ pub(crate) async fn run_app(
     );
     app.set_ui_extensions(Arc::clone(&ui_extensions));
     app.set_chrome_state(chrome_state);
-    app.context_window = Some(initial_context_window);
-    app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
+    app.usage.context_window = Some(initial_context_window);
+    app.usage.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     let mut current_model_variant = initial_model_variant.or_else(|| {
         crate::provider_metadata::default_model_variant_for_provider(
             provider.kind(),
@@ -329,7 +326,7 @@ pub(crate) async fn run_app(
     });
 
     loop {
-        log_runtime_handoff(
+        log_runtime_transition(
             "loop_top",
             &app,
             &runtime,
@@ -338,13 +335,9 @@ pub(crate) async fn run_app(
             active_stream_id,
         );
 
-        if !app.running
-            && runtime.is_some()
-            && runtime_return_rx.is_none()
-            && app.has_queued_messages()
-        {
+        if !app.running && runtime.is_some() && runtime_return_rx.is_none() {
             tracing::debug!("dispatching queued turn from idle-ready trigger");
-            dispatch_next_queued_turn(
+            if dispatch_next_queued_turn(
                 &mut app,
                 &mut ui_trace,
                 &mut terminal,
@@ -371,8 +364,10 @@ pub(crate) async fn run_app(
                 &app_tx,
                 &mut pending_clear_after_return,
             )
-            .await?;
-            continue;
+            .await?
+            {
+                continue;
+            }
         }
 
         // Check if runtime turn completed — reclaim runtime + updated history
@@ -385,65 +380,6 @@ pub(crate) async fn run_app(
                         active_stream_id,
                         "runtime return received in interactive loop"
                     );
-                    if done.stream_id == active_stream_id
-                        && !pending_clear_after_return
-                        && let lash_core::TurnOutcome::Handoff { session_id } = &done.result.outcome
-                    {
-                        let session_id = session_id.clone();
-                        app.stop_turn();
-                        runtime_return_rx = None;
-                        cancel_token = None;
-                        if activate_foreground_session_handoff(
-                            &mut app,
-                            session_id,
-                            &mut history,
-                            &mut runtime,
-                            &mut turn_counter,
-                            &mut current_execution_mode,
-                            &mut current_model_variant,
-                            ui_extensions.as_ref(),
-                        )
-                        .await
-                        {
-                            if let Err(err) = sync_runtime_tool_surface(&mut runtime).await {
-                                push_system_message(
-                                    &mut app,
-                                    format!(
-                                        "Failed to sync tool surface after session handoff: {err}"
-                                    ),
-                                );
-                            }
-                            dispatch_next_queued_turn(
-                                &mut app,
-                                &mut ui_trace,
-                                &mut terminal,
-                                logger,
-                                args,
-                                &paused,
-                                ui_extensions.as_ref(),
-                                &runtime_factory,
-                                &lash_config,
-                                &mut runtime,
-                                &mut history,
-                                &mut turn_counter,
-                                &mut last_turn,
-                                &mut runtime_return_rx,
-                                &mut cancel_token,
-                                &mut active_stream_id,
-                                &mut provider,
-                                &mut current_model_variant,
-                                &mut current_execution_mode,
-                                &mut desired_tool_state,
-                                &mut pending_reconfigure,
-                                model_catalog.as_ref(),
-                                &mut toolset_hash,
-                                &app_tx,
-                                &mut pending_clear_after_return,
-                            )
-                            .await?;
-                        }
-                        continue;
-                    }
                     if let Err(err) = sync_runtime_tool_surface(&mut runtime).await {
                         push_system_message(
                             &mut app,
@@ -462,7 +398,7 @@ pub(crate) async fn run_app(
                         }
                         history.clear();
                         turn_counter = 0;
-                        app.token_usage = TokenUsage::default();
+                        app.usage.token_usage = TokenUsage::default();
                         app.stop_turn();
                         app.clear_mode_indicators();
                         app.set_model_variant(current_model_variant.clone());
@@ -470,7 +406,7 @@ pub(crate) async fn run_app(
                         cancel_token = None;
                         pending_clear_after_return = false;
                         app.dirty = true;
-                        log_runtime_handoff(
+                        log_runtime_transition(
                             "runtime_return_ignored_or_cleared",
                             &app,
                             &runtime,
@@ -487,7 +423,7 @@ pub(crate) async fn run_app(
                     let no_visible_output = matches!(
                         &done.result.outcome,
                         lash_core::TurnOutcome::Finished(_)
-                            | lash_core::TurnOutcome::Handoff { .. }
+                            | lash_core::TurnOutcome::AgentFrameSwitch { .. }
                     ) && !turn_has_visible_output(&done.result);
                     let state = done.result.state;
                     tracing::info!(
@@ -522,15 +458,15 @@ pub(crate) async fn run_app(
                     let read_view = state.read_view();
                     history = read_view.messages().to_vec();
                     turn_counter = state.turn_index;
-                    app.token_usage = state.token_usage.clone();
-                    app.last_prompt_usage = state.last_prompt_usage.clone();
+                    app.usage.token_usage = state.token_usage.clone();
+                    app.usage.last_prompt_usage = state.last_prompt_usage.clone();
                     tracing::debug!(
                         stream_id = done.stream_id,
                         turn_index = state.turn_index,
                         outcome = ?done.result.outcome,
                         messages = read_view.messages().len(),
                         blocks = app.timeline.len(),
-                        had_live_turn = app.live_turn.is_some(),
+                        had_live_turn = app.live.turn.is_some(),
                         running = app.running,
                         "reconciling completed runtime turn"
                     );
@@ -595,7 +531,7 @@ pub(crate) async fn run_app(
                     app.finish_turn_from_read_view(&read_view);
                     runtime_return_rx = None;
                     cancel_token = None;
-                    log_runtime_handoff(
+                    log_runtime_transition(
                         "runtime_return_completed",
                         &app,
                         &runtime,
@@ -637,7 +573,7 @@ pub(crate) async fn run_app(
                     app.stop_turn();
                     runtime_return_rx = None;
                     cancel_token = None;
-                    log_runtime_handoff(
+                    log_runtime_transition(
                         "runtime_return_channel_closed",
                         &app,
                         &runtime,
@@ -756,11 +692,7 @@ pub(crate) async fn run_app(
                         if let Some(recorder) = ui_trace.as_mut() {
                             recorder.record_prompt_insert_text(text.clone());
                         }
-                        let _ = apply_terminal_action(
-                            &mut app,
-                            &terminal,
-                            UiAction::PromptInsertText(text),
-                        );
+                        app.prompt_insert_text(&text);
                     }
                     // Prompt modal is focused: swallow pastes that don't
                     // belong in its text field instead of leaking them
@@ -782,11 +714,8 @@ pub(crate) async fn run_app(
                 if let Some(recorder) = ui_trace.as_mut() {
                     recorder.record_input_insert_text(text.clone());
                 }
-                let _ = apply_terminal_action(
-                    &mut app,
-                    &terminal,
-                    UiAction::InputInsertPastedText(text),
-                );
+                app.insert_pasted_text(&text);
+                app.update_suggestions();
             }
             AppEvent::ClipboardImageReady { id, png } => {
                 app.dirty = true;
@@ -824,36 +753,34 @@ pub(crate) async fn run_app(
                 }
             }
             AppEvent::Terminal(TermEvent::Key(key)) => {
-                if handle_key_event(
-                    key,
-                    &mut app,
-                    &mut terminal,
-                    &mut ui_trace,
-                    logger,
+                let mut ctx = SessionCtx {
+                    app: &mut app,
+                    terminal: &mut terminal,
+                    ui_trace: &mut ui_trace,
+                    logger: &mut *logger,
                     args,
-                    &paused,
-                    ui_extensions.as_ref(),
-                    &runtime_factory,
-                    &lash_config,
-                    &mut runtime,
-                    &mut history,
-                    &mut turn_counter,
-                    &mut last_turn,
-                    &mut runtime_return_rx,
-                    &mut cancel_token,
-                    &mut active_stream_id,
-                    &mut provider,
-                    &mut current_model_variant,
-                    &mut current_execution_mode,
-                    &mut desired_tool_state,
-                    &mut pending_reconfigure,
-                    model_catalog.as_ref(),
-                    &mut toolset_hash,
-                    &app_tx,
-                    &mut pending_clear_after_return,
-                )
-                .await?
-                {
+                    paused: &paused,
+                    ui_extensions: ui_extensions.as_ref(),
+                    runtime_factory: &runtime_factory,
+                    lash_config: &lash_config,
+                    runtime: &mut runtime,
+                    history: &mut history,
+                    turn_counter: &mut turn_counter,
+                    last_turn: &mut last_turn,
+                    runtime_return_rx: &mut runtime_return_rx,
+                    cancel_token: &mut cancel_token,
+                    active_stream_id: &mut active_stream_id,
+                    provider: &mut provider,
+                    current_model_variant: &mut current_model_variant,
+                    current_execution_mode: &mut current_execution_mode,
+                    desired_tool_state: &mut desired_tool_state,
+                    pending_reconfigure: &mut pending_reconfigure,
+                    model_catalog: model_catalog.as_ref(),
+                    toolset_hash: &mut toolset_hash,
+                    app_tx: &app_tx,
+                    pending_clear_after_return: &mut pending_clear_after_return,
+                };
+                if dispatch_key_event(key, &mut ctx).await? {
                     break;
                 }
             }

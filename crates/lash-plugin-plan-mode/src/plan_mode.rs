@@ -11,30 +11,30 @@ use lash_core::plugin::{
     SessionPlugin, SnapshotReader, SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride,
 };
 use lash_core::{
-    JsonSchema, PluginMessage, SessionCreateRequest, SessionPluginSource, SessionStartPoint,
-    ToolCall, ToolContext, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
+    JsonSchema, PluginMessage, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolResult,
     ToolScheduling,
 };
 use lash_tool_apply_patch::{PatchAction, inspect_patch_ops};
+use lash_tool_support::{StaticToolExecute, StaticToolProvider};
+
+mod prompt;
+mod state;
+
+pub use prompt::{
+    PlanModePrompt, PlanModePromptRequest, PlanModePromptResponse, PlanModePromptReview,
+};
+use prompt::{
+    plan_exit_confirmation_display, plan_exit_fresh_context_input, plan_exit_next_turn_input,
+    plan_mode_guidance_message, plan_mode_tool_note,
+};
+#[cfg(test)]
+use state::PLAN_TEMPLATE;
+use state::{
+    PlanModeSnapshot, PlanModeState, PlanReport, effective_run_session_id, plan_display_path,
+    read_plan_report, resolve_plan_path, seed_plan_template,
+};
 
 const PLAN_MODE_STATE_EVENT: &str = "plan_mode.state";
-const PLAN_TEMPLATE: &str = r#"# Plan
-
-## Goal
-- TBD
-
-## Steps
-- TBD
-
-## Files
-- TBD
-
-## Risks
-- TBD
-
-## Verification
-- TBD
-"#;
 
 fn default_allowed_tools() -> BTreeSet<String> {
     [
@@ -54,123 +54,8 @@ fn default_allowed_tools() -> BTreeSet<String> {
     .collect()
 }
 
-fn plan_display_path(path: &Path) -> String {
-    let display = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| path.strip_prefix(&cwd).ok().map(PathBuf::from))
-        .unwrap_or_else(|| path.to_path_buf());
-    let rendered = display.display().to_string();
-    if rendered.is_empty() {
-        ".".to_string()
-    } else {
-        rendered.replace('\\', "/")
-    }
-}
-
-fn plan_exit_next_turn_input(display: &str, note: Option<&str>) -> String {
-    if let Some(note) = note.filter(|note| !note.trim().is_empty()) {
-        format!(
-            "The user approved the plan. Execute the plan in `{display}` now — start immediately, do not ask for confirmation.\n\nUser note: {note}"
-        )
-    } else {
-        format!(
-            "The user approved the plan. Execute the plan in `{display}` now — start immediately, do not ask for confirmation."
-        )
-    }
-}
-
-fn plan_exit_fresh_context_input(display: &str) -> String {
-    format!("Do a full, faithful implementation of the plan found at: {display}")
-}
-
-fn plan_exit_confirmation_display(selection: &str, note: Option<&str>) -> String {
-    if let Some(note) = note.filter(|note| !note.trim().is_empty()) {
-        format!("{selection}\n\nNote: {note}")
-    } else {
-        selection.to_string()
-    }
-}
-
-fn fresh_context_session_id() -> String {
-    format!("plan-{}", uuid::Uuid::new_v4().simple())
-}
-
-fn resolve_plan_path(run_session_id: &str) -> Result<PathBuf, String> {
-    let cwd = std::env::current_dir().map_err(|err| format!("Failed to determine cwd: {err}"))?;
-    Ok(cwd
-        .join(".lash")
-        .join("plans")
-        .join(format!("{run_session_id}.md")))
-}
-
-fn effective_run_session_id<'a>(
-    session_id: &'a str,
-    policy: &'a lash_core::SessionPolicy,
-) -> &'a str {
-    policy.session_id.as_deref().unwrap_or(session_id)
-}
-
-fn seed_plan_template(path: &Path) -> Result<bool, String> {
-    if path.is_file() {
-        return Ok(false);
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| {
-            format!(
-                "Failed to create plan directory `{}`: {err}",
-                plan_display_path(parent)
-            )
-        })?;
-    }
-    fs::write(path, PLAN_TEMPLATE).map_err(|err| {
-        format!(
-            "Failed to seed plan template `{}`: {err}",
-            plan_display_path(path)
-        )
-    })?;
-    Ok(true)
-}
-
-#[derive(Clone, Debug, Default)]
-struct PlanReport {
-    display_path: String,
-    content: Option<String>,
-}
-
-impl PlanReport {
-    fn preview_content(&self) -> String {
-        format!("Path: `{}`", self.display_path)
-    }
-
-    fn approval_content(&self) -> String {
-        self.content
-            .as_deref()
-            .map(str::trim_end)
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| self.preview_content())
-    }
-}
-
-fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
-    let display_path = plan_display_path(path);
-    if !path.is_file() {
-        return Ok(PlanReport {
-            display_path,
-            ..Default::default()
-        });
-    }
-
-    let content = fs::read_to_string(path).map_err(|err| {
-        format!(
-            "Failed to read plan file `{}`: {err}",
-            plan_display_path(path)
-        )
-    })?;
-    Ok(PlanReport {
-        display_path,
-        content: Some(content),
-    })
+fn fresh_context_frame_id() -> String {
+    format!("plan-frame-{}", uuid::Uuid::new_v4().simple())
 }
 
 fn plan_protocol_state_event(
@@ -186,88 +71,9 @@ fn plan_protocol_state_event(
     })
 }
 
-fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
-    let display = plan_display_path(plan_path);
-    PluginMessage::text(
-        lash_core::MessageRole::System,
-        format!(
-            "Plan mode: use `{display}` as the single source of truth. Read/search/list, web, and `ask(...)` as needed, and update only that file with `apply_patch`. Do not present the plan with snippets, showcases, or prose checklists; the host can surface the file path while planning. When the plan is ready for review, call `plan_exit()`."
-        ),
-    )
-}
-
-fn plan_mode_tool_note(plan_path: Option<&Path>) -> String {
-    match plan_path {
-        Some(path) => format!(
-            "Plan mode tools: read/search/list, web search/fetch, `ask`, `apply_patch` for `{}`, `plan_exit()`. The host can surface the plan file path; full review happens in `plan_exit()`.",
-            plan_display_path(path)
-        ),
-        None => "Plan mode tools: read/search/list, web search/fetch, `ask`, plan-file `apply_patch`, `plan_exit()`. The host can surface the plan file path; full review happens in `plan_exit()`.".to_string(),
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct PlanModePluginConfig {
     pub allowed_tools: BTreeSet<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PlanModePromptRequest {
-    pub question: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub options: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review: Option<PlanModePromptReview>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub allow_note: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PlanModePromptReview {
-    pub title: String,
-    pub markdown: String,
-}
-
-impl PlanModePromptRequest {
-    pub fn single(question: impl Into<String>, options: Vec<String>) -> Self {
-        Self {
-            question: question.into(),
-            options,
-            review: None,
-            allow_note: false,
-        }
-    }
-
-    pub fn with_review(mut self, title: impl Into<String>, markdown: impl Into<String>) -> Self {
-        self.review = Some(PlanModePromptReview {
-            title: title.into(),
-            markdown: markdown.into(),
-        });
-        self
-    }
-
-    pub fn with_optional_note(mut self) -> Self {
-        self.allow_note = !self.options.is_empty();
-        self
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PlanModePromptResponse {
-    Single {
-        selection: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        note: Option<String>,
-    },
-}
-
-#[async_trait::async_trait]
-pub trait PlanModePrompt: Send + Sync {
-    async fn prompt_user(
-        &self,
-        request: PlanModePromptRequest,
-    ) -> Result<PlanModePromptResponse, PluginError>;
 }
 
 impl Default for PlanModePluginConfig {
@@ -288,16 +94,6 @@ impl PlanModePluginConfig {
         self.allowed_tools.insert("plan_exit".to_string());
         self
     }
-}
-
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-struct PlanModeSnapshot {
-    #[serde(default)]
-    enabled: bool,
-    #[serde(default)]
-    generation: u64,
-    #[serde(default)]
-    plan_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -339,85 +135,6 @@ impl PluginAction for PlanModeToggleOp {
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = PlanModeExternalArgs;
     type Output = PlanModeExternalStatus;
-}
-
-#[derive(Debug, Default)]
-struct PlanModeState {
-    enabled: bool,
-    generation: u64,
-    plan_path: Option<PathBuf>,
-    active_turn_applied_generation: Option<u64>,
-}
-
-impl PlanModeState {
-    fn snapshot(&self) -> PlanModeSnapshot {
-        PlanModeSnapshot {
-            enabled: self.enabled,
-            generation: self.generation,
-            plan_path: self
-                .plan_path
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string()),
-        }
-    }
-
-    fn set_enabled(&mut self, enabled: bool) -> PlanModeSnapshot {
-        if self.enabled != enabled {
-            self.enabled = enabled;
-            self.generation = self.generation.wrapping_add(1).max(1);
-            self.active_turn_applied_generation = None;
-        }
-        self.snapshot()
-    }
-
-    fn prepare_turn(&mut self) -> bool {
-        if !self.enabled {
-            return false;
-        }
-        if self.active_turn_applied_generation == Some(self.generation) {
-            return false;
-        }
-        self.active_turn_applied_generation = Some(self.generation);
-        true
-    }
-
-    fn checkpoint_injection_needed(&mut self) -> bool {
-        if !self.enabled || self.active_turn_applied_generation == Some(self.generation) {
-            return false;
-        }
-        self.active_turn_applied_generation = Some(self.generation);
-        true
-    }
-
-    fn finish_turn(&mut self) {}
-
-    fn plan_path(&self) -> Option<PathBuf> {
-        self.plan_path.clone()
-    }
-
-    fn ensure_plan_path_from_state(
-        &mut self,
-        state: &lash_core::SessionStateEnvelope,
-    ) -> Result<PathBuf, PluginError> {
-        if let Some(path) = self.plan_path() {
-            return Ok(path);
-        }
-        let path = resolve_plan_path(effective_run_session_id(&state.session_id, &state.policy))
-            .map_err(PluginError::Session)?;
-        self.plan_path = Some(path.clone());
-        Ok(path)
-    }
-
-    fn set_plan_path(&mut self, path: PathBuf) {
-        self.plan_path = Some(path);
-    }
-
-    fn restore_snapshot(&mut self, snapshot: PlanModeSnapshot) {
-        self.enabled = snapshot.enabled;
-        self.generation = snapshot.generation;
-        self.plan_path = snapshot.plan_path.map(PathBuf::from);
-        self.active_turn_applied_generation = None;
-    }
 }
 
 async fn ensure_plan_path<H>(
@@ -724,16 +441,18 @@ impl PlanModeTools {
     }
 }
 
+fn plan_mode_provider(
+    state: Arc<Mutex<PlanModeState>>,
+    prompt: Option<Arc<dyn PlanModePrompt>>,
+) -> StaticToolProvider<PlanModeTools> {
+    StaticToolProvider::new(
+        vec![plan_exit_tool_definition()],
+        PlanModeTools { state, prompt },
+    )
+}
+
 #[async_trait::async_trait]
-impl ToolProvider for PlanModeTools {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![plan_exit_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "plan_exit").then(|| Arc::new(plan_exit_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for PlanModeTools {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
             "plan_exit" => self.execute_plan_exit(call.context).await,
@@ -806,10 +525,10 @@ impl SessionPlugin for PlanModePlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.tools().provider(Arc::new(PlanModeTools {
-            state: Arc::clone(&self.state),
-            prompt: self.prompt.clone(),
-        }))?;
+        reg.tools().provider(Arc::new(plan_mode_provider(
+            Arc::clone(&self.state),
+            self.prompt.clone(),
+        )))?;
 
         let before_turn_state = Arc::clone(&self.state);
         reg.turn().before(Arc::new(move |ctx| {
@@ -945,33 +664,23 @@ impl SessionPlugin for PlanModePlugin {
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()
                             .to_string();
-                        let seed = PluginMessage::text(
-                            lash_core::MessageRole::User,
-                            plan_exit_fresh_context_input(&plan_path),
-                        );
-                        let session_id = fresh_context_session_id();
-                        directives.push(PluginDirective::CreateSession {
-                            request: Box::new(
-                                SessionCreateRequest::child_inheriting_policy(
-                                    ctx.session_id.clone(),
-                                    SessionStartPoint::Empty,
-                                    lash_core::PluginOptions::default(),
-                                    "plan_execution",
-                                )
-                                .with_session_id(session_id.clone())
-                                .with_plugin_source(SessionPluginSource::CurrentHostFresh)
-                                .with_first_turn_input(seed),
+                        let frame_id = fresh_context_frame_id();
+                        let task = plan_exit_fresh_context_input(&plan_path);
+                        directives.push(PluginDirective::short_circuit(
+                            ToolResult::ok(json!({
+                                "approved": true,
+                                "plan_path": plan_path,
+                                "execution_mode": "fresh_context",
+                                "frame_id": frame_id.clone(),
+                            }))
+                            .with_control(
+                                ToolControl::SwitchAgentFrame {
+                                    frame_id,
+                                    initial_nodes: Vec::new(),
+                                    task: Some(task),
+                                },
                             ),
-                        });
-                        directives.push(PluginDirective::HandoffSession {
-                            session_id: session_id.clone(),
-                        });
-                        directives.push(PluginDirective::short_circuit(ToolResult::ok(json!({
-                            "approved": true,
-                            "plan_path": plan_path,
-                            "execution_mode": "fresh_context",
-                            "session_id": session_id,
-                        }))));
+                        ));
                     }
                     return Ok(directives);
                 }

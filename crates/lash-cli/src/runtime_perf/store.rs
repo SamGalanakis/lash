@@ -5,15 +5,28 @@ use std::sync::{Arc, Mutex};
 use lash::usage::TokenLedgerEntry;
 use lash_core::store;
 use lash_core::{
-    BlobRef, GcReport, GraphCommitDelta, PersistedSessionRead, RuntimeCommit, RuntimeCommitResult,
-    RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnLease,
-    SessionCheckpoint, SessionGraph, SessionHeadMeta, SessionNodeRecord, SessionReadScope,
-    SessionStoreCreateRequest, SessionStoreFactory, StoreError, VacuumReport,
+    BlobRef, DeliveryPolicy, GcReport, GraphCommitDelta, PersistedSessionRead, QueuedWorkBatch,
+    QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary, QueuedWorkItem, RuntimeCommit,
+    RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
+    RuntimeTurnLease, SessionCheckpoint, SessionGraph, SessionHeadMeta, SessionNodeRecord,
+    SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError,
+    VacuumReport, current_epoch_ms,
 };
+
+#[derive(Clone)]
+struct RuntimePerfQueuedBatch {
+    batch: QueuedWorkBatch,
+    claim_id: Option<String>,
+    claim_token: Option<String>,
+    claim_owner_id: Option<String>,
+    claim_fencing_token: u64,
+    claim_expires_at_ms: u64,
+}
 
 #[derive(Default)]
 pub(crate) struct RuntimePerfStore {
     next_blob_id: AtomicU64,
+    queued_work_next_seq: AtomicU64,
     session_head_meta: Mutex<Option<SessionHeadMeta>>,
     session_graph: Mutex<SessionGraph>,
     usage_deltas: Mutex<Vec<TokenLedgerEntry>>,
@@ -21,6 +34,7 @@ pub(crate) struct RuntimePerfStore {
     runtime_turn_leases: Mutex<HashMap<(String, String), RuntimeTurnLease>>,
     runtime_turn_checkpoints: Mutex<HashMap<(String, String), RuntimeTurnCheckpoint>>,
     runtime_effect_journal: Mutex<HashMap<(String, String, String), RuntimeEffectJournalRecord>>,
+    queued_work: Mutex<Vec<RuntimePerfQueuedBatch>>,
 }
 
 impl RuntimePerfStore {
@@ -92,6 +106,8 @@ impl RuntimePersistence for RuntimePerfStore {
             session_id: meta.session_id,
             head_revision: meta.head_revision,
             config: meta.config,
+            agent_frames: meta.agent_frames,
+            current_agent_frame_id: meta.current_agent_frame_id,
             graph,
             checkpoint_ref: meta.checkpoint_ref,
             checkpoint: None,
@@ -123,10 +139,13 @@ impl RuntimePersistence for RuntimePerfStore {
             session_id,
             expected_head_revision,
             config,
+            agent_frames,
+            current_agent_frame_id,
             graph: graph_delta,
             checkpoint,
             usage_deltas,
             completed_turn,
+            completed_queue_claims,
             committed_attachment_ids: _,
         } = commit;
         let mut meta_guard = self
@@ -162,6 +181,30 @@ impl RuntimePersistence for RuntimePerfStore {
                 .expect("lock perf usage deltas")
                 .extend(usage_deltas);
         }
+        for completed in &completed_queue_claims {
+            let mut queued = self.queued_work.lock().expect("lock perf queued work");
+            let matches = queued
+                .iter()
+                .filter(|entry| {
+                    entry.batch.session_id == completed.session_id
+                        && entry.claim_id.as_deref() == Some(completed.claim_id.as_str())
+                        && entry.claim_token.as_deref() == Some(completed.lease_token.as_str())
+                        && completed.batch_ids.contains(&entry.batch.batch_id)
+                })
+                .count();
+            if matches != completed.batch_ids.len() {
+                return Err(StoreError::QueuedWorkClaimExpired {
+                    session_id: completed.session_id.clone(),
+                    claim_id: completed.claim_id.clone(),
+                });
+            }
+            queued.retain(|entry| {
+                !(entry.batch.session_id == completed.session_id
+                    && entry.claim_id.as_deref() == Some(completed.claim_id.as_str())
+                    && entry.claim_token.as_deref() == Some(completed.lease_token.as_str())
+                    && completed.batch_ids.contains(&entry.batch.batch_id))
+            });
+        }
         let next_checkpoint_blob_ref = |kind: &str| {
             let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
             BlobRef(format!("perf-{kind}-{id}"))
@@ -194,6 +237,8 @@ impl RuntimePersistence for RuntimePerfStore {
             session_id,
             head_revision,
             config,
+            agent_frames,
+            current_agent_frame_id,
             checkpoint_ref: Some(checkpoint_ref.clone()),
             leaf_node_id,
             graph_node_count,
@@ -229,6 +274,184 @@ impl RuntimePersistence for RuntimePerfStore {
             checkpoint_ref,
             manifest,
         })
+    }
+
+    async fn enqueue_queued_work(
+        &self,
+        batch: QueuedWorkBatchDraft,
+    ) -> Result<QueuedWorkBatch, StoreError> {
+        let mut queued = self.queued_work.lock().expect("lock perf queued work");
+        if let Some(source_key) = batch.source_key.as_deref()
+            && let Some(existing) = queued.iter().find(|entry| {
+                entry.batch.session_id == batch.session_id
+                    && entry.batch.source_key.as_deref() == Some(source_key)
+            })
+        {
+            return Ok(existing.batch.clone());
+        }
+        let enqueue_seq = self.queued_work_next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let batch_id = format!("perf-qwb-{enqueue_seq}");
+        let items = batch
+            .payloads
+            .into_iter()
+            .enumerate()
+            .map(|(index, payload)| QueuedWorkItem {
+                item_id: format!("{batch_id}:item:{index}"),
+                payload,
+            })
+            .collect();
+        let stored = QueuedWorkBatch {
+            batch_id,
+            session_id: batch.session_id,
+            enqueue_seq,
+            source_key: batch.source_key,
+            delivery_policy: batch.delivery_policy,
+            slot_policy: batch.slot_policy,
+            merge_key: batch.merge_key,
+            available_at_ms: batch.available_at_ms,
+            enqueued_at_ms: current_epoch_ms(),
+            items,
+        };
+        queued.push(RuntimePerfQueuedBatch {
+            batch: stored.clone(),
+            claim_id: None,
+            claim_token: None,
+            claim_owner_id: None,
+            claim_fencing_token: 0,
+            claim_expires_at_ms: 0,
+        });
+        queued.sort_by_key(|entry| entry.batch.enqueue_seq);
+        Ok(stored)
+    }
+
+    async fn claim_ready_queued_work(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        boundary: QueuedWorkClaimBoundary,
+        lease_ttl_ms: u64,
+        max_batches: usize,
+    ) -> Result<Option<QueuedWorkClaim>, StoreError> {
+        if max_batches == 0 {
+            return Ok(None);
+        }
+        let now = current_epoch_ms();
+        let mut queued = self.queued_work.lock().expect("lock perf queued work");
+        queued.sort_by_key(|entry| entry.batch.enqueue_seq);
+        let first_index = queued.iter().position(|entry| {
+            entry.batch.session_id == session_id
+                && entry.batch.available_at_ms <= now
+                && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
+        });
+        let Some(first_index) = first_index else {
+            return Ok(None);
+        };
+        let first = queued[first_index].batch.clone();
+        if boundary == QueuedWorkClaimBoundary::ActiveTurnCheckpoint
+            && first.delivery_policy != DeliveryPolicy::EarliestSafeBoundary
+        {
+            return Ok(None);
+        }
+        let mut indices = vec![first_index];
+        if first.slot_policy == SlotPolicy::Join {
+            for (index, entry) in queued.iter().enumerate().skip(first_index + 1) {
+                if indices.len() >= max_batches {
+                    break;
+                }
+                if entry.batch.session_id != session_id
+                    || entry.batch.available_at_ms > now
+                    || (entry.claim_token.is_some() && entry.claim_expires_at_ms > now)
+                    || entry.batch.slot_policy != SlotPolicy::Join
+                    || entry.batch.delivery_policy != first.delivery_policy
+                    || entry.batch.merge_key != first.merge_key
+                {
+                    break;
+                }
+                indices.push(index);
+            }
+        }
+        let fencing_token = queued[first_index].claim_fencing_token.saturating_add(1);
+        let claim_id = format!("perf-qwc:{}:{fencing_token}", first.enqueue_seq);
+        let lease_token = format!("{session_id}:{owner_id}:{claim_id}:{now}");
+        let expires_at = now.saturating_add(lease_ttl_ms);
+        let mut batches = Vec::new();
+        for index in indices {
+            let entry = &mut queued[index];
+            entry.claim_id = Some(claim_id.clone());
+            entry.claim_token = Some(lease_token.clone());
+            entry.claim_owner_id = Some(owner_id.to_string());
+            entry.claim_fencing_token = entry.claim_fencing_token.saturating_add(1);
+            entry.claim_expires_at_ms = expires_at;
+            batches.push(entry.batch.clone());
+        }
+        Ok(Some(QueuedWorkClaim {
+            session_id: session_id.to_string(),
+            claim_id,
+            owner_id: owner_id.to_string(),
+            lease_token,
+            fencing_token,
+            claimed_at_epoch_ms: now,
+            expires_at_epoch_ms: expires_at,
+            batches,
+        }))
+    }
+
+    async fn renew_queued_work_claim(
+        &self,
+        claim: &QueuedWorkClaim,
+        lease_ttl_ms: u64,
+    ) -> Result<QueuedWorkClaim, StoreError> {
+        let mut queued = self.queued_work.lock().expect("lock perf queued work");
+        let expires_at = current_epoch_ms().saturating_add(lease_ttl_ms);
+        let mut changed = 0;
+        for entry in queued.iter_mut() {
+            if entry.batch.session_id == claim.session_id
+                && entry.claim_id.as_deref() == Some(claim.claim_id.as_str())
+                && entry.claim_token.as_deref() == Some(claim.lease_token.as_str())
+            {
+                entry.claim_expires_at_ms = expires_at;
+                changed += 1;
+            }
+        }
+        if changed != claim.batches.len() {
+            return Err(StoreError::QueuedWorkClaimExpired {
+                session_id: claim.session_id.clone(),
+                claim_id: claim.claim_id.clone(),
+            });
+        }
+        Ok(QueuedWorkClaim {
+            expires_at_epoch_ms: expires_at,
+            ..claim.clone()
+        })
+    }
+
+    async fn abandon_queued_work_claim(&self, claim: &QueuedWorkClaim) -> Result<(), StoreError> {
+        let mut queued = self.queued_work.lock().expect("lock perf queued work");
+        for entry in queued.iter_mut() {
+            if entry.batch.session_id == claim.session_id
+                && entry.claim_id.as_deref() == Some(claim.claim_id.as_str())
+                && entry.claim_token.as_deref() == Some(claim.lease_token.as_str())
+            {
+                entry.claim_id = None;
+                entry.claim_token = None;
+                entry.claim_owner_id = None;
+                entry.claim_expires_at_ms = 0;
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_queued_work(&self, session_id: &str) -> Result<Vec<QueuedWorkBatch>, StoreError> {
+        let mut batches = self
+            .queued_work
+            .lock()
+            .expect("lock perf queued work")
+            .iter()
+            .filter(|entry| entry.batch.session_id == session_id)
+            .map(|entry| entry.batch.clone())
+            .collect::<Vec<_>>();
+        batches.sort_by_key(|batch| batch.enqueue_seq);
+        Ok(batches)
     }
 
     async fn claim_runtime_turn_lease(
@@ -354,7 +577,7 @@ impl RuntimePersistence for RuntimePerfStore {
                 (
                     record.session_id.clone(),
                     record.turn_id.clone(),
-                    record.idempotency_key.clone(),
+                    record.replay_key.clone(),
                 ),
                 record,
             );
@@ -365,7 +588,7 @@ impl RuntimePersistence for RuntimePerfStore {
         &self,
         session_id: &str,
         turn_id: &str,
-        idempotency_key: &str,
+        replay_key: &str,
     ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError> {
         Ok(self
             .runtime_effect_journal
@@ -374,7 +597,7 @@ impl RuntimePersistence for RuntimePerfStore {
             .get(&(
                 session_id.to_string(),
                 turn_id.to_string(),
-                idempotency_key.to_string(),
+                replay_key.to_string(),
             ))
             .cloned())
     }

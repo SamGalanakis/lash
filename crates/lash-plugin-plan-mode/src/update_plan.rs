@@ -25,10 +25,8 @@ use lash_core::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     SessionPlugin,
 };
-use lash_core::{
-    PromptContribution, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
-    ToolResult, ToolScheduling,
-};
+use lash_core::{PromptContribution, ToolCall, ToolDefinition, ToolResult, ToolScheduling};
+use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 
 const PLUGIN_ID: &str = "update_plan";
 const UPDATE_PLAN_SNAPSHOT_EVENT: &str = "update_plan.snapshot";
@@ -90,16 +88,15 @@ struct UpdatePlanTool {
     state: Arc<Mutex<PlanState>>,
 }
 
+fn update_plan_provider(state: Arc<Mutex<PlanState>>) -> StaticToolProvider<UpdatePlanTool> {
+    StaticToolProvider::new(
+        vec![update_plan_tool_definition()],
+        UpdatePlanTool { state },
+    )
+}
+
 #[async_trait::async_trait]
-impl ToolProvider for UpdatePlanTool {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![update_plan_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "update_plan").then(|| Arc::new(update_plan_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for UpdatePlanTool {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
             "update_plan" => execute_update_plan(&self.state, call.args),
@@ -272,9 +269,8 @@ impl SessionPlugin for UpdatePlanPlugin {
         reg.prompt().contribute(Arc::new(|_ctx| {
             Box::pin(async move { Ok(planning_prompt_contributions()) })
         }));
-        reg.tools().provider(Arc::new(UpdatePlanTool {
-            state: Arc::clone(&self.state),
-        }))?;
+        reg.tools()
+            .provider(Arc::new(update_plan_provider(Arc::clone(&self.state))))?;
         let after_state = Arc::clone(&self.state);
         reg.tool_calls().after(Arc::new(move |ctx| {
             let state = Arc::clone(&after_state);
@@ -318,9 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn validates_shape() {
-        let tool = UpdatePlanTool {
-            state: Arc::new(Mutex::new(PlanState::default())),
-        };
+        let tool = update_plan_provider(Arc::new(Mutex::new(PlanState::default())));
         let result = lash_core::testing::run_tool(
             &tool,
             "update_plan",
@@ -332,9 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_multiple_in_progress_steps() {
-        let tool = UpdatePlanTool {
-            state: Arc::new(Mutex::new(PlanState::default())),
-        };
+        let tool = update_plan_provider(Arc::new(Mutex::new(PlanState::default())));
         let result = lash_core::testing::run_tool(
             &tool,
             "update_plan",
@@ -352,9 +344,7 @@ mod tests {
     #[tokio::test]
     async fn bumps_generation_on_success() {
         let state = Arc::new(Mutex::new(PlanState::default()));
-        let tool = UpdatePlanTool {
-            state: Arc::clone(&state),
-        };
+        let tool = update_plan_provider(Arc::clone(&state));
         assert_eq!(state.lock().unwrap().generation, 0);
         let result = lash_core::testing::run_tool(
             &tool,

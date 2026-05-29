@@ -92,7 +92,7 @@ pub(crate) fn run_activity_projection_once(workload: UiPerfWorkload) -> UiPerfRu
     result
 }
 
-fn build_projection_read_view(turn_count: usize) -> SessionReadView {
+pub(crate) fn build_projection_read_view(turn_count: usize) -> SessionReadView {
     let mut graph = lash_core::SessionGraph::default();
     let mut tool_calls = Vec::new();
 
@@ -140,7 +140,7 @@ fn build_projection_read_view(turn_count: usize) -> SessionReadView {
                         reasoning: format!(
                             "Check runtime state {turn}.\n\n```lashlang\nsubmit \"ok\"\n```"
                         ),
-                        code: "now = await TOOL.default.exec_command({ cmd: \"date -u\" })?\nprint now"
+                        code: "now = await shell.exec({ cmd: \"date -u\" })?\nprint now"
                             .to_string(),
                         output: vec!["time".to_string()],
                         tool_call_ids: vec![call_id],

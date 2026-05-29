@@ -26,10 +26,15 @@ pub enum StoreError {
     },
     #[error("runtime turn lease for `{session_id}`/`{turn_id}` is missing or expired")]
     RuntimeTurnLeaseExpired { session_id: String, turn_id: String },
-    #[error("runtime effect journal hash mismatch for idempotency key `{idempotency_key}`")]
-    RuntimeEffectJournalHashMismatch { idempotency_key: String },
+    #[error("runtime effect journal hash mismatch for replay key `{replay_key}`")]
+    RuntimeEffectJournalHashMismatch { replay_key: String },
     #[error("runtime turn checkpoint hash mismatch for `{session_id}`/`{turn_id}`")]
     RuntimeTurnCheckpointHashMismatch { session_id: String, turn_id: String },
+    #[error("queued work claim `{claim_id}` for session `{session_id}` is missing or expired")]
+    QueuedWorkClaimExpired {
+        session_id: String,
+        claim_id: String,
+    },
     #[error(
         "{record_kind} schema_version {actual} is not supported by this binary (expected {expected})"
     )]
@@ -145,6 +150,10 @@ pub struct SessionHead {
     pub session_id: String,
     #[serde(default)]
     pub head_revision: u64,
+    #[serde(default)]
+    pub agent_frames: Vec<crate::AgentFrameRecord>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub current_agent_frame_id: crate::AgentFrameId,
     pub graph: crate::SessionGraph,
     pub config: crate::PersistedSessionConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,6 +169,10 @@ pub struct SessionHeadMeta {
     #[serde(default)]
     pub head_revision: u64,
     pub config: crate::PersistedSessionConfig,
+    #[serde(default)]
+    pub agent_frames: Vec<crate::AgentFrameRecord>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub current_agent_frame_id: crate::AgentFrameId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_ref: Option<BlobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,6 +203,8 @@ pub struct PersistedSessionRead {
     pub session_id: String,
     pub head_revision: u64,
     pub config: crate::PersistedSessionConfig,
+    pub agent_frames: Vec<crate::AgentFrameRecord>,
+    pub current_agent_frame_id: crate::AgentFrameId,
     pub graph: crate::SessionGraph,
     pub checkpoint_ref: Option<BlobRef>,
     pub checkpoint: Option<HydratedSessionCheckpoint>,
@@ -224,10 +239,13 @@ pub struct RuntimeCommit {
     pub session_id: String,
     pub expected_head_revision: Option<u64>,
     pub config: crate::PersistedSessionConfig,
+    pub agent_frames: Vec<crate::AgentFrameRecord>,
+    pub current_agent_frame_id: crate::AgentFrameId,
     pub graph: GraphCommitDelta,
     pub checkpoint: HydratedSessionCheckpoint,
     pub usage_deltas: Vec<crate::TokenLedgerEntry>,
     pub completed_turn: Option<RuntimeTurnCompletion>,
+    pub completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     /// Attachment ids whose bytes are referenced by this commit and
     /// should be stamped `committed` in the write-ahead manifest as
     /// part of the same SQL transaction. The backend marks each id
@@ -366,6 +384,129 @@ macro_rules! impl_noop_attachment_manifest {
     };
 }
 
+#[macro_export]
+macro_rules! impl_unsupported_queued_work_methods {
+    () => {
+        fn enqueue_queued_work<'life0, 'async_trait>(
+            &'life0 self,
+            _batch: $crate::QueuedWorkBatchDraft,
+        ) -> ::core::pin::Pin<
+            Box<
+                dyn ::core::future::Future<
+                        Output = ::std::result::Result<$crate::QueuedWorkBatch, $crate::StoreError>,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                Err($crate::StoreError::Backend(
+                    "queued work is not supported by this test store".to_string(),
+                ))
+            })
+        }
+
+        fn claim_ready_queued_work<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            session_id: &'life1 str,
+            _owner_id: &'life2 str,
+            _boundary: $crate::QueuedWorkClaimBoundary,
+            _lease_ttl_ms: u64,
+            _max_batches: usize,
+        ) -> ::core::pin::Pin<
+            Box<
+                dyn ::core::future::Future<
+                        Output = ::std::result::Result<
+                            Option<$crate::QueuedWorkClaim>,
+                            $crate::StoreError,
+                        >,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                Err($crate::StoreError::Backend(format!(
+                    "queued work is not supported for session `{session_id}` by this test store"
+                )))
+            })
+        }
+
+        fn renew_queued_work_claim<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            claim: &'life1 $crate::QueuedWorkClaim,
+            _lease_ttl_ms: u64,
+        ) -> ::core::pin::Pin<
+            Box<
+                dyn ::core::future::Future<
+                        Output = ::std::result::Result<$crate::QueuedWorkClaim, $crate::StoreError>,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                Err($crate::StoreError::QueuedWorkClaimExpired {
+                    session_id: claim.session_id.clone(),
+                    claim_id: claim.claim_id.clone(),
+                })
+            })
+        }
+
+        fn abandon_queued_work_claim<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            _claim: &'life1 $crate::QueuedWorkClaim,
+        ) -> ::core::pin::Pin<
+            Box<
+                dyn ::core::future::Future<Output = ::std::result::Result<(), $crate::StoreError>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn list_queued_work<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            _session_id: &'life1 str,
+        ) -> ::core::pin::Pin<
+            Box<
+                dyn ::core::future::Future<
+                        Output = ::std::result::Result<
+                            Vec<$crate::QueuedWorkBatch>,
+                            $crate::StoreError,
+                        >,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+    };
+}
+
 /// Wire-format version stamped on every persisted [`RuntimeTurnCheckpoint`].
 ///
 /// Bump when the on-wire shape of `RuntimeTurnCheckpoint` changes in a way that
@@ -413,7 +554,7 @@ pub struct RuntimeTurnMachineConfigSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
     pub sync_execution_surface: bool,
-    pub tool_specs: Vec<crate::llm::types::LlmToolSpec>,
+    pub tool_specs: std::sync::Arc<Vec<crate::llm::types::LlmToolSpec>>,
     pub system_prompt: String,
     pub termination: crate::ProtocolTurnOptions,
 }
@@ -483,7 +624,7 @@ pub struct RuntimeEffectJournalRecord {
     pub schema_version: u32,
     pub session_id: String,
     pub turn_id: String,
-    pub idempotency_key: String,
+    pub replay_key: String,
     pub envelope_hash: String,
     pub effect_kind: crate::RuntimeEffectKind,
     pub outcome: crate::RuntimeEffectOutcome,
@@ -530,6 +671,8 @@ impl RuntimeCommit {
             session_id: state.session_id.clone(),
             expected_head_revision: state.head_revision,
             config: persisted_session_config_from_state(state),
+            agent_frames: state.agent_frames.clone(),
+            current_agent_frame_id: state.current_agent_frame_id.clone(),
             graph: if state.graph_replace_required || state.head_revision.is_none() {
                 GraphCommitDelta::ReplaceFull(state.session_graph.clone())
             } else {
@@ -540,6 +683,7 @@ impl RuntimeCommit {
             checkpoint: build_checkpoint_from_persisted_state(state),
             usage_deltas: usage_deltas.to_vec(),
             completed_turn: None,
+            completed_queue_claims: Vec::new(),
             committed_attachment_ids: Vec::new(),
         }
     }
@@ -553,16 +697,35 @@ impl RuntimeCommit {
             session_id: state.session_id.clone(),
             expected_head_revision: state.head_revision,
             config: persisted_session_config_from_state(state),
+            agent_frames: state.agent_frames.clone(),
+            current_agent_frame_id: state.current_agent_frame_id.clone(),
             graph,
             checkpoint: build_checkpoint_from_persisted_state(state),
             usage_deltas: usage_deltas.to_vec(),
             completed_turn: None,
+            completed_queue_claims: Vec::new(),
             committed_attachment_ids: Vec::new(),
         }
     }
 
     pub fn clearing_completed_turn(mut self, completed_turn: RuntimeTurnCompletion) -> Self {
         self.completed_turn = Some(completed_turn);
+        self
+    }
+
+    pub fn completing_queue_claim(
+        mut self,
+        completed_queue_claim: crate::QueuedWorkCompletion,
+    ) -> Self {
+        self.completed_queue_claims.push(completed_queue_claim);
+        self
+    }
+
+    pub fn completing_queue_claims(
+        mut self,
+        completed_queue_claims: impl IntoIterator<Item = crate::QueuedWorkCompletion>,
+    ) -> Self {
+        self.completed_queue_claims.extend(completed_queue_claims);
         self
     }
 
@@ -582,6 +745,8 @@ fn persisted_session_state_from_head(
     let mut state = crate::RuntimeSessionState {
         session_id: head.session_id,
         policy: crate::SessionPolicy::default(),
+        agent_frames: head.agent_frames,
+        current_agent_frame_id: head.current_agent_frame_id,
         session_graph: head.graph,
         turn_index: 0,
         token_usage: crate::TokenUsage::default(),
@@ -618,6 +783,7 @@ fn persisted_session_state_from_head(
         state.execution_state_ref = checkpoint.execution_state_ref.clone();
         state.execution_state_snapshot = checkpoint.execution_state;
     }
+    state.ensure_agent_frame_initialized();
     state
 }
 
@@ -626,6 +792,8 @@ impl Default for SessionHead {
         Self {
             session_id: default_root_session_id(),
             head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
             graph: crate::SessionGraph::default(),
             config: crate::PersistedSessionConfig::default(),
             checkpoint_ref: None,
@@ -640,6 +808,8 @@ impl Default for SessionHeadMeta {
             session_id: default_root_session_id(),
             head_revision: 0,
             config: crate::PersistedSessionConfig::default(),
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
             checkpoint_ref: None,
             leaf_node_id: None,
             graph_node_count: 0,
@@ -679,6 +849,36 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError>;
 
+    async fn enqueue_queued_work(
+        &self,
+        batch: crate::QueuedWorkBatchDraft,
+    ) -> Result<crate::QueuedWorkBatch, StoreError>;
+
+    async fn claim_ready_queued_work(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        boundary: crate::QueuedWorkClaimBoundary,
+        lease_ttl_ms: u64,
+        max_batches: usize,
+    ) -> Result<Option<crate::QueuedWorkClaim>, StoreError>;
+
+    async fn renew_queued_work_claim(
+        &self,
+        claim: &crate::QueuedWorkClaim,
+        lease_ttl_ms: u64,
+    ) -> Result<crate::QueuedWorkClaim, StoreError>;
+
+    async fn abandon_queued_work_claim(
+        &self,
+        claim: &crate::QueuedWorkClaim,
+    ) -> Result<(), StoreError>;
+
+    async fn list_queued_work(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::QueuedWorkBatch>, StoreError>;
+
     async fn claim_runtime_turn_lease(
         &self,
         session_id: &str,
@@ -717,7 +917,7 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         &self,
         session_id: &str,
         turn_id: &str,
-        idempotency_key: &str,
+        replay_key: &str,
     ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError>;
 
     async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError>;
@@ -733,6 +933,8 @@ fn persisted_session_state_from_read(read: PersistedSessionRead) -> crate::Runti
         SessionHead {
             session_id: read.session_id,
             head_revision: read.head_revision,
+            agent_frames: read.agent_frames,
+            current_agent_frame_id: read.current_agent_frame_id,
             graph: read.graph,
             config: read.config,
             checkpoint_ref: read.checkpoint_ref,

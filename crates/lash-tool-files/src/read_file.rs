@@ -1,67 +1,21 @@
 use serde_json::json;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::Arc;
 
-use lash_core::plugin::{
-    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
-};
-use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
-    ToolRetryPolicy, ToolScheduling,
-};
+use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
 
-use lash_tool_support::{object_schema, parse_optional_usize_arg, require_str, run_blocking_value};
+use lash_tool_support::{
+    StaticToolExecute, StaticToolProvider, object_schema, parse_optional_usize_arg, require_str,
+    run_blocking_value,
+};
 
 /// Read files with line-number-prefixed output. Supports images natively.
 #[derive(Default)]
 pub struct ReadFile;
 
-pub struct ReadFilePluginFactory;
-
-struct ReadFilePlugin {
-    provider: Arc<ReadFile>,
-}
-
-impl ReadFile {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl ReadFilePluginFactory {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for ReadFilePluginFactory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PluginFactory for ReadFilePluginFactory {
-    fn id(&self) -> &'static str {
-        "read_file"
-    }
-
-    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(ReadFilePlugin {
-            provider: Arc::new(ReadFile::new()),
-        }))
-    }
-}
-
-impl SessionPlugin for ReadFilePlugin {
-    fn id(&self) -> &'static str {
-        "read_file"
-    }
-
-    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.tools()
-            .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)
-    }
+/// Build the cached `read_file` tool provider.
+pub fn read_file_provider() -> StaticToolProvider<ReadFile> {
+    StaticToolProvider::new(vec![read_file_tool_definition()], ReadFile)
 }
 
 const DEFAULT_LIMIT: usize = 2000;
@@ -96,15 +50,7 @@ impl ReadFileBlockingResult {
 }
 
 #[async_trait::async_trait]
-impl ToolProvider for ReadFile {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![read_file_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "read_file").then(|| Arc::new(read_file_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for ReadFile {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let args = call.args;
         let path_str = match require_str(args, "path") {
@@ -156,10 +102,14 @@ fn read_file_tool_definition() -> ToolDefinition {
                 serde_json::json!({ "type": "string" }),
             )
             .with_examples(vec![
-                r#"read_file(path="Cargo.toml")"#.into(),
-                r#"read_file(path="src/main.rs", offset=1, limit=120)"#.into(),
+                r#"await files.read({ path: "Cargo.toml" })?"#.into(),
+                r#"await files.read({ path: "src/main.rs", offset: 1, limit: 120 })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["cat", "view_file"]))
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["files"],
+                "read",
+                &["cat", "view_file"],
+            ))
             .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
@@ -209,7 +159,7 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ReadFi
     // Binary detection
     if is_likely_binary(path) {
         return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
-            "Binary file detected: {path_str}. Use `read_image` for images, or `exec_command` for binary inspection."
+            "Binary file detected: {path_str}. Use image-aware reads for images, or `shell.exec` for binary inspection."
         )));
     }
 
@@ -591,6 +541,8 @@ fn truncate_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use lash_core::AttachmentStore;
     use serde_json::json;
     use tempfile::TempDir;
@@ -601,7 +553,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3").unwrap();
         let result = lash_core::testing::run_tool(
-            &ReadFile,
+            &read_file_provider(),
             "read_file",
             &json!({"path": path.to_str().unwrap()}),
         )
@@ -621,7 +573,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3\nline4\nline5").unwrap();
         let result = lash_core::testing::run_tool(
-            &ReadFile,
+            &read_file_provider(),
             "read_file",
             &json!({"path": path.to_str().unwrap(), "offset": 2, "limit": 2}),
         )
@@ -647,7 +599,7 @@ mod tests {
             .join("\n");
         std::fs::write(&path, content).unwrap();
         let result = lash_core::testing::run_tool(
-            &ReadFile,
+            &read_file_provider(),
             "read_file",
             &json!({"path": path.to_str().unwrap(), "limit": 200}),
         )
@@ -662,7 +614,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_nonexistent() {
         let result = lash_core::testing::run_tool(
-            &ReadFile,
+            &read_file_provider(),
             "read_file",
             &json!({"path": "/nonexistent/path/to/file.txt"}),
         )

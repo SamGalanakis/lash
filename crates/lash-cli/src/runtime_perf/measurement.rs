@@ -24,11 +24,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::perf_support::memory::{ProcessMemorySample, diff_opt_i64, process_memory_sample};
 use crate::perf_support::metrics::BasicMetricSummary as RuntimePerfMetricSummary;
+use crate::perf_support::tempdir::make_temp_bench_dir;
 use crate::perf_support::time::{elapsed_ms, round3};
 
 use super::harness::{
-    benchmark_prompt, build_embed_core, build_runtime, prepare_turn, rlm_perf_projected_bindings,
-    seed_runtime_state, validate_runtime_perf_turn,
+    benchmark_prompt, build_embed_core, build_runtime, build_runtime_with_sqlite_store,
+    prepare_turn, rlm_perf_projected_bindings, seed_runtime_state, validate_runtime_perf_turn,
 };
 use super::scenarios::RuntimePerfScenario;
 use super::store::RuntimePerfStore;
@@ -308,7 +309,16 @@ pub(crate) async fn run_once(
 
     let build_before_alloc = allocator_stats();
     let build_started = Instant::now();
-    let mut runtime = build_runtime(scenario).await?;
+    let sqlite_root = if matches!(scenario, RuntimePerfScenario::SqliteStoreReopen) {
+        Some(make_temp_bench_dir("lash-runtime-perf-sqlite-store")?)
+    } else {
+        None
+    };
+    let mut runtime = if let Some(root) = sqlite_root.as_ref() {
+        build_runtime_with_sqlite_store(scenario, root.clone()).await?
+    } else {
+        build_runtime(scenario).await?
+    };
     let build_runtime_ms = elapsed_ms(build_started);
     let build_runtime_alloc = alloc_delta(build_before_alloc, allocator_stats());
     let after_build_memory = process_memory_sample();
@@ -373,6 +383,23 @@ pub(crate) async fn run_once(
                     allocations: alloc_delta(hydrate_before_alloc, allocator_stats()),
                     rss_growth_kb: diff_opt_i64(
                         hydrate_before_memory.rss_kb,
+                        process_memory_sample().rss_kb,
+                    ),
+                },
+            );
+        }
+        if matches!(scenario, RuntimePerfScenario::SqliteStoreReopen) && turn_index > 0 {
+            let reopen_before_alloc = allocator_stats();
+            let reopen_before_memory = process_memory_sample();
+            let reopen_started = Instant::now();
+            runtime.reopen_session(scenario).await?;
+            extra_phase_profile.insert(
+                "sqlite_store_reopen.runtime_reopen".to_string(),
+                RuntimePerfPhaseRunResult {
+                    duration_ms: elapsed_ms(reopen_started),
+                    allocations: alloc_delta(reopen_before_alloc, allocator_stats()),
+                    rss_growth_kb: diff_opt_i64(
+                        reopen_before_memory.rss_kb,
                         process_memory_sample().rss_kb,
                     ),
                 },
@@ -502,6 +529,10 @@ pub(crate) async fn run_once(
     let after_export_memory = process_memory_sample();
     let total_alloc = alloc_delta(total_before_alloc, allocator_stats());
     let last_turn_memory = turns.last().map(|turn| &turn.memory);
+    if let Some(root) = sqlite_root {
+        runtime.close().await?;
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     Ok(RuntimePerfRunResult {
         scenario: scenario.name().to_string(),
@@ -1049,15 +1080,15 @@ fn completed_checkpoint_tool(index: usize, call: PendingToolCall) -> CompletedTo
 
 fn checkpoint_exec_code(protocol_iteration: usize) -> String {
     format!(
-        r#"process benchmark_echo_process(tool: TOOL, value: str, ordinal: int) {{
+        r#"process benchmark_echo_process(tool: Tools, value: str, ordinal: int) {{
   result = await tool.benchmark_echo({{ value: value, ordinal: ordinal }})?
   finish result
 }}
 
 print("checkpoint turn {protocol_iteration}")
-first = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 1)
-second = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 2)
-third = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 3)
+first = start benchmark_echo_process(tool: tools, value: "runtime perf benchmark ok", ordinal: 1)
+second = start benchmark_echo_process(tool: tools, value: "runtime perf benchmark ok", ordinal: 2)
+third = start benchmark_echo_process(tool: tools, value: "runtime perf benchmark ok", ordinal: 3)
 fanout = await {{
   a: first,
   b: second,
@@ -1136,7 +1167,7 @@ pub(crate) async fn run_once_embed(
     let core = build_embed_core(scenario, Arc::clone(&store))?;
     let session = core
         .session(format!("runtime-perf-{}", scenario.name()))
-        .mode(lash::ModeId::new(scenario.execution_mode().as_str()))
+        .mode(scenario.execution_mode())
         .open()
         .await
         .with_context(|| format!("open embed session for {}", scenario.name()))?;
@@ -1168,6 +1199,7 @@ pub(crate) async fn run_once_embed(
                         scenario, turn_index,
                     )))
                     .cancel(cancel)
+                    .advanced()
                     .collect_session_events_with(&lash::advanced::NoopEventSink)
                     .await
                     .map_err(anyhow::Error::from)

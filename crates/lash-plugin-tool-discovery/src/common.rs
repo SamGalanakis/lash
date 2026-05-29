@@ -33,9 +33,9 @@ pub(crate) fn args_with_limit(args: &Value, limit: usize) -> Value {
     Value::Object(args)
 }
 
-pub(crate) fn namespace_filter(value: Option<&Value>) -> Vec<String> {
+pub(crate) fn module_filter(value: Option<&Value>) -> Vec<String> {
     match value {
-        Some(Value::String(namespace)) => namespace
+        Some(Value::String(module)) => module
             .split(',')
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -93,7 +93,40 @@ pub(crate) fn catalog_key(catalog: &[Value]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     catalog.len().hash(&mut hasher);
     for value in catalog {
-        value.to_string().hash(&mut hasher);
+        hash_json_value(value, &mut hasher);
     }
     hasher.finish()
+}
+
+fn hash_json_value(value: &Value, state: &mut impl Hasher) {
+    match value {
+        Value::Null => 0_u8.hash(state),
+        Value::Bool(value) => {
+            1_u8.hash(state);
+            value.hash(state);
+        }
+        Value::Number(value) => {
+            2_u8.hash(state);
+            value.to_string().hash(state);
+        }
+        Value::String(value) => {
+            3_u8.hash(state);
+            value.hash(state);
+        }
+        Value::Array(values) => {
+            4_u8.hash(state);
+            values.len().hash(state);
+            for value in values {
+                hash_json_value(value, state);
+            }
+        }
+        Value::Object(values) => {
+            5_u8.hash(state);
+            values.len().hash(state);
+            for (key, value) in values {
+                key.hash(state);
+                hash_json_value(value, state);
+            }
+        }
+    }
 }

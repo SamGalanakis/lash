@@ -70,7 +70,7 @@ impl RuntimeSessionManager {
 
 fn process_terminal_state_for_turn(turn: &crate::AssembledTurn) -> crate::ProcessTerminalState {
     match &turn.outcome {
-        crate::TurnOutcome::Finished(_) | crate::TurnOutcome::Handoff { .. } => {
+        crate::TurnOutcome::Finished(_) | crate::TurnOutcome::AgentFrameSwitch { .. } => {
             crate::ProcessTerminalState::Completed
         }
         crate::TurnOutcome::Stopped(crate::TurnStop::Cancelled) => {

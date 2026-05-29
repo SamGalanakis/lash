@@ -2437,6 +2437,7 @@ dependencies = [
  "async-trait",
  "jsonschema",
  "lash-core",
+ "lash-tool-support",
  "lashlang",
  "serde_json",
  "tokio",
@@ -2450,6 +2451,7 @@ dependencies = [
  "lash-core",
  "lash-sansio",
  "reqwest 0.13.3",
+ "serde_json",
  "tokio",
 ]
 
@@ -2466,7 +2468,6 @@ dependencies = [
 name = "lash-openai-schema"
 version = "0.1.0-alpha.12"
 dependencies = [
- "lash-sansio",
  "serde",
  "serde_json",
 ]
@@ -2505,6 +2506,7 @@ dependencies = [
  "async-trait",
  "lash-core",
  "lash-tool-apply-patch",
+ "lash-tool-support",
  "schemars",
  "serde",
  "serde_json",
@@ -2520,6 +2522,7 @@ version = "0.1.0-alpha.12"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-tool-support",
  "serde_json",
 ]
 
@@ -2543,6 +2546,7 @@ version = "0.1.0-alpha.12"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-tool-support",
  "model2vec-rs",
  "schemars",
  "serde_json",
@@ -2629,11 +2633,11 @@ dependencies = [
  "lash-llm-transport",
  "lash-openai-schema",
  "lash-provider-auth",
+ "lash-provider-openai",
  "reqwest 0.13.3",
  "serde",
  "serde_json",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -2720,6 +2724,8 @@ dependencies = [
  "lash-protocol-rlm",
  "lash-protocol-standard",
  "lash-rlm-types",
+ "lash-sqlite-store",
+ "lash-tool-support",
  "lash-trace",
  "serde",
  "serde_json",
@@ -2785,6 +2791,7 @@ dependencies = [
  "lash-llm-tools",
  "lash-protocol-rlm",
  "lash-rlm-types",
+ "lash-tool-support",
  "serde",
  "serde_json",
  "tokio",
@@ -2849,6 +2856,7 @@ dependencies = [
 name = "lash-tool-support"
 version = "0.1.0-alpha.12"
 dependencies = [
+ "async-trait",
  "chrono",
  "ignore",
  "lash-core",

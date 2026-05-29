@@ -1,6 +1,5 @@
 pub(crate) mod dhat;
 pub(crate) mod git;
-#[cfg(feature = "runtime-perf")]
 pub(crate) mod memory;
 pub(crate) mod metrics;
 pub(crate) mod paths;

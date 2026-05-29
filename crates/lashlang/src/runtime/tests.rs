@@ -25,7 +25,7 @@ impl ExecutionHost for Host {
                 }
                 "err" => Err(ExecutionHostError::new("boom")),
                 other => Err(ExecutionHostError::new(format!(
-                    "unknown resource operation: {other}"
+                    "unknown module operation: {other}"
                 ))),
             },
             AbilityOp::Await(handle) => match handle {
@@ -53,10 +53,10 @@ impl ExecutionHost for RecordingProcessHost {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
             AbilityOp::ResourceOperation(_) => Err(ExecutionHostError::new(
-                "resource operations are not supported by this host",
+                "module operations are not supported by this host",
             )),
             AbilityOp::StartProcess(start) => {
-                self.starts.lock().expect("starts lock").push(start);
+                self.starts.lock().expect("starts lock").push(*start);
                 let mut handle = Record::new();
                 handle.insert("__handle__".to_string(), Value::String("process".into()));
                 handle.insert("id".to_string(), Value::String("proc-1".into()));
@@ -102,7 +102,14 @@ async fn exec_outcome(source: &str) -> Result<ExecutionOutcome, RuntimeError> {
 }
 
 fn compile_source(source: &str) -> Result<CompiledProgram, crate::ParseError> {
-    crate::compile(source)
+    let program = crate::parse(source)?;
+    if source.contains("tools.")
+        && let Ok(linked) = crate::LinkedModule::link(program.clone(), runtime_test_surface())
+    {
+        Ok(crate::compile_linked(&linked))
+    } else {
+        Ok(compile_program(&program))
+    }
 }
 
 fn compile_program(program: &Program) -> CompiledProgram {
@@ -111,9 +118,11 @@ fn compile_program(program: &Program) -> CompiledProgram {
 
 fn runtime_test_surface() -> crate::LashlangSurface {
     let mut resources = crate::ResourceCatalog::new();
-    resources.add_alias("TOOL", "default");
-    resources.add_operation("TOOL", "echo", "echo");
-    resources.add_operation("TOOL", "err", "err");
+    resources.add_module_instance(["tools"], "Tools");
+    resources.add_operation("Tools", "echo", "echo");
+    resources.add_operation("Tools", "err", "err");
+    resources.add_operation("Tools", "missing", "missing");
+    resources.add_operation("Tools", "spawn", "spawn");
     crate::LashlangSurface::new(resources, crate::LashlangAbilities::all())
 }
 
@@ -296,7 +305,7 @@ async fn golden_lashlang_diagnostic_corpus_is_exact() {
     ));
     cases.push(diagnostic_case(
         "runtime_failed_resource_operation_unwrap",
-        runtime_diagnostic("submit (await TOOL.default.err({})?)").await,
+        runtime_diagnostic("submit (await tools.err({})?)").await,
     ));
     cases.push(diagnostic_case(
         "runtime_invalid_await_handle",
@@ -581,7 +590,6 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
                 slot_name(chunk, binding)
             )
         }
-        Instruction::LoweredLoop(index) => lowered_loop_snapshot(chunk, index),
         Instruction::IterNext { jump_to } => format!("iter_next {jump_to}"),
         Instruction::EndIter => "end_iter".to_string(),
         Instruction::ResolveTypeRef(slot) => {
@@ -593,21 +601,6 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
 
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).expect("value should serialize")
-}
-
-fn lowered_loop_snapshot(chunk: &Chunk, index: usize) -> String {
-    let lowered_loop = &chunk.lowered_loops[index];
-    let iterable = match &lowered_loop.iterable {
-        LoopIterable::Range(args) => format!("range argc={}", args.len()),
-        LoopIterable::Values(_) => "values".to_string(),
-        LoopIterable::Keys(_) => "keys".to_string(),
-    };
-    format!(
-        "lowered_loop #{index} {}:{} {iterable} ops={}",
-        lowered_loop.binding,
-        slot_name(chunk, lowered_loop.binding),
-        lowered_loop.body.len()
-    )
 }
 
 fn slot_name(chunk: &Chunk, index: usize) -> &str {
@@ -824,7 +817,7 @@ async fn compiler_propagates_safe_straight_line_constants() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn lowered_loops_cover_range_list_keys_nested_control_and_mutation() {
+async fn generic_iterator_loops_cover_range_list_keys_nested_control_and_mutation() {
     let source = r#"
         counts = {}
         items = ["a", "b", "a"]
@@ -851,17 +844,21 @@ async fn lowered_loops_cover_range_list_keys_nested_control_and_mutation() {
         }
         submit { total: total, counts: counts, seen: seen, pairs: pairs }
     "#;
-    let program = crate::parse(source).expect("program should parse");
-    let compiled = compile_program(&program);
+    let compiled = compile_source(source).expect("program should compile");
+    let begin_iterators = compiled
+        .chunk
+        .code
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                instruction,
+                Instruction::BeginIter(_) | Instruction::BeginRangeIter { .. }
+            )
+        })
+        .count();
     assert!(
-        compiled
-            .chunk
-            .code
-            .iter()
-            .filter(|instruction| matches!(instruction, Instruction::LoweredLoop(_)))
-            .count()
-            >= 3,
-        "eligible loops should lower into loop-local instructions"
+        begin_iterators >= 4,
+        "every `for` loop should compile to the generic iterator bytecode, got {begin_iterators}"
     );
 
     let mut state = State::new();
@@ -886,7 +883,7 @@ async fn lowered_loops_cover_range_list_keys_nested_control_and_mutation() {
 }
 
 #[test]
-fn effectful_loop_bodies_stay_on_generic_iterator_bytecode() {
+fn effectful_loop_bodies_compile_to_generic_iterator_bytecode() {
     let program = crate::parse(
         r#"
         items = [1, 2]
@@ -904,15 +901,7 @@ fn effectful_loop_bodies_stay_on_generic_iterator_bytecode() {
             .code
             .iter()
             .any(|instruction| matches!(instruction, Instruction::BeginIter(_))),
-        "effectful loops should use the generic iterator fallback"
-    );
-    assert!(
-        !compiled
-            .chunk
-            .code
-            .iter()
-            .any(|instruction| matches!(instruction, Instruction::LoweredLoop(_))),
-        "effectful loops must not lower"
+        "effectful loops should use the generic iterator bytecode"
     );
 }
 
@@ -1000,22 +989,22 @@ async fn condition_and_iteration_errors_are_reported() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn stmt_call_and_tool_results_cover_success_and_error() {
-    exec("await TOOL.default.echo({ value: 1 }) submit 1")
+    exec("await tools.echo({ value: 1 }) submit 1")
         .await
-        .expect("statement resource operation should succeed");
-    let missing = exec("bad = await TOOL.default.missing({}) submit bad")
+        .expect("statement module operation should succeed");
+    let missing = exec("bad = await tools.missing({}) submit bad")
         .await
-        .expect("missing resource operation should be wrapped");
+        .expect("missing module operation should be wrapped");
     assert_eq!(
         missing.as_record().expect("result should be a record")["ok"],
         Value::Bool(false)
     );
 
     let value = exec(
-        "ok = await TOOL.default.echo({ value: 7 }) bad = await TOOL.default.err({}) submit { ok: ok, bad: bad }",
+        "ok = await tools.echo({ value: 7 }) bad = await tools.err({}) submit { ok: ok, bad: bad }",
     )
     .await
-    .expect("resource operation program should succeed");
+    .expect("module operation program should succeed");
     let record = value.as_record().expect("expected record");
     assert_eq!(record["ok"].as_record().unwrap()["ok"], Value::Bool(true));
     assert_eq!(record["bad"].as_record().unwrap()["ok"], Value::Bool(false));
@@ -1023,14 +1012,14 @@ async fn stmt_call_and_tool_results_cover_success_and_error() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn result_unwrap_extracts_success_and_preserves_manual_handling() {
-    let value = exec("submit (await TOOL.default.echo({ value: 7 })?)")
+    let value = exec("submit (await tools.echo({ value: 7 })?)")
         .await
         .expect("unwrap should succeed");
     assert_eq!(value, Value::Number(7.0));
 
     let value = exec(
         r#"
-        result = await TOOL.default.err({})
+        result = await tools.err({})
         submit result.ok ? result.error : "unexpected"
         "#,
     )
@@ -1040,10 +1029,9 @@ async fn result_unwrap_extracts_success_and_preserves_manual_handling() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn direct_resource_operation_unwrap_skips_observable_wrapper() {
-    let program = crate::parse("submit (await TOOL.default.echo({ value: 7 })?)")
-        .expect("program should parse");
-    let compiled = compile_program(&program);
+async fn direct_module_operation_unwrap_skips_observable_wrapper() {
+    let compiled =
+        compile_source("submit (await tools.echo({ value: 7 })?)").expect("program should compile");
     assert!(
         compiled
             .chunk
@@ -1065,26 +1053,26 @@ async fn direct_resource_operation_unwrap_skips_observable_wrapper() {
         .expect("program should run");
     assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(7.0)));
 
-    let err = exec("submit (await TOOL.default.err({})?)")
+    let err = exec("submit (await tools.err({})?)")
         .await
         .expect_err("failed unwrap should abort");
     assert_eq!(
         err,
         RuntimeError::ValueError {
-            message: "`?` unwrapped failed resource operation: boom".to_string(),
+            message: "`?` unwrapped failed module operation: boom".to_string(),
         }
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn result_unwrap_reports_failed_and_malformed_wrappers() {
-    let err = exec("submit (await TOOL.default.err({})?)")
+    let err = exec("submit (await tools.err({})?)")
         .await
-        .expect_err("failed resource operation unwrap should abort");
+        .expect_err("failed module operation unwrap should abort");
     assert_eq!(
         err,
         RuntimeError::ValueError {
-            message: "`?` unwrapped failed resource operation: boom".to_string(),
+            message: "`?` unwrapped failed module operation: boom".to_string(),
         }
     );
 
@@ -1663,7 +1651,7 @@ async fn validate_static_and_dynamic_type_paths_share_error_text() {
         .expect_err("static Type literal should reject number");
     let dynamic_err = exec(
         r#"
-Schema = await TOOL.default.echo({ value: Type { email: str | null } })?
+Schema = await tools.echo({ value: Type { email: str | null } })?
 submit validate({ email: 42 }, Schema)
 "#,
     )
@@ -3202,10 +3190,10 @@ impl ExecutionHost for AsyncHost {
 #[test]
 fn linked_trigger_declaration_records_process_binding() {
     let mut resources = crate::ResourceCatalog::new();
-    resources.add_alias("TOOL", "default");
-    resources.add_operation("TOOL", "echo", "echo");
+    resources.add_module_instance(["tools"], "Tools");
+    resources.add_operation("Tools", "echo", "echo");
     resources.add_trigger_event(
-        "TOOL",
+        "Tools",
         "changed",
         crate::TypeExpr::Object(vec![crate::TypeField {
             name: "path".into(),
@@ -3217,12 +3205,12 @@ fn linked_trigger_declaration_records_process_binding() {
     let program = crate::parse(
         r#"
         type Changed = { path: str }
-        process scan(tool: TOOL, event: Changed) {
+        process scan(tool: Tools, event: Changed) {
           finish event.path
         }
 
-        trigger changed on TOOL.default.changed as event
-          -> scan(tool: TOOL.default, event: event)
+        trigger changed on tools.changed as event
+          -> scan(tool: tools, event: event)
         "#,
     )
     .expect("program should parse");
@@ -3352,20 +3340,20 @@ fn compiled_process_cache_reuses_process_ref_and_surface_ref() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn receiver_resource_operation_unwraps_result() {
-    let value = exec(r#"submit (await TOOL.default.echo({ value: "ok" })?)"#)
+async fn receiver_module_operation_unwraps_result() {
+    let value = exec(r#"submit (await tools.echo({ value: "ok" })?)"#)
         .await
-        .expect("resource operation should run");
+        .expect("module operation should run");
     assert_eq!(value, Value::String("ok".into()));
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn receiver_resource_operation_errors_are_sanitized() {
-    let err = exec(r#"submit (await TOOL.default.err({ value: "nope" })?)"#)
+async fn receiver_module_operation_errors_are_sanitized() {
+    let err = exec(r#"submit (await tools.err({ value: "nope" })?)"#)
         .await
-        .expect_err("resource operation should fail");
+        .expect_err("module operation should fail");
     assert!(matches!(err, RuntimeError::ValueError { .. }));
-    assert!(err.to_string().contains("resource operation"));
+    assert!(err.to_string().contains("module operation"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -3526,7 +3514,7 @@ async fn sync_steps_resume_correctly_after_tool_effects() {
     let value = exec(
         r#"
         before = 20 + 2
-        echoed = await TOOL.default.echo({ value: before })?
+        echoed = await tools.echo({ value: before })?
         after = echoed + 1
         submit [before, echoed, after]
         "#,
@@ -3551,24 +3539,23 @@ async fn sync_steps_resume_correctly_after_tool_effects() {
 async fn traced_started_tool_errors_keep_original_instruction_span() {
     let source = r#"
         before = 1
-        value = await TOOL.default.err({})?
+        value = await tools.err({})?
         submit value
         "#;
-    let program = crate::parse(source).expect("program should parse");
-    let compiled = compile_program(&program);
+    let compiled = compile_source(source).expect("program should compile");
     let mut state = State::new();
     let failure = execute_compiled_traced(&compiled, &mut state, &Host)
         .await
-        .expect_err("unwrapped resource operation error should fail");
+        .expect_err("unwrapped module operation error should fail");
     let message = crate::format_runtime_diagnostic(source, &failure.error, failure.span);
 
     assert!(
-        message.contains("`?` unwrapped failed resource operation: boom"),
+        message.contains("`?` unwrapped failed module operation: boom"),
         "{message}"
     );
     assert!(message.contains("--> line 3, column 9"), "{message}");
     assert!(
-        message.contains("value = await TOOL.default.err({})?"),
+        message.contains("value = await tools.err({})?"),
         "{message}"
     );
 }
@@ -3577,12 +3564,11 @@ async fn traced_started_tool_errors_keep_original_instruction_span() {
 async fn profiled_tool_effect_keeps_sync_instruction_counts() {
     let source = r#"
         before = 20 + 2
-        echoed = await TOOL.default.echo({ value: before })?
+        echoed = await tools.echo({ value: before })?
         after = echoed + 1
         submit after
         "#;
-    let program = crate::parse(source).expect("program should parse");
-    let compiled = compile_program(&program);
+    let compiled = compile_source(source).expect("program should compile");
     let mut state = State::new();
     let (_outcome, report) = profile_compiled(&compiled, &mut state, &Host)
         .await
@@ -3973,8 +3959,7 @@ async fn compile_stats_count_const_folded_and_dynamic_literals() {
         B = Type { nested: Inner }
         submit B
     "#;
-    let program = crate::parse(src).expect("should parse");
-    let compiled = compile_program(&program);
+    let compiled = compile_source(src).expect("should compile");
     let stats = compiled.compile_stats();
     assert_eq!(stats.type_literals_total, 3);
     assert_eq!(
@@ -3990,13 +3975,12 @@ async fn profile_report_surfaces_resolve_type_ref_counts() {
     let src = r#"
         Inner = Type { n: int }
         Outer = Type { nested: Inner }
-        limit = await TOOL.default.echo({ value: 1 })?
+        limit = await tools.echo({ value: 1 })?
         numbers = push(range(limit), limit)
         checked = validate({ nested: { n: numbers[0] } }, Outer)
         submit checked
     "#;
-    let program = crate::parse(src).expect("should parse");
-    let compiled = compile_program(&program);
+    let compiled = compile_source(src).expect("should compile");
     let mut state = State::new();
     let (_outcome, report) = profile_compiled(&compiled, &mut state, &Host)
         .await
@@ -4064,7 +4048,7 @@ async fn type_literal_inside_resource_operation_args_passes_through_as_record() 
     let program = crate::parse(
         r#"
         Shape = Type { name: str, tags: list[str] }
-        await TOOL.default.spawn({ output: Shape })
+        await tools.spawn({ output: Shape })
         submit null
         "#,
     )

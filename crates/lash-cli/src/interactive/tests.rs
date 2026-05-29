@@ -3,7 +3,6 @@ use super::*;
 use crate::app::App;
 use crate::clipboard::{ClipboardEnv, osc52_allowed_by_env, osc52_sequence_for};
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
-use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_action};
 use lash::{TurnActivity, TurnActivityId, TurnActivitySink};
 use lash_core::SessionPolicy;
 
@@ -107,7 +106,7 @@ fn promote_pending_steers_to_queue_preserves_order() {
     let mut ui_trace = None;
     promote_pending_steers_to_queue(&mut app, &mut ui_trace);
 
-    assert!(app.pending_steers.is_empty());
+    assert!(app.queues.pending_steers.is_empty());
     let queued: Vec<String> = std::iter::from_fn(|| app.take_next_queued_turn())
         .map(|(turn, _)| turn.display_text)
         .collect();
@@ -173,7 +172,7 @@ fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
     let mut ui_trace = None;
     promote_pending_steers_to_queue(&mut app, &mut ui_trace);
 
-    assert!(app.pending_steers.is_empty());
+    assert!(app.queues.pending_steers.is_empty());
     assert!(app.has_queued_messages());
     assert!(matches!(
         app.timeline.last(),
@@ -282,21 +281,13 @@ fn osc52_disallowed_for_unknown_terminal_without_ssh() {
 }
 
 #[test]
-fn pasted_text_ui_action_uses_large_paste_placeholder_path() {
+fn pasted_text_input_uses_large_paste_placeholder_path() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 5);
 
-    let outcome = apply_ui_action(
-        &mut app,
-        UiAction::InputInsertPastedText(large),
-        UiActionContext {
-            viewport_width: 80,
-            viewport_height: 24,
-            prompt_max_scroll: 0,
-        },
-    );
+    app.insert_pasted_text(&large);
+    app.update_suggestions();
 
-    assert_eq!(outcome, UiActionOutcome::None);
     assert_eq!(app.editor.pending_large_pastes.len(), 1);
     assert!(app.input().contains("[Pasted Content"));
 }
@@ -306,27 +297,9 @@ fn word_cursor_actions_move_across_word_boundaries() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.insert_text("alpha beta_gamma-delta  omega");
 
-    let outcome = apply_ui_action(
-        &mut app,
-        UiAction::MoveCursorWordLeft,
-        UiActionContext {
-            viewport_width: 80,
-            viewport_height: 24,
-            prompt_max_scroll: 0,
-        },
-    );
-    assert_eq!(outcome, UiActionOutcome::None);
+    app.editor.move_cursor_word_left();
     assert_eq!(&app.input()[app.cursor_pos()..], "omega");
 
-    let outcome = apply_ui_action(
-        &mut app,
-        UiAction::MoveCursorWordRight,
-        UiActionContext {
-            viewport_width: 80,
-            viewport_height: 24,
-            prompt_max_scroll: 0,
-        },
-    );
-    assert_eq!(outcome, UiActionOutcome::None);
+    app.editor.move_cursor_word_right();
     assert_eq!(app.cursor_pos(), app.input().len());
 }

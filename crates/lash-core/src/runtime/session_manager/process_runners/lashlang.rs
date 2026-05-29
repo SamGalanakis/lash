@@ -78,29 +78,13 @@ impl RuntimeSessionManager {
             lashlang_abilities,
             self.current.plugins.lashlang_resources(),
         );
-        let relinked = match ::lashlang::LinkedModule::link(
-            artifact.canonical_ir.clone(),
-            current_surface,
-        ) {
-            Ok(linked) => linked,
-            Err(err) => {
-                return process_lashlang_failure(
-                    "process_surface_incompatible",
-                    format!(
-                        "lashlang process `{process_name}` is incompatible with this host surface: {err}"
-                    ),
-                    None,
-                );
-            }
-        };
-        if relinked.module_ref != module_ref
-            || relinked.required_surface_ref != required_surface_ref
+        if let Err(err) =
+            lashlang_surface_satisfies_requirements(&artifact.required_surface, &current_surface)
         {
             return process_lashlang_failure(
                 "process_surface_incompatible",
                 format!(
-                    "lashlang process `{process_name}` resolved to module {} / surface {}, expected {module_ref} / {required_surface_ref}",
-                    relinked.module_ref, relinked.required_surface_ref
+                    "lashlang process `{process_name}` is incompatible with this host surface: {err}"
                 ),
                 None,
             );
@@ -136,9 +120,9 @@ impl RuntimeSessionManager {
                 &self.current.host.core.effect_controller,
             )),
             execution_context
-                .tool_effect_metadata
+                .causal_invocation
                 .as_ref()
-                .and_then(|metadata| metadata.turn_id.clone()),
+                .and_then(|invocation| invocation.scope.turn_id.clone()),
             self.current.turn_lease.clone(),
         );
         let dispatch = crate::tool_dispatch::ToolDispatchContext {
@@ -151,10 +135,11 @@ impl RuntimeSessionManager {
                 &self.current.host.core.effect_controller,
             )),
             direct_completions: direct_completions.clone(),
-            tool_effect_metadata: None,
+            parent_invocation: None,
             session_id: self.current.session_id.clone(),
+            agent_frame_id: String::new(),
             event_tx,
-            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             attachment_store: Arc::clone(&self.current.host.core.attachment_store),
             turn_context: crate::TurnContext::default(),
         };
@@ -169,8 +154,8 @@ impl RuntimeSessionManager {
             crate::TurnContext::default(),
         )
         .with_cancellation_token(cancellation.clone());
-        if let Some(metadata) = execution_context.tool_effect_metadata.clone() {
-            ctx = ctx.with_effect_metadata(metadata);
+        if let Some(invocation) = execution_context.causal_invocation.clone() {
+            ctx = ctx.with_parent_invocation(invocation);
         }
 
         let host = LashlangProcessHost {
@@ -178,6 +163,7 @@ impl RuntimeSessionManager {
             registry: Arc::clone(&registry),
             process_id: registration.id.clone(),
             wake_target_scope: execution_context.wake_target_scope,
+            store: self.current.store.clone(),
             cancellation: cancellation.clone(),
             sleep_sequence: AtomicU64::new(0),
             signal_sequence: tokio::sync::Mutex::new(0),
@@ -204,6 +190,7 @@ struct LashlangProcessHost<'run> {
     registry: Arc<dyn crate::ProcessRegistry>,
     process_id: String,
     wake_target_scope: Option<crate::ProcessScope>,
+    store: Option<Arc<dyn crate::RuntimePersistence>>,
     cancellation: tokio_util::sync::CancellationToken,
     sleep_sequence: AtomicU64,
     signal_sequence: tokio::sync::Mutex<u64>,
@@ -228,7 +215,7 @@ impl LashlangProcessHost<'_> {
             })
         };
         payload.as_object_mut().ok_or_else(|| {
-            ::lashlang::ExecutionHostError::new("resource operation payload must be an object")
+            ::lashlang::ExecutionHostError::new("module operation payload must be an object")
         })?;
         Ok(payload)
     }
@@ -241,23 +228,14 @@ impl LashlangProcessHost<'_> {
         receiver: ::lashlang::Value,
         args: Vec<::lashlang::Value>,
     ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
-        let resource = match &receiver {
-            ::lashlang::Value::Resource(resource) => resource,
-            _ => {
-                return Err(::lashlang::ExecutionHostError::new(format!(
-                    "resource operation `{operation}` requires a resource receiver"
-                )));
-            }
-        };
-        if resource.resource_type != "TOOL" || resource.alias != "default" {
+        if !matches!(&receiver, ::lashlang::Value::Resource(_)) {
             return Err(::lashlang::ExecutionHostError::new(format!(
-                "resource `{}`.`{}` is not executable in this host",
-                resource.resource_type, resource.alias
+                "module operation `{operation}` requires a module authority receiver"
             )));
         }
         let manifest = self.ctx.callable_tool_manifest(&operation).ok_or_else(|| {
             ::lashlang::ExecutionHostError::new(format!(
-                "resource operation `{operation}` is unavailable in this session"
+                "module operation `{operation}` is unavailable in this session"
             ))
         })?;
         let reply = self
@@ -320,7 +298,8 @@ impl LashlangProcessHost<'_> {
             ::lashlang::ProcessEventKind::Yield => "process.yield",
             ::lashlang::ProcessEventKind::Wake => "process.wake",
         };
-        self.registry
+        let result = self
+            .registry
             .append_event(
                 &self.process_id,
                 crate::ProcessEventAppendRequest::new(
@@ -331,6 +310,13 @@ impl LashlangProcessHost<'_> {
             )
             .await
             .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
+        crate::tool_provider::process_events::enqueue_wake_delivery(
+            self.store.as_deref(),
+            result.wake_delivery,
+            Some(self.ctx.runtime_host()),
+        )
+        .await
+        .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
         Ok(())
     }
 
@@ -410,7 +396,7 @@ impl ::lashlang::ExecutionHost for LashlangProcessHost<'_> {
                 .await
                 .map(::lashlang::AbilityResult::Value),
             ::lashlang::AbilityOp::StartProcess(start) => self
-                .start_process(start)
+                .start_process(*start)
                 .await
                 .map(::lashlang::AbilityResult::Value),
             ::lashlang::AbilityOp::ProcessEvent(event) => {
@@ -540,6 +526,79 @@ fn process_id_from_lashlang_handle(
         .ok_or_else(|| {
             ::lashlang::ExecutionHostError::new("signal run process handle is missing `id`")
         })
+}
+
+fn lashlang_surface_satisfies_requirements(
+    required: &::lashlang::SurfaceRequirements,
+    current: &::lashlang::LashlangSurface,
+) -> Result<(), String> {
+    let abilities = required.abilities;
+    let current_abilities = current.abilities;
+    if abilities.processes && !current_abilities.processes {
+        return Err("processes are not available".to_string());
+    }
+    if abilities.process_sleep && !current_abilities.process_sleep {
+        return Err("process sleep is not available".to_string());
+    }
+    if abilities.process_signals && !current_abilities.process_signals {
+        return Err("process signals are not available".to_string());
+    }
+    if abilities.triggers && !current_abilities.triggers {
+        return Err("triggers are not available".to_string());
+    }
+    if abilities.schedules.cron && !current_abilities.schedules.cron {
+        return Err("cron schedules are not available".to_string());
+    }
+
+    for module in required.resources.module_instances.values() {
+        let current_module = current
+            .resources
+            .resolve_module_path(&module.path)
+            .ok_or_else(|| format!("module `{}` is not available", module.alias))?;
+        if current_module.resource_type != module.resource_type {
+            return Err(format!(
+                "module `{}` has type `{}`, expected `{}`",
+                module.alias, current_module.resource_type, module.resource_type
+            ));
+        }
+    }
+
+    for (resource_type, required_type) in &required.resources.resource_types {
+        if !current.resources.has_resource_type(resource_type) {
+            return Err(format!("resource type `{resource_type}` is not available"));
+        }
+        for (operation, required_binding) in &required_type.operations {
+            let current_binding = current
+                .resources
+                .resolve_operation(resource_type, operation)
+                .ok_or_else(|| {
+                    format!(
+                        "resource type `{resource_type}` does not expose operation `{operation}`"
+                    )
+                })?;
+            if current_binding.host_operation != required_binding.host_operation {
+                return Err(format!(
+                    "resource type `{resource_type}` operation `{operation}` resolves to `{}`, expected `{}`",
+                    current_binding.host_operation, required_binding.host_operation
+                ));
+            }
+        }
+        for (event, required_binding) in &required_type.trigger_events {
+            let current_binding = current
+                .resources
+                .trigger_event(resource_type, event)
+                .ok_or_else(|| {
+                    format!("resource type `{resource_type}` does not expose event `{event}`")
+                })?;
+            if current_binding.payload_ty != required_binding.payload_ty {
+                return Err(format!(
+                    "resource type `{resource_type}` event `{event}` has incompatible payload type"
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn process_lashlang_execution_result(

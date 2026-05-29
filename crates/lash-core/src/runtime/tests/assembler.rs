@@ -255,7 +255,7 @@ fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() 
     );
     assert!(matches!(
         &out.outcome,
-        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+        TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. }
     ));
     assert!(matches!(
         &out.outcome,

@@ -167,7 +167,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = transport.clone().into_handle();
+    set_runtime_provider(&mut runtime, transport.clone().into_handle());
 
     let _turn = runtime
         .run_turn_assembled(
@@ -287,7 +287,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = transport.clone().into_handle();
+    set_runtime_provider(&mut runtime, transport.clone().into_handle());
 
     let _turn = runtime
         .run_turn_assembled(

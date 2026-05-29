@@ -338,7 +338,7 @@ mod tests {
         async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
             match op {
                 AbilityOp::ResourceOperation(operation) => Err(ExecutionHostError::new(format!(
-                    "unknown resource operation: {}",
+                    "unknown module operation: {}",
                     operation.operation
                 ))),
                 AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
@@ -464,8 +464,8 @@ mod tests {
 
     fn trigger_resources() -> lashlang::ResourceCatalog {
         let mut resources = lashlang::ResourceCatalog::new();
-        resources.add_alias("TRIGGER", "button");
-        resources.add_trigger_event("TRIGGER", "pressed", lashlang::TypeExpr::Any);
+        resources.add_module_instance(["ui", "button"], "Button");
+        resources.add_trigger_event("Button", "pressed", lashlang::TypeExpr::Any);
         resources
     }
 
@@ -501,7 +501,7 @@ mod tests {
                   finish event
                 }
 
-                trigger remembered on TRIGGER.button.pressed as event
+                trigger remembered on ui.button.pressed as event
                   -> remember(event: event)
 
                 submit { answer: "foreground ran" }
@@ -530,7 +530,7 @@ mod tests {
                   finish event
                 }
 
-                trigger remembered on TRIGGER.button.pressed as event
+                trigger remembered on ui.button.pressed as event
                   -> remember(event: event)
                 "#,
             )
@@ -560,7 +560,7 @@ mod tests {
                   finish event
                 }
 
-                trigger remembered on TRIGGER.button.pressed as event
+                trigger remembered on ui.button.pressed as event
                   -> remember(event: event)
 
                 submit len(1)
@@ -580,7 +580,7 @@ mod tests {
                   finish event
                 }
 
-                trigger remembered on TRIGGER.button.missing as event
+                trigger remembered on ui.button.missing as event
                   -> remember(event: event)
 
                 submit "should not run"
@@ -644,7 +644,7 @@ mod tests {
             DisabledCase {
                 name: "trigger",
                 code: r#"
-                    trigger changed on TOOL.default.changed as event
+                    trigger changed on tools.changed as event
                       -> worker(event: event)
                 "#,
                 abilities: lashlang::LashlangAbilities::default().with_cron_schedules(),

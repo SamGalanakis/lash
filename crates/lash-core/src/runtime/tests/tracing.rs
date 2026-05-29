@@ -58,7 +58,7 @@ async fn standard_runtime_trace_records_stream_event_entries() {
 
     assert!(matches!(
         &turn.outcome,
-        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+        TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. }
     ));
 
     let logged = std::fs::read_to_string(&trace_path).expect("read trace");
@@ -223,7 +223,7 @@ async fn extended_runtime_trace_records_provider_stream_events() {
 
     assert!(matches!(
         &turn.outcome,
-        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+        TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. }
     ));
 
     let logged = std::fs::read_to_string(&trace_path).expect("read trace");
@@ -308,7 +308,7 @@ async fn standard_runtime_trace_omits_stream_event_entries_by_default() {
 
     assert!(matches!(
         &turn.outcome,
-        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+        TurnOutcome::Finished(_) | TurnOutcome::AgentFrameSwitch { .. }
     ));
 
     let logged = std::fs::read_to_string(&trace_path).expect("read trace");

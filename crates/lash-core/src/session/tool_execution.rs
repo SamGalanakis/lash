@@ -76,7 +76,7 @@ pub(crate) struct CompletedProtocolToolCall {
 pub(crate) struct PreparedToolRun {
     pub prepared: crate::PreparedToolCall,
     pub index: usize,
-    pub effect_metadata: Option<crate::EffectInvocationMetadata>,
+    pub parent_invocation: Option<crate::RuntimeInvocation>,
     pub activity_id: TurnActivityId,
 }
 
@@ -85,13 +85,13 @@ impl RuntimeExecutionContext<'_> {
         &self,
         prepared: crate::PreparedToolCall,
         index: usize,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
     ) -> PreparedToolRun {
         let activity_id = TurnActivityId::new(format!("tool:{}", prepared.call_id));
         PreparedToolRun {
             prepared,
             index,
-            effect_metadata,
+            parent_invocation,
             activity_id,
         }
     }
@@ -103,7 +103,7 @@ impl RuntimeExecutionContext<'_> {
         args: serde_json::Value,
         index: usize,
         replay: Option<crate::llm::types::ProviderReplayMeta>,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
     ) -> CompletedProtocolToolCall {
         let _ = self
             .dispatch
@@ -125,9 +125,9 @@ impl RuntimeExecutionContext<'_> {
         )
         .await;
 
-        let effect_metadata = effect_metadata.or_else(|| self.effect_metadata.clone());
+        let parent_invocation = parent_invocation.or_else(|| self.parent_invocation.clone());
         let mut dispatch = (*self.dispatch).clone();
-        dispatch.tool_effect_metadata = effect_metadata.clone();
+        dispatch.parent_invocation = parent_invocation.clone();
         let pending = crate::sansio::PendingToolCall {
             call_id: call_id.clone(),
             tool_name: name,
@@ -142,7 +142,7 @@ impl RuntimeExecutionContext<'_> {
                         crate::ToolContext::from_dispatch(std::sync::Arc::clone(&dispatch_context))
                             .prepared_call(&prepared)
                             .cancellation_token(self.cancellation_token.clone())
-                            .tool_effect_metadata(effect_metadata.clone())
+                            .parent_invocation(parent_invocation.clone())
                             .build();
                     dispatch_prepared_tool_call_with_execution_context(
                         dispatch_context.as_ref(),
@@ -172,9 +172,9 @@ impl RuntimeExecutionContext<'_> {
         &self,
         prepared: crate::PreparedToolCall,
         index: usize,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
     ) -> CompletedProtocolToolCall {
-        self.execute_prepared_tool_call_inner(prepared, index, effect_metadata)
+        self.execute_prepared_tool_call_inner(prepared, index, parent_invocation)
             .await
     }
 
@@ -182,14 +182,14 @@ impl RuntimeExecutionContext<'_> {
         &self,
         prepared: crate::PreparedToolCall,
         index: usize,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
     ) -> CompletedProtocolToolCall {
         let call_id = prepared.call_id.clone();
         let name = prepared.tool_name.clone();
         let args = prepared.args.clone();
         let replay = prepared.replay.clone();
-        let effect_metadata = effect_metadata.or_else(|| self.effect_metadata.clone());
-        let run = self.prepared_tool_run(prepared, index, effect_metadata);
+        let parent_invocation = parent_invocation.or_else(|| self.parent_invocation.clone());
+        let run = self.prepared_tool_run(prepared, index, parent_invocation);
         let prepared = run.prepared.clone();
         let _ = self
             .dispatch
@@ -214,7 +214,7 @@ impl RuntimeExecutionContext<'_> {
         let tool_context = crate::ToolContext::from_dispatch(std::sync::Arc::clone(&self.dispatch))
             .prepared_call(&prepared)
             .cancellation_token(self.cancellation_token.clone())
-            .tool_effect_metadata(run.effect_metadata.clone())
+            .parent_invocation(run.parent_invocation.clone())
             .build();
         let mut outcome = dispatch_prepared_tool_call_with_execution_context(
             self.dispatch.as_ref(),
@@ -233,31 +233,31 @@ impl RuntimeExecutionContext<'_> {
     pub(super) async fn await_process_with_cancellation(
         &self,
         process_id: &str,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
         if let Some(cancellation) = cancellation {
             tokio::select! {
                 result = self.dispatch.processes.await_process(
                     process_id,
-                    self.process_scope(effect_metadata.clone()),
+                    self.process_scope(parent_invocation.clone()),
                 ) => result,
                 _ = cancellation.cancelled() => {
                     let _ = self.dispatch.processes.cancel(
                         &self.dispatch.session_id,
                         process_id,
-                        self.process_scope(effect_metadata.clone()),
+                        self.process_scope(parent_invocation.clone()),
                     ).await;
                     self.dispatch.processes.await_process(
                         process_id,
-                        self.process_scope(effect_metadata),
+                        self.process_scope(parent_invocation),
                     ).await
                 }
             }
         } else {
             self.dispatch
                 .processes
-                .await_process(process_id, self.process_scope(effect_metadata))
+                .await_process(process_id, self.process_scope(parent_invocation))
                 .await
         }
     }

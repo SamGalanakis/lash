@@ -154,11 +154,19 @@ async fn control_turn_accepts_prebuilt_turn_input() -> Result<()> {
 
 #[tokio::test]
 async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
+    register_checkpoint_gated_provider_factory();
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let core = LashCore::standard()
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
         .model(mock_model_spec())
+        .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            std::env::temp_dir().join(format!(
+                "lash-queued-input-{}-{}",
+                std::process::id(),
+                test_current_epoch_ms()
+            )),
+        )))
         .build()?;
     let session = core.session("queued-input").open().await?;
     let events = Arc::new(RecordingEvents::default());
@@ -173,8 +181,12 @@ async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
 
     entered_rx.await.expect("provider entered first call");
     session
-        .queue(TurnInput::text("queued follow-up"))
-        .id("queue-1")
+        .control()
+        .injection()
+        .inject_turn_input(
+            Some("queue-1".to_string()),
+            lash_core::PluginMessage::text(lash_core::MessageRole::User, "queued follow-up"),
+        )
         .await?;
     release_tx.send(()).expect("release provider");
     let result = turn.await.expect("turn task")?;
@@ -272,7 +284,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
             "code-1",
             TurnEvent::CodeBlockStarted {
                 language: "lashlang".to_string(),
-                code: "x = await TOOL.default.app_lookup({})?".to_string(),
+                code: "x = await tools.app_lookup({})?".to_string(),
             },
         ))
         .await;
@@ -307,7 +319,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
     assert!(matches!(
         &activities[0].event,
         TurnEvent::CodeBlockStarted { language, code }
-            if language == "lashlang" && code == "x = await TOOL.default.app_lookup({})?"
+            if language == "lashlang" && code == "x = await tools.app_lookup({})?"
     ));
     assert!(matches!(
         &activities[1].event,
@@ -448,7 +460,7 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
 async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
     let core = LashCore::rlm()
         .provider(queued_text_provider(vec![
-            "```lashlang\nvalue = await TOOL.default.app_lookup({})?\nsubmit \"done\"\n```",
+            "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit \"done\"\n```",
         ]))
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -558,11 +570,11 @@ async fn process_control_lists_started_lashlang_process_until_awaited() -> Resul
     let core = LashCore::rlm()
         .provider(queued_text_provider(vec![
             r#"```lashlang
-process lookup(tool: TOOL) {
-  value = await tool.app_lookup({})?
+process lookup(tools: Tools) {
+  value = await tools.app_lookup({})?
   finish value
 }
-h = start lookup(tool: TOOL.default)
+h = start lookup(tools: tools)
 value = await h
 submit value
 ```"#,

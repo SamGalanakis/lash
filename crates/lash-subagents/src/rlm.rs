@@ -1,16 +1,17 @@
 //! RLM protocol subagent spawning surface.
 //!
-//! Examples are written in lashlang receiver-operation syntax. Prompt prose is
-//! tuned for schema-first results and binding subagent output.
+//! Examples are written in Lashlang module syntax. Prompt prose is tuned for
+//! schema-first results and binding subagent output.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash_core::{
     PreparedToolCall, SessionSpec, SubagentSessionContext, ToolArgumentProjectionPolicy, ToolCall,
-    ToolContext, ToolContract, ToolDefinition, ToolManifest, ToolPrepareCall, ToolProvider,
-    ToolResult, ToolScheduling,
+    ToolContext, ToolDefinition, ToolPrepareContext, ToolResult, ToolScheduling,
+    sansio::PendingToolCall,
 };
+use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,7 +37,7 @@ impl RlmSubagentToolsProvider {
         let prepared: PreparedSpawnAgent = context
             .decode_prepared_payload()
             .map_err(|err| format!("spawn_agent was not prepared correctly: {err}"))?;
-        run_child_session(context, prepared.create_request, prepared.turn_input).await
+        run_child_session(context, *prepared.create_request, prepared.turn_input).await
     }
 
     async fn prepare_spawn_agent(
@@ -62,20 +63,27 @@ impl RlmSubagentToolsProvider {
             .session_snapshot()
             .await
             .map_err(|err| ToolResult::err(serde_json::json!(err.to_string())))?;
-        let create_request = build_spawn_create_request(SpawnCreateRequestInput {
-            registry: &self.registry,
-            parent_session_id: context.session_id(),
-            current_snapshot,
-            session_spec: &self.session_spec,
-            capability_name: &capability_name,
-            output_schema: output_schema.clone(),
-            seed,
-            parent_subagent: self.parent_subagent.as_ref(),
-            originating_tool_call_id: context.tool_call_id(),
-            configurator: self.configurator.as_ref(),
-        })
-        .await
-        .map_err(|err| ToolResult::err(serde_json::json!(err)))?;
+        let create_request = Box::new(
+            build_spawn_create_request(SpawnCreateRequestInput {
+                registry: &self.registry,
+                parent_session_id: context.session_id(),
+                current_snapshot,
+                session_spec: &self.session_spec,
+                capability_name: &capability_name,
+                output_schema: output_schema.clone(),
+                seed,
+                parent_subagent: self.parent_subagent.as_ref(),
+                caused_by: context
+                    .tool_call_id()
+                    .map(|call_id| lash_core::CausalRef::ToolCall {
+                        session_id: context.session_id().to_string(),
+                        call_id: call_id.to_string(),
+                    }),
+                configurator: self.configurator.as_ref(),
+            })
+            .await
+            .map_err(|err| ToolResult::err(serde_json::json!(err)))?,
+        );
         let turn_input = turn_input_for_task(render_task_prompt(&task, output_schema.as_ref()));
         let payload = serde_json::to_value(PreparedSpawnAgent {
             create_request,
@@ -94,7 +102,7 @@ impl RlmSubagentToolsProvider {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PreparedSpawnAgent {
-    create_request: lash_core::SessionCreateRequest,
+    create_request: Box<lash_core::SessionCreateRequest>,
     turn_input: lash_core::TurnInput,
 }
 
@@ -131,31 +139,17 @@ async fn run_child_session(
 }
 
 #[async_trait]
-impl ToolProvider for RlmSubagentToolsProvider {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        self.tool_definitions()
-            .into_iter()
-            .map(|tool| tool.manifest())
-            .collect()
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        self.tool_definitions()
-            .into_iter()
-            .find(|tool| tool.name == name)
-            .map(|tool| Arc::new(tool.contract()))
-    }
-
+impl StaticToolExecute for RlmSubagentToolsProvider {
     async fn prepare_tool_call(
         &self,
-        call: ToolPrepareCall<'_>,
+        pending: PendingToolCall,
+        context: &ToolPrepareContext,
     ) -> Result<PreparedToolCall, ToolResult> {
-        if call.pending.tool_name == "spawn_agent" {
-            let args = call.pending.args.clone();
-            self.prepare_spawn_agent(&args, call.context, call.pending)
-                .await
+        if pending.tool_name == "spawn_agent" {
+            let args = pending.args.clone();
+            self.prepare_spawn_agent(&args, context, pending).await
         } else {
-            Ok(PreparedToolCall::identity(call.pending))
+            Ok(PreparedToolCall::identity(pending))
         }
     }
 
@@ -170,6 +164,14 @@ impl ToolProvider for RlmSubagentToolsProvider {
 }
 
 impl RlmSubagentToolsProvider {
+    /// Build the cached subagent tool provider. The served definitions are
+    /// fixed once the provider is constructed (they depend only on the
+    /// registered capability names and whether `submit_error` is exposed).
+    pub(crate) fn into_provider(self) -> StaticToolProvider<Self> {
+        let definitions = self.tool_definitions();
+        StaticToolProvider::new(definitions, self)
+    }
+
     fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = rlm_subagent_tool_definitions(&self.registry.names());
         if self.include_submit_error {
@@ -191,21 +193,21 @@ pub fn spawn_agent_tool_definition(capability_names: &[String]) -> ToolDefinitio
         vec![
             // Schema-first: the highest-leverage shape — bind a typed result.
             format!(
-                r#"typed = await TOOL.default.spawn_agent({{ task: "Find the longest line in src/main.rs"{capability_arg}, output: {{ line: "str", length: "int" }} }})?"#
+                r#"typed = await agents.spawn({{ task: "Find the longest line in src/main.rs"{capability_arg}, output: {{ line: "str", length: "int" }} }})?"#
             ),
             // Reusable Type literal for richer shapes.
             r#"Shape = Type { name: str, tags: list[str], status: enum["ok", "err"] }"#.into(),
             format!(
-                r#"signed = await TOOL.default.spawn_agent({{ task: "Parse the book listing in data/books.json"{capability_arg}, output: Shape }})?"#
+                r#"signed = await agents.spawn({{ task: "Parse the book listing in data/books.json"{capability_arg}, output: Shape }})?"#
             ),
             // seed: pass projected source through to the child as a projected
             // binding; pass plain values as RLM globals on the child.
             format!(
-                r#"answer = await TOOL.default.spawn_agent({{ task: "Solve sub-problem 3 using the bound problem text and the running findings."{capability_arg}, seed: {{ problem: input.prompt, findings: findings }}, output: {{ value: "int" }} }})?"#
+                r#"answer = await agents.spawn({{ task: "Solve sub-problem 3 using the bound problem text and the running findings."{capability_arg}, seed: {{ problem: input.prompt, findings: findings }}, output: {{ value: "int" }} }})?"#
             ),
             // Untyped is fine for free-form prose results.
             format!(
-                r#"prose = await TOOL.default.spawn_agent({{ task: "Skim the routes in api/ and flag any missing auth checks"{capability_arg} }})?"#
+                r#"prose = await agents.spawn({{ task: "Skim the routes in api/ and flag any missing auth checks"{capability_arg} }})?"#
             ),
         ],
     )
@@ -215,9 +217,9 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
     let cap_list = capability_list_for_description(capability_names);
     let capability_detail = capability_detail_for_tool_description(capability_names);
     let description = format!(
-        "Run a subagent and return its final result. Invoke it as `await TOOL.default.spawn_agent({{ ... }})?`. For fan-out, use `start spawn_agent(...)` once per branch and then await the returned handles. {capability_detail} `output` defines the typed return shape. Available capabilities: {cap_list}. \
+        "Run a subagent through the `agents.spawn` module operation and return its final result. For process-level fan-out, declare a named process that accepts `agents: Agents`, call `await agents.spawn({{ ... }})?` inside it, then `start` that named process once per branch with `agents: agents`. {capability_detail} `output` defines the typed return shape. Available capabilities: {cap_list}. \
         \n\nThe child starts with **no** inherited state — globals, projected bindings, message history are all blank. Hand it specific data via `seed: {{ name: value, ... }}`. Each entry's kind is preserved automatically: if `value`'s lashlang source root is a host-projected binding (e.g. `seed: {{ problem: input.prompt }}`) the child receives `problem` as a read-only projected binding, identical to how it appeared on the parent. Otherwise it lands as a regular RLM global. Computed expressions default to global. Projected seed entries require an RLM child; passing one to a non-RLM capability is an error.\
-        \n\nA child can fail terminally with `await TOOL.default.submit_error({{ reason: \"...\" }})?`; this tool returns an error with that reason."
+        \n\nA child can fail terminally with `await tools.submit_error({{ reason: \"...\" }})?`; this tool returns an error with that reason."
     );
     tool_definition(
         "spawn_agent",
@@ -229,6 +231,7 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
     .with_argument_projection(
         ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"),
     )
+    .with_agent_surface(lash_core::ToolAgentSurface::new(["agents"], "spawn"))
     .with_output_from_input_schema("output", None)
 }
 

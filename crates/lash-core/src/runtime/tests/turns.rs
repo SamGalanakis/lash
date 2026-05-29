@@ -1,5 +1,60 @@
 use super::*;
 
+async fn standard_runtime_with_transport_and_queue_store(
+    transport: TestProvider,
+) -> (LashRuntime, Arc<RecordingStore>) {
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::store::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
+    (runtime, store)
+}
+
+async fn append_process_wake_to_queue(
+    registry: &dyn crate::ProcessRegistry,
+    store: &RecordingStore,
+    process_id: &str,
+    request: crate::ProcessEventAppendRequest,
+) -> crate::ProcessWakeDelivery {
+    let appended = registry
+        .append_event(process_id, request)
+        .await
+        .expect("append wake");
+    let wake = appended.wake_delivery.expect("wake delivery");
+    crate::store::RuntimePersistence::enqueue_queued_work(
+        store,
+        crate::process_wake_batch_draft(wake.clone()),
+    )
+    .await
+    .expect("enqueue wake");
+    wake
+}
+
+async fn enqueue_turn_input_for_checkpoint(
+    store: &RecordingStore,
+    session_id: &str,
+    source_key: Option<String>,
+    input: TurnInput,
+) {
+    let mut draft = crate::QueuedWorkBatchDraft::new(
+        session_id.to_string(),
+        crate::DeliveryPolicy::EarliestSafeBoundary,
+        crate::SlotPolicy::Join,
+        vec![crate::QueuedWorkPayload::turn_input(input)],
+    );
+    draft.source_key = source_key;
+    crate::store::RuntimePersistence::enqueue_queued_work(store, draft)
+        .await
+        .expect("enqueue turn input");
+}
+
 #[tokio::test]
 async fn session_config_change_hook_receives_context_window_updates() {
     let observed = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -234,14 +289,7 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
 }
 
 #[tokio::test]
-async fn bridge_checkpoint_injection_continues_standard_turn() {
-    let bridge = crate::TurnInputInjectionBridge::new();
-    bridge
-        .enqueue(vec![crate::InjectedTurnInput {
-            id: None,
-            message: crate::PluginMessage::text(crate::MessageRole::User, "one more thing"),
-        }])
-        .expect("enqueue");
+async fn queued_checkpoint_input_continues_standard_turn() {
     let transport = mock_provider(vec![
         MockCall {
             stream_events: Vec::new(),
@@ -266,7 +314,14 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
             }),
         },
     ]);
-    let mut runtime = standard_runtime_with_input_bridge(transport, bridge).await;
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    enqueue_turn_input_for_checkpoint(
+        store.as_ref(),
+        "root",
+        None,
+        TurnInput::text("one more thing"),
+    )
+    .await;
 
     let turn = runtime
         .run_turn_assembled(
@@ -310,78 +365,48 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
 }
 
 #[tokio::test]
-async fn bridge_checkpoint_injection_preserves_images() {
-    let bridge = crate::TurnInjectionBridge::new();
-    bridge
-        .enqueue(vec![crate::PluginMessage {
-            role: crate::MessageRole::User,
-            content: "see image".to_string(),
-            origin: None,
-            parts: vec![
-                crate::Part {
-                    id: String::new(),
-                    kind: crate::PartKind::Image,
-                    content: String::new(),
-                    attachment: Some(crate::session_model::message::PartAttachment {
-                        reference: crate::AttachmentRef {
-                            id: crate::AttachmentId::new("test-image"),
-                            media_type: crate::MediaType::Image(crate::ImageMediaType::Png),
-                            byte_len: 3,
-                            width: None,
-                            height: None,
-                            label: None,
-                        },
-                    }),
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_replay: None,
-                    prune_state: crate::PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                },
-                crate::Part {
-                    id: String::new(),
-                    kind: crate::PartKind::Text,
-                    content: "see image".to_string(),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_replay: None,
-                    prune_state: crate::PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                },
-            ],
-            images: Vec::new(),
-        }])
-        .expect("enqueue");
-    let transport = mock_provider(vec![
-        MockCall {
-            stream_events: Vec::new(),
-            response: Ok(LlmResponse {
-                full_text: "First answer.".to_string(),
-                parts: vec![LlmOutputPart::Text {
-                    text: "First answer.".to_string(),
-                    response_meta: None,
-                }],
-                ..LlmResponse::default()
-            }),
-        },
-        MockCall {
-            stream_events: Vec::new(),
-            response: Ok(LlmResponse {
-                full_text: "Second answer.".to_string(),
-                parts: vec![LlmOutputPart::Text {
-                    text: "Second answer.".to_string(),
-                    response_meta: None,
-                }],
-                ..LlmResponse::default()
-            }),
-        },
-    ]);
-    let mut runtime = standard_runtime_with_bridge(transport, bridge).await;
+async fn queued_checkpoint_input_preserves_images() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_requests = Arc::clone(&requests);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_calls = Arc::clone(&calls);
+    let transport = TestProvider::builder()
+        .kind("mock")
+        .complete(move |request| {
+            let captured_requests = Arc::clone(&captured_requests);
+            let captured_calls = Arc::clone(&captured_calls);
+            async move {
+                captured_requests
+                    .lock()
+                    .expect("request capture lock")
+                    .push(request);
+                let call = captured_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let text = if call == 0 {
+                    "First answer."
+                } else {
+                    "Second answer."
+                };
+                Ok(LlmResponse {
+                    full_text: text.to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: text.to_string(),
+                        response_meta: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build();
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    enqueue_turn_input_for_checkpoint(
+        store.as_ref(),
+        "root",
+        None,
+        TurnInput::text("see image").with_image_ref("test-image", vec![1, 2, 3]),
+    )
+    .await;
 
-    let turn = runtime
+    runtime
         .run_turn_assembled(
             TurnInput {
                 items: vec![InputItem::Text {
@@ -398,16 +423,15 @@ async fn bridge_checkpoint_injection_preserves_images() {
         .await
         .expect("turn");
 
-    assert!(
-        active_conversation_messages(&turn.state)
-            .iter()
-            .any(|message| {
-                message.role == MessageRole::User
-                    && message.parts.iter().any(|part| {
-                        matches!(part.kind, PartKind::Image) && part.attachment.is_some()
-                    })
-            })
-    );
+    let requests = requests.lock().expect("request capture lock").clone();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == crate::llm::types::LlmRole::User
+            && message
+                .blocks
+                .iter()
+                .any(|block| matches!(block, crate::llm::types::LlmContentBlock::Image { .. }))
+    }));
 }
 
 #[tokio::test]
@@ -493,34 +517,39 @@ async fn checkpoint_hook_can_inject_messages() {
 }
 
 #[tokio::test]
-async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_duplicate_user_message()
-{
-    let bridge = crate::TurnInputInjectionBridge::new();
-    bridge
-        .enqueue(vec![crate::InjectedTurnInput {
-            id: Some("follow-up-id".to_string()),
-            message: crate::PluginMessage {
-                role: crate::MessageRole::User,
-                content: "follow up".to_string(),
-                origin: None,
-                parts: Vec::new(),
-                images: Vec::new(),
-            },
-        }])
-        .expect("enqueue injected turn input");
-
-    let transport = mock_provider(vec![MockCall {
-        stream_events: Vec::new(),
-        response: Ok(LlmResponse {
-            full_text: "answer".to_string(),
-            parts: vec![LlmOutputPart::Text {
-                text: "answer".to_string(),
-                response_meta: None,
-            }],
-            ..LlmResponse::default()
-        }),
-    }]);
-    let mut runtime = standard_runtime_with_input_bridge(transport, bridge).await;
+async fn queued_checkpoint_input_accepts_active_turn_without_persisting_duplicate_user_message() {
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "first".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "first".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "answer".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "answer".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
+    enqueue_turn_input_for_checkpoint(
+        store.as_ref(),
+        "root",
+        Some("host:follow-up-id".to_string()),
+        TurnInput::text("follow up"),
+    )
+    .await;
     let sink = RecordingSink::default();
     let assembled = runtime
         .stream_turn(
@@ -573,7 +602,7 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
 }
 
 #[tokio::test]
-async fn pending_process_wake_drains_into_first_prompt_as_turn_event() {
+async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let captured_requests = Arc::clone(&requests);
     let transport = TestProvider::builder()
@@ -597,7 +626,7 @@ async fn pending_process_wake_drains_into_first_prompt_as_turn_event() {
             }
         })
         .build();
-    let mut runtime = standard_runtime_with_transport(transport).await;
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
     let registry = runtime
         .host
         .process_registry
@@ -617,32 +646,70 @@ async fn pending_process_wake_drains_into_first_prompt_as_turn_event() {
         )
         .await
         .expect("register wake process");
-    registry
-        .append_event(
-            "wake-proc",
-            crate::ProcessEventAppendRequest::new(
-                "process.wake",
-                json!({
-                    "text": "deploy complete",
-                    "value": {
-                        "status": "deploy complete"
-                    }
-                }),
-            )
-            .with_wake_target_scope(target_scope.clone()),
+    let wake = append_process_wake_to_queue(
+        registry.as_ref(),
+        store.as_ref(),
+        "wake-proc",
+        crate::ProcessEventAppendRequest::new(
+            "process.wake",
+            json!({
+                "text": "deploy complete",
+                "value": {
+                    "status": "deploy complete"
+                }
+            }),
         )
-        .await
-        .expect("append wake");
+        .with_wake_target_scope(target_scope.clone()),
+    )
+    .await;
 
+    let turn_events = RecordingTurnEvents::default();
     runtime
-        .stream_turn(
-            TurnInput::empty(),
-            TurnOptions::new(CancellationToken::new()),
+        .stream_next_queued_work(
+            TurnOptions::new(CancellationToken::new()).with_turn_events(&turn_events),
         )
         .await
-        .expect("turn");
+        .expect("turn")
+        .expect("queued turn");
 
-    let requests = requests.lock().expect("request capture lock");
+    let events = turn_events.snapshot();
+    let queued_started = events
+        .iter()
+        .position(|activity| matches!(&activity.event, crate::TurnEvent::QueuedWorkStarted { .. }))
+        .expect("queued work started event");
+    let model_started = events
+        .iter()
+        .position(|activity| {
+            matches!(
+                &activity.event,
+                crate::TurnEvent::ModelRequestStarted { .. }
+            )
+        })
+        .expect("model request started event");
+    assert!(
+        queued_started < model_started,
+        "queued work should be announced before model output starts"
+    );
+    let crate::TurnEvent::QueuedWorkStarted {
+        boundary,
+        batch_ids,
+        causes,
+    } = &events[queued_started].event
+    else {
+        panic!("expected queued work started event");
+    };
+    assert_eq!(*boundary, crate::QueuedWorkClaimBoundary::Idle);
+    assert_eq!(batch_ids.len(), 1);
+    assert!(causes.iter().any(|cause| {
+        cause.event_type == "process.wake"
+            && cause.id == wake.wake_id
+            && cause.text.contains("deploy complete")
+    }));
+
+    let requests = {
+        let guard = requests.lock().expect("request capture lock");
+        guard.clone()
+    };
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
     let message_text = |message: &crate::llm::types::LlmMessage| {
@@ -688,10 +755,9 @@ async fn pending_process_wake_drains_into_first_prompt_as_turn_event() {
         "empty wake turns must not synthesize blank user history"
     );
     assert!(
-        registry
-            .drain_wake_inputs(&target_scope.id(), 10)
+        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
             .await
-            .expect("wakes after ack")
+            .expect("queued work after commit")
             .is_empty()
     );
 }
@@ -722,7 +788,7 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
             }),
         },
     ]);
-    let mut runtime = standard_runtime_with_transport(transport).await;
+    let (mut runtime, store) = standard_runtime_with_transport_and_queue_store(transport).await;
     let registry = runtime
         .host
         .process_registry
@@ -742,38 +808,57 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
         )
         .await
         .expect("register wake process");
-    registry
-        .append_event(
-            "wake-proc",
-            crate::ProcessEventAppendRequest::new(
-                "process.wake",
-                json!({
-                    "text": "deploy complete",
-                    "value": {
-                        "status": "deploy complete"
-                    }
-                }),
-            )
-            .with_wake_target_scope(target_scope.clone()),
+    let wake = append_process_wake_to_queue(
+        registry.as_ref(),
+        store.as_ref(),
+        "wake-proc",
+        crate::ProcessEventAppendRequest::new(
+            "process.wake",
+            json!({
+                "text": "deploy complete",
+                "value": {
+                    "status": "deploy complete"
+                }
+            }),
         )
-        .await
-        .expect("append wake");
-    let pending_wakes = registry
-        .drain_wake_inputs(&target_scope.id(), 10)
-        .await
-        .expect("pending wakes");
-    assert_eq!(pending_wakes.len(), 1);
-    let expected_wake_id = pending_wakes[0].wake_id.clone();
+        .with_wake_target_scope(target_scope.clone()),
+    )
+    .await;
+    let expected_wake_id = wake.wake_id.clone();
     let expected_text = "Background process wake\nProcess: wake-proc\nEvent: process.wake #1\nWake input:\ndeploy complete";
 
     let sink = RecordingSink::default();
+    let turn_events = RecordingTurnEvents::default();
     runtime
         .stream_turn(
             TurnInput::text("hello"),
-            TurnOptions::new(CancellationToken::new()).with_events(&sink),
+            TurnOptions::new(CancellationToken::new())
+                .with_events(&sink)
+                .with_turn_events(&turn_events),
         )
         .await
         .expect("turn");
+
+    let turn_event_snapshot = turn_events.snapshot();
+    let queued_started = turn_event_snapshot
+        .iter()
+        .find(|activity| matches!(&activity.event, crate::TurnEvent::QueuedWorkStarted { .. }))
+        .expect("queued work started event");
+    let crate::TurnEvent::QueuedWorkStarted {
+        boundary, causes, ..
+    } = &queued_started.event
+    else {
+        panic!("expected queued work started event");
+    };
+    assert_eq!(
+        *boundary,
+        crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint
+    );
+    assert!(causes.iter().any(|cause| {
+        cause.event_type == "process.wake"
+            && cause.id == expected_wake_id
+            && cause.text == expected_text
+    }));
 
     assert!(
         sink.snapshot().into_iter().all(|event| {
@@ -786,10 +871,9 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
         "durable wake events must not be bridged as injected plugin messages"
     );
     assert!(
-        registry
-            .drain_wake_inputs(&target_scope.id(), 10)
+        crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
             .await
-            .expect("wakes after ack")
+            .expect("queued work after commit")
             .is_empty()
     );
     let wake_history = active_conversation_messages(&runtime.state)
@@ -1115,63 +1199,6 @@ async fn child_relation_does_not_replace_active_session() {
 }
 
 #[tokio::test]
-async fn handoff_relation_routes_original_session_to_successor() {
-    let transport = mock_provider(vec![MockCall {
-        stream_events: Vec::new(),
-        response: Ok(LlmResponse {
-            full_text: "successor response".to_string(),
-            parts: vec![LlmOutputPart::Text {
-                text: "successor response".to_string(),
-                response_meta: None,
-            }],
-            ..LlmResponse::default()
-        }),
-    }]);
-    let mut runtime = runtime_with_plugins(Vec::new(), transport).await;
-    runtime.state.turn_index = 31;
-    let manager = runtime.session_manager().expect("session manager");
-    manager
-        .create_session(
-            crate::SessionCreateRequest::handoff_session(
-                runtime.session_id(),
-                "test",
-                serde_json::Map::new(),
-                crate::PluginOptions::default(),
-            )
-            .with_session_id("handoff-child")
-            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
-        )
-        .await
-        .expect("handoff session");
-
-    let assembled = runtime
-        .run_turn_assembled(
-            TurnInput {
-                items: vec![InputItem::Text {
-                    text: "next external turn".to_string(),
-                }],
-                image_blobs: HashMap::new(),
-                protocol_turn_options: None,
-                trace_turn_id: None,
-                protocol_extension: None,
-                turn_context: crate::TurnContext::default(),
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .expect("routed turn");
-
-    assert_eq!(runtime.session_id(), "root");
-    assert_eq!(runtime.export_state().turn_index, 32);
-    assert_eq!(assembled.state.session_id, "handoff-child");
-    assert_eq!(assembled.state.turn_index, 32);
-    assert_eq!(
-        assembled.assistant_output.safe_text.trim(),
-        "successor response"
-    );
-}
-
-#[tokio::test]
 async fn session_manager_rejects_duplicate_child_session_ids() {
     let runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
     let manager = runtime.session_manager().expect("session manager");
@@ -1215,11 +1242,7 @@ async fn runtime_can_activate_managed_child_session() {
                 "test",
             )
             .with_session_id("child")
-            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork)
-            .with_first_turn_input(crate::PluginMessage::text(
-                crate::MessageRole::User,
-                "run child",
-            )),
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork),
         )
         .await
         .expect("child session");
@@ -1230,12 +1253,6 @@ async fn runtime_can_activate_managed_child_session() {
         .expect("activate child");
 
     assert_eq!(runtime.session_id(), "child");
-    let seed = manager
-        .take_first_turn_input("child")
-        .await
-        .expect("seed lookup")
-        .expect("seed");
-    assert_eq!(seed.content, "run child");
     assert!(
         manager
             .start_turn(

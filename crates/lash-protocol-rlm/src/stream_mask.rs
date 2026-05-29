@@ -441,7 +441,7 @@ mod tests {
         // Everything after is suppressed.
         assert_eq!(d.process_chunk("\n").chunk, "");
         assert_eq!(
-            d.process_chunk("result = await TOOL.default.exec({ cmd: \"date\" })\n")
+            d.process_chunk("result = await tools.exec({ cmd: \"date\" })\n")
                 .chunk,
             ""
         );
@@ -496,15 +496,15 @@ mod tests {
         // Reproduces: a single chunk like "```lashlang\nnow = await ..."
         // used to drop the part after the opener, so the spliced body
         // started after the assignment target instead of preserving the
-        // full receiver operation.
+        // full module operation.
         let mut d = FenceDetector::new();
         d.process_chunk(
-            "```lashlang\nnow = await TOOL.default.exec({ cmd: \"date\" })?\nprint now.output\n",
+            "```lashlang\nnow = await tools.exec({ cmd: \"date\" })?\nprint now.output\n",
         );
         assert!(d.inside_fence);
         assert!(
             d.fence_body
-                .starts_with("now = await TOOL.default.exec({ cmd: \"date\" })?")
+                .starts_with("now = await tools.exec({ cmd: \"date\" })?")
         );
     }
 

@@ -1,10 +1,8 @@
 use serde_json::json;
 
-use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
-};
+use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolScheduling};
 
-use lash_tool_support::{object_schema, require_str};
+use lash_tool_support::{StaticToolExecute, StaticToolProvider, object_schema, require_str};
 
 /// Fetch a URL and return its content as text.
 pub struct FetchUrl {
@@ -30,16 +28,13 @@ impl Default for FetchUrl {
     }
 }
 
+/// Build the cached `fetch_url` tool provider for the given Tavily API key.
+pub fn fetch_url_provider(api_key: impl Into<String>) -> StaticToolProvider<FetchUrl> {
+    StaticToolProvider::new(vec![fetch_url_tool_definition()], FetchUrl::new(api_key))
+}
+
 #[async_trait::async_trait]
-impl ToolProvider for FetchUrl {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![fetch_url_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
-        (name == "fetch_url").then(|| std::sync::Arc::new(fetch_url_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for FetchUrl {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let args = call.args;
         let url = match require_str(args, "url") {
@@ -48,7 +43,7 @@ impl ToolProvider for FetchUrl {
         };
 
         if self.api_key.trim().is_empty() {
-            return ToolResult::err(json!("Tavily API key is required for fetch_url"));
+            return ToolResult::err(json!("Tavily API key is required for web.fetch"));
         }
 
         let body = json!({
@@ -64,12 +59,12 @@ impl ToolProvider for FetchUrl {
             .await;
         let resp = match resp {
             Ok(resp) => resp,
-            Err(err) => return ToolResult::err(json!(format!("fetch_url request failed: {err}"))),
+            Err(err) => return ToolResult::err(json!(format!("web.fetch request failed: {err}"))),
         };
         let status = resp.status();
         let value: serde_json::Value = match resp.json().await {
             Ok(value) => value,
-            Err(err) => return ToolResult::err(json!(format!("fetch_url response failed: {err}"))),
+            Err(err) => return ToolResult::err(json!(format!("web.fetch response failed: {err}"))),
         };
         if !status.is_success() {
             return ToolResult::err(value);
@@ -115,9 +110,10 @@ fn fetch_url_tool_definition() -> ToolDefinition {
                     "additionalProperties": false
                 }),
             )
-            .with_examples(vec!["fetch_url(url=\"https://www.rust-lang.org/\")".into()])
-            .with_discovery(lash_tool_support::discovery_metadata(
-                "web",
+            .with_examples(vec!["await web.fetch({ url: \"https://www.rust-lang.org/\" })?".into()])
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["web"],
+                "fetch",
                 &["fetch", "open_url"],
             ))
             .with_scheduling(ToolScheduling::Parallel)
@@ -132,20 +128,23 @@ mod tests {
         let definition = fetch_url_tool_definition();
 
         assert_eq!(
-            definition.output_schema["type"],
+            definition.contract.output_schema["type"],
             serde_json::json!("object")
         );
         assert_eq!(
-            definition.output_schema["required"],
+            definition.contract.output_schema["required"],
             serde_json::json!(["url", "content"])
         );
         assert_eq!(
-            definition.output_schema["additionalProperties"],
+            definition.contract.output_schema["additionalProperties"],
             serde_json::json!(false)
         );
-        assert_eq!(definition.activation, lash_core::ToolActivation::Always);
         assert_eq!(
-            definition.availability.base,
+            definition.manifest.activation,
+            lash_core::ToolActivation::Always
+        );
+        assert_eq!(
+            definition.manifest.availability.base,
             lash_core::ToolAvailability::Showcased
         );
     }

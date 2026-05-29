@@ -1,12 +1,15 @@
 use std::sync::{Arc, RwLock};
 
-use lash_core::{ToolCall, ToolContext, ToolContract, ToolManifest, ToolProvider, ToolResult};
+use lash_core::{ToolCall, ToolContext, ToolResult};
+use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 use serde_json::{Value, json};
 
 use crate::common::{LLM_CANDIDATE_LIMIT, args_with_limit, catalog_key, limit_from_args};
 use crate::definitions::search_tools_definition;
 use crate::ranking::ToolDiscoveryIndex;
-use crate::rerank::{llm_rerank_request, merge_llm_selection, parse_llm_tool_names};
+use crate::rerank::{
+    llm_rerank_request, merge_llm_selection, parse_llm_tool_names, rerank_payment_action_intent,
+};
 
 #[derive(Clone, Default)]
 struct IndexCache {
@@ -31,8 +34,8 @@ impl ToolDiscoveryToolsProvider {
         }
     }
 
-    fn index_for_catalog(&self, catalog: Vec<Value>) -> Arc<ToolDiscoveryIndex> {
-        let key = catalog_key(&catalog);
+    fn index_for_catalog(&self, catalog: Arc<Vec<Value>>) -> Arc<ToolDiscoveryIndex> {
+        let key = catalog_key(catalog.as_ref());
         if let Some(index) = self
             .cache
             .read()
@@ -45,7 +48,7 @@ impl ToolDiscoveryToolsProvider {
             return index;
         }
 
-        let index = Arc::new(ToolDiscoveryIndex::build(key, catalog));
+        let index = Arc::new(ToolDiscoveryIndex::build(key, catalog.as_ref().clone()));
         self.cache
             .write()
             .expect("tool discovery cache lock poisoned")
@@ -56,7 +59,7 @@ impl ToolDiscoveryToolsProvider {
     async fn search_tools(
         &self,
         args: &Value,
-        catalog: Vec<Value>,
+        catalog: Arc<Vec<Value>>,
         context: &ToolContext<'_>,
     ) -> ToolResult {
         let index = self.index_for_catalog(catalog);
@@ -66,6 +69,11 @@ impl ToolDiscoveryToolsProvider {
         if candidates.is_empty() {
             return ToolResult::ok(json!([]));
         }
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let candidates = rerank_payment_action_intent(query, candidates);
 
         let request = llm_rerank_request(args, &candidates, limit);
         let completion = match context
@@ -94,19 +102,19 @@ impl ToolDiscoveryToolsProvider {
     }
 }
 
+/// Build the `search_tools` provider backed by a fresh discovery cache.
+pub fn tool_discovery_provider() -> StaticToolProvider<ToolDiscoveryToolsProvider> {
+    StaticToolProvider::new(
+        vec![search_tools_definition()],
+        ToolDiscoveryToolsProvider::new(),
+    )
+}
+
 #[async_trait::async_trait]
-impl ToolProvider for ToolDiscoveryToolsProvider {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![search_tools_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "search_tools").then(|| Arc::new(search_tools_definition().contract()))
-    }
-
+impl StaticToolExecute for ToolDiscoveryToolsProvider {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
-            "search_tools" => match call.context.sessions().tool_catalog().await {
+            "search_tools" => match call.context.sessions().shared_tool_catalog().await {
                 Ok(catalog) => self.search_tools(call.args, catalog, call.context).await,
                 Err(err) => ToolResult::err_fmt(err.to_string()),
             },
@@ -121,7 +129,8 @@ mod tests {
     use lash_core::plugin::runtime_host::RuntimeSessionHost;
     use lash_core::plugin::{PluginError, SessionHandle, SessionSnapshot};
     use lash_core::{
-        DirectCompletion, TokenUsage, ToolCall, ToolContract, ToolDefinition, ToolDiscoveryMetadata,
+        DirectCompletion, TokenUsage, ToolAgentSurface, ToolCall, ToolContract, ToolDefinition,
+        ToolProvider,
     };
     use serde_json::json;
     use std::sync::Mutex;
@@ -198,7 +207,7 @@ mod tests {
     fn catalog_tool_with_metadata(
         name: &str,
         description: &str,
-        namespace: Option<&str>,
+        module: Option<&str>,
         aliases: Vec<&str>,
     ) -> Value {
         let tool = ToolDefinition::raw_named(
@@ -207,17 +216,32 @@ mod tests {
             ToolContract::default_input_schema(),
             json!({}),
         )
-        .with_discovery(ToolDiscoveryMetadata {
-            namespace: namespace.map(str::to_string),
-            aliases: aliases.into_iter().map(str::to_string).collect(),
-        });
+        .with_agent_surface(
+            ToolAgentSurface::new(
+                [module.unwrap_or(match name {
+                    "read_file" => "files",
+                    "search_web" => "web",
+                    _ => "tools",
+                })],
+                match name {
+                    "read_file" => "read",
+                    "search_web" => "search",
+                    _ => name,
+                },
+            )
+            .with_aliases(aliases),
+        );
         let manifest = tool.manifest();
+        let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
+        let call = agent_surface.call_path();
         json!({
             "id": manifest.id,
             "name": manifest.name,
-            "namespace": manifest.discovery.namespace,
+            "module_path": agent_surface.module_path.clone(),
+            "operation": agent_surface.operation.clone(),
+            "call": call,
             "description": manifest.description,
-            "aliases": manifest.discovery.aliases,
+            "aliases": agent_surface.aliases.clone(),
             "availability": "searchable",
             "callable": false,
             "showcased": false,
@@ -242,7 +266,7 @@ mod tests {
 
     #[test]
     fn provider_exposes_search_tools_only() {
-        let names = ToolDiscoveryToolsProvider::new()
+        let names = tool_discovery_provider()
             .tool_manifests()
             .into_iter()
             .map(|definition| definition.name)
@@ -270,12 +294,12 @@ mod tests {
             ],
             ..Default::default()
         });
-        let provider = ToolDiscoveryToolsProvider::new();
+        let provider = tool_discovery_provider();
         let context = discovery_context(host);
 
         let args = json!({
             "query": "cat",
-            "namespace": "filesystem",
+            "module": "filesystem",
             "limit": 1,
         });
         let result = provider
@@ -291,15 +315,16 @@ mod tests {
         let value = result.value_for_projection();
         let results = value.as_array().expect("search result list");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["name"], json!("read_file"));
+        assert_eq!(results[0]["name"], json!("filesystem.read"));
+        assert_eq!(results[0]["call"], json!("filesystem.read"));
         assert!(
             results[0]["signature"]
                 .as_str()
                 .expect("signature")
-                .starts_with("read_file() -> ")
+                .starts_with("await filesystem.read({})? -> ")
         );
         assert_eq!(results[0]["description"], json!("Read file contents"));
-        assert!(results[0].get("namespace").is_none());
+        assert_eq!(results[0]["module_path"], json!(["filesystem"]));
         assert!(results[0].get("score").is_none());
     }
 
@@ -315,7 +340,7 @@ mod tests {
             )),
             ..Default::default()
         });
-        let provider = ToolDiscoveryToolsProvider::new();
+        let provider = tool_discovery_provider();
         let context = discovery_context(host.clone());
 
         let args = json!({
@@ -335,7 +360,7 @@ mod tests {
         assert!(result.is_success(), "{result:?}");
         let value = result.value_for_projection();
         let results = value.as_array().expect("search result list");
-        assert_eq!(ranked_names(results), vec!["search_web"]);
+        assert_eq!(ranked_names(results), vec!["web.search"]);
         let requests = host
             .direct_requests
             .lock()

@@ -123,7 +123,7 @@ impl PluginSession {
                 .tool_access
                 .tools
                 .iter()
-                .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+                .map(|tool| (tool.name().to_string(), Arc::new(tool.contract())))
                 .collect::<BTreeMap<_, _>>();
             (
                 ctx.tool_access

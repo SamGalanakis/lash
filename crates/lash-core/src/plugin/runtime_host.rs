@@ -22,6 +22,13 @@ pub trait RuntimeSessionHost: Send + Sync {
         ))
     }
 
+    async fn shared_tool_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<std::sync::Arc<Vec<serde_json::Value>>, PluginError> {
+        Ok(std::sync::Arc::new(self.tool_catalog(session_id).await?))
+    }
+
     async fn tool_state(&self, _session_id: &str) -> Result<crate::ToolState, PluginError> {
         Err(PluginError::Session(
             "tool state is unavailable in this session".to_string(),
@@ -75,18 +82,6 @@ pub trait RuntimeSessionHost: Send + Sync {
         ))
     }
 
-    /// Pop the seed message that was queued for `session_id` via
-    /// `SessionCreateRequest::first_turn_input`. Returns `None` if no
-    /// seed was queued, or after a previous caller has already taken
-    /// it. Hosts call this when starting the inaugural turn on a
-    /// freshly created session.
-    async fn take_first_turn_input(
-        &self,
-        _session_id: &str,
-    ) -> Result<Option<PluginMessage>, PluginError> {
-        Ok(None)
-    }
-
     async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
         Err(PluginError::Session(
             "session closing is unavailable in this runtime".to_string(),
@@ -100,20 +95,6 @@ pub trait RuntimeSessionHost: Send + Sync {
     ) -> Result<AssembledTurn, PluginError> {
         Err(PluginError::Session(
             "session execution is unavailable in this runtime".to_string(),
-        ))
-    }
-
-    /// Push a user-visible message into the target session's turn-input
-    /// injection bridge so it surfaces at the next iteration boundary of
-    /// the current turn (or at the start of the next turn if the target
-    /// is idle).
-    async fn inject_turn_input(
-        &self,
-        _session_id: &str,
-        _input: crate::InjectedTurnInput,
-    ) -> Result<(), PluginError> {
-        Err(PluginError::Session(
-            "turn input injection is unavailable in this session".to_string(),
         ))
     }
 

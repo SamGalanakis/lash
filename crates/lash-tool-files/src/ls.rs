@@ -1,32 +1,27 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
-    ToolRetryPolicy, ToolScheduling,
-};
+use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
 use lash_tool_support::{
-    FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
-    parse_optional_bool, parse_optional_usize_arg, rg_file_list, run_blocking,
+    FS_DEFAULTS_PREAMBLE, StaticToolExecute, StaticToolProvider, build_path_entry,
+    filesystem_entries_result, object_schema, parse_optional_bool, parse_optional_usize_arg,
+    rg_file_list, run_blocking,
 };
 
 /// List filesystem entries in a directory tree.
 #[derive(Default)]
 pub struct Ls;
 
+/// Build the cached `ls` tool provider.
+pub fn ls_provider() -> StaticToolProvider<Ls> {
+    StaticToolProvider::new(vec![ls_tool_definition()], Ls)
+}
+
 const DEFAULT_DEPTH: usize = 3;
 const MAX_ENTRIES: usize = 500;
 
 #[async_trait::async_trait]
-impl ToolProvider for Ls {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![ls_tool_definition().manifest()]
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
-        (name == "ls").then(|| std::sync::Arc::new(ls_tool_definition().contract()))
-    }
-
+impl StaticToolExecute for Ls {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let args = call.args;
         let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -148,11 +143,12 @@ fn ls_tool_definition() -> ToolDefinition {
                 serde_json::json!({ "type": "object", "additionalProperties": true }),
             )
             .with_examples(vec![
-                r#"ls(path=".", depth=1, limit=100)"#.into(),
-                r#"ls(path="crates/lash/src/tools", with_lines=true)"#.into(),
+                r#"await files.list({ path: ".", depth: 1, limit: 100 })?"#.into(),
+                r#"await files.list({ path: "crates/lash/src/tools", with_lines: true })?"#.into(),
             ])
-            .with_discovery(lash_tool_support::discovery_metadata(
-                "filesystem",
+            .with_agent_surface(lash_tool_support::agent_surface(
+                ["files"],
+                "list",
                 &["list_files", "list_directory"],
             ))
             .with_scheduling(ToolScheduling::Parallel)
@@ -215,9 +211,12 @@ mod tests {
         std::fs::write(dir.path().join("file.txt"), "").unwrap();
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
         std::fs::write(dir.path().join("subdir/nested.rs"), "").unwrap();
-        let result =
-            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         let arr = items(&result);
         let paths: Vec<&str> = arr
@@ -232,9 +231,12 @@ mod tests {
     #[tokio::test]
     async fn test_ls_empty_dir() {
         let dir = TempDir::new().unwrap();
-        let result =
-            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         assert!(items(&result).is_empty());
     }
@@ -244,8 +246,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("file.txt");
         std::fs::write(&path, "").unwrap();
-        let result =
-            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": path.to_str().unwrap()})).await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": path.to_str().unwrap()}),
+        )
+        .await;
         assert!(!result.is_success());
     }
 
@@ -255,7 +261,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
         std::fs::write(dir.path().join("a/b/c/file.txt"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Ls,
+            &ls_provider(),
             "ls",
             &json!({"path": dir.path().to_str().unwrap(), "depth": 1}),
         )
@@ -278,7 +284,7 @@ mod tests {
         std::fs::write(dir.path().join("b.txt"), "").unwrap();
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Ls,
+            &ls_provider(),
             "ls",
             &json!({"path": dir.path().to_str().unwrap(), "limit": 2}),
         )
@@ -297,7 +303,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "line1\nline2\n").unwrap();
         let result = lash_core::testing::run_tool(
-            &Ls,
+            &ls_provider(),
             "ls",
             &json!({"path": dir.path().to_str().unwrap(), "with_lines": true}),
         )
@@ -312,9 +318,12 @@ mod tests {
     async fn test_ls_includes_hidden_by_default() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".env"), "KEY=value\n").unwrap();
-        let result =
-            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
@@ -328,9 +337,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
-        let result =
-            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
@@ -350,7 +362,7 @@ mod tests {
         std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Ls,
+            &ls_provider(),
             "ls",
             &json!({
                 "path": dir.path().to_str().unwrap(),
@@ -377,7 +389,7 @@ mod tests {
         std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Ls,
+            &ls_provider(),
             "ls",
             &json!({
                 "path": dir.path().to_str().unwrap()
@@ -400,9 +412,12 @@ mod tests {
             .current_dir(dir.path())
             .status()
             .unwrap();
-        let result =
-            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
@@ -417,9 +432,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
         std::fs::write(dir.path().join("node_modules/pkg/index.js"), "").unwrap();
-        let result =
-            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
@@ -434,7 +452,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
         std::fs::write(dir.path().join("node_modules/pkg/index.js"), "").unwrap();
         let result = lash_core::testing::run_tool(
-            &Ls,
+            &ls_provider(),
             "ls",
             &json!({
                 "path": dir.path().to_str().unwrap(),

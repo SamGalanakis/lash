@@ -5,7 +5,10 @@ use lash::{
     PluginBinding,
     plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
     prompt::PromptContribution,
-    tools::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult},
+    tools::{
+        StaticToolExecute, StaticToolProvider, ToolAgentSurface, ToolCall, ToolDefinition,
+        ToolResult,
+    },
 };
 use serde_json::json;
 
@@ -70,9 +73,12 @@ impl SessionPlugin for DemoSessionPlugin {
                 )])
             })
         }));
-        reg.tools().provider(Arc::new(DemoTools {
-            db: Arc::clone(&self.db),
-        }))?;
+        reg.tools().provider(Arc::new(StaticToolProvider::new(
+            demo_tool_definitions(),
+            DemoTools {
+                db: Arc::clone(&self.db),
+            },
+        )))?;
         Ok(())
     }
 }
@@ -82,21 +88,7 @@ struct DemoTools {
 }
 
 #[async_trait]
-impl ToolProvider for DemoTools {
-    fn tool_manifests(&self) -> Vec<ToolManifest> {
-        demo_tool_definitions()
-            .into_iter()
-            .map(|tool| tool.manifest())
-            .collect()
-    }
-
-    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        demo_tool_definitions()
-            .into_iter()
-            .find(|tool| tool.name == name)
-            .map(|tool| Arc::new(tool.contract()))
-    }
-
+impl StaticToolExecute for DemoTools {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
             "read_board" => match load_chat_board_for_tool(&self.db, call.context.session_id()) {
@@ -134,6 +126,7 @@ fn read_board_tool() -> ToolDefinition {
         }),
         json!({ "type": "object" }),
     )
+    .with_agent_surface(ToolAgentSurface::new(["board"], "read"))
 }
 
 fn play_move_tool() -> ToolDefinition {
@@ -149,6 +142,7 @@ fn play_move_tool() -> ToolDefinition {
         }),
         json!({ "type": "object" }),
     )
+    .with_agent_surface(ToolAgentSurface::new(["board"], "play"))
 }
 
 fn load_chat_board_for_plugin(

@@ -6,12 +6,15 @@ use thiserror::Error;
 use crate::artifact::{ModuleArtifact, surface_requirements_for_program_with_catalog};
 use crate::ast::{
     AssignPathStep, AstString, Declaration, Expr, ProcessDecl, Program, ResourceRefExpr,
-    ScheduleCadence, TriggerArg, TriggerDecl, TriggerSource, TypeExpr, TypeField, format_type_expr,
+    ScheduleCadence, ScheduleDecl, TriggerArg, TriggerDecl, TriggerSource, TypeExpr, TypeField,
+    format_type_expr,
 };
 use crate::lexer::Span;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceCatalog {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub module_instances: BTreeMap<String, ModuleInstanceCatalog>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resource_types: BTreeMap<String, ResourceTypeCatalog>,
 }
@@ -23,20 +26,32 @@ impl ResourceCatalog {
 
     pub fn tool_default(operations: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let mut catalog = Self::new();
-        catalog.add_alias("TOOL", "default");
+        catalog.add_module_instance(["tools"], "Tools");
         for operation in operations {
             let operation = operation.into();
-            catalog.add_operation("TOOL", operation.clone(), operation);
+            catalog.add_operation("Tools", operation.clone(), operation);
         }
         catalog
     }
 
-    pub fn add_alias(&mut self, resource_type: impl Into<String>, alias: impl Into<String>) {
-        self.resource_types
-            .entry(resource_type.into())
-            .or_default()
-            .aliases
-            .insert(alias.into());
+    pub fn add_module_instance(
+        &mut self,
+        module_path: impl IntoIterator<Item = impl Into<String>>,
+        resource_type: impl Into<String>,
+    ) {
+        let path = module_path.into_iter().map(Into::into).collect::<Vec<_>>();
+        assert!(!path.is_empty(), "module path must not be empty");
+        let resource_type = resource_type.into();
+        let key = module_path_key(&path);
+        self.module_instances.insert(
+            key.clone(),
+            ModuleInstanceCatalog {
+                path,
+                resource_type: resource_type.clone(),
+                alias: key,
+            },
+        );
+        self.ensure_resource_type(resource_type);
     }
 
     pub fn ensure_resource_type(&mut self, resource_type: impl Into<String>) {
@@ -77,10 +92,10 @@ impl ResourceCatalog {
     pub fn extend(&mut self, other: Self) {
         for (resource_type, incoming) in other.resource_types {
             let entry = self.resource_types.entry(resource_type).or_default();
-            entry.aliases.extend(incoming.aliases);
             entry.operations.extend(incoming.operations);
             entry.trigger_events.extend(incoming.trigger_events);
         }
+        self.module_instances.extend(other.module_instances);
     }
 
     pub fn union(mut self, other: Self) -> Self {
@@ -92,9 +107,26 @@ impl ResourceCatalog {
         self.resource_types.contains_key(resource_type)
     }
 
+    pub fn resolve_module_path(&self, path: &[impl AsRef<str>]) -> Option<ResourceRefExpr> {
+        let key = module_path_key(path);
+        let module = self.module_instances.get(&key)?;
+        Some(ResourceRefExpr::resolved(
+            module
+                .path
+                .iter()
+                .map(|segment| segment.as_str().into())
+                .collect(),
+            module.resource_type.clone(),
+            module.alias.clone(),
+        ))
+    }
+
     pub fn resolve_alias(&self, resource: &ResourceRefExpr) -> Option<&ResourceTypeCatalog> {
-        let ty = self.resource_types.get(resource.resource_type.as_str())?;
-        ty.aliases.contains(resource.alias.as_str()).then_some(ty)
+        if !resource.resource_type.is_empty() {
+            return self.resource_types.get(resource.resource_type.as_str());
+        }
+        let resolved = self.resolve_module_path(&resource.path)?;
+        self.resource_types.get(resolved.resource_type.as_str())
     }
 
     pub fn resolve_operation(
@@ -106,6 +138,20 @@ impl ResourceCatalog {
             .get(resource_type)?
             .operations
             .get(operation)
+    }
+
+    pub fn resolve_operation_by_host(
+        &self,
+        resource_type: &str,
+        host_operation: &str,
+    ) -> Option<(&str, &ResourceOperationBinding)> {
+        self.resource_types
+            .get(resource_type)?
+            .operations
+            .iter()
+            .find_map(|(operation, binding)| {
+                (binding.host_operation == host_operation).then_some((operation.as_str(), binding))
+            })
     }
 
     pub fn has_operations(&self) -> bool {
@@ -124,16 +170,61 @@ impl ResourceCatalog {
             .trigger_events
             .get(event)
     }
+
+    pub fn operation_suggestions_for_host(&self, host_operation: &str) -> Vec<String> {
+        let mut suggestions = Vec::new();
+        for module in self.module_instances.values() {
+            let Some(resource_type) = self.resource_types.get(&module.resource_type) else {
+                continue;
+            };
+            for (operation, binding) in &resource_type.operations {
+                if binding.host_operation == host_operation {
+                    suggestions.push(format!("{}.{}", module.alias, operation));
+                }
+            }
+        }
+        suggestions.sort();
+        suggestions.dedup();
+        suggestions
+    }
+
+    pub fn operation_suggestions_for_prefix(
+        &self,
+        prefix: &[impl AsRef<str>],
+        operation: &str,
+    ) -> Vec<String> {
+        let prefix = module_path_key(prefix);
+        let mut suggestions = Vec::new();
+        for module in self.module_instances.values() {
+            if module.alias == prefix || !module.alias.starts_with(&format!("{prefix}.")) {
+                continue;
+            }
+            if self
+                .resolve_operation(&module.resource_type, operation)
+                .is_some()
+            {
+                suggestions.push(format!("{}.{}", module.alias, operation));
+            }
+        }
+        suggestions.sort();
+        suggestions.dedup();
+        suggestions
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceTypeCatalog {
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub aliases: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub operations: BTreeMap<String, ResourceOperationBinding>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub trigger_events: BTreeMap<String, TriggerEventBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleInstanceCatalog {
+    pub path: Vec<String>,
+    pub resource_type: String,
+    pub alias: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,32 +314,46 @@ pub struct LashlangScheduleAbilities {
     pub cron: bool,
 }
 
+fn module_path_key(path: &[impl AsRef<str>]) -> String {
+    path.iter()
+        .map(|segment| segment.as_ref())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LinkedModule {
     pub module_ref: crate::ModuleRef,
     pub required_surface_ref: crate::RequiredSurfaceRef,
     pub artifact: ModuleArtifact,
+    #[serde(skip)]
+    linked_program: Option<Program>,
 }
 
 impl LinkedModule {
     pub fn link(program: Program, surface: LashlangSurface) -> Result<Self, LinkError> {
         let mut linker = Linker::new(&program, &surface);
-        linker.validate()?;
+        let program = linker.link_program()?;
         let requirements =
             surface_requirements_for_program_with_catalog(&program, &surface.resources);
-        let artifact = ModuleArtifact::from_program_with_requirements(program, requirements)
-            .map_err(|err| LinkError::ModuleHash {
-                message: err.to_string(),
-            })?;
+        let artifact =
+            ModuleArtifact::from_program_with_requirements(program.clone(), requirements).map_err(
+                |err| LinkError::ModuleHash {
+                    message: err.to_string(),
+                },
+            )?;
         Ok(Self {
             module_ref: artifact.module_ref.clone(),
             required_surface_ref: artifact.required_surface_ref.clone(),
             artifact,
+            linked_program: Some(program),
         })
     }
 
     pub fn program(&self) -> &Program {
-        &self.artifact.canonical_ir
+        self.linked_program
+            .as_ref()
+            .unwrap_or(&self.artifact.canonical_ir)
     }
 }
 
@@ -278,12 +383,8 @@ pub enum LinkError {
     UnknownName { name: String, span: Option<Span> },
     #[error("unknown builtin `{name}`")]
     UnknownBuiltin { name: String, span: Option<Span> },
-    #[error("unknown resource `{resource_type}.{alias}`")]
-    UnknownResource {
-        resource_type: String,
-        alias: String,
-        span: Option<Span>,
-    },
+    #[error("unknown module `{path}`")]
+    UnknownResource { path: String, span: Option<Span> },
     #[error("resource type `{resource_type}` does not declare trigger event `{event}`")]
     UnknownTriggerEvent {
         resource_type: String,
@@ -301,14 +402,14 @@ pub enum LinkError {
         "trigger `{trigger}` binding for process `{process}` argument `{arg}` has incompatible type: expected {expected}, got {actual}"
     )]
     IncompatibleTriggerArgument {
-        trigger: String,
-        process: String,
-        arg: String,
-        expected: String,
-        actual: String,
+        trigger: Box<str>,
+        process: Box<str>,
+        arg: Box<str>,
+        expected: Box<str>,
+        actual: Box<str>,
         span: Option<Span>,
     },
-    #[error("receiver for operation `{operation}` is not a catalog resource handle")]
+    #[error("receiver for operation `{operation}` is not a module authority")]
     UnresolvedReceiver {
         operation: String,
         span: Option<Span>,
@@ -319,12 +420,27 @@ pub enum LinkError {
         operation: String,
         span: Option<Span>,
     },
+    #[error("module `{module_path}` does not expose operation `{operation}`; available identity-qualified paths: {}", suggestions.join(", "))]
+    AmbiguousModuleOperation {
+        module_path: String,
+        operation: String,
+        suggestions: Vec<String>,
+        span: Option<Span>,
+    },
+    #[error("tools must be called through module paths, e.g. `{suggestion}`")]
+    BareToolCall {
+        name: String,
+        suggestion: String,
+        span: Option<Span>,
+    },
     #[error(
-        "catalog resource `{resource_type}.{alias}` cannot be used inside a process body; pass it as a process parameter"
+        "process `{process}` argument `{arg}` has incompatible authority type: expected {expected}, got {actual}"
     )]
-    CatalogRefInsideProcess {
-        resource_type: String,
-        alias: String,
+    IncompatibleProcessArgument {
+        process: String,
+        arg: String,
+        expected: String,
+        actual: String,
         span: Option<Span>,
     },
     #[error("lashlang feature `{feature}` is disabled by this host")]
@@ -358,7 +474,9 @@ impl LinkError {
             | Self::IncompatibleTriggerArgument { span, .. }
             | Self::UnresolvedReceiver { span, .. }
             | Self::UnknownResourceOperation { span, .. }
-            | Self::CatalogRefInsideProcess { span, .. }
+            | Self::AmbiguousModuleOperation { span, .. }
+            | Self::BareToolCall { span, .. }
+            | Self::IncompatibleProcessArgument { span, .. }
             | Self::FeatureDisabled { span, .. }
             | Self::ProcessLifecycleOutsideProcess { span, .. } => *span,
             Self::ModuleHash { .. } => None,
@@ -391,6 +509,24 @@ impl<'module> Linker<'module> {
         }
     }
 
+    fn link_program(&mut self) -> Result<Program, LinkError> {
+        self.validate()?;
+        let mut scope = Scope::new(true, false, None);
+        let main = self.lower_expr(&self.program.main, &mut scope)?.0;
+        let declarations = self
+            .program
+            .declarations
+            .iter()
+            .map(|declaration| self.lower_declaration(declaration))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Program {
+            declarations,
+            main,
+            declaration_spans: self.program.declaration_spans.clone(),
+            expression_spans: self.program.expression_spans.clone(),
+        })
+    }
+
     fn validate(&mut self) -> Result<(), LinkError> {
         self.collect_declarations()?;
         for (index, declaration) in self.program.declarations.iter().enumerate() {
@@ -402,7 +538,7 @@ impl<'module> Linker<'module> {
                     self.ensure_feature(self.surface.abilities.processes, "processes", span)?;
                     let payload_ty = match &trigger.source {
                         TriggerSource::Binding { resource, event } => {
-                            self.validate_resource_ref(resource, span)?;
+                            let resource = self.validate_resource_ref(resource, span)?;
                             self.trigger_event_payload(
                                 resource.resource_type.as_str(),
                                 event.as_str(),
@@ -430,7 +566,7 @@ impl<'module> Linker<'module> {
                             span,
                         });
                     }
-                    let mut scope = Scope::new(false, true, false, span);
+                    let mut scope = Scope::new(false, false, span);
                     scope.bind(schedule.tick_binding.as_str(), Binding::Value);
                     match &schedule.cadence {
                         ScheduleCadence::Cron {
@@ -449,7 +585,7 @@ impl<'module> Linker<'module> {
             }
         }
 
-        let mut top_level = Scope::new(true, true, false, None);
+        let mut top_level = Scope::new(true, false, None);
         self.validate_expr(&self.program.main, &mut top_level)?;
         Ok(())
     }
@@ -489,7 +625,7 @@ impl<'module> Linker<'module> {
 
     fn validate_process(&self, process: &ProcessDecl, span: Option<Span>) -> Result<(), LinkError> {
         self.ensure_feature(self.surface.abilities.processes, "processes", span)?;
-        let mut scope = Scope::new(false, false, true, span);
+        let mut scope = Scope::new(false, true, span);
         let mut seen = BTreeSet::new();
         for param in &process.params {
             if !seen.insert(param.name.to_string()) {
@@ -559,7 +695,7 @@ impl<'module> Linker<'module> {
     ) -> Result<(), LinkError> {
         match binding {
             TriggerArg::EventBinding(name) => {
-                if name != &trigger.event_binding {
+                if name != trigger.event_binding {
                     return Err(LinkError::UnknownTriggerBinding {
                         trigger: trigger.name.to_string(),
                         arg: param.name.to_string(),
@@ -604,7 +740,7 @@ impl<'module> Linker<'module> {
                 self.validate_resource_param(trigger, process, param, resource_type, span)
             }
             TriggerArg::ResourceRef(resource) => {
-                self.validate_resource_ref(resource, span)?;
+                let resource = self.validate_resource_ref(resource, span)?;
                 self.validate_resource_param(
                     trigger,
                     process,
@@ -631,11 +767,11 @@ impl<'module> Linker<'module> {
             return Ok(());
         }
         Err(LinkError::IncompatibleTriggerArgument {
-            trigger: trigger.name.to_string(),
-            process: process.name.to_string(),
-            arg: param.name.to_string(),
-            expected: format_type_expr(&self.resolve_type_aliases(&param.ty)),
-            actual: resource_type.to_string(),
+            trigger: trigger.name.to_string().into_boxed_str(),
+            process: process.name.to_string().into_boxed_str(),
+            arg: param.name.to_string().into_boxed_str(),
+            expected: format_type_expr(&self.resolve_type_aliases(&param.ty)).into_boxed_str(),
+            actual: resource_type.to_string().into_boxed_str(),
             span,
         })
     }
@@ -650,11 +786,11 @@ impl<'module> Linker<'module> {
         span: Option<Span>,
     ) -> LinkError {
         LinkError::IncompatibleTriggerArgument {
-            trigger: trigger.name.to_string(),
-            process: process.name.to_string(),
-            arg: arg.to_string(),
-            expected: format_type_expr(&self.resolve_type_aliases(expected)),
-            actual: format_type_expr(&self.resolve_type_aliases(actual)),
+            trigger: trigger.name.to_string().into_boxed_str(),
+            process: process.name.to_string().into_boxed_str(),
+            arg: arg.to_string().into_boxed_str(),
+            expected: format_type_expr(&self.resolve_type_aliases(expected)).into_boxed_str(),
+            actual: format_type_expr(&self.resolve_type_aliases(actual)).into_boxed_str(),
             span,
         }
     }
@@ -779,6 +915,11 @@ impl<'module> Linker<'module> {
                 if let Some(binding) = scope.get(name) {
                     return Ok(Some(binding));
                 }
+                if let Some(resource) = self.resolve_module_expr(expr, scope) {
+                    return Ok(Some(Binding::Resource {
+                        resource_type: resource.resource_type.to_string(),
+                    }));
+                }
                 if scope.allow_unknown_globals {
                     return Ok(Some(Binding::Value));
                 }
@@ -857,14 +998,21 @@ impl<'module> Linker<'module> {
                             span: scope.span,
                         });
                     }
-                    if !process.params.iter().any(|param| param.name == *arg) {
+                    let Some(param) = process.params.iter().find(|param| param.name == *arg) else {
                         return Err(LinkError::UnexpectedProcessArgument {
                             process: process.name.to_string(),
                             arg: arg.to_string(),
                             span: scope.span,
                         });
-                    }
-                    self.validate_expr(value, scope)?;
+                    };
+                    let binding = self.validate_expr(value, scope)?;
+                    self.validate_process_arg_binding(
+                        process.name.as_str(),
+                        arg.as_str(),
+                        &param.ty,
+                        binding.as_ref(),
+                        scope.span,
+                    )?;
                 }
                 for param in &process.params {
                     if !seen.contains(param.name.as_str()) {
@@ -923,14 +1071,7 @@ impl<'module> Linker<'module> {
                 Ok(Some(Binding::Value))
             }
             Expr::ResourceRef(resource) => {
-                if !scope.allow_catalog_refs {
-                    return Err(LinkError::CatalogRefInsideProcess {
-                        resource_type: resource.resource_type.to_string(),
-                        alias: resource.alias.to_string(),
-                        span: scope.span,
-                    });
-                }
-                self.validate_resource_ref(resource, scope.span)?;
+                let resource = self.validate_resource_ref(resource, scope.span)?;
                 Ok(Some(Binding::Resource {
                     resource_type: resource.resource_type.to_string(),
                 }))
@@ -940,8 +1081,29 @@ impl<'module> Linker<'module> {
                 operation,
                 args,
             } => {
-                let receiver = self.validate_expr(receiver, scope)?;
-                let Some(Binding::Resource { resource_type }) = receiver else {
+                let receiver_binding =
+                    if let Some(resource) = self.resolve_module_expr(receiver, scope) {
+                        Some(Binding::Resource {
+                            resource_type: resource.resource_type.to_string(),
+                        })
+                    } else {
+                        self.validate_expr(receiver, scope)?
+                    };
+                let Some(Binding::Resource { resource_type }) = receiver_binding else {
+                    if let Some(path) = module_path_for_expr(receiver) {
+                        let suggestions = self
+                            .surface
+                            .resources
+                            .operation_suggestions_for_prefix(&path, operation.as_str());
+                        if !suggestions.is_empty() {
+                            return Err(LinkError::AmbiguousModuleOperation {
+                                module_path: module_path_key(&path),
+                                operation: operation.to_string(),
+                                suggestions,
+                                span: scope.span,
+                            });
+                        }
+                    }
                     return Err(LinkError::UnresolvedReceiver {
                         operation: operation.to_string(),
                         span: scope.span,
@@ -983,6 +1145,19 @@ impl<'module> Linker<'module> {
             }
             Expr::BuiltinCall { name, args } => {
                 if !is_builtin(name.as_str()) {
+                    if let Some(suggestion) = self
+                        .surface
+                        .resources
+                        .operation_suggestions_for_host(name.as_str())
+                        .into_iter()
+                        .next()
+                    {
+                        return Err(LinkError::BareToolCall {
+                            name: name.to_string(),
+                            suggestion,
+                            span: scope.span,
+                        });
+                    }
                     return Err(LinkError::UnknownBuiltin {
                         name: name.to_string(),
                         span: scope.span,
@@ -994,6 +1169,11 @@ impl<'module> Linker<'module> {
                 Ok(Some(Binding::Value))
             }
             Expr::Field { target, .. } => {
+                if let Some(resource) = self.resolve_module_expr(expr, scope) {
+                    return Ok(Some(Binding::Resource {
+                        resource_type: resource.resource_type.to_string(),
+                    }));
+                }
                 self.validate_expr(target, scope)?;
                 Ok(Some(Binding::Value))
             }
@@ -1014,16 +1194,441 @@ impl<'module> Linker<'module> {
         &self,
         resource: &ResourceRefExpr,
         span: Option<Span>,
-    ) -> Result<(), LinkError> {
+    ) -> Result<ResourceRefExpr, LinkError> {
+        if !resource.resource_type.is_empty() {
+            return self
+                .surface
+                .resources
+                .resolve_alias(resource)
+                .map(|_| resource.clone())
+                .ok_or_else(|| LinkError::UnknownResource {
+                    path: resource.path_string(),
+                    span,
+                });
+        }
         self.surface
             .resources
-            .resolve_alias(resource)
-            .map(|_| ())
+            .resolve_module_path(&resource.path)
             .ok_or_else(|| LinkError::UnknownResource {
-                resource_type: resource.resource_type.to_string(),
-                alias: resource.alias.to_string(),
+                path: resource.path_string(),
                 span,
             })
+    }
+
+    fn lower_declaration(&self, declaration: &Declaration) -> Result<Declaration, LinkError> {
+        Ok(match declaration {
+            Declaration::Type(type_decl) => Declaration::Type(type_decl.clone()),
+            Declaration::Process(process) => {
+                let mut scope = Scope::new(false, true, None);
+                for param in &process.params {
+                    scope.bind(param.name.as_str(), self.binding_for_type(&param.ty));
+                }
+                scope.bind("input", Binding::Value);
+                scope.bind("inputs", Binding::Value);
+                let body = self.lower_expr(&process.body, &mut scope)?.0;
+                Declaration::Process(ProcessDecl {
+                    name: process.name.clone(),
+                    params: process.params.clone(),
+                    return_ty: process.return_ty.clone(),
+                    body,
+                })
+            }
+            Declaration::Trigger(trigger) => {
+                let source = match &trigger.source {
+                    TriggerSource::Binding { resource, event } => TriggerSource::Binding {
+                        resource: self.validate_resource_ref(resource, None)?,
+                        event: event.clone(),
+                    },
+                    TriggerSource::Each {
+                        resource_type,
+                        event,
+                        resource_binding,
+                    } => TriggerSource::Each {
+                        resource_type: resource_type.clone(),
+                        event: event.clone(),
+                        resource_binding: resource_binding.clone(),
+                    },
+                };
+                let args = trigger
+                    .args
+                    .iter()
+                    .map(|(name, arg)| {
+                        let arg = match arg {
+                            TriggerArg::ResourceRef(resource) => {
+                                TriggerArg::ResourceRef(self.validate_resource_ref(resource, None)?)
+                            }
+                            TriggerArg::EventBinding(name) => {
+                                TriggerArg::EventBinding(name.clone())
+                            }
+                            TriggerArg::ResourceBinding(name) => {
+                                TriggerArg::ResourceBinding(name.clone())
+                            }
+                        };
+                        Ok((name.clone(), arg))
+                    })
+                    .collect::<Result<Vec<_>, LinkError>>()?;
+                Declaration::Trigger(TriggerDecl {
+                    name: trigger.name.clone(),
+                    source,
+                    event_binding: trigger.event_binding.clone(),
+                    process_name: trigger.process_name.clone(),
+                    args,
+                })
+            }
+            Declaration::Schedule(schedule) => {
+                let mut scope = Scope::new(false, false, None);
+                scope.bind(schedule.tick_binding.as_str(), Binding::Value);
+                let cadence = match &schedule.cadence {
+                    ScheduleCadence::Cron {
+                        expression,
+                        options,
+                    } => ScheduleCadence::Cron {
+                        expression: self.lower_expr(expression, &mut scope)?.0,
+                        options: options
+                            .iter()
+                            .map(|(name, value)| {
+                                Ok((name.clone(), self.lower_expr(value, &mut scope)?.0))
+                            })
+                            .collect::<Result<Vec<_>, LinkError>>()?,
+                    },
+                };
+                let body = self.lower_expr(&schedule.body, &mut scope)?.0;
+                Declaration::Schedule(ScheduleDecl {
+                    name: schedule.name.clone(),
+                    cadence,
+                    tick_binding: schedule.tick_binding.clone(),
+                    body,
+                })
+            }
+        })
+    }
+
+    fn lower_expr(
+        &self,
+        expr: &Expr,
+        scope: &mut Scope,
+    ) -> Result<(Expr, Option<Binding>), LinkError> {
+        if matches!(expr, Expr::Variable(_) | Expr::Field { .. })
+            && let Some(resource) = self.resolve_module_expr(expr, scope)
+        {
+            return Ok((
+                Expr::ResourceRef(resource.clone()),
+                Some(Binding::Resource {
+                    resource_type: resource.resource_type.to_string(),
+                }),
+            ));
+        }
+        Ok(match expr {
+            Expr::Block(expressions) => {
+                let mut lowered = Vec::with_capacity(expressions.len());
+                let mut last = None;
+                for expression in expressions {
+                    let (expr, binding) = self.lower_expr(expression, scope)?;
+                    lowered.push(expr);
+                    last = binding;
+                }
+                (Expr::Block(lowered), last)
+            }
+            Expr::Variable(name) => (Expr::Variable(name.clone()), scope.get(name)),
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Number(_)
+            | Expr::String(_)
+            | Expr::Break
+            | Expr::Continue
+            | Expr::TypeLiteral(_) => (expr.clone(), Some(Binding::Value)),
+            Expr::List(items) => (
+                Expr::List(
+                    items
+                        .iter()
+                        .map(|item| self.lower_expr(item, scope).map(|(expr, _)| expr))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                Some(Binding::Value),
+            ),
+            Expr::Record(entries) => (
+                Expr::Record(
+                    entries
+                        .iter()
+                        .map(|(name, value)| Ok((name.clone(), self.lower_expr(value, scope)?.0)))
+                        .collect::<Result<Vec<_>, LinkError>>()?,
+                ),
+                Some(Binding::Value),
+            ),
+            Expr::Assign { target, expr } => {
+                for step in &target.steps {
+                    if let AssignPathStep::Index(index) = step {
+                        self.lower_expr(index, scope)?;
+                    }
+                }
+                let (lowered, binding) = self.lower_expr(expr, scope)?;
+                if target.steps.is_empty() {
+                    scope.bind(
+                        target.root.as_str(),
+                        binding.clone().unwrap_or(Binding::Value),
+                    );
+                }
+                (
+                    Expr::Assign {
+                        target: target.clone(),
+                        expr: Box::new(lowered),
+                    },
+                    Some(Binding::Value),
+                )
+            }
+            Expr::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                let condition = self.lower_expr(condition, scope)?.0;
+                let mut then_scope = scope.clone();
+                let then_block = self.lower_expr(then_block, &mut then_scope)?.0;
+                let mut else_scope = scope.clone();
+                let else_block = self.lower_expr(else_block, &mut else_scope)?.0;
+                scope.merge_from(then_scope);
+                scope.merge_from(else_scope);
+                (
+                    Expr::If {
+                        condition: Box::new(condition),
+                        then_block: Box::new(then_block),
+                        else_block: Box::new(else_block),
+                    },
+                    Some(Binding::Value),
+                )
+            }
+            Expr::For {
+                binding,
+                iterable,
+                body,
+            } => {
+                let iterable = self.lower_expr(iterable, scope)?.0;
+                let previous = scope.bind(binding.as_str(), Binding::Value);
+                let body = self.lower_expr(body, scope)?.0;
+                scope.restore(binding.as_str(), previous);
+                (
+                    Expr::For {
+                        binding: binding.clone(),
+                        iterable: Box::new(iterable),
+                        body: Box::new(body),
+                    },
+                    Some(Binding::Value),
+                )
+            }
+            Expr::StartProcess(start) => (
+                Expr::StartProcess(crate::ast::ProcessStartExpr {
+                    process: start.process.clone(),
+                    args: start
+                        .args
+                        .iter()
+                        .map(|(name, value)| Ok((name.clone(), self.lower_expr(value, scope)?.0)))
+                        .collect::<Result<Vec<_>, LinkError>>()?,
+                }),
+                Some(Binding::Value),
+            ),
+            Expr::ResourceRef(resource) => {
+                let resource = self.validate_resource_ref(resource, scope.span)?;
+                (
+                    Expr::ResourceRef(resource.clone()),
+                    Some(Binding::Resource {
+                        resource_type: resource.resource_type.to_string(),
+                    }),
+                )
+            }
+            Expr::ReceiverCall {
+                receiver,
+                operation,
+                args,
+            } => {
+                let (receiver, resource_type) =
+                    if let Some(resource) = self.resolve_module_expr(receiver, scope) {
+                        (
+                            Expr::ResourceRef(resource.clone()),
+                            resource.resource_type.to_string(),
+                        )
+                    } else {
+                        let (receiver, binding) = self.lower_expr(receiver, scope)?;
+                        let resource_type = match binding {
+                            Some(Binding::Resource { resource_type }) => resource_type,
+                            _ => String::new(),
+                        };
+                        (receiver, resource_type)
+                    };
+                let host_operation = self
+                    .surface
+                    .resources
+                    .resolve_operation(&resource_type, operation)
+                    .map(|binding| binding.host_operation.clone())
+                    .unwrap_or_else(|| operation.to_string());
+                (
+                    Expr::ReceiverCall {
+                        receiver: Box::new(receiver),
+                        operation: host_operation.into(),
+                        args: args
+                            .iter()
+                            .map(|arg| self.lower_expr(arg, scope).map(|(expr, _)| expr))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    },
+                    Some(Binding::Value),
+                )
+            }
+            Expr::Await(inner) => (
+                Expr::Await(Box::new(self.lower_expr(inner, scope)?.0)),
+                Some(Binding::Value),
+            ),
+            Expr::SleepFor(inner) => (
+                Expr::SleepFor(Box::new(self.lower_expr(inner, scope)?.0)),
+                Some(Binding::Value),
+            ),
+            Expr::SleepUntil(inner) => (
+                Expr::SleepUntil(Box::new(self.lower_expr(inner, scope)?.0)),
+                Some(Binding::Value),
+            ),
+            Expr::WaitSignal => (Expr::WaitSignal, Some(Binding::Value)),
+            Expr::SignalRun { run, payload } => (
+                Expr::SignalRun {
+                    run: Box::new(self.lower_expr(run, scope)?.0),
+                    payload: Box::new(self.lower_expr(payload, scope)?.0),
+                },
+                Some(Binding::Value),
+            ),
+            Expr::ResultUnwrap(inner) => (
+                Expr::ResultUnwrap(Box::new(self.lower_expr(inner, scope)?.0)),
+                Some(Binding::Value),
+            ),
+            Expr::Cancel(inner) => (
+                Expr::Cancel(Box::new(self.lower_expr(inner, scope)?.0)),
+                Some(Binding::Value),
+            ),
+            Expr::Print(inner) => (
+                Expr::Print(Box::new(self.lower_expr(inner, scope)?.0)),
+                Some(Binding::Value),
+            ),
+            Expr::Submit(inner) => (
+                Expr::Submit(
+                    inner
+                        .as_deref()
+                        .map(|inner| {
+                            self.lower_expr(inner, scope)
+                                .map(|(expr, _)| Box::new(expr))
+                        })
+                        .transpose()?,
+                ),
+                Some(Binding::Value),
+            ),
+            Expr::Yield(inner) => (
+                Expr::Yield(Box::new(self.lower_expr(inner, scope)?.0)),
+                Some(Binding::Value),
+            ),
+            Expr::Wake(inner) => (
+                Expr::Wake(Box::new(self.lower_expr(inner, scope)?.0)),
+                Some(Binding::Value),
+            ),
+            Expr::Finish(inner) => (
+                Expr::Finish(
+                    inner
+                        .as_deref()
+                        .map(|inner| {
+                            self.lower_expr(inner, scope)
+                                .map(|(expr, _)| Box::new(expr))
+                        })
+                        .transpose()?,
+                ),
+                Some(Binding::Value),
+            ),
+            Expr::Fail(inner) => (
+                Expr::Fail(Box::new(self.lower_expr(inner, scope)?.0)),
+                Some(Binding::Value),
+            ),
+            Expr::BuiltinCall { name, args } => (
+                Expr::BuiltinCall {
+                    name: name.clone(),
+                    args: args
+                        .iter()
+                        .map(|arg| self.lower_expr(arg, scope).map(|(expr, _)| expr))
+                        .collect::<Result<Vec<_>, _>>()?,
+                },
+                Some(Binding::Value),
+            ),
+            Expr::Field { target, field } => (
+                Expr::Field {
+                    target: Box::new(self.lower_expr(target, scope)?.0),
+                    field: field.clone(),
+                },
+                Some(Binding::Value),
+            ),
+            Expr::Index { target, index } => (
+                Expr::Index {
+                    target: Box::new(self.lower_expr(target, scope)?.0),
+                    index: Box::new(self.lower_expr(index, scope)?.0),
+                },
+                Some(Binding::Value),
+            ),
+            Expr::Unary { op, expr } => (
+                Expr::Unary {
+                    op: *op,
+                    expr: Box::new(self.lower_expr(expr, scope)?.0),
+                },
+                Some(Binding::Value),
+            ),
+            Expr::Binary { left, op, right } => (
+                Expr::Binary {
+                    left: Box::new(self.lower_expr(left, scope)?.0),
+                    op: *op,
+                    right: Box::new(self.lower_expr(right, scope)?.0),
+                },
+                Some(Binding::Value),
+            ),
+        })
+    }
+
+    fn resolve_module_expr(&self, expr: &Expr, scope: &Scope) -> Option<ResourceRefExpr> {
+        if scope.process_body {
+            return None;
+        }
+        let path = module_path_for_expr(expr)?;
+        if path
+            .first()
+            .and_then(|root| scope.get_str(root.as_str()))
+            .is_some()
+        {
+            return None;
+        }
+        self.surface.resources.resolve_module_path(&path)
+    }
+
+    fn validate_process_arg_binding(
+        &self,
+        process: &str,
+        arg: &str,
+        expected_ty: &TypeExpr,
+        actual: Option<&Binding>,
+        span: Option<Span>,
+    ) -> Result<(), LinkError> {
+        let Some(expected_resource) = self.resource_type_for_type(expected_ty) else {
+            return Ok(());
+        };
+        match actual {
+            Some(Binding::Resource { resource_type }) if *resource_type == expected_resource => {
+                Ok(())
+            }
+            Some(Binding::Resource { resource_type }) => {
+                Err(LinkError::IncompatibleProcessArgument {
+                    process: process.to_string(),
+                    arg: arg.to_string(),
+                    expected: expected_resource,
+                    actual: resource_type.clone(),
+                    span,
+                })
+            }
+            _ => Err(LinkError::IncompatibleProcessArgument {
+                process: process.to_string(),
+                arg: arg.to_string(),
+                expected: expected_resource,
+                actual: "value".to_string(),
+                span,
+            }),
+        }
     }
 }
 
@@ -1031,22 +1636,15 @@ impl<'module> Linker<'module> {
 struct Scope {
     bindings: BTreeMap<String, Binding>,
     allow_unknown_globals: bool,
-    allow_catalog_refs: bool,
     process_body: bool,
     span: Option<Span>,
 }
 
 impl Scope {
-    fn new(
-        allow_unknown_globals: bool,
-        allow_catalog_refs: bool,
-        process_body: bool,
-        span: Option<Span>,
-    ) -> Self {
+    fn new(allow_unknown_globals: bool, process_body: bool, span: Option<Span>) -> Self {
         Self {
             bindings: BTreeMap::new(),
             allow_unknown_globals,
-            allow_catalog_refs,
             process_body,
             span,
         }
@@ -1071,10 +1669,27 @@ impl Scope {
         self.bindings.get(name.as_str()).cloned()
     }
 
+    fn get_str(&self, name: &str) -> Option<Binding> {
+        self.bindings.get(name).cloned()
+    }
+
     fn merge_from(&mut self, other: Scope) {
         for (name, binding) in other.bindings {
             self.bindings.entry(name).or_insert(binding);
         }
+    }
+}
+
+fn module_path_for_expr(expr: &Expr) -> Option<Vec<AstString>> {
+    match expr {
+        Expr::Variable(name) => Some(vec![name.clone()]),
+        Expr::Field { target, field } => {
+            let mut path = module_path_for_expr(target)?;
+            path.push(field.clone());
+            Some(path)
+        }
+        Expr::ResourceRef(resource) => Some(resource.path.clone()),
+        _ => None,
     }
 }
 
@@ -1161,10 +1776,10 @@ mod tests {
 
     fn resources() -> ResourceCatalog {
         let mut catalog = ResourceCatalog::new();
-        catalog.add_alias("TOOL", "default");
-        catalog.add_operation("TOOL", "read_file", "read_file");
-        catalog.add_operation("TOOL", "echo", "echo");
-        catalog.add_trigger_event("TOOL", "changed", change_event_type());
+        catalog.add_module_instance(["tools"], "Tools");
+        catalog.add_operation("Tools", "read_file", "read_file");
+        catalog.add_operation("Tools", "echo", "echo");
+        catalog.add_trigger_event("Tools", "changed", change_event_type());
         catalog
     }
 
@@ -1185,7 +1800,7 @@ mod tests {
         let program = crate::parse(
             r#"
             type ChangeEvent = { path: str }
-            process scan(tool: TOOL, event: ChangeEvent) {
+            process scan(tool: Tools, event: ChangeEvent) {
               text = await tool.read_file({ path: event.path })?
               finish text
             }
@@ -1195,10 +1810,10 @@ mod tests {
               signal run run with signal
               finish signal
             }
-            trigger changed on TOOL.default.changed as event
-              -> scan(tool: TOOL.default, event: event)
+            trigger changed on tools.changed as event
+              -> scan(tool: tools, event: event)
             schedule hourly every cron("0 * * * *") as tick {
-              start scan(tool: TOOL.default, event: { path: tick.path })
+              start scan(tool: tools, event: { path: tick.path })
             }
             "#,
         )
@@ -1237,8 +1852,8 @@ mod tests {
     fn linked_module_rejects_bad_process_args_and_unresolved_operations() {
         let missing_arg = crate::parse(
             r#"
-            process scan(tool: TOOL, path: str) { finish path }
-            start scan(tool: TOOL.default)
+            process scan(tool: Tools, path: str) { finish path }
+            start scan(tool: tools)
             "#,
         )
         .expect("parse missing arg");
@@ -1249,7 +1864,7 @@ mod tests {
 
         let bad_operation = crate::parse(
             r#"
-            process scan(tool: TOOL) {
+            process scan(tool: Tools) {
               finish await tool.missing({})?
             }
             "#,
@@ -1317,7 +1932,7 @@ mod tests {
         let trigger = crate::parse(
             r#"
             process worker(event: any) { finish event }
-            trigger changed on TOOL.default.changed as event
+            trigger changed on tools.changed as event
               -> worker(event: event)
             "#,
         )
@@ -1340,7 +1955,7 @@ mod tests {
 
         let trigger_without_process_ability = crate::parse(
             r#"
-            trigger changed on TOOL.default.changed as event
+            trigger changed on tools.changed as event
               -> worker(event: event)
             "#,
         )
@@ -1364,13 +1979,13 @@ mod tests {
             "#,
         )
         .expect("parse disabled schedule");
-        assert!(matches!(
+        assert!(
             LinkedModule::link(
                 schedule,
                 LashlangSurface::new(resources(), LashlangAbilities::all())
-            ),
-            Ok(_)
-        ));
+            )
+            .is_ok()
+        );
         assert!(matches!(
             LinkedModule::link(
                 crate::parse(
@@ -1400,11 +2015,11 @@ mod tests {
         let fixed = crate::parse(
             r#"
             type ChangeEvent = { path: str }
-            process scan(first: TOOL, second: TOOL, event: ChangeEvent) {
+            process scan(first: Tools, second: Tools, event: ChangeEvent) {
               finish event.path
             }
-            trigger changed on TOOL.default.changed as event
-              -> scan(first: TOOL.default, second: TOOL.default, event: event)
+            trigger changed on tools.changed as event
+              -> scan(first: tools, second: tools, event: event)
             "#,
         )
         .expect("parse fixed trigger");
@@ -1413,10 +2028,10 @@ mod tests {
         let each = crate::parse(
             r#"
             type ChangeEvent = { path: str }
-            process scan(tool: TOOL, event: ChangeEvent) {
+            process scan(tool: Tools, event: ChangeEvent) {
               finish event.path
             }
-            trigger changed on each TOOL.changed as tool, event
+            trigger changed on each Tools.changed as tool, event
               -> scan(tool: tool, event: event)
             "#,
         )
@@ -1428,9 +2043,9 @@ mod tests {
     fn linked_module_rejects_bad_declarative_trigger_bindings() {
         let missing = crate::parse(
             r#"
-            process scan(tool: TOOL, event: any) { finish event }
-            trigger changed on TOOL.default.changed as event
-              -> scan(tool: TOOL.default)
+            process scan(tool: Tools, event: any) { finish event }
+            trigger changed on tools.changed as event
+              -> scan(tool: tools)
             "#,
         )
         .expect("parse missing trigger arg");
@@ -1442,8 +2057,8 @@ mod tests {
         let extra = crate::parse(
             r#"
             process scan(event: any) { finish event }
-            trigger changed on TOOL.default.changed as event
-              -> scan(event: event, tool: TOOL.default)
+            trigger changed on tools.changed as event
+              -> scan(event: event, tool: tools)
             "#,
         )
         .expect("parse extra trigger arg");
@@ -1455,7 +2070,7 @@ mod tests {
         let duplicate = crate::parse(
             r#"
             process scan(event: any) { finish event }
-            trigger changed on TOOL.default.changed as event
+            trigger changed on tools.changed as event
               -> scan(event: event, event: event)
             "#,
         )
@@ -1467,7 +2082,7 @@ mod tests {
 
         let unknown_process = crate::parse(
             r#"
-            trigger changed on TOOL.default.changed as event
+            trigger changed on tools.changed as event
               -> missing(event: event)
             "#,
         )
@@ -1480,7 +2095,7 @@ mod tests {
         let unknown_event = crate::parse(
             r#"
             process scan(event: any) { finish event }
-            trigger changed on TOOL.default.missing as event
+            trigger changed on tools.missing as event
               -> scan(event: event)
             "#,
         )
@@ -1494,27 +2109,27 @@ mod tests {
             r#"
             type DifferentEvent = { id: str }
             process scan(event: DifferentEvent) { finish event.id }
-            trigger changed on TOOL.default.changed as event
+            trigger changed on tools.changed as event
               -> scan(event: event)
             "#,
         )
         .expect("parse payload mismatch");
         assert!(matches!(
             LinkedModule::link(payload_mismatch, full_surface()),
-            Err(LinkError::IncompatibleTriggerArgument { arg, .. }) if arg == "event"
+            Err(LinkError::IncompatibleTriggerArgument { arg, .. }) if arg.as_ref() == "event"
         ));
 
         let resource_mismatch = crate::parse(
             r#"
             process scan(path: str) { finish path }
-            trigger changed on TOOL.default.changed as event
-              -> scan(path: TOOL.default)
+            trigger changed on tools.changed as event
+              -> scan(path: tools)
             "#,
         )
         .expect("parse resource mismatch");
         assert!(matches!(
             LinkedModule::link(resource_mismatch, full_surface()),
-            Err(LinkError::IncompatibleTriggerArgument { arg, .. }) if arg == "path"
+            Err(LinkError::IncompatibleTriggerArgument { arg, .. }) if arg.as_ref() == "path"
         ));
     }
 
@@ -1603,9 +2218,9 @@ mod tests {
     #[test]
     fn required_surface_ref_tracks_resource_requirements_not_unrelated_tools() {
         let mut with_extra = resources();
-        with_extra.add_operation("TOOL", "unrelated", "unrelated");
+        with_extra.add_operation("Tools", "unrelated", "unrelated");
         let program = crate::parse(
-            "process scan(tool: TOOL) { finish (await tool.read_file({ path: \".\" }))? }",
+            "process scan(tool: Tools) { finish (await tool.read_file({ path: \".\" }))? }",
         )
         .expect("parse process");
 
@@ -1617,7 +2232,7 @@ mod tests {
         .expect("link extra");
         let changed_requirement = LinkedModule::link(
             crate::parse(
-                "process scan(tool: TOOL) { finish (await tool.echo({ value: \".\" }))? }",
+                "process scan(tool: Tools) { finish (await tool.echo({ value: \".\" }))? }",
             )
             .expect("parse changed resource"),
             full_surface(),

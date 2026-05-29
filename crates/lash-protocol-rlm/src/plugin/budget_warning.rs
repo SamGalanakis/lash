@@ -46,11 +46,11 @@ mod tests {
         let content = format_budget_suffix(0, Some(&usage), Some(200_000))
             .expect("budget suffix should render");
 
-        assert!(content.contains("Tokens: 47213 · handoff threshold: 200000 (23%)"));
+        assert!(content.contains("Tokens: 47213 · frame switch threshold: 200000 (23%)"));
         assert!(content.contains("Turn:"));
-        assert!(!content.contains("Look for a clean handoff point"));
+        assert!(!content.contains("Look for a clean frame switch point"));
         assert!(!content.contains("Budget tight"));
-        assert!(!content.contains("Past the handoff threshold"));
+        assert!(!content.contains("Past the frame switch threshold"));
     }
 
     #[test]
@@ -59,10 +59,10 @@ mod tests {
         let content = format_budget_suffix(0, Some(&usage), Some(100_000))
             .expect("budget suffix should render");
 
-        assert!(content.contains("Tokens: 75000 · handoff threshold: 100000 (75%)"));
-        assert!(content.contains("Look for a clean handoff point"));
+        assert!(content.contains("Tokens: 75000 · frame switch threshold: 100000 (75%)"));
+        assert!(content.contains("Look for a clean frame switch point"));
         assert!(!content.contains("Budget tight"));
-        assert!(!content.contains("Past the handoff threshold"));
+        assert!(!content.contains("Past the frame switch threshold"));
     }
 
     #[test]
@@ -71,22 +71,22 @@ mod tests {
         let content = format_budget_suffix(0, Some(&usage), Some(100_000))
             .expect("budget suffix should render");
 
-        assert!(content.contains("Tokens: 95000 · handoff threshold: 100000 (95%)"));
+        assert!(content.contains("Tokens: 95000 · frame switch threshold: 100000 (95%)"));
         assert!(content.contains("Budget tight"));
-        assert!(content.contains("`continue_as`"));
-        assert!(!content.contains("Past the handoff threshold"));
-        assert!(!content.contains("Look for a clean handoff point"));
+        assert!(content.contains("`control.continue_as(...)`"));
+        assert!(!content.contains("Past the frame switch threshold"));
+        assert!(!content.contains("Look for a clean frame switch point"));
     }
 
     #[test]
-    fn budget_prompt_contribution_over_threshold_forces_handoff() {
+    fn budget_prompt_contribution_over_threshold_forces_frame_switch() {
         let usage = prompt_usage(120_292);
         let content = format_budget_suffix(0, Some(&usage), Some(100_000))
             .expect("budget suffix should render");
 
-        assert!(content.contains("Tokens: 120292 · handoff threshold: 100000 (120%)"));
-        assert!(content.contains("Past the handoff threshold"));
-        assert!(content.contains("End this block with `continue_as` now"));
+        assert!(content.contains("Tokens: 120292 · frame switch threshold: 100000 (120%)"));
+        assert!(content.contains("Past the frame switch threshold"));
+        assert!(content.contains("End this block with `control.continue_as(...)` now"));
         assert!(content.contains("do not call `submit`"));
         assert!(content.contains("`task` + `seed`"));
     }

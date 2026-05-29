@@ -49,7 +49,7 @@
               <p>Only active-path nodes resident; orphans on disk. Lower memory, occasional store reads when crossing forks. Long-lived multi-session servers.</p>
             </article>
           </div>
-          <pre><code>use lash::Residency;
+          <pre><code>use lash::advanced::Residency;
 
 let core = LashCore::rlm()
     .provider(provider)
@@ -68,7 +68,7 @@ let core = LashCore::rlm()
             <h2>Durable Workflows</h2>
             <p>Standard <code>LashCore</code> persists at the turn boundary. For sub-turn durability — expensive LLM calls, long tool calls, process control, mid-turn worker migration — run the turn with a scoped <code>RuntimeEffectController</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
           </div>
-          <p>Shape: the runtime driver polls <code>TurnMachine</code> and claims a <code>RuntimeTurnLease</code>. For each reply-producing turn effect it saves a lease-guarded <code>RuntimeTurnCheckpoint</code>, builds <code>RuntimeEffectEnvelope</code> metadata, invokes the active scoped controller, renews the same lease token before journaling the returned outcome by idempotency key, and feeds it back as the matching response. <code>LashSession::resume_turn(turn_id)</code> claims ownership again, reloads the checkpoint, and replays any already-completed effect outcomes without rerunning input hooks or stream history. Controller/runtime errors abandon lease ownership while preserving resumable state; only the final commit clears the checkpoint and journal.</p>
+          <p>Shape: the runtime driver polls <code>TurnMachine</code> and claims a <code>RuntimeTurnLease</code>. For each reply-producing turn effect it saves a lease-guarded <code>RuntimeTurnCheckpoint</code>, builds a <code>RuntimeEffectEnvelope</code> with a typed <code>RuntimeInvocation</code>, invokes the active scoped controller, renews the same lease token before journaling the returned outcome by <code>replay.key</code>, and feeds it back as the matching response. <code>LashSession::resume_turn(turn_id)</code> claims ownership again, reloads the checkpoint, and replays any already-completed effect outcomes without rerunning input hooks or stream history. Controller/runtime errors abandon lease ownership while preserving resumable state; only the final commit clears the checkpoint and journal.</p>
           <p>Full contract: <a href="./architecture/durability.html">Architecture → Durability</a>. Embedders without workflow orchestration use the regular <a href="./persistence.html">session-store path</a>.</p>
         </div>
 
@@ -103,7 +103,7 @@ let core = LashCore::rlm()
               <p>Concurrent self. Inherits parent execution mode and tool authority, including recursive spawning. For a sibling branch of the same work.</p>
             </article>
           </div>
-          <p>Both tiers consult <code>tier_models</code> for an override, then fall back to <code>default_agent_model(tier)</code>, then the parent's model. Pass overrides through <code>default_registry(&amp;tier_models)</code>.</p>
+          <p>Both tiers consult <code>tier_models</code> for an override, then fall back to the parent's model. Pass overrides through <code>default_registry(&amp;tier_models)</code>.</p>
           <h3>Capability resolution</h3>
           <p><code>Capability::resolve(ctx)</code> sees the live parent <code>SessionPolicy</code> and returns a <code>SessionSpec</code>. The runtime composes spec against parent policy to produce effective child config. The spec is what's persisted, so a resumed subagent re-derives the same authority.</p>
           <p>Three interactive-only tools are always stripped from subagents: <code>ask</code>, <code>showcase</code>, <code>plan_exit</code>. A subagent calling them would block indefinitely.</p>
@@ -160,7 +160,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
     .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
     .advanced()
-    .residency(Residency::ActivePathOnly)
+    .residency(lash::advanced::Residency::ActivePathOnly)
     .build()?;</code></pre>
           <p>Streaming is semantic: <code>TurnBuilder::stream</code> emits <code>TurnActivity</code> and resolves to a <code>TurnResult</code>. Raw runtime telemetry belongs in tracing, not the app surface.</p>
         </div>
@@ -188,7 +188,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
             <article class="panel"><h3><a href="./tracing.html">Tracing</a></h3><p><code>TraceSink</code>, JSONL schema v2, fan-out, <code>lash-trace-viewer</code>, OTel export.</p></article>
             <article class="panel"><h3><a href="./cli.html">CLI</a></h3><p>Slash commands, keyboard shortcuts, config schema, env vars, resume/fork.</p></article>
             <article class="panel"><h3><a href="./architecture/">Architecture</a></h3><p>Crate map, residency, session graph, plugin host traits, providers, Lashlang internals.</p></article>
-            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p><code>RuntimeEffectController</code>, deterministic effect metadata, idempotency keys, checkpoint / restore, workflow adapter seam.</p></article>
+            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p><code>RuntimeEffectController</code>, <code>RuntimeInvocation</code>, replay keys, checkpoint / restore, workflow adapter seam.</p></article>
           </div>
         </div>
   </main>

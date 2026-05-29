@@ -15,8 +15,8 @@ pub(super) async fn execute_tool_call<'run>(
     let tool_name = prepared.tool_name.as_str();
     let retry_policy = manifest.retry_policy;
     let max_attempts = retry_policy.max_attempts();
-    let idempotency_key = derive_idempotency_key(&tool_context, tool_name);
-    if retry_policy.requires_idempotency_key() && idempotency_key.is_none() {
+    let replay_key = derive_retry_replay_key(&tool_context, tool_name);
+    if retry_policy.requires_replay_key() && replay_key.is_none() {
         return execute_once(
             context,
             prepared,
@@ -92,35 +92,30 @@ async fn sleep_before_retry(
         .cancellation_token()
         .cloned()
         .unwrap_or_else(tokio_util::sync::CancellationToken::new);
-    let metadata = if let Some(parent) = tool_context.tool_effect_metadata.as_ref() {
-        crate::runtime::tool_retry_sleep_metadata(parent, tool_name, attempt)
+    let invocation = if let Some(parent) = tool_context.parent_invocation.as_ref() {
+        crate::runtime::tool_retry_sleep_invocation(parent, tool_name, attempt)
     } else {
-        let idempotency_base =
-            derive_idempotency_key(tool_context, tool_name).unwrap_or_else(|| {
-                format!(
-                    "lash-tool:{}:unknown:{tool_name}",
-                    tool_context.session_id()
-                )
-            });
-        let effect_id = format!("{idempotency_base}:attempt:{attempt}:sleep");
-        crate::EffectInvocationMetadata {
-            session_id: tool_context.session_id().to_string(),
-            origin: crate::EffectOrigin::Turn,
-            turn_id: None,
-            turn_index: None,
-            protocol_iteration: None,
-            effect_id: effect_id.clone(),
-            effect_kind: crate::RuntimeEffectKind::Sleep,
-            idempotency_key: effect_id,
-            turn_checkpoint_hash: None,
-        }
+        let replay_base = derive_retry_replay_key(tool_context, tool_name).unwrap_or_else(|| {
+            format!(
+                "lash-tool:{}:unknown:{tool_name}",
+                tool_context.session_id()
+            )
+        });
+        let effect_id = format!("{replay_base}:attempt:{attempt}:sleep");
+        crate::RuntimeInvocation::effect(
+            crate::RuntimeScope::new(tool_context.session_id().to_string()),
+            effect_id.clone(),
+            crate::RuntimeEffectKind::Sleep,
+            effect_id,
+            None,
+        )
     };
     let outcome = context
         .effect_controller
         .as_controller()
         .execute_effect(
             crate::RuntimeEffectEnvelope::new(
-                metadata,
+                invocation,
                 crate::RuntimeEffectCommand::Sleep {
                     duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
                 },
@@ -137,7 +132,7 @@ async fn sleep_before_retry(
     }
 }
 
-fn derive_idempotency_key(tool_context: &ToolContext<'_>, tool_name: &str) -> Option<String> {
+fn derive_retry_replay_key(tool_context: &ToolContext<'_>, tool_name: &str) -> Option<String> {
     tool_context.tool_call_id().map(|call_id| {
         format!(
             "lash-tool:{}:{call_id}:{tool_name}",

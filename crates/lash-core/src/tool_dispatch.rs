@@ -10,7 +10,7 @@ mod tests;
 pub use context::ToolDispatchContext;
 pub use scheduling::{ParallelToolCallOutcome, ParallelToolCallSpec, dispatch_parallel_tool_calls};
 
-pub(crate) use context::{ToolDispatchOutcome, ToolPreparationOutcome};
+pub(crate) use context::{CheckpointMessageBuffer, ToolDispatchOutcome, ToolPreparationOutcome};
 pub(crate) use execution::dispatch_prepared_tool_call_with_execution_context;
 #[cfg(test)]
 pub(crate) use preparation::dispatch_tool_call;

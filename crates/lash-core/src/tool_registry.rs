@@ -997,7 +997,7 @@ mod tests {
     fn contract_from(definitions: Vec<ToolDefinition>, name: &str) -> Option<Arc<ToolContract>> {
         definitions
             .into_iter()
-            .find(|tool| tool.name == name)
+            .find(|tool| tool.name() == name)
             .map(|tool| Arc::new(tool.contract()))
     }
 
@@ -1491,13 +1491,22 @@ mod tests {
     #[test]
     fn project_tool_catalog_keeps_searchable_tools_with_surface_metadata() {
         fn dummy_tool(name: &str) -> crate::ToolDefinition {
-            crate::ToolDefinition::raw_with_id(
+            let tool = crate::ToolDefinition::raw_with_id(
                 format!("tool:{name}"),
                 name,
                 format!("desc for {name}"),
                 crate::ToolDefinition::default_input_schema(),
                 serde_json::json!({}),
-            )
+            );
+            match name {
+                "read_file" => {
+                    tool.with_agent_surface(crate::ToolAgentSurface::new(["files"], "read"))
+                }
+                "search_tools" => {
+                    tool.with_agent_surface(crate::ToolAgentSurface::new(["tools"], "search"))
+                }
+                _ => tool,
+            }
         }
         let catalog = project_tool_catalog([
             crate::ToolSurfaceEntry {
@@ -1513,7 +1522,7 @@ mod tests {
         assert_eq!(catalog[0]["name"], serde_json::json!("read_file"));
         assert_eq!(
             catalog[0]["contract"]["signature"],
-            serde_json::json!("read_file()")
+            serde_json::json!("await files.read({})?")
         );
         assert_eq!(catalog[0]["showcased"], serde_json::json!(true));
         assert_eq!(catalog[1]["callable"], serde_json::json!(true));
@@ -1529,6 +1538,7 @@ mod tests {
                 crate::ToolDefinition::default_input_schema(),
                 serde_json::json!({}),
             )
+            .with_agent_surface(crate::ToolAgentSurface::new(["llm"], "query"))
         }
         let catalog = project_tool_catalog([crate::ToolSurfaceEntry {
             manifest: dummy_tool("llm_query")
@@ -1542,7 +1552,7 @@ mod tests {
 
         assert_eq!(
             catalog[0]["contract"]["signature"],
-            serde_json::json!("llm_query<T = str>()")
+            serde_json::json!("await llm.query<T = str>({})?")
         );
         assert_eq!(catalog[0]["contract"]["returns"], serde_json::json!("T"));
     }
@@ -1558,12 +1568,17 @@ where
         .map(|entry| {
             let manifest = entry.manifest;
             let availability = entry.availability;
+            let agent_surface = manifest.agent_surface.executable_for(&manifest.name);
+            let call = agent_surface.call_path();
             let mut projected = serde_json::json!({
                 "id": manifest.id,
                 "name": manifest.name,
-                "namespace": manifest.discovery.namespace,
+                "module_path": agent_surface.module_path,
+                "operation": agent_surface.operation,
+                "authority_type": agent_surface.authority_type,
+                "call": call,
                 "description": manifest.description,
-                "aliases": manifest.discovery.aliases,
+                "aliases": agent_surface.aliases,
                 "availability": availability,
                 "callable": availability.is_callable(),
                 "showcased": availability.is_showcased(),

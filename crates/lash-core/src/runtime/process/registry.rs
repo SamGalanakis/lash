@@ -1,11 +1,11 @@
 use crate::plugin::PluginError;
 
 use super::events::{
-    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessWakeDelivery,
+    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
 };
 use super::model::{
     ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessRecord, ProcessRegistration, ProcessScope, ProcessScopeId, ProcessSessionDeleteReport,
+    ProcessRecord, ProcessRegistration, ProcessScope, ProcessSessionDeleteReport,
 };
 
 /// Durability-neutral process registry.
@@ -61,7 +61,7 @@ pub trait ProcessRegistry: Send + Sync {
         &self,
         process_id: &str,
         request: ProcessEventAppendRequest,
-    ) -> Result<ProcessEvent, PluginError>;
+    ) -> Result<ProcessEventAppendResult, PluginError>;
 
     async fn events_after(
         &self,
@@ -91,14 +91,6 @@ pub trait ProcessRegistry: Send + Sync {
     ) -> Result<ProcessRecord, PluginError>;
 
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord>;
-
-    async fn drain_wake_inputs(
-        &self,
-        target_scope_id: &ProcessScopeId,
-        limit: usize,
-    ) -> Result<Vec<ProcessWakeDelivery>, PluginError>;
-
-    async fn ack_wake_input(&self, wake_id: &str) -> Result<(), PluginError>;
 
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError>;
 }

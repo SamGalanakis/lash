@@ -20,6 +20,7 @@ mod markdown;
 mod model_catalog;
 mod overlay;
 mod paths;
+#[cfg(feature = "bench")]
 mod perf_support;
 mod persistence;
 mod plugin_surface;
@@ -30,7 +31,7 @@ mod provider_metadata;
 mod render;
 mod repo_status;
 mod resume;
-#[cfg(feature = "runtime-perf")]
+#[cfg(feature = "bench")]
 mod runtime_perf;
 mod scratch_tui;
 mod session_bootstrap;
@@ -46,7 +47,7 @@ mod text_layout;
 mod theme;
 mod tree;
 mod turn_runner;
-mod ui_action;
+#[cfg(feature = "bench")]
 mod ui_perf;
 mod ui_trace;
 mod update;
@@ -275,96 +276,107 @@ struct Args {
     turn_usage_json: Option<std::path::PathBuf>,
 
     /// Run the synthetic non-provider UI performance benchmark and exit
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true)]
     ui_perf_benchmark: bool,
 
     /// Write the UI benchmark JSON report to this file
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, value_name = "OUT.json")]
     ui_perf_out: Option<std::path::PathBuf>,
 
     /// Write a dhat heap profile for the measured UI benchmark window
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true)]
     ui_perf_dhat: bool,
 
     /// Write a dhat heap profile for the measured UI benchmark window
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, value_name = "OUT.json")]
     ui_perf_dhat_out: Option<std::path::PathBuf>,
 
     /// Trim dhat backtraces to this many frames
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, value_name = "FRAMES")]
     ui_perf_dhat_frames: Option<usize>,
 
     /// Number of measured runs for the UI benchmark
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, default_value_t = 5)]
     ui_perf_runs: usize,
 
     /// Number of warmup runs for the UI benchmark
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, default_value_t = 1)]
     ui_perf_warmups: usize,
 
     /// Limit the UI benchmark to one or more named scenarios
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, value_name = "SCENARIO")]
     ui_perf_scenario: Vec<String>,
 
     /// UI benchmark workload profile: quick, full, or stress
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, default_value = "quick", value_name = "PROFILE")]
     ui_perf_profile: String,
 
     /// Include baseline report paths as comparison inputs in the UI perf report
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, value_name = "REPORT.json")]
     ui_perf_compare: Vec<std::path::PathBuf>,
 
     /// Exit non-zero when a UI perf budget is exceeded
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true)]
     ui_perf_enforce_budgets: bool,
 
     /// Run the synthetic non-inference runtime performance benchmark and exit
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true)]
     runtime_perf_benchmark: bool,
 
     /// Write the runtime benchmark JSON report to this file
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, value_name = "OUT.json")]
     runtime_perf_out: Option<std::path::PathBuf>,
 
     /// Write a dhat heap profile for the measured runtime benchmark window
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true)]
     runtime_perf_dhat: bool,
 
     /// Write a dhat heap profile for the measured runtime benchmark window
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, value_name = "OUT.json")]
     runtime_perf_dhat_out: Option<std::path::PathBuf>,
 
     /// Trim dhat backtraces to this many frames
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, value_name = "FRAMES")]
     runtime_perf_dhat_frames: Option<usize>,
 
     /// Number of measured runs for the runtime benchmark
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, default_value_t = 5)]
     runtime_perf_runs: usize,
 
     /// Number of warmup runs for the runtime benchmark
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, default_value_t = 1)]
     runtime_perf_warmups: usize,
 
     /// Limit the runtime benchmark to one or more named scenarios
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, value_name = "SCENARIO")]
     runtime_perf_scenario: Vec<String>,
 
     /// Number of committed turns to run inside each measured runtime session
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, default_value_t = 12)]
     runtime_perf_turns: usize,
 
     /// Tokio worker stack size for runtime benchmark processes
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     #[arg(long, hide = true, value_name = "BYTES")]
     runtime_perf_worker_stack_bytes: Option<usize>,
 
@@ -420,7 +432,7 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse_from(normalized_cli_args());
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     if args.runtime_perf_benchmark
         && let Some(stack_bytes) = args.runtime_perf_worker_stack_bytes
     {
@@ -430,6 +442,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(args: Args) -> anyhow::Result<()> {
+    #[cfg(feature = "bench")]
     if args.ui_perf_benchmark {
         return ui_perf::run_cli(
             args.ui_perf_out,
@@ -446,7 +459,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             BUILD_GIT_HEAD,
         );
     }
-    #[cfg(feature = "runtime-perf")]
+    #[cfg(feature = "bench")]
     if args.runtime_perf_benchmark {
         return runtime_perf::run_cli(
             args.runtime_perf_out,

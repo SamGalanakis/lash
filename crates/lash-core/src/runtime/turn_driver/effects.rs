@@ -9,14 +9,14 @@ impl RuntimeTurnDriver<'_> {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<crate::CheckpointDelivery, RuntimeError> {
-        let metadata = self
-            .turn_effect_metadata(machine, id, RuntimeEffectKind::Checkpoint)
+        let invocation = self
+            .turn_effect_invocation(machine, id, RuntimeEffectKind::Checkpoint)
             .map_err(RuntimeEffectControllerError::into_runtime_error)?;
         self.execute_typed_turn_effect(
             machine,
             event_tx,
             cancel,
-            RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::Checkpoint { checkpoint }),
+            RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::Checkpoint { checkpoint }),
             RuntimeEffectOutcome::into_checkpoint,
         )
         .await
@@ -35,14 +35,14 @@ impl RuntimeTurnDriver<'_> {
         Result<Option<crate::sansio::ExecutionSurfaceSync>, String>,
         RuntimeEffectControllerError,
     > {
-        let metadata =
-            self.turn_effect_metadata(machine, id, RuntimeEffectKind::SyncExecutionSurface)?;
+        let invocation =
+            self.turn_effect_invocation(machine, id, RuntimeEffectKind::SyncExecutionSurface)?;
         self.execute_typed_turn_effect(
             machine,
             event_tx,
             cancel,
             RuntimeEffectEnvelope::new(
-                metadata,
+                invocation,
                 RuntimeEffectCommand::SyncExecutionSurface {
                     update_machine_config,
                 },
@@ -60,12 +60,12 @@ impl RuntimeTurnDriver<'_> {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<Result<crate::ExecResponse, String>, RuntimeEffectControllerError> {
-        let metadata = self.turn_effect_metadata(machine, id, RuntimeEffectKind::ExecCode)?;
+        let invocation = self.turn_effect_invocation(machine, id, RuntimeEffectKind::ExecCode)?;
         self.execute_typed_turn_effect(
             machine,
             event_tx,
             cancel,
-            RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::ExecCode { code }),
+            RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::ExecCode { code }),
             RuntimeEffectOutcome::into_exec_code,
         )
         .await
@@ -77,35 +77,72 @@ impl RuntimeTurnDriver<'_> {
         checkpoint: CheckpointKind,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<crate::CheckpointDelivery, RuntimeError> {
-        let mut committed = self
-            .session
-            .turn_injection_bridge()
-            .drain()
-            .map_err(|err| RuntimeError::new(RuntimeErrorCode::TurnInjectionBridge, err))?;
-        let injected = self
-            .session
-            .turn_input_injection_bridge()
-            .drain()
-            .map_err(|err| RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err))?;
-        let durable_wakes = if let Some(registry) = self.session_manager.process_registry() {
-            let scope_id = self.session_manager.process_scope_id(&self.session_id);
-            registry
-                .drain_wake_inputs(&scope_id, 256)
+        let mut committed = self.checkpoint_messages.drain().map_err(|err| {
+            RuntimeError::new(
+                RuntimeErrorCode::Other("checkpoint_messages".to_string()),
+                err,
+            )
+        })?;
+        let mut transient_messages = Vec::new();
+        let mut turn_causes = Vec::new();
+        let queue_claim = if let Some(store) = self.session.history_store() {
+            store
+                .claim_ready_queued_work(
+                    &self.session_id,
+                    &self.turn_id,
+                    crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+                    crate::QUEUED_WORK_CLAIM_TTL_MS,
+                    64,
+                )
                 .await
                 .map_err(|err| {
-                    RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err.to_string())
+                    RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
                 })?
         } else {
-            Vec::new()
+            None
         };
-        let injected_messages = injected
-            .iter()
-            .map(|item| item.message.clone())
-            .collect::<Vec<_>>();
-        let turn_causes = durable_wakes
-            .iter()
-            .map(crate::process_wake_turn_cause)
-            .collect::<Vec<_>>();
+        if let Some(claim) = queue_claim {
+            let accepted_turn_inputs = claim.accepted_turn_inputs();
+            let materialized = claim
+                .materialize_for_checkpoint_with_attachments(
+                    self.host.core.attachment_store.as_ref(),
+                )
+                .map_err(|err| {
+                    RuntimeError::new(RuntimeErrorCode::DurableAttachmentStoreRequired, err)
+                })?;
+            send_queued_work_started_event(
+                event_tx,
+                crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+                &claim,
+                materialized.turn_causes.clone(),
+            )
+            .await;
+            self.emit_trace(
+                machine.protocol_iteration(),
+                lash_trace::TraceEvent::Custom {
+                    name: "queued_work.claimed".to_string(),
+                    payload: queued_work_trace_payload(
+                        crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+                        &claim,
+                        &materialized.turn_causes,
+                    ),
+                },
+            );
+            committed.extend(materialized.messages);
+            transient_messages.extend(materialized.transient_messages);
+            turn_causes.extend(materialized.turn_causes);
+            if !accepted_turn_inputs.is_empty() {
+                send_session_event(
+                    event_tx,
+                    SessionEvent::InjectedTurnInputAccepted {
+                        inputs: accepted_turn_inputs,
+                        checkpoint,
+                    },
+                )
+                .await;
+            }
+            self.pending_queue_claims.push(claim);
+        }
         let plugins = Arc::clone(self.session.plugins());
         let applied = plugins
             .apply_checkpoint(CheckpointHookContext {
@@ -121,23 +158,6 @@ impl RuntimeTurnDriver<'_> {
             .map_err(|err| {
                 RuntimeError::new(RuntimeErrorCode::PluginCheckpoint, err.to_string())
             })?;
-        if !injected.is_empty() {
-            send_session_event(
-                event_tx,
-                SessionEvent::InjectedTurnInputAccepted {
-                    inputs: injected
-                        .iter()
-                        .cloned()
-                        .map(|item| crate::AcceptedInjectedTurnInput {
-                            id: item.id,
-                            message: item.message,
-                        })
-                        .collect(),
-                    checkpoint,
-                },
-            )
-            .await;
-        }
         committed.extend(applied.messages);
         emit_session_events(event_tx, applied.events).await;
         if let Some(abort) = applied.abort {
@@ -157,7 +177,7 @@ impl RuntimeTurnDriver<'_> {
 
         Ok(crate::CheckpointDelivery {
             messages: committed,
-            transient_messages: injected_messages,
+            transient_messages,
             turn_causes,
         })
     }
@@ -167,7 +187,7 @@ impl RuntimeTurnDriver<'_> {
         code: &str,
         messages: crate::MessageSequence,
         protocol_iteration: usize,
-        effect_metadata: crate::EffectInvocationMetadata,
+        invocation: crate::RuntimeInvocation,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<crate::ExecResponse, String> {
         let (session_event_tx, mut session_event_rx) = mpsc::channel::<SessionEvent>(100);
@@ -220,7 +240,7 @@ impl RuntimeTurnDriver<'_> {
             .execution_context(session_event_tx.clone(), chronological_projection)
             .map_err(|err| err.to_string())?
             .with_turn_event_sender(turn_event_tx.clone());
-        let context = context.with_effect_metadata(effect_metadata);
+        let context = context.with_parent_invocation(invocation);
         let context = context.with_turn_lease(self.turn_lease.clone());
         let result = match code_executor {
             Some(code_executor) => code_executor

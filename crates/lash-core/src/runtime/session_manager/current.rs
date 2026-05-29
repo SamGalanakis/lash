@@ -37,12 +37,24 @@ impl CurrentSessionCapability {
         managed: &ManagedSessionCapability,
         session_id: &str,
     ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
+        Ok(self
+            .shared_tool_catalog_by_id(managed, session_id)
+            .await?
+            .as_ref()
+            .clone())
+    }
+
+    pub(in crate::runtime::session_manager) async fn shared_tool_catalog_by_id(
+        &self,
+        managed: &ManagedSessionCapability,
+        session_id: &str,
+    ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {
         if session_id == self.session_id {
             if let Some(runtime) = managed.registry.lock().await.get(session_id).cloned() {
                 let runtime = runtime.runtime.lock().await;
-                return runtime.active_tool_catalog();
+                return runtime.active_tool_catalog_shared();
             }
-            return self.plugins.tool_catalog(session_id);
+            return Ok(Arc::new(self.plugins.tool_catalog(session_id)?));
         }
         let runtime = {
             let registry = managed.registry.lock().await;
@@ -53,7 +65,7 @@ impl CurrentSessionCapability {
         if let Some(err) = observation.tool_catalog_error.as_ref() {
             return Err(crate::PluginError::Session(err.clone()));
         }
-        Ok(observation.tool_catalog.as_ref().clone())
+        Ok(Arc::clone(&observation.tool_catalog))
     }
 
     pub(in crate::runtime::session_manager) fn enrich_current_snapshot(
@@ -96,6 +108,14 @@ impl CurrentSessionCapability {
         session_id: &str,
     ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
         self.tool_catalog_by_id(managed, session_id).await
+    }
+
+    pub(in crate::runtime::session_manager) async fn shared_tool_catalog(
+        &self,
+        managed: &ManagedSessionCapability,
+        session_id: &str,
+    ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {
+        self.shared_tool_catalog_by_id(managed, session_id).await
     }
 
     pub(in crate::runtime::session_manager) async fn tool_state(

@@ -17,7 +17,7 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionManager {
                     registration,
                     Arc::clone(&registry),
                     call.clone(),
-                    execution_context.tool_effect_metadata,
+                    execution_context.causal_invocation,
                     execution_context.wake_target_scope,
                     cancellation,
                 )

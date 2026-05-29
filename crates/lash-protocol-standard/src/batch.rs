@@ -1,4 +1,4 @@
-use lash_core::{ToolAvailabilityConfig, ToolDefinition, ToolDiscoveryMetadata, ToolScheduling};
+use lash_core::{ToolAgentSurface, ToolAvailabilityConfig, ToolDefinition, ToolScheduling};
 
 pub fn batch_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
@@ -28,12 +28,11 @@ pub fn batch_tool_definition() -> ToolDefinition {
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(vec![
-            r#"batch(tool_calls=[{"tool":"read_file","parameters":{"path":"src/main.rs"}},{"tool":"grep","parameters":{"query":"ToolProvider crates/lash/src/"}}])"#.to_string(),
+            r#"await tools.batch({ tool_calls: [{ tool: "read_file", parameters: { path: "src/main.rs" } }, { tool: "grep", parameters: { query: "ToolProvider crates/lash/src/" } }] })?"#.to_string(),
         ])
-    .with_discovery(ToolDiscoveryMetadata {
-        namespace: Some("runtime".to_string()),
-        aliases: vec!["parallel_tools".to_string()],
-    })
+    .with_agent_surface(
+        ToolAgentSurface::new(["tools"], "batch").with_aliases(["parallel_tools"]),
+    )
     .with_availability(ToolAvailabilityConfig::callable())
     .with_scheduling(ToolScheduling::Parallel)
 }

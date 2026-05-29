@@ -22,7 +22,7 @@ impl OpenAiCompatibleProvider {
 
     pub fn into_components(self) -> ProviderComponents {
         let model_policy = std::sync::Arc::new(OpenAiModelPolicy::new(self.base_url.clone()));
-        ProviderComponents::new(Box::new(self.clone()), Box::new(self), model_policy)
+        ProviderComponents::new(Box::new(self), model_policy)
     }
 }
 
@@ -44,11 +44,7 @@ impl OpenAiProvider {
     }
 
     pub fn into_components(self) -> ProviderComponents {
-        ProviderComponents::new(
-            Box::new(self.clone()),
-            Box::new(self),
-            std::sync::Arc::new(OpenAiDirectModelPolicy),
-        )
+        ProviderComponents::new(Box::new(self), std::sync::Arc::new(OpenAiDirectModelPolicy))
     }
 
     #[cfg(test)]
@@ -61,7 +57,8 @@ impl OpenAiProvider {
     }
 }
 
-impl ProviderState for OpenAiCompatibleProvider {
+#[async_trait]
+impl Provider for OpenAiCompatibleProvider {
     fn kind(&self) -> &'static str {
         "openai-compatible"
     }
@@ -93,12 +90,17 @@ impl ProviderState for OpenAiCompatibleProvider {
         serde_json::Value::Object(map)
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderState> {
+    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        complete(self, req, CompletionEndpoint::ChatCompletions).await
+    }
+
+    fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
 }
 
-impl ProviderState for OpenAiProvider {
+#[async_trait]
+impl Provider for OpenAiProvider {
     fn kind(&self) -> &'static str {
         "openai"
     }
@@ -126,29 +128,11 @@ impl ProviderState for OpenAiProvider {
         serde_json::Value::Object(map)
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderState> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
-impl ProviderTransport for OpenAiCompatibleProvider {
-    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
-        complete(self, req, CompletionEndpoint::ChatCompletions).await
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
-impl ProviderTransport for OpenAiProvider {
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         complete(&mut self.inner, req, CompletionEndpoint::Responses).await
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+    fn clone_boxed(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
 }

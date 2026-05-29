@@ -133,12 +133,13 @@ pub(crate) async fn complete(
                     status.as_u16()
                 )
             });
+        // Retryability is decided centrally by the provider failure
+        // classifier from the attached HTTP status; no inline override here.
         return Err(LlmTransportError::new(message)
             .with_status(status.as_u16())
             .with_headers(header_pairs(&headers))
             .with_raw(text)
-            .with_request_body(String::from_utf8_lossy(&request_body).into_owned())
-            .retryable(status.as_u16() == 429 || status.as_u16() >= 500));
+            .with_request_body(String::from_utf8_lossy(&request_body).into_owned()));
     }
     drop(request_body);
 

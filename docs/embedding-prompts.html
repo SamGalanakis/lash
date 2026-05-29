@@ -25,7 +25,7 @@
 <div class="section" id="context-window">
           <div class="section-header">
             <h2>Context Window And History</h2>
-            <p><code>ModelSpec.limits.context_window_tokens</code> caps every provider request. Overflow finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> auto-truncate. Compact, switch model, or hand off.</p>
+            <p><code>ModelSpec.limits.context_window_tokens</code> caps every provider request. Overflow finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> auto-truncate. Compact, switch model, or switch frames.</p>
           </div>
           <p>Two history strategies, picked via the mode's context-approach setting:</p>
           <div class="two-col">
@@ -104,7 +104,7 @@ submit({ "move": move_idx, "tenant": tenant_id })
             <li><code>.bind_value(name, FlowValue)</code> — pass a native lashlang value, skipping the JSON round-trip.</li>
             <li><code>.bind_lazy(name, ProjectionRef)</code> — for large host structures. Register the host object with a <code>ProjectionResolver</code>, bind the stable ref, and let RLM resolve it immediately before Lashlang execution.</li>
           </ul>
-          <p>Lazy bindings no longer accept a raw <code>Arc&lt;dyn ProjectedHostValue&gt;</code> through the public RLM API. Keep the object behind a resolver so snapshots, handoffs, and child seeds carry an opaque <code>ProjectionRef</code> instead of accidentally materializing the large value.</p>
+          <p>Lazy bindings no longer accept a raw <code>Arc&lt;dyn ProjectedHostValue&gt;</code> through the public RLM API. Keep the object behind a resolver so snapshots, AgentFrame switches, and child seeds carry an opaque <code>ProjectionRef</code> instead of accidentally materializing the large value.</p>
           <pre><code>use std::sync::Arc;
 use lash::{LashCore, ModeId, ModePreset, PluginStack, TurnInput};
 use lash_protocol_rlm::{
@@ -129,8 +129,8 @@ let input = TurnInput::text("Answer using docs only when needed.")
           <h3>Reserved names and the read-only guard</h3>
           <p>Projected names are read-only — assignment inside lashlang raises a protocol error. The runtime reserves <code>history</code>; override by narrowing through your own projected handle, not by rebinding.</p>
           <p>Duplicate names between session and turn scopes are rejected at <code>run()</code> time. Pick one scope; merge at the source.</p>
-          <h3>Seeds for handoffs and subagents</h3>
-          <p><code>continue_as</code> and <code>spawn_agent</code> accept a <code>seed:</code> map whose entries re-project in the successor or child session. Ref-backed projected values keep their <code>ProjectionRef</code>; value-backed projected values serialize as JSON. See <a href="./embedding-advanced.html#subagents">Subagents</a> and <a href="./architecture/lashlang-effects.html#projected-host-bindings">Projected Host Bindings</a>.</p>
+          <h3>Seeds for AgentFrame switches and subagents</h3>
+          <p><code>continue_as</code> and <code>spawn_agent</code> accept a <code>seed:</code> map whose entries re-project in the AgentFrame or child session. Ref-backed projected values keep their <code>ProjectionRef</code>; value-backed projected values serialize as JSON. See <a href="./embedding-advanced.html#subagents">Subagents</a> and <a href="./architecture/lashlang-effects.html#projected-host-bindings">Projected Host Bindings</a>.</p>
           <p>Deep reference: <a href="./architecture/lashlang-effects.html#projected-host-bindings">Architecture → Lashlang → Projected Host Bindings</a>.</p>
         </div>
 

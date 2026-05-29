@@ -4,20 +4,21 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 impl ProcessCapability {
-    pub(in crate::runtime::session_manager) fn process_scope(
+    fn process_scope_for_op(
         &self,
         session_id: &str,
+        agent_frame_id: Option<&str>,
     ) -> crate::ProcessScope {
-        crate::ProcessScope::new(session_id)
+        agent_frame_id
+            .filter(|frame_id| !frame_id.is_empty())
+            .map(|frame_id| crate::ProcessScope::for_agent_frame(session_id, frame_id))
+            .unwrap_or_else(|| crate::ProcessScope::new(session_id))
     }
 
-    pub(in crate::runtime::session_manager) fn process_scope_id(
-        &self,
-        session_id: &str,
-    ) -> crate::ProcessScopeId {
-        self.process_scope(session_id).id()
-    }
-
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "process start composes current session, managed session, runner, target, registration, options, and scoped effect context"
+    )]
     pub(in crate::runtime::session_manager) async fn start_process(
         &self,
         current: &CurrentSessionCapability,
@@ -36,15 +37,24 @@ impl ProcessCapability {
             ));
         };
         self.mark_current_process_sync_needed(current, session_id);
-        let creator_scope = self.process_scope(session_id);
-        let registration = registration.with_provenance(
-            creator_scope.clone(),
-            current.host.core.host_profile_id.clone(),
+        let creator_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
+        let caused_by = scope
+            .parent_invocation
+            .as_ref()
+            .and_then(crate::RuntimeInvocation::causal_ref);
+        let registration = registration.with_process_provenance(
+            crate::ProcessProvenance::new(
+                creator_scope.clone(),
+                current.host.core.host_profile_id.clone(),
+            )
+            .with_caused_by(caused_by),
         );
         let wake_target_scope = options
             .wake_session_id
             .as_deref()
-            .map(|session_id| self.process_scope(session_id))
+            .map(|session_id| {
+                self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref())
+            })
             .unwrap_or_else(|| creator_scope.clone());
         let execution_context = options
             .execution_context(&scope)
@@ -64,7 +74,7 @@ impl ProcessCapability {
                     execution_context: Box::new(execution_context),
                 },
                 Some(runner),
-                scope.effect_metadata,
+                scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
             )
@@ -96,7 +106,7 @@ impl ProcessCapability {
                     process_id: process_id.to_string(),
                 },
                 None,
-                scope.effect_metadata,
+                scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
             )
@@ -125,10 +135,11 @@ impl ProcessCapability {
                 current,
                 Arc::clone(registry),
                 crate::ProcessCommand::List {
-                    owner_scope: self.process_scope(session_id),
+                    owner_scope: self
+                        .process_scope_for_op(session_id, scope.agent_frame_id.as_deref()),
                 },
                 None,
-                scope.effect_metadata,
+                scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
             )
@@ -170,7 +181,7 @@ impl ProcessCapability {
                     reason: Some("requested by host".to_string()),
                 },
                 None,
-                scope.effect_metadata,
+                scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
             )
@@ -220,6 +231,7 @@ impl ProcessCapability {
         _managed: &ManagedSessionCapability,
         session_id: &str,
         handle_ids: &[String],
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<(), crate::PluginError> {
         if handle_ids.is_empty() {
             return Ok(());
@@ -231,7 +243,7 @@ impl ProcessCapability {
                 "process registry is unavailable in this runtime".to_string(),
             ));
         };
-        let owner_scope = self.process_scope(session_id);
+        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
         for (grant, _record) in registry.list_handle_grants(&owner_scope).await? {
             visible.insert(grant.process_id);
         }
@@ -265,12 +277,16 @@ impl ProcessCapability {
                 current,
                 Arc::clone(registry),
                 crate::ProcessCommand::Transfer {
-                    from_scope: self.process_scope(from_session_id),
-                    to_scope: self.process_scope(to_session_id),
+                    from_scope: self
+                        .process_scope_for_op(from_session_id, scope.agent_frame_id.as_deref()),
+                    to_scope: self.process_scope_for_op(
+                        to_session_id,
+                        scope.target_agent_frame_id.as_deref(),
+                    ),
                     process_ids,
                 },
                 None,
-                scope.effect_metadata,
+                scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
             )
@@ -298,7 +314,7 @@ impl ProcessCapability {
                 "process registry is unavailable in this runtime".to_string(),
             ));
         };
-        let owner_scope = self.process_scope(session_id);
+        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
         let tasks = registry.list_handle_grants(&owner_scope).await?;
         let mut cancelled = Vec::new();
         for (grant, record) in tasks {
@@ -359,20 +375,28 @@ impl ProcessCapability {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "journaled process effects keep registry, command, runner, invocation, controller, and turn lease explicit"
+    )]
     async fn execute_process_effect(
         &self,
         current: &CurrentSessionCapability,
         registry: Arc<dyn crate::ProcessRegistry>,
         command: crate::ProcessCommand,
         runner: Option<Arc<dyn crate::runtime::effect::ProcessRunner>>,
-        parent_metadata: Option<crate::EffectInvocationMetadata>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
         effect_controller: Option<&dyn crate::RuntimeEffectController>,
         scope_turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Result<crate::ProcessEffectOutcome, crate::PluginError> {
         let effect_id = command.effect_id();
-        let metadata = self.process_effect_metadata(current, &effect_id, parent_metadata)?;
+        let invocation = crate::runtime::causal::process_effect_invocation(
+            &current.session_id,
+            parent_invocation,
+            &effect_id,
+        );
         let envelope = crate::RuntimeEffectEnvelope::new(
-            metadata,
+            invocation,
             crate::RuntimeEffectCommand::Process { command },
         );
         let controller = effect_controller.unwrap_or(current.host.core.effect_controller.as_ref());
@@ -389,42 +413,5 @@ impl ProcessCapability {
         )
         .await?;
         outcome.into_process().map_err(crate::PluginError::from)
-    }
-
-    fn process_effect_metadata(
-        &self,
-        current: &CurrentSessionCapability,
-        effect_id: &str,
-        parent_metadata: Option<crate::EffectInvocationMetadata>,
-    ) -> Result<crate::EffectInvocationMetadata, crate::PluginError> {
-        if let Some(parent) = parent_metadata {
-            let Some(turn_id) = parent.turn_id.clone() else {
-                return Err(crate::PluginError::Session(format!(
-                    "process effect `{effect_id}` requires active turn metadata"
-                )));
-            };
-            return Ok(crate::EffectInvocationMetadata {
-                session_id: current.session_id.clone(),
-                origin: parent.origin,
-                turn_id: Some(turn_id),
-                turn_index: parent.turn_index,
-                protocol_iteration: parent.protocol_iteration,
-                effect_id: effect_id.to_string(),
-                effect_kind: crate::RuntimeEffectKind::Process,
-                idempotency_key: format!("{}:{effect_id}", parent.idempotency_key),
-                turn_checkpoint_hash: parent.turn_checkpoint_hash,
-            });
-        }
-        Ok(crate::EffectInvocationMetadata {
-            session_id: current.session_id.clone(),
-            origin: crate::EffectOrigin::Turn,
-            turn_id: None,
-            turn_index: None,
-            protocol_iteration: None,
-            effect_id: effect_id.to_string(),
-            effect_kind: crate::RuntimeEffectKind::Process,
-            idempotency_key: format!("{}:{effect_id}", current.session_id),
-            turn_checkpoint_hash: None,
-        })
     }
 }

@@ -20,6 +20,16 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
     ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
         self.current.tool_catalog(&self.managed, session_id).await
     }
+
+    async fn shared_tool_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {
+        self.current
+            .shared_tool_catalog(&self.managed, session_id)
+            .await
+    }
+
     async fn tool_state(&self, session_id: &str) -> Result<crate::ToolState, crate::PluginError> {
         self.current.tool_state(&self.managed, session_id).await
     }
@@ -42,13 +52,6 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             .await
     }
 
-    async fn take_first_turn_input(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<crate::PluginMessage>, crate::PluginError> {
-        self.managed.take_first_turn_input(session_id).await
-    }
-
     async fn close_session(&self, session_id: &str) -> Result<(), crate::PluginError> {
         self.managed
             .close_session(&self.current, &self.usage, session_id)
@@ -63,14 +66,6 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             .start_turn(&self.current, &self.usage, session_id, input)
             .await
     }
-    async fn inject_turn_input(
-        &self,
-        session_id: &str,
-        input: crate::InjectedTurnInput,
-    ) -> Result<(), crate::PluginError> {
-        self.managed.inject_turn_input(session_id, input).await
-    }
-
     async fn append_session_nodes(
         &self,
         session_id: &str,
@@ -141,9 +136,16 @@ impl crate::ProcessService for RuntimeSessionManager {
         &self,
         session_id: &str,
         handle_ids: &[String],
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<(), crate::PluginError> {
         self.processes
-            .validate_process_handles_visible(&self.current, &self.managed, session_id, handle_ids)
+            .validate_process_handles_visible(
+                &self.current,
+                &self.managed,
+                session_id,
+                handle_ids,
+                scope,
+            )
             .await
     }
 

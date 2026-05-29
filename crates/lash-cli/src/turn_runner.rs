@@ -1,8 +1,8 @@
 use lash::LashSession;
 use lash::{TurnActivitySink, TurnInput};
 use lash_core::{
-    AssistantOutput, ExecutionSummary, OutputState, RuntimeSessionState, SessionStateEnvelope,
-    TokenUsage, TurnIssue, TurnOutcome, TurnStop,
+    AssistantOutput, ExecutionSummary, OutputState, RuntimeSessionState, TokenUsage, TurnIssue,
+    TurnOutcome, TurnStop,
 };
 #[cfg(test)]
 use lash_sqlite_store::Store;
@@ -46,52 +46,80 @@ where
             .await
         {
             Ok(turn) => turn,
-            Err(err) => {
-                let state = session
-                    .control()
-                    .state()
-                    .persist_current()
-                    .await
-                    .unwrap_or_else(|_| RuntimeSessionState::default());
-                let state = SessionStateEnvelope {
-                    session_id: state.session_id,
-                    policy: state.policy,
-                    session_graph: state.session_graph,
-                    turn_index: state.turn_index,
-                    token_usage: state.token_usage,
-                    last_prompt_usage: state.last_prompt_usage,
-                    protocol_turn_options: state.protocol_turn_options,
-                };
-                lash::TurnResult {
-                    execution: ExecutionSummary {
-                        had_tool_calls: false,
-                        had_code_execution: false,
-                    },
-                    state,
-                    outcome: TurnOutcome::Stopped(TurnStop::RuntimeError),
-                    assistant_output: AssistantOutput {
-                        safe_text: String::new(),
-                        raw_text: String::new(),
-                        state: OutputState::EmptyOutput,
-                    },
-                    usage: TokenUsage::default(),
-                    children_usage: Vec::new(),
-                    tool_calls: Vec::new(),
-                    errors: vec![TurnIssue {
-                        kind: "runtime".to_string(),
-                        code: Some(err.to_string()),
-                        terminal_reason: None,
-                        message: err.to_string(),
-                        raw: None,
-                    }],
-                }
-            }
+            Err(err) => runtime_error_turn_result(&session, err.to_string()).await,
         };
         tracing::debug!(stream_id, outcome = ?result.outcome, "runtime turn task completed");
         let _ = return_tx.send(RuntimeRunResult { stream_id, result });
     });
 
     (cancel, return_rx)
+}
+
+pub(crate) fn spawn_session_queued_turn<S>(
+    session: LashSession,
+    sink: S,
+    stream_id: u64,
+) -> (CancellationToken, oneshot::Receiver<RuntimeRunResult>)
+where
+    S: TurnActivitySink + Send + Sync + 'static,
+{
+    let (return_tx, return_rx) = oneshot::channel();
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+
+    tokio::spawn(async move {
+        tracing::debug!(stream_id, "queued runtime turn task spawned");
+        let result = match session
+            .next_queued_turn()
+            .cancel(task_cancel)
+            .stream(&sink)
+            .await
+        {
+            Ok(Some(turn)) => turn,
+            Ok(None) => {
+                runtime_error_turn_result(&session, "no durable queued work was ready".to_string())
+                    .await
+            }
+            Err(err) => runtime_error_turn_result(&session, err.to_string()).await,
+        };
+        tracing::debug!(stream_id, outcome = ?result.outcome, "queued runtime turn task completed");
+        let _ = return_tx.send(RuntimeRunResult { stream_id, result });
+    });
+
+    (cancel, return_rx)
+}
+
+async fn runtime_error_turn_result(session: &LashSession, message: String) -> lash::TurnResult {
+    let state = session
+        .control()
+        .state()
+        .persist_current()
+        .await
+        .unwrap_or_else(|_| RuntimeSessionState::default());
+    let state = state.into_envelope();
+    lash::TurnResult {
+        execution: ExecutionSummary {
+            had_tool_calls: false,
+            had_code_execution: false,
+        },
+        state,
+        outcome: TurnOutcome::Stopped(TurnStop::RuntimeError),
+        assistant_output: AssistantOutput {
+            safe_text: String::new(),
+            raw_text: String::new(),
+            state: OutputState::EmptyOutput,
+        },
+        usage: TokenUsage::default(),
+        children_usage: Vec::new(),
+        tool_calls: Vec::new(),
+        errors: vec![TurnIssue {
+            kind: "runtime".to_string(),
+            code: Some(message.clone()),
+            terminal_reason: None,
+            message,
+            raw: None,
+        }],
+    }
 }
 
 #[cfg(test)]
@@ -162,6 +190,8 @@ mod tests {
         store.save_session_head(SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
             graph: graph.clone(),
             config: PersistedSessionConfig {
                 provider_id: "openai-compatible".into(),

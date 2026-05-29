@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,12 +57,6 @@ pub struct TraceContext {
     pub effect_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_call_id: Option<String>,
-    /// When the LLM call was issued from inside a tool's `execute` via
-    /// `direct_completion`, this carries the originating tool's call id so
-    /// the renderer can group fan-outs (e.g. tournament_rerank's batch
-    /// reranks) under their parent tool.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub originating_tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, Value>,
 }
@@ -90,11 +84,6 @@ impl TraceContext {
 
     pub fn for_llm_call(mut self, llm_call_id: impl Into<String>) -> Self {
         self.llm_call_id = Some(llm_call_id.into());
-        self
-    }
-
-    pub fn for_originating_tool_call(mut self, tool_call_id: impl Into<String>) -> Self {
-        self.originating_tool_call_id = Some(tool_call_id.into());
         self
     }
 }
@@ -194,7 +183,7 @@ pub enum TraceEvent {
         status: String,
         done_reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        handoff: Option<TraceHandoff>,
+        agent_frame_switch: Option<TraceAgentFrameSwitch>,
     },
     Custom {
         name: String,
@@ -391,8 +380,8 @@ pub struct TraceTokenUsage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TraceHandoff {
-    pub successor_session_id: String,
+pub struct TraceAgentFrameSwitch {
+    pub frame_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -470,6 +459,45 @@ impl TraceSink for JsonlTraceSink {
     }
 }
 
+/// Writes each trace record as one JSON line to stderr — handy for `cargo run`
+/// debugging without a trace file.
+#[derive(Default)]
+pub struct StderrTraceSink {
+    lock: Mutex<()>,
+}
+
+impl TraceSink for StderrTraceSink {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
+        let line = serde_json::to_string(record)?;
+        let _guard = self.lock.lock().map_err(|_| TraceSinkError::LockPoisoned)?;
+        eprintln!("{line}");
+        Ok(())
+    }
+}
+
+/// Fans each trace record out to several sinks in order (e.g. stderr + a JSONL
+/// file). Stops at the first sink that errors.
+pub struct TeeTraceSink {
+    sinks: Vec<Arc<dyn TraceSink>>,
+}
+
+impl TeeTraceSink {
+    pub fn new(sinks: impl IntoIterator<Item = Arc<dyn TraceSink>>) -> Self {
+        Self {
+            sinks: sinks.into_iter().collect(),
+        }
+    }
+}
+
+impl TraceSink for TeeTraceSink {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
+        for sink in &self.sinks {
+            sink.append(record)?;
+        }
+        Ok(())
+    }
+}
+
 pub fn sha256_hex(input: impl AsRef<[u8]>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_ref());
@@ -504,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_start_and_handoff_records_are_jsonl_shaped() {
+    fn tool_start_and_frame_switch_records_are_jsonl_shaped() {
         let started = TraceRecord::new(
             TraceContext::default().for_session("root"),
             TraceEvent::ToolCallStarted {
@@ -518,8 +546,8 @@ mod tests {
             TraceEvent::TurnCompleted {
                 status: "completed".to_string(),
                 done_reason: "modelstop".to_string(),
-                handoff: Some(TraceHandoff {
-                    successor_session_id: "child-1".to_string(),
+                agent_frame_switch: Some(TraceAgentFrameSwitch {
+                    frame_id: "frame-1".to_string(),
                 }),
             },
         );
@@ -530,7 +558,7 @@ mod tests {
 
         let completed_json = serde_json::to_value(completed).unwrap();
         assert_eq!(completed_json["type"], "turn_completed");
-        assert_eq!(completed_json["handoff"]["successor_session_id"], "child-1");
+        assert_eq!(completed_json["agent_frame_switch"]["frame_id"], "frame-1");
     }
 
     #[test]

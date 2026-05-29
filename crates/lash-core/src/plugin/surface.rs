@@ -106,9 +106,6 @@ pub enum PluginDirective {
     CreateSession {
         request: Box<SessionCreateRequest>,
     },
-    HandoffSession {
-        session_id: String,
-    },
     ReplaceToolArgs {
         args: serde_json::Value,
     },

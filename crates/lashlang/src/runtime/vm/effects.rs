@@ -48,7 +48,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 {
                     Ok(AbilityResult::Value(value)) => success(value),
                     Ok(AbilityResult::Unit) => {
-                        error_value("resource operation returned no value".to_string())
+                        error_value("module operation returned no value".to_string())
                     }
                     Err(error) => error_value(error.to_string()),
                 };
@@ -64,9 +64,9 @@ impl<H: ExecutionHost> Vm<'_, H> {
                         args,
                     }))
                     .await
-                    .and_then(|result| result.into_value("resource operation"))
+                    .and_then(|result| result.into_value("module operation"))
                     .map_err(|error| RuntimeError::ValueError {
-                        message: format!("`?` unwrapped failed resource operation: {error}"),
+                        message: format!("`?` unwrapped failed module operation: {error}"),
                     })?;
                 self.stack.push(value);
             }
@@ -93,13 +93,13 @@ impl<H: ExecutionHost> Vm<'_, H> {
                     })?;
                 let value = self
                     .host
-                    .perform(AbilityOp::StartProcess(ProcessStart {
+                    .perform(AbilityOp::StartProcess(Box::new(ProcessStart {
                         module_ref: module_context.module_ref.clone(),
                         process_ref,
                         required_surface_ref: module_context.required_surface_ref.clone(),
                         process_name,
                         args,
-                    }))
+                    })))
                     .await
                     .and_then(|result| result.into_value("process start"))
                     .map_err(|err| RuntimeError::ValueError {

@@ -12,7 +12,7 @@ cargo run -p agent-workbench
 Configuration is read from `.env` or the process environment:
 
 - `OPENROUTER_API_KEY`: model provider key.
-- `TAVILY_API_KEY`: Tavily key for `search_web` and `fetch_url`, matching the
+- `TAVILY_API_KEY`: Tavily key for `web.search(...)` and `web.fetch(...)`, matching the
   CLI web tools.
 - `AGENT_WORKBENCH_ADDR`: bind address, default `127.0.0.1:3030`.
 - `AGENT_WORKBENCH_DATA_DIR`: persistence directory, default
@@ -23,6 +23,6 @@ Configuration is read from `.env` or the process environment:
 The browser UI has three work areas: the left rail contains red and blue host
 event buttons plus per-turn model controls, the center pane is a chat/event
 stream, and the right rail polls the process registry for visible background
-work. The two buttons emit the declared host event `TRIGGER.button.pressed`.
+work. The two buttons emit the declared host event `ui.button.pressed`.
 The agent installs behavior by declaring a Lashlang `trigger` on that event;
 started Lashlang background processes appear in the right rail.

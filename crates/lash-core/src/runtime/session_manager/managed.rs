@@ -24,27 +24,12 @@ impl ManagedSessionCapability {
             plan.session_id.clone(),
             RuntimeHandle::new(materialized.runtime),
         );
-        if let crate::SessionRelation::Handoff {
-            parent_session_id, ..
-        } = &plan.relation
-        {
-            self.active_handoff_continuations
-                .lock()
-                .await
-                .insert(parent_session_id.clone(), plan.session_id.clone());
-        }
         if let Some(source) = &plan.usage_source {
             usage
                 .child_sources
                 .lock()
                 .expect("child usage sources lock")
                 .insert(plan.session_id.clone(), source.clone());
-        }
-        if let Some(seed) = plan.first_turn_input.clone() {
-            self.pending_first_turn_inputs
-                .lock()
-                .expect("pending first turn inputs lock")
-                .insert(plan.session_id.clone(), seed);
         }
         Ok(SessionHandle {
             session_id: plan.session_id,
@@ -88,58 +73,12 @@ impl ManagedSessionCapability {
             )));
         }
         self.registry.lock().await.remove(session_id);
-        {
-            let mut continuations = self.active_handoff_continuations.lock().await;
-            continuations.remove(session_id);
-            continuations.retain(|_, successor| successor != session_id);
-        }
         usage
             .child_sources
             .lock()
             .expect("child usage sources lock")
             .remove(session_id);
-        self.pending_first_turn_inputs
-            .lock()
-            .expect("pending first turn inputs lock")
-            .remove(session_id);
         current.plugins.host().unregister_session(session_id)?;
         Ok(())
-    }
-
-    pub(in crate::runtime::session_manager) async fn take_first_turn_input(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<crate::PluginMessage>, crate::PluginError> {
-        Ok(self
-            .pending_first_turn_inputs
-            .lock()
-            .expect("pending first turn inputs lock")
-            .remove(session_id))
-    }
-
-    pub(in crate::runtime::session_manager) async fn inject_turn_input(
-        &self,
-        session_id: &str,
-        input: crate::InjectedTurnInput,
-    ) -> Result<(), crate::PluginError> {
-        let runtime_handle = {
-            let registry = self.registry.lock().await;
-            registry.get(session_id).cloned()
-        };
-        let Some(runtime_handle) = runtime_handle else {
-            return Err(crate::PluginError::Session(format!(
-                "unknown or inactive session `{session_id}` for turn input injection"
-            )));
-        };
-        let runtime = runtime_handle.runtime.lock().await;
-        let Some(session) = runtime.session.as_ref() else {
-            return Err(crate::PluginError::Session(format!(
-                "session `{session_id}` has no live turn-input bridge"
-            )));
-        };
-        session
-            .turn_input_injection_bridge()
-            .enqueue(vec![input])
-            .map_err(crate::PluginError::Session)
     }
 }

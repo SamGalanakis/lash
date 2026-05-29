@@ -107,17 +107,14 @@ impl Clone for ProcessInput {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProcessExecutionContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+    pub causal_invocation: Option<crate::RuntimeInvocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_target_scope: Option<ProcessScope>,
 }
 
 impl ProcessExecutionContext {
-    pub fn with_tool_effect_metadata(
-        mut self,
-        metadata: Option<crate::EffectInvocationMetadata>,
-    ) -> Self {
-        self.tool_effect_metadata = metadata;
+    pub fn with_causal_invocation(mut self, invocation: Option<crate::RuntimeInvocation>) -> Self {
+        self.causal_invocation = invocation;
         self
     }
 
@@ -127,15 +124,17 @@ impl ProcessExecutionContext {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tool_effect_metadata.is_none() && self.wake_target_scope.is_none()
+        self.causal_invocation.is_none() && self.wake_target_scope.is_none()
     }
 }
 
 #[derive(Clone, Default)]
 pub struct ProcessOpScope<'scope> {
-    pub effect_metadata: Option<crate::EffectInvocationMetadata>,
+    pub parent_invocation: Option<crate::RuntimeInvocation>,
     pub effect_controller: Option<&'scope dyn crate::RuntimeEffectController>,
     pub turn_lease: Option<crate::RuntimeTurnLease>,
+    pub agent_frame_id: Option<crate::AgentFrameId>,
+    pub target_agent_frame_id: Option<crate::AgentFrameId>,
 }
 
 impl<'scope> ProcessOpScope<'scope> {
@@ -143,11 +142,11 @@ impl<'scope> ProcessOpScope<'scope> {
         Self::default()
     }
 
-    pub fn with_effect_metadata(
+    pub fn with_parent_invocation(
         mut self,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
+        parent_invocation: Option<crate::RuntimeInvocation>,
     ) -> Self {
-        self.effect_metadata = effect_metadata;
+        self.parent_invocation = parent_invocation;
         self
     }
 
@@ -161,6 +160,19 @@ impl<'scope> ProcessOpScope<'scope> {
 
     pub fn with_turn_lease(mut self, turn_lease: Option<crate::RuntimeTurnLease>) -> Self {
         self.turn_lease = turn_lease;
+        self
+    }
+
+    pub fn with_agent_frame_id(mut self, agent_frame_id: Option<crate::AgentFrameId>) -> Self {
+        self.agent_frame_id = agent_frame_id;
+        self
+    }
+
+    pub fn with_target_agent_frame_id(
+        mut self,
+        agent_frame_id: Option<crate::AgentFrameId>,
+    ) -> Self {
+        self.target_agent_frame_id = agent_frame_id;
         self
     }
 }
@@ -193,7 +205,7 @@ impl ProcessStartOptions {
 
     pub fn execution_context(&self, scope: &ProcessOpScope<'_>) -> ProcessExecutionContext {
         ProcessExecutionContext {
-            tool_effect_metadata: scope.effect_metadata.clone(),
+            causal_invocation: scope.parent_invocation.clone(),
             wake_target_scope: None,
         }
     }
@@ -202,17 +214,58 @@ impl ProcessStartOptions {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessScope {
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_frame_id: Option<crate::AgentFrameId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessProvenance {
+    pub owner_scope: ProcessScope,
+    pub host_profile_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caused_by: Option<crate::CausalRef>,
+}
+
+impl ProcessProvenance {
+    pub fn new(owner_scope: ProcessScope, host_profile_id: impl Into<String>) -> Self {
+        Self {
+            owner_scope,
+            host_profile_id: host_profile_id.into(),
+            caused_by: None,
+        }
+    }
+
+    pub fn with_caused_by(mut self, caused_by: Option<crate::CausalRef>) -> Self {
+        self.caused_by = caused_by;
+        self
+    }
 }
 
 impl ProcessScope {
     pub fn new(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
+            agent_frame_id: None,
+        }
+    }
+
+    pub fn for_agent_frame(
+        session_id: impl Into<String>,
+        agent_frame_id: impl Into<crate::AgentFrameId>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            agent_frame_id: Some(agent_frame_id.into()),
         }
     }
 
     pub fn id(&self) -> ProcessScopeId {
-        ProcessScopeId::new(format!("session:{}", self.session_id))
+        match self.agent_frame_id.as_deref() {
+            Some(frame_id) if !frame_id.is_empty() => {
+                ProcessScopeId::new(format!("session:{}/frame:{frame_id}", self.session_id))
+            }
+            _ => ProcessScopeId::new(format!("session:{}", self.session_id)),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -227,10 +280,7 @@ pub struct ProcessRegistration {
     pub input: Arc<ProcessInput>,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
-    #[serde(default)]
-    pub created_by_scope: Option<ProcessScope>,
-    #[serde(default)]
-    pub host_profile_id: String,
+    pub provenance: ProcessProvenance,
 }
 
 impl Clone for ProcessRegistration {
@@ -239,8 +289,7 @@ impl Clone for ProcessRegistration {
             id: self.id.clone(),
             input: Arc::clone(&self.input),
             event_types: self.event_types.clone(),
-            created_by_scope: self.created_by_scope.clone(),
-            host_profile_id: self.host_profile_id.clone(),
+            provenance: self.provenance.clone(),
         }
     }
 }
@@ -251,18 +300,12 @@ impl ProcessRegistration {
             id: id.into(),
             input: Arc::new(input),
             event_types: default_process_event_types(),
-            created_by_scope: None,
-            host_profile_id: String::new(),
+            provenance: ProcessProvenance::new(ProcessScope::new("root"), "default"),
         }
     }
 
-    pub fn with_provenance(
-        mut self,
-        created_by_scope: ProcessScope,
-        host_profile_id: impl Into<String>,
-    ) -> Self {
-        self.created_by_scope = Some(created_by_scope);
-        self.host_profile_id = host_profile_id.into();
+    pub fn with_process_provenance(mut self, provenance: ProcessProvenance) -> Self {
+        self.provenance = provenance;
         self
     }
 
@@ -292,10 +335,7 @@ pub struct ProcessRecord {
     pub input: Arc<ProcessInput>,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
-    #[serde(default)]
-    pub created_by_scope: Option<ProcessScope>,
-    #[serde(default)]
-    pub host_profile_id: String,
+    pub provenance: ProcessProvenance,
     #[serde(default)]
     pub created_at_ms: u64,
     #[serde(default)]
@@ -326,8 +366,7 @@ impl ProcessRecord {
             registration_hash,
             input: registration.input,
             event_types: registration.event_types,
-            created_by_scope: registration.created_by_scope,
-            host_profile_id: registration.host_profile_id,
+            provenance: registration.provenance,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             external_ref: None,
@@ -339,8 +378,12 @@ impl ProcessRecord {
         self.terminal.is_some()
     }
 
-    pub fn created_by_scope_id(&self) -> Option<ProcessScopeId> {
-        self.created_by_scope.as_ref().map(ProcessScope::id)
+    pub fn owner_scope_id(&self) -> ProcessScopeId {
+        self.provenance.owner_scope.id()
+    }
+
+    pub fn host_profile_id(&self) -> &str {
+        &self.provenance.host_profile_id
     }
 }
 

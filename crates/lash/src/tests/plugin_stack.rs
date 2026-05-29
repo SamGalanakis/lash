@@ -278,7 +278,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
 
                     let rlm_core = LashCore::rlm()
                         .provider(queued_text_provider(vec![
-                            "```lashlang\nvalue = await TOOL.default.app_lookup({})?\nsubmit \"done\"\n```",
+                            "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit \"done\"\n```",
                         ]))
                         .model(mock_model_spec())
                         .tools(Arc::new(LongTextTools))

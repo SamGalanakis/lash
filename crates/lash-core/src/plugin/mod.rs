@@ -75,6 +75,7 @@ pub(crate) use services::NoopSessionManager;
 pub use services::{PersistentRuntimeServices, PluginActionInvokeError, RuntimeServices};
 pub use session_obj::PluginSession;
 pub use session_types::{
+    AgentFrameAssignment, AgentFrameId, AgentFrameReason, AgentFrameRecord, AgentFrameStatus,
     PluginOwned, SessionAppendNode, SessionContextSurface, SessionCreateRequest, SessionHandle,
     SessionPluginSource, SessionRelation, SessionSnapshot, SessionStartPoint, SessionToolAccess,
     SubagentSessionContext,
@@ -90,7 +91,9 @@ pub use surface::{
     TurnPreparation,
 };
 pub(crate) use surface::{emit_plugin_runtime_events, plugin_runtime_session_events};
-pub(crate) use trigger_registry::{InstalledSessionTrigger, SessionTriggerRegistry};
+pub(crate) use trigger_registry::{
+    SessionTriggerMatcher, SessionTriggerRegistry, SessionTriggerRoute,
+};
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     // Protocol plugins must be registered by the embedder before calling
     // `PluginHost::build_session`. Unit tests use an in-tree fake to avoid
@@ -154,7 +157,7 @@ mod tests {
         fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
             self.tool_definitions()
                 .into_iter()
-                .find(|tool| tool.name == name)
+                .find(|tool| tool.name() == name)
                 .map(|tool| Arc::new(tool.contract()))
         }
 
@@ -206,8 +209,8 @@ mod tests {
 
         fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
             let mut resources = lashlang::ResourceCatalog::new();
-            resources.add_alias("TRIGGER", "button");
-            resources.add_trigger_event("TRIGGER", "pressed", lashlang::TypeExpr::Any);
+            resources.add_module_instance(["ui", "button"], "Button");
+            resources.add_trigger_event("Button", "pressed", lashlang::TypeExpr::Any);
             resources
         }
 
@@ -303,14 +306,14 @@ mod tests {
 
         assert!(
             host.lashlang_resources()
-                .trigger_event("TRIGGER", "pressed")
+                .trigger_event("Button", "pressed")
                 .is_some()
         );
         let session = host.build_session("root", None).expect("session");
         assert!(
             session
                 .lashlang_resources()
-                .trigger_event("TRIGGER", "pressed")
+                .trigger_event("Button", "pressed")
                 .is_some()
         );
     }
@@ -341,7 +344,7 @@ mod tests {
 
             fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
                 reg.host_events().declare(
-                    crate::HostEvent::new("TRIGGER", "button", "pressed")
+                    crate::HostEvent::new("Button", "ui.button", "pressed")
                         .payload(lashlang::TypeExpr::Str),
                 )
             }
@@ -351,20 +354,20 @@ mod tests {
 
         assert!(
             host.lashlang_resources()
-                .trigger_event("TRIGGER", "pressed")
+                .trigger_event("Button", "pressed")
                 .is_none()
         );
         let session = host.build_session("root", None).expect("session");
         assert!(
             session
                 .host_events()
-                .get("TRIGGER", "button", "pressed")
+                .get("Button", "ui.button", "pressed")
                 .is_some()
         );
         assert!(
             session
                 .lashlang_resources()
-                .trigger_event("TRIGGER", "pressed")
+                .trigger_event("Button", "pressed")
                 .is_none()
         );
     }

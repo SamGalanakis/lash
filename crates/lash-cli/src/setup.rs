@@ -14,6 +14,7 @@ use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
 use lash_tui::{Frame, Line, Modifier, Rect, Span, Style, Terminal};
 use unicode_width::UnicodeWidthStr;
 
+use crate::cli_support::centered_rect;
 use crate::theme;
 
 fn kind_index(kind: &str) -> Option<usize> {
@@ -979,15 +980,6 @@ fn help_line(items: &[(&str, &str)]) -> Line<'static> {
         spans.push(Span::styled(format!(" {}", desc), theme::help_desc()));
     }
     Line::from(spans)
-}
-
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
 }
 
 fn inner_panel(panel: Rect) -> Rect {

@@ -529,9 +529,19 @@ impl ToolCancellation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolControl {
-    Handoff { session_id: String },
-    Finish { value: ToolValue },
-    Fail { failure: ToolFailure },
+    SwitchAgentFrame {
+        frame_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        initial_nodes: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+    },
+    Finish {
+        value: ToolValue,
+    },
+    Fail {
+        failure: ToolFailure,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

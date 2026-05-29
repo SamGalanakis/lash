@@ -1130,9 +1130,9 @@ fn rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes()
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nok = await TOOL.default.ok({})\nfail = await TOOL.default.fail({})\nstop = await TOOL.default.stop({})\nresults = { a: ok, b: fail, c: stop }\n```".to_string(),
+            full_text: "```lashlang\nok = await tools.ok({})\nfail = await tools.fail({})\nstop = await tools.stop({})\nresults = { a: ok, b: fail, c: stop }\n```".to_string(),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nok = await TOOL.default.ok({})\nfail = await TOOL.default.fail({})\nstop = await TOOL.default.stop({})\nresults = { a: ok, b: fail, c: stop }\n```".to_string(),
+                text: "```lashlang\nok = await tools.ok({})\nfail = await tools.fail({})\nstop = await tools.stop({})\nresults = { a: ok, b: fail, c: stop }\n```".to_string(),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1226,11 +1226,10 @@ fn rlm_exec_result_stores_tool_call_ids_without_replayed_tool_events() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nx = await TOOL.default.read_file({ path: \"foo\" })?\n```"
+            full_text: "```lashlang\nx = await tools.read_file({ path: \"foo\" })?\n```"
                 .to_string(),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nx = await TOOL.default.read_file({ path: \"foo\" })?\n```"
-                    .to_string(),
+                text: "```lashlang\nx = await tools.read_file({ path: \"foo\" })?\n```".to_string(),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1278,9 +1277,9 @@ fn rlm_exec_result_stores_tool_call_ids_without_replayed_tool_events() {
 }
 
 #[test]
-fn rlm_exec_any_tool_control_handoff_is_terminal() {
+fn rlm_exec_any_tool_control_frame_switch_is_terminal() {
     let config = test_config(TestProtocol::Rlm);
-    let msgs = vec![user_message("run a custom handoff tool")];
+    let msgs = vec![user_message("run a custom frame-switch tool")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
@@ -1289,9 +1288,9 @@ fn rlm_exec_any_tool_control_handoff_is_terminal() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nx = await TOOL.default.custom_handoff({})?\n```".to_string(),
+            full_text: "```lashlang\nx = await tools.custom_frame_switch({})?\n```".to_string(),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nx = await TOOL.default.custom_handoff({})?\n```".to_string(),
+                text: "```lashlang\nx = await tools.custom_frame_switch({})?\n```".to_string(),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -1314,11 +1313,13 @@ fn rlm_exec_any_tool_control_handoff_is_terminal() {
             observation_truncation: Vec::new(),
             tool_calls: vec![lash_core::ToolCallRecord {
                 call_id: Some("custom-call-1".to_string()),
-                tool: "custom_handoff".to_string(),
+                tool: "custom_frame_switch".to_string(),
                 args: serde_json::json!({}),
                 output: lash_core::ToolCallOutput::success(serde_json::json!({"ok": true}))
-                    .with_control(lash_core::ToolControl::Handoff {
-                        session_id: "successor-session".to_string(),
+                    .with_control(lash_core::ToolControl::SwitchAgentFrame {
+                        frame_id: "next-frame".to_string(),
+                        initial_nodes: Vec::new(),
+                        task: Some("continue".to_string()),
                     }),
                 duration_ms: 3,
             }],
@@ -1347,8 +1348,8 @@ fn rlm_exec_any_tool_control_handoff_is_terminal() {
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::Emit(SessionEvent::TurnOutcome {
-            outcome: lash_core::TurnOutcome::Handoff { session_id }
-        }) if session_id == "successor-session"
+            outcome: lash_core::TurnOutcome::AgentFrameSwitch { frame_id }
+        }) if frame_id == "next-frame"
     )));
     assert!(find_done(&effects).is_some());
 }
@@ -1365,9 +1366,9 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nx = await TOOL.default.custom_fail({})?\n```".to_string(),
+            full_text: "```lashlang\nx = await tools.custom_fail({})?\n```".to_string(),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nx = await TOOL.default.custom_fail({})?\n```".to_string(),
+                text: "```lashlang\nx = await tools.custom_fail({})?\n```".to_string(),
                 response_meta: None,
             }],
             ..LlmResponse::default()

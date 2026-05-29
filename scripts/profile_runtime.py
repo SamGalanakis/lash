@@ -66,8 +66,10 @@ def parse_args() -> argparse.Namespace:
             "standard_tool_calls, rlm_tool_calls, rlm_process_handles, "
             "rlm_llm_query, rlm_globals, rlm_large_tool_surface, "
             "observational_memory, observational_memory_maintenance, "
-            "openai_compat_stream, embed_standard, embed_rlm, "
-            "scoped_effect_controller, store_reopen, turn_checkpoint, all."
+            "openai_compat_stream, standard_shell_output, "
+            "tool_discovery_search, embed_standard, embed_rlm, "
+            "scoped_effect_controller, store_reopen, sqlite_store_reopen, "
+            "turn_checkpoint, all."
         ),
     )
     parser.add_argument(
@@ -123,9 +125,9 @@ def maybe_build(
     if not force and binary.exists():
         return
     cmd = ["cargo", "build", "-q", "-p", "lash-cli"]
-    # `--runtime-perf-benchmark` is gated behind the `runtime-perf` cargo
+    # `--runtime-perf-benchmark` is gated behind the `bench` cargo
     # feature so production CLI builds don't inherit `lash/testing` fixtures.
-    feature_list = ["runtime-perf", *cargo_features]
+    feature_list = ["bench", *cargo_features]
     if dhat:
         feature_list.append("dhat-heap")
     cmd.extend(["--features", ",".join(feature_list)])

@@ -1,6 +1,7 @@
 use crate::support::*;
 use crate::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
-use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
+use lash_core::llm::transport::ProviderFailureKind;
+use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolChoice, LlmToolSpec};
 use lash_core::provider::CacheRetention;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -291,7 +292,7 @@ fn provider_factories_materialize_distinct_kinds() {
     let direct = OpenAiProviderFactory
         .deserialize(json!({ "api_key": "key" }))
         .expect("direct config");
-    assert_eq!(direct.state.kind(), "openai");
+    assert_eq!(direct.provider.kind(), "openai");
 
     let compatible = OpenAiCompatibleProviderFactory
         .deserialize(json!({
@@ -299,7 +300,7 @@ fn provider_factories_materialize_distinct_kinds() {
             "base_url": OPENROUTER_BASE_URL
         }))
         .expect("compatible config");
-    assert_eq!(compatible.state.kind(), "openai-compatible");
+    assert_eq!(compatible.provider.kind(), "openai-compatible");
 }
 
 #[test]
@@ -603,7 +604,7 @@ fn assistant_text_preserves_response_meta() {
             response_meta: Some(ResponseTextMeta {
                 id: Some("msg_1".to_string()),
                 status: Some("completed".to_string()),
-                phase: Some(ResponseTextPhase::FinalAnswer),
+                phase: Some("final_answer".to_string()),
             }),
             cache_breakpoint: false,
         }],
@@ -892,11 +893,11 @@ fn stream_parser_captures_text_reasoning_tool_and_phase() {
         &parts[1],
         LlmOutputPart::Text {
             response_meta: Some(ResponseTextMeta {
-                phase: Some(ResponseTextPhase::Commentary),
+                phase: Some(phase),
                 ..
             }),
             ..
-        }
+        } if phase == "commentary"
     ));
     assert!(matches!(
         &parts[2],
