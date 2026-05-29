@@ -8,7 +8,7 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.12" }
+lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.13" }
 serde_json = { workspace = true }
 
 [[bin]]
