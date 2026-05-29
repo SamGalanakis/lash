@@ -728,11 +728,7 @@ impl MdRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use unicode_width::UnicodeWidthStr;
-
-    fn display_width(text: &str) -> usize {
-        UnicodeWidthStr::width(text)
-    }
+    use crate::cli_support::display_width;
 
     #[test]
     fn render_plain_text() {

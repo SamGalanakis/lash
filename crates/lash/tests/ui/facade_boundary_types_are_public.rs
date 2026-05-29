@@ -166,6 +166,8 @@ fn persistence_types_are_nameable(
         session_id: "facade".to_string(),
         expected_head_revision: Some(0),
         config: Default::default(),
+        agent_frames: Vec::new(),
+        current_agent_frame_id: String::new(),
         graph,
         checkpoint: Default::default(),
         usage_deltas: ledger,

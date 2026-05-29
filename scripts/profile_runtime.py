@@ -66,8 +66,10 @@ def parse_args() -> argparse.Namespace:
             "standard_tool_calls, rlm_tool_calls, rlm_process_handles, "
             "rlm_llm_query, rlm_globals, rlm_large_tool_surface, "
             "observational_memory, observational_memory_maintenance, "
-            "openai_compat_stream, embed_standard, embed_rlm, "
-            "scoped_effect_controller, store_reopen, turn_checkpoint, all."
+            "openai_compat_stream, standard_shell_output, "
+            "tool_discovery_search, embed_standard, embed_rlm, "
+            "scoped_effect_controller, store_reopen, sqlite_store_reopen, "
+            "turn_checkpoint, all."
         ),
     )
     parser.add_argument(

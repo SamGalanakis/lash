@@ -1,14 +1,8 @@
 use serde_json::json;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::Arc;
 
-use lash_core::plugin::{
-    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
-};
-use lash_core::{
-    ToolCall, ToolDefinition, ToolProvider, ToolResult, ToolRetryPolicy, ToolScheduling,
-};
+use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
 
 use lash_tool_support::{
     StaticToolExecute, StaticToolProvider, object_schema, parse_optional_usize_arg, require_str,
@@ -22,46 +16,6 @@ pub struct ReadFile;
 /// Build the cached `read_file` tool provider.
 pub fn read_file_provider() -> StaticToolProvider<ReadFile> {
     StaticToolProvider::new(vec![read_file_tool_definition()], ReadFile)
-}
-
-pub struct ReadFilePluginFactory;
-
-struct ReadFilePlugin {
-    provider: Arc<dyn ToolProvider>,
-}
-
-impl ReadFilePluginFactory {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for ReadFilePluginFactory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PluginFactory for ReadFilePluginFactory {
-    fn id(&self) -> &'static str {
-        "read_file"
-    }
-
-    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(ReadFilePlugin {
-            provider: Arc::new(read_file_provider()),
-        }))
-    }
-}
-
-impl SessionPlugin for ReadFilePlugin {
-    fn id(&self) -> &'static str {
-        "read_file"
-    }
-
-    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.tools().provider(Arc::clone(&self.provider))
-    }
 }
 
 const DEFAULT_LIMIT: usize = 2000;
@@ -587,6 +541,8 @@ fn truncate_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use lash_core::AttachmentStore;
     use serde_json::json;
     use tempfile::TempDir;

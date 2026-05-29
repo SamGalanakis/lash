@@ -1,4 +1,4 @@
-use lash::{LashSession, advanced::ExecutionMode, tools::ToolAvailability};
+use lash::{LashSession, ModeId, tools::ToolAvailability};
 use lash_core::ToolState;
 
 use crate::app::App;
@@ -39,7 +39,7 @@ pub(super) async fn handle_tools(
     _runtime: &Option<lash::LashSession>,
     desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
-    _current_execution_mode: ExecutionMode,
+    _current_execution_mode: ModeId,
 ) -> anyhow::Result<bool> {
     let raw = raw.unwrap_or_default();
     let raw_trim = raw.trim();

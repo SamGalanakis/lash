@@ -2,9 +2,9 @@
 //! Every read of `record.field` / `list[index]` and every write of
 //! `record.field = …` / `list[index] = …` flows through these helpers.
 //!
-//! The async `read_field` / `read_index` are the entry points the VM calls;
-//! the `*_direct` and `*_blocking` variants are sync fast paths used during
-//! const-folding and pure-expression evaluation. `assign_path` and
+//! The `*_direct` and `*_ref_direct` variants are the sync fast paths the VM
+//! uses for concrete operands; projected operands are resolved inline by the
+//! VM via `ProjectedValue::get_field` / `get_index`. `assign_path` and
 //! `assign_path_steps` walk a `CompiledAssignPath` to mutate nested
 //! structures in place.
 
@@ -70,13 +70,6 @@ pub(crate) fn is_process_handle_record(record: &Record) -> bool {
     record.get("__handle__").is_some() || record.get("handle").is_some()
 }
 
-pub(crate) async fn read_field(value: Value, field: &Name) -> Result<Value, RuntimeError> {
-    match value {
-        Value::Projected(value) => value.get_field(field).await,
-        other => read_field_direct(other, field),
-    }
-}
-
 pub(crate) fn read_field_direct(value: Value, field: &Name) -> Result<Value, RuntimeError> {
     match value {
         Value::Record(record) => Ok(record
@@ -109,14 +102,6 @@ pub(crate) fn read_image_field(image: &ImageValue, field: &Name) -> Result<Value
             .map(|height| Value::Number(height as f64))
             .unwrap_or(Value::Null)),
         _ => Ok(Value::Null),
-    }
-}
-
-pub(crate) async fn read_index(target: Value, index: Value) -> Result<Value, RuntimeError> {
-    let index = materialize_projected_async(index).await;
-    match target {
-        Value::Projected(value) => value.get_index(&index).await,
-        other => read_index_direct(other, index),
     }
 }
 

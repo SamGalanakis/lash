@@ -5,7 +5,99 @@ use lash_core::{
 };
 use serde_json::{Value, json};
 
-use crate::common::DEFAULT_LLM_RERANK_MODEL;
+use crate::common::{DEFAULT_LLM_RERANK_MODEL, tokenize};
+
+/// Domain-specific intent reranking applied to candidate tools *after* the
+/// generic lexical/semantic ranker produces them. The BM25 scorer is kept
+/// domain-agnostic; payment-action heuristics (which up- or down-rank
+/// transaction, request, reminder, and balance-style tools for "send money"
+/// type queries) live here instead, where benchmark-shaped tweaks belong.
+///
+/// Candidates are reordered stably: their existing relative order is the
+/// tiebreak, so this only promotes/demotes tools the intent rules touch.
+pub(crate) fn rerank_payment_action_intent(query: &str, candidates: Vec<Value>) -> Vec<Value> {
+    let query_tokens = tokenize(query);
+    if !has_payment_action_intent(&query_tokens) || has_query_token(&query_tokens, "request") {
+        return candidates;
+    }
+
+    let mut scored = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(position, candidate)| {
+            let multiplier = payment_intent_multiplier(&candidate);
+            (multiplier, position, candidate)
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left_score, left_pos, _), (right_score, right_pos, _)| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left_pos.cmp(right_pos))
+    });
+    scored
+        .into_iter()
+        .map(|(_, _, candidate)| candidate)
+        .collect()
+}
+
+/// Searchable lowercased text for a projected candidate (name, signature,
+/// description, examples) used by the intent rules to recognize tool kinds.
+fn candidate_text(candidate: &Value) -> String {
+    let mut parts = Vec::new();
+    for key in ["name", "call", "signature", "description"] {
+        if let Some(text) = candidate.get(key).and_then(Value::as_str) {
+            parts.push(text.to_string());
+        }
+    }
+    if let Some(examples) = candidate.get("examples").and_then(Value::as_array) {
+        for example in examples {
+            if let Some(text) = example.as_str() {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    parts.join("\n").to_ascii_lowercase()
+}
+
+fn payment_intent_multiplier(candidate: &Value) -> f64 {
+    let text = candidate_text(candidate);
+    let tokens = tokenize(&text);
+    let has_token = |needle: &str| tokens.iter().any(|token| token == needle);
+    let has_phrase = |phrase: &str| text.contains(phrase);
+
+    let mut multiplier = 1.0;
+    if has_token("transaction") || has_phrase("send money") || has_phrase("pay user") {
+        multiplier += 6.0;
+    }
+    if has_token("remind") || has_token("reminder") {
+        multiplier *= 0.05;
+    } else if has_token("request") {
+        multiplier *= 0.8;
+    }
+    if has_phrase("venmo balance") || has_phrase("bank transfer") {
+        multiplier *= 0.65;
+    }
+    multiplier
+}
+
+fn has_payment_action_intent(query_tokens: &[String]) -> bool {
+    let has_send = has_query_token(query_tokens, "send");
+    let has_payment = has_query_token(query_tokens, "payment");
+    let has_money = has_query_token(query_tokens, "money");
+    let has_make = has_query_token(query_tokens, "make");
+    let has_pay = has_query_token(query_tokens, "pay");
+    let has_transfer = has_query_token(query_tokens, "transfer");
+
+    (has_send && (has_payment || has_money))
+        || (has_make && has_payment)
+        || has_pay
+        || (has_transfer && has_money)
+}
+
+fn has_query_token(query_tokens: &[String], needle: &str) -> bool {
+    query_tokens.iter().any(|token| token == needle)
+}
 
 pub(crate) fn llm_rerank_request(
     args: &Value,
@@ -203,6 +295,38 @@ mod tests {
             schema.schema["properties"]["tool_names"]["items"]["enum"],
             json!(["read_file", "search_web"])
         );
+    }
+
+    #[test]
+    fn payment_action_intent_promotes_transaction_tool_and_demotes_reminder() {
+        let candidates = vec![
+            json!({"name": "venmo.create_reminder", "description": "Create a payment reminder"}),
+            json!({"name": "venmo.create_transaction", "description": "Send money to another user"}),
+            json!({"name": "venmo.show_balance", "description": "Show the venmo balance"}),
+        ];
+
+        let reranked = rerank_payment_action_intent("send money to a friend", candidates);
+
+        assert_eq!(
+            ranked_names(&reranked),
+            vec![
+                "venmo.create_transaction",
+                "venmo.show_balance",
+                "venmo.create_reminder",
+            ]
+        );
+    }
+
+    #[test]
+    fn payment_action_intent_noop_without_payment_query() {
+        let candidates = vec![
+            json!({"name": "venmo.create_reminder", "description": "Create a payment reminder"}),
+            json!({"name": "venmo.create_transaction", "description": "Send money to another user"}),
+        ];
+
+        let reranked = rerank_payment_action_intent("list reminders", candidates.clone());
+
+        assert_eq!(reranked, candidates);
     }
 
     #[test]

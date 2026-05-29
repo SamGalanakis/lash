@@ -4,10 +4,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::LlmResponse;
 use crate::llm::transport::LlmTransportError;
-use crate::plugin::{DirectCompletion, DirectLlmCompletion};
 use crate::runtime::session_manager::{CurrentSessionCapability, UsageCapability};
 use crate::sansio::LlmCallError;
-use crate::{DirectRequest, LlmRequest as CoreLlmRequest, PluginError, session_model::TokenUsage};
+use crate::{LlmRequest as CoreLlmRequest, PluginError, session_model::TokenUsage};
 
 use super::envelope::{CausalRef, RuntimeEffectEnvelope, RuntimeEffectOutcome, RuntimeInvocation};
 use super::executor::{
@@ -140,56 +139,31 @@ pub(crate) fn llm_call_error_from_transport(err: LlmTransportError) -> LlmCallEr
 // Direct-completion outcome plumbing
 // =============================================================================
 
-pub(crate) async fn apply_direct_completion_outcome(
-    current: &CurrentSessionCapability,
-    usage_capability: &UsageCapability,
-    request: &DirectRequest,
-    normalized_request: &CoreLlmRequest,
-    model: &str,
-    usage_source: &str,
-    outcome: RuntimeEffectOutcome,
-) -> Result<DirectCompletion, PluginError> {
-    let result = outcome
-        .into_direct_completion_response()
-        .map_err(|err| PluginError::Session(err.to_string()))?;
-    let (response, usage) = apply_direct_llm_result(
-        current,
-        usage_capability,
-        normalized_request,
-        usage_source,
-        model,
-        request.caused_by.as_ref(),
-        result,
-    )
-    .await?;
-    Ok(DirectCompletion {
-        text: response.full_text,
-        usage,
-    })
-}
-
-pub(crate) async fn apply_direct_llm_completion_outcome(
+/// Applies a journaled direct-effect outcome: records usage/trace against the
+/// session and yields the raw provider response. Both the text-only
+/// (`DirectCompletion`) and full-output (`DirectLlmCompletion`) client methods
+/// project from this single result.
+pub(crate) async fn apply_direct_outcome(
     current: &CurrentSessionCapability,
     usage_capability: &UsageCapability,
     request: &CoreLlmRequest,
     usage_source: &str,
+    caused_by: Option<&CausalRef>,
     outcome: RuntimeEffectOutcome,
-) -> Result<DirectLlmCompletion, PluginError> {
+) -> Result<(LlmResponse, TokenUsage), PluginError> {
     let result = outcome
-        .into_direct_llm_completion_response()
+        .into_direct_response()
         .map_err(|err| PluginError::Session(err.to_string()))?;
-    let model = request.model.clone();
-    let (response, usage) = apply_direct_llm_result(
+    apply_direct_llm_result(
         current,
         usage_capability,
         request,
         usage_source,
-        &model,
-        None,
+        &request.model.clone(),
+        caused_by,
         result,
     )
-    .await?;
-    Ok(DirectLlmCompletion { response, usage })
+    .await
 }
 
 async fn apply_direct_llm_result(
@@ -514,22 +488,18 @@ mod tests {
         let invocation = crate::runtime::causal::direct_effect_invocation(
             "s",
             "tool",
-            RuntimeEffectKind::DirectCompletion,
             "request:k".to_string(),
             None,
             None,
         );
 
         assert_eq!(invocation.scope.session_id, "s");
-        assert_eq!(
-            invocation.effect_kind(),
-            Some(RuntimeEffectKind::DirectCompletion)
-        );
+        assert_eq!(invocation.effect_kind(), Some(RuntimeEffectKind::Direct));
         assert!(
             invocation
                 .replay_key()
                 .expect("replay key")
-                .starts_with("s:direct:direct_completion:tool:request:k")
+                .starts_with("s:direct:tool:request:k")
         );
         assert!(invocation.checkpoint_hash.is_none());
     }
@@ -539,7 +509,6 @@ mod tests {
         let mut parent = crate::runtime::causal::direct_effect_invocation(
             "s",
             "tool",
-            RuntimeEffectKind::DirectCompletion,
             "request:k".to_string(),
             Some("turn"),
             None,

@@ -108,7 +108,7 @@ impl RuntimeTurnDriver<'_> {
             generation: checkpoint_record.machine_config.generation.clone(),
             run_session_id: checkpoint_record.machine_config.run_session_id.clone(),
             autonomous: checkpoint_record.machine_config.autonomous,
-            tool_specs: Arc::new(checkpoint_record.machine_config.tool_specs.clone()),
+            tool_specs: checkpoint_record.machine_config.tool_specs.clone(),
             system_prompt: Arc::<str>::from(checkpoint_record.machine_config.system_prompt.clone()),
             session_id: checkpoint_record.machine_config.session_id.clone(),
             emit_llm_trace: false,
@@ -179,11 +179,7 @@ impl RuntimeTurnDriver<'_> {
                 .turn_driver_preamble
                 .config
                 .sync_execution_surface,
-            tool_specs: execution_surface
-                .turn_driver_preamble
-                .tool_specs
-                .as_ref()
-                .clone(),
+            tool_specs: execution_surface.turn_driver_preamble.tool_specs.clone(),
             system_prompt: prepared_prompt.system_prompt.to_string(),
             termination: self.protocol_turn_options.clone(),
         };

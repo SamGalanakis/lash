@@ -590,7 +590,6 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
                 slot_name(chunk, binding)
             )
         }
-        Instruction::LoweredLoop(index) => lowered_loop_snapshot(chunk, index),
         Instruction::IterNext { jump_to } => format!("iter_next {jump_to}"),
         Instruction::EndIter => "end_iter".to_string(),
         Instruction::ResolveTypeRef(slot) => {
@@ -602,21 +601,6 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
 
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).expect("value should serialize")
-}
-
-fn lowered_loop_snapshot(chunk: &Chunk, index: usize) -> String {
-    let lowered_loop = &chunk.lowered_loops[index];
-    let iterable = match &lowered_loop.iterable {
-        LoopIterable::Range(args) => format!("range argc={}", args.len()),
-        LoopIterable::Values(_) => "values".to_string(),
-        LoopIterable::Keys(_) => "keys".to_string(),
-    };
-    format!(
-        "lowered_loop #{index} {}:{} {iterable} ops={}",
-        lowered_loop.binding,
-        slot_name(chunk, lowered_loop.binding),
-        lowered_loop.body.len()
-    )
 }
 
 fn slot_name(chunk: &Chunk, index: usize) -> &str {
@@ -833,7 +817,7 @@ async fn compiler_propagates_safe_straight_line_constants() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn lowered_loops_cover_range_list_keys_nested_control_and_mutation() {
+async fn generic_iterator_loops_cover_range_list_keys_nested_control_and_mutation() {
     let source = r#"
         counts = {}
         items = ["a", "b", "a"]
@@ -861,15 +845,20 @@ async fn lowered_loops_cover_range_list_keys_nested_control_and_mutation() {
         submit { total: total, counts: counts, seen: seen, pairs: pairs }
     "#;
     let compiled = compile_source(source).expect("program should compile");
+    let begin_iterators = compiled
+        .chunk
+        .code
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                instruction,
+                Instruction::BeginIter(_) | Instruction::BeginRangeIter { .. }
+            )
+        })
+        .count();
     assert!(
-        compiled
-            .chunk
-            .code
-            .iter()
-            .filter(|instruction| matches!(instruction, Instruction::LoweredLoop(_)))
-            .count()
-            >= 3,
-        "eligible loops should lower into loop-local instructions"
+        begin_iterators >= 4,
+        "every `for` loop should compile to the generic iterator bytecode, got {begin_iterators}"
     );
 
     let mut state = State::new();
@@ -894,7 +883,7 @@ async fn lowered_loops_cover_range_list_keys_nested_control_and_mutation() {
 }
 
 #[test]
-fn effectful_loop_bodies_stay_on_generic_iterator_bytecode() {
+fn effectful_loop_bodies_compile_to_generic_iterator_bytecode() {
     let program = crate::parse(
         r#"
         items = [1, 2]
@@ -912,15 +901,7 @@ fn effectful_loop_bodies_stay_on_generic_iterator_bytecode() {
             .code
             .iter()
             .any(|instruction| matches!(instruction, Instruction::BeginIter(_))),
-        "effectful loops should use the generic iterator fallback"
-    );
-    assert!(
-        !compiled
-            .chunk
-            .code
-            .iter()
-            .any(|instruction| matches!(instruction, Instruction::LoweredLoop(_))),
-        "effectful loops must not lower"
+        "effectful loops should use the generic iterator bytecode"
     );
 }
 

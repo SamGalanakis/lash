@@ -327,7 +327,8 @@ pub(crate) fn build_benchmark_harness(
         | UiPerfScenario::SlowSnapshot
         | UiPerfScenario::FileIndexStorm
         | UiPerfScenario::TimelineProjection
-        | UiPerfScenario::ActivityProjection => None,
+        | UiPerfScenario::ActivityProjection
+        | UiPerfScenario::HtmlExport => None,
     };
 
     UiPerfHarness {
@@ -343,7 +344,7 @@ pub(crate) fn build_benchmark_app(turn_count: usize) -> App {
         "ui-perf".to_string(),
         "test-session-id".into(),
     );
-    app.timeline.clear();
+    app.timeline.truncate(0);
     app.usage.token_usage = TokenUsage {
         input_tokens: 208_000,
         output_tokens: 11_500,

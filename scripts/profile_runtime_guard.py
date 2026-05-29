@@ -19,7 +19,12 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_SCENARIOS = ["rlm_large_tool_surface", "rlm_process_handles", "turn_checkpoint"]
+DEFAULT_SCENARIOS = [
+    "rlm_large_tool_surface",
+    "rlm_process_handles",
+    "tool_discovery_search",
+    "turn_checkpoint",
+]
 DEFAULT_STACKS = ["64k", "128k", "256k", "320k", "512k", "1m", "8m"]
 
 

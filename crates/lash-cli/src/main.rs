@@ -47,7 +47,6 @@ mod text_layout;
 mod theme;
 mod tree;
 mod turn_runner;
-mod ui_action;
 #[cfg(feature = "bench")]
 mod ui_perf;
 mod ui_trace;

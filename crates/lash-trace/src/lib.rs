@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -456,6 +456,45 @@ impl TraceSink for JsonlTraceSink {
             path: self.path.clone(),
             source,
         })
+    }
+}
+
+/// Writes each trace record as one JSON line to stderr — handy for `cargo run`
+/// debugging without a trace file.
+#[derive(Default)]
+pub struct StderrTraceSink {
+    lock: Mutex<()>,
+}
+
+impl TraceSink for StderrTraceSink {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
+        let line = serde_json::to_string(record)?;
+        let _guard = self.lock.lock().map_err(|_| TraceSinkError::LockPoisoned)?;
+        eprintln!("{line}");
+        Ok(())
+    }
+}
+
+/// Fans each trace record out to several sinks in order (e.g. stderr + a JSONL
+/// file). Stops at the first sink that errors.
+pub struct TeeTraceSink {
+    sinks: Vec<Arc<dyn TraceSink>>,
+}
+
+impl TeeTraceSink {
+    pub fn new(sinks: impl IntoIterator<Item = Arc<dyn TraceSink>>) -> Self {
+        Self {
+            sinks: sinks.into_iter().collect(),
+        }
+    }
+}
+
+impl TraceSink for TeeTraceSink {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
+        for sink in &self.sinks {
+            sink.append(record)?;
+        }
+        Ok(())
     }
 }
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use lash::LashSession;
-use lash::advanced::ExecutionMode;
+use lash::ModeId;
 use lash::control::SessionConfigPatch;
 use lash_core::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, fresh_message_id,
@@ -135,7 +135,7 @@ async fn apply_graph_resume_state(
     runtime: &mut Option<LashSession>,
     app: &mut App,
     turn_counter: &mut usize,
-    execution_mode: &mut ExecutionMode,
+    execution_mode: &mut ModeId,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     desired_tool_state: &mut ToolState,
@@ -237,7 +237,7 @@ pub async fn load_resumed_session(
     history: &mut Vec<Message>,
     runtime: &mut Option<LashSession>,
     turn_counter: &mut usize,
-    execution_mode: &mut ExecutionMode,
+    execution_mode: &mut ModeId,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     desired_tool_state: &mut ToolState,
@@ -291,7 +291,7 @@ pub async fn restore_session_state(
     runtime: &mut Option<LashSession>,
     app: &mut App,
     turn_counter: &mut usize,
-    execution_mode: &mut ExecutionMode,
+    execution_mode: &mut ModeId,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     desired_tool_state: &mut ToolState,
@@ -453,7 +453,7 @@ mod tests {
         let mut history = Vec::new();
         let mut runtime = None;
         let mut turn_counter = 0;
-        let mut execution_mode = ExecutionMode::standard();
+        let mut execution_mode = ModeId::standard();
         let mut current_model_variant = None;
 
         restore_session_state(
@@ -472,7 +472,7 @@ mod tests {
         .expect("restore");
 
         assert_eq!(turn_counter, 7);
-        assert_eq!(execution_mode, ExecutionMode::standard());
+        assert_eq!(execution_mode, ModeId::standard());
         assert_eq!(app.usage.token_usage.input_tokens, 1200);
         assert_eq!(app.usage.token_usage.output_tokens, 340);
         assert_eq!(app.usage.token_usage.cached_input_tokens, 80);

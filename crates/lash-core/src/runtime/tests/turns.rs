@@ -646,7 +646,7 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
         )
         .await
         .expect("register wake process");
-    append_process_wake_to_queue(
+    let wake = append_process_wake_to_queue(
         registry.as_ref(),
         store.as_ref(),
         "wake-proc",
@@ -663,11 +663,48 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
     )
     .await;
 
+    let turn_events = RecordingTurnEvents::default();
     runtime
-        .stream_next_queued_work(TurnOptions::new(CancellationToken::new()))
+        .stream_next_queued_work(
+            TurnOptions::new(CancellationToken::new()).with_turn_events(&turn_events),
+        )
         .await
         .expect("turn")
         .expect("queued turn");
+
+    let events = turn_events.snapshot();
+    let queued_started = events
+        .iter()
+        .position(|activity| matches!(&activity.event, crate::TurnEvent::QueuedWorkStarted { .. }))
+        .expect("queued work started event");
+    let model_started = events
+        .iter()
+        .position(|activity| {
+            matches!(
+                &activity.event,
+                crate::TurnEvent::ModelRequestStarted { .. }
+            )
+        })
+        .expect("model request started event");
+    assert!(
+        queued_started < model_started,
+        "queued work should be announced before model output starts"
+    );
+    let crate::TurnEvent::QueuedWorkStarted {
+        boundary,
+        batch_ids,
+        causes,
+    } = &events[queued_started].event
+    else {
+        panic!("expected queued work started event");
+    };
+    assert_eq!(*boundary, crate::QueuedWorkClaimBoundary::Idle);
+    assert_eq!(batch_ids.len(), 1);
+    assert!(causes.iter().any(|cause| {
+        cause.event_type == "process.wake"
+            && cause.id == wake.wake_id
+            && cause.text.contains("deploy complete")
+    }));
 
     let requests = {
         let guard = requests.lock().expect("request capture lock");
@@ -791,13 +828,37 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
     let expected_text = "Background process wake\nProcess: wake-proc\nEvent: process.wake #1\nWake input:\ndeploy complete";
 
     let sink = RecordingSink::default();
+    let turn_events = RecordingTurnEvents::default();
     runtime
         .stream_turn(
             TurnInput::text("hello"),
-            TurnOptions::new(CancellationToken::new()).with_events(&sink),
+            TurnOptions::new(CancellationToken::new())
+                .with_events(&sink)
+                .with_turn_events(&turn_events),
         )
         .await
         .expect("turn");
+
+    let turn_event_snapshot = turn_events.snapshot();
+    let queued_started = turn_event_snapshot
+        .iter()
+        .find(|activity| matches!(&activity.event, crate::TurnEvent::QueuedWorkStarted { .. }))
+        .expect("queued work started event");
+    let crate::TurnEvent::QueuedWorkStarted {
+        boundary, causes, ..
+    } = &queued_started.event
+    else {
+        panic!("expected queued work started event");
+    };
+    assert_eq!(
+        *boundary,
+        crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint
+    );
+    assert!(causes.iter().any(|cause| {
+        cause.event_type == "process.wake"
+            && cause.id == expected_wake_id
+            && cause.text == expected_text
+    }));
 
     assert!(
         sink.snapshot().into_iter().all(|event| {

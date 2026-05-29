@@ -4,9 +4,9 @@ use lash_core::{
     PluginSessionSnapshot, PreparedPrompt, PromptContext, ProtocolTurnOptions,
     RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit, RuntimeEffectJournalRecord,
     RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence, RuntimeSessionState,
-    RuntimeTurnCheckpoint, RuntimeTurnCompletion, RuntimeTurnMachineConfigSnapshot, SessionGraph,
-    SessionHead, SessionPolicy, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
-    StoreError, TokenLedgerEntry, TokenUsage, ToolState, TurnDriverConfig, TurnDriverPreamble,
+    RuntimeTurnCheckpoint, RuntimeTurnMachineConfigSnapshot, SessionGraph, SessionHead,
+    SessionPolicy, SessionStoreCreateRequest, SessionStoreFactory, TokenUsage, ToolState,
+    TurnDriverConfig, TurnDriverPreamble,
 };
 use lash_sqlite_store::{
     BlobArtifactDescriptor, BuiltinBlobProfile, SqliteSessionStoreFactory, Store, StoreGcPolicy,
@@ -20,64 +20,6 @@ fn model_spec(id: &str) -> ModelSpec {
 
 fn test_model_spec() -> ModelSpec {
     model_spec("gpt-5.4-mini")
-}
-
-#[tokio::test]
-async fn runtime_commit_persists_agent_frame_head_and_execution_snapshot() {
-    let store = Store::memory().expect("store");
-    let mut state = RuntimeSessionState {
-        session_id: "root".to_string(),
-        policy: SessionPolicy {
-            model: test_model_spec(),
-            ..SessionPolicy::default()
-        },
-        ..RuntimeSessionState::default()
-    };
-    state.ensure_agent_frame_initialized();
-    let previous_frame_id = state.current_agent_frame_id.clone();
-    let assignment = state
-        .current_agent_frame()
-        .expect("initial frame")
-        .assignment
-        .clone();
-    state.append_agent_frame(lash_core::AgentFrameRecord::new(
-        "frame-2".to_string(),
-        "root".to_string(),
-        Some(previous_frame_id),
-        lash_core::AgentFrameReason::ContinueAs,
-        None,
-        assignment,
-        ProtocolTurnOptions::default(),
-    ));
-    state.set_execution_state_snapshot(Some(b"frame-vm".to_vec()));
-
-    store
-        .commit_runtime_state(RuntimeCommit::persisted_state(&state, &[]))
-        .await
-        .expect("commit runtime state");
-    let read = store
-        .load_session(SessionReadScope::FullGraph)
-        .await
-        .expect("load session")
-        .expect("session read");
-
-    assert_eq!(read.current_agent_frame_id, "frame-2");
-    assert_eq!(read.agent_frames.len(), 2);
-    let current = read
-        .agent_frames
-        .iter()
-        .find(|frame| frame.frame_id == "frame-2")
-        .expect("current frame");
-    assert_eq!(
-        current.execution_state_snapshot.as_deref(),
-        Some(&b"frame-vm"[..])
-    );
-    assert_eq!(
-        read.checkpoint
-            .as_ref()
-            .and_then(|checkpoint| checkpoint.execution_state.as_deref()),
-        Some(&b"frame-vm"[..])
-    );
 }
 
 #[test]
@@ -128,76 +70,6 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
     assert!(store.get_blob(&dynamic_ref).is_some());
     assert!(store.get_blob(&plugin_ref).is_some());
     assert!(store.get_blob(&orphan).is_none());
-}
-
-#[tokio::test]
-async fn runtime_commit_rejects_different_session_id_on_single_session_store() {
-    let store = Store::memory().expect("store");
-    let alpha = RuntimeSessionState {
-        session_id: "alpha".to_string(),
-        ..RuntimeSessionState::default()
-    };
-    let first = store
-        .commit_runtime_state(RuntimeCommit::persisted_state(&alpha, &[]))
-        .await;
-    assert!(first.is_ok());
-
-    let beta = RuntimeSessionState {
-        session_id: "beta".to_string(),
-        ..RuntimeSessionState::default()
-    };
-    let err = store
-        .commit_runtime_state(RuntimeCommit::persisted_state(&beta, &[]))
-        .await
-        .expect_err("mismatched session commit should fail");
-    assert!(err.to_string().contains("bound to session `alpha`"));
-}
-
-#[tokio::test]
-async fn load_session_hydrates_checkpoint_and_usage_without_reentrant_locking() {
-    let store = Store::memory().expect("store");
-    let state = RuntimeSessionState {
-        session_id: "hydrated".to_string(),
-        tool_state_snapshot: Some(ToolState::default().with_generation(9)),
-        plugin_snapshot_revision: Some(12),
-        plugin_snapshot: Some(PluginSessionSnapshot {
-            plugins: Default::default(),
-        }),
-        ..RuntimeSessionState::default()
-    };
-    let usage = TokenLedgerEntry {
-        source: "turn".to_string(),
-        model: "mock-model".to_string(),
-        usage: TokenUsage {
-            input_tokens: 11,
-            output_tokens: 7,
-            cached_input_tokens: 3,
-            reasoning_tokens: 5,
-        },
-    };
-
-    store
-        .commit_runtime_state(RuntimeCommit::persisted_state(&state, &[usage]))
-        .await
-        .expect("commit");
-
-    let read = store
-        .load_session(SessionReadScope::FullGraph)
-        .await
-        .expect("load")
-        .expect("session");
-    let checkpoint = read.checkpoint.expect("checkpoint");
-    assert_eq!(read.session_id, "hydrated");
-    assert_eq!(
-        checkpoint
-            .tool_state
-            .expect("dynamic snapshot")
-            .generation(),
-        9
-    );
-    assert_eq!(checkpoint.plugin_snapshot_revision, Some(12));
-    assert_eq!(read.token_ledger.len(), 1);
-    assert_eq!(read.token_ledger[0].usage.input_tokens, 11);
 }
 
 #[tokio::test]
@@ -359,194 +231,6 @@ async fn sqlite_factory_delete_session_removes_database_and_sidecars_idempotentl
 }
 
 #[tokio::test]
-async fn runtime_effect_journal_replays_by_replay_key_and_clears_on_final_commit() {
-    let store = Store::memory().expect("store");
-    let lease = store
-        .claim_runtime_turn_lease("root", "turn-1", "test-owner", 60_000)
-        .await
-        .expect("lease");
-    let record = RuntimeEffectJournalRecord {
-        schema_version: RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
-        session_id: "root".to_string(),
-        turn_id: "turn-1".to_string(),
-        replay_key: "root:turn-1:1:0:sleep:1".to_string(),
-        envelope_hash: "hash-a".to_string(),
-        effect_kind: RuntimeEffectKind::Sleep,
-        outcome: RuntimeEffectOutcome::Sleep,
-        created_at_epoch_ms: 1,
-    };
-    store
-        .save_runtime_effect_outcome(&lease, record.clone())
-        .await
-        .expect("save journal");
-
-    let loaded = store
-        .load_runtime_effect_outcome("root", "turn-1", &record.replay_key)
-        .await
-        .expect("load journal")
-        .expect("journal record");
-    assert_eq!(loaded.envelope_hash, "hash-a");
-
-    let state = RuntimeSessionState {
-        session_id: "root".to_string(),
-        ..RuntimeSessionState::default()
-    };
-    let commit = RuntimeCommit::persisted_state(&state, &[])
-        .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease));
-    store
-        .commit_runtime_state(commit)
-        .await
-        .expect("final commit clears turn");
-
-    let cleared = store
-        .load_runtime_effect_outcome("root", "turn-1", &record.replay_key)
-        .await
-        .expect("load after clear");
-    assert!(cleared.is_none());
-    assert!(
-        store
-            .load_runtime_turn_checkpoint("root", "turn-1")
-            .await
-            .expect("load checkpoint")
-            .is_none()
-    );
-}
-
-#[tokio::test]
-async fn stale_completed_turn_commit_rejects_and_preserves_resume_state() {
-    let store = Store::memory().expect("store");
-    let old = store
-        .claim_runtime_turn_lease("root", "turn-stale-final", "owner-a", 20)
-        .await
-        .expect("old lease");
-    store
-        .save_runtime_turn_checkpoint(&old, runtime_turn_checkpoint("root", "turn-stale-final"))
-        .await
-        .expect("save checkpoint");
-    let record = runtime_effect_record("root", "turn-stale-final", "current");
-    store
-        .save_runtime_effect_outcome(&old, record.clone())
-        .await
-        .expect("save journal");
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-    let current = store
-        .claim_runtime_turn_lease("root", "turn-stale-final", "owner-b", 60_000)
-        .await
-        .expect("new lease");
-
-    let state = RuntimeSessionState {
-        session_id: "root".to_string(),
-        ..RuntimeSessionState::default()
-    };
-    let err = store
-        .commit_runtime_state(
-            RuntimeCommit::persisted_state(
-                &state,
-                &[TokenLedgerEntry {
-                    source: "turn".to_string(),
-                    model: "mock".to_string(),
-                    usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 0,
-                        cached_input_tokens: 0,
-                        reasoning_tokens: 0,
-                    },
-                }],
-            )
-            .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&old)),
-        )
-        .await
-        .expect_err("stale final commit must fail");
-
-    assert!(matches!(err, StoreError::RuntimeTurnLeaseExpired { .. }));
-    assert!(
-        store
-            .load_runtime_turn_checkpoint("root", "turn-stale-final")
-            .await
-            .expect("load checkpoint")
-            .is_some()
-    );
-    assert!(
-        store
-            .load_runtime_effect_outcome("root", "turn-stale-final", &record.replay_key)
-            .await
-            .expect("load journal")
-            .is_some()
-    );
-    assert!(
-        store
-            .load_session(SessionReadScope::FullGraph)
-            .await
-            .expect("load session")
-            .is_none()
-    );
-    store
-        .save_runtime_effect_outcome(
-            &current,
-            runtime_effect_record("root", "turn-stale-final", "after-stale-final"),
-        )
-        .await
-        .expect("current owner can still write");
-}
-
-#[tokio::test]
-async fn expired_completed_turn_commit_rejects_and_preserves_resume_state() {
-    let store = Store::memory().expect("store");
-    let lease = store
-        .claim_runtime_turn_lease("root", "turn-expired-final", "owner-a", 20)
-        .await
-        .expect("lease");
-    store
-        .save_runtime_turn_checkpoint(
-            &lease,
-            runtime_turn_checkpoint("root", "turn-expired-final"),
-        )
-        .await
-        .expect("save checkpoint");
-    let record = runtime_effect_record("root", "turn-expired-final", "effect");
-    store
-        .save_runtime_effect_outcome(&lease, record.clone())
-        .await
-        .expect("save journal");
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-
-    let state = RuntimeSessionState {
-        session_id: "root".to_string(),
-        ..RuntimeSessionState::default()
-    };
-    let err = store
-        .commit_runtime_state(
-            RuntimeCommit::persisted_state(&state, &[])
-                .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease)),
-        )
-        .await
-        .expect_err("expired final commit must fail");
-
-    assert!(matches!(err, StoreError::RuntimeTurnLeaseExpired { .. }));
-    assert!(
-        store
-            .load_runtime_turn_checkpoint("root", "turn-expired-final")
-            .await
-            .expect("load checkpoint")
-            .is_some()
-    );
-    assert!(
-        store
-            .load_runtime_effect_outcome("root", "turn-expired-final", &record.replay_key)
-            .await
-            .expect("load journal")
-            .is_some()
-    );
-    assert!(
-        store
-            .load_session(SessionReadScope::FullGraph)
-            .await
-            .expect("load session")
-            .is_none()
-    );
-}
-
-#[tokio::test]
 async fn abandon_runtime_turn_lease_releases_owner_and_preserves_resume_data() {
     let store = Store::memory().expect("store");
     let lease = store
@@ -587,90 +271,6 @@ async fn abandon_runtime_turn_lease_releases_owner_and_preserves_resume_data() {
         .claim_runtime_turn_lease("root", "turn-abandon", "owner-b", 60_000)
         .await
         .expect("new owner can claim abandoned turn");
-}
-
-#[tokio::test]
-async fn superseded_runtime_turn_lease_cannot_write_or_clear_newer_owner() {
-    let store = Store::memory().expect("store");
-    let old = store
-        .claim_runtime_turn_lease("root", "turn-superseded", "owner-a", 0)
-        .await
-        .expect("old lease");
-    let current = store
-        .claim_runtime_turn_lease("root", "turn-superseded", "owner-b", 60_000)
-        .await
-        .expect("new lease");
-
-    let stale_save = store
-        .save_runtime_effect_outcome(
-            &old,
-            runtime_effect_record("root", "turn-superseded", "stale"),
-        )
-        .await;
-    assert!(matches!(
-        stale_save,
-        Err(StoreError::RuntimeTurnLeaseExpired { .. })
-    ));
-
-    store
-        .abandon_runtime_turn_lease(&old)
-        .await
-        .expect("stale abandon is ignored");
-
-    let conflict = store
-        .claim_runtime_turn_lease("root", "turn-superseded", "owner-c", 60_000)
-        .await;
-    assert!(matches!(
-        conflict,
-        Err(StoreError::RuntimeTurnLeaseConflict { .. })
-    ));
-    store
-        .save_runtime_effect_outcome(
-            &current,
-            runtime_effect_record("root", "turn-superseded", "current"),
-        )
-        .await
-        .expect("current owner can still write");
-}
-
-#[tokio::test]
-async fn renewed_runtime_turn_lease_survives_original_expiry() {
-    let store = Store::memory().expect("store");
-    let lease = store
-        .claim_runtime_turn_lease("root", "turn-renew", "owner-a", 20)
-        .await
-        .expect("lease");
-    let renewed = store
-        .renew_runtime_turn_lease(&lease, 60_000)
-        .await
-        .expect("renew lease");
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-
-    store
-        .save_runtime_effect_outcome(
-            &renewed,
-            runtime_effect_record("root", "turn-renew", "renewed"),
-        )
-        .await
-        .expect("renewed lease can write after original expiry");
-}
-
-#[tokio::test]
-async fn active_runtime_turn_lease_fences_competing_claims() {
-    let store = Store::memory().expect("store");
-    store
-        .claim_runtime_turn_lease("root", "turn-active", "owner-a", 60_000)
-        .await
-        .expect("lease");
-
-    let conflict = store
-        .claim_runtime_turn_lease("root", "turn-active", "owner-b", 60_000)
-        .await;
-
-    assert!(matches!(
-        conflict,
-        Err(StoreError::RuntimeTurnLeaseConflict { .. })
-    ));
 }
 
 struct NoopDriver;
@@ -770,7 +370,7 @@ fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckp
             generation: lash_core::GenerationOptions::default(),
             max_turns: None,
             sync_execution_surface: false,
-            tool_specs: Vec::new(),
+            tool_specs: Arc::new(Vec::new()),
             system_prompt: String::new(),
             termination,
         },

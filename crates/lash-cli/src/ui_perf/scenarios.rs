@@ -18,10 +18,11 @@ pub(crate) enum UiPerfScenario {
     FileIndexStorm,
     TimelineProjection,
     ActivityProjection,
+    HtmlExport,
 }
 
 impl UiPerfScenario {
-    pub(crate) const DEFAULTS: [Self; 8] = [
+    pub(crate) const DEFAULTS: [Self; 9] = [
         Self::HistoryRender,
         Self::WorkspaceSurface,
         Self::WorkspaceOverlay,
@@ -30,9 +31,10 @@ impl UiPerfScenario {
         Self::FileIndexStorm,
         Self::TimelineProjection,
         Self::ActivityProjection,
+        Self::HtmlExport,
     ];
 
-    pub(crate) const KNOWN: [Self; 8] = Self::DEFAULTS;
+    pub(crate) const KNOWN: [Self; 9] = Self::DEFAULTS;
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
@@ -44,6 +46,7 @@ impl UiPerfScenario {
             "file_index_storm" | "file-index-storm" => Some(Self::FileIndexStorm),
             "timeline_projection" | "projection" => Some(Self::TimelineProjection),
             "activity_projection" | "activity" => Some(Self::ActivityProjection),
+            "html_export" | "export" => Some(Self::HtmlExport),
             _ => None,
         }
     }
@@ -58,6 +61,7 @@ impl UiPerfScenario {
             Self::FileIndexStorm => "file_index_storm",
             Self::TimelineProjection => "timeline_projection",
             Self::ActivityProjection => "activity_projection",
+            Self::HtmlExport => "html_export",
         }
     }
 }

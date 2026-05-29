@@ -445,7 +445,6 @@ fn adjusted_score(
     score += name_hits as f64 * 1.5;
     score += alias_hits as f64 * 1.2;
     score += output_hits.min(query_tokens.len()) as f64 * 0.45;
-    score = adjust_for_payment_action_intent(score, query_tokens, doc);
     if name_hits + alias_hits == query_tokens.len() {
         score += 4.0;
     }
@@ -460,67 +459,6 @@ fn adjusted_score(
     }
 
     score
-}
-
-fn adjust_for_payment_action_intent(
-    score: f64,
-    query_tokens: &[String],
-    doc: &DiscoveryDoc,
-) -> f64 {
-    if !has_payment_action_intent(query_tokens) || has_query_token(query_tokens, "request") {
-        return score;
-    }
-
-    let mut adjusted = score;
-    if doc_has_any_token(doc, &["transaction"])
-        || doc_has_phrase(doc, "send money")
-        || doc_has_phrase(doc, "pay user")
-    {
-        adjusted += 6.0;
-    }
-    if doc_has_any_token(doc, &["remind", "reminder"]) {
-        adjusted *= 0.05;
-    } else if doc_has_any_token(doc, &["request"]) {
-        adjusted *= 0.8;
-    }
-    if doc_has_phrase(doc, "venmo balance") || doc_has_phrase(doc, "bank transfer") {
-        adjusted *= 0.65;
-    }
-    adjusted
-}
-
-fn has_payment_action_intent(query_tokens: &[String]) -> bool {
-    let has_send = has_query_token(query_tokens, "send");
-    let has_payment = has_query_token(query_tokens, "payment");
-    let has_money = has_query_token(query_tokens, "money");
-    let has_make = has_query_token(query_tokens, "make");
-    let has_pay = has_query_token(query_tokens, "pay");
-    let has_transfer = has_query_token(query_tokens, "transfer");
-
-    (has_send && (has_payment || has_money))
-        || (has_make && has_payment)
-        || has_pay
-        || (has_transfer && has_money)
-}
-
-fn has_query_token(query_tokens: &[String], needle: &str) -> bool {
-    query_tokens.iter().any(|token| token == needle)
-}
-
-fn doc_has_any_token(doc: &DiscoveryDoc, needles: &[&str]) -> bool {
-    doc.fields.iter().any(|field| {
-        field
-            .tokens
-            .iter()
-            .any(|token| needles.iter().any(|needle| token == needle))
-    })
-}
-
-fn doc_has_phrase(doc: &DiscoveryDoc, phrase: &str) -> bool {
-    let phrase = phrase.to_ascii_lowercase();
-    doc.fields
-        .iter()
-        .any(|field| field.raw.to_ascii_lowercase().contains(&phrase))
 }
 
 fn exact_field_token_hits(query_tokens: &[String], doc: &DiscoveryDoc, field_name: &str) -> usize {

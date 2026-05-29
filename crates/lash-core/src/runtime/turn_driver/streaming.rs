@@ -586,6 +586,90 @@ impl RuntimeTurnDriver<'_> {
         ))
     }
 
+    /// Shared visible-assistant-text path for streamed text, used by both the
+    /// `Delta` (item-less) and `Part::Text` (item-scoped) provider events.
+    ///
+    /// Sets the `text_streamed` flag, runs the chunk through plugin stream
+    /// transforms (forwarding any reasoning deltas + abort request), logs the
+    /// event, and emits the visible prose deltas.
+    async fn emit_visible_assistant_text(
+        &mut self,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        text: String,
+        item_id: Option<&str>,
+        event_type: &'static str,
+        state: &mut LlmStreamState<'_>,
+    ) -> Result<(), LlmCallError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        *state.text_streamed = true;
+        let raw_text = self.host.core.trace_sink.as_ref().map(|_| text.clone());
+        let outcome = self
+            .transform_assistant_stream_chunk(event_tx, text)
+            .await?;
+        if outcome.abort_requested {
+            *state.abort_requested = true;
+        }
+        for reasoning_delta in outcome.reasoning_deltas {
+            state.stream_accumulator.push_reasoning(
+                reasoning_delta.clone(),
+                None,
+                Vec::new(),
+                None,
+            );
+            send_session_event(
+                event_tx,
+                SessionEvent::ReasoningDelta {
+                    content: reasoning_delta.clone(),
+                },
+            )
+            .await;
+            let correlation_id = stream_correlation_id(state.reasoning_correlation, None);
+            send_turn_activity(
+                event_tx,
+                correlation_id,
+                TurnEvent::ReasoningDelta {
+                    text: reasoning_delta,
+                },
+            )
+            .await;
+        }
+        let text = outcome.chunk;
+        self.log_llm_stream_event(
+            state.debug,
+            LlmStreamEventLog {
+                protocol_iteration: state.protocol_iteration,
+                event_type,
+                text: LlmDebugText {
+                    raw: raw_text.as_deref(),
+                    visible: Some(&text),
+                },
+                item_id,
+                usage: None,
+                tool_call: None,
+            },
+        );
+        if !text.is_empty() {
+            state.stream_accumulator.push_text(&text);
+            send_session_event(
+                event_tx,
+                SessionEvent::TextDelta {
+                    content: text.clone(),
+                },
+            )
+            .await;
+            let correlation_id = stream_correlation_id(state.assistant_prose_correlation, item_id);
+            send_turn_activity(
+                event_tx,
+                correlation_id,
+                TurnEvent::AssistantProseDelta { text },
+            )
+            .await;
+        }
+        Ok(())
+    }
+
     async fn forward_provider_stream_event(
         &mut self,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
@@ -594,74 +678,8 @@ impl RuntimeTurnDriver<'_> {
     ) -> Result<(), LlmCallError> {
         match stream_event {
             LlmStreamEvent::Delta(delta) => {
-                if !delta.is_empty() {
-                    *state.text_streamed = true;
-                    let raw_delta = self.host.core.trace_sink.as_ref().map(|_| delta.clone());
-                    let outcome = self
-                        .transform_assistant_stream_chunk(event_tx, delta)
-                        .await?;
-                    if outcome.abort_requested {
-                        *state.abort_requested = true;
-                    }
-                    for reasoning_delta in outcome.reasoning_deltas {
-                        state.stream_accumulator.push_reasoning(
-                            reasoning_delta.clone(),
-                            None,
-                            Vec::new(),
-                            None,
-                        );
-                        send_session_event(
-                            event_tx,
-                            SessionEvent::ReasoningDelta {
-                                content: reasoning_delta.clone(),
-                            },
-                        )
-                        .await;
-                        let correlation_id =
-                            stream_correlation_id(state.reasoning_correlation, None);
-                        send_turn_activity(
-                            event_tx,
-                            correlation_id,
-                            TurnEvent::ReasoningDelta {
-                                text: reasoning_delta,
-                            },
-                        )
-                        .await;
-                    }
-                    let delta = outcome.chunk;
-                    self.log_llm_stream_event(
-                        state.debug,
-                        LlmStreamEventLog {
-                            protocol_iteration: state.protocol_iteration,
-                            event_type: "delta",
-                            text: LlmDebugText {
-                                raw: raw_delta.as_deref(),
-                                visible: Some(&delta),
-                            },
-                            item_id: None,
-                            usage: None,
-                            tool_call: None,
-                        },
-                    );
-                    if !delta.is_empty() {
-                        state.stream_accumulator.push_text(&delta);
-                        send_session_event(
-                            event_tx,
-                            SessionEvent::TextDelta {
-                                content: delta.clone(),
-                            },
-                        )
-                        .await;
-                        let correlation_id =
-                            stream_correlation_id(state.assistant_prose_correlation, None);
-                        send_turn_activity(
-                            event_tx,
-                            correlation_id,
-                            TurnEvent::AssistantProseDelta { text: delta },
-                        )
-                        .await;
-                    }
-                }
+                self.emit_visible_assistant_text(event_tx, delta, None, "delta", state)
+                    .await?;
             }
             LlmStreamEvent::ReasoningDelta(delta) => {
                 if !delta.is_empty() {
@@ -705,75 +723,15 @@ impl RuntimeTurnDriver<'_> {
                 text,
                 response_meta,
             }) => {
-                if !text.is_empty() {
-                    *state.text_streamed = true;
-                    let item_id = response_meta.as_ref().and_then(|meta| meta.id.as_deref());
-                    let raw_text = self.host.core.trace_sink.as_ref().map(|_| text.clone());
-                    let outcome = self
-                        .transform_assistant_stream_chunk(event_tx, text)
-                        .await?;
-                    if outcome.abort_requested {
-                        *state.abort_requested = true;
-                    }
-                    for reasoning_delta in outcome.reasoning_deltas {
-                        state.stream_accumulator.push_reasoning(
-                            reasoning_delta.clone(),
-                            None,
-                            Vec::new(),
-                            None,
-                        );
-                        send_session_event(
-                            event_tx,
-                            SessionEvent::ReasoningDelta {
-                                content: reasoning_delta.clone(),
-                            },
-                        )
-                        .await;
-                        let correlation_id =
-                            stream_correlation_id(state.reasoning_correlation, None);
-                        send_turn_activity(
-                            event_tx,
-                            correlation_id,
-                            TurnEvent::ReasoningDelta {
-                                text: reasoning_delta,
-                            },
-                        )
-                        .await;
-                    }
-                    let text = outcome.chunk;
-                    self.log_llm_stream_event(
-                        state.debug,
-                        LlmStreamEventLog {
-                            protocol_iteration: state.protocol_iteration,
-                            event_type: "text_part",
-                            text: LlmDebugText {
-                                raw: raw_text.as_deref(),
-                                visible: Some(&text),
-                            },
-                            item_id,
-                            usage: None,
-                            tool_call: None,
-                        },
-                    );
-                    if !text.is_empty() {
-                        state.stream_accumulator.push_text(&text);
-                        send_session_event(
-                            event_tx,
-                            SessionEvent::TextDelta {
-                                content: text.clone(),
-                            },
-                        )
-                        .await;
-                        let correlation_id =
-                            stream_correlation_id(state.assistant_prose_correlation, item_id);
-                        send_turn_activity(
-                            event_tx,
-                            correlation_id,
-                            TurnEvent::AssistantProseDelta { text },
-                        )
-                        .await;
-                    }
-                }
+                let item_id = response_meta.as_ref().and_then(|meta| meta.id.clone());
+                self.emit_visible_assistant_text(
+                    event_tx,
+                    text,
+                    item_id.as_deref(),
+                    "text_part",
+                    state,
+                )
+                .await?;
             }
             LlmStreamEvent::Part(LlmOutputPart::ToolCall {
                 call_id,

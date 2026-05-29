@@ -55,6 +55,7 @@ impl LashRuntime {
                 )
                 .await?;
         }
+        self.stamp_live_plugin_state();
         if let Some(store) = self
             .session
             .as_ref()

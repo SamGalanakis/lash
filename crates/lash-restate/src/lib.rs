@@ -734,8 +734,7 @@ fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExec
         RuntimeEffectCommand::Process { .. } => RestateEffectExecution::DirectProcess,
         RuntimeEffectCommand::Sleep { .. } => RestateEffectExecution::Timer,
         RuntimeEffectCommand::LlmCall { .. }
-        | RuntimeEffectCommand::DirectCompletion { .. }
-        | RuntimeEffectCommand::DirectLlmCompletion { .. }
+        | RuntimeEffectCommand::Direct { .. }
         | RuntimeEffectCommand::ToolCall { .. }
         | RuntimeEffectCommand::ExecCode { .. }
         | RuntimeEffectCommand::Checkpoint { .. }
@@ -838,26 +837,12 @@ mod tests {
             model: "model".to_string(),
             messages: Vec::new(),
             attachments: Vec::new(),
-            tools: Vec::new(),
+            tools: Arc::new(Vec::new()),
             tool_choice: Default::default(),
             model_variant: None,
             generation: lash_core::GenerationOptions::default(),
             session_id: Some("session".to_string()),
             output_spec: None,
-        }
-    }
-
-    fn direct_spec() -> lash_core::DirectRequestSpec {
-        lash_core::DirectRequestSpec {
-            model: "model".to_string(),
-            model_variant: None,
-            generation: lash_core::GenerationOptions::default(),
-            messages: Vec::new(),
-            attachments: Vec::new(),
-            output: Default::default(),
-            session_id: Some("session".to_string()),
-            caused_by: None,
-            replay: None,
         }
     }
 
@@ -990,16 +975,7 @@ mod tests {
                 RestateEffectExecution::JournaledRun,
             ),
             (
-                RuntimeEffectCommand::DirectCompletion {
-                    request: Box::new(direct_spec()),
-                    normalized_request: Box::new(llm_spec()),
-                    model: "model".to_string(),
-                    usage_source: "test".to_string(),
-                },
-                RestateEffectExecution::JournaledRun,
-            ),
-            (
-                RuntimeEffectCommand::DirectLlmCompletion {
+                RuntimeEffectCommand::Direct {
                     request: Box::new(llm_spec()),
                     usage_source: "test".to_string(),
                 },

@@ -185,40 +185,44 @@ impl RuntimeEffectController for RecordingEffectController {
                 }),
             }),
             RuntimeEffectCommand::Sleep { .. } => Ok(RuntimeEffectOutcome::Sleep),
-            RuntimeEffectCommand::DirectCompletion {
-                model: _,
-                usage_source: _,
-                ..
-            } => Ok(RuntimeEffectOutcome::DirectCompletion {
-                result: Ok(LlmResponse {
-                    full_text: "direct answer".to_string(),
-                    parts: vec![LlmOutputPart::Text {
-                        text: "direct answer".to_string(),
-                        response_meta: None,
-                    }],
-                    usage: LlmUsage {
-                        input_tokens: 7,
-                        output_tokens: 5,
-                        cached_input_tokens: 1,
-                        reasoning_tokens: 2,
-                    },
-                    ..LlmResponse::default()
-                }),
-            }),
-            RuntimeEffectCommand::DirectLlmCompletion { request: _, .. } => {
-                Ok(RuntimeEffectOutcome::DirectLlmCompletion {
-                    result: Ok(LlmResponse {
-                        full_text: "raw direct answer".to_string(),
-                        parts: vec![LlmOutputPart::Text {
-                            text: "raw direct answer".to_string(),
-                            response_meta: None,
-                        }],
-                        usage: LlmUsage {
+            RuntimeEffectCommand::Direct { request, .. } => {
+                // Both the text-only (`direct_completion`) and full-response
+                // (`direct_llm_completion`) client methods now flow through the
+                // single `Direct` effect; they differ only in how the caller
+                // projects the resulting `LlmResponse`. The full-response tests
+                // submit a "raw prompt" message or an image attachment, so use
+                // those to pick the response text/usage the assertions expect.
+                let prompt = format!("{:?}", request.messages);
+                let is_full = prompt.contains("raw prompt") || !request.attachments.is_empty();
+                let (text, usage) = if is_full {
+                    (
+                        "raw direct answer",
+                        LlmUsage {
                             input_tokens: 4,
                             output_tokens: 6,
                             cached_input_tokens: 0,
                             reasoning_tokens: 1,
                         },
+                    )
+                } else {
+                    (
+                        "direct answer",
+                        LlmUsage {
+                            input_tokens: 7,
+                            output_tokens: 5,
+                            cached_input_tokens: 1,
+                            reasoning_tokens: 2,
+                        },
+                    )
+                };
+                Ok(RuntimeEffectOutcome::Direct {
+                    result: Ok(LlmResponse {
+                        full_text: text.to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: text.to_string(),
+                            response_meta: None,
+                        }],
+                        usage,
                         ..LlmResponse::default()
                     }),
                 })
@@ -1204,10 +1208,7 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
 
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
     assert_eq!(scoped_recorder.count_kind(RuntimeEffectKind::ToolCall), 1);
-    assert_eq!(
-        default_recorder.count_kind(RuntimeEffectKind::DirectCompletion),
-        0
-    );
+    assert_eq!(default_recorder.count_kind(RuntimeEffectKind::Direct), 0);
     assert!(scoped_recorder.records().iter().any(|record| {
         record.kind == RuntimeEffectKind::ToolCall && record.replay_key.contains("direct-call-1")
     }));
@@ -1552,9 +1553,9 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
 
     assert_eq!(completion.text, "direct answer");
     assert_eq!(completion.usage.input_tokens, 7);
-    assert_eq!(recorder.count_kind(RuntimeEffectKind::DirectCompletion), 1);
+    assert_eq!(recorder.count_kind(RuntimeEffectKind::Direct), 1);
     assert!(recorder.records().iter().any(|record| {
-        record.kind == RuntimeEffectKind::DirectCompletion
+        record.kind == RuntimeEffectKind::Direct
             && record
                 .replay_key
                 .contains("cause:tool_call:root:originating-tool-call")
@@ -1619,8 +1620,7 @@ async fn in_turn_direct_completion_requires_lease_and_journals_under_it() {
 
     assert_eq!(completion.text, "direct answer");
     assert!(recorder.records().iter().any(|record| {
-        record.kind == RuntimeEffectKind::DirectCompletion
-            && record.turn_id.as_deref() == Some("turn-direct")
+        record.kind == RuntimeEffectKind::Direct && record.turn_id.as_deref() == Some("turn-direct")
     }));
     assert_eq!(store.runtime_effect_journal_save_count(), 1);
     assert!(store.runtime_turn_lease_renew_count() >= 1);
@@ -1691,10 +1691,7 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
 
     assert_eq!(completion.response.full_text, "raw direct answer");
     assert_eq!(completion.usage.output_tokens, 6);
-    assert_eq!(
-        recorder.count_kind(RuntimeEffectKind::DirectLlmCompletion),
-        1
-    );
+    assert_eq!(recorder.count_kind(RuntimeEffectKind::Direct), 1);
     let ledger = runtime.shared_token_ledger.lock().expect("token ledger");
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger[0].source, "direct-llm-test");
@@ -1747,7 +1744,7 @@ async fn direct_llm_completion_envelope_stores_attachment_refs_not_bytes() {
     let envelope = recorder
         .envelopes()
         .into_iter()
-        .find(|envelope| envelope.contains("direct_llm_completion"))
+        .find(|envelope| envelope.contains("\"type\":\"direct\""))
         .expect("direct llm envelope");
     assert!(!envelope.contains("\"data\""));
     assert!(envelope.contains(&expected_attachment_id));

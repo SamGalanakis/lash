@@ -56,6 +56,21 @@ impl SessionControl {
         }
     }
 
+    /// Run `f` against the locked runtime writer, then publish the resulting
+    /// observation. The body is the canonical `lock → call → publish_from`
+    /// stamp shared by nearly every mutating control method; publish happens
+    /// unconditionally once the closure returns.
+    async fn with_writer<F, T>(&self, f: F) -> T
+    where
+        F: AsyncFnOnce(&mut LashRuntime) -> T,
+    {
+        let writer = self.runtime.writer();
+        let mut runtime = writer.lock().await;
+        let value = f(&mut runtime).await;
+        self.runtime.publish_from(&runtime);
+        value
+    }
+
     async fn update_config(&self, patch: SessionConfigPatch) -> Result<()> {
         self.update_session_config(patch.provider, patch.model, patch.prompt)
             .await;
@@ -68,10 +83,10 @@ impl SessionControl {
         model: Option<lash_core::ModelSpec>,
         prompt: Option<PromptLayer>,
     ) {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        runtime.update_session_config(provider, model, prompt).await;
-        self.runtime.publish_from(&runtime);
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime.update_session_config(provider, model, prompt).await;
+        })
+        .await
     }
 
     async fn export_state(&self) -> lash_core::SessionStateEnvelope {
@@ -79,20 +94,20 @@ impl SessionControl {
     }
 
     async fn append_messages(&self, messages: Vec<PluginMessage>) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let result = runtime
-            .append_session_nodes(lash_core::AppendSessionNodesRequest {
-                nodes: messages
-                    .into_iter()
-                    .map(lash_core::SessionAppendNode::message)
-                    .collect(),
-                requires_ancestor_node_id: None,
-            })
-            .await
-            .map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        result.map(|_| ())
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .append_session_nodes(lash_core::AppendSessionNodesRequest {
+                    nodes: messages
+                        .into_iter()
+                        .map(lash_core::SessionAppendNode::message)
+                        .collect(),
+                    requires_ancestor_node_id: None,
+                })
+                .await
+                .map(|_| ())
+                .map_err(Into::into)
+        })
+        .await
     }
 
     async fn append_plugin_body(
@@ -100,47 +115,47 @@ impl SessionControl {
         plugin_type: impl Into<String>,
         body: serde_json::Value,
     ) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let result = runtime
-            .append_session_nodes(lash_core::AppendSessionNodesRequest {
-                nodes: vec![lash_core::SessionAppendNode::plugin(plugin_type, body)],
-                requires_ancestor_node_id: None,
-            })
-            .await
-            .map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        result.map(|_| ())
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .append_session_nodes(lash_core::AppendSessionNodesRequest {
+                    nodes: vec![lash_core::SessionAppendNode::plugin(plugin_type, body)],
+                    requires_ancestor_node_id: None,
+                })
+                .await
+                .map(|_| ())
+                .map_err(Into::into)
+        })
+        .await
     }
 
     async fn set_persisted_state(&self, state: RuntimeSessionState) {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        runtime.set_persisted_state(state);
-        self.runtime.publish_from(&runtime);
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime.set_persisted_state(state);
+        })
+        .await
     }
 
     async fn set_prompt_template(&self, template: PromptTemplate) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        runtime.set_prompt_template(template).await;
-        self.runtime.publish_from(&runtime);
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime.set_prompt_template(template).await;
+        })
+        .await;
         Ok(())
     }
 
     async fn clear_prompt_template(&self) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        runtime.clear_prompt_template().await;
-        self.runtime.publish_from(&runtime);
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime.clear_prompt_template().await;
+        })
+        .await;
         Ok(())
     }
 
     async fn add_prompt_contribution(&self, contribution: PromptContribution) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        runtime.add_prompt_contribution(contribution).await;
-        self.runtime.publish_from(&runtime);
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime.add_prompt_contribution(contribution).await;
+        })
+        .await;
         Ok(())
     }
 
@@ -149,18 +164,18 @@ impl SessionControl {
         slot: PromptSlot,
         contributions: impl IntoIterator<Item = PromptContribution>,
     ) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        runtime.replace_prompt_slot(slot, contributions).await;
-        self.runtime.publish_from(&runtime);
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime.replace_prompt_slot(slot, contributions).await;
+        })
+        .await;
         Ok(())
     }
 
     async fn clear_prompt_slot(&self, slot: PromptSlot) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        runtime.clear_prompt_slot(slot).await;
-        self.runtime.publish_from(&runtime);
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime.clear_prompt_slot(slot).await;
+        })
+        .await;
         Ok(())
     }
 
@@ -168,58 +183,56 @@ impl SessionControl {
         &self,
         extension: lash_core::ProtocolSessionExtensionHandle,
     ) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let result = runtime
-            .apply_protocol_session_extension(extension)
-            .await
-            .map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        result
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .apply_protocol_session_extension(extension)
+                .await
+                .map_err(Into::into)
+        })
+        .await
     }
 
     async fn branch_to_node(
         &self,
         target_leaf: Option<String>,
     ) -> Result<lash_core::SessionStateEnvelope> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let result = runtime
-            .branch_to_node(target_leaf)
-            .await
-            .map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        result
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .branch_to_node(target_leaf)
+                .await
+                .map_err(Into::into)
+        })
+        .await
     }
 
     async fn await_background_work(&self) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        runtime.await_background_work().await?;
-        self.runtime.publish_from(&runtime);
-        Ok(())
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime.await_background_work().await.map_err(Into::into)
+        })
+        .await
     }
 
     async fn refresh_tool_surface(&self) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        runtime.refresh_session_tool_surface().await?;
-        self.runtime.publish_from(&runtime);
-        Ok(())
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .refresh_session_tool_surface()
+                .await
+                .map_err(Into::into)
+        })
+        .await
     }
 
     async fn install_lashlang_trigger_source(
         &self,
         source: &str,
     ) -> Result<lash_core::SessionTriggerInstallReport> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let result = runtime
-            .install_lashlang_trigger_source(source)
-            .await
-            .map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        result
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .install_lashlang_trigger_source(source)
+                .await
+                .map_err(Into::into)
+        })
+        .await
     }
 
     async fn emit_host_event(
@@ -229,14 +242,13 @@ impl SessionControl {
         event: &str,
         payload: serde_json::Value,
     ) -> Result<lash_core::HostEventEmitReport> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let result = runtime
-            .emit_host_event(resource_type, alias, event, payload)
-            .await
-            .map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        result
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .emit_host_event(resource_type, alias, event, payload)
+                .await
+                .map_err(Into::into)
+        })
+        .await
     }
 
     async fn invoke_plugin_action(
@@ -285,20 +297,18 @@ impl SessionControl {
     }
 
     async fn rewrite_history(&self, trigger: RewriteTrigger) -> Result<bool> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let result = runtime.rewrite_history(trigger).await.map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        result
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime.rewrite_history(trigger).await.map_err(Into::into)
+        })
+        .await
     }
 
     async fn persist_current_state(&self) -> Result<RuntimeSessionState> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        runtime.await_background_work().await?;
-        let state = runtime.export_persisted_state();
-        self.runtime.publish_from(&runtime);
-        Ok(state)
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime.await_background_work().await?;
+            Ok(runtime.export_persisted_state())
+        })
+        .await
     }
 
     async fn list_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
@@ -357,22 +367,20 @@ impl SessionControl {
     }
 
     async fn snapshot_execution_state(&self) -> Result<Option<Vec<u8>>> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let result = runtime.snapshot_execution_state().await.map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        result
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime.snapshot_execution_state().await.map_err(Into::into)
+        })
+        .await
     }
 
     async fn restore_execution_state(&self, bytes: &[u8]) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let result = runtime
-            .restore_execution_state(bytes)
-            .await
-            .map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        result
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .restore_execution_state(bytes)
+                .await
+                .map_err(Into::into)
+        })
+        .await
     }
 
     async fn tool_state(&self) -> Result<ToolState> {
@@ -384,14 +392,13 @@ impl SessionControl {
     }
 
     async fn apply_tool_state(&self, state: ToolState) -> Result<u64> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let generation = runtime
-            .apply_tool_state(state)
-            .await
-            .map_err(EmbedError::from)?;
-        self.runtime.publish_from(&runtime);
-        Ok(generation)
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .apply_tool_state(state)
+                .await
+                .map_err(EmbedError::from)
+        })
+        .await
     }
 
     async fn set_tool_availability(
@@ -473,14 +480,13 @@ impl SessionControl {
     }
 
     async fn activate_managed_session(&self, session_id: &str) -> Result<()> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let result = runtime
-            .activate_managed_session(session_id)
-            .await
-            .map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        result
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .activate_managed_session(session_id)
+                .await
+                .map_err(Into::into)
+        })
+        .await
     }
 
     async fn inject_turn_input(&self, id: Option<String>, message: PluginMessage) -> Result<()> {

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use lash::{LashCore, LashSession, ModeId, ModePreset, PluginStack, advanced::ExecutionMode};
+use lash::{LashCore, LashSession, ModeId, ModePreset, PluginStack};
 use lash_core::{
     AttachmentStore, PersistedSessionConfig, ProcessRegistry, RuntimePersistence,
     RuntimeSessionState, SessionGraph, SessionHead, SessionPolicy,
@@ -31,13 +31,13 @@ pub(crate) struct SessionBootstrap {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CliSessionHostConfig {
-    pub(crate) execution_mode: ExecutionMode,
+    pub(crate) execution_mode: ModeId,
     pub(crate) standard_context_approach: Option<StandardContextApproach>,
 }
 
 impl CliSessionHostConfig {
     pub(crate) fn new(
-        execution_mode: ExecutionMode,
+        execution_mode: ModeId,
         standard_context_approach: Option<StandardContextApproach>,
     ) -> Self {
         Self {
@@ -254,7 +254,7 @@ impl CliSessionOpener {
         &self,
         source: SessionBootstrapSource,
         fallback_policy: SessionPolicy,
-        fallback_execution_mode: ExecutionMode,
+        fallback_execution_mode: ModeId,
         fallback_standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
         let bootstrap = SessionBootstrap::open(source)?;
@@ -281,7 +281,7 @@ impl CliSessionOpener {
         let core_builder = LashCore::builder()
             .install_mode(ModePreset::standard())
             .install_mode(ModePreset::rlm())
-            .default_mode(ModeId::new(host_config.execution_mode.as_str().to_string()))
+            .default_mode(host_config.execution_mode.clone())
             .provider(policy.provider.clone())
             .model(policy.model.clone())
             .child_store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
@@ -296,7 +296,7 @@ impl CliSessionOpener {
         let core = core_builder.build()?;
         let session = core
             .session(session_id)
-            .mode(ModeId::new(host_config.execution_mode.as_str().to_string()))
+            .mode(host_config.execution_mode.clone())
             .store(store)
             .open_with_state(state)
             .await?;
@@ -310,7 +310,7 @@ impl CliSessionOpener {
     pub(crate) async fn fresh(
         &self,
         fallback_policy: SessionPolicy,
-        execution_mode: ExecutionMode,
+        execution_mode: ModeId,
         standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
         self.open(
@@ -326,7 +326,7 @@ impl CliSessionOpener {
         &self,
         identifier: &str,
         fallback_policy: SessionPolicy,
-        execution_mode: ExecutionMode,
+        execution_mode: ModeId,
         standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
         self.open(

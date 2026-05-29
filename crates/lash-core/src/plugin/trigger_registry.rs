@@ -228,7 +228,7 @@ impl SessionPlugin for SessionTriggerPlugin {
                 .registry
                 .restore_state(SessionTriggerRegistryState::default());
         };
-        let state = serde_json::from_value(value).map_err(|err| {
+        let state: SessionTriggerRegistryState = serde_json::from_value(value).map_err(|err| {
             PluginError::Session(format!("failed to decode trigger registry snapshot: {err}"))
         })?;
         self.registry.restore_state(state)

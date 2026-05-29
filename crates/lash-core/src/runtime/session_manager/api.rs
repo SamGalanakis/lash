@@ -20,6 +20,16 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
     ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
         self.current.tool_catalog(&self.managed, session_id).await
     }
+
+    async fn shared_tool_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {
+        self.current
+            .shared_tool_catalog(&self.managed, session_id)
+            .await
+    }
+
     async fn tool_state(&self, session_id: &str) -> Result<crate::ToolState, crate::PluginError> {
         self.current.tool_state(&self.managed, session_id).await
     }

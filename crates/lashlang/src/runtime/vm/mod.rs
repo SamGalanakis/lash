@@ -18,13 +18,9 @@ use crate::ast::UnaryOp;
 
 mod control;
 mod effects;
-mod lowered_loop;
-
-pub(crate) use lowered_loop::{LoopExpr, LoopIterable, LoopOp, LoweredLoop};
 
 use control::{VmMode, VmStep};
 use effects::VmEffect;
-use lowered_loop::range_has_next;
 
 use super::host::{ExecutionMode, ProcessEventKind, ProcessSleepKind};
 use super::record::{Record, record_with_capacity};
@@ -36,9 +32,8 @@ use super::{
     Chunk, ExecutionHost, ExecutionScratch, Instruction, InstructionProfileTag, IntrinsicOp,
     LASH_TYPE_KEY, ListValue, Name, ProfileAccumulator, ProfileReport, ProjectedBindings,
     RuntimeError, Value, add_assign_index_number, add_values, as_number, assign_path,
-    eval_binary_values, eval_binary_values_async, eval_compare_values, eval_compare_values_async,
-    eval_number_binary_values, eval_number_compare_values, eval_number_numeric_binary_value,
-    execute_compiled_format, execute_compiled_format_direct,
+    eval_binary_values, eval_compare_values, eval_number_binary_values, eval_number_compare_values,
+    eval_number_numeric_binary_value, execute_compiled_format, execute_compiled_format_direct,
     execute_compiled_format_one_number_compact_direct, execute_intrinsic,
     execute_push_builtin_async, is_truthy, is_truthy_async, iterable_values,
     materialize_projected_async, materialize_value, range_bounds, range_bounds_async,
@@ -219,11 +214,6 @@ pub(crate) struct Vm<'a, H> {
     iter_stack: Vec<IterState>,
     profile: Option<ProfileAccumulator>,
     validation_plans: FxHashMap<usize, (Arc<Record>, ValidationPlan)>,
-}
-
-enum AddAssignRight {
-    Number(f64),
-    Value(Value),
 }
 
 fn validation_plan_cache_entry(schema: &Value) -> Option<(usize, Arc<Record>)> {
@@ -659,11 +649,6 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     restore: self.slots.capture_temporary(binding),
                 });
             }
-            Instruction::LoweredLoop(index) => {
-                if !self.execute_lowered_loop_direct(&self.chunk.lowered_loops[index])? {
-                    return Ok(None);
-                }
-            }
             Instruction::IterNext { jump_to } => {
                 let Some(iter_state) = self.iter_stack.last_mut() else {
                     return Err(RuntimeError::ValueError {
@@ -685,6 +670,61 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             _ => return Ok(None),
         }
         Ok(Some(VmStep::Continue))
+    }
+
+    /// Re-run `step_instruction_fast` after replacing the two projected stack
+    /// operands the opcode consumes with their materialized values.
+    ///
+    /// `step_instruction_fast` only routes the pure-arithmetic stack opcodes
+    /// (`Binary`, `JumpIfCompareFalse`) to the async path when an operand is
+    /// `Value::Projected`. Materializing the top two operands in place — in the
+    /// same right-then-left order the opcode pops them — and re-dispatching is
+    /// exactly equivalent to the inline `materialize_projected_async` the async
+    /// arm would have done, but without duplicating the eval logic. The retry
+    /// always completes because both operands are now concrete.
+    async fn redispatch_with_materialized_stack_pair(
+        &mut self,
+        instruction: Instruction,
+    ) -> Result<VmStep, RuntimeError> {
+        let right = materialize_projected_async(self.pop_stack()?).await;
+        let left = materialize_projected_async(self.pop_stack()?).await;
+        self.stack.push(left);
+        self.stack.push(right);
+        self.redispatch_fast(instruction)
+    }
+
+    /// Re-run `step_instruction_fast` after temporarily resolving a projected
+    /// slot operand to its materialized value.
+    ///
+    /// The fused slot arithmetic opcodes (`SlotNumberBinary`,
+    /// `SlotNumberCompare`, `SlotNumberBinaryCompare`,
+    /// `JumpIfSlotNumberCompareFalse`, `JumpIfSlotNumberBinaryCompareFalse`)
+    /// only read `slot` and never write it, so we materialize the projected
+    /// value, swap it into the slot for the (fully synchronous) re-dispatch,
+    /// then restore the original projected value. The projected binding is
+    /// re-materialized on every touch, matching the old async arm's
+    /// per-touch `materialize_projected_async(left.clone())`.
+    async fn redispatch_with_materialized_slot(
+        &mut self,
+        slot: usize,
+        instruction: Instruction,
+    ) -> Result<VmStep, RuntimeError> {
+        let original = self.load_slot(slot)?.clone();
+        let materialized = materialize_projected_async(original.clone()).await;
+        self.slots.values[slot] = Some(materialized);
+        let result = self.redispatch_fast(instruction);
+        self.slots.values[slot] = Some(original);
+        result
+    }
+
+    #[inline(always)]
+    fn redispatch_fast(&mut self, instruction: Instruction) -> Result<VmStep, RuntimeError> {
+        match self.step_instruction_fast(instruction)? {
+            Some(step) => Ok(step),
+            None => unreachable!(
+                "fast path re-dispatch with resolved operands must complete the opcode"
+            ),
+        }
     }
 
     #[inline(always)]
@@ -736,66 +776,26 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
         Ok(())
     }
 
-    #[inline(always)]
-    fn append_assign_value(&mut self, slot: usize, item: Value) -> Result<(), RuntimeError> {
-        let slot_name = &self.chunk.slot_names[slot];
-        self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
-        let current = self
-            .slots
-            .get_mut(slot)
-            .ok_or_else(|| RuntimeError::UndefinedVariable {
-                name: slot_name.text.to_string(),
-            })?;
-        let value = if let Value::List(items) = current {
-            let values = items.make_mut();
-            if values.len() == values.capacity() {
-                values.reserve(1);
-            }
-            values.push(item);
-            Value::List(items.clone())
-        } else {
-            let value = add_values(current.clone(), Value::List(vec![item].into()))?;
-            *current = value.clone();
-            value
-        };
-        self.record_assignment(slot);
-        self.last_value = Some(value);
-        Ok(())
-    }
-
+    /// Async slow path for the run loop. The synchronous `step_instruction_fast`
+    /// fully handles every pure-compute and effect-producing opcode on
+    /// non-projected operands; it only yields `Ok(None)` (routing here) when an
+    /// operand is `Value::Projected` or the opcode inherently needs a host
+    /// `.await` (field/index projected reads, tool/process effects, intrinsics,
+    /// type literals).
+    ///
+    /// The pure-arithmetic opcodes (`Binary`, `JumpIfCompareFalse`, and the
+    /// fused `SlotNumber*` / `JumpIfSlotNumber*` ops) do not duplicate the
+    /// fast-path eval here: they resolve the blocking projected operand and
+    /// re-dispatch through `step_instruction_fast` (see
+    /// `redispatch_with_materialized_stack_pair` /
+    /// `redispatch_with_materialized_slot`). Only the genuinely-async opcodes
+    /// keep bespoke arms — lazy projected field/index propagation, the
+    /// `truthy`-hook bool ops, `Unary`, intrinsics, iteration, type literals,
+    /// and effects. The opcodes the fast path always completes are unreachable
+    /// here.
     #[inline(always)]
     async fn step_instruction(&mut self, instruction: Instruction) -> Result<VmStep, RuntimeError> {
         match instruction {
-            Instruction::PushConst(index) => {
-                self.stack.push(self.chunk.constants[index].clone());
-            }
-            Instruction::PushNull => {
-                self.stack.push(Value::Null);
-            }
-            Instruction::PushBool(value) => {
-                self.stack.push(Value::Bool(value));
-            }
-            Instruction::PushNumber(value) => {
-                self.stack.push(Value::Number(value));
-            }
-            Instruction::LoadName(name) => {
-                let value = self.load_slot(name)?.clone();
-                self.stack.push(value);
-            }
-            Instruction::StoreName(name) => {
-                let value = self.pop_stack()?;
-                self.slots
-                    .assign(name, value.clone(), &self.chunk.slot_names)?;
-                self.record_assignment(name);
-                self.last_value = Some(value);
-            }
-            Instruction::StoreConst { slot, constant } => {
-                let value = self.chunk.constants[constant].clone();
-                self.slots
-                    .assign(slot, value.clone(), &self.chunk.slot_names)?;
-                self.record_assignment(slot);
-                self.last_value = Some(value);
-            }
             Instruction::LoadField { slot, field } => {
                 let value = self.load_slot(slot)?;
                 let field = &self.chunk.names[field];
@@ -821,14 +821,6 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     value => read_field_ref_direct(value, field)?,
                 };
                 self.stack.push(unwrap_tool_result(value)?);
-            }
-            Instruction::BuildList(len) => {
-                let values = self.pop_n(len)?;
-                self.stack.push(Value::List(values.into()));
-            }
-            Instruction::BuildRecord(keys) => {
-                let record = self.drain_record_from_stack(keys)?;
-                self.stack.push(Value::Record(Arc::new(record)));
             }
             Instruction::Field(field) => {
                 let target = self.pop_stack()?;
@@ -875,10 +867,6 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 self.record_assignment(slot);
                 self.last_value = Some(last_value);
             }
-            Instruction::ResultUnwrap => {
-                let value = self.pop_stack()?;
-                self.stack.push(unwrap_tool_result(value)?);
-            }
             Instruction::Unary(op) => {
                 let value = self.pop_stack()?;
                 let value = match op {
@@ -893,78 +881,17 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 };
                 self.stack.push(value);
             }
-            Instruction::Binary(op) => {
-                let right = self.pop_stack()?;
-                let left = self.pop_stack()?;
-                let value = match (left, right) {
-                    (Value::Number(left), Value::Number(right)) => {
-                        eval_number_binary_values(left, op, right)
-                    }
-                    (left, right) => {
-                        let has_projected = matches!(left, Value::Projected(_))
-                            || matches!(right, Value::Projected(_));
-                        if has_projected {
-                            eval_binary_values_async(left, op, right).await?
-                        } else {
-                            eval_binary_values(left, op, right)?
-                        }
-                    }
-                };
-                self.stack.push(value);
+            Instruction::Binary(_) => {
+                return self
+                    .redispatch_with_materialized_stack_pair(instruction)
+                    .await;
             }
-            Instruction::SlotNumberBinary { slot, op, right } => {
-                let value = match self.load_slot(slot)? {
-                    Value::Number(left) => {
-                        Value::Number(eval_number_numeric_binary_value(*left, op, right))
-                    }
-                    left => {
-                        eval_binary_values_async(left.clone(), op, Value::Number(right)).await?
-                    }
-                };
-                self.stack.push(value);
-            }
-            Instruction::SlotNumberCompare { slot, op, right } => {
-                let value = match self.load_slot(slot)? {
-                    Value::Number(left) => {
-                        Value::Bool(eval_number_compare_values(*left, op, right))
-                    }
-                    left => Value::Bool(
-                        eval_compare_values_async(left.clone(), op, Value::Number(right)).await?,
-                    ),
-                };
-                self.stack.push(value);
-            }
-            Instruction::SlotNumberBinaryCompare {
-                slot,
-                binary_op,
-                binary_right,
-                compare_op,
-                compare_right,
-            } => {
-                let value = match self.load_slot(slot)? {
-                    Value::Number(left) => {
-                        let value =
-                            eval_number_numeric_binary_value(*left, binary_op, binary_right);
-                        Value::Bool(eval_number_compare_values(value, compare_op, compare_right))
-                    }
-                    left => {
-                        let value = eval_binary_values_async(
-                            left.clone(),
-                            binary_op,
-                            Value::Number(binary_right),
-                        )
-                        .await?;
-                        Value::Bool(
-                            eval_compare_values_async(
-                                value,
-                                compare_op,
-                                Value::Number(compare_right),
-                            )
-                            .await?,
-                        )
-                    }
-                };
-                self.stack.push(value);
+            Instruction::SlotNumberBinary { slot, .. }
+            | Instruction::SlotNumberCompare { slot, .. }
+            | Instruction::SlotNumberBinaryCompare { slot, .. } => {
+                return self
+                    .redispatch_with_materialized_slot(slot, instruction)
+                    .await;
             }
             Instruction::ToBool => {
                 let value = self.pop_stack()?;
@@ -974,7 +901,6 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 };
                 self.stack.push(Value::Bool(truthy));
             }
-            Instruction::Jump(target) => self.ip = target,
             Instruction::JumpIfFalse(target) => {
                 let value = self.pop_stack()?;
                 let truthy = match &value {
@@ -985,59 +911,16 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     self.ip = target;
                 }
             }
-            Instruction::JumpIfCompareFalse { op, target } => {
-                let right = self.pop_stack()?;
-                let left = self.pop_stack()?;
-                if !eval_compare_values_async(left, op, right).await? {
-                    self.ip = target;
-                }
+            Instruction::JumpIfCompareFalse { .. } => {
+                return self
+                    .redispatch_with_materialized_stack_pair(instruction)
+                    .await;
             }
-            Instruction::JumpIfSlotNumberCompareFalse {
-                slot,
-                op,
-                right,
-                target,
-            } => {
-                let value = self.load_slot(slot)?;
-                let truthy = match value {
-                    Value::Number(left) => eval_number_compare_values(*left, op, right),
-                    value => {
-                        eval_compare_values_async(value.clone(), op, Value::Number(right)).await?
-                    }
-                };
-                if !truthy {
-                    self.ip = target;
-                }
-            }
-            Instruction::JumpIfSlotNumberBinaryCompareFalse {
-                slot,
-                binary_op,
-                binary_right,
-                compare_op,
-                compare_right,
-                target,
-            } => {
-                let value = self.load_slot(slot)?;
-                let truthy = match value {
-                    Value::Number(left) => {
-                        let value =
-                            eval_number_numeric_binary_value(*left, binary_op, binary_right);
-                        eval_number_compare_values(value, compare_op, compare_right)
-                    }
-                    value => {
-                        let value = eval_binary_values_async(
-                            value.clone(),
-                            binary_op,
-                            Value::Number(binary_right),
-                        )
-                        .await?;
-                        eval_compare_values_async(value, compare_op, Value::Number(compare_right))
-                            .await?
-                    }
-                };
-                if !truthy {
-                    self.ip = target;
-                }
+            Instruction::JumpIfSlotNumberCompareFalse { slot, .. }
+            | Instruction::JumpIfSlotNumberBinaryCompareFalse { slot, .. } => {
+                return self
+                    .redispatch_with_materialized_slot(slot, instruction)
+                    .await;
             }
             Instruction::JumpIfTrue(target) => {
                 let value = self.pop_stack()?;
@@ -1064,38 +947,6 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             Instruction::AwaitHandle => {
                 return Ok(VmStep::Effect(VmEffect::AwaitHandle));
             }
-            Instruction::ProcessSleepFor => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "sleep" });
-                }
-                return Ok(VmStep::Effect(VmEffect::ProcessSleep(
-                    ProcessSleepKind::For,
-                )));
-            }
-            Instruction::ProcessSleepUntil => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "sleep" });
-                }
-                return Ok(VmStep::Effect(VmEffect::ProcessSleep(
-                    ProcessSleepKind::Until,
-                )));
-            }
-            Instruction::ProcessWaitSignal => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess {
-                        keyword: "wait signal",
-                    });
-                }
-                return Ok(VmStep::Effect(VmEffect::WaitSignal));
-            }
-            Instruction::ProcessSignalRun => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess {
-                        keyword: "signal run",
-                    });
-                }
-                return Ok(VmStep::Effect(VmEffect::SignalRun));
-            }
             Instruction::AwaitHandleUnwrap => {
                 return Ok(VmStep::Effect(VmEffect::AwaitHandleUnwrap));
             }
@@ -1105,186 +956,11 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             Instruction::Intrinsic(op) => {
                 self.execute_intrinsic_instruction(op).await?;
             }
-            Instruction::AddAssign(slot) => {
-                let right = self.pop_stack()?;
-                let slot_name = &self.chunk.slot_names[slot];
-                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
-                let value = {
-                    let left = self.slots.get_mut(slot).ok_or_else(|| {
-                        RuntimeError::UndefinedVariable {
-                            name: slot_name.text.to_string(),
-                        }
-                    })?;
-                    match (left, right) {
-                        (Value::Number(left), Value::Number(right)) => {
-                            *left += right;
-                            Value::Number(*left)
-                        }
-                        (left, right) => {
-                            let value = add_values(left.clone(), right)?;
-                            *left = value.clone();
-                            value
-                        }
-                    }
-                };
-                self.record_assignment(slot);
-                self.last_value = Some(value);
-            }
-            Instruction::AddAssignNumber { slot, right } => {
-                let slot_name = &self.chunk.slot_names[slot];
-                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
-                let value = {
-                    let left = self.slots.get_mut(slot).ok_or_else(|| {
-                        RuntimeError::UndefinedVariable {
-                            name: slot_name.text.to_string(),
-                        }
-                    })?;
-                    match left {
-                        Value::Number(left) => {
-                            *left += right;
-                            Value::Number(*left)
-                        }
-                        left => {
-                            let value = add_values(left.clone(), Value::Number(right))?;
-                            *left = value.clone();
-                            value
-                        }
-                    }
-                };
-                self.record_assignment(slot);
-                self.last_value = Some(value);
-            }
-            Instruction::AddAssignSlot { slot, right } => {
-                let slot_name = &self.chunk.slot_names[slot];
-                let right = match self.load_slot(right)? {
-                    Value::Number(value) => AddAssignRight::Number(*value),
-                    value => AddAssignRight::Value(value.clone()),
-                };
-                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
-                let value = {
-                    let left = self.slots.get_mut(slot).ok_or_else(|| {
-                        RuntimeError::UndefinedVariable {
-                            name: slot_name.text.to_string(),
-                        }
-                    })?;
-                    match (left, right) {
-                        (Value::Number(left), AddAssignRight::Number(right)) => {
-                            *left += right;
-                            Value::Number(*left)
-                        }
-                        (left, AddAssignRight::Number(right)) => {
-                            let value = add_values(left.clone(), Value::Number(right))?;
-                            *left = value.clone();
-                            value
-                        }
-                        (left, AddAssignRight::Value(right)) => {
-                            let value = add_values(left.clone(), right)?;
-                            *left = value.clone();
-                            value
-                        }
-                    }
-                };
-                self.record_assignment(slot);
-                self.last_value = Some(value);
-            }
-            Instruction::AddAssignIndexNumber { slot, right } => {
-                let index = self.pop_stack()?;
-                let slot_name = &self.chunk.slot_names[slot];
-                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
-                let root =
-                    self.slots
-                        .get_mut(slot)
-                        .ok_or_else(|| RuntimeError::UndefinedVariable {
-                            name: slot_name.text.to_string(),
-                        })?;
-                let value = add_assign_index_number(root, &index, right)?;
-                self.record_assignment(slot);
-                self.last_value = Some(value);
-            }
-            Instruction::AddAssignIndexSlotNumber { slot, index, right } => {
-                let index = self.load_slot(index)?.clone();
-                let slot_name = &self.chunk.slot_names[slot];
-                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
-                let root =
-                    self.slots
-                        .get_mut(slot)
-                        .ok_or_else(|| RuntimeError::UndefinedVariable {
-                            name: slot_name.text.to_string(),
-                        })?;
-                let value = add_assign_index_number(root, &index, right)?;
-                self.record_assignment(slot);
-                self.last_value = Some(value);
-            }
-            Instruction::AppendAssign(slot) => {
-                let item = self.pop_stack()?;
-                let slot_name = &self.chunk.slot_names[slot];
-                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
-                let current =
-                    self.slots
-                        .get_mut(slot)
-                        .ok_or_else(|| RuntimeError::UndefinedVariable {
-                            name: slot_name.text.to_string(),
-                        })?;
-                if let Value::List(items) = current {
-                    let values = items.make_mut();
-                    if values.len() == values.capacity() {
-                        values.reserve(1);
-                    }
-                    values.push(item);
-                    let value = Value::List(items.clone());
-                    self.record_assignment(slot);
-                    self.last_value = Some(value);
-                    return Ok(VmStep::Continue);
-                }
-                let current = current.clone();
-                let value = add_values(current, Value::List(vec![item].into()))?;
-                self.slots
-                    .assign(slot, value.clone(), &self.chunk.slot_names)?;
-                self.record_assignment(slot);
-                self.last_value = Some(value);
-            }
             Instruction::Print => {
                 if self.mode == VmMode::Process {
                     return Err(RuntimeError::ForegroundControlInsideProcess { keyword: "print" });
                 }
                 return Ok(VmStep::Effect(VmEffect::Print));
-            }
-            Instruction::Submit => {
-                if self.mode == VmMode::Process {
-                    return Err(RuntimeError::ForegroundControlInsideProcess { keyword: "submit" });
-                }
-                return Ok(VmStep::Effect(VmEffect::Submit));
-            }
-            Instruction::ProcessYield => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "yield" });
-                }
-                return Ok(VmStep::Effect(VmEffect::ProcessEvent(
-                    ProcessEventKind::Yield,
-                )));
-            }
-            Instruction::ProcessWake => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "wake" });
-                }
-                return Ok(VmStep::Effect(VmEffect::ProcessEvent(
-                    ProcessEventKind::Wake,
-                )));
-            }
-            Instruction::ProcessFinish => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "finish" });
-                }
-                return Ok(VmStep::Effect(VmEffect::Finish));
-            }
-            Instruction::ProcessFail => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "fail" });
-                }
-                return Ok(VmStep::Effect(VmEffect::Fail));
-            }
-            Instruction::Pop => {
-                self.last_value = Some(self.pop_stack()?);
             }
             Instruction::BeginIter(binding) => {
                 let iterable = self.pop_stack()?;
@@ -1317,28 +993,6 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     restore: self.slots.capture_temporary(binding),
                 });
             }
-            Instruction::LoweredLoop(index) => {
-                self.execute_lowered_loop(&self.chunk.lowered_loops[index])
-                    .await?;
-            }
-            Instruction::IterNext { jump_to } => {
-                let Some(iter_state) = self.iter_stack.last_mut() else {
-                    return Err(RuntimeError::ValueError {
-                        message: "missing loop state".to_string(),
-                    });
-                };
-                let Some(value) = iter_state.cursor.next_value() else {
-                    self.ip = jump_to;
-                    return Ok(VmStep::Continue);
-                };
-                self.slots.assign_loop_binding(iter_state.binding, value);
-            }
-            Instruction::EndIter => {
-                if let Some(iter_state) = self.iter_stack.pop() {
-                    self.slots
-                        .restore_temporary(iter_state.binding, iter_state.restore);
-                }
-            }
             Instruction::ResolveTypeRef(slot) => {
                 let slot_name = &self.chunk.slot_names[slot];
                 let value = self.slots.get(slot).cloned().ok_or_else(|| {
@@ -1362,6 +1016,40 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 let mut wrapper = record_with_capacity(1);
                 wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
                 self.stack.push(Value::Record(Arc::new(wrapper)));
+            }
+            // Every remaining opcode is fully handled by `step_instruction_fast`
+            // for any operand shape (it never returns `Ok(None)` for them), so
+            // the run loop never routes them here.
+            Instruction::PushConst(_)
+            | Instruction::PushNull
+            | Instruction::PushBool(_)
+            | Instruction::PushNumber(_)
+            | Instruction::LoadName(_)
+            | Instruction::StoreName(_)
+            | Instruction::StoreConst { .. }
+            | Instruction::BuildList(_)
+            | Instruction::BuildRecord(_)
+            | Instruction::ResultUnwrap
+            | Instruction::AddAssign(_)
+            | Instruction::AddAssignNumber { .. }
+            | Instruction::AddAssignSlot { .. }
+            | Instruction::AddAssignIndexNumber { .. }
+            | Instruction::AddAssignIndexSlotNumber { .. }
+            | Instruction::AppendAssign(_)
+            | Instruction::Submit
+            | Instruction::ProcessSleepFor
+            | Instruction::ProcessSleepUntil
+            | Instruction::ProcessWaitSignal
+            | Instruction::ProcessSignalRun
+            | Instruction::ProcessYield
+            | Instruction::ProcessWake
+            | Instruction::ProcessFinish
+            | Instruction::ProcessFail
+            | Instruction::Pop
+            | Instruction::Jump(_)
+            | Instruction::IterNext { .. }
+            | Instruction::EndIter => {
+                unreachable!("opcode is always completed by step_instruction_fast")
             }
         }
         Ok(VmStep::Continue)
@@ -1458,9 +1146,8 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                         )?)
                     }
                     left => {
-                        let value =
-                            eval_binary_values_async(left.clone(), op, Value::Number(right))
-                                .await?;
+                        let left = materialize_projected_async(left.clone()).await;
+                        let value = eval_binary_values(left, op, Value::Number(right))?;
                         let value = if matches!(value, Value::Projected(_)) {
                             execute_compiled_format(template, &[value]).await?
                         } else {
@@ -1626,4 +1313,8 @@ impl IterCursor {
 
 struct LoopRestore {
     previous: Option<Value>,
+}
+
+pub(super) fn range_has_next(start: i64, end: i64, step: i64) -> bool {
+    (step > 0 && start < end) || (step < 0 && start > end)
 }

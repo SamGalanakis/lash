@@ -554,7 +554,7 @@ pub struct RuntimeTurnMachineConfigSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
     pub sync_execution_surface: bool,
-    pub tool_specs: Vec<crate::llm::types::LlmToolSpec>,
+    pub tool_specs: std::sync::Arc<Vec<crate::llm::types::LlmToolSpec>>,
     pub system_prompt: String,
     pub termination: crate::ProtocolTurnOptions,
 }

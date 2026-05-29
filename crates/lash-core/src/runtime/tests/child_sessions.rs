@@ -50,7 +50,7 @@ async fn inherited_child_session_carries_parent_tool_state() {
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = mock_provider(Vec::new()).into_handle();
+    set_runtime_provider(&mut runtime, mock_provider(Vec::new()).into_handle());
     let manager = runtime.session_manager().expect("session manager");
     let mut snapshot = manager.tool_state("root").await.expect("tool state");
     assert!(snapshot.remove("memory_probe").is_some());

@@ -36,10 +36,10 @@ use nucleo::pattern::Normalization;
 use nucleo::pattern::Pattern;
 
 /// How long to wait for the FS-event stream to quiesce before rebuilding.
-/// Long enough that a `git checkout` or `cargo build` event burst coalesces
-/// into one walk; short enough that a single edited file shows up in the
-/// `@`-popup before the user gives up and re-types.
-const REBUILD_DEBOUNCE: Duration = Duration::from_millis(300);
+/// Generated-output directories are filtered before this point, so the debounce
+/// only needs to coalesce real source bursts without making `@` completions feel
+/// stale after a single save.
+const REBUILD_DEBOUNCE: Duration = Duration::from_millis(75);
 
 /// Hard cap on indexed entries. A misconfigured repo (e.g. a workspace inside a
 /// huge cache directory with no `.gitignore`) will stop adding entries past

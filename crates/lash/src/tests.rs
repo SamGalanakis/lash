@@ -208,7 +208,50 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         })
     }
 
-    lash_core::impl_unsupported_queued_work_methods!();
+    async fn enqueue_queued_work(
+        &self,
+        _batch: lash_core::QueuedWorkBatchDraft,
+    ) -> std::result::Result<lash_core::QueuedWorkBatch, lash_core::store::StoreError> {
+        Err(lash_core::store::StoreError::Backend(
+            "queued work is not supported by SnapshotStore".to_string(),
+        ))
+    }
+
+    async fn claim_ready_queued_work(
+        &self,
+        _session_id: &str,
+        _owner_id: &str,
+        _boundary: lash_core::QueuedWorkClaimBoundary,
+        _lease_ttl_ms: u64,
+        _max_batches: usize,
+    ) -> std::result::Result<Option<lash_core::QueuedWorkClaim>, lash_core::store::StoreError> {
+        Ok(None)
+    }
+
+    async fn renew_queued_work_claim(
+        &self,
+        claim: &lash_core::QueuedWorkClaim,
+        _lease_ttl_ms: u64,
+    ) -> std::result::Result<lash_core::QueuedWorkClaim, lash_core::store::StoreError> {
+        Err(lash_core::store::StoreError::QueuedWorkClaimExpired {
+            session_id: claim.session_id.clone(),
+            claim_id: claim.claim_id.clone(),
+        })
+    }
+
+    async fn abandon_queued_work_claim(
+        &self,
+        _claim: &lash_core::QueuedWorkClaim,
+    ) -> std::result::Result<(), lash_core::store::StoreError> {
+        Ok(())
+    }
+
+    async fn list_queued_work(
+        &self,
+        _session_id: &str,
+    ) -> std::result::Result<Vec<lash_core::QueuedWorkBatch>, lash_core::store::StoreError> {
+        Ok(Vec::new())
+    }
 
     async fn claim_runtime_turn_lease(
         &self,
@@ -734,7 +777,7 @@ impl lash_core::SessionPlugin for SurfacePlugin {
 }
 
 fn mock_provider() -> ProviderHandle {
-    lash_core::testing::TestProvider::builder()
+    crate::testing::TestProvider::builder()
         .kind("embed-test")
         .requires_streaming(true)
         .complete(|request| async move {
@@ -782,7 +825,7 @@ fn tool_roundtrip_provider() -> ProviderHandle {
             ..LlmResponse::default()
         },
     ])));
-    lash_core::testing::TestProvider::builder()
+    crate::testing::TestProvider::builder()
         .kind("embed-test")
         .complete(move |_request| {
             let responses = Arc::clone(&responses);
@@ -817,7 +860,7 @@ fn queued_text_provider(texts: Vec<&'static str>) -> ProviderHandle {
             })
             .collect::<Vec<_>>(),
     )));
-    lash_core::testing::TestProvider::builder()
+    crate::testing::TestProvider::builder()
         .kind("embed-test")
         .complete(move |_request| {
             let responses = Arc::clone(&responses);
@@ -828,7 +871,7 @@ fn queued_text_provider(texts: Vec<&'static str>) -> ProviderHandle {
 }
 
 fn semantic_group_provider() -> ProviderHandle {
-    lash_core::testing::TestProvider::builder()
+    crate::testing::TestProvider::builder()
         .kind("embed-test")
         .complete(|_request| async move {
             Ok(LlmResponse {
@@ -859,7 +902,7 @@ fn semantic_group_provider() -> ProviderHandle {
 }
 
 fn text_provider(kind: &'static str, _model: &'static str, text: &'static str) -> ProviderHandle {
-    lash_core::testing::TestProvider::builder()
+    crate::testing::TestProvider::builder()
         .kind(kind)
         .complete(move |_request| async move {
             Ok(LlmResponse {
@@ -884,7 +927,7 @@ fn recording_text_provider(
     text: &'static str,
     seen: SeenModels,
 ) -> ProviderHandle {
-    lash_core::testing::TestProvider::builder()
+    crate::testing::TestProvider::builder()
         .kind(kind)
         .supported_variants(|_| {
             &[
@@ -955,7 +998,7 @@ fn system_text(request: &LlmRequest) -> String {
 }
 
 fn recording_prompt_provider(seen: Arc<std::sync::Mutex<Vec<String>>>) -> ProviderHandle {
-    lash_core::testing::TestProvider::builder()
+    crate::testing::TestProvider::builder()
         .kind("prompt-test")
         .complete(move |request| {
             let seen = Arc::clone(&seen);
@@ -979,7 +1022,7 @@ fn recording_prompt_provider(seen: Arc<std::sync::Mutex<Vec<String>>>) -> Provid
 
 fn retry_once_provider() -> ProviderHandle {
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    lash_core::testing::TestProvider::builder()
+    crate::testing::TestProvider::builder()
         .kind("retry-test")
         .requires_streaming(true)
         .options(lash_core::ProviderOptions {
@@ -1017,7 +1060,7 @@ fn checkpoint_gated_provider(
     let entered_tx = Arc::new(std::sync::Mutex::new(Some(entered_tx)));
     let release_rx = Arc::new(TokioMutex::new(Some(release_rx)));
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    lash_core::testing::TestProvider::builder()
+    crate::testing::TestProvider::builder()
         .kind("checkpoint-gated")
         .complete(move |request| {
             let entered_tx = Arc::clone(&entered_tx);
@@ -1043,6 +1086,39 @@ fn checkpoint_gated_provider(
         })
         .build()
         .into_handle()
+}
+
+struct CheckpointGatedProviderFactory;
+
+impl lash_core::provider::ProviderFactory for CheckpointGatedProviderFactory {
+    fn kind(&self) -> &'static str {
+        "checkpoint-gated"
+    }
+
+    fn deserialize(
+        &self,
+        _config: serde_json::Value,
+    ) -> std::result::Result<lash_core::provider::ProviderComponents, String> {
+        let provider = crate::testing::TestProvider::builder()
+            .kind("checkpoint-gated")
+            .complete(|request| async move {
+                Ok(text_response(&format!(
+                    "after {}",
+                    last_user_text(&request)
+                )))
+            })
+            .build();
+        let model_policy: Arc<dyn lash_core::provider::ProviderModelPolicy> =
+            Arc::new(provider.clone());
+        Ok(lash_core::provider::ProviderComponents::new(
+            Box::new(provider),
+            model_policy,
+        ))
+    }
+}
+
+fn register_checkpoint_gated_provider_factory() {
+    lash_core::provider::register_provider_factory(Arc::new(CheckpointGatedProviderFactory));
 }
 
 fn standard_core() -> LashCore {

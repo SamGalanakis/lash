@@ -92,7 +92,7 @@ pub(crate) fn run_activity_projection_once(workload: UiPerfWorkload) -> UiPerfRu
     result
 }
 
-fn build_projection_read_view(turn_count: usize) -> SessionReadView {
+pub(crate) fn build_projection_read_view(turn_count: usize) -> SessionReadView {
     let mut graph = lash_core::SessionGraph::default();
     let mut tool_calls = Vec::new();
 

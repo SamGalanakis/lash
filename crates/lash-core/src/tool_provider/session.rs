@@ -57,6 +57,10 @@ impl ToolSessionControl {
         self.host.tool_catalog(&self.session_id).await
     }
 
+    pub async fn shared_tool_catalog(&self) -> Result<Arc<Vec<serde_json::Value>>, PluginError> {
+        self.host.shared_tool_catalog(&self.session_id).await
+    }
+
     pub async fn set_tools_availability(
         &self,
         names: &[String],
@@ -70,6 +74,17 @@ impl ToolSessionControl {
 
 #[async_trait::async_trait]
 impl RuntimeSessionHost for ToolSessionControl {
+    async fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
+        self.host.tool_catalog(session_id).await
+    }
+
+    async fn shared_tool_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<Vec<serde_json::Value>>, PluginError> {
+        self.host.shared_tool_catalog(session_id).await
+    }
+
     async fn create_session(
         &self,
         request: crate::SessionCreateRequest,

@@ -1,7 +1,5 @@
 use crossterm::event::{KeyCode, KeyModifiers};
-use lash::{
-    TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput, advanced::ExecutionMode,
-};
+use lash::{ModeId, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput};
 use lash_core::{SessionPolicy, SessionStateEnvelope};
 use lash_tui_extensions::{
     KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers,
@@ -17,7 +15,7 @@ use crate::{collect_ui_snapshot, copy_binding, queued_turn_edit_binding};
 pub(super) struct TurnReplayPayload {
     pub(super) prepared_turn: PreparedTurn,
     pub(super) turn_input: TurnInput,
-    pub(super) execution_mode: ExecutionMode,
+    pub(super) execution_mode: ModeId,
 }
 
 pub(super) struct TurnActivityAppSink {

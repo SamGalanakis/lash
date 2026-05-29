@@ -1,4 +1,4 @@
-use lash::advanced::ExecutionMode;
+use lash::ModeId;
 use lash_standard_plugins::{
     ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
 };
@@ -16,15 +16,18 @@ pub(crate) enum RuntimePerfScenario {
     ObservationalMemory,
     ObservationalMemoryMaintenance,
     OpenAiCompatStream,
+    StandardShellOutput,
+    ToolDiscoverySearch,
     EmbedStandard,
     EmbedRlm,
     ScopedEffectController,
     StoreReopen,
+    SqliteStoreReopen,
     TurnCheckpoint,
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 16] = [
+    pub(crate) const DEFAULTS: [Self; 19] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -36,13 +39,16 @@ impl RuntimePerfScenario {
         Self::ObservationalMemory,
         Self::ObservationalMemoryMaintenance,
         Self::OpenAiCompatStream,
+        Self::StandardShellOutput,
+        Self::ToolDiscoverySearch,
         Self::EmbedStandard,
         Self::EmbedRlm,
         Self::ScopedEffectController,
         Self::StoreReopen,
+        Self::SqliteStoreReopen,
         Self::TurnCheckpoint,
     ];
-    pub(crate) const KNOWN: [Self; 16] = [
+    pub(crate) const KNOWN: [Self; 19] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -54,10 +60,13 @@ impl RuntimePerfScenario {
         Self::ObservationalMemory,
         Self::ObservationalMemoryMaintenance,
         Self::OpenAiCompatStream,
+        Self::StandardShellOutput,
+        Self::ToolDiscoverySearch,
         Self::EmbedStandard,
         Self::EmbedRlm,
         Self::ScopedEffectController,
         Self::StoreReopen,
+        Self::SqliteStoreReopen,
         Self::TurnCheckpoint,
     ];
 
@@ -74,10 +83,13 @@ impl RuntimePerfScenario {
             "observational_memory" => Some(Self::ObservationalMemory),
             "observational_memory_maintenance" => Some(Self::ObservationalMemoryMaintenance),
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
+            "standard_shell_output" => Some(Self::StandardShellOutput),
+            "tool_discovery_search" => Some(Self::ToolDiscoverySearch),
             "embed_standard" => Some(Self::EmbedStandard),
             "embed_rlm" => Some(Self::EmbedRlm),
             "scoped_effect_controller" => Some(Self::ScopedEffectController),
             "store_reopen" => Some(Self::StoreReopen),
+            "sqlite_store_reopen" => Some(Self::SqliteStoreReopen),
             "turn_checkpoint" => Some(Self::TurnCheckpoint),
             _ => None,
         }
@@ -96,38 +108,44 @@ impl RuntimePerfScenario {
             Self::ObservationalMemory => "observational_memory",
             Self::ObservationalMemoryMaintenance => "observational_memory_maintenance",
             Self::OpenAiCompatStream => "openai_compat_stream",
+            Self::StandardShellOutput => "standard_shell_output",
+            Self::ToolDiscoverySearch => "tool_discovery_search",
             Self::EmbedStandard => "embed_standard",
             Self::EmbedRlm => "embed_rlm",
             Self::ScopedEffectController => "scoped_effect_controller",
             Self::StoreReopen => "store_reopen",
+            Self::SqliteStoreReopen => "sqlite_store_reopen",
             Self::TurnCheckpoint => "turn_checkpoint",
         }
     }
 
-    pub(crate) fn execution_mode(self) -> ExecutionMode {
+    pub(crate) fn execution_mode(self) -> ModeId {
         match self {
             Self::Standard
             | Self::StandardToolCalls
             | Self::ObservationalMemory
             | Self::ObservationalMemoryMaintenance
             | Self::OpenAiCompatStream
+            | Self::StandardShellOutput
+            | Self::ToolDiscoverySearch
             | Self::EmbedStandard
             | Self::ScopedEffectController
             | Self::StoreReopen
-            | Self::TurnCheckpoint => ExecutionMode::standard(),
+            | Self::SqliteStoreReopen
+            | Self::TurnCheckpoint => ModeId::standard(),
             Self::Rlm
             | Self::RlmToolCalls
             | Self::RlmProcessHandles
             | Self::RlmLlmQuery
             | Self::RlmGlobals
             | Self::RlmLargeToolSurface
-            | Self::EmbedRlm => ExecutionMode::rlm(),
+            | Self::EmbedRlm => ModeId::rlm(),
         }
     }
 
     pub(crate) fn standard_context_approach(self) -> Option<StandardContextApproach> {
         match self.execution_mode() {
-            mode if mode != ExecutionMode::standard() => None,
+            mode if mode != ModeId::standard() => None,
             _ => Some(match self {
                 Self::ObservationalMemory => StandardContextApproach::ObservationalMemory(
                     ObservationalMemoryConfig::default(),

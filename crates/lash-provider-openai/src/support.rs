@@ -9,8 +9,14 @@ pub(crate) use lash_core::llm::transport::{LlmTransportError, validate_image_att
 pub(crate) use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec,
     LlmProviderTraceSender, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason,
-    LlmUsage, ProviderReplayMeta, ResponseTextMeta, ResponseTextPhase,
+    LlmUsage, ProviderReplayMeta,
 };
+// `ResponseTextMeta` is only referenced by the crate's `#[cfg(test)]`
+// assertions (the request/response shapes that exercise the shared Responses
+// input builder), so gate the re-export to test builds to keep the non-test
+// lib free of unused-import warnings.
+#[cfg(test)]
+pub(crate) use lash_core::llm::types::ResponseTextMeta;
 pub(crate) use lash_core::provider::{
     CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderModelPolicy,
     ProviderOptions, resolve_generation_policy,

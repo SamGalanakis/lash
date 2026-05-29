@@ -42,6 +42,7 @@ DEFAULT_SCENARIOS = [
     "rlm_tool_calls",
     "rlm_process_handles",
     "rlm_large_tool_surface",
+    "tool_discovery_search",
     "scoped_effect_controller",
     "turn_checkpoint",
 ]

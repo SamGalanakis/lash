@@ -22,6 +22,7 @@ path = "src/lib.rs"
 [dependencies]
 async-trait = { workspace = true }
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12" }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.12" }
 lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.12" }
 lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.12" }
 lash-local-store = { path = "../lash-local-store", version = "=0.1.0-alpha.12" }
@@ -33,6 +34,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
+
+[features]
+# Exposes `lash::testing` (e.g. `TestProvider`) for embedder integration tests.
+testing = ["lash-core/testing"]
 
 [dev-dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12", features = ["testing"] }

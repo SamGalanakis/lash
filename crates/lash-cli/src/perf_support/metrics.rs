@@ -3,7 +3,6 @@ use serde::Serialize;
 use super::time::round3;
 
 #[derive(Debug, Clone, Serialize)]
-#[cfg(feature = "runtime-perf")]
 pub(crate) struct BasicMetricSummary {
     pub(crate) min: f64,
     pub(crate) median: f64,
@@ -20,7 +19,6 @@ pub(crate) struct PercentileMetricSummary {
     pub(crate) mean: f64,
 }
 
-#[cfg(feature = "runtime-perf")]
 pub(crate) fn basic_summary(mut values: Vec<f64>) -> BasicMetricSummary {
     values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let min = *values.first().unwrap_or(&0.0);
@@ -45,7 +43,6 @@ pub(crate) fn basic_summary(mut values: Vec<f64>) -> BasicMetricSummary {
     }
 }
 
-#[cfg(feature = "runtime-perf")]
 pub(crate) fn optional_basic_summary(values: Vec<f64>) -> Option<BasicMetricSummary> {
     if values.is_empty() {
         None

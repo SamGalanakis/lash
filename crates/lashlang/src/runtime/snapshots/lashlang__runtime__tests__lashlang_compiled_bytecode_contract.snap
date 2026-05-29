@@ -10,7 +10,8 @@ constants:
   c1: "beta"
   c2: "beta"
   c3: {}
-  c4: {"$lash_type":{"additionalProperties":false,"properties":{"beta_index":{"anyOf":[{"type":"integer"},{"type":"null"}]},"counts":{"type":"object"},"matches":{"items":{"type":"object"},"type":"array"}},"required":["beta_index","matches","counts"],"type":"object"}}
+  c4: ","
+  c5: {"$lash_type":{"additionalProperties":false,"properties":{"beta_index":{"anyOf":[{"type":"integer"},{"type":"null"}]},"counts":{"type":"object"},"matches":{"items":{"type":"object"},"type":"array"}},"required":["beta_index","matches","counts"],"type":"object"}}
 code:
   0000: load_name 1:history
   0001: push_const c0 ","
@@ -25,12 +26,19 @@ code:
   0010: intrinsic grep_text argc=2
   0011: store_name 3:matches
   0012: store_const 4:counts c3 {}
-  0013: lowered_loop #0 5:token values ops=1
-  0014: push_const c4 {"$lash_type":{"additionalProperties":false,"properties":{"beta_index":{"anyOf":[{"type":"integer"},{"type":"null"}]},"counts":{"type":"object"},"matches":{"items":{"type":"object"},"type":"array"}},"required":["beta_index","matches","counts"],"type":"object"}}
-  0015: store_name 6:Payload
-  0016: load_name 2:beta_index
-  0017: load_name 3:matches
-  0018: load_name 4:counts
-  0019: build_record [beta_index, matches, counts]
-  0020: intrinsic validate_compiled schema#0
-  0021: submit
+  0013: load_name 0:source
+  0014: push_const c4 ","
+  0015: intrinsic split argc=2
+  0016: begin_iter 5:token
+  0017: iter_next 20
+  0018: add_assign_index_slot_number 4:counts 5:token 1
+  0019: jump 17
+  0020: end_iter
+  0021: push_const c5 {"$lash_type":{"additionalProperties":false,"properties":{"beta_index":{"anyOf":[{"type":"integer"},{"type":"null"}]},"counts":{"type":"object"},"matches":{"items":{"type":"object"},"type":"array"}},"required":["beta_index","matches","counts"],"type":"object"}}
+  0022: store_name 6:Payload
+  0023: load_name 2:beta_index
+  0024: load_name 3:matches
+  0025: load_name 4:counts
+  0026: build_record [beta_index, matches, counts]
+  0027: intrinsic validate_compiled schema#0
+  0028: submit

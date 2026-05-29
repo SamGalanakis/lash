@@ -36,10 +36,6 @@ impl UiTimeline {
         self.items.as_slice()
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.items.clear();
-    }
-
     pub(crate) fn truncate(&mut self, len: usize) {
         self.items.truncate(len);
     }

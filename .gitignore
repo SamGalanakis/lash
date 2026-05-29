@@ -13,6 +13,7 @@ jobs/
 # benchmark harness state: vendored upstream repos, venvs, runs, responses.
 # All harnesses under bench/ are expected to write generated state here.
 /.benchmarks/
+/crates/.benchmarks/
 bench/**/.venv/
 bench/**/vendor/
 bench/**/runs/

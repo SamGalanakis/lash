@@ -359,18 +359,14 @@ fn strip_heredoc_wrapper(input: &str) -> Option<String> {
 }
 
 fn resolve_patch_workdir(workdir: Option<&str>) -> Result<PathBuf, String> {
-    let base = match workdir {
-        Some(path) => PathBuf::from(path),
-        None => std::env::current_dir().map_err(|err| format!("Failed to determine cwd: {err}"))?,
-    };
-    let cwd = if base.is_absolute() {
-        normalize_lexical(&base)
-    } else {
-        let here =
-            std::env::current_dir().map_err(|err| format!("Failed to determine cwd: {err}"))?;
-        resolve_under(&here, &base)
-    };
-    Ok(cwd)
+    let here = std::env::current_dir().map_err(|err| format!("Failed to determine cwd: {err}"))?;
+    // `resolve_under` already passes absolute paths through (normalized) and
+    // joins relative ones onto `here`, so it covers both branches; an absent
+    // `workdir` is just the cwd itself.
+    Ok(match workdir {
+        Some(path) => resolve_under(&here, Path::new(path)),
+        None => normalize_lexical(&here),
+    })
 }
 
 fn parse_heredoc_start(line: &str) -> Option<&str> {

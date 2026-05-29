@@ -25,10 +25,17 @@ impl LashRuntime {
         // Fill it in from the caller's policy so tests and hosts that
         // pass a real policy alongside default state don't trip the
         // explicit model-spec guard below.
-        if state.policy.provider.kind() == "unconfigured" {
+        let state_policy_was_unconfigured = state.policy.provider.kind() == "unconfigured";
+        if state_policy_was_unconfigured {
             state.policy = policy.clone();
         }
         state.ensure_agent_frame_initialized();
+        if policy.provider.kind() != "unconfigured"
+            && let Some(frame) = state.current_agent_frame_mut()
+            && frame.assignment.policy.provider.kind() == "unconfigured"
+        {
+            frame.assignment.policy = policy.clone();
+        }
         state.policy = state.effective_policy().clone();
         state.protocol_turn_options = state.effective_protocol_turn_options().clone();
         normalize_session_graph(&mut state);

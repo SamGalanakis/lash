@@ -94,6 +94,7 @@ impl AutonomousRenderer {
             // aligned with the model's final answer.
             TurnEvent::ReasoningDelta { .. } => {}
             TurnEvent::ToolCallStarted { .. }
+            | TurnEvent::QueuedWorkStarted { .. }
             | TurnEvent::Usage { .. }
             | TurnEvent::ChildUsage { .. }
             | TurnEvent::QueuedInputAccepted { .. }

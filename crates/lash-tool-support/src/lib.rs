@@ -65,7 +65,11 @@ pub fn canonicalize_under(base: &Path, path: &Path) -> std::io::Result<PathBuf> 
 /// (then the full path) when `path` is not under `base`. Backslashes are
 /// normalized to forward slashes so output is stable across platforms.
 pub fn display_relative(base: &Path, path: &Path) -> String {
-    let display = path.strip_prefix(base).unwrap_or(path).display().to_string();
+    let display = path
+        .strip_prefix(base)
+        .unwrap_or(path)
+        .display()
+        .to_string();
     let display = if display.is_empty() {
         path.file_name()
             .and_then(|name| name.to_str())

@@ -313,6 +313,7 @@ impl LashlangProcessHost<'_> {
         crate::tool_provider::process_events::enqueue_wake_delivery(
             self.store.as_deref(),
             result.wake_delivery,
+            Some(self.ctx.runtime_host()),
         )
         .await
         .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;

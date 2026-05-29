@@ -26,10 +26,10 @@ use super::record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, 
 use super::schema::{ValidationPlan, compile_schema_value};
 use super::{
     Chunk, CompileStats, CompiledAssignPath, CompiledAssignPathStep, CompiledFormatTemplate,
-    Instruction, IntrinsicOp, LASH_TYPE_KEY, LoopExpr, LoopIterable, LoopOp, LoweredLoop, Name,
-    Value, as_number, compile_format_template, eval_binary_values, execute_integer_div_builtin,
-    execute_len_direct, execute_range_builtin, is_comparison_binary_op, is_numeric_binary_op,
-    is_truthy, read_field_direct, read_index_direct, transient_name, unwrap_type_value,
+    Instruction, IntrinsicOp, LASH_TYPE_KEY, Name, Value, as_number, compile_format_template,
+    eval_binary_values, execute_integer_div_builtin, execute_len_direct, execute_range_builtin,
+    is_comparison_binary_op, is_numeric_binary_op, is_truthy, read_field_direct, read_index_direct,
+    transient_name, unwrap_type_value,
 };
 
 pub(crate) struct Compiler {
@@ -44,7 +44,6 @@ pub(crate) struct Compiler {
     format_templates: Vec<CompiledFormatTemplate>,
     compiled_schemas: Vec<ValidationPlan>,
     assign_paths: Vec<CompiledAssignPath>,
-    lowered_loops: Vec<LoweredLoop>,
     compile_stats: Rc<RefCell<CompileStats>>,
     const_slots: Vec<Option<Value>>,
     loop_contexts: Vec<LoopContext>,
@@ -53,183 +52,6 @@ pub(crate) struct Compiler {
 struct LoopContext {
     continue_target: usize,
     break_jumps: SmallVec<[usize; 4]>,
-}
-
-struct LoweredLoopOptimizer<'a, 'b> {
-    compiler: &'a mut Compiler,
-    binding_name: &'b str,
-    assigned_slots: SmallVec<[usize; 8]>,
-}
-
-impl LoweredLoopOptimizer<'_, '_> {
-    fn optimize_block(&mut self, block: &Expr) -> Option<Vec<LoopOp>> {
-        match block {
-            Expr::Block(expressions) => expressions
-                .iter()
-                .map(|expression| self.optimize_expr(expression))
-                .collect(),
-            expression => Some(vec![self.optimize_expr(expression)?]),
-        }
-    }
-
-    fn optimize_expr(&mut self, expression: &Expr) -> Option<LoopOp> {
-        match expression {
-            Expr::Assign { target, expr } if target.root.as_str() == self.binding_name => None,
-            Expr::Assign { target, expr } if target.is_simple() => {
-                let slot = self.compiler.push_slot(&target.root);
-                self.assigned_slots.push(slot);
-                if let Expr::Binary {
-                    left,
-                    op: BinaryOp::Add,
-                    right,
-                } = expr.as_ref()
-                    && matches!(left.as_ref(), Expr::Variable(var) if var.as_str() == target.root.as_str())
-                {
-                    if let Expr::List(items) = right.as_ref()
-                        && items.len() == 1
-                    {
-                        return Some(LoopOp::AppendAssign {
-                            slot,
-                            expr: self.compiler.optimize_loop_expr(&items[0])?,
-                        });
-                    }
-                    if let Some(Value::Number(right)) = self.compiler.fold_compile_time_expr(right)
-                    {
-                        return Some(LoopOp::AddAssignNumber { slot, right });
-                    }
-                    if let Expr::Variable(right_name) = right.as_ref() {
-                        let right = self.compiler.push_slot(right_name);
-                        return Some(LoopOp::AddAssignSlot { slot, right });
-                    }
-                    return Some(LoopOp::AddAssign {
-                        slot,
-                        expr: self.compiler.optimize_loop_expr(right)?,
-                    });
-                }
-                if let Expr::BuiltinCall {
-                    name: builtin_name,
-                    args,
-                } = expr.as_ref()
-                    && builtin_name == "push"
-                    && let [Expr::Variable(first_arg), item] = args.as_slice()
-                    && first_arg.as_str() == target.root.as_str()
-                {
-                    return Some(LoopOp::AppendAssign {
-                        slot,
-                        expr: self.compiler.optimize_loop_expr(item)?,
-                    });
-                }
-                Some(LoopOp::Assign {
-                    slot,
-                    expr: self.compiler.optimize_loop_expr(expr)?,
-                })
-            }
-            Expr::Assign { target, expr } => {
-                let slot = self.compiler.push_slot(&target.root);
-                self.assigned_slots.push(slot);
-                if let [AssignPathStep::Index(index)] = target.steps.as_slice()
-                    && let Expr::Binary {
-                        left,
-                        op: BinaryOp::Add,
-                        right,
-                    } = expr.as_ref()
-                    && let Expr::Index {
-                        target: left_target,
-                        index: left_index,
-                    } = left.as_ref()
-                    && matches!(left_target.as_ref(), Expr::Variable(name) if name.as_str() == target.root.as_str())
-                    && left_index.as_ref() == index
-                    && let Some(Value::Number(right)) = self.compiler.fold_compile_time_expr(right)
-                {
-                    if let Expr::Variable(index_name) = index {
-                        let index = self.compiler.push_slot(index_name);
-                        return Some(LoopOp::AddAssignIndexSlotNumber { slot, index, right });
-                    }
-                    return Some(LoopOp::AddAssignIndexNumber {
-                        slot,
-                        index: self.compiler.optimize_loop_expr(index)?,
-                        right,
-                    });
-                }
-
-                let indexes = target
-                    .steps
-                    .iter()
-                    .filter_map(|step| match step {
-                        AssignPathStep::Field(_) => None,
-                        AssignPathStep::Index(index) => {
-                            Some(self.compiler.optimize_loop_expr(index))
-                        }
-                    })
-                    .collect::<Option<Vec<_>>>()?
-                    .into_boxed_slice();
-                let path = self.compiler.push_assign_path(&target.steps);
-                Some(LoopOp::PathAssign {
-                    slot,
-                    path,
-                    indexes,
-                    expr: self.compiler.optimize_loop_expr(expr)?,
-                })
-            }
-            Expr::If {
-                condition,
-                then_block,
-                else_block,
-            } => {
-                let condition = self.compiler.optimize_loop_expr(condition)?;
-                let then_ops = self.optimize_block(then_block)?.into_boxed_slice();
-                let else_ops = self.optimize_block(else_block)?.into_boxed_slice();
-                Some(LoopOp::If {
-                    condition,
-                    then_ops,
-                    else_ops,
-                })
-            }
-            Expr::For {
-                binding,
-                iterable,
-                body,
-            } => {
-                let binding_slot = self.compiler.push_slot(binding);
-                let iterable = self.compiler.optimize_loop_iterable(iterable)?;
-                let mut nested = LoweredLoopOptimizer {
-                    compiler: self.compiler,
-                    binding_name: binding,
-                    assigned_slots: SmallVec::new(),
-                };
-                let body = nested.optimize_block(body)?.into_boxed_slice();
-                nested.compiler.set_const_slot(binding_slot, None);
-                for slot in nested.assigned_slots {
-                    nested.compiler.set_const_slot(slot, None);
-                    self.assigned_slots.push(slot);
-                }
-                Some(LoopOp::Loop(Box::new(LoweredLoop {
-                    binding: binding_slot,
-                    iterable,
-                    body,
-                })))
-            }
-            Expr::Break => Some(LoopOp::Break),
-            Expr::Continue => Some(LoopOp::Continue),
-            Expr::Block(_)
-            | Expr::ReceiverCall { .. }
-            | Expr::Cancel(_)
-            | Expr::Print(_)
-            | Expr::Submit(_)
-            | Expr::Yield(_)
-            | Expr::Wake(_)
-            | Expr::Finish(_)
-            | Expr::Fail(_)
-            | Expr::StartProcess(_)
-            | Expr::ResourceRef(_)
-            | Expr::SleepFor(_)
-            | Expr::SleepUntil(_)
-            | Expr::WaitSignal
-            | Expr::SignalRun { .. }
-            | Expr::Await(_) => None,
-            expr => Some(LoopOp::Expr(self.compiler.optimize_loop_expr(expr)?)),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -285,7 +107,6 @@ impl Compiler {
             format_templates: Vec::new(),
             compiled_schemas: Vec::new(),
             assign_paths: Vec::new(),
-            lowered_loops: Vec::new(),
             compile_stats,
             const_slots: Vec::new(),
             loop_contexts: Vec::new(),
@@ -307,7 +128,6 @@ impl Compiler {
             format_templates: self.format_templates,
             compiled_schemas: self.compiled_schemas,
             assign_paths: self.assign_paths,
-            lowered_loops: self.lowered_loops,
         }
     }
 
@@ -407,12 +227,6 @@ impl Compiler {
     fn push_compiled_schema(&mut self, schema: &Value) -> usize {
         let index = self.compiled_schemas.len();
         self.compiled_schemas.push(compile_schema_value(schema));
-        index
-    }
-
-    fn push_lowered_loop(&mut self, lowered_loop: LoweredLoop) -> usize {
-        let index = self.lowered_loops.len();
-        self.lowered_loops.push(lowered_loop);
         index
     }
 
@@ -719,13 +533,6 @@ impl Compiler {
     }
 
     fn compile_for_expr(&mut self, binding: &str, iterable: &Expr, body: &Expr, leave_value: bool) {
-        if let Some(loop_id) = self.compile_lowered_for(binding, iterable, body) {
-            self.clear_const_slots();
-            self.code.push(Instruction::LoweredLoop(loop_id));
-            self.push_null_if(leave_value);
-            return;
-        }
-
         let binding = self.push_slot(binding);
         if let Expr::BuiltinCall { name, args } = iterable
             && name.as_str() == "range"
@@ -775,157 +582,6 @@ impl Compiler {
             self.patch_jump(break_jump, loop_end);
         }
         self.clear_const_slots();
-    }
-
-    fn compile_lowered_for(
-        &mut self,
-        binding_name: &str,
-        iterable: &Expr,
-        body: &Expr,
-    ) -> Option<usize> {
-        let binding = self.push_slot(binding_name);
-        let iterable = self.optimize_loop_iterable(iterable)?;
-        let mut lowerer = LoweredLoopOptimizer {
-            compiler: self,
-            binding_name,
-            assigned_slots: SmallVec::new(),
-        };
-        let body = lowerer.optimize_block(body)?;
-        lowerer.compiler.set_const_slot(binding, None);
-        for slot in lowerer.assigned_slots {
-            lowerer.compiler.set_const_slot(slot, None);
-        }
-        let lowered_loop = LoweredLoop {
-            binding,
-            iterable,
-            body: body.into_boxed_slice(),
-        };
-        Some(lowerer.compiler.push_lowered_loop(lowered_loop))
-    }
-
-    fn optimize_loop_iterable(&mut self, iterable: &Expr) -> Option<LoopIterable> {
-        match iterable {
-            Expr::BuiltinCall { name, args }
-                if name == "range" && (1..=3).contains(&args.len()) =>
-            {
-                Some(LoopIterable::Range(
-                    args.iter()
-                        .map(|arg| self.optimize_loop_expr(arg))
-                        .collect::<Option<Vec<_>>>()?
-                        .into_boxed_slice(),
-                ))
-            }
-            Expr::BuiltinCall { name, args } if name == "keys" && args.len() == 1 => Some(
-                LoopIterable::Keys(Box::new(self.optimize_loop_expr(&args[0])?)),
-            ),
-            _ => Some(LoopIterable::Values(Box::new(
-                self.optimize_loop_expr(iterable)?,
-            ))),
-        }
-    }
-
-    fn optimize_loop_expr(&mut self, expr: &Expr) -> Option<LoopExpr> {
-        match expr {
-            Expr::Null => Some(LoopExpr::Const(Value::Null)),
-            Expr::Bool(value) => Some(LoopExpr::Const(Value::Bool(*value))),
-            Expr::Number(value) => Some(LoopExpr::Const(Value::Number(*value))),
-            Expr::String(value) => Some(LoopExpr::Const(Value::String(value.clone()))),
-            Expr::ResourceRef(resource) => Some(LoopExpr::Const(Value::Resource(
-                super::ResourceHandle::new(
-                    resource.resource_type.to_string(),
-                    resource.alias.to_string(),
-                ),
-            ))),
-            Expr::Variable(name) => Some(LoopExpr::Slot(self.push_slot(name))),
-            Expr::List(items) => Some(LoopExpr::List(
-                items
-                    .iter()
-                    .map(|item| self.optimize_loop_expr(item))
-                    .collect::<Option<Vec<_>>>()?
-                    .into_boxed_slice(),
-            )),
-            Expr::Record(entries) => Some(LoopExpr::Record(
-                entries
-                    .iter()
-                    .map(|(key, value)| {
-                        Some((self.push_name(key), self.optimize_loop_expr(value)?))
-                    })
-                    .collect::<Option<Vec<_>>>()?
-                    .into_boxed_slice(),
-            )),
-            Expr::BuiltinCall { name, args } => {
-                if name == "validate" {
-                    return None;
-                }
-                if name == "format"
-                    && let Some((Expr::String(template), value_args)) = args.split_first()
-                {
-                    return Some(LoopExpr::Format {
-                        template: compile_format_template(template, value_args.len()),
-                        args: value_args
-                            .iter()
-                            .map(|arg| self.optimize_loop_expr(arg))
-                            .collect::<Option<Vec<_>>>()?
-                            .into_boxed_slice(),
-                    });
-                }
-                Some(LoopExpr::Intrinsic {
-                    op: self.resolve_intrinsic(name, args.len()),
-                    args: args
-                        .iter()
-                        .map(|arg| self.optimize_loop_expr(arg))
-                        .collect::<Option<Vec<_>>>()?
-                        .into_boxed_slice(),
-                })
-            }
-            Expr::Field { target, field } => Some(LoopExpr::Field {
-                target: Box::new(self.optimize_loop_expr(target)?),
-                field: self.push_name(field),
-            }),
-            Expr::Index { target, index } => Some(LoopExpr::Index {
-                target: Box::new(self.optimize_loop_expr(target)?),
-                index: Box::new(self.optimize_loop_expr(index)?),
-            }),
-            Expr::Unary { op, expr } => Some(LoopExpr::Unary {
-                op: *op,
-                expr: Box::new(self.optimize_loop_expr(expr)?),
-            }),
-            Expr::If {
-                condition,
-                then_block,
-                else_block,
-            } => Some(LoopExpr::Conditional {
-                condition: Box::new(self.optimize_loop_expr(condition)?),
-                then_expr: Box::new(self.optimize_loop_expr(then_block)?),
-                else_expr: Box::new(self.optimize_loop_expr(else_block)?),
-            }),
-            Expr::Binary { left, op, right } => Some(LoopExpr::Binary {
-                left: Box::new(self.optimize_loop_expr(left)?),
-                op: *op,
-                right: Box::new(self.optimize_loop_expr(right)?),
-            }),
-            Expr::Block(_)
-            | Expr::Assign { .. }
-            | Expr::For { .. }
-            | Expr::Break
-            | Expr::Continue
-            | Expr::ReceiverCall { .. }
-            | Expr::StartProcess(_)
-            | Expr::Await(_)
-            | Expr::SleepFor(_)
-            | Expr::SleepUntil(_)
-            | Expr::WaitSignal
-            | Expr::SignalRun { .. }
-            | Expr::ResultUnwrap(_)
-            | Expr::Cancel(_)
-            | Expr::Print(_)
-            | Expr::Submit(_)
-            | Expr::Yield(_)
-            | Expr::Wake(_)
-            | Expr::Finish(_)
-            | Expr::Fail(_)
-            | Expr::TypeLiteral(_) => None,
-        }
     }
 
     fn fold_compile_time_expr(&self, expr: &Expr) -> Option<Value> {

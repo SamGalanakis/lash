@@ -9,29 +9,44 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use lash_core::plugin::{
-    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+    PluginError, PluginFactory, PluginSessionContext, PluginSpec, SessionPlugin,
+    StaticPluginFactory,
 };
 use lash_core::{
-    ToolAgentSurface, ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolResult, ToolScheduling,
+    ToolAgentSurface, ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolProvider, ToolResult,
+    ToolScheduling,
 };
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 
 /// Plugin factory for process-control tools.
-#[derive(Clone, Copy, Debug)]
+///
+/// Declares its provider through a [`PluginSpec`] driven by
+/// [`StaticPluginFactory`], so it does not hand-roll the `SessionPlugin` +
+/// `register` ceremony.
 pub struct ProcessControlsPluginFactory {
-    include_cancel_process: bool,
+    inner: StaticPluginFactory,
 }
 
 impl ProcessControlsPluginFactory {
     pub fn new() -> Self {
-        Self {
-            include_cancel_process: true,
-        }
+        Self::with_cancel_process(true)
     }
 
     pub fn without_cancel_process() -> Self {
+        Self::with_cancel_process(false)
+    }
+
+    fn with_cancel_process(include_cancel_process: bool) -> Self {
+        let provider = StaticToolProvider::new(
+            process_control_tool_definitions(include_cancel_process),
+            ProcessControlsTools {
+                include_cancel_process,
+            },
+        );
+        let spec =
+            PluginSpec::new().with_tool_provider(Arc::new(provider) as Arc<dyn ToolProvider>);
         Self {
-            include_cancel_process: false,
+            inner: StaticPluginFactory::new("process_controls", spec),
         }
     }
 }
@@ -44,34 +59,11 @@ impl Default for ProcessControlsPluginFactory {
 
 impl PluginFactory for ProcessControlsPluginFactory {
     fn id(&self) -> &'static str {
-        "process_controls"
+        self.inner.id()
     }
 
-    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(ProcessControlsPlugin {
-            include_cancel_process: self.include_cancel_process,
-        }))
-    }
-}
-
-struct ProcessControlsPlugin {
-    include_cancel_process: bool,
-}
-
-impl SessionPlugin for ProcessControlsPlugin {
-    fn id(&self) -> &'static str {
-        "process_controls"
-    }
-
-    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        let include_cancel_process = self.include_cancel_process;
-        reg.tools().provider(Arc::new(StaticToolProvider::new(
-            process_control_tool_definitions(include_cancel_process),
-            ProcessControlsTools {
-                include_cancel_process,
-            },
-        )))?;
-        Ok(())
+    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        self.inner.build(ctx)
     }
 }
 

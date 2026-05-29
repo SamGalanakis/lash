@@ -52,7 +52,7 @@ impl OpenAiCompatibleProvider {
                     LlmContentBlock::Text { text, .. } if !text.is_empty() => {
                         let mut part = json!({
                             "type": "text",
-                            "text": sanitize_surrogates(text),
+                            "text": text,
                         });
                         if let LlmContentBlock::Text {
                             cache_breakpoint: true,
@@ -102,7 +102,7 @@ impl OpenAiCompatibleProvider {
                         let mut tool_message = json!({
                             "role": "tool",
                             "tool_call_id": call_id,
-                            "content": sanitize_surrogates(content),
+                            "content": content,
                         });
                         if let Some(name) = tool_name.as_deref()
                             && !name.is_empty()

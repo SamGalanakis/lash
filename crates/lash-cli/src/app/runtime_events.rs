@@ -376,6 +376,16 @@ impl App {
             TurnEvent::QueuedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
             }
+            TurnEvent::QueuedWorkStarted { causes, .. } => {
+                if causes
+                    .iter()
+                    .any(|cause| cause.event_type == "process.wake")
+                {
+                    self.set_status("agent woken", None, true);
+                } else {
+                    self.set_status("queued work", None, true);
+                }
+            }
             TurnEvent::CodeBlockCompleted { .. } | TurnEvent::ToolValue { .. } => {}
         }
     }

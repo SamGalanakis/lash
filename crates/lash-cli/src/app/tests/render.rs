@@ -193,7 +193,7 @@ fn llm_request_flushes_intermediate_stream_text() {
 #[test]
 fn tool_call_flushes_intermediate_stream_text_immediately() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
 
     app.handle_session_event(SessionEvent::TextDelta {
         content: "I’m checking the rendering path first.".into(),
@@ -587,7 +587,7 @@ fn repeated_cancelled_errors_do_not_duplicate_system_message() {
 #[test]
 fn keep_latest_user_block_visible_shows_prompt_start_before_first_token() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
     for idx in 0..6 {
         app.timeline
             .push(UiTimelineItem::AssistantText(format!("history {idx}")));
@@ -625,7 +625,7 @@ fn keep_latest_user_block_visible_shows_prompt_start_before_first_token() {
 #[test]
 fn keep_latest_user_block_visible_keeps_short_prompt_bottom_aligned() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
     for idx in 0..6 {
         app.timeline
             .push(UiTimelineItem::AssistantText(format!("history {idx}")));
@@ -679,7 +679,7 @@ fn dismiss_splash_removes_empty_state_before_history_content() {
 #[test]
 fn refresh_follow_output_anchor_tracks_bottom_when_idle() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
 
     app.timeline
         .push(UiTimelineItem::UserInput("Message 1".into()));
@@ -702,7 +702,7 @@ fn refresh_follow_output_anchor_tracks_bottom_when_idle() {
 #[test]
 fn refresh_follow_output_anchor_reveals_output_start_once_then_follows_tail() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
 
     app.timeline
         .push(UiTimelineItem::UserInput("Message 1".into()));
@@ -734,7 +734,7 @@ fn refresh_follow_output_anchor_reveals_output_start_once_then_follows_tail() {
 #[test]
 fn resume_follow_output_reenables_bottom_following() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
     app.timeline.push(UiTimelineItem::UserInput("hello".into()));
     app.timeline
         .push(UiTimelineItem::AssistantText("world".into()));
@@ -750,7 +750,7 @@ fn resume_follow_output_reenables_bottom_following() {
 #[test]
 fn scroll_up_from_follow_output_detaches_from_bottom_anchor() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
     app.timeline.push(UiTimelineItem::UserInput("hello".into()));
     app.timeline.push(UiTimelineItem::AssistantText(
         (0..20)
@@ -774,7 +774,7 @@ fn scroll_up_from_follow_output_detaches_from_bottom_anchor() {
 #[test]
 fn scroll_down_to_bottom_reenables_tail_follow_instead_of_contextual_anchor() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
     app.timeline
         .push(UiTimelineItem::AssistantText("older history".into()));
     app.timeline
@@ -816,7 +816,7 @@ fn scroll_down_to_bottom_reenables_tail_follow_instead_of_contextual_anchor() {
 #[test]
 fn text_delta_does_not_force_scroll_when_follow_output_is_paused() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
     app.timeline
         .push(UiTimelineItem::UserInput("prompt".into()));
     app.start_turn();
@@ -834,7 +834,7 @@ fn text_delta_does_not_force_scroll_when_follow_output_is_paused() {
 #[test]
 fn text_delta_reveals_message_start_before_switching_to_tail_follow() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
     app.timeline
         .push(UiTimelineItem::UserInput("prompt".into()));
     app.start_turn();
@@ -894,7 +894,7 @@ fn refresh_follow_output_anchor_repositions_waiting_prompt_on_resize() {
 #[test]
 fn handle_tool_call_merges_contiguous_exploration_activity() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
 
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: Some("tc3".into()),
@@ -941,7 +941,7 @@ fn handle_tool_call_merges_contiguous_exploration_activity() {
 #[test]
 fn handle_tool_call_merges_contiguous_edit_activity() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
 
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: Some("tc5".into()),
@@ -998,7 +998,7 @@ fn handle_tool_call_merges_contiguous_edit_activity() {
 #[test]
 fn live_batch_tool_call_expands_children_without_parent_batch_block() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.timeline.clear();
+    app.timeline.truncate(0);
 
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: None,

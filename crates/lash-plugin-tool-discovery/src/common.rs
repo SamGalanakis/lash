@@ -93,7 +93,40 @@ pub(crate) fn catalog_key(catalog: &[Value]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     catalog.len().hash(&mut hasher);
     for value in catalog {
-        value.to_string().hash(&mut hasher);
+        hash_json_value(value, &mut hasher);
     }
     hasher.finish()
+}
+
+fn hash_json_value(value: &Value, state: &mut impl Hasher) {
+    match value {
+        Value::Null => 0_u8.hash(state),
+        Value::Bool(value) => {
+            1_u8.hash(state);
+            value.hash(state);
+        }
+        Value::Number(value) => {
+            2_u8.hash(state);
+            value.to_string().hash(state);
+        }
+        Value::String(value) => {
+            3_u8.hash(state);
+            value.hash(state);
+        }
+        Value::Array(values) => {
+            4_u8.hash(state);
+            values.len().hash(state);
+            for value in values {
+                hash_json_value(value, state);
+            }
+        }
+        Value::Object(values) => {
+            5_u8.hash(state);
+            values.len().hash(state);
+            for (key, value) in values {
+                key.hash(state);
+                hash_json_value(value, state);
+            }
+        }
+    }
 }

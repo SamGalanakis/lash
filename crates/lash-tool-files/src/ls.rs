@@ -211,9 +211,12 @@ mod tests {
         std::fs::write(dir.path().join("file.txt"), "").unwrap();
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
         std::fs::write(dir.path().join("subdir/nested.rs"), "").unwrap();
-        let result =
-            lash_core::testing::run_tool(&ls_provider(), "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         let arr = items(&result);
         let paths: Vec<&str> = arr
@@ -228,9 +231,12 @@ mod tests {
     #[tokio::test]
     async fn test_ls_empty_dir() {
         let dir = TempDir::new().unwrap();
-        let result =
-            lash_core::testing::run_tool(&ls_provider(), "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         assert!(items(&result).is_empty());
     }
@@ -240,8 +246,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("file.txt");
         std::fs::write(&path, "").unwrap();
-        let result =
-            lash_core::testing::run_tool(&ls_provider(), "ls", &json!({"path": path.to_str().unwrap()})).await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": path.to_str().unwrap()}),
+        )
+        .await;
         assert!(!result.is_success());
     }
 
@@ -308,9 +318,12 @@ mod tests {
     async fn test_ls_includes_hidden_by_default() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".env"), "KEY=value\n").unwrap();
-        let result =
-            lash_core::testing::run_tool(&ls_provider(), "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
@@ -324,9 +337,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
-        let result =
-            lash_core::testing::run_tool(&ls_provider(), "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
@@ -396,9 +412,12 @@ mod tests {
             .current_dir(dir.path())
             .status()
             .unwrap();
-        let result =
-            lash_core::testing::run_tool(&ls_provider(), "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
@@ -413,9 +432,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
         std::fs::write(dir.path().join("node_modules/pkg/index.js"), "").unwrap();
-        let result =
-            lash_core::testing::run_tool(&ls_provider(), "ls", &json!({"path": dir.path().to_str().unwrap()}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &ls_provider(),
+            "ls",
+            &json!({"path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()

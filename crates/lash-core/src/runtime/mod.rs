@@ -78,8 +78,8 @@ pub use causal::process_event_invocation;
 pub(crate) use causal::tool_retry_sleep_invocation;
 pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
-    CausalRef, DirectRequestSpec, InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec,
-    ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectController,
+    CausalRef, InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec, ProcessCommand,
+    ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
     RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
     RuntimeReplay, RuntimeScope, RuntimeSubject,
@@ -235,9 +235,65 @@ impl TurnInput {
     }
 }
 
+/// Per-turn, in-process side channel of typed plugin inputs.
+///
+/// This is an `Any`-keyed map of live Rust values handed to plugins for a
+/// single turn. It is deliberately **not** serializable: the values never
+/// survive a process boundary, so the durable runtime explicitly rejects a turn
+/// that carries any live inputs (see [`LiveTurnInputs::durable_rejection`]).
+/// Durable callers must instead encode resumable data in
+/// `protocol_turn_options` or persisted plugin state.
+#[derive(Clone, Default)]
+pub struct LiveTurnInputs {
+    inputs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
+}
+
+impl LiveTurnInputs {
+    fn insert<T>(&mut self, plugin_id: &'static str, input: T)
+    where
+        T: Send + Sync + 'static,
+    {
+        self.inputs.insert(plugin_id, Arc::new(input));
+    }
+
+    fn get<T>(&self, plugin_id: &'static str) -> Option<&T>
+    where
+        T: 'static,
+    {
+        self.inputs
+            .get(plugin_id)
+            .and_then(|input| input.downcast_ref::<T>())
+    }
+
+    fn contains(&self, plugin_id: &'static str) -> bool {
+        self.inputs.contains_key(plugin_id)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inputs.is_empty()
+    }
+
+    fn plugin_ids(&self) -> Vec<&'static str> {
+        self.inputs.keys().copied().collect()
+    }
+
+    /// Returns an error if any live input is present, with the reason a durable
+    /// turn cannot carry it. Returns `Ok(())` when the channel is empty and the
+    /// turn is safe for durable replay.
+    pub(crate) fn durable_rejection(&self) -> Result<(), RuntimeError> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        Err(RuntimeError::new(
+            RuntimeErrorCode::DurableTurnLivePluginInput,
+            "durable turn resume does not support live TurnContext plugin inputs; encode resumable data in protocol_turn_options or persisted plugin state",
+        ))
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct TurnContext {
-    plugin_inputs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
+    plugin_inputs: LiveTurnInputs,
     provider: Option<crate::ProviderHandle>,
     model: Option<crate::ModelSpec>,
     prompt: crate::PromptLayer,
@@ -252,7 +308,7 @@ impl TurnContext {
     where
         T: Send + Sync + 'static,
     {
-        self.plugin_inputs.insert(plugin_id, Arc::new(input));
+        self.plugin_inputs.insert(plugin_id, input);
     }
 
     pub fn set_provider(&mut self, provider: crate::ProviderHandle) {
@@ -275,17 +331,17 @@ impl TurnContext {
     where
         T: 'static,
     {
-        self.plugin_inputs
-            .get(plugin_id)
-            .and_then(|input| input.downcast_ref::<T>())
+        self.plugin_inputs.get(plugin_id)
     }
 
     pub fn has_plugin_input(&self, plugin_id: &'static str) -> bool {
-        self.plugin_inputs.contains_key(plugin_id)
+        self.plugin_inputs.contains(plugin_id)
     }
 
-    pub fn has_plugin_inputs(&self) -> bool {
-        !self.plugin_inputs.is_empty()
+    /// Live plugin inputs for this turn. The durable boundary inspects this to
+    /// reject turns carrying non-serializable live state.
+    pub(crate) fn live_plugin_inputs(&self) -> &LiveTurnInputs {
+        &self.plugin_inputs
     }
 
     pub fn set_prompt_template(&mut self, template: crate::PromptTemplate) {
@@ -320,10 +376,7 @@ impl TurnContext {
 impl fmt::Debug for TurnContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TurnContext")
-            .field(
-                "plugin_inputs",
-                &self.plugin_inputs.keys().collect::<Vec<_>>(),
-            )
+            .field("plugin_inputs", &self.plugin_inputs.plugin_ids())
             .field("has_provider", &self.provider.is_some())
             .field("has_model", &self.model.is_some())
             .field("has_prompt_layer", &(!self.prompt.is_empty()))
@@ -580,6 +633,11 @@ impl TurnActivity {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum TurnEvent {
+    QueuedWorkStarted {
+        boundary: crate::QueuedWorkClaimBoundary,
+        batch_ids: Vec<String>,
+        causes: Vec<crate::TurnCause>,
+    },
     ModelRequestStarted {
         protocol_iteration: usize,
     },

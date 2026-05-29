@@ -188,7 +188,7 @@ impl TurnBuilder {
 
     pub async fn stream(self, events: &dyn TurnActivitySink) -> Result<TurnResult> {
         let (runtime, input, cancel) = self.prepare()?;
-        stream_prepared_turn(&runtime, input, TurnSinks::turn(events), cancel).await
+        stream_prepared_turn(&runtime, input, TurnSinks::turn(events), None, cancel).await
     }
 
     pub async fn stream_with_effect_scope(
@@ -197,11 +197,11 @@ impl TurnBuilder {
         effect_scope: RuntimeEffectControllerScope<'_>,
     ) -> Result<TurnResult> {
         let (runtime, input, cancel) = self.prepare()?;
-        stream_prepared_turn_with_effect_scope(
+        stream_prepared_turn(
             &runtime,
             input,
             TurnSinks::turn(events),
-            effect_scope,
+            Some(effect_scope),
             cancel,
         )
         .await
@@ -212,7 +212,7 @@ impl TurnBuilder {
         let (tx, rx) = mpsc::channel(64);
         let sink = ChannelTurnActivitySink { tx };
         let completion = tokio::spawn(async move {
-            stream_prepared_turn(&runtime, input, TurnSinks::turn(&sink), cancel).await
+            stream_prepared_turn(&runtime, input, TurnSinks::turn(&sink), None, cancel).await
         });
         Ok(TurnStream {
             activities: rx,
@@ -235,7 +235,7 @@ impl AdvancedTurn {
     /// Run the turn while sending raw session events to `events`.
     pub async fn collect_session_events_with(self, events: &dyn EventSink) -> Result<TurnResult> {
         let (runtime, input, cancel) = self.builder.prepare()?;
-        stream_prepared_turn(&runtime, input, TurnSinks::session(events), cancel).await
+        stream_prepared_turn(&runtime, input, TurnSinks::session(events), None, cancel).await
     }
 }
 
@@ -329,6 +329,7 @@ impl ResumeTurnBuilder {
             &self.runtime,
             &self.turn_id,
             TurnSinks::turn(events),
+            None,
             self.cancel,
         )
         .await?;
@@ -340,11 +341,11 @@ impl ResumeTurnBuilder {
         events: &dyn TurnActivitySink,
         effect_scope: RuntimeEffectControllerScope<'_>,
     ) -> Result<TurnResult> {
-        let assembled = resume_prepared_assembled_with_effect_scope(
+        let assembled = resume_prepared_assembled(
             &self.runtime,
             &self.turn_id,
             TurnSinks::turn(events),
-            effect_scope,
+            Some(effect_scope),
             self.cancel,
         )
         .await?;
@@ -372,6 +373,7 @@ impl AdvancedResumeTurn {
             &self.builder.runtime,
             &self.builder.turn_id,
             TurnSinks::session(events),
+            None,
             self.builder.cancel,
         )
         .await?;
@@ -383,11 +385,11 @@ impl AdvancedResumeTurn {
         events: &dyn EventSink,
         effect_scope: RuntimeEffectControllerScope<'_>,
     ) -> Result<TurnResult> {
-        let assembled = resume_prepared_assembled_with_effect_scope(
+        let assembled = resume_prepared_assembled(
             &self.builder.runtime,
             &self.builder.turn_id,
             TurnSinks::session(events),
-            effect_scope,
+            Some(effect_scope),
             self.builder.cancel,
         )
         .await?;
@@ -426,28 +428,13 @@ pub(crate) async fn resume_prepared_assembled(
     runtime: &RuntimeHandle,
     turn_id: &str,
     sinks: TurnSinks<'_>,
+    effect_scope: Option<RuntimeEffectControllerScope<'_>>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
     let turn = writer
-        .resume_turn(turn_id, turn_options(sinks, None, cancel))
-        .await?;
-    runtime.publish_from(&writer);
-    Ok(turn)
-}
-
-pub(crate) async fn resume_prepared_assembled_with_effect_scope(
-    runtime: &RuntimeHandle,
-    turn_id: &str,
-    sinks: TurnSinks<'_>,
-    effect_scope: RuntimeEffectControllerScope<'_>,
-    cancel: CancellationToken,
-) -> Result<AssembledTurn> {
-    let writer_handle = runtime.writer();
-    let mut writer = writer_handle.lock().await;
-    let turn = writer
-        .resume_turn(turn_id, turn_options(sinks, Some(effect_scope), cancel))
+        .resume_turn(turn_id, turn_options(sinks, effect_scope, cancel))
         .await?;
     runtime.publish_from(&writer);
     Ok(turn)
@@ -525,20 +512,10 @@ pub(crate) async fn stream_prepared_turn(
     runtime: &RuntimeHandle,
     input: TurnInput,
     sinks: TurnSinks<'_>,
+    effect_scope: Option<RuntimeEffectControllerScope<'_>>,
     cancel: CancellationToken,
 ) -> Result<TurnResult> {
-    let turn = Box::pin(stream_prepared_assembled(runtime, input, sinks, cancel)).await?;
-    Ok(TurnResult::from_assembled(turn))
-}
-
-pub(crate) async fn stream_prepared_turn_with_effect_scope(
-    runtime: &RuntimeHandle,
-    input: TurnInput,
-    sinks: TurnSinks<'_>,
-    effect_scope: RuntimeEffectControllerScope<'_>,
-    cancel: CancellationToken,
-) -> Result<TurnResult> {
-    let turn = Box::pin(stream_prepared_assembled_with_effect_scope(
+    let turn = Box::pin(stream_prepared_assembled(
         runtime,
         input,
         sinks,
@@ -553,28 +530,10 @@ pub(crate) async fn stream_prepared_assembled(
     runtime: &RuntimeHandle,
     input: TurnInput,
     sinks: TurnSinks<'_>,
+    effect_scope: Option<RuntimeEffectControllerScope<'_>>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
     let turn = Box::pin(stream_prepared_agent_frame_run(
-        runtime, input, sinks, cancel,
-    ))
-    .await?;
-    turn.into_final_turn().ok_or_else(|| {
-        EmbedError::Runtime(lash_core::RuntimeError::new(
-            RuntimeErrorCode::EmptyAgentFrameRun,
-            "runtime completed without an assembled turn",
-        ))
-    })
-}
-
-pub(crate) async fn stream_prepared_assembled_with_effect_scope(
-    runtime: &RuntimeHandle,
-    input: TurnInput,
-    sinks: TurnSinks<'_>,
-    effect_scope: RuntimeEffectControllerScope<'_>,
-    cancel: CancellationToken,
-) -> Result<AssembledTurn> {
-    let turn = Box::pin(stream_prepared_agent_frame_run_with_effect_scope(
         runtime,
         input,
         sinks,
@@ -594,28 +553,7 @@ pub(crate) async fn stream_prepared_agent_frame_run(
     runtime: &RuntimeHandle,
     input: TurnInput,
     sinks: TurnSinks<'_>,
-    cancel: CancellationToken,
-) -> Result<lash_core::AgentFrameRun> {
-    let writer_handle = runtime.writer();
-    let mut writer = writer_handle.lock().await;
-    if let Some(extension) = input.protocol_extension.as_ref() {
-        writer
-            .validate_protocol_turn_extension(extension)
-            .await
-            .map_err(EmbedError::Session)?;
-    }
-    let turn =
-        Box::pin(writer.stream_turn_with_agent_frames(input, turn_options(sinks, None, cancel)))
-            .await?;
-    runtime.publish_from(&writer);
-    Ok(turn)
-}
-
-pub(crate) async fn stream_prepared_agent_frame_run_with_effect_scope(
-    runtime: &RuntimeHandle,
-    input: TurnInput,
-    sinks: TurnSinks<'_>,
-    effect_scope: RuntimeEffectControllerScope<'_>,
+    effect_scope: Option<RuntimeEffectControllerScope<'_>>,
     cancel: CancellationToken,
 ) -> Result<lash_core::AgentFrameRun> {
     let writer_handle = runtime.writer();
@@ -627,8 +565,7 @@ pub(crate) async fn stream_prepared_agent_frame_run_with_effect_scope(
             .map_err(EmbedError::Session)?;
     }
     let turn = Box::pin(
-        writer
-            .stream_turn_with_agent_frames(input, turn_options(sinks, Some(effect_scope), cancel)),
+        writer.stream_turn_with_agent_frames(input, turn_options(sinks, effect_scope, cancel)),
     )
     .await?;
     runtime.publish_from(&writer);

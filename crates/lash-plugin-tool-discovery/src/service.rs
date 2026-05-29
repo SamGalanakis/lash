@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use crate::common::{LLM_CANDIDATE_LIMIT, args_with_limit, catalog_key, limit_from_args};
 use crate::definitions::search_tools_definition;
 use crate::ranking::ToolDiscoveryIndex;
-use crate::rerank::{llm_rerank_request, merge_llm_selection, parse_llm_tool_names};
+use crate::rerank::{
+    llm_rerank_request, merge_llm_selection, parse_llm_tool_names, rerank_payment_action_intent,
+};
 
 #[derive(Clone, Default)]
 struct IndexCache {
@@ -32,8 +34,8 @@ impl ToolDiscoveryToolsProvider {
         }
     }
 
-    fn index_for_catalog(&self, catalog: Vec<Value>) -> Arc<ToolDiscoveryIndex> {
-        let key = catalog_key(&catalog);
+    fn index_for_catalog(&self, catalog: Arc<Vec<Value>>) -> Arc<ToolDiscoveryIndex> {
+        let key = catalog_key(catalog.as_ref());
         if let Some(index) = self
             .cache
             .read()
@@ -46,7 +48,7 @@ impl ToolDiscoveryToolsProvider {
             return index;
         }
 
-        let index = Arc::new(ToolDiscoveryIndex::build(key, catalog));
+        let index = Arc::new(ToolDiscoveryIndex::build(key, catalog.as_ref().clone()));
         self.cache
             .write()
             .expect("tool discovery cache lock poisoned")
@@ -57,7 +59,7 @@ impl ToolDiscoveryToolsProvider {
     async fn search_tools(
         &self,
         args: &Value,
-        catalog: Vec<Value>,
+        catalog: Arc<Vec<Value>>,
         context: &ToolContext<'_>,
     ) -> ToolResult {
         let index = self.index_for_catalog(catalog);
@@ -67,6 +69,11 @@ impl ToolDiscoveryToolsProvider {
         if candidates.is_empty() {
             return ToolResult::ok(json!([]));
         }
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let candidates = rerank_payment_action_intent(query, candidates);
 
         let request = llm_rerank_request(args, &candidates, limit);
         let completion = match context
@@ -107,7 +114,7 @@ pub fn tool_discovery_provider() -> StaticToolProvider<ToolDiscoveryToolsProvide
 impl StaticToolExecute for ToolDiscoveryToolsProvider {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
-            "search_tools" => match call.context.sessions().tool_catalog().await {
+            "search_tools" => match call.context.sessions().shared_tool_catalog().await {
                 Ok(catalog) => self.search_tools(call.args, catalog, call.context).await,
                 Err(err) => ToolResult::err_fmt(err.to_string()),
             },

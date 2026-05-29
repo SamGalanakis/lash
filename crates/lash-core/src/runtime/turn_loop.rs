@@ -41,6 +41,91 @@ fn trace_stop_reason(stop: &TurnStop) -> &'static str {
     }
 }
 
+fn queued_work_payload_type(payload: &crate::QueuedWorkPayload) -> &'static str {
+    match payload {
+        crate::QueuedWorkPayload::TurnInput { .. } => "turn_input",
+        crate::QueuedWorkPayload::ProcessWake { .. } => "process_wake",
+        crate::QueuedWorkPayload::HostEvent { .. } => "host_event",
+        crate::QueuedWorkPayload::Timer { .. } => "timer",
+        crate::QueuedWorkPayload::Resume { .. } => "resume",
+    }
+}
+
+fn queued_work_batch_ids(claim: &crate::QueuedWorkClaim) -> Vec<String> {
+    claim
+        .batches
+        .iter()
+        .map(|batch| batch.batch_id.clone())
+        .collect()
+}
+
+pub(in crate::runtime) fn queued_work_trace_payload(
+    boundary: crate::QueuedWorkClaimBoundary,
+    claim: &crate::QueuedWorkClaim,
+    causes: &[crate::TurnCause],
+) -> serde_json::Value {
+    serde_json::json!({
+        "boundary": boundary,
+        "claim_id": claim.claim_id,
+        "owner_id": claim.owner_id,
+        "batch_ids": queued_work_batch_ids(claim),
+        "payload_types": claim.batches.iter()
+            .flat_map(|batch| batch.items.iter())
+            .map(|item| queued_work_payload_type(&item.payload))
+            .collect::<Vec<_>>(),
+        "causes": causes,
+    })
+}
+
+pub(in crate::runtime) fn queued_work_completion_trace_payload(
+    completions: &[crate::QueuedWorkCompletion],
+) -> serde_json::Value {
+    serde_json::json!({
+        "claims": completions.iter().map(|completion| {
+            serde_json::json!({
+                "session_id": completion.session_id,
+                "claim_id": completion.claim_id,
+                "batch_ids": completion.batch_ids,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+async fn emit_queued_work_started_to_sink(
+    events: &dyn TurnActivitySink,
+    boundary: crate::QueuedWorkClaimBoundary,
+    claim: &crate::QueuedWorkClaim,
+    causes: Vec<crate::TurnCause>,
+) {
+    emit_turn_activity_to_sink(
+        events,
+        TurnActivity::independent(TurnEvent::QueuedWorkStarted {
+            boundary,
+            batch_ids: queued_work_batch_ids(claim),
+            causes,
+        }),
+    )
+    .await;
+}
+
+pub(in crate::runtime) async fn send_queued_work_started_event(
+    event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+    boundary: crate::QueuedWorkClaimBoundary,
+    claim: &crate::QueuedWorkClaim,
+    causes: Vec<crate::TurnCause>,
+) {
+    send_turn_activity(
+        event_tx,
+        TurnActivityId::fresh(),
+        TurnEvent::QueuedWorkStarted {
+            boundary,
+            batch_ids: queued_work_batch_ids(claim),
+            causes,
+        },
+    )
+    .await;
+}
+
 async fn abandon_runtime_turn_lease_best_effort(
     store: Option<&(dyn crate::RuntimePersistence + '_)>,
     lease: Option<&crate::RuntimeTurnLease>,
@@ -195,6 +280,7 @@ impl LashRuntime {
 
         let mut returned_turn = finalized.turn;
         self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
+        let queued_work_completion_trace = queued_work_completions.clone();
         if let Err(err) = turn_pipeline
             .final_commit(
                 &mut returned_turn,
@@ -237,6 +323,20 @@ impl LashRuntime {
                         err.to_string(),
                     )
                 })?;
+        }
+        if !queued_work_completion_trace.is_empty() {
+            crate::trace::emit_trace(
+                &self.host.core.trace_sink,
+                &self.host.core.trace_context,
+                lash_trace::TraceContext::default()
+                    .for_session(returned_turn.state.session_id.clone())
+                    .for_turn_index(returned_turn.state.turn_index)
+                    .for_turn(trace_turn_id.clone()),
+                lash_trace::TraceEvent::Custom {
+                    name: "queued_work.completed".to_string(),
+                    payload: queued_work_completion_trace_payload(&queued_work_completion_trace),
+                },
+            );
         }
         self.emit_turn_persisted_event(&returned_turn).await;
         self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
@@ -362,6 +462,30 @@ impl LashRuntime {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         work.input.trace_turn_id = Some(turn_id.clone());
+        let causes = work.turn_causes.clone();
+        emit_queued_work_started_to_sink(
+            opts.turn_events_or_noop(),
+            crate::QueuedWorkClaimBoundary::Idle,
+            &claim,
+            causes.clone(),
+        )
+        .await;
+        crate::trace::emit_trace(
+            &self.host.core.trace_sink,
+            &self.host.core.trace_context,
+            lash_trace::TraceContext::default()
+                .for_session(self.state.session_id.clone())
+                .for_turn_index(self.state.turn_index + 1)
+                .for_turn(turn_id.clone()),
+            lash_trace::TraceEvent::Custom {
+                name: "queued_work.claimed".to_string(),
+                payload: queued_work_trace_payload(
+                    crate::QueuedWorkClaimBoundary::Idle,
+                    &claim,
+                    &causes,
+                ),
+            },
+        );
         let cancel = opts.cancel.clone();
         let effect_controller = Arc::clone(&self.host.core.effect_controller);
         let effect_scope = opts.resolve_effect_scope(effect_controller.as_ref(), &turn_id)?;
@@ -1319,12 +1443,10 @@ pub fn ensure_durable_turn_input(input: &TurnInput) -> Result<(), RuntimeError> 
             "durable turn resume does not support live protocol_extension inputs; encode resumable data in protocol_turn_options or persisted plugin state",
         ));
     }
-    if input.turn_context.has_plugin_inputs() {
-        return Err(RuntimeError::new(
-            RuntimeErrorCode::DurableTurnLivePluginInput,
-            "durable turn resume does not support live TurnContext plugin inputs; encode resumable data in protocol_turn_options or persisted plugin state",
-        ));
-    }
+    input
+        .turn_context
+        .live_plugin_inputs()
+        .durable_rejection()?;
     Ok(())
 }
 

@@ -154,6 +154,7 @@ async fn control_turn_accepts_prebuilt_turn_input() -> Result<()> {
 
 #[tokio::test]
 async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
+    register_checkpoint_gated_provider_factory();
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let core = LashCore::standard()

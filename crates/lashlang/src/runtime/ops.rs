@@ -831,40 +831,11 @@ pub(crate) fn eval_compare_values(
     }
 }
 
-pub(crate) async fn eval_compare_values_async(
-    left: Value,
-    op: BinaryOp,
-    right: Value,
-) -> Result<bool, RuntimeError> {
-    let has_projected = matches!(left, Value::Projected(_)) || matches!(right, Value::Projected(_));
-    if has_projected {
-        eval_compare_values(
-            materialize_projected_async(left).await,
-            op,
-            materialize_projected_async(right).await,
-        )
-    } else {
-        eval_compare_values(left, op, right)
-    }
-}
-
 pub(crate) fn expect_bool_value(value: Value) -> bool {
     match value {
         Value::Bool(value) => value,
         _ => unreachable!("comparison produced non-bool value"),
     }
-}
-
-pub(crate) async fn eval_binary_values_async(
-    left: Value,
-    op: BinaryOp,
-    right: Value,
-) -> Result<Value, RuntimeError> {
-    eval_binary_values(
-        materialize_projected_async(left).await,
-        op,
-        materialize_projected_async(right).await,
-    )
 }
 
 pub(crate) async fn materialize_projected_async(value: Value) -> Value {

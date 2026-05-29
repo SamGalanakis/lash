@@ -6,6 +6,7 @@ mod queue;
 mod tests;
 
 use crate::SkillCatalog;
+use crate::cli_support::selection_ordered;
 use crate::skill_prompt::collect_skill_mentions_with_ranges;
 use lash_tui::{Line, Modifier, Rect, Span, Style};
 use lash_tui_extensions::TuiSurfaceSlot;
@@ -610,16 +611,6 @@ fn line_slice_by_display_columns(line: &Line<'_>, start: usize, end: usize) -> S
         }
     }
     out
-}
-
-fn selection_ordered(sel: &crate::app::TextSelection) -> ((u16, usize), (u16, usize)) {
-    let (ax, ay) = sel.anchor;
-    let (ex, ey) = sel.end;
-    if ay < ey || (ay == ey && ax <= ex) {
-        ((ax, ay), (ex, ey))
-    } else {
-        ((ex, ey), (ax, ay))
-    }
 }
 
 fn truncate_to_display_width(text: &str, max_width: usize) -> String {

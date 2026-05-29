@@ -604,7 +604,7 @@ fn assistant_text_preserves_response_meta() {
             response_meta: Some(ResponseTextMeta {
                 id: Some("msg_1".to_string()),
                 status: Some("completed".to_string()),
-                phase: Some(ResponseTextPhase::FinalAnswer),
+                phase: Some("final_answer".to_string()),
             }),
             cache_breakpoint: false,
         }],
@@ -893,11 +893,11 @@ fn stream_parser_captures_text_reasoning_tool_and_phase() {
         &parts[1],
         LlmOutputPart::Text {
             response_meta: Some(ResponseTextMeta {
-                phase: Some(ResponseTextPhase::Commentary),
+                phase: Some(phase),
                 ..
             }),
             ..
-        }
+        } if phase == "commentary"
     ));
     assert!(matches!(
         &parts[2],

@@ -575,7 +575,7 @@ fn backspace_deletes_image_marker_atomically() {
         png_bytes: vec![1, 2, 3],
     }];
 
-    app.backspace();
+    app.editor.backspace();
 
     assert_eq!(app.input(), "hello  world");
     assert!(app.editor.pending_images.is_empty());
@@ -647,7 +647,7 @@ fn pending_image_jobs_only_count_visible_markers() {
     app.editor.cursor_pos = app.input().len();
     assert!(app.has_pending_image_jobs());
 
-    app.backspace();
+    app.editor.backspace();
     assert!(!app.has_pending_image_jobs());
 }
 
@@ -762,7 +762,7 @@ fn backspace_deletes_large_paste_placeholder_atomically() {
     let placeholder = app.input().to_string();
     app.editor.cursor_pos = placeholder.len();
 
-    app.backspace();
+    app.editor.backspace();
 
     assert!(app.input().is_empty());
     assert!(app.editor.pending_large_pastes.is_empty());

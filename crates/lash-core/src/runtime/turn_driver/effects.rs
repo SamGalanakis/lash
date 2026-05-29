@@ -110,6 +110,24 @@ impl RuntimeTurnDriver<'_> {
                 .map_err(|err| {
                     RuntimeError::new(RuntimeErrorCode::DurableAttachmentStoreRequired, err)
                 })?;
+            send_queued_work_started_event(
+                event_tx,
+                crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+                &claim,
+                materialized.turn_causes.clone(),
+            )
+            .await;
+            self.emit_trace(
+                machine.protocol_iteration(),
+                lash_trace::TraceEvent::Custom {
+                    name: "queued_work.claimed".to_string(),
+                    payload: queued_work_trace_payload(
+                        crate::QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+                        &claim,
+                        &materialized.turn_causes,
+                    ),
+                },
+            );
             committed.extend(materialized.messages);
             transient_messages.extend(materialized.transient_messages);
             turn_causes.extend(materialized.turn_causes);

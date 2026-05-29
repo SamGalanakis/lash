@@ -200,7 +200,7 @@ pub use provider::{
 pub use runtime::TestLocalProcessRegistry;
 pub use runtime::{
     AgentFrameRun, AssembledTurn, AssistantOutput, CausalRef, CodeOutputRecord, DeliveryPolicy,
-    DirectCompletionClient, DirectRequestSpec, DurableProcessWorker, DurableProcessWorkerConfig,
+    DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig,
     EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary,
     InlineRuntimeEffectController, InputItem, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
     MergeKey, NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession,

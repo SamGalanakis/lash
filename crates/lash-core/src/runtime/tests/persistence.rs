@@ -1,5 +1,17 @@
 use super::*;
 
+// The in-memory `RecordingStore` stands in for the real store across these
+// runtime tests; the conformance suite holds it to the same durability
+// contract as the SQLite backend so it can't silently drift.
+#[tokio::test]
+async fn recording_store_satisfies_runtime_persistence_conformance() {
+    crate::testing::conformance::runtime_persistence(|| {
+        std::sync::Arc::new(RecordingStore::default())
+            as std::sync::Arc<dyn crate::RuntimePersistence>
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn standard_runtime_assembles_stream_only_text_response() {
     let transport = mock_provider(vec![MockCall {

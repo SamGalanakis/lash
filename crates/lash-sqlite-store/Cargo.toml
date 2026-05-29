@@ -27,6 +27,7 @@ tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12", features = ["testing"] }
 lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.12" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

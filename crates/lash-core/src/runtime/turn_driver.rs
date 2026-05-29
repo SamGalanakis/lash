@@ -12,6 +12,9 @@ mod surface;
 mod tools;
 mod trace;
 
+pub(in crate::runtime) use crate::runtime::turn_loop::{
+    queued_work_trace_payload, send_queued_work_started_event,
+};
 pub(super) use events::{emit_semantic_response_parts, send_session_event, send_turn_activity};
 pub(super) use trace::protocol_step_trace_event;
 

@@ -19,7 +19,8 @@ use lash_core::{
 };
 
 use lash_tool_support::{
-    StaticToolExecute, StaticToolProvider, canonicalize_under, object_schema, require_str,
+    StaticToolExecute, StaticToolProvider, canonicalize_under, object_schema,
+    parse_optional_usize_arg, require_str,
 };
 
 const DEFAULT_MAX_RESULTS: usize = 20;
@@ -1055,25 +1056,10 @@ fn looks_like_definition_line(line: &str) -> bool {
 }
 
 fn parse_limit(args: &serde_json::Value) -> Result<usize, ToolResult> {
-    match args.get("limit") {
-        None => Ok(DEFAULT_MAX_RESULTS),
-        Some(value) if value.is_null() => Ok(DEFAULT_MAX_RESULTS),
-        Some(value) => {
-            let parsed = value
-                .as_u64()
-                .map(|number| number as usize)
-                .or_else(|| value.as_f64().map(|number| number as usize))
-                .ok_or_else(|| {
-                    ToolResult::err_fmt(format_args!("Invalid limit: expected number"))
-                })?;
-            if parsed == 0 {
-                return Err(ToolResult::err_fmt(format_args!(
-                    "Invalid limit: must be >= 1"
-                )));
-            }
-            Ok(parsed)
-        }
-    }
+    Ok(
+        parse_optional_usize_arg(args, "limit", Some(DEFAULT_MAX_RESULTS), false, 1)?
+            .unwrap_or(DEFAULT_MAX_RESULTS),
+    )
 }
 
 fn cleanup_fuzzy_query(input: &str) -> String {
@@ -1424,7 +1410,10 @@ mod tests {
     use tempfile::TempDir;
 
     fn grep_provider_with_base_path(base_path: std::path::PathBuf) -> StaticToolProvider<Grep> {
-        StaticToolProvider::new(vec![grep_tool_definition()], Grep::with_base_path(base_path))
+        StaticToolProvider::new(
+            vec![grep_tool_definition()],
+            Grep::with_base_path(base_path),
+        )
     }
 
     #[test]

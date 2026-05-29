@@ -415,20 +415,11 @@ impl RuntimeEffectLocalRunner for LocalDirectEffectRunner {
         envelope: RuntimeEffectEnvelope,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         match envelope.command {
-            RuntimeEffectCommand::DirectCompletion {
-                normalized_request, ..
-            } => Ok(RuntimeEffectOutcome::DirectCompletion {
+            RuntimeEffectCommand::Direct { request, .. } => Ok(RuntimeEffectOutcome::Direct {
                 result: self
-                    .run_direct_llm_request((*normalized_request).into_request(None, None))
+                    .run_direct_llm_request((*request).into_request(None, None))
                     .await,
             }),
-            RuntimeEffectCommand::DirectLlmCompletion { request, .. } => {
-                Ok(RuntimeEffectOutcome::DirectLlmCompletion {
-                    result: self
-                        .run_direct_llm_request((*request).into_request(None, None))
-                        .await,
-                })
-            }
             RuntimeEffectCommand::Sleep { duration_ms } => {
                 sleep_with_cancellation(duration_ms, &CancellationToken::new()).await?;
                 Ok(RuntimeEffectOutcome::Sleep)

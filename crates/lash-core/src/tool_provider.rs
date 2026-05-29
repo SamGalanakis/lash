@@ -61,6 +61,7 @@ pub(crate) struct ToolProcessEventContext {
     registry: Arc<dyn crate::ProcessRegistry>,
     wake_target_scope: Option<crate::ProcessScope>,
     store: Option<Arc<dyn crate::RuntimePersistence>>,
+    host: Arc<dyn RuntimeSessionHost>,
 }
 
 pub(crate) struct ToolContextBuilder<'run> {
@@ -144,6 +145,7 @@ impl<'run> ToolContextBuilder<'run> {
             registry,
             wake_target_scope,
             store,
+            host: Arc::clone(&self.host),
         });
         self
     }
@@ -445,6 +447,12 @@ impl ToolPrepareContext {
 
     pub async fn tool_catalog(&self) -> Result<Vec<serde_json::Value>, PluginError> {
         self.host.tool_catalog(&self.session_id).await
+    }
+
+    pub async fn shared_tool_catalog(
+        &self,
+    ) -> Result<std::sync::Arc<Vec<serde_json::Value>>, PluginError> {
+        self.host.shared_tool_catalog(&self.session_id).await
     }
 }
 

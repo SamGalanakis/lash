@@ -22,6 +22,13 @@ pub trait RuntimeSessionHost: Send + Sync {
         ))
     }
 
+    async fn shared_tool_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<std::sync::Arc<Vec<serde_json::Value>>, PluginError> {
+        Ok(std::sync::Arc::new(self.tool_catalog(session_id).await?))
+    }
+
     async fn tool_state(&self, _session_id: &str) -> Result<crate::ToolState, PluginError> {
         Err(PluginError::Session(
             "tool state is unavailable in this session".to_string(),

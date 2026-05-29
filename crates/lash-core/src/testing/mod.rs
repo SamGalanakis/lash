@@ -4,6 +4,12 @@
 //! providing a configurable mock implementation plus a couple of small
 //! builders for common policy / turn fixtures.
 
+/// Backend-agnostic conformance suites for durable-backend traits
+/// (`ProcessRegistry`, …). Run the same suite against every implementation —
+/// production and in-memory double alike — so the trait contract has a single
+/// source of truth and the doubles cannot silently drift.
+pub mod conformance;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};

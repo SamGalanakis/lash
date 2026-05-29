@@ -129,6 +129,10 @@ impl<'run> RuntimeExecutionContext<'run> {
         &self.turn_context
     }
 
+    pub(crate) fn runtime_host(&self) -> &dyn crate::plugin::RuntimeSessionHost {
+        self.dispatch.host.as_ref()
+    }
+
     pub(super) async fn emit_turn_activity(
         &self,
         correlation_id: TurnActivityId,

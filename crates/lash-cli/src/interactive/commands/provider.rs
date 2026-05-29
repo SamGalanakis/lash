@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::LashConfig;
 use lash::control::SessionConfigPatch;
-use lash::{LashSession, advanced::ExecutionMode, provider::ProviderHandle};
+use lash::{LashSession, ModeId, provider::ProviderHandle};
 use lash_tui::Terminal;
 
 use crate::app::App;
@@ -199,7 +199,7 @@ pub(super) async fn handle_variant(
 pub(super) fn handle_mode(
     new_mode: Option<String>,
     app: &mut App,
-    current_execution_mode: &ExecutionMode,
+    current_execution_mode: &ModeId,
 ) -> anyhow::Result<bool> {
     let Some(new_mode) = new_mode else {
         push_system_message(

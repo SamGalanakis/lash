@@ -59,6 +59,10 @@ pub mod tools {
         ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult, ToolScheduling,
         ToolSourceHandle,
     };
+    /// Author a fixed-tool provider without hand-rolling `tool_manifests` /
+    /// `resolve_contract`: supply the [`ToolDefinition`]s once and an
+    /// [`StaticToolExecute`] for behavior.
+    pub use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 }
 
 pub mod direct {
@@ -128,15 +132,14 @@ pub mod messages {
 
 pub mod advanced {
     pub use crate::AdvancedLashCoreBuilder;
-    pub use crate::mode::ExecutionMode;
     pub use lash_core::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
     // Benchmarks and diagnostics still need a semantic harness facade for
     // preloaded state, event capture, plugin-stack presets, and graph seeding.
     // Do not expose runtime bridge internals here to fill that gap.
     pub use lash_core::{
-        AssembledTurn, DirectCompletionClient, DirectRequestSpec, DurableProcessWorker,
-        DurableProcessWorkerConfig, EmbeddedRuntimeHost, EventSink, InlineRuntimeEffectController,
-        LashRuntime, LlmAttachmentSpec, LlmRequestSpec, NoopEventSink, NoopTurnActivitySink,
+        AssembledTurn, DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig,
+        EmbeddedRuntimeHost, EventSink, InlineRuntimeEffectController, LashRuntime,
+        LlmAttachmentSpec, LlmRequestSpec, NoopEventSink, NoopTurnActivitySink,
         PersistentRuntimeServices, PluginMessage, ProcessHandleDescriptor, ProcessHandleGrant,
         ProcessHandleGrantEntry, ProcessInput, ProcessOpScope, ProcessRecord, ProcessRegistration,
         ProcessRegistry, ProcessScope, ProcessScopeId, ProcessService, ProcessSessionDeleteReport,
@@ -167,7 +170,17 @@ pub mod tracing {
         TraceProviderStreamEvent, TraceRecord, TraceRuntimeStreamEvent, TraceSinkError,
         TraceTokenUsage, TraceToolSpec,
     };
-    pub use lash_trace::{TraceContext, TraceLevel, TraceSink};
+    pub use lash_trace::{StderrTraceSink, TeeTraceSink, TraceContext, TraceLevel, TraceSink};
+}
+
+/// Test helpers for embedders. Enable with `lash = { ..., features = ["testing"] }`
+/// to script model responses in integration tests without a live provider.
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
+    /// Backend-agnostic conformance suites — validate a custom `ProcessRegistry`
+    /// or `RuntimePersistence` against the trait contract.
+    pub use lash_core::testing::conformance;
+    pub use lash_core::testing::{TestProvider, TestProviderBuilder};
 }
 
 pub mod provider {

@@ -1,4 +1,4 @@
-use lash::{LashSession, advanced::ExecutionMode, provider::ProviderHandle};
+use lash::{LashSession, ModeId, provider::ProviderHandle};
 use lash_core::session_model::Message;
 use lash_core::{SessionPolicy, ToolState};
 use lash_standard_plugins::StandardContextApproach;
@@ -25,7 +25,7 @@ async fn activate_opened_session(
     runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
-    current_execution_mode: &mut ExecutionMode,
+    current_execution_mode: &mut ModeId,
     current_model_variant: &mut Option<String>,
     desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
@@ -70,7 +70,7 @@ fn fallback_policy_for_session_switch(
     provider: &ProviderHandle,
     app: &App,
     current_model_variant: &mut Option<String>,
-    _current_execution_mode: &mut ExecutionMode,
+    _current_execution_mode: &mut ModeId,
 ) -> SessionPolicy {
     let model = lash_core::ModelSpec::from_token_limits(
         app.model.clone(),
@@ -88,9 +88,9 @@ fn fallback_policy_for_session_switch(
 }
 
 fn fallback_standard_context_approach(
-    current_execution_mode: &ExecutionMode,
+    current_execution_mode: &ModeId,
 ) -> Option<StandardContextApproach> {
-    (current_execution_mode == &ExecutionMode::standard()).then(StandardContextApproach::default)
+    (current_execution_mode == &ModeId::standard()).then(StandardContextApproach::default)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -105,7 +105,7 @@ pub(super) async fn handle_clear(
     active_stream_id: &mut u64,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    current_execution_mode: &mut ExecutionMode,
+    current_execution_mode: &mut ModeId,
     desired_tool_state: &mut ToolState,
     pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<bool> {
@@ -168,7 +168,7 @@ pub(super) async fn handle_retry(
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
-    current_execution_mode: &mut ExecutionMode,
+    current_execution_mode: &mut ModeId,
     desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     toolset_hash: &mut String,
@@ -328,7 +328,7 @@ pub(crate) async fn switch_to_session_identifier(
     turn_counter: &mut usize,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    current_execution_mode: &mut ExecutionMode,
+    current_execution_mode: &mut ModeId,
     desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
@@ -382,7 +382,7 @@ pub(super) async fn handle_resume(
     last_turn: &mut Option<TurnReplayPayload>,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    current_execution_mode: &mut ExecutionMode,
+    current_execution_mode: &mut ModeId,
     desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,

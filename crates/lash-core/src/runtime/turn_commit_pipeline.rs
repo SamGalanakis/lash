@@ -28,9 +28,33 @@ struct ProgressBoundarySnapshot<'a> {
 }
 
 pub(super) struct TurnCommitPipeline {
-    draft: Option<TurnCommitDraft>,
-    final_state: Option<RuntimeSessionState>,
-    final_graph_commit: Option<GraphCommitDelta>,
+    stage: TurnCommitStage,
+}
+
+/// Explicit two-phase lifecycle for a turn commit.
+///
+/// A pipeline starts in [`TurnCommitStage::Drafting`] while progress-boundary
+/// commits accumulate against a mutable [`TurnCommitDraft`]. The first call
+/// that needs the assembled session state transitions it (irreversibly) to
+/// [`TurnCommitStage::Finalized`], snapshotting the progress graph commit so
+/// later final commits can reconcile it against the materialized graph.
+enum TurnCommitStage {
+    Drafting(TurnCommitDraft),
+    Finalized {
+        state: RuntimeSessionState,
+        progress_graph_commit: GraphCommitDelta,
+    },
+}
+
+impl TurnCommitStage {
+    /// Cheap throwaway value used only to move out of `&mut self` during the
+    /// `Drafting` → `Finalized` transition.
+    fn placeholder() -> Self {
+        Self::Finalized {
+            state: RuntimeSessionState::default(),
+            progress_graph_commit: GraphCommitDelta::Unchanged { leaf_node_id: None },
+        }
+    }
 }
 
 struct FinalCommitInput<'a> {
@@ -72,29 +96,21 @@ impl PersistedGraphMark {
 impl TurnCommitPipeline {
     pub(super) fn from_state(state: RuntimeSessionState) -> Self {
         Self {
-            draft: Some(TurnCommitDraft::from_state(state)),
-            final_state: None,
-            final_graph_commit: None,
+            stage: TurnCommitStage::Drafting(TurnCommitDraft::from_state(state)),
         }
     }
 
     pub(super) fn state_mut(&mut self) -> &mut RuntimeSessionState {
-        match self.draft.as_mut() {
-            Some(draft) => draft.state_mut(),
-            None => self
-                .final_state
-                .as_mut()
-                .expect("turn commit pipeline final state must be present"),
+        match &mut self.stage {
+            TurnCommitStage::Drafting(draft) => draft.state_mut(),
+            TurnCommitStage::Finalized { state, .. } => state,
         }
     }
 
     pub(super) fn state(&self) -> &RuntimeSessionState {
-        match self.draft.as_ref() {
-            Some(draft) => draft.state(),
-            None => self
-                .final_state
-                .as_ref()
-                .expect("turn commit pipeline final state must be present"),
+        match &self.stage {
+            TurnCommitStage::Drafting(draft) => draft.state(),
+            TurnCommitStage::Finalized { state, .. } => state,
         }
     }
 
@@ -309,41 +325,47 @@ impl TurnCommitPipeline {
         Ok(())
     }
 
-    pub(super) fn into_final_state(mut self) -> RuntimeSessionState {
-        if let Some(state) = self.final_state.take() {
-            return state;
+    pub(super) fn into_final_state(self) -> RuntimeSessionState {
+        match self.stage {
+            TurnCommitStage::Drafting(draft) => draft.into_final_state(),
+            TurnCommitStage::Finalized { state, .. } => state,
         }
-        self.draft
-            .take()
-            .expect("turn commit pipeline draft must be present")
-            .into_final_state()
     }
 
     fn draft_ref(&self) -> &TurnCommitDraft {
-        self.draft
-            .as_ref()
-            .expect("turn commit draft is unavailable after final state materialization")
+        match &self.stage {
+            TurnCommitStage::Drafting(draft) => draft,
+            TurnCommitStage::Finalized { .. } => {
+                panic!("turn commit draft is unavailable after final state materialization")
+            }
+        }
     }
 
     fn draft_mut(&mut self) -> &mut TurnCommitDraft {
-        self.draft
-            .as_mut()
-            .expect("turn commit draft is unavailable after final state materialization")
+        match &mut self.stage {
+            TurnCommitStage::Drafting(draft) => draft,
+            TurnCommitStage::Finalized { .. } => {
+                panic!("turn commit draft is unavailable after final state materialization")
+            }
+        }
     }
 
     fn final_state_mut(&mut self) -> &mut RuntimeSessionState {
-        if self.final_state.is_none() {
-            let draft = self
-                .draft
-                .take()
-                .expect("turn commit pipeline draft must be present");
-            self.final_graph_commit =
-                Some(draft.graph_commit(draft.state().graph_replace_required));
-            self.final_state = Some(draft.into_final_state());
+        self.stage = match std::mem::replace(&mut self.stage, TurnCommitStage::placeholder()) {
+            TurnCommitStage::Drafting(draft) => {
+                let progress_graph_commit =
+                    draft.graph_commit(draft.state().graph_replace_required);
+                TurnCommitStage::Finalized {
+                    state: draft.into_final_state(),
+                    progress_graph_commit,
+                }
+            }
+            finalized => finalized,
+        };
+        match &mut self.stage {
+            TurnCommitStage::Finalized { state, .. } => state,
+            TurnCommitStage::Drafting(_) => unreachable!("stage was just finalized"),
         }
-        self.final_state
-            .as_mut()
-            .expect("turn commit pipeline final state must be present")
     }
 
     async fn commit_progress_graph(
@@ -386,11 +408,15 @@ impl TurnCommitPipeline {
         }
         materialize_terminal_output(state, outcome);
         materialize_agent_frame_switch(state, outcome, tool_calls);
-        let progress_graph = self
-            .draft
-            .as_ref()
-            .map(|draft| draft.graph_commit(draft.state().graph_replace_required))
-            .or_else(|| self.final_graph_commit.clone());
+        let progress_graph = match &self.stage {
+            TurnCommitStage::Drafting(draft) => {
+                Some(draft.graph_commit(draft.state().graph_replace_required))
+            }
+            TurnCommitStage::Finalized {
+                progress_graph_commit,
+                ..
+            } => Some(progress_graph_commit.clone()),
+        };
         let state = self.final_state_mut();
 
         if let Some(store) = store {
@@ -449,7 +475,7 @@ impl TurnCommitPipeline {
         commit.completed_queue_claims = completed_queue_claims;
         let result = store.commit_runtime_state(commit).await?;
         state.apply_persisted_commit_result(result);
-        if let Some(draft) = self.draft.as_mut() {
+        if let TurnCommitStage::Drafting(draft) = &mut self.stage {
             match mark {
                 PersistedGraphMark::Unchanged => {}
                 PersistedGraphMark::Append(node_ids) => {

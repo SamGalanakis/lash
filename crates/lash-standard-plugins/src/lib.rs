@@ -10,7 +10,7 @@ use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
 use lash_plugin_tool_output_budget::{ToolOutputBudgetPluginFactory, tool_output_budget_stack};
 use lash_tool_apply_patch::apply_patch_provider;
-use lash_tool_files::{ReadFilePluginFactory, glob_provider, ls_provider};
+use lash_tool_files::{glob_provider, ls_provider, read_file_provider};
 use lash_tool_search::grep_provider;
 use lash_tool_shell::StandardShellPluginFactory;
 use lash_tool_web::{fetch_url_provider, web_search_provider};
@@ -110,7 +110,11 @@ fn push_local_runtime_tools(stack: &mut PluginStack, include_cancel_process: boo
         PluginSpec::new()
             .with_tool_provider(Arc::new(apply_patch_provider()) as Arc<dyn ToolProvider>),
     )));
-    stack.push(Arc::new(ReadFilePluginFactory::new()));
+    stack.push(Arc::new(StaticPluginFactory::new(
+        "read_file",
+        PluginSpec::new()
+            .with_tool_provider(Arc::new(read_file_provider()) as Arc<dyn ToolProvider>),
+    )));
     stack.push(Arc::new(StaticPluginFactory::new(
         "glob",
         PluginSpec::new().with_tool_provider(Arc::new(glob_provider()) as Arc<dyn ToolProvider>),

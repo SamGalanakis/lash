@@ -20,11 +20,6 @@ impl LashRuntime {
             self.state.plugin_snapshot_revision = None;
         }
     }
-    pub(super) fn active_tool_catalog(&self) -> Result<Vec<serde_json::Value>, crate::PluginError> {
-        self.active_tool_catalog_shared()
-            .map(|catalog| catalog.as_ref().clone())
-    }
-
     pub(super) fn active_tool_catalog_shared(
         &self,
     ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {

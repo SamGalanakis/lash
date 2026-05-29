@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lash::advanced::ExecutionMode;
+use lash::ModeId;
 use lash::provider::ProviderHandle;
 #[cfg(test)]
 use lash_sqlite_store::Store;
@@ -239,11 +239,11 @@ fn parse_variant_input(input: &str) -> Result<String, String> {
     Ok(trimmed.to_ascii_lowercase())
 }
 
-pub(crate) fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String> {
+pub(crate) fn parse_execution_mode(input: &str) -> Result<ModeId, String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "" => Err("Execution mode cannot be empty.".to_string()),
-        "rlm" => Ok(ExecutionMode::rlm()),
-        "standard" | "tools" => Ok(ExecutionMode::standard()),
+        "rlm" => Ok(ModeId::rlm()),
+        "standard" | "tools" => Ok(ModeId::standard()),
         other => Err(format!(
             "Unknown execution mode `{other}`. Expected `rlm` or `standard`."
         )),
@@ -372,13 +372,11 @@ pub(crate) fn execution_mode_usage() -> &'static str {
     "<rlm|standard>"
 }
 
-pub(crate) fn ensure_supported_execution_mode(
-    mode: ExecutionMode,
-) -> Result<ExecutionMode, String> {
+pub(crate) fn ensure_supported_execution_mode(mode: ModeId) -> Result<ModeId, String> {
     Ok(mode)
 }
 
-pub(crate) fn execution_mode_label(mode: &ExecutionMode) -> &str {
+pub(crate) fn execution_mode_label(mode: &ModeId) -> &str {
     mode.as_str()
 }
 
@@ -529,7 +527,7 @@ lash-sansio {}",
     )
 }
 
-pub(crate) fn info_text_unconfigured(execution_mode: &ExecutionMode, cwd: &str) -> String {
+pub(crate) fn info_text_unconfigured(execution_mode: &ModeId, cwd: &str) -> String {
     [
         format!("lash-cli: {}", crate::APP_VERSION),
         format!("lash-sansio: {}", lash_core::SANSIO_VERSION),
@@ -549,7 +547,7 @@ pub(crate) fn info_text(
     provider: &ProviderHandle,
     configured_model: &str,
     model_variant: Option<&str>,
-    execution_mode: &ExecutionMode,
+    execution_mode: &ModeId,
     standard_context_approach: Option<&StandardContextApproach>,
     context_window: Option<u64>,
     tool_summary: Option<(usize, &str)>,
@@ -572,7 +570,7 @@ pub(crate) fn info_text(
         format!("resolved model: {}", resolved_model),
         format!("execution mode: {}", execution_mode_label(execution_mode)),
     ];
-    if *execution_mode == ExecutionMode::standard()
+    if *execution_mode == ModeId::standard()
         && let Some(standard_context_approach) = standard_context_approach
     {
         lines.push(format!(
@@ -816,6 +814,35 @@ pub(crate) fn shell_escape_command(input: &str) -> Option<&str> {
         .filter(|cmd| !cmd.is_empty())
 }
 
+/// Normalize a text selection into `(start, end)` in reading order
+/// regardless of drag direction. Shared by the history and live-draw
+/// renderers.
+pub(crate) fn selection_ordered(sel: &crate::app::TextSelection) -> ((u16, usize), (u16, usize)) {
+    let (ax, ay) = sel.anchor;
+    let (ex, ey) = sel.end;
+    if ay < ey || (ay == ey && ax <= ex) {
+        ((ax, ay), (ex, ey))
+    } else {
+        ((ex, ey), (ax, ay))
+    }
+}
+
+/// Center a `width`×`height` rectangle inside `area`, clamping to the
+/// available space. Shared by every popup/overlay layout.
+pub(crate) fn centered_rect(area: lash_tui::Rect, width: u16, height: u16) -> lash_tui::Rect {
+    lash_tui::Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+/// Terminal-cell display width of `text` (wide-character aware).
+pub(crate) fn display_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -956,7 +983,7 @@ mod tests {
             &provider,
             "google/gemini-3-flash-preview",
             None,
-            &ExecutionMode::rlm(),
+            &ModeId::rlm(),
             None,
             Some(123_000),
             Some((7, "abcd1234")),

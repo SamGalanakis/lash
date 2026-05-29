@@ -214,7 +214,7 @@ pub(super) async fn dispatch_next_queued_turn(
     active_stream_id: &mut u64,
     _provider: &mut ProviderHandle,
     _current_model_variant: &mut Option<String>,
-    current_execution_mode: &mut ExecutionMode,
+    current_execution_mode: &mut ModeId,
     desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     _model_catalog: &CachedModelCatalog,
@@ -291,7 +291,7 @@ pub(super) async fn handle_parsed_slash_command(
     active_stream_id: &mut u64,
     provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
-    current_execution_mode: &mut ExecutionMode,
+    current_execution_mode: &mut ModeId,
     desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
@@ -355,7 +355,7 @@ async fn handle_slash_command(
     active_stream_id: &mut u64,
     provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
-    current_execution_mode: &mut ExecutionMode,
+    current_execution_mode: &mut ModeId,
     desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
@@ -392,7 +392,7 @@ async fn handle_slash_command(
             let context_window = app.usage.context_window;
             let cwd = app.cwd.clone();
             let session_name = app.session_name.clone();
-            let standard_context_approach = (current_execution_mode == &ExecutionMode::standard())
+            let standard_context_approach = (current_execution_mode == &ModeId::standard())
                 .then(lash_standard_plugins::StandardContextApproach::default);
             let session_db_path = logger.db_path().to_string_lossy().to_string();
             push_system_message(

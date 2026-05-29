@@ -9,10 +9,10 @@ use crate::llm::types::{
 };
 use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
 use crate::{
-    AttachmentCreateMeta, AttachmentRef, AttachmentStore, CheckpointDelivery, DirectMessage,
-    DirectOutputSpec, DirectRequest, ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse,
-    MediaType, ProcessAwaitOutput, ProcessExecutionContext, ProcessHandleGrantEntry, ProcessRecord,
-    ProcessRegistration, ProcessScope, ProcessStartGrant,
+    AttachmentCreateMeta, AttachmentRef, AttachmentStore, CheckpointDelivery, ExecResponse,
+    LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
+    ProcessExecutionContext, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistration,
+    ProcessScope, ProcessStartGrant,
 };
 
 use super::executor::RuntimeEffectControllerError;
@@ -22,8 +22,7 @@ use super::executor::RuntimeEffectControllerError;
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeEffectKind {
     LlmCall,
-    DirectCompletion,
-    DirectLlmCompletion,
+    Direct,
     ToolCall,
     Process,
     ExecCode,
@@ -36,8 +35,7 @@ impl RuntimeEffectKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LlmCall => "llm_call",
-            Self::DirectCompletion => "direct_completion",
-            Self::DirectLlmCompletion => "direct_llm_completion",
+            Self::Direct => "direct",
             Self::ToolCall => "tool_call",
             Self::Process => "process",
             Self::ExecCode => "exec_code",
@@ -302,13 +300,7 @@ pub enum RuntimeEffectCommand {
     LlmCall {
         request: Box<LlmRequestSpec>,
     },
-    DirectCompletion {
-        request: Box<DirectRequestSpec>,
-        normalized_request: Box<LlmRequestSpec>,
-        model: String,
-        usage_source: String,
-    },
-    DirectLlmCompletion {
+    Direct {
         request: Box<LlmRequestSpec>,
         usage_source: String,
     },
@@ -336,8 +328,7 @@ impl RuntimeEffectCommand {
     pub fn kind(&self) -> RuntimeEffectKind {
         match self {
             Self::LlmCall { .. } => RuntimeEffectKind::LlmCall,
-            Self::DirectCompletion { .. } => RuntimeEffectKind::DirectCompletion,
-            Self::DirectLlmCompletion { .. } => RuntimeEffectKind::DirectLlmCompletion,
+            Self::Direct { .. } => RuntimeEffectKind::Direct,
             Self::ToolCall { .. } => RuntimeEffectKind::ToolCall,
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
@@ -443,10 +434,7 @@ pub enum RuntimeEffectOutcome {
         result: Result<LlmResponse, LlmCallError>,
         text_streamed: bool,
     },
-    DirectCompletion {
-        result: Result<LlmResponse, LlmCallError>,
-    },
-    DirectLlmCompletion {
+    Direct {
         result: Result<LlmResponse, LlmCallError>,
     },
     ToolCall {
@@ -495,7 +483,7 @@ pub struct LlmRequestSpec {
     pub model: String,
     pub messages: Vec<LlmMessage>,
     pub attachments: Vec<LlmAttachmentSpec>,
-    pub tools: Vec<LlmToolSpec>,
+    pub tools: Arc<Vec<LlmToolSpec>>,
     pub tool_choice: LlmToolChoice,
     pub model_variant: Option<String>,
     #[serde(default)]
@@ -513,7 +501,7 @@ impl LlmRequestSpec {
             model: request.model.clone(),
             messages: request.messages.clone(),
             attachments: attachment_specs_from_attachments(&request.attachments, attachment_store)?,
-            tools: request.tools.iter().cloned().collect(),
+            tools: Arc::clone(&request.tools),
             tool_choice: request.tool_choice.clone(),
             model_variant: request.model_variant.clone(),
             generation: request.generation.clone(),
@@ -535,7 +523,7 @@ impl LlmRequestSpec {
                 .into_iter()
                 .map(LlmAttachmentSpec::into_attachment)
                 .collect(),
-            tools: Arc::new(self.tools),
+            tools: self.tools,
             tool_choice: self.tool_choice,
             model_variant: self.model_variant,
             generation: self.generation,
@@ -543,60 +531,6 @@ impl LlmRequestSpec {
             output_spec: self.output_spec,
             stream_events,
             provider_trace,
-        }
-    }
-}
-
-/// Serializable direct request data. Caller-provided stream callbacks remain
-/// local process state and are reattached by local direct executors.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DirectRequestSpec {
-    pub model: String,
-    pub model_variant: Option<String>,
-    #[serde(default)]
-    pub generation: crate::GenerationOptions,
-    pub messages: Vec<DirectMessage>,
-    pub attachments: Vec<LlmAttachmentSpec>,
-    pub output: DirectOutputSpec,
-    pub session_id: Option<String>,
-    pub caused_by: Option<CausalRef>,
-    pub replay: Option<RuntimeReplay>,
-}
-
-impl DirectRequestSpec {
-    pub fn from_request(
-        request: &DirectRequest,
-        attachment_store: &dyn AttachmentStore,
-    ) -> Result<Self, RuntimeEffectControllerError> {
-        Ok(Self {
-            model: request.model.clone(),
-            model_variant: request.model_variant.clone(),
-            generation: request.generation.clone(),
-            messages: request.messages.clone(),
-            attachments: attachment_specs_from_attachments(&request.attachments, attachment_store)?,
-            output: request.output.clone(),
-            session_id: request.session_id.clone(),
-            caused_by: request.caused_by.clone(),
-            replay: request.replay.clone(),
-        })
-    }
-
-    pub fn into_request(self, stream_events: Option<LlmEventSender>) -> DirectRequest {
-        DirectRequest {
-            model: self.model,
-            model_variant: self.model_variant,
-            generation: self.generation,
-            messages: self.messages,
-            attachments: self
-                .attachments
-                .into_iter()
-                .map(LlmAttachmentSpec::into_attachment)
-                .collect(),
-            output: self.output,
-            stream_events,
-            session_id: self.session_id,
-            caused_by: self.caused_by,
-            replay: self.replay,
         }
     }
 }
@@ -665,25 +599,13 @@ impl RuntimeEffectOutcome {
         }
     }
 
-    pub fn into_direct_completion_response(
+    pub fn into_direct_response(
         self,
     ) -> Result<Result<LlmResponse, LlmCallError>, RuntimeEffectControllerError> {
         match self {
-            Self::DirectCompletion { result } => Ok(result),
+            Self::Direct { result } => Ok(result),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
-                RuntimeEffectKind::DirectCompletion,
-                other.kind(),
-            )),
-        }
-    }
-
-    pub fn into_direct_llm_completion_response(
-        self,
-    ) -> Result<Result<LlmResponse, LlmCallError>, RuntimeEffectControllerError> {
-        match self {
-            Self::DirectLlmCompletion { result } => Ok(result),
-            other => Err(RuntimeEffectControllerError::wrong_outcome(
-                RuntimeEffectKind::DirectLlmCompletion,
+                RuntimeEffectKind::Direct,
                 other.kind(),
             )),
         }
@@ -746,8 +668,7 @@ impl RuntimeEffectOutcome {
     pub fn kind(&self) -> RuntimeEffectKind {
         match self {
             Self::LlmCall { .. } => RuntimeEffectKind::LlmCall,
-            Self::DirectCompletion { .. } => RuntimeEffectKind::DirectCompletion,
-            Self::DirectLlmCompletion { .. } => RuntimeEffectKind::DirectLlmCompletion,
+            Self::Direct { .. } => RuntimeEffectKind::Direct,
             Self::ToolCall { .. } => RuntimeEffectKind::ToolCall,
             Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,

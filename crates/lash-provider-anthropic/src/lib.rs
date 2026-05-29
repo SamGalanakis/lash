@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 
 use lash_core::llm::transport::{LlmTransportError, validate_image_attachments};
 use lash_core::llm::types::{
-    LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmUsage, ProviderReasoningReplay,
+    LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse,
+    LlmRole, LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmUsage, ProviderReasoningReplay,
 };
 use lash_core::provider::{
     CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderModelPolicy,
@@ -123,7 +123,7 @@ impl AnthropicProvider {
     fn text_block_value(text: &str, cache_breakpoint: bool) -> Value {
         let mut block = json!({
             "type": "text",
-            "text": sanitize_surrogates(text),
+            "text": text,
         });
         if cache_breakpoint {
             block["__lash_cache_breakpoint"] = json!(true);
@@ -194,7 +194,7 @@ impl AnthropicProvider {
                 }
                 Some(json!({
                     "type": "thinking",
-                    "thinking": sanitize_surrogates(text),
+                    "thinking": text,
                     "signature": sig,
                 }))
             }
@@ -386,7 +386,7 @@ impl AnthropicProvider {
         let mut system_value: Option<Value> = system_text.map(|text| {
             json!([{
                 "type": "text",
-                "text": sanitize_surrogates(&text),
+                "text": text,
             }])
         });
 
@@ -501,15 +501,6 @@ impl AnthropicProvider {
             reasoning_tokens: 0,
         }
     }
-}
-
-/// Replace lone surrogate code units with U+FFFD so the Anthropic API, which
-/// strictly validates UTF-8, doesn't reject the request. Normal BMP text
-/// passes through untouched.
-fn sanitize_surrogates(s: &str) -> String {
-    s.chars()
-        .map(|c| if c == '\u{FFFD}' { '\u{FFFD}' } else { c })
-        .collect()
 }
 
 /// Join all `Text` blocks in a message into a single string, separated by

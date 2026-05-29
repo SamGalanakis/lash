@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::Event as TermEvent;
-use lash::{LashSession, TurnEvent, advanced::ExecutionMode, provider::ProviderHandle};
+use lash::{LashSession, ModeId, TurnEvent, provider::ProviderHandle};
 use lash_core::session_model::Message;
 use lash_core::{TokenUsage, ToolState};
 use lash_sqlite_store::Store;
@@ -27,7 +27,6 @@ use crate::resume;
 use crate::session_bootstrap::CliSessionOpener;
 use crate::session_log::{self, SessionLogger};
 use crate::turn_runner::{RuntimeRunResult, make_turn_input};
-use crate::ui_action::UiAction;
 use crate::ui_trace::{
     UiTraceRecorder, disable_aux_op_recording, enable_aux_op_recording, render_screen_text,
 };
@@ -52,7 +51,7 @@ use self::runtime::{apply_pending_reconfigure, send_user_message, sync_runtime_t
 pub(crate) use self::runtime::{generate_session_name, notify_desktop};
 
 use self::input_handling::{
-    apply_terminal_action, handle_key_event, handle_mouse_event, handle_surface_input,
+    SessionCtx, dispatch_key_event, handle_mouse_event, handle_surface_input,
 };
 
 // Items used only by tests via `use super::*;` in tests.rs.
@@ -87,7 +86,7 @@ pub(crate) async fn run_app(
     _store: Arc<Store>,
     mut toolset_hash: String,
     initial_model_variant: Option<String>,
-    initial_execution_mode: ExecutionMode,
+    initial_execution_mode: ModeId,
     startup_system_message: Option<String>,
 ) -> anyhow::Result<()> {
     let initial_session_id = session.session_id();
@@ -693,11 +692,7 @@ pub(crate) async fn run_app(
                         if let Some(recorder) = ui_trace.as_mut() {
                             recorder.record_prompt_insert_text(text.clone());
                         }
-                        let _ = apply_terminal_action(
-                            &mut app,
-                            &terminal,
-                            UiAction::PromptInsertText(text),
-                        );
+                        app.prompt_insert_text(&text);
                     }
                     // Prompt modal is focused: swallow pastes that don't
                     // belong in its text field instead of leaking them
@@ -719,11 +714,8 @@ pub(crate) async fn run_app(
                 if let Some(recorder) = ui_trace.as_mut() {
                     recorder.record_input_insert_text(text.clone());
                 }
-                let _ = apply_terminal_action(
-                    &mut app,
-                    &terminal,
-                    UiAction::InputInsertPastedText(text),
-                );
+                app.insert_pasted_text(&text);
+                app.update_suggestions();
             }
             AppEvent::ClipboardImageReady { id, png } => {
                 app.dirty = true;
@@ -761,36 +753,34 @@ pub(crate) async fn run_app(
                 }
             }
             AppEvent::Terminal(TermEvent::Key(key)) => {
-                if handle_key_event(
-                    key,
-                    &mut app,
-                    &mut terminal,
-                    &mut ui_trace,
-                    logger,
+                let mut ctx = SessionCtx {
+                    app: &mut app,
+                    terminal: &mut terminal,
+                    ui_trace: &mut ui_trace,
+                    logger: &mut *logger,
                     args,
-                    &paused,
-                    ui_extensions.as_ref(),
-                    &runtime_factory,
-                    &lash_config,
-                    &mut runtime,
-                    &mut history,
-                    &mut turn_counter,
-                    &mut last_turn,
-                    &mut runtime_return_rx,
-                    &mut cancel_token,
-                    &mut active_stream_id,
-                    &mut provider,
-                    &mut current_model_variant,
-                    &mut current_execution_mode,
-                    &mut desired_tool_state,
-                    &mut pending_reconfigure,
-                    model_catalog.as_ref(),
-                    &mut toolset_hash,
-                    &app_tx,
-                    &mut pending_clear_after_return,
-                )
-                .await?
-                {
+                    paused: &paused,
+                    ui_extensions: ui_extensions.as_ref(),
+                    runtime_factory: &runtime_factory,
+                    lash_config: &lash_config,
+                    runtime: &mut runtime,
+                    history: &mut history,
+                    turn_counter: &mut turn_counter,
+                    last_turn: &mut last_turn,
+                    runtime_return_rx: &mut runtime_return_rx,
+                    cancel_token: &mut cancel_token,
+                    active_stream_id: &mut active_stream_id,
+                    provider: &mut provider,
+                    current_model_variant: &mut current_model_variant,
+                    current_execution_mode: &mut current_execution_mode,
+                    desired_tool_state: &mut desired_tool_state,
+                    pending_reconfigure: &mut pending_reconfigure,
+                    model_catalog: model_catalog.as_ref(),
+                    toolset_hash: &mut toolset_hash,
+                    app_tx: &app_tx,
+                    pending_clear_after_return: &mut pending_clear_after_return,
+                };
+                if dispatch_key_event(key, &mut ctx).await? {
                     break;
                 }
             }

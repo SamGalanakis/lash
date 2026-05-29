@@ -2468,7 +2468,6 @@ dependencies = [
 name = "lash-openai-schema"
 version = "0.1.0-alpha.12"
 dependencies = [
- "lash-sansio",
  "serde",
  "serde_json",
 ]
@@ -2726,6 +2725,7 @@ dependencies = [
  "lash-protocol-standard",
  "lash-rlm-types",
  "lash-sqlite-store",
+ "lash-tool-support",
  "lash-trace",
  "serde",
  "serde_json",

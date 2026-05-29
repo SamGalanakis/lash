@@ -91,10 +91,7 @@ fn rlm_definitions_expose_spawn_without_mini_api() {
 
     assert!(rlm_defs.iter().any(|tool| tool.name() == "spawn_agent"));
     assert_eq!(
-        rlm_defs
-            .iter()
-            .map(|tool| tool.name())
-            .collect::<Vec<_>>(),
+        rlm_defs.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
         vec!["spawn_agent"]
     );
 
@@ -671,7 +668,12 @@ fn subagent_surface_reports_authority_notes() {
     ];
     let contracts = tools
         .iter()
-        .map(|tool| (tool.name().to_string(), std::sync::Arc::new(tool.contract())))
+        .map(|tool| {
+            (
+                tool.name().to_string(),
+                std::sync::Arc::new(tool.contract()),
+            )
+        })
         .collect::<std::collections::BTreeMap<_, _>>();
     let ctx = ToolSurfaceContext {
         session_id: "child".to_string(),

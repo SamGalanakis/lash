@@ -6,13 +6,11 @@ use serde_json::{Value, json};
 
 use lash_core::SchemaProjectionOverride;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
-use lash_core::llm::types::{
-    LlmContentBlock, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent,
-    LlmTerminalReason, LlmUsage,
-};
+use lash_core::llm::types::{LlmOutputSpec, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
 use lash_core::provider::{
-    CacheRetention, Provider, ProviderComponents, ProviderFactory, ProviderFailureClassifier,
-    ProviderModelPolicy, ProviderOptions, ProviderReliability, resolve_generation_policy,
+    CacheRetention, DefaultProviderFailureClassifier, Provider, ProviderComponents,
+    ProviderFactory, ProviderFailureClassifier, ProviderModelPolicy, ProviderOptions,
+    ProviderReliability, resolve_generation_policy,
 };
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::{
@@ -99,16 +97,6 @@ impl CodexProvider {
         self
     }
 
-    /// Detect pi's "usage limit reached" marker in an error body.
-    /// Pi matches the literal string `"type":"usage_limit_reached"` (see
-    /// `openai-codex-responses.ts:891`, which tests `/usage_limit_reached/`).
-    fn is_usage_limit_error(body_text: &str) -> bool {
-        // JSON serialisers don't insert whitespace between `"type":` and the value,
-        // but be lenient across a single space just in case.
-        body_text.contains("\"type\":\"usage_limit_reached\"")
-            || body_text.contains("\"type\": \"usage_limit_reached\"")
-    }
-
     /// Translate a Codex error body into a user-friendly one-line message.
     /// Mirrors pi-mono's `openai-codex-responses.ts:880-904`: for a
     /// `usage_limit_reached`/`rate_limit_exceeded` code (or any 429),
@@ -161,7 +149,9 @@ impl CodexProvider {
             Some(m) => format!(" Try again in ~{m} min."),
             None => String::new(),
         };
-        Some(format!("You have hit your ChatGPT usage limit{plan}.{when}"))
+        Some(format!(
+            "You have hit your ChatGPT usage limit{plan}.{when}"
+        ))
     }
 
     fn should_parse_stream(stream_requested: bool, content_type: Option<&str>) -> bool {
@@ -189,311 +179,6 @@ impl CodexProvider {
         ))
         .retryable(err.retryable)
         .with_code(code)
-    }
-
-    fn build_input(req: &LlmRequest) -> (String, Vec<Value>) {
-        let mut input = Vec::new();
-        let mut instructions: Vec<String> = Vec::new();
-
-        for msg in &req.messages {
-            // System-role messages are hoisted into the Codex Responses
-            // `instructions` top-level field rather than appearing in the
-            // input array.
-            if matches!(msg.role, LlmRole::System) {
-                for block in msg.blocks.iter() {
-                    if let LlmContentBlock::Text { text, .. } = block
-                        && !text.is_empty()
-                    {
-                        instructions.push(text.to_string());
-                    }
-                }
-                continue;
-            }
-
-            // Per-message input items are emitted in block order. Text and
-            // image blocks accumulate into a single role-typed content
-            // message that gets flushed before the next tool/reasoning
-            // item so the wire ordering matches pi's shape.
-            let role_str = shared::role_name(&msg.role);
-            let mut pending_content: Vec<Value> = Vec::new();
-
-            // Pre-compute which blocks have already been folded into an
-            // earlier ToolResult's `output` so we don't double-emit them.
-            let mut consumed_after_tool_result: std::collections::HashSet<usize> =
-                std::collections::HashSet::new();
-            for (idx, block) in msg.blocks.iter().enumerate() {
-                let LlmContentBlock::ToolResult { .. } = block else {
-                    continue;
-                };
-                for (j, sibling) in msg.blocks.iter().enumerate().skip(idx + 1) {
-                    match sibling {
-                        LlmContentBlock::Image { .. } => {
-                            consumed_after_tool_result.insert(j);
-                        }
-                        LlmContentBlock::Text { text: t, .. } if t.starts_with("[Tool image:") => {
-                            consumed_after_tool_result.insert(j);
-                        }
-                        _ => break,
-                    }
-                }
-            }
-
-            for (block_idx, block) in msg.blocks.iter().enumerate() {
-                if consumed_after_tool_result.contains(&block_idx) {
-                    continue;
-                }
-                match block {
-                    LlmContentBlock::Text { text, .. } => {
-                        if text.is_empty() {
-                            continue;
-                        }
-                        let part_type = match msg.role {
-                            LlmRole::Assistant => "output_text",
-                            _ => "input_text",
-                        };
-                        pending_content.push(json!({
-                            "type": part_type,
-                            "text": text,
-                        }));
-                    }
-                    LlmContentBlock::Image { attachment_idx } => {
-                        let Some(att) = req.attachments.get(*attachment_idx) else {
-                            continue;
-                        };
-                        if matches!(msg.role, LlmRole::User) {
-                            pending_content.push(shared::input_image_part(att));
-                        }
-                    }
-                    LlmContentBlock::Reasoning { text, replay } => {
-                        Self::flush_pending_content(
-                            &mut pending_content,
-                            &mut input,
-                            role_str,
-                            matches!(msg.role, LlmRole::User),
-                        );
-                        let payload = replay
-                            .as_ref()
-                            .and_then(|meta| meta.encrypted_content.as_deref());
-                        // Only replay reasoning items that actually carry a
-                        // Codex-style encrypted blob. Display-only summaries
-                        // (no blob) must not be fed back — the server will
-                        // either ignore them or reject the turn.
-                        let Some(blob) = payload else {
-                            continue;
-                        };
-                        let summary = replay
-                            .as_ref()
-                            .map(|meta| meta.summary.as_slice())
-                            .unwrap_or_default();
-                        let summary_items: Vec<Value> = if summary.is_empty() {
-                            if text.is_empty() {
-                                Vec::new()
-                            } else {
-                                vec![json!({"type": "summary_text", "text": text})]
-                            }
-                        } else {
-                            summary
-                                .iter()
-                                .map(|entry| json!({"type": "summary_text", "text": entry}))
-                                .collect()
-                        };
-                        let mut item = json!({
-                            "type": "reasoning",
-                            "summary": summary_items,
-                            "encrypted_content": blob,
-                        });
-                        if let Some(id) = replay.as_ref().and_then(|meta| meta.item_id.as_deref())
-                            && !id.is_empty()
-                        {
-                            item["id"] = json!(id);
-                        }
-                        input.push(item);
-                    }
-                    LlmContentBlock::ToolCall {
-                        call_id,
-                        tool_name,
-                        input_json,
-                        replay,
-                    } => {
-                        Self::flush_pending_content(
-                            &mut pending_content,
-                            &mut input,
-                            role_str,
-                            matches!(msg.role, LlmRole::User),
-                        );
-                        let mut item = json!({
-                            "type": "function_call",
-                            "call_id": call_id,
-                            "name": tool_name,
-                            "arguments": input_json,
-                        });
-                        // Codex uses `id` (e.g. `fc_...`) to pair
-                        // function_call items with their sibling reasoning
-                        // items across turns. Omit when absent so we don't
-                        // send a bogus id.
-                        if let Some(id) = replay.as_ref().and_then(|meta| meta.item_id.as_deref()) {
-                            item["id"] = json!(id);
-                        }
-                        input.push(item);
-                    }
-                    LlmContentBlock::ToolResult {
-                        call_id, content, ..
-                    } => {
-                        Self::flush_pending_content(
-                            &mut pending_content,
-                            &mut input,
-                            role_str,
-                            matches!(msg.role, LlmRole::User),
-                        );
-                        // Look ahead in THIS message for sibling image
-                        // blocks (plus optional placeholder text) so the
-                        // image rides in the tool_result's `output` array.
-                        // Matches pi's tool-result-with-image shape.
-                        let mut image_parts: Vec<Value> = Vec::new();
-                        for sibling in msg
-                            .blocks
-                            .iter()
-                            .skip_while(|b| {
-                                !matches!(
-                                    b,
-                                    LlmContentBlock::ToolResult { call_id: id, .. }
-                                        if id == call_id
-                                )
-                            })
-                            .skip(1)
-                        {
-                            match sibling {
-                                LlmContentBlock::Image { attachment_idx } => {
-                                    if let Some(att) = req.attachments.get(*attachment_idx) {
-                                        image_parts.push(shared::input_image_part(att));
-                                    }
-                                }
-                                LlmContentBlock::Text { text: t, .. }
-                                    if t.starts_with("[Tool image:") =>
-                                {
-                                    // placeholder — consume silently
-                                }
-                                _ => break,
-                            }
-                        }
-
-                        if image_parts.is_empty() {
-                            input.push(json!({
-                                "type": "function_call_output",
-                                "call_id": call_id,
-                                "output": content,
-                            }));
-                        } else {
-                            let mut parts: Vec<Value> = Vec::new();
-                            if !content.is_empty() {
-                                parts.push(json!({
-                                    "type": "input_text",
-                                    "text": content,
-                                }));
-                            }
-                            parts.extend(image_parts);
-                            input.push(json!({
-                                "type": "function_call_output",
-                                "call_id": call_id,
-                                "output": parts,
-                            }));
-                        }
-                    }
-                }
-            }
-            Self::flush_pending_content(
-                &mut pending_content,
-                &mut input,
-                role_str,
-                matches!(msg.role, LlmRole::User),
-            );
-
-            // Fold any user-role Image blocks that shared a message with
-            // tool_result blocks into the preceding function_call_output's
-            // `output` as a structured {input_text, input_image} array —
-            // matches pi's "tool_result images" shape.
-            if matches!(msg.role, LlmRole::User) {
-                Self::fold_tool_result_images(&mut input);
-            }
-        }
-        (instructions.join("\n\n"), input)
-    }
-
-    fn flush_pending_content(
-        pending: &mut Vec<Value>,
-        input: &mut Vec<Value>,
-        role_str: &'static str,
-        is_user: bool,
-    ) {
-        if pending.is_empty() {
-            return;
-        }
-        let content = std::mem::take(pending);
-        if is_user
-            && let Some(prev) = input.last_mut()
-            && prev.get("role").and_then(|r| r.as_str()) == Some("user")
-            && prev.get("content").is_some_and(|c| c.is_array())
-        {
-            prev["content"].as_array_mut().unwrap().extend(content);
-        } else {
-            input.push(json!({
-                "role": role_str,
-                "content": content,
-            }));
-        }
-    }
-
-    /// Walk backwards from the last input item: if the final entry is a
-    /// user `content` message whose parts are all `input_image`, and the
-    /// entry before it is a `function_call_output`, promote the image
-    /// parts into the `output` of that function_call_output so the Codex
-    /// server sees the image as the tool's result rather than as a
-    /// standalone user turn.
-    fn fold_tool_result_images(input: &mut Vec<Value>) {
-        if input.len() < 2 {
-            return;
-        }
-        let last_idx = input.len() - 1;
-        let is_user_image_msg = input[last_idx].get("role").and_then(|v| v.as_str())
-            == Some("user")
-            && input[last_idx]
-                .get("content")
-                .and_then(|c| c.as_array())
-                .is_some_and(|parts| {
-                    parts
-                        .iter()
-                        .all(|p| p.get("type").and_then(|t| t.as_str()) == Some("input_image"))
-                });
-        if !is_user_image_msg {
-            return;
-        }
-        let prev_is_call_output = input[last_idx - 1].get("type").and_then(|v| v.as_str())
-            == Some("function_call_output");
-        if !prev_is_call_output {
-            return;
-        }
-        let last = input.remove(last_idx);
-        let image_parts = last
-            .get("content")
-            .and_then(|c| c.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let prev = input.last_mut().expect("function_call_output present");
-        if !prev["output"].is_array() {
-            let existing_text = prev["output"]
-                .as_str()
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            let mut parts: Vec<Value> = Vec::new();
-            if !existing_text.is_empty() {
-                parts.push(json!({
-                    "type": "input_text",
-                    "text": existing_text,
-                }));
-            }
-            prev["output"] = Value::Array(parts);
-        }
-        prev["output"].as_array_mut().unwrap().extend(image_parts);
     }
 
     fn projected_schema(
@@ -551,7 +236,8 @@ impl CodexProvider {
         stream: bool,
     ) -> Result<Value, LlmTransportError> {
         let tools = Self::build_tools(req)?;
-        let (instructions, input) = Self::build_input(req);
+        let (instructions, input) =
+            shared::build_responses_input(req, shared::ResponsesInputOptions::CODEX);
         let reasoning_effort = req
             .model_variant
             .as_deref()
@@ -629,87 +315,6 @@ impl CodexProvider {
             || payload.contains("\ndata:")
     }
 
-    fn terminal_reason_from_response_value(
-        value: &Value,
-        parts: &[lash_core::llm::types::LlmOutputPart],
-    ) -> LlmTerminalReason {
-        let incomplete_details = value.get("incomplete_details");
-        if incomplete_details
-            .and_then(|details| details.get("reason").and_then(Value::as_str))
-            .is_some_and(|reason| matches!(reason, "content_filter" | "safety"))
-        {
-            return LlmTerminalReason::ContentFilter;
-        }
-        if value.get("status").and_then(Value::as_str) == Some("incomplete")
-            || incomplete_details.is_some_and(|details| !details.is_null())
-        {
-            return LlmTerminalReason::OutputLimit;
-        }
-        if value.get("status").and_then(Value::as_str) == Some("cancelled") {
-            return LlmTerminalReason::Cancelled;
-        }
-        if value.get("status").and_then(Value::as_str) == Some("failed") {
-            return LlmTerminalReason::ProviderError;
-        }
-        if parts
-            .iter()
-            .any(|part| matches!(part, lash_core::llm::types::LlmOutputPart::ToolCall { .. }))
-        {
-            LlmTerminalReason::ToolUse
-        } else {
-            LlmTerminalReason::Stop
-        }
-    }
-
-    fn terminal_reason_from_state(
-        state: &shared::ResponsesStreamState,
-        parts: &[lash_core::llm::types::LlmOutputPart],
-    ) -> LlmTerminalReason {
-        match &state.final_response {
-            Some(final_response) => Self::terminal_reason_from_response_value(final_response, parts),
-            None => {
-                if parts
-                    .iter()
-                    .any(|part| matches!(part, lash_core::llm::types::LlmOutputPart::ToolCall { .. }))
-                {
-                    LlmTerminalReason::ToolUse
-                } else {
-                    LlmTerminalReason::Stop
-                }
-            }
-        }
-    }
-
-    fn response_from_stream_state(
-        state: shared::ResponsesStreamState,
-        request_body: Option<String>,
-        http_summary: String,
-    ) -> LlmResponse {
-        let parts = state.response_parts();
-        let terminal_reason = Self::terminal_reason_from_state(&state, &parts);
-        let full_text = if !state.full_text.is_empty() {
-            state.full_text.clone()
-        } else {
-            parts
-                .iter()
-                .filter_map(|part| match part {
-                    lash_core::llm::types::LlmOutputPart::Text { text, .. } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>()
-        };
-        LlmResponse {
-            full_text,
-            parts,
-            usage: state.usage,
-            terminal_reason,
-            terminal_diagnostic: None,
-            provider_usage: None,
-            request_body,
-            http_summary: Some(http_summary),
-        }
-    }
-
     #[cfg(test)]
     fn process_sse_event(
         raw: &str,
@@ -731,56 +336,21 @@ impl CodexProvider {
 struct CodexFailureClassifier;
 
 impl ProviderFailureClassifier for CodexFailureClassifier {
-    fn classify(&self, mut failure: ProviderFailure) -> ProviderFailure {
+    fn classify(&self, failure: ProviderFailure) -> ProviderFailure {
+        // The default classifier already covers everything Codex needs from a
+        // status/text standpoint: HTTP-status → kind/retryability, the
+        // usage-limit/quota and content-filter text markers, and context
+        // overflow. Codex's only genuine delta is rewriting the user-facing
+        // message into a friendly "you hit your ChatGPT usage limit" form.
         let status = failure
             .status
             .or_else(|| failure.code.as_deref().and_then(|code| code.parse().ok()));
-        if let Some(status) = status {
-            failure.status = Some(status);
-            failure.kind = ProviderFailureKind::Http;
-            let raw = failure.raw.as_deref().unwrap_or_default();
-            // Codex treats a 429 carrying a usage-limit marker as a hard quota
-            // failure (not retryable); other 429s and 5xx remain retryable.
-            failure.retryable =
-                (status == 429 && !CodexProvider::is_usage_limit_error(raw)) || status >= 500;
-            if let Some(summary) = CodexProvider::codex_error_summary(status, raw) {
-                failure.message = summary;
-            }
-        } else if matches!(
-            failure.kind,
-            ProviderFailureKind::Transport | ProviderFailureKind::Timeout
-        ) || failure.retryable
-        {
-            failure.kind = if failure.kind == ProviderFailureKind::Unknown {
-                ProviderFailureKind::Transport
-            } else {
-                failure.kind
-            };
-            failure.retryable = true;
-        }
-
-        let text = format!(
-            "{}\n{}\n{}",
-            failure.code.as_deref().unwrap_or_default(),
-            failure.message,
-            failure.raw.as_deref().unwrap_or_default()
-        )
-        .to_ascii_lowercase();
-        if text.contains("usage_limit_reached") || text.contains("usage_not_included") {
-            failure.kind = ProviderFailureKind::Quota;
-            failure.retryable = false;
-        }
-        if text.contains("content_filter")
-            || text.contains("prohibited_content")
-            || text.contains("safety")
-            || text.contains("sensitive")
-        {
-            failure.terminal_reason = LlmTerminalReason::ContentFilter;
-        }
-        if lash_core::provider::is_context_overflow_text(&text) {
-            failure.kind = ProviderFailureKind::Validation;
-            failure.retryable = false;
-            failure.terminal_reason = LlmTerminalReason::ContextOverflow;
+        let summary = status.and_then(|status| {
+            CodexProvider::codex_error_summary(status, failure.raw.as_deref().unwrap_or_default())
+        });
+        let mut failure = DefaultProviderFailureClassifier.classify(failure);
+        if let Some(summary) = summary {
+            failure.message = summary;
         }
         failure
     }
@@ -965,7 +535,7 @@ impl Provider for CodexProvider {
             if Self::looks_like_sse_payload(&text) {
                 let mut state = shared::ResponsesStreamState::default();
                 shared::parse_sse_payload(PROVIDER, &text, &mut state)?;
-                let response = Self::response_from_stream_state(
+                let response = shared::response_from_stream_state(
                     state,
                     request_body,
                     format!("HTTP POST {} (stream/fallback)", Self::CODEX_RESPONSES_URL),
@@ -1018,7 +588,7 @@ impl Provider for CodexProvider {
                     tx.send(LlmStreamEvent::Delta(content.clone()));
                 }
             }
-            let terminal_reason = Self::terminal_reason_from_response_value(&value, &parts);
+            let terminal_reason = shared::terminal_reason_from_response_value(&value, &parts);
             return Ok(LlmResponse {
                 full_text: content,
                 parts,
@@ -1093,7 +663,7 @@ impl Provider for CodexProvider {
             .with_code("empty_stream"));
         }
 
-        Ok(Self::response_from_stream_state(
+        Ok(shared::response_from_stream_state(
             state,
             request_body,
             format!("HTTP POST {} (stream)", Self::CODEX_RESPONSES_URL),
@@ -1156,8 +726,8 @@ impl ProviderFactory for CodexProviderFactory {
 mod tests {
     use super::*;
     use lash_core::llm::types::{
-        LlmJsonSchema, LlmMessage, LlmOutputPart, LlmToolChoice, LlmToolSpec, ResponseTextMeta,
-        ResponseTextPhase,
+        LlmJsonSchema, LlmMessage, LlmOutputPart, LlmRole, LlmTerminalReason, LlmToolChoice,
+        LlmToolSpec, ResponseTextMeta,
     };
     use lash_core::provider::ProviderModelPolicy;
     use shared::ResponsesStreamState as CodexStreamState;
@@ -1177,7 +747,7 @@ mod tests {
     }
 
     fn response_from_state(state: CodexStreamState) -> LlmResponse {
-        CodexProvider::response_from_stream_state(state, None, "test".to_string())
+        shared::response_from_stream_state(state, None, "test".to_string())
     }
 
     fn request(messages: Vec<LlmMessage>) -> LlmRequest {
@@ -1213,7 +783,7 @@ mod tests {
 
     #[test]
     fn codex_null_incomplete_details_does_not_map_to_output_limit() {
-        let terminal_reason = CodexProvider::terminal_reason_from_response_value(
+        let terminal_reason = shared::terminal_reason_from_response_value(
             &json!({"status":"completed","incomplete_details":null}),
             &[LlmOutputPart::Text {
                 text: "Hi".to_string(),
@@ -1226,7 +796,7 @@ mod tests {
 
     #[test]
     fn codex_content_filter_incomplete_maps_to_content_filter() {
-        let terminal_reason = CodexProvider::terminal_reason_from_response_value(
+        let terminal_reason = shared::terminal_reason_from_response_value(
             &json!({"status":"incomplete","incomplete_details":{"reason":"content_filter"}}),
             &[],
         );
@@ -1375,7 +945,7 @@ mod tests {
                 response_meta: Some(ResponseTextMeta {
                     id: Some("msg_1".to_string()),
                     status: Some("completed".to_string()),
-                    phase: Some(ResponseTextPhase::Commentary),
+                    phase: Some("commentary".to_string()),
                 }),
             }
         );

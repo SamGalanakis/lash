@@ -29,35 +29,6 @@ impl fmt::Display for ModeId {
     }
 }
 
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-pub struct ExecutionMode(String);
-
-impl ExecutionMode {
-    pub fn new(mode: impl Into<String>) -> Self {
-        Self(mode.into())
-    }
-
-    pub fn standard() -> Self {
-        Self::new("standard")
-    }
-
-    pub fn rlm() -> Self {
-        Self::new("rlm")
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ExecutionMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// Semantic mode preset installed on a [`LashCore`].
 #[derive(Clone)]
 pub struct ModePreset {

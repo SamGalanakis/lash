@@ -5,6 +5,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, format_tokens};
 #[cfg(test)]
 use crate::chrome_ui::animated_lash_word;
+use crate::cli_support::{centered_rect, display_width, selection_ordered};
 use crate::editor::SuggestionKind;
 use crate::{render, theme};
 
@@ -623,16 +624,6 @@ fn apply_selection_highlight(frame: &mut Frame<'_>, app: &App, history_area: Rec
                 style.bg(theme::SELECTION_BG)
             });
         }
-    }
-}
-
-fn selection_ordered(sel: &crate::app::TextSelection) -> ((u16, usize), (u16, usize)) {
-    let (ax, ay) = sel.anchor;
-    let (ex, ey) = sel.end;
-    if ay < ey || (ay == ey && ax <= ex) {
-        ((ax, ay), (ex, ey))
-    } else {
-        ((ex, ey), (ax, ay))
     }
 }
 
@@ -1259,19 +1250,6 @@ fn draw_top_bottom_rule(frame: &mut Frame<'_>, area: Rect, style: Style) {
             1,
         );
     }
-}
-
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
-}
-
-fn display_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
 }
 
 fn fg(color: lash_tui::Color) -> Style {

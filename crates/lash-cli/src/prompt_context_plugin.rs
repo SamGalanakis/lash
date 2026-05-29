@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use lash::advanced::ExecutionMode;
+use lash::ModeId;
 use lash_core::PreparedContext;
 use lash_core::PromptContribution;
 use lash_core::plugin::{
@@ -39,14 +39,14 @@ impl Default for PromptContextPluginConfig {
 pub struct PromptContextPluginFactory {
     instruction_source: Arc<dyn InstructionSource>,
     config: PromptContextPluginConfig,
-    execution_mode: ExecutionMode,
+    execution_mode: ModeId,
 }
 
 impl PromptContextPluginFactory {
     pub fn new(
         instruction_source: Arc<dyn InstructionSource>,
         config: PromptContextPluginConfig,
-        execution_mode: ExecutionMode,
+        execution_mode: ModeId,
     ) -> Self {
         Self {
             instruction_source,
@@ -76,7 +76,7 @@ impl PluginFactory for PromptContextPluginFactory {
 struct PromptContextPlugin {
     instruction_source: Arc<dyn InstructionSource>,
     config: PromptContextPluginConfig,
-    execution_mode: ExecutionMode,
+    execution_mode: ModeId,
 }
 
 impl lash_core::SessionPlugin for PromptContextPlugin {
@@ -126,7 +126,7 @@ impl lash_core::SessionPlugin for PromptContextPlugin {
             })
         }));
 
-        if self.config.include_environment && self.execution_mode == ExecutionMode::standard() {
+        if self.config.include_environment && self.execution_mode == ModeId::standard() {
             reg.history()
                 .prepare_turn(50, Arc::new(EnvironmentTailTransform));
         }
@@ -255,7 +255,7 @@ mod tests {
                 read_text: String::new(),
             }),
             PromptContextPluginConfig::default(),
-            ExecutionMode::standard(),
+            ModeId::standard(),
         )));
         let host = PluginHost::new(factories);
         let session = host.build_session("root", None).expect("session");

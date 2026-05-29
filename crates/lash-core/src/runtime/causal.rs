@@ -201,24 +201,15 @@ pub(crate) fn session_node_invocation(
 pub(crate) fn direct_effect_invocation(
     session_id: &str,
     usage_source: &str,
-    effect_kind: RuntimeEffectKind,
     replay_discriminator: String,
     turn_id: Option<&str>,
     caused_by: Option<CausalRef>,
 ) -> RuntimeInvocation {
-    match effect_kind {
-        RuntimeEffectKind::DirectCompletion | RuntimeEffectKind::DirectLlmCompletion => {}
-        _ => unreachable!("direct invocation requires a direct effect kind"),
-    }
     let replay_key = match turn_id.filter(|value| !value.is_empty()) {
-        Some(turn_id) => format!(
-            "{session_id}:{turn_id}:direct:{}:{usage_source}:{replay_discriminator}",
-            effect_kind.as_str(),
-        ),
-        None => format!(
-            "{session_id}:direct:{}:{usage_source}:{replay_discriminator}",
-            effect_kind.as_str(),
-        ),
+        Some(turn_id) => {
+            format!("{session_id}:{turn_id}:direct:{usage_source}:{replay_discriminator}")
+        }
+        None => format!("{session_id}:direct:{usage_source}:{replay_discriminator}"),
     };
     RuntimeInvocation::effect(
         RuntimeScope {
@@ -228,7 +219,7 @@ pub(crate) fn direct_effect_invocation(
             protocol_iteration: None,
         },
         replay_discriminator,
-        effect_kind,
+        RuntimeEffectKind::Direct,
         replay_key,
         None,
     )

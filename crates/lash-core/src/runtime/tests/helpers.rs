@@ -609,20 +609,37 @@ impl crate::store::RuntimePersistence for RecordingStore {
         owner_id: &str,
         lease_ttl_ms: u64,
     ) -> Result<crate::RuntimeTurnLease, crate::store::StoreError> {
+        let mut leases = self
+            .runtime_turn_leases
+            .lock()
+            .expect("lock runtime turn leases");
+        let key = (session_id.to_string(), turn_id.to_string());
+        let next_fencing = match leases.get(&key) {
+            Some(active)
+                if active.expires_at_epoch_ms > current_epoch_ms()
+                    && active.owner_id != owner_id =>
+            {
+                return Err(crate::store::StoreError::RuntimeTurnLeaseConflict {
+                    session_id: session_id.to_string(),
+                    turn_id: turn_id.to_string(),
+                    owner_id: active.owner_id.clone(),
+                    expires_at_epoch_ms: active.expires_at_epoch_ms,
+                });
+            }
+            Some(previous) => previous.fencing_token.saturating_add(1),
+            None => 1,
+        };
         let lease = crate::RuntimeTurnLease {
             schema_version: crate::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
             owner_id: owner_id.to_string(),
-            lease_token: format!("{session_id}:{turn_id}:{owner_id}"),
-            fencing_token: 1,
+            lease_token: format!("{session_id}:{turn_id}:{owner_id}:{next_fencing}"),
+            fencing_token: next_fencing,
             claimed_at_epoch_ms: current_epoch_ms(),
             expires_at_epoch_ms: current_epoch_ms().saturating_add(lease_ttl_ms),
         };
-        self.runtime_turn_leases
-            .lock()
-            .expect("lock runtime turn leases")
-            .insert((session_id.to_string(), turn_id.to_string()), lease.clone());
+        leases.insert(key, lease.clone());
         Ok(lease)
     }
 
@@ -889,6 +906,14 @@ pub(crate) fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
         .build()
 }
 
+pub(crate) fn set_runtime_provider(runtime: &mut LashRuntime, provider: crate::ProviderHandle) {
+    runtime.policy.provider = provider.clone();
+    runtime.state.policy.provider = provider.clone();
+    if let Some(frame) = runtime.state.current_agent_frame_mut() {
+        frame.assignment.policy.provider = provider;
+    }
+}
+
 pub(crate) fn standard_test_policy() -> SessionPolicy {
     SessionPolicy {
         provider: mock_provider(Vec::new()).into_handle(),
@@ -999,7 +1024,7 @@ pub(crate) async fn standard_runtime_with_transport(transport: TestProvider) -> 
     .await
     .expect("runtime");
     runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
-    runtime.policy.provider = transport.clone().into_handle();
+    set_runtime_provider(&mut runtime, transport.clone().into_handle());
     runtime
 }
 pub(crate) type RuntimeTestPluginBuilder = dyn Fn(&crate::PluginSessionContext) -> Result<Arc<dyn crate::SessionPlugin>, crate::PluginError>
@@ -1102,7 +1127,7 @@ pub(crate) async fn runtime_with_plugins_and_tools_and_host(
     .await
     .expect("runtime");
     runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
-    runtime.policy.provider = transport.clone().into_handle();
+    set_runtime_provider(&mut runtime, transport.clone().into_handle());
     runtime
 }
 
@@ -1131,7 +1156,7 @@ pub(crate) async fn runtime_with_plugins_and_tools_and_host_and_store(
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = transport.clone().into_handle();
+    set_runtime_provider(&mut runtime, transport.clone().into_handle());
     runtime
 }
 
@@ -1376,6 +1401,6 @@ pub(crate) async fn standard_runtime_with_transport_and_host(
     )
     .await
     .expect("runtime");
-    runtime.policy.provider = transport.clone().into_handle();
+    set_runtime_provider(&mut runtime, transport.clone().into_handle());
     runtime
 }

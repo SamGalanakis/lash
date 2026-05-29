@@ -596,6 +596,20 @@ mod tests {
         );
         assert!(events.iter().any(|event| event.event_type == "process.wake"
             && event.payload["text"] == serde_json::json!("raw:seed")));
+        let wake_sequence = events
+            .iter()
+            .find(|event| event.event_type == "process.wake")
+            .expect("wake event")
+            .sequence;
+        let completed_sequence = events
+            .iter()
+            .find(|event| event.event_type == "process.completed")
+            .expect("completed event")
+            .sequence;
+        assert!(
+            wake_sequence < completed_sequence,
+            "process.wake should be committed before process completion"
+        );
         let queued = crate::store::RuntimePersistence::list_queued_work(
             store.as_ref(),
             &wake_target.session_id,
@@ -603,6 +617,10 @@ mod tests {
         .await
         .expect("queued wake");
         assert_eq!(queued.len(), 1);
+        assert_eq!(
+            queued[0].delivery_policy,
+            crate::DeliveryPolicy::EarliestSafeBoundary
+        );
         assert_eq!(queued[0].items.len(), 1);
         let crate::QueuedWorkPayload::ProcessWake { wake } = &queued[0].items[0].payload else {
             panic!("expected process wake queue payload");

@@ -29,8 +29,9 @@ use std::collections::HashMap;
 use lash_core::SchemaProjectionOverride;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailureKind};
 use lash_core::llm::types::{
-    LlmAttachment, LlmOutputPart, LlmRole, LlmToolChoice, LlmUsage, ProviderReasoningReplay,
-    ProviderReplayMeta, ResponseTextMeta, ResponseTextPhase,
+    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole,
+    LlmTerminalReason, LlmToolChoice, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
+    ResponseTextMeta,
 };
 use lash_llm_transport::util::parse_i64;
 use lash_openai_schema::{
@@ -133,6 +134,496 @@ pub fn build_tools(
 }
 
 // ---------------------------------------------------------------------------
+// Request input assembly
+// ---------------------------------------------------------------------------
+
+/// The handful of genuine deltas between the direct-OpenAI and Codex flavours
+/// of the Responses `input` array. Everything else — the per-message block
+/// loop, the reasoning-replay item shape, function_call/function_call_output
+/// emission, the `system → instructions` hoist — is identical.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponsesInputOptions {
+    /// OpenAI assigns each assistant `message` item a stable id
+    /// (`msg_lash_{message}_{part}` when the request carries none), tracks
+    /// `status`/`phase` from [`ResponseTextMeta`], and tags `output_text`
+    /// parts with an empty `annotations` array. Codex emits none of this.
+    pub assistant_message_metadata: bool,
+    /// Codex folds sibling user `input_image` parts that follow a
+    /// `function_call_output` into that output's `output` array so the image
+    /// reads as the tool's result. OpenAI keeps them as a standalone user turn.
+    pub fold_tool_result_images: bool,
+}
+
+impl ResponsesInputOptions {
+    /// Direct OpenAI Responses: synthetic assistant ids + phase/annotations,
+    /// no tool-result image folding.
+    pub const OPENAI: Self = Self {
+        assistant_message_metadata: true,
+        fold_tool_result_images: false,
+    };
+
+    /// Codex Responses: no synthetic ids/phase/annotations, fold tool-result
+    /// images into the preceding `function_call_output`.
+    pub const CODEX: Self = Self {
+        assistant_message_metadata: false,
+        fold_tool_result_images: true,
+    };
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_pending_content(
+    pending: &mut Vec<Value>,
+    input: &mut Vec<Value>,
+    role: &'static str,
+    is_user: bool,
+    opts: &ResponsesInputOptions,
+    response_meta: Option<ResponseTextMeta>,
+    message_index: usize,
+    part_index: usize,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let content = std::mem::take(pending);
+    if opts.assistant_message_metadata && role == "assistant" {
+        let meta = response_meta.unwrap_or(ResponseTextMeta {
+            id: Some(format!("msg_lash_{message_index}_{part_index}")),
+            status: Some("completed".to_string()),
+            phase: None,
+        });
+        let mut item = json!({
+            "type": "message",
+            "role": "assistant",
+            "id": meta.id.unwrap_or_else(|| format!("msg_lash_{message_index}_{part_index}")),
+            "status": meta.status.unwrap_or_else(|| "completed".to_string()),
+            "content": content,
+        });
+        if let Some(phase) = meta.phase.as_ref() {
+            item["phase"] = json!(phase);
+        }
+        input.push(item);
+        return;
+    }
+    if is_user
+        && let Some(prev) = input.last_mut()
+        && prev.get("role").and_then(|v| v.as_str()) == Some("user")
+        && prev.get("content").is_some_and(|v| v.is_array())
+    {
+        prev["content"].as_array_mut().unwrap().extend(content);
+    } else {
+        input.push(json!({
+            "role": role,
+            "content": content,
+        }));
+    }
+}
+
+/// Walk backwards from the last input item: if the final entry is a user
+/// `content` message whose parts are all `input_image`, and the entry before
+/// it is a `function_call_output`, promote the image parts into the `output`
+/// of that function_call_output so the server sees the image as the tool's
+/// result rather than as a standalone user turn.
+fn fold_tool_result_images(input: &mut Vec<Value>) {
+    if input.len() < 2 {
+        return;
+    }
+    let last_idx = input.len() - 1;
+    let is_user_image_msg = input[last_idx].get("role").and_then(|v| v.as_str()) == Some("user")
+        && input[last_idx]
+            .get("content")
+            .and_then(|c| c.as_array())
+            .is_some_and(|parts| {
+                parts
+                    .iter()
+                    .all(|p| p.get("type").and_then(|t| t.as_str()) == Some("input_image"))
+            });
+    if !is_user_image_msg {
+        return;
+    }
+    let prev_is_call_output =
+        input[last_idx - 1].get("type").and_then(|v| v.as_str()) == Some("function_call_output");
+    if !prev_is_call_output {
+        return;
+    }
+    let last = input.remove(last_idx);
+    let image_parts = last
+        .get("content")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let prev = input.last_mut().expect("function_call_output present");
+    if !prev["output"].is_array() {
+        let existing_text = prev["output"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let mut parts: Vec<Value> = Vec::new();
+        if !existing_text.is_empty() {
+            parts.push(json!({
+                "type": "input_text",
+                "text": existing_text,
+            }));
+        }
+        prev["output"] = Value::Array(parts);
+    }
+    prev["output"].as_array_mut().unwrap().extend(image_parts);
+}
+
+fn reasoning_replay_item(text: &str, replay: Option<&ProviderReasoningReplay>) -> Option<Value> {
+    // Only replay reasoning items that actually carry an encrypted blob.
+    // Display-only summaries (no blob) must not be fed back — the server will
+    // either ignore them or reject the turn.
+    let blob = replay.and_then(|meta| meta.encrypted_content.as_deref())?;
+    let summary = replay
+        .map(|meta| meta.summary.as_slice())
+        .unwrap_or_default();
+    let summary_items: Vec<Value> = if summary.is_empty() {
+        if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![json!({"type": "summary_text", "text": text})]
+        }
+    } else {
+        summary
+            .iter()
+            .map(|entry| json!({"type": "summary_text", "text": entry}))
+            .collect()
+    };
+    let mut item = json!({
+        "type": "reasoning",
+        "summary": summary_items,
+        "encrypted_content": blob,
+    });
+    if let Some(id) = replay.and_then(|meta| meta.item_id.as_deref())
+        && !id.is_empty()
+    {
+        item["id"] = json!(id);
+    }
+    Some(item)
+}
+
+/// Build the Responses `(instructions, input)` pair shared by both the direct
+/// OpenAI provider and Codex. System-role text is hoisted into `instructions`;
+/// the remaining blocks become the `input` array. `opts` selects the few real
+/// provider deltas (synthetic assistant ids, tool-result image folding).
+pub fn build_responses_input(
+    req: &LlmRequest,
+    opts: ResponsesInputOptions,
+) -> (String, Vec<Value>) {
+    let mut instructions: Vec<String> = Vec::new();
+    let mut input: Vec<Value> = Vec::new();
+
+    for (message_index, msg) in req.messages.iter().enumerate() {
+        if matches!(msg.role, LlmRole::System) {
+            for block in msg.blocks.iter() {
+                if let LlmContentBlock::Text { text, .. } = block
+                    && !text.is_empty()
+                {
+                    instructions.push(text.to_string());
+                }
+            }
+            continue;
+        }
+
+        let role = role_name(&msg.role);
+        let is_user = matches!(msg.role, LlmRole::User);
+        let mut pending_content: Vec<Value> = Vec::new();
+        let mut pending_meta: Option<ResponseTextMeta> = None;
+        let mut pending_part_index = 0usize;
+
+        // Codex folds the image/placeholder blocks that follow a ToolResult
+        // into that tool's `output`. One scan yields both the folded image
+        // parts (keyed by ToolResult block index) and the sibling indices to
+        // skip in the main loop so they aren't double-emitted.
+        let (tool_result_image_folds, consumed_after_tool_result) = if opts.fold_tool_result_images
+        {
+            collect_tool_result_image_folds(req, msg)
+        } else {
+            Default::default()
+        };
+
+        for (part_index, block) in msg.blocks.iter().enumerate() {
+            if consumed_after_tool_result.contains(&part_index) {
+                continue;
+            }
+            match block {
+                LlmContentBlock::Text {
+                    text,
+                    response_meta,
+                    ..
+                } => {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    if opts.assistant_message_metadata
+                        && matches!(msg.role, LlmRole::Assistant)
+                        && (!pending_content.is_empty() || response_meta.is_some())
+                    {
+                        flush_pending_content(
+                            &mut pending_content,
+                            &mut input,
+                            role,
+                            false,
+                            &opts,
+                            pending_meta.take(),
+                            message_index,
+                            pending_part_index,
+                        );
+                        pending_part_index = part_index;
+                        pending_meta = response_meta.clone();
+                    }
+                    let part_type = if matches!(msg.role, LlmRole::Assistant) {
+                        "output_text"
+                    } else {
+                        "input_text"
+                    };
+                    if opts.assistant_message_metadata && part_type == "output_text" {
+                        pending_content.push(json!({
+                            "type": part_type,
+                            "text": text,
+                            "annotations": [],
+                        }));
+                    } else {
+                        pending_content.push(json!({
+                            "type": part_type,
+                            "text": text,
+                        }));
+                    }
+                }
+                LlmContentBlock::Image { attachment_idx } => {
+                    if is_user && let Some(att) = req.attachments.get(*attachment_idx) {
+                        pending_content.push(input_image_part(att));
+                    }
+                }
+                LlmContentBlock::Reasoning { text, replay, .. } => {
+                    flush_pending_content(
+                        &mut pending_content,
+                        &mut input,
+                        role,
+                        is_user,
+                        &opts,
+                        pending_meta.take(),
+                        message_index,
+                        pending_part_index,
+                    );
+                    if let Some(item) = reasoning_replay_item(text, replay.as_ref()) {
+                        input.push(item);
+                    }
+                }
+                LlmContentBlock::ToolCall {
+                    call_id,
+                    tool_name,
+                    input_json,
+                    replay,
+                    ..
+                } => {
+                    flush_pending_content(
+                        &mut pending_content,
+                        &mut input,
+                        role,
+                        is_user,
+                        &opts,
+                        pending_meta.take(),
+                        message_index,
+                        pending_part_index,
+                    );
+                    let mut item = json!({
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": tool_name,
+                        "arguments": input_json,
+                    });
+                    // `id` (e.g. `fc_...`) pairs a function_call with its
+                    // sibling reasoning item across turns; omit when absent.
+                    if let Some(id) = replay.as_ref().and_then(|meta| meta.item_id.as_deref()) {
+                        item["id"] = json!(id);
+                    }
+                    input.push(item);
+                }
+                LlmContentBlock::ToolResult {
+                    call_id, content, ..
+                } => {
+                    flush_pending_content(
+                        &mut pending_content,
+                        &mut input,
+                        role,
+                        is_user,
+                        &opts,
+                        pending_meta.take(),
+                        message_index,
+                        pending_part_index,
+                    );
+                    let image_parts = tool_result_image_folds
+                        .get(&part_index)
+                        .cloned()
+                        .unwrap_or_default();
+                    if image_parts.is_empty() {
+                        input.push(json!({
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": content,
+                        }));
+                    } else {
+                        let mut parts: Vec<Value> = Vec::new();
+                        if !content.is_empty() {
+                            parts.push(json!({
+                                "type": "input_text",
+                                "text": content,
+                            }));
+                        }
+                        parts.extend(image_parts);
+                        input.push(json!({
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": parts,
+                        }));
+                    }
+                }
+            }
+        }
+        flush_pending_content(
+            &mut pending_content,
+            &mut input,
+            role,
+            is_user,
+            &opts,
+            pending_meta.take(),
+            message_index,
+            pending_part_index,
+        );
+
+        if opts.fold_tool_result_images && is_user {
+            fold_tool_result_images(&mut input);
+        }
+    }
+
+    (instructions.join("\n\n"), input)
+}
+
+/// For each `ToolResult` block in `msg`, the Codex-folded image parts (its
+/// trailing sibling `Image` / `[Tool image: …]` blocks) keyed by the
+/// ToolResult's block index, plus the set of all sibling indices consumed this
+/// way so the main loop skips them. One scan replaces the former skip-set
+/// pre-pass plus a separate per-ToolResult re-scan.
+fn collect_tool_result_image_folds(
+    req: &LlmRequest,
+    msg: &lash_core::llm::types::LlmMessage,
+) -> (
+    std::collections::HashMap<usize, Vec<Value>>,
+    std::collections::HashSet<usize>,
+) {
+    let mut folds: std::collections::HashMap<usize, Vec<Value>> = std::collections::HashMap::new();
+    let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (idx, block) in msg.blocks.iter().enumerate() {
+        if !matches!(block, LlmContentBlock::ToolResult { .. }) {
+            continue;
+        }
+        let mut parts: Vec<Value> = Vec::new();
+        for (j, sibling) in msg.blocks.iter().enumerate().skip(idx + 1) {
+            match sibling {
+                LlmContentBlock::Image { attachment_idx } => {
+                    if let Some(att) = req.attachments.get(*attachment_idx) {
+                        parts.push(input_image_part(att));
+                    }
+                    consumed.insert(j);
+                }
+                LlmContentBlock::Text { text: t, .. } if t.starts_with("[Tool image:") => {
+                    consumed.insert(j);
+                }
+                _ => break,
+            }
+        }
+        if !parts.is_empty() {
+            folds.insert(idx, parts);
+        }
+    }
+    (folds, consumed)
+}
+
+// ---------------------------------------------------------------------------
+// Terminal reason + response assembly
+// ---------------------------------------------------------------------------
+
+/// Map a final Responses object to a terminal reason. Honours both
+/// `incomplete_details` and the camelCase `incompleteDetails` some gateways
+/// emit. Falls back to ToolUse/Stop based on the assembled parts.
+pub fn terminal_reason_from_response_value(
+    value: &Value,
+    parts: &[LlmOutputPart],
+) -> LlmTerminalReason {
+    let incomplete_details = value
+        .get("incomplete_details")
+        .or_else(|| value.get("incompleteDetails"));
+    if incomplete_details
+        .and_then(|details| details.get("reason").and_then(Value::as_str))
+        .is_some_and(|reason| matches!(reason, "content_filter" | "safety"))
+    {
+        return LlmTerminalReason::ContentFilter;
+    }
+    if value.get("status").and_then(Value::as_str) == Some("incomplete")
+        || incomplete_details.is_some_and(|details| !details.is_null())
+    {
+        return LlmTerminalReason::OutputLimit;
+    }
+    if value.get("status").and_then(Value::as_str) == Some("cancelled") {
+        return LlmTerminalReason::Cancelled;
+    }
+    if value.get("status").and_then(Value::as_str) == Some("failed") {
+        return LlmTerminalReason::ProviderError;
+    }
+    terminal_reason_from_parts(parts)
+}
+
+/// Terminal reason from assembled parts alone: ToolUse when any tool call is
+/// present, otherwise Stop.
+pub fn terminal_reason_from_parts(parts: &[LlmOutputPart]) -> LlmTerminalReason {
+    if parts
+        .iter()
+        .any(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+    {
+        LlmTerminalReason::ToolUse
+    } else {
+        LlmTerminalReason::Stop
+    }
+}
+
+/// Collapse a finished [`ResponsesStreamState`] into an [`LlmResponse`]. Used
+/// by Codex; the direct OpenAI driver inlines an equivalent assembly with its
+/// own provider-usage/streaming plumbing.
+pub fn response_from_stream_state(
+    state: ResponsesStreamState,
+    request_body: Option<String>,
+    http_summary: String,
+) -> LlmResponse {
+    let parts = state.response_parts();
+    let terminal_reason = match &state.final_response {
+        Some(final_response) => terminal_reason_from_response_value(final_response, &parts),
+        None => terminal_reason_from_parts(&parts),
+    };
+    let full_text = if !state.full_text.is_empty() {
+        state.full_text.clone()
+    } else {
+        parts
+            .iter()
+            .filter_map(|part| match part {
+                LlmOutputPart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
+    };
+    LlmResponse {
+        full_text,
+        parts,
+        usage: state.usage,
+        terminal_reason,
+        terminal_diagnostic: None,
+        provider_usage: None,
+        request_body,
+        http_summary: Some(http_summary),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Final-response parsing
 // ---------------------------------------------------------------------------
 
@@ -147,11 +638,7 @@ pub fn response_text_meta_from_message_item(item: &Value) -> ResponseTextMeta {
         phase: item
             .get("phase")
             .and_then(|v| v.as_str())
-            .and_then(|phase| match phase {
-                "commentary" => Some(ResponseTextPhase::Commentary),
-                "final_answer" => Some(ResponseTextPhase::FinalAnswer),
-                _ => None,
-            }),
+            .map(str::to_string),
     }
 }
 
@@ -517,7 +1004,11 @@ impl ResponsesStreamState {
                             ..
                         } => {
                             part_item_id
-                                .zip(existing_replay.as_ref().and_then(|meta| meta.item_id.as_deref()))
+                                .zip(
+                                    existing_replay
+                                        .as_ref()
+                                        .and_then(|meta| meta.item_id.as_deref()),
+                                )
                                 .is_some_and(|(a, b)| a == b)
                                 || (!part_call_id.is_empty() && part_call_id == existing_call_id)
                         }
@@ -897,7 +1388,8 @@ pub fn process_sse_event(
             // by appending the missing suffix if our accumulator lags behind.
             if let Some(text) = event.get("text").and_then(|v| v.as_str())
                 && let Some(index) = state.current_reasoning_part
-                && let Some(LlmOutputPart::Reasoning { text: existing, .. }) = state.parts.get(index)
+                && let Some(LlmOutputPart::Reasoning { text: existing, .. }) =
+                    state.parts.get(index)
             {
                 let existing = existing.clone();
                 if text != existing
@@ -958,11 +1450,11 @@ pub fn process_sse_event(
                 .or_else(|| event.get("error"))
                 .cloned()
                 .unwrap_or(Value::Null);
-            return Err(
-                LlmTransportError::new(error_message_from_response_failed(provider, &event))
-                    .retryable(responses_error_is_retryable(&error_value))
-                    .with_raw(event.to_string()),
-            );
+            return Err(LlmTransportError::new(error_message_from_response_failed(
+                provider, &event,
+            ))
+            .retryable(responses_error_is_retryable(&error_value))
+            .with_raw(event.to_string()));
         }
         _ => {}
     }
