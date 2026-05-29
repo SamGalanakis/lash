@@ -2331,7 +2331,6 @@ dependencies = [
  "lash-provider-codex",
  "lash-provider-google",
  "lash-provider-openai",
- "lash-providers-builtin",
  "lash-rlm-types",
  "lash-runtime",
  "lash-sqlite-store",
@@ -2415,7 +2414,6 @@ dependencies = [
  "dirs 6.0.0",
  "lash-cli",
  "lash-core",
- "lash-providers-builtin",
  "lash-rlm-types",
  "lash-runtime",
  "lash-sansio",
@@ -2674,12 +2672,6 @@ dependencies = [
 [[package]]
 name = "lash-providers-builtin"
 version = "0.1.0-alpha.13"
-dependencies = [
- "lash-provider-anthropic",
- "lash-provider-codex",
- "lash-provider-google",
- "lash-provider-openai",
-]
 
 [[package]]
 name = "lash-restate"
