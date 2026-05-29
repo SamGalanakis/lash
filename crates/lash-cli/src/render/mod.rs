@@ -135,6 +135,40 @@ fn chrome_layout(app: &App, frame_width: u16, frame_height: u16) -> ChromeLayout
     }
 }
 
+/// Every chrome region for one frame, derived from a single `chrome_layout`
+/// pass. The frame draw uses this instead of calling `history_area`,
+/// `dock_area`, … separately, each of which recomputes the whole layout.
+pub struct ChromeAreas {
+    pub status: Rect,
+    pub history: Rect,
+    pub dock: Rect,
+    pub queue: Rect,
+    pub footer: Rect,
+    pub input: Rect,
+    pub body: Rect,
+}
+
+/// Compute every chrome region in one `chrome_layout` pass. The individual
+/// `*_area` accessors below stay for callers that need a single region; the
+/// draw loop uses this to avoid recomputing the layout once per region.
+pub fn chrome_areas(app: &App, frame_width: u16, frame_height: u16) -> ChromeAreas {
+    let layout = chrome_layout(app, frame_width, frame_height);
+    let history_y = 1;
+    let dock_y = history_y + layout.history_height;
+    let queue_y = dock_y + layout.dock_height;
+    let footer_y = queue_y + layout.queue_height;
+    let input_y = footer_y + layout.footer_height;
+    ChromeAreas {
+        status: Rect::new(0, 0, frame_width, 1),
+        history: Rect::new(0, history_y, frame_width, layout.history_height),
+        dock: Rect::new(0, dock_y, frame_width, layout.dock_height),
+        queue: Rect::new(0, queue_y, frame_width, layout.queue_height),
+        footer: Rect::new(0, footer_y, frame_width, layout.footer_height),
+        input: Rect::new(0, input_y, frame_width, layout.input_height),
+        body: Rect::new(0, 1, frame_width, frame_height.saturating_sub(1)),
+    }
+}
+
 pub fn history_viewport_height(app: &App, frame_width: u16, frame_height: u16) -> usize {
     chrome_layout(app, frame_width, frame_height).history_height as usize
 }
@@ -144,45 +178,11 @@ pub fn history_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
     Rect::new(0, 1, frame_width, layout.history_height)
 }
 
-pub fn dock_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
-    let layout = chrome_layout(app, frame_width, frame_height);
-    Rect::new(
-        0,
-        1 + layout.history_height,
-        frame_width,
-        layout.dock_height,
-    )
-}
-
-pub fn queue_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
-    let layout = chrome_layout(app, frame_width, frame_height);
-    Rect::new(
-        0,
-        1 + layout.history_height + layout.dock_height,
-        frame_width,
-        layout.queue_height,
-    )
-}
-
-pub fn footer_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
-    let layout = chrome_layout(app, frame_width, frame_height);
-    Rect::new(
-        0,
-        1 + layout.history_height + layout.dock_height + layout.queue_height,
-        frame_width,
-        layout.footer_height,
-    )
-}
-
 pub fn input_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {
     let layout = chrome_layout(app, frame_width, frame_height);
     let y =
         1 + layout.history_height + layout.dock_height + layout.queue_height + layout.footer_height;
     Rect::new(0, y, frame_width, layout.input_height)
-}
-
-pub fn body_area(_app: &App, frame_width: u16, frame_height: u16) -> Rect {
-    Rect::new(0, 1, frame_width, frame_height.saturating_sub(1))
 }
 
 pub fn input_content_area(app: &App, frame_width: u16, frame_height: u16) -> Rect {

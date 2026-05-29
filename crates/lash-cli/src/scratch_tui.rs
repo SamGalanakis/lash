@@ -30,16 +30,22 @@ pub fn draw_with_capabilities(
 
     sync_chrome_turn_status(app);
 
-    let history = render::history_area(app, area.width, area.height);
-    let dock_area = render::dock_area(app, area.width, area.height);
+    // One layout pass for the whole frame; the `render::*_area` accessors each
+    // recompute `chrome_layout`, so calling them per region would repeat that
+    // work five times per draw.
+    let render::ChromeAreas {
+        status: status_area,
+        history,
+        dock: dock_area,
+        queue: queue_area,
+        footer: footer_area,
+        input: input_area,
+        body: body_area,
+    } = render::chrome_areas(app, area.width, area.height);
     let queue_lines = render::queue_preview_lines_snapshot(app, area.width);
-    let queue_area = render::queue_area(app, area.width, area.height);
-    let footer_area = render::footer_area(app, area.width, area.height);
-    let input_area = render::input_area(app, area.width, area.height);
-    let body_area = render::body_area(app, area.width, area.height);
 
     let surfaces = app.ui_extensions().surface_scene();
-    draw_status_bar(frame, app, Rect::new(0, 0, area.width, 1));
+    draw_status_bar(frame, app, status_area);
     let surfaces = sync_surface_areas(app, surfaces, history, dock_area, footer_area, body_area);
     if surfaces.has_slot(TuiSurfaceSlot::Workspace) {
         draw_workspace_surface(frame, app, &surfaces, history, capabilities);
