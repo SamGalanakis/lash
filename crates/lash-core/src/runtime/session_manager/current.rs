@@ -80,7 +80,10 @@ impl CurrentSessionCapability {
         let tool_state = self.plugins.tool_registry().export_state();
         snapshot.tool_state_generation = Some(tool_state.generation());
         snapshot.tool_state_snapshot = Some(tool_state);
-        snapshot.plugin_snapshot = self.plugins.snapshot().ok();
+        crate::runtime::state::store_plugin_snapshot(
+            &mut snapshot.plugin_snapshot,
+            self.plugins.snapshot(),
+        );
         snapshot.plugin_snapshot_revision = Some(self.plugins.snapshot_revision_fingerprint());
     }
 

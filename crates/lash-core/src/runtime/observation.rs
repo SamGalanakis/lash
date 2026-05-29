@@ -36,7 +36,17 @@ impl RuntimeObservation {
             (Some(generation), Some(snapshot)) if snapshot.generation() == generation => {
                 Some(snapshot.clone())
             }
-            (Some(_), _) => runtime.tool_state().ok(),
+            (Some(_), _) => match runtime.tool_state() {
+                Ok(state) => Some(state),
+                Err(err) => {
+                    tracing::warn!(
+                        session_id = %runtime.session_id(),
+                        error = %err,
+                        "failed to capture tool state for observation; omitting the snapshot",
+                    );
+                    None
+                }
+            },
             (None, _) => None,
         };
         Self {

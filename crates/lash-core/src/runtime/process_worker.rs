@@ -24,6 +24,12 @@ pub struct DurableProcessWorkerConfig {
     pub session_policy: crate::SessionPolicy,
     pub session_store_factory: Arc<dyn SessionStoreFactory>,
     pub process_registry: Arc<dyn ProcessRegistry>,
+    /// Residency for sessions the worker rebuilds to run a process. Defaults to
+    /// [`Residency::KeepAll`]; a host running [`Residency::ActivePathOnly`] wires
+    /// it here so the worker's rebuilt sessions trim to the active path too,
+    /// instead of silently diverging from the live runtime by keeping the full
+    /// graph resident.
+    pub residency: crate::Residency,
 }
 
 impl DurableProcessWorkerConfig {
@@ -39,11 +45,17 @@ impl DurableProcessWorkerConfig {
             session_policy: crate::SessionPolicy::default(),
             session_store_factory,
             process_registry,
+            residency: crate::Residency::default(),
         }
     }
 
     pub fn with_session_policy(mut self, policy: crate::SessionPolicy) -> Self {
         self.session_policy = policy;
+        self
+    }
+
+    pub fn with_residency(mut self, residency: crate::Residency) -> Self {
+        self.residency = residency;
         self
     }
 
@@ -80,6 +92,17 @@ impl DurableProcessWorkerConfig {
 #[derive(Clone)]
 pub struct DurableProcessWorker {
     config: Arc<DurableProcessWorkerConfig>,
+}
+
+/// Why a recovery run did not produce a terminal outcome under the lease.
+enum RecoverFailure {
+    /// The lease was lost mid-run (another owner reclaimed an expired lease).
+    /// The losing worker must not write a terminal outcome — the new owner is
+    /// now the single writer.
+    LeaseLost(PluginError),
+    /// The process could not be run (rebuild/substrate failure). The lease is
+    /// still held, so this worker terminalizes the row.
+    Run(PluginError),
 }
 
 impl DurableProcessWorker {
@@ -160,19 +183,26 @@ impl DurableProcessWorker {
     /// detected after claiming and skipped, so re-running a recovery sweep does
     /// not double-execute completed work.
     pub async fn drive_pending_processes(&self) -> Result<(), PluginError> {
-        let owner_id = format!("process-recovery-{}", uuid::Uuid::new_v4());
         let records = self.config.process_registry.list_non_terminal().await?;
         for record in records {
-            self.recover_process(&owner_id, record).await?;
+            // Run each claimed process on its OWN lease-fenced task. A sequential
+            // drive that awaited each process to terminal would deadlock a process
+            // that blocks awaiting a nested child (`start child` then `await`, or a
+            // subagent fan-out): the one drive task would park inside the parent's
+            // await and never claim the child. Spawning frees the loop so a
+            // subsequent drive (poke or poll) claims and runs the child, and the
+            // per-process `ProcessLease` fences concurrent owners — so spawning a
+            // task per pending row on every drive is idempotent (a row already
+            // running is skipped on claim conflict) and one failing row never
+            // aborts the rest of the sweep.
+            let worker = self.clone();
+            tokio::spawn(async move { worker.recover_process(record).await });
         }
         Ok(())
     }
 
-    async fn recover_process(
-        &self,
-        owner_id: &str,
-        record: ProcessRecord,
-    ) -> Result<(), PluginError> {
+    async fn recover_process(&self, record: ProcessRecord) {
+        let owner_id = format!("process-recovery-{}", uuid::Uuid::new_v4());
         let process_id = record.id.clone();
         // Skip if held live by another owner: a claim conflict means a worker is
         // already running this process, so re-running here would violate the
@@ -180,10 +210,10 @@ impl DurableProcessWorker {
         let Ok(lease) = self
             .config
             .process_registry
-            .claim_process_lease(&process_id, owner_id, RUNTIME_TURN_LEASE_TTL_MS)
+            .claim_process_lease(&process_id, &owner_id, RUNTIME_TURN_LEASE_TTL_MS)
             .await
         else {
-            return Ok(());
+            return;
         };
         // The process may have reached a terminal state between the list and the
         // claim. Idempotent by process_id: do not re-execute a finished process.
@@ -194,7 +224,8 @@ impl DurableProcessWorker {
             .await
             .is_some_and(|current| current.is_terminal())
         {
-            return self.release_process_lease(&lease).await;
+            self.release_or_log(&lease).await;
+            return;
         }
         let registration = ProcessRegistration {
             id: record.id,
@@ -206,26 +237,94 @@ impl DurableProcessWorker {
         // in provenance is that creator scope, so it is the wake target.
         let execution_context = ProcessExecutionContext::default()
             .with_wake_target_scope(record.provenance.owner_scope);
-        let outcome = self
+        match self
             .run_process_with_lease_renewal(registration, execution_context, lease.clone())
-            .await;
-        let output = match outcome {
-            Ok(output) => output,
-            Err(err) => ProcessAwaitOutput::Failure {
-                class: crate::ToolFailureClass::Execution,
-                code: "process_recovery_failed".to_string(),
-                message: err.to_string(),
-                raw: None,
-                control: None,
-            },
-        };
-        // Mirror the workflow run path: the worker that ran the process writes
-        // the terminal outcome so the process becomes terminal and idempotent.
-        self.config
+            .await
+        {
+            // Ran to a terminal outcome (success or a process-level failure) while
+            // holding the lease: this owner is the single writer of the terminal.
+            Ok(output) => self.complete_and_release(&lease, &process_id, output).await,
+            // The lease was lost mid-run — another owner reclaimed the expired
+            // lease and is now running this process. Do NOT write a terminal
+            // outcome or release the lease: that would race the new owner and
+            // could record a succeeded process as Failed. Leave the row to the
+            // lease holder; it will finish (or another sweep retries it).
+            Err(RecoverFailure::LeaseLost(err)) => {
+                tracing::warn!(
+                    process_id = %process_id,
+                    error = %err,
+                    "process recovery lost its lease mid-run; deferring to the new owner",
+                );
+            }
+            // The process could not be run at all (rebuild/substrate failure):
+            // terminalize as a recovery failure so the row leaves the worklist.
+            Err(RecoverFailure::Run(err)) => {
+                let output = ProcessAwaitOutput::Failure {
+                    class: crate::ToolFailureClass::Execution,
+                    code: "process_recovery_failed".to_string(),
+                    message: err.to_string(),
+                    raw: None,
+                    control: None,
+                };
+                self.complete_and_release(&lease, &process_id, output).await;
+            }
+        }
+    }
+
+    /// Write a recovered process's terminal outcome (the running lease owner is
+    /// the single writer) and then release the lease, logging either failure
+    /// rather than aborting — the lease's TTL is the backstop.
+    async fn complete_and_release(
+        &self,
+        lease: &ProcessLease,
+        process_id: &str,
+        output: ProcessAwaitOutput,
+    ) {
+        // Fence the terminal write: re-confirm the lease immediately before
+        // writing. `renew_process_lease` is rejected (by owner/lease_token/
+        // fencing_token) if another owner has reclaimed an expired lease, and on
+        // success extends the window so the back-to-back write lands inside the
+        // owned interval. A worker that stalled past its TTL therefore cannot
+        // overwrite the new owner's outcome — it defers instead.
+        let fenced = match self
+            .config
             .process_registry
-            .complete_process(&process_id, output)
-            .await?;
-        self.release_process_lease(&lease).await
+            .renew_process_lease(lease, RUNTIME_TURN_LEASE_TTL_MS)
+            .await
+        {
+            Ok(renewed) => renewed,
+            Err(err) => {
+                tracing::warn!(
+                    process_id = %process_id,
+                    error = %err,
+                    "lost process lease before terminal write; deferring to the new owner",
+                );
+                return;
+            }
+        };
+        if let Err(err) = self
+            .config
+            .process_registry
+            .complete_process(process_id, output)
+            .await
+        {
+            tracing::warn!(
+                process_id = %process_id,
+                error = %err,
+                "failed to write recovered process terminal outcome",
+            );
+        }
+        self.release_or_log(&fenced).await;
+    }
+
+    async fn release_or_log(&self, lease: &ProcessLease) {
+        if let Err(err) = self.release_process_lease(lease).await {
+            tracing::warn!(
+                process_id = %lease.process_id,
+                error = %err,
+                "failed to release recovered process lease",
+            );
+        }
     }
 
     /// Run a recovered process while renewing its lease across the execution,
@@ -236,18 +335,22 @@ impl DurableProcessWorker {
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
         mut lease: ProcessLease,
-    ) -> Result<ProcessAwaitOutput, PluginError> {
+    ) -> Result<ProcessAwaitOutput, RecoverFailure> {
         let pending = self.run_process(registration, execution_context, CancellationToken::new());
         tokio::pin!(pending);
         loop {
             tokio::select! {
-                outcome = &mut pending => return outcome,
+                outcome = &mut pending => return outcome.map_err(RecoverFailure::Run),
                 _ = tokio::time::sleep(process_lease_renew_interval()) => {
-                    lease = self
+                    match self
                         .config
                         .process_registry
                         .renew_process_lease(&lease, RUNTIME_TURN_LEASE_TTL_MS)
-                        .await?;
+                        .await
+                    {
+                        Ok(renewed) => lease = renewed,
+                        Err(err) => return Err(RecoverFailure::LeaseLost(err)),
+                    }
                 }
             }
         }
@@ -296,6 +399,7 @@ impl DurableProcessWorker {
             .with_policy(self.config.session_policy.clone())
             .with_session_store_factory(Arc::clone(&self.config.session_store_factory))
             .with_process_registry(Arc::clone(&self.config.process_registry))
+            .with_residency(self.config.residency)
             .with_store(store)
             .build()
             .await
@@ -401,7 +505,7 @@ fn process_lease_renew_interval_ms() -> u64 {
 mod boundary_tests {
     use super::*;
     use crate::{
-        AttachmentStore, AttachmentStorePersistence, AttachmentStoreError, DurabilityTier,
+        AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier,
         DurableSubstrateFacet, InMemoryAttachmentStore, LashlangArtifactStore, ProcessInput,
         ProcessRegistration, RuntimeEffectController, RuntimeError, StoredAttachment,
     };
@@ -516,7 +620,8 @@ mod boundary_tests {
         let factory: Arc<dyn SessionStoreFactory> = Arc::new(TierSessionStoreFactory {
             tier: session_store_tier,
         });
-        let registry: Arc<dyn ProcessRegistry> = Arc::new(crate::TestLocalProcessRegistry::default());
+        let registry: Arc<dyn ProcessRegistry> =
+            Arc::new(crate::TestLocalProcessRegistry::default());
         DurableProcessWorker::new(DurableProcessWorkerConfig::new(
             plugin_host,
             runtime_core,

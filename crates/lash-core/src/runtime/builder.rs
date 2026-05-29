@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use super::{apply_residency_on_load, normalize_session_graph};
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
     EmbeddedRuntimeHost, LashRuntime, PersistentRuntimeServices, PluginStack, ProcessRegistry,
-    ProcessRuntimeHost, RuntimeCoreConfig, RuntimeEffectController, RuntimePersistence,
+    ProcessRuntimeHost, Residency, RuntimeCoreConfig, RuntimeEffectController, RuntimePersistence,
     RuntimeServices, RuntimeSessionState, SessionError, SessionPolicy, SessionStoreFactory,
     TerminationPolicy,
 };
@@ -36,6 +37,7 @@ pub struct EmbeddedRuntimeBuilder {
     session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     store: Option<Arc<dyn RuntimePersistence>>,
     process_registry: Option<Arc<dyn ProcessRegistry>>,
+    residency: Residency,
 }
 
 impl Default for EmbeddedRuntimeBuilder {
@@ -52,6 +54,7 @@ impl Default for EmbeddedRuntimeBuilder {
             session_store_factory: None,
             store: None,
             process_registry: None,
+            residency: Residency::default(),
         }
     }
 }
@@ -197,6 +200,17 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    /// Trim a rebuilt session's resident graph to match the host's residency.
+    ///
+    /// Defaults to [`Residency::KeepAll`]. Setting [`Residency::ActivePathOnly`]
+    /// makes a rebuilt runtime (e.g. a durable worker reconstructing a session to
+    /// run a background process) keep only the active path resident, matching the
+    /// live runtime's behavior instead of silently retaining the full graph.
+    pub fn with_residency(mut self, residency: Residency) -> Self {
+        self.residency = residency;
+        self
+    }
+
     fn resolve_state_from_defaults(&self) -> RuntimeSessionState {
         let mut state = self.initial_state.clone().unwrap_or_default();
         if let Some(session_id) = &self.session_id {
@@ -279,11 +293,27 @@ impl EmbeddedRuntimeBuilder {
     }
 
     pub async fn build(self) -> Result<LashRuntime, SessionError> {
-        let state = self.resolve_state().await?;
+        // ActivePathOnly without a store is a data-loss footgun: trimming drops
+        // orphans from RAM with nowhere to reload them from (mirrors the live
+        // open path's guard).
+        if matches!(self.residency, Residency::ActivePathOnly) && self.store.is_none() {
+            return Err(SessionError::Protocol(
+                "Residency::ActivePathOnly requires a persistent store — \
+                 without one, trimmed orphans are irrecoverable"
+                    .to_string(),
+            ));
+        }
+        let mut state = self.resolve_state().await?;
+        // Heal FIRST (against the full resident set), then trim to the residency
+        // — the same order the live open path uses. `from_host_state` normalizes
+        // again, which is safe on an already-trimmed graph.
+        normalize_session_graph(&mut state);
+        apply_residency_on_load(&mut state, self.residency);
+        let residency = self.residency;
         let plugins = self.resolve_plugins(&state)?;
         let embedded_host = EmbeddedRuntimeHost::new(self.core)
             .with_session_store_factory_option(self.session_store_factory.clone());
-        match (self.store, self.process_registry) {
+        let mut runtime = match (self.store, self.process_registry) {
             (Some(store), Some(process_registry)) => {
                 LashRuntime::from_persistent_background_state(
                     state.policy.clone(),
@@ -291,7 +321,7 @@ impl EmbeddedRuntimeBuilder {
                     PersistentRuntimeServices::new(plugins, store),
                     state,
                 )
-                .await
+                .await?
             }
             (Some(store), None) => {
                 LashRuntime::from_persistent_embedded_state(
@@ -300,7 +330,7 @@ impl EmbeddedRuntimeBuilder {
                     PersistentRuntimeServices::new(plugins, store),
                     state,
                 )
-                .await
+                .await?
             }
             (None, Some(process_registry)) => {
                 LashRuntime::from_background_state(
@@ -309,7 +339,7 @@ impl EmbeddedRuntimeBuilder {
                     RuntimeServices::new(plugins),
                     state,
                 )
-                .await
+                .await?
             }
             (None, None) => {
                 LashRuntime::from_embedded_state(
@@ -318,9 +348,11 @@ impl EmbeddedRuntimeBuilder {
                     RuntimeServices::new(plugins),
                     state,
                 )
-                .await
+                .await?
             }
-        }
+        };
+        runtime.residency = residency;
+        Ok(runtime)
     }
 
     pub async fn build_ephemeral(mut self) -> Result<LashRuntime, SessionError> {

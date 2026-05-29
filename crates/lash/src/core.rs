@@ -507,11 +507,15 @@ impl LashCoreBuilder {
     ///   itself durable (the registry's process records are meaningless without
     ///   a durable session behind them).
     fn ensure_store_peer_coherence(&self) -> Result<()> {
-        // The root session store factory is the session-store signal at build:
-        // the child factory falls back to it, so a durable root governs both.
+        // Match `build()`'s wiring exactly: the session store factory it installs
+        // is `child_store_factory.or(store_factory)` (child takes precedence, root
+        // is the fallback). The coherence check must read the tier of that same
+        // effective factory, or a host that wires only a durable child factory
+        // (no root) is wrongly rejected though `build()` would wire it durably.
         let session_store_tier = self
-            .store_factory
+            .child_store_factory
             .as_ref()
+            .or(self.store_factory.as_ref())
             .map(|factory| factory.durability_tier());
         let attachment_tier = self
             .attachment_store
@@ -608,10 +612,15 @@ impl LashCoreBuilder {
             self.process_registry.as_ref(),
             &default_plugin_host,
             &core,
-            self.store_factory.as_ref(),
+            // The worker rebuilds sessions with the same factory `build()` wires
+            // below: `child_store_factory.or(store_factory)`.
+            self.child_store_factory
+                .as_ref()
+                .or(self.store_factory.as_ref()),
             &policy,
             self.process_work_poke.take(),
             self.disable_default_process_work_runner,
+            self.residency.unwrap_or_default(),
         )?;
 
         let mut env_builder = RuntimeEnvironment::builder()
@@ -661,6 +670,7 @@ impl LashCoreBuilder {
         policy: &SessionPolicy,
         explicit_poke: Option<ProcessWorkPoke>,
         default_disabled: bool,
+        residency: lash_core::Residency,
     ) -> Result<ProcessWorkRunnerSetup> {
         let Some(process_registry) = process_registry else {
             return Ok(ProcessWorkRunnerSetup::None);
@@ -691,7 +701,8 @@ impl LashCoreBuilder {
                 Arc::clone(store_factory),
                 Arc::clone(process_registry),
             )
-            .with_session_policy(policy.clone()),
+            .with_session_policy(policy.clone())
+            .with_residency(residency),
         );
         Ok(ProcessWorkRunnerSetup::LazyDefault { config })
     }

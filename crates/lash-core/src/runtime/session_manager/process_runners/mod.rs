@@ -271,12 +271,11 @@ mod tests {
     /// Spawn `count` independent inline [`ProcessWorkRunner`]s over the same
     /// registry, returning their pokes.
     ///
-    /// The detached per-start spawn this replaces ran each process in its own
-    /// task, so a parent blocked awaiting a child still let the child run. The
-    /// runner's per-drive sweep is sequential, so a single runner blocked on a
-    /// nested-process await would starve the child; running more than one
-    /// lease-fenced runner restores that concurrency without double-execution
-    /// (a process already leased by one runner is skipped by the others).
+    /// One runner suffices for any nesting depth: the worker runs each claimed
+    /// process on its own task, so a parent blocked awaiting a child does not
+    /// park the runner — a later drive claims and runs the child. (The `count`
+    /// parameter is retained for tests that deliberately exercise concurrent
+    /// competing owners, where the lease fences double-execution.)
     fn spawn_inline_process_runners(
         worker: &crate::DurableProcessWorker,
         count: usize,
@@ -440,8 +439,7 @@ mod tests {
         }
 
         async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
-            self.runs
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let value = call
                 .args
                 .get("value")
@@ -830,11 +828,22 @@ mod tests {
         );
         assert!(events.iter().any(|event| event.event_type == "process.wake"
             && event.payload["text"] == serde_json::json!("raw:seed")));
-        let wake_sequence = events
+        let wake_event = events
             .iter()
             .find(|event| event.event_type == "process.wake")
-            .expect("wake event")
-            .sequence;
+            .expect("wake event");
+        // M1: wake/yield emissions carry a deterministic per-process ordinal
+        // replay key, so a crash-recovery replay re-issues the same key and the
+        // append dedupes instead of redelivering a duplicate wake.
+        assert!(
+            wake_event
+                .invocation
+                .replay_key()
+                .is_some_and(|key| key.starts_with("process:process-1:event:")),
+            "wake emission must carry a deterministic replay key, got {:?}",
+            wake_event.invocation.replay_key(),
+        );
+        let wake_sequence = wake_event.sequence;
         let completed_sequence = events
             .iter()
             .find(|event| event.event_type == "process.completed")
@@ -849,10 +858,9 @@ mod tests {
         // runner-driven process wakes its creator session `root`. (The registry
         // record does not persist a start-time custom wake target, so wake
         // delivery follows provenance, matching the durable recovery path.)
-        let queued =
-            crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
-                .await
-                .expect("queued wake");
+        let queued = crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+            .await
+            .expect("queued wake");
         assert_eq!(queued.len(), 1);
         assert_eq!(
             queued[0].delivery_policy,
@@ -883,7 +891,7 @@ mod tests {
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
             crate::RuntimeCoreConfig::in_memory(),
         );
-        let pokes = spawn_inline_process_runners(&worker, 2);
+        let pokes = spawn_inline_process_runners(&worker, 1);
         let manager = RuntimeSessionManager::new(&runtime, true, None, None)
             .expect("runtime session manager");
         assert!(
@@ -985,7 +993,7 @@ mod tests {
             crate::RuntimeCoreConfig::in_memory()
                 .with_effect_controller(Arc::new(controller.clone())),
         );
-        let pokes = spawn_inline_process_runners(&worker, 2);
+        let pokes = spawn_inline_process_runners(&worker, 1);
 
         let target = lashlang_process_registration(
             "signal-target",

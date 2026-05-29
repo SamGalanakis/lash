@@ -41,9 +41,16 @@ pub struct InMemorySessionStore {
     runtime_effect_journal: Mutex<
         std::collections::HashMap<(String, String, String), crate::RuntimeEffectJournalRecord>,
     >,
+    // Save/renew/abandon counters are observed only by lash-core tests; they
+    // exist (and are incremented) solely under `cfg(test)` so the shipped store
+    // carries no dead test-only state.
+    #[cfg(test)]
     runtime_turn_checkpoint_save_count: Mutex<usize>,
+    #[cfg(test)]
     runtime_effect_journal_save_count: Mutex<usize>,
+    #[cfg(test)]
     runtime_turn_lease_renew_count: Mutex<usize>,
+    #[cfg(test)]
     runtime_turn_lease_abandon_count: Mutex<usize>,
     queued_work: Mutex<Vec<InMemoryQueuedBatch>>,
     queued_work_next_seq: Mutex<u64>,
@@ -490,10 +497,13 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 (renewed.session_id.clone(), renewed.turn_id.clone()),
                 renewed.clone(),
             );
-        *self
-            .runtime_turn_lease_renew_count
-            .lock()
-            .expect("lock runtime turn lease renew count") += 1;
+        #[cfg(test)]
+        {
+            *self
+                .runtime_turn_lease_renew_count
+                .lock()
+                .expect("lock runtime turn lease renew count") += 1;
+        }
         Ok(renewed)
     }
 
@@ -513,10 +523,13 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         }) {
             leases.remove(&key);
         }
-        *self
-            .runtime_turn_lease_abandon_count
-            .lock()
-            .expect("lock runtime turn lease abandon count") += 1;
+        #[cfg(test)]
+        {
+            *self
+                .runtime_turn_lease_abandon_count
+                .lock()
+                .expect("lock runtime turn lease abandon count") += 1;
+        }
         Ok(())
     }
 
@@ -544,10 +557,13 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 (checkpoint.session_id.clone(), checkpoint.turn_id.clone()),
                 checkpoint,
             );
-        *self
-            .runtime_turn_checkpoint_save_count
-            .lock()
-            .expect("lock runtime turn checkpoint save count") += 1;
+        #[cfg(test)]
+        {
+            *self
+                .runtime_turn_checkpoint_save_count
+                .lock()
+                .expect("lock runtime turn checkpoint save count") += 1;
+        }
         Ok(())
     }
 
@@ -592,10 +608,13 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 ),
                 record,
             );
-        *self
-            .runtime_effect_journal_save_count
-            .lock()
-            .expect("lock runtime effect journal save count") += 1;
+        #[cfg(test)]
+        {
+            *self
+                .runtime_effect_journal_save_count
+                .lock()
+                .expect("lock runtime effect journal save count") += 1;
+        }
         Ok(())
     }
 
@@ -652,9 +671,9 @@ fn current_epoch_ms() -> u64 {
 }
 
 /// Test-only introspection: call counters and a head-meta seeder used by the
-/// lash-core runtime tests. Not part of the embedding surface; the counters are
-/// maintained on every build but only read by tests.
-#[allow(dead_code)]
+/// lash-core runtime tests. Compiled only under `cfg(test)`, so the shipped
+/// embedding surface carries none of it.
+#[cfg(test)]
 impl InMemorySessionStore {
     pub(crate) async fn save_session_head_meta(&self, meta: crate::SessionHeadMeta) {
         *self.session_head_meta.lock().expect("lock store") = Some(meta);

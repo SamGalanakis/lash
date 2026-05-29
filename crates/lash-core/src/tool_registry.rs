@@ -1505,6 +1505,49 @@ mod tests {
     }
 
     #[test]
+    fn restore_state_adopts_generation_at_or_above_three() {
+        // Cold rebuild ratchet: a session whose tool surface advanced to
+        // generation >= 3 restores onto a fresh base-1 registry. `restore_state`
+        // adopts the snapshot's generation verbatim; `apply_state` (a gen-matched
+        // delta) rejects it. This is the exact divergence the durable worker /
+        // session resume rebuild relies on `restore_state` to absorb.
+        let source = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("source registry");
+        let snapshot = source.export_state().with_generation(3);
+
+        let target = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target registry");
+        assert_eq!(
+            target.generation(),
+            1,
+            "a fresh registry starts at generation 1"
+        );
+        let restored = target
+            .restore_state(snapshot.clone())
+            .expect("restore adopts the snapshot generation");
+        assert_eq!(restored, 3, "restore returns the adopted generation");
+        assert_eq!(
+            target.generation(),
+            3,
+            "restore adopts gen 3 onto a base-1 registry without bumping"
+        );
+        // A re-export round-trips at the same generation (idempotent).
+        assert_eq!(target.export_state().generation(), 3);
+
+        // apply_state on the same high-generation snapshot is rejected — proving
+        // the rebuild would have failed without restore_state.
+        let fresh = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("fresh registry");
+        assert!(
+            matches!(
+                fresh.apply_state(snapshot),
+                Err(ReconfigureError::GenerationMismatch {
+                    expected: 3,
+                    actual: 1
+                })
+            ),
+            "apply_state must reject a gen-3 snapshot on a base-1 registry"
+        );
+    }
+
+    #[test]
     fn remove_source_removes_all_source_tools() {
         let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
         registry

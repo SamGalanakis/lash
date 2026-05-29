@@ -58,8 +58,6 @@ pub enum EmbedError {
     ProtocolTurnOptions(#[from] serde_json::Error),
     #[error("runtime control unavailable: {0}")]
     Control(#[from] lash_core::PluginActionInvokeError),
-    #[error("queued image `{id}` is missing its image blob")]
-    MissingQueuedImageBlob { id: String },
 }
 
 pub type Result<T> = std::result::Result<T, EmbedError>;

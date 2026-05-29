@@ -166,6 +166,7 @@ impl RuntimeSessionManager {
             store: self.current.store.clone(),
             cancellation: cancellation.clone(),
             sleep_sequence: AtomicU64::new(0),
+            event_sequence: AtomicU64::new(0),
             signal_sequence: tokio::sync::Mutex::new(0),
         };
         let env = ::lashlang::ExecutionEnvironment::new(&host).process();
@@ -193,6 +194,11 @@ struct LashlangProcessHost<'run> {
     store: Option<Arc<dyn crate::RuntimePersistence>>,
     cancellation: tokio_util::sync::CancellationToken,
     sleep_sequence: AtomicU64,
+    /// Per-execution ordinal for wake/yield emissions. Deterministic replay
+    /// re-issues `process_event` calls in the same order, so the Nth emission
+    /// gets the same ordinal — and thus the same replay key — across a
+    /// crash-recovery re-run, making the append idempotent on redelivery.
+    event_sequence: AtomicU64,
     signal_sequence: tokio::sync::Mutex<u64>,
 }
 
@@ -298,6 +304,11 @@ impl LashlangProcessHost<'_> {
             ::lashlang::ProcessEventKind::Yield => "process.yield",
             ::lashlang::ProcessEventKind::Wake => "process.wake",
         };
+        // Deterministic per-emission key: a crash-recovery re-run replays the
+        // process from the start, re-issuing wake/yield events in the same order,
+        // so the Nth emission keys to the same value and the append dedupes
+        // instead of redelivering a duplicate wake/yield.
+        let ordinal = self.event_sequence.fetch_add(1, Ordering::Relaxed);
         let result = self
             .registry
             .append_event(
@@ -306,6 +317,7 @@ impl LashlangProcessHost<'_> {
                     event_type,
                     crate::lashlang_bridge::process_event_payload(&event.value)?,
                 )
+                .with_replay_key(format!("process:{}:event:{ordinal}", self.process_id))
                 .with_optional_wake_target_scope(self.wake_target_scope.clone()),
             )
             .await

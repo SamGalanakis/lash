@@ -83,7 +83,9 @@ impl LashRuntime {
             // the snapshot's generation. `apply_state` (a delta-apply that
             // requires `snapshot.generation == base` and bumps) would reject a
             // session whose surface reached generation ≥ 2 onto a fresh base-1
-            // registry — the worker-rebuild / restart divergence.
+            // registry — the worker-rebuild / restart divergence. `restore_state`
+            // adopts the snapshot's generation wholesale, so any generation
+            // rebuilds.
             session
                 .plugins()
                 .tool_registry()

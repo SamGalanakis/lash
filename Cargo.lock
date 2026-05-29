@@ -2364,7 +2364,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-util",
- "jsonschema",
  "lash-sansio",
  "lash-trace",
  "lashlang",

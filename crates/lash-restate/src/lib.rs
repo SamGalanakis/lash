@@ -144,18 +144,6 @@ impl RestateCoreProcessRunner {
     pub fn worker(&self) -> &DurableProcessWorker {
         &self.worker
     }
-
-    /// Re-execute every non-terminal process this worker's registry still
-    /// holds, claiming a single-owner lease per process so a crashed
-    /// deployment's trigger/host-event/cron-started processes are driven to a
-    /// terminal state when the endpoint comes back up.
-    ///
-    /// Call this once at the serve path, after binding the process workflow,
-    /// so durable background work survives a restart the same way a
-    /// turn-started process does.
-    pub async fn recover_non_terminal(&self) -> Result<(), PluginError> {
-        self.worker.drive_pending_processes().await
-    }
 }
 
 #[async_trait::async_trait]
@@ -224,7 +212,11 @@ impl RestateProcessIngressRunner {
         }
     }
 
-    async fn submit_record(&self, owner_id: &str, record: ProcessRecord) -> Result<(), PluginError> {
+    async fn submit_record(
+        &self,
+        owner_id: &str,
+        record: ProcessRecord,
+    ) -> Result<(), PluginError> {
         let process_id = record.id.clone();
         // Fence the submit: a claim conflict means another runner is already
         // submitting this process, so skip it. Treat any claim failure as
@@ -2119,8 +2111,9 @@ mod tests {
     /// route's linked module is published before the process runs; that store
     /// survives the registry/worker reopen within a single test process.
     fn trigger_lashlang_registration(process_id: &str, resource: &str) -> ProcessRegistration {
-        let module = lashlang::parse("process notify(resource: str) { finish { triggered: resource } }")
-            .expect("lashlang trigger module");
+        let module =
+            lashlang::parse("process notify(resource: str) { finish { triggered: resource } }")
+                .expect("lashlang trigger module");
         let linked_module = lashlang::LinkedModule::link(
             module,
             lashlang::LashlangSurface::new(
@@ -2439,6 +2432,104 @@ mod tests {
                 process_id: "task-workflow".to_string(),
                 reason: Some("stop".to_string()),
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn ingress_runner_submits_non_terminal_process_under_fenced_lease() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // A non-terminal process is the durable worklist row the ingress runner
+        // must submit.
+        let registry = process_registry();
+        registry
+            .register_process(external_registration("task-1"))
+            .await
+            .expect("register");
+
+        // Minimal mock ingress: capture the first request (request line +
+        // headers), then reply 202 Accepted so the reqwest submit succeeds.
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let captured_server = captured.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.expect("read request");
+            *captured_server.lock().expect("captured lock") =
+                Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+            socket
+                .write_all(b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .expect("write response");
+            socket.flush().await.expect("flush");
+        });
+
+        let runner = RestateProcessIngressRunner::new(format!("http://{addr}"), registry.clone());
+        runner.claim_and_run_pending().await.expect("drive pending");
+        server.await.expect("mock ingress server task");
+
+        let request = captured
+            .lock()
+            .expect("captured lock")
+            .clone()
+            .expect("a workflow run was submitted to the ingress");
+        assert!(
+            request.starts_with("POST /LashProcessWorkflow/task-1/run/send "),
+            "submits the keyed workflow run: {request}"
+        );
+        assert!(
+            request.contains("idempotency-key: lash-process:task-1:run"),
+            "carries the idempotent submit key so a re-submit coalesces: {request}"
+        );
+
+        // The durable backend reference is recorded so the process is observably
+        // owned by Restate.
+        let record = registry.get_process("task-1").await.expect("get process");
+        assert_eq!(
+            record.external_ref.as_ref().map(|e| e.backend.as_str()),
+            Some("restate"),
+            "the durable external_ref must be recorded after a successful submit"
+        );
+        // The fence lease is released after the submit, so a fresh owner can
+        // claim it again.
+        assert!(
+            registry
+                .claim_process_lease("task-1", "probe", 1_000)
+                .await
+                .is_ok(),
+            "the submit fence lease must be released after the ingress POST"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingress_runner_skips_process_fenced_by_another_owner() {
+        // A live lease held by a different owner means another runner is already
+        // submitting this process; the ingress runner must skip it (no submit) so
+        // a process is submitted exactly once. The unreachable ingress URL makes a
+        // stray submit fail loudly rather than pass silently.
+        let registry = process_registry();
+        registry
+            .register_process(external_registration("task-1"))
+            .await
+            .expect("register");
+        registry
+            .claim_process_lease("task-1", "other-owner", 30_000)
+            .await
+            .expect("pre-claim by another owner");
+
+        let runner = RestateProcessIngressRunner::new("http://127.0.0.1:9", registry.clone());
+        runner
+            .claim_and_run_pending()
+            .await
+            .expect("drive skips the fenced record without error");
+
+        let record = registry.get_process("task-1").await.expect("get process");
+        assert!(
+            record.external_ref.is_none(),
+            "a record fenced by another owner must not be submitted"
         );
     }
 }

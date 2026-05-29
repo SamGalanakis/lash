@@ -510,12 +510,12 @@ async fn run_seed_probe(
         ..SessionPolicy::default()
     };
     // `agents.spawn(...)` starts a SessionTurn (subagent) process that the
-    // lease-protected worker executes — not inline. Spawn inline runners over the
-    // same registry + an explicit in-memory store factory so the subagent runs
-    // and provider re-supply reaches the child. Several lease-fenced runners are
-    // spawned so a parent process that blocks awaiting a nested child (e.g.
-    // `start spawn_child` → `await agents.spawn`) does not deadlock a single
-    // sequential drive (each process is run by exactly one owner via the lease).
+    // lease-protected worker executes — not inline. A SINGLE inline runner over
+    // the same registry + an explicit in-memory store factory runs it (and
+    // provider re-supply reaches the child). One runner suffices even for the
+    // nested case here (`handle = start spawn_child` then `await handle`) because
+    // the worker runs each process on its own task, so the parent's await never
+    // parks the runner away from the child.
     let worker = lash_core::DurableProcessWorker::new(
         lash_core::DurableProcessWorkerConfig::from_plugin_factories(
             factories,
@@ -525,9 +525,7 @@ async fn run_seed_probe(
         )
         .with_session_policy(policy.clone()),
     );
-    let _pokes: Vec<_> = (0..3)
-        .map(|_| lash_core::ProcessWorkRunner::inline(worker.clone()).spawn())
-        .collect();
+    let _poke = lash_core::ProcessWorkRunner::inline(worker).spawn();
     let mut runtime = LashRuntime::from_background_state(
         policy.clone(),
         host,

@@ -1088,9 +1088,7 @@ fn peer_coherence_builder() -> crate::core::LashCoreBuilder {
         .model(mock_model_spec())
 }
 
-fn durable_session_store_factory(
-    dir: &std::path::Path,
-) -> Arc<dyn lash_core::SessionStoreFactory> {
+fn durable_session_store_factory(dir: &std::path::Path) -> Arc<dyn lash_core::SessionStoreFactory> {
     Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         dir.join("sessions"),
     ))
@@ -1116,7 +1114,8 @@ fn expect_build_error(
 
 fn durable_artifact_store(dir: &std::path::Path) -> Arc<dyn lash_core::LashlangArtifactStore> {
     Arc::new(
-        lash_sqlite_store::Store::open(&dir.join("artifacts.db")).expect("open durable artifact store"),
+        lash_sqlite_store::Store::open(&dir.join("artifacts.db"))
+            .expect("open durable artifact store"),
     )
 }
 
@@ -1214,6 +1213,31 @@ async fn all_durable_stores_build_successfully() -> Result<()> {
 }
 
 #[tokio::test]
+async fn durable_registry_with_only_child_store_factory_builds() -> Result<()> {
+    // C2 regression: the CLI wires a durable process registry + a durable *child*
+    // store factory (managed child sessions) and NO root `store_factory`. Since
+    // `build()` installs `child_store_factory.or(store_factory)` as the session
+    // store, this wiring is durable end-to-end and must build. The coherence
+    // guard and the work-runner resolver therefore have to read that same
+    // effective factory; reading `store_factory` alone wrongly rejected it with
+    // `DurableProcessRegistryRequiresStoreFactory` even though `build()` would
+    // wire the child factory durably.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
+            .expect("open durable registry"),
+    );
+    peer_coherence_builder()
+        .effect_controller(Arc::new(lash_core::InlineRuntimeEffectController::default()))
+        .child_store_factory(durable_session_store_factory(dir.path()))
+        .attachment_store(durable_attachment_store(dir.path()))
+        .lashlang_artifact_store(durable_artifact_store(dir.path()))
+        .process_registry(registry)
+        .build()?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn in_memory_stores_build_successfully() -> Result<()> {
     // The durable-first guard must not regress inline/in-memory hosts: an
     // all-ephemeral build (the named in-memory implementations) succeeds,
@@ -1245,7 +1269,8 @@ async fn process_registry_without_work_runner_fails_loudly() {
 }
 
 #[tokio::test]
-async fn default_process_work_runner_spawns_when_registry_and_store_factory_present() -> Result<()> {
+async fn default_process_work_runner_spawns_when_registry_and_store_factory_present() -> Result<()>
+{
     // Zero-ceremony path: a registry + a store factory (so the inline worker can
     // rebuild session runtimes) and no explicit runner spawns the default inline
     // `ProcessWorkRunner` on first `session().open()`. The runner's actual
@@ -1289,5 +1314,8 @@ async fn registry_without_store_factory_fails_loudly() {
         result,
         "a process registry with no store factory must be rejected",
     );
-    assert!(matches!(err, EmbedError::ProcessRegistryRequiresStoreFactory));
+    assert!(matches!(
+        err,
+        EmbedError::ProcessRegistryRequiresStoreFactory
+    ));
 }

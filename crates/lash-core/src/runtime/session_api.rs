@@ -10,7 +10,8 @@ impl LashRuntime {
             let snapshot = session.plugins().tool_registry().export_state();
             self.state.tool_state_generation = Some(snapshot.generation());
             self.state.tool_state_snapshot = Some(snapshot);
-            self.state.plugin_snapshot = session.plugins().snapshot().ok();
+            let captured = session.plugins().snapshot();
+            crate::runtime::state::store_plugin_snapshot(&mut self.state.plugin_snapshot, captured);
             self.state.plugin_snapshot_revision =
                 Some(session.plugins().snapshot_revision_fingerprint());
         } else {
@@ -89,7 +90,8 @@ impl LashRuntime {
             let snapshot = session.plugins().tool_registry().export_state();
             state.tool_state_generation = Some(snapshot.generation());
             state.tool_state_snapshot = Some(snapshot);
-            state.plugin_snapshot = session.plugins().snapshot().ok();
+            let captured = session.plugins().snapshot();
+            crate::runtime::state::store_plugin_snapshot(&mut state.plugin_snapshot, captured);
             state.plugin_snapshot_revision =
                 Some(session.plugins().snapshot_revision_fingerprint());
         }
@@ -267,7 +269,11 @@ impl LashRuntime {
                 .replace_active_read_state(&outcome.messages, &outcome.tool_calls);
             if let Some(session) = self.session.as_ref() {
                 self.state.tool_state_snapshot = Some(session.tool_registry().export_state());
-                self.state.plugin_snapshot = session.plugins().snapshot().ok();
+                let captured = session.plugins().snapshot();
+                crate::runtime::state::store_plugin_snapshot(
+                    &mut self.state.plugin_snapshot,
+                    captured,
+                );
                 self.state.plugin_snapshot_revision =
                     Some(session.plugins().snapshot_revision_fingerprint());
             }
