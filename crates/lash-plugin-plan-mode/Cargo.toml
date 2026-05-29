@@ -14,9 +14,9 @@ keywords = ["lash", "agent", "plan", "plugin", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12" }
-lash-tool-apply-patch = { path = "../lash-tool-apply-patch", version = "=0.1.0-alpha.12" }
-lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.12" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.13" }
+lash-tool-apply-patch = { path = "../lash-tool-apply-patch", version = "=0.1.0-alpha.13" }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.13" }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -25,7 +25,7 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.12", features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.13", features = ["testing"] }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
