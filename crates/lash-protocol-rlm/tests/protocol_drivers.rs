@@ -301,9 +301,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
             model_return: lash_sansio::ModelToolReturn {
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
-                parts: vec![lash_sansio::ModelToolReturnPart::Text(
-                    "file contents".to_string(),
-                )],
+                parts: vec![lash_sansio::ModelToolReturnPart::text("file contents")],
             },
             duration_ms: 10,
             replay: None,
@@ -422,7 +420,7 @@ fn standard_checkpoint_after_tool_control_finish_preserves_terminal_outcome() {
             model_return: lash_sansio::ModelToolReturn {
                 call_id: "tc-finish".to_string(),
                 tool_name: "submit_result".to_string(),
-                parts: vec![lash_sansio::ModelToolReturnPart::Text("done".to_string())],
+                parts: vec![lash_sansio::ModelToolReturnPart::text("done")],
             },
             duration_ms: 1,
             replay: None,
@@ -485,9 +483,7 @@ fn standard_empty_final_after_tool_result_finishes_without_error() {
             model_return: lash_sansio::ModelToolReturn {
                 call_id: "tc1".to_string(),
                 tool_name: "update_plan".to_string(),
-                parts: vec![lash_sansio::ModelToolReturnPart::Text(
-                    "Plan updated".to_string(),
-                )],
+                parts: vec![lash_sansio::ModelToolReturnPart::text("Plan updated")],
             },
             duration_ms: 1,
             replay: None,
@@ -575,7 +571,7 @@ fn standard_max_turns_stops_iteration() {
             model_return: lash_sansio::ModelToolReturn {
                 call_id: "tc1".to_string(),
                 tool_name: "test".to_string(),
-                parts: vec![lash_sansio::ModelToolReturnPart::Text("ok".to_string())],
+                parts: vec![lash_sansio::ModelToolReturnPart::text("ok")],
             },
             duration_ms: 1,
             replay: None,

@@ -477,6 +477,10 @@ impl ObservableSession {
         self.snapshot().list_process_handles().await
     }
 
+    pub async fn list_all_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
+        self.snapshot().list_all_process_handles().await
+    }
+
     pub fn process_scope(&self) -> ProcessScope {
         self.snapshot().process_scope()
     }

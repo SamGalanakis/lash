@@ -107,6 +107,9 @@ impl CodexProvider {
     /// raw status.
     fn codex_error_summary(status: u16, body_text: &str) -> Option<String> {
         let parsed: Value = serde_json::from_str(body_text).ok()?;
+        if let Some(detail) = parsed.get("detail").and_then(|v| v.as_str()) {
+            return Some(format!("Codex request failed with {status}: {detail}"));
+        }
         let err = parsed.get("error")?;
         let code = err
             .get("code")
@@ -253,7 +256,6 @@ impl CodexProvider {
             "instructions": instructions,
             "input": input,
             "tools": tools,
-            "max_output_tokens": policy.max_output_tokens,
             "parallel_tool_calls": !req.tools.is_empty(),
             "stream": stream,
             "store": false,
@@ -819,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_output_token_cap_prefers_request_then_provider() {
+    fn codex_request_omits_output_token_cap() {
         let provider = CodexProvider::new("access", "refresh", 0).with_options(ProviderOptions {
             max_output_tokens: Some(9_999),
             ..ProviderOptions::default()
@@ -830,12 +832,22 @@ mod tests {
                 false,
             )
             .unwrap();
-        assert_eq!(provider_limited["max_output_tokens"], 9_999);
+        assert!(provider_limited.get("max_output_tokens").is_none());
 
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
         req.generation.output_token_cap = NonZeroUsize::new(2_048);
         let request_limited = provider.build_request_body(&req, false).unwrap();
-        assert_eq!(request_limited["max_output_tokens"], 2_048);
+        assert!(request_limited.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn codex_error_summary_uses_top_level_detail() {
+        let summary =
+            CodexProvider::codex_error_summary(400, r#"{"detail":"Unsupported parameter: foo"}"#);
+        assert_eq!(
+            summary.as_deref(),
+            Some("Codex request failed with 400: Unsupported parameter: foo")
+        );
     }
 
     #[test]

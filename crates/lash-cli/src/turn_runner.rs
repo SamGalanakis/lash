@@ -7,6 +7,7 @@ use lash_core::{
 #[cfg(test)]
 use lash_sqlite_store::Store;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::PreparedTurn;
@@ -36,21 +37,30 @@ where
     let (return_tx, return_rx) = oneshot::channel();
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
+    let task_session = session.clone();
+    let return_session = session;
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         tracing::debug!(stream_id, "runtime turn task spawned");
-        let result = match session
+        let result = match task_session
             .turn(turn_input)
             .cancel(task_cancel)
             .stream(&sink)
             .await
         {
             Ok(turn) => turn,
-            Err(err) => runtime_error_turn_result(&session, err.to_string()).await,
+            Err(err) => runtime_error_turn_result(&task_session, err.to_string()).await,
         };
         tracing::debug!(stream_id, outcome = ?result.outcome, "runtime turn task completed");
-        let _ = return_tx.send(RuntimeRunResult { stream_id, result });
+        result
     });
+    tokio::spawn(return_turn_result(
+        "runtime turn",
+        stream_id,
+        return_session,
+        task,
+        return_tx,
+    ));
 
     (cancel, return_rx)
 }
@@ -66,10 +76,12 @@ where
     let (return_tx, return_rx) = oneshot::channel();
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
+    let task_session = session.clone();
+    let return_session = session;
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         tracing::debug!(stream_id, "queued runtime turn task spawned");
-        let result = match session
+        let result = match task_session
             .next_queued_turn()
             .cancel(task_cancel)
             .stream(&sink)
@@ -77,16 +89,55 @@ where
         {
             Ok(Some(turn)) => turn,
             Ok(None) => {
-                runtime_error_turn_result(&session, "no durable queued work was ready".to_string())
-                    .await
+                runtime_error_turn_result(
+                    &task_session,
+                    "no durable queued work was ready".to_string(),
+                )
+                .await
             }
-            Err(err) => runtime_error_turn_result(&session, err.to_string()).await,
+            Err(err) => runtime_error_turn_result(&task_session, err.to_string()).await,
         };
         tracing::debug!(stream_id, outcome = ?result.outcome, "queued runtime turn task completed");
-        let _ = return_tx.send(RuntimeRunResult { stream_id, result });
+        result
     });
+    tokio::spawn(return_turn_result(
+        "queued runtime turn",
+        stream_id,
+        return_session,
+        task,
+        return_tx,
+    ));
 
     (cancel, return_rx)
+}
+
+async fn return_turn_result(
+    task_label: &'static str,
+    stream_id: u64,
+    session: LashSession,
+    task: JoinHandle<lash::TurnResult>,
+    return_tx: oneshot::Sender<RuntimeRunResult>,
+) {
+    let result = match task.await {
+        Ok(result) => result,
+        Err(err) => {
+            let failure = if err.is_panic() {
+                "panicked"
+            } else if err.is_cancelled() {
+                "was cancelled"
+            } else {
+                "failed"
+            };
+            tracing::error!(
+                stream_id,
+                task = task_label,
+                error = %err,
+                "runtime task join failed"
+            );
+            runtime_error_turn_result(&session, format!("{task_label} {failure}: {err}")).await
+        }
+    };
+    let _ = return_tx.send(RuntimeRunResult { stream_id, result });
 }
 
 async fn runtime_error_turn_result(session: &LashSession, message: String) -> lash::TurnResult {

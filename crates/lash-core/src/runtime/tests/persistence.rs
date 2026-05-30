@@ -5,10 +5,13 @@ use super::*;
 // contract as the SQLite backend so it can't silently drift.
 #[tokio::test]
 async fn recording_store_satisfies_runtime_persistence_conformance() {
-    crate::testing::conformance::runtime_persistence(|| {
-        std::sync::Arc::new(RecordingStore::default())
-            as std::sync::Arc<dyn crate::RuntimePersistence>
-    })
+    crate::testing::conformance::runtime_persistence_with_options(
+        || {
+            std::sync::Arc::new(RecordingStore::default())
+                as std::sync::Arc<dyn crate::RuntimePersistence>
+        },
+        crate::testing::conformance::RuntimePersistenceConformance::noop_attachment_manifest(),
+    )
     .await;
 }
 

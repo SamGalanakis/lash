@@ -153,7 +153,7 @@ impl RuntimeEffectController for RecordingEffectController {
                         model_return: crate::ModelToolReturn {
                             call_id: call.call_id,
                             tool_name: call.tool_name,
-                            parts: vec![crate::ModelToolReturnPart::Text("ok".to_string())],
+                            parts: vec![crate::ModelToolReturnPart::text("ok")],
                         },
                         output,
                         duration_ms: 0,
@@ -288,6 +288,27 @@ impl RuntimeEffectController for ProcessJournalController {
                                 metadata: serde_json::json!({}),
                             },
                         )),
+                    },
+                }),
+                ProcessCommand::Signal { process_id, .. } => Ok(RuntimeEffectOutcome::Process {
+                    result: ProcessEffectOutcome::Signal {
+                        event: crate::ProcessEvent {
+                            process_id,
+                            sequence: 1,
+                            event_type: "process.signal".to_string(),
+                            payload: serde_json::json!({}),
+                            invocation: crate::RuntimeInvocation {
+                                scope: crate::RuntimeScope::new("test-session"),
+                                subject: crate::RuntimeSubject::Process {
+                                    process_id: "test-process".to_string(),
+                                },
+                                caused_by: None,
+                                replay: None,
+                                checkpoint_hash: None,
+                            },
+                            semantics: crate::ProcessEventSemantics::default(),
+                            occurred_at: std::time::SystemTime::UNIX_EPOCH,
+                        },
                     },
                 }),
             },
@@ -844,7 +865,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         "turn-process",
         1,
         0,
-        "process:list:scope-a",
+        "process:list:scope-a:live",
         RuntimeEffectKind::Process,
         "root:turn-process:1:0:process:list",
     );
@@ -853,6 +874,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         RuntimeEffectCommand::Process {
             command: ProcessCommand::List {
                 owner_scope: ProcessScope::new("scope-a"),
+                mode: crate::ProcessListMode::Live,
             },
         },
     );
@@ -899,6 +921,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
             RuntimeEffectCommand::Process {
                 command: ProcessCommand::List {
                     owner_scope: ProcessScope::new("scope-b"),
+                    mode: crate::ProcessListMode::Live,
                 },
             },
         ),
@@ -1275,8 +1298,8 @@ async fn durable_controller_with_all_durable_stores_runs_turn() {
         ),
     )
     .await;
-    let effect_scope = RuntimeEffectControllerScope::new(&controller, "durable-ok-turn")
-        .expect("effect scope");
+    let effect_scope =
+        RuntimeEffectControllerScope::new(&controller, "durable-ok-turn").expect("effect scope");
 
     let turn = runtime
         .stream_turn(

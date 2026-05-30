@@ -13,11 +13,12 @@
 use std::sync::Arc;
 
 use crate::{
-    AgentFrameReason, AgentFrameRecord, ModelSpec, PluginSessionSnapshot, ProtocolTurnOptions,
-    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit, RuntimeEffectJournalRecord,
-    RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence, RuntimeSessionState,
-    RuntimeTurnCompletion, SessionPolicy, SessionReadScope, StoreError, TokenLedgerEntry,
-    TokenUsage, ToolState,
+    AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, DeliveryPolicy, MergeKey,
+    ModelSpec, PluginSessionSnapshot, ProtocolTurnOptions, QueuedWorkBatchDraft,
+    QueuedWorkClaimBoundary, QueuedWorkPayload, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+    RuntimeCommit, RuntimeEffectJournalRecord, RuntimeEffectKind, RuntimeEffectOutcome,
+    RuntimePersistence, RuntimeSessionState, RuntimeTurnCompletion, SessionPolicy,
+    SessionReadScope, SlotPolicy, StoreError, TokenLedgerEntry, TokenUsage, ToolState, TurnInput,
 };
 use crate::{
     LashSchema, ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventSemanticsSpec,
@@ -42,6 +43,7 @@ where
     processes_can_exist_with_zero_grants(make()).await;
     delete_session_revokes_handles_by_session(make()).await;
     list_non_terminal_excludes_terminal_processes(make()).await;
+    list_live_handle_grants_excludes_terminal_history(make()).await;
     active_process_lease_fences_competing_owner(make()).await;
     superseded_process_lease_cannot_renew(make()).await;
     renewed_process_lease_survives_original_expiry(make()).await;
@@ -544,6 +546,60 @@ async fn list_non_terminal_excludes_terminal_processes(registry: Arc<dyn Process
     );
 }
 
+async fn list_live_handle_grants_excludes_terminal_history(registry: Arc<dyn ProcessRegistry>) {
+    let scope = ProcessScope::new("history-owner");
+    for process_id in ["proc-live-grant", "proc-done-grant"] {
+        registry
+            .register_process(registration(process_id))
+            .await
+            .expect("register");
+        registry
+            .grant_handle(
+                &scope,
+                process_id,
+                ProcessHandleDescriptor::new(Some("test"), Some(process_id)),
+            )
+            .await
+            .expect("grant");
+    }
+    registry
+        .complete_process(
+            "proc-done-grant",
+            ProcessAwaitOutput::Success {
+                value: serde_json::Value::Null,
+                control: None,
+            },
+        )
+        .await
+        .expect("complete done");
+
+    let live_ids = registry
+        .list_live_handle_grants(&scope)
+        .await
+        .expect("list live grants")
+        .into_iter()
+        .map(|(grant, _)| grant.process_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        live_ids,
+        vec!["proc-live-grant".to_string()],
+        "list_live_handle_grants must exclude terminal historical handles"
+    );
+
+    let all_ids = registry
+        .list_handle_grants(&scope)
+        .await
+        .expect("list all grants")
+        .into_iter()
+        .map(|(grant, _)| grant.process_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        all_ids,
+        vec!["proc-done-grant".to_string(), "proc-live-grant".to_string()],
+        "list_handle_grants remains the explicit all-history path"
+    );
+}
+
 async fn active_process_lease_fences_competing_owner(registry: Arc<dyn ProcessRegistry>) {
     registry
         .register_process(registration("proc-lease-active"))
@@ -670,23 +726,74 @@ async fn stale_lease_completion_cannot_release_live_lease(registry: Arc<dyn Proc
         .expect("the live owner can still renew");
 }
 
+/// Attachment-manifest behavior expected from a [`RuntimePersistence`] backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachmentManifestConformance {
+    /// The backend stores and reconciles attachment intent rows.
+    Persistent,
+    /// The backend explicitly has no attachment-write story and uses the no-op
+    /// manifest contract.
+    Noop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimePersistenceConformance {
+    pub attachment_manifest: AttachmentManifestConformance,
+}
+
+impl RuntimePersistenceConformance {
+    pub const fn noop_attachment_manifest() -> Self {
+        Self {
+            attachment_manifest: AttachmentManifestConformance::Noop,
+        }
+    }
+}
+
+impl Default for RuntimePersistenceConformance {
+    fn default() -> Self {
+        Self {
+            attachment_manifest: AttachmentManifestConformance::Persistent,
+        }
+    }
+}
+
 /// Run the [`RuntimePersistence`] durability conformance suite against the
 /// backend produced by `make`. `make` must return a fresh, empty,
 /// single-session store on each call.
 ///
 /// Covers the durability crown jewels: optimistic head CAS, session binding,
-/// checkpoint/usage hydration, lease fencing (claim/renew/abandon/supersede/
-/// expire), lease-guarded journal writes, replay-key journal idempotency, and
-/// atomic final commit that clears the journal only under a live lease (else
-/// preserves resume state). In-flight `RuntimeTurnCheckpoint` round-tripping —
-/// whose hash validation is backend-specific — is exercised per backend.
+/// checkpoint/usage hydration, queued work claim fencing, attachment manifest
+/// intent/commit/GC reconciliation, lease fencing (claim/renew/abandon/
+/// supersede/expire), lease-guarded journal writes, replay-key journal
+/// idempotency, and atomic final commit that clears the journal only under a
+/// live lease (else preserves resume state). In-flight
+/// `RuntimeTurnCheckpoint` round-tripping — whose hash validation is
+/// backend-specific — is exercised per backend.
 pub async fn runtime_persistence<F>(make: F)
+where
+    F: Fn() -> Arc<dyn RuntimePersistence>,
+{
+    runtime_persistence_with_options(make, RuntimePersistenceConformance::default()).await;
+}
+
+pub async fn runtime_persistence_with_options<F>(make: F, options: RuntimePersistenceConformance)
 where
     F: Fn() -> Arc<dyn RuntimePersistence>,
 {
     commit_increments_head_and_round_trips_agent_frames(make()).await;
     commit_rejects_a_different_session_id(make()).await;
     load_hydrates_checkpoint_and_usage(make()).await;
+    match options.attachment_manifest {
+        AttachmentManifestConformance::Persistent => {
+            attachment_manifest_records_intent_and_commit_stamps(make()).await;
+        }
+        AttachmentManifestConformance::Noop => {
+            noop_attachment_manifest_is_explicit_and_empty(make()).await;
+        }
+    }
+    queued_work_source_keys_are_idempotent_and_list_ordered(make()).await;
+    queued_work_claims_respect_boundaries_renewal_and_abandon(make()).await;
+    queued_work_completion_is_lease_guarded(make()).await;
     journal_is_idempotent_and_cleared_on_final_commit(make()).await;
     active_lease_fences_competing_claims(make()).await;
     superseded_lease_cannot_write_or_clear(make()).await;
@@ -706,6 +813,29 @@ fn effect_record(session_id: &str, turn_id: &str, effect: &str) -> RuntimeEffect
         effect_kind: RuntimeEffectKind::Sleep,
         outcome: RuntimeEffectOutcome::Sleep,
         created_at_epoch_ms: 1,
+    }
+}
+
+fn queued_draft(
+    session_id: &str,
+    text: &str,
+    delivery_policy: DeliveryPolicy,
+    slot_policy: SlotPolicy,
+) -> QueuedWorkBatchDraft {
+    QueuedWorkBatchDraft::new(
+        session_id,
+        delivery_policy,
+        slot_policy,
+        vec![QueuedWorkPayload::turn_input(TurnInput::text(text))],
+    )
+}
+
+fn attachment_intent(id: &str) -> AttachmentIntent {
+    AttachmentIntent {
+        attachment_id: AttachmentId::new(id.to_string()),
+        session_id: "root".to_string(),
+        canonical_uri: format!("sha256:{id}"),
+        intent_at_epoch_ms: 100,
     }
 }
 
@@ -831,6 +961,295 @@ async fn load_hydrates_checkpoint_and_usage(store: Arc<dyn RuntimePersistence>) 
     assert_eq!(checkpoint.plugin_snapshot_revision, Some(12));
     assert_eq!(read.token_ledger.len(), 1);
     assert_eq!(read.token_ledger[0].usage.input_tokens, 11);
+}
+
+async fn attachment_manifest_records_intent_and_commit_stamps(store: Arc<dyn RuntimePersistence>) {
+    let committed_by_runtime = AttachmentId::new("runtime-commit".to_string());
+    let committed_out_of_band = AttachmentId::new("manual-commit".to_string());
+    let orphan = AttachmentId::new("orphan".to_string());
+    for id in [&committed_by_runtime, &committed_out_of_band, &orphan] {
+        store
+            .record_intent(attachment_intent(id.as_str()))
+            .expect("record attachment intent");
+    }
+
+    let mut uncommitted = store
+        .list_uncommitted(200)
+        .expect("list uncommitted attachment intents");
+    uncommitted.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
+    assert_eq!(uncommitted.len(), 3);
+
+    store
+        .commit_refs("root", std::slice::from_ref(&committed_out_of_band))
+        .expect("commit attachment ref out of band");
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[])
+                .with_committed_attachments([committed_by_runtime.clone()]),
+        )
+        .await
+        .expect("runtime commit stamps attachment manifest");
+
+    let still_uncommitted = store
+        .list_uncommitted(200)
+        .expect("list remaining uncommitted attachments");
+    assert_eq!(still_uncommitted.len(), 1);
+    assert_eq!(still_uncommitted[0].attachment_id, orphan);
+    assert!(still_uncommitted[0].committed_at_epoch_ms.is_none());
+
+    store.forget(&orphan).expect("forget orphan attachment");
+    assert!(
+        store
+            .list_uncommitted(200)
+            .expect("list after forget")
+            .is_empty()
+    );
+}
+
+async fn noop_attachment_manifest_is_explicit_and_empty(store: Arc<dyn RuntimePersistence>) {
+    let attachment = AttachmentId::new("noop".to_string());
+    store
+        .record_intent(attachment_intent(attachment.as_str()))
+        .expect("noop record intent succeeds");
+    store
+        .commit_refs("root", std::slice::from_ref(&attachment))
+        .expect("noop commit refs succeeds");
+    assert!(
+        store
+            .list_uncommitted(200)
+            .expect("noop list uncommitted")
+            .is_empty(),
+        "declared no-op attachment manifests must not retain intent rows"
+    );
+    store.forget(&attachment).expect("noop forget succeeds");
+}
+
+async fn queued_work_source_keys_are_idempotent_and_list_ordered(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let first = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "first",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_source_key("source:first"),
+        )
+        .await
+        .expect("enqueue first batch");
+    let replay = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "different replay payload",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_source_key("source:first"),
+        )
+        .await
+        .expect("replay first batch");
+    let second = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "second",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue second batch");
+    store
+        .enqueue_queued_work(queued_draft(
+            "other",
+            "other session",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue other session");
+
+    assert_eq!(
+        first.batch_id, replay.batch_id,
+        "replaying a source key must return the original batch"
+    );
+    assert_eq!(first.items[0].item_id, replay.items[0].item_id);
+    let listed = store
+        .list_queued_work("root")
+        .await
+        .expect("list queued work");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.batch_id.as_str(), second.batch_id.as_str()]
+    );
+    assert!(listed[0].enqueue_seq < listed[1].enqueue_seq);
+}
+
+async fn queued_work_claims_respect_boundaries_renewal_and_abandon(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let after_commit = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "after current commit",
+            DeliveryPolicy::AfterCurrentTurnCommit,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue after-commit work");
+    let earliest = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "earliest",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue earliest work");
+
+    assert!(
+        store
+            .claim_ready_queued_work(
+                "root",
+                "owner-a",
+                QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+                60_000,
+                10,
+            )
+            .await
+            .expect("checkpoint claim")
+            .is_none(),
+        "after-current-commit work at the queue head must wait for the idle boundary"
+    );
+
+    let idle_claim = store
+        .claim_ready_queued_work("root", "owner-a", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .await
+        .expect("idle claim")
+        .expect("idle claim exists");
+    assert_eq!(idle_claim.batches.len(), 1);
+    assert_eq!(idle_claim.batches[0].batch_id, after_commit.batch_id);
+
+    let checkpoint_claim = store
+        .claim_ready_queued_work(
+            "root",
+            "owner-b",
+            QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+            60_000,
+            10,
+        )
+        .await
+        .expect("checkpoint claim after head is leased")
+        .expect("checkpoint claim exists");
+    assert_eq!(checkpoint_claim.batches[0].batch_id, earliest.batch_id);
+
+    store
+        .abandon_queued_work_claim(&idle_claim)
+        .await
+        .expect("abandon idle claim");
+    let reclaimed = store
+        .claim_ready_queued_work("root", "owner-c", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .await
+        .expect("reclaim abandoned work")
+        .expect("reclaimed work exists");
+    assert_eq!(reclaimed.batches[0].batch_id, after_commit.batch_id);
+    assert!(
+        reclaimed.fencing_token > idle_claim.fencing_token,
+        "reclaiming abandoned work must advance the fencing token"
+    );
+
+    let renewed = store
+        .renew_queued_work_claim(&reclaimed, 60_000)
+        .await
+        .expect("renew queued work claim");
+    assert_eq!(renewed.claim_id, reclaimed.claim_id);
+    assert_eq!(renewed.lease_token, reclaimed.lease_token);
+    assert_eq!(renewed.batches[0].batch_id, reclaimed.batches[0].batch_id);
+    assert!(renewed.expires_at_epoch_ms >= reclaimed.expires_at_epoch_ms);
+}
+
+async fn queued_work_completion_is_lease_guarded(store: Arc<dyn RuntimePersistence>) {
+    let first = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "join one",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("joined".to_string())),
+        )
+        .await
+        .expect("enqueue first joined batch");
+    let second = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "join two",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("joined".to_string())),
+        )
+        .await
+        .expect("enqueue second joined batch");
+    let claim = store
+        .claim_ready_queued_work("root", "owner-a", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .await
+        .expect("claim joined batches")
+        .expect("joined claim exists");
+    assert_eq!(
+        claim
+            .batches
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.batch_id.as_str(), second.batch_id.as_str()]
+    );
+
+    let mut stale_completion = claim.completion();
+    stale_completion.lease_token.push_str(":stale");
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    let err = store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[]).completing_queue_claim(stale_completion),
+        )
+        .await
+        .expect_err("stale queued-work completion must fail");
+    assert!(matches!(err, StoreError::QueuedWorkClaimExpired { .. }));
+    assert_eq!(
+        store
+            .list_queued_work("root")
+            .await
+            .expect("stale completion preserves queued work")
+            .len(),
+        2
+    );
+
+    store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[]).completing_queue_claim(claim.completion()),
+        )
+        .await
+        .expect("valid queued-work completion commits");
+    assert!(
+        store
+            .list_queued_work("root")
+            .await
+            .expect("valid completion clears queued work")
+            .is_empty()
+    );
 }
 
 async fn journal_is_idempotent_and_cleared_on_final_commit(store: Arc<dyn RuntimePersistence>) {

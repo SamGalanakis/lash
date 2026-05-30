@@ -7,8 +7,9 @@ pub use lash_core::testing::{TestProvider, TestProviderBuilder};
 /// against a contract by running the same suite the in-tree backends run.
 ///
 /// Re-exports the lash-core trait suites ([`process_registry`], [`runtime_persistence`])
-/// and adds [`runtime_rebuild`] — a runtime-level suite that proves the durable
-/// worker reconstructs a session identically to a live `session().open()`.
+/// and adds [`runtime_rebuild_and_worker_recovery`] — a runtime-level suite
+/// that proves cold session rebuild and durable worker recovery use the same
+/// reconstructed runtime surface.
 pub mod conformance {
     pub use lash_core::testing::conformance::*;
 
@@ -22,21 +23,24 @@ pub mod conformance {
     use crate::testing::TestProvider;
     use crate::{LashCore, ModeId, ModePreset};
 
-    /// Stores + registry for one run of the [`runtime_rebuild`] suite.
+    /// Stores + registry for one run of the
+    /// [`runtime_rebuild_and_worker_recovery`] suite.
     ///
     /// `build_core` receives a builder pre-loaded with the mode, provider, model,
     /// plugins, and `process_registry`, and must wire the stores (and, for a
     /// durable store factory, an effect controller) and `build()`. `process_registry`
     /// is the same registry the builder is given, retained so the suite can drive
-    /// and await processes. `make` in [`runtime_rebuild`] must return a fresh
-    /// backend (fresh stores) on each call.
-    pub struct RebuildBackend {
+    /// and await processes. `make` in
+    /// [`runtime_rebuild_and_worker_recovery`] must return a fresh backend
+    /// (fresh stores) on each call.
+    pub struct RuntimeRebuildBackend {
         pub process_registry: Arc<dyn lash_core::ProcessRegistry>,
         pub build_core: Box<dyn Fn(LashCoreBuilder) -> LashCore + Send + Sync>,
     }
 
-    /// Run the full runtime-rebuild conformance suite against the backend
-    /// produced by `make`. `make` must return a fresh backend on each call.
+    /// Run the full cold-rebuild + worker-recovery conformance suite against
+    /// the backend produced by `make`. `make` must return a fresh backend on
+    /// each call.
     ///
     /// Each scenario mutates a session's tool surface (installs a lashlang
     /// trigger → generation ≥ 2), drops and reopens it (a restart from cold
@@ -46,9 +50,9 @@ pub mod conformance {
     /// `session().open()` — the surface is restored (not reset to the base
     /// generation) and the process reaches terminal success — across the
     /// [`ProcessInput`](lash_core::ProcessInput) variants the worker runs.
-    pub async fn runtime_rebuild<F>(make: F)
+    pub async fn runtime_rebuild_and_worker_recovery<F>(make: F)
     where
-        F: Fn() -> RebuildBackend,
+        F: Fn() -> RuntimeRebuildBackend,
     {
         reopen_restores_mutated_tool_surface(make()).await;
         worker_runs_trigger_started_lashlang_process_after_restart(make()).await;
@@ -217,7 +221,10 @@ trigger remembered on ui.button.pressed as event
             .process_registry(registry)
     }
 
-    fn worker_registration(input: lash_core::ProcessInput, id: &str) -> lash_core::ProcessRegistration {
+    fn worker_registration(
+        input: lash_core::ProcessInput,
+        id: &str,
+    ) -> lash_core::ProcessRegistration {
         lash_core::ProcessRegistration::new(id, input).with_process_provenance(
             lash_core::ProcessProvenance::new(lash_core::ProcessScope::new(SESSION_ID), "default"),
         )
@@ -231,7 +238,12 @@ trigger remembered on ui.button.pressed as event
         register: Option<lash_core::ProcessRegistration>,
         registry: &Arc<dyn lash_core::ProcessRegistry>,
     ) {
-        let session = core.session(SESSION_ID).rlm().open().await.expect("open session");
+        let session = core
+            .session(SESSION_ID)
+            .rlm()
+            .open()
+            .await
+            .expect("open session");
         let install = session
             .triggers()
             .install_lashlang_source(TRIGGER_SOURCE)
@@ -255,13 +267,11 @@ trigger remembered on ui.button.pressed as event
     }
 
     async fn await_success(registry: &Arc<dyn lash_core::ProcessRegistry>, process_id: &str) {
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(10),
-            registry.await_process(process_id),
-        )
-        .await
-        .expect("worker runs the process to terminal promptly")
-        .expect("await terminal output");
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(10), registry.await_process(process_id))
+                .await
+                .expect("worker runs the process to terminal promptly")
+                .expect("await terminal output");
         assert!(
             matches!(outcome, lash_core::ProcessAwaitOutput::Success { .. }),
             "process `{process_id}` must reach terminal SUCCESS via the worker's rebuilt \
@@ -272,12 +282,17 @@ trigger remembered on ui.button.pressed as event
     /// Differential baseline: a live reopen restores the mutated tool surface
     /// (the trigger removed the `attach_button_trigger` tool), not the base
     /// surface — the same reconstruction the worker must produce.
-    async fn reopen_restores_mutated_tool_surface(backend: RebuildBackend) {
+    async fn reopen_restores_mutated_tool_surface(backend: RuntimeRebuildBackend) {
         let registry = Arc::clone(&backend.process_registry);
         let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
         open_mutate_and_restart(&core, None, &registry).await;
 
-        let reopened = core.session(SESSION_ID).rlm().open().await.expect("reopen session");
+        let reopened = core
+            .session(SESSION_ID)
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session");
         let tool_names = reopened
             .tools()
             .active_definitions()
@@ -289,17 +304,26 @@ trigger remembered on ui.button.pressed as event
         // The installed trigger removes the surface-mutating installer tool; a
         // base-generation surface (rebuild failure) would still advertise it.
         assert!(
-            !tool_names.iter().any(|name| name == "attach_button_trigger"),
+            !tool_names
+                .iter()
+                .any(|name| name == "attach_button_trigger"),
             "reopened surface should reflect the installed trigger, got tools: {tool_names:?}"
         );
     }
 
-    async fn worker_runs_trigger_started_lashlang_process_after_restart(backend: RebuildBackend) {
+    async fn worker_runs_trigger_started_lashlang_process_after_restart(
+        backend: RuntimeRebuildBackend,
+    ) {
         let registry = Arc::clone(&backend.process_registry);
         let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
         open_mutate_and_restart(&core, None, &registry).await;
 
-        let session = core.session(SESSION_ID).rlm().open().await.expect("reopen session");
+        let session = core
+            .session(SESSION_ID)
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session");
         let report = session
             .host_events()
             .emit(
@@ -318,7 +342,9 @@ trigger remembered on ui.button.pressed as event
         await_success(&registry, &report.started_process_ids[0]).await;
     }
 
-    async fn worker_recovers_tool_call_process_in_restarted_session(backend: RebuildBackend) {
+    async fn worker_recovers_tool_call_process_in_restarted_session(
+        backend: RuntimeRebuildBackend,
+    ) {
         let registry = Arc::clone(&backend.process_registry);
         let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
         let registration = worker_registration(
@@ -337,7 +363,9 @@ trigger remembered on ui.button.pressed as event
         await_success(&registry, "proc-tool-call").await;
     }
 
-    async fn worker_recovers_session_turn_process_in_restarted_session(backend: RebuildBackend) {
+    async fn worker_recovers_session_turn_process_in_restarted_session(
+        backend: RuntimeRebuildBackend,
+    ) {
         let registry = Arc::clone(&backend.process_registry);
         let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
         let child_policy = lash_core::SessionPolicy {

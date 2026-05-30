@@ -12,6 +12,8 @@ mod tools;
 async fn collect_owned_async<C, O, H, F>(
     hooks: &[RegisteredHook<H>],
     ctx: C,
+    hook_kind: &'static str,
+    phase_probe: Option<&Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     invoke: F,
 ) -> Result<Vec<PluginOwned<O>>, PluginError>
 where
@@ -20,7 +22,15 @@ where
 {
     let mut out = Vec::new();
     for registered in hooks {
-        for value in invoke(&registered.hook, ctx.clone()).await? {
+        let phase_name = plugin_hook_phase_name(hook_kind, &registered.plugin_id);
+        if let Some(probe) = phase_probe {
+            probe.begin_named(&phase_name);
+        }
+        let result = invoke(&registered.hook, ctx.clone()).await;
+        if let Some(probe) = phase_probe {
+            probe.end_named(&phase_name);
+        }
+        for value in result? {
             out.push(PluginOwned {
                 plugin_id: registered.plugin_id.clone(),
                 value,
@@ -28,6 +38,19 @@ where
         }
     }
     Ok(out)
+}
+
+fn plugin_hook_phase_name(hook_kind: &str, plugin_id: &str) -> String {
+    format!("plugin_hook.{hook_kind}.{plugin_id}")
+}
+
+fn lifecycle_event_hook_kind(event: &PluginLifecycleEvent) -> &'static str {
+    match event {
+        PluginLifecycleEvent::TurnFinalized(_) => "turn_finalized",
+        PluginLifecycleEvent::TurnPersisted(_) => "turn_persisted",
+        PluginLifecycleEvent::SessionRestored(_) => "session_restored",
+        PluginLifecycleEvent::SessionConfigChanged(_) => "session_config_changed",
+    }
 }
 
 fn collect_owned_sync<C, O, H, F>(
@@ -186,10 +209,20 @@ impl PluginSession {
         &self,
         ctx: &TurnTransformContext,
         input: crate::session_model::context::PreparedContext,
+        phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     ) -> Result<crate::session_model::context::PreparedContext, HistoryError> {
         let mut current = input;
-        for (_, transform) in &self.contributions.turn_context_transforms {
-            current = transform.transform(ctx, current).await?;
+        for (_, registered) in &self.contributions.turn_context_transforms {
+            let phase_name =
+                plugin_hook_phase_name("context_transform", registered.plugin_id.as_str());
+            if let Some(probe) = phase_probe.as_ref() {
+                probe.begin_named(&phase_name);
+            }
+            let result = registered.hook.transform(ctx, current).await;
+            if let Some(probe) = phase_probe.as_ref() {
+                probe.end_named(&phase_name);
+            }
+            current = result?;
         }
         Ok(current)
     }
@@ -202,11 +235,11 @@ impl PluginSession {
         input: HistoryState,
     ) -> Result<HistoryState, HistoryError> {
         let mut current = input;
-        for (_, rewriter) in &self.contributions.history_rewriters {
-            if !rewriter.accepts(&ctx.trigger) {
+        for (_, registered) in &self.contributions.history_rewriters {
+            if !registered.hook.accepts(&ctx.trigger) {
                 continue;
             }
-            current = rewriter.rewrite(ctx, current).await?;
+            current = registered.hook.rewrite(ctx, current).await?;
         }
         Ok(current)
     }
@@ -215,14 +248,17 @@ impl PluginSession {
         &self,
         ctx: PromptHookContext,
     ) -> Result<Vec<PromptContribution>, PluginError> {
-        let mut out =
-            collect_owned_async(&self.contributions.prompt_contributors, ctx, |hook, ctx| {
-                hook(ctx)
-            })
-            .await?
-            .into_iter()
-            .map(|owned| owned.value)
-            .collect::<Vec<_>>();
+        let mut out = collect_owned_async(
+            &self.contributions.prompt_contributors,
+            ctx,
+            "prompt_contributor",
+            None,
+            |hook, ctx| hook(ctx),
+        )
+        .await?
+        .into_iter()
+        .map(|owned| owned.value)
+        .collect::<Vec<_>>();
         let mut seen = BTreeSet::new();
         out.retain(|contribution| {
             seen.insert((
@@ -243,9 +279,21 @@ impl PluginSession {
         &self,
         ctx: TurnHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        collect_owned_async(&self.contributions.before_turn_hooks, ctx, |hook, ctx| {
-            hook(ctx)
-        })
+        self.before_turn_with_phase_probe(ctx, None).await
+    }
+
+    async fn before_turn_with_phase_probe(
+        &self,
+        ctx: TurnHookContext,
+        phase_probe: Option<&Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
+    ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
+        collect_owned_async(
+            &self.contributions.before_turn_hooks,
+            ctx,
+            "before_turn",
+            phase_probe,
+            |hook, ctx| hook(ctx),
+        )
         .await
     }
 
@@ -256,6 +304,8 @@ impl PluginSession {
         collect_owned_async(
             &self.contributions.before_tool_call_hooks,
             ctx,
+            "before_tool_call",
+            None,
             |hook, ctx| hook(ctx),
         )
         .await
@@ -268,6 +318,8 @@ impl PluginSession {
         collect_owned_async(
             &self.contributions.after_tool_call_hooks,
             ctx,
+            "after_tool_call",
+            None,
             |hook, ctx| hook(ctx),
         )
         .await
@@ -277,9 +329,21 @@ impl PluginSession {
         &self,
         ctx: TurnResultHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        collect_owned_async(&self.contributions.after_turn_hooks, ctx, |hook, ctx| {
-            hook(ctx)
-        })
+        self.after_turn_with_phase_probe(ctx, None).await
+    }
+
+    async fn after_turn_with_phase_probe(
+        &self,
+        ctx: TurnResultHookContext,
+        phase_probe: Option<&Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
+    ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
+        collect_owned_async(
+            &self.contributions.after_turn_hooks,
+            ctx,
+            "after_turn",
+            phase_probe,
+            |hook, ctx| hook(ctx),
+        )
         .await
     }
 
@@ -287,9 +351,13 @@ impl PluginSession {
         &self,
         ctx: CheckpointHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        collect_owned_async(&self.contributions.checkpoint_hooks, ctx, |hook, ctx| {
-            hook(ctx)
-        })
+        collect_owned_async(
+            &self.contributions.checkpoint_hooks,
+            ctx,
+            "checkpoint",
+            None,
+            |hook, ctx| hook(ctx),
+        )
         .await
     }
 
@@ -352,11 +420,32 @@ impl PluginSession {
     }
 
     pub async fn emit_runtime_event(&self, event: PluginLifecycleEvent) {
+        self.emit_runtime_event_with_phase_probe(event, None).await;
+    }
+
+    pub async fn emit_runtime_event_with_phase_probe(
+        &self,
+        event: PluginLifecycleEvent,
+        phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
+    ) {
         let mut tasks = JoinSet::new();
-        for hook in &self.contributions.runtime_event_hooks {
-            let hook = Arc::clone(hook);
+        let hook_kind = lifecycle_event_hook_kind(&event);
+        for registered in &self.contributions.runtime_event_hooks {
+            let hook = Arc::clone(&registered.hook);
+            let plugin_id = registered.plugin_id.clone();
             let event = event.clone();
-            tasks.spawn(async move { hook(event).await });
+            let phase_probe = phase_probe.clone();
+            tasks.spawn(async move {
+                let phase_name = plugin_hook_phase_name(hook_kind, &plugin_id);
+                if let Some(probe) = phase_probe.as_ref() {
+                    probe.begin_named(&phase_name);
+                }
+                let result = hook(event).await;
+                if let Some(probe) = phase_probe.as_ref() {
+                    probe.end_named(&phase_name);
+                }
+                result
+            });
         }
 
         while let Some(result) = tasks.join_next().await {

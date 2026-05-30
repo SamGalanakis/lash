@@ -1290,7 +1290,7 @@ mod tests {
             .expect("trigger process should finish");
         let handles = session
             .process_control()
-            .list()
+            .list_all()
             .await
             .expect("list handles");
         assert_eq!(handles.len(), 1);
@@ -1306,7 +1306,7 @@ mod tests {
             .expect("reopen session");
         let reopened_handles = reopened
             .process_control()
-            .list()
+            .list_all()
             .await
             .expect("list handles after reopen");
         assert_eq!(reopened_handles.len(), 1);

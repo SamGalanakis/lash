@@ -48,6 +48,22 @@ pub struct ToolProcessEventControl {
 }
 
 impl ToolProcessEventControl {
+    pub async fn wait_event_after(
+        &self,
+        event_type: &str,
+        after_sequence: u64,
+    ) -> Result<crate::ProcessEvent, PluginError> {
+        let Some(process) = self.context.as_ref() else {
+            return Err(PluginError::Session(
+                "process event waiting is unavailable outside a durable process".to_string(),
+            ));
+        };
+        process
+            .registry
+            .wait_event_after(&process.process_id, event_type, after_sequence)
+            .await
+    }
+
     pub async fn emit(
         &self,
         event_type: impl Into<String>,

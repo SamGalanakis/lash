@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::borrow::Cow;
 
 use lash_core::PreparedContext;
 use lash_core::plugin::{HistoryError, TurnContextTransform, TurnTransformContext};
@@ -38,10 +39,10 @@ impl TurnContextTransform for ObservationalMemoryTransform {
         ctx: &TurnTransformContext,
         input: PreparedContext,
     ) -> Result<PreparedContext, HistoryError> {
-        let mut graph = ctx.state.to_owned_state().session_graph;
-        let om_state = build_graph_state(&graph);
+        let graph = ctx.state.session_graph();
+        let om_state = build_graph_state(graph);
         let pending_message_tokens = approx_message_nodes_tokens(&active_unobserved_message_nodes(
-            &graph,
+            graph,
             om_state
                 .active
                 .as_ref()
@@ -53,21 +54,24 @@ impl TurnContextTransform for ObservationalMemoryTransform {
             .map(|state| approx_token_count(&state.observations))
             .unwrap_or(0);
 
-        if pending_message_tokens >= self.config.observation_message_tokens
-            || active_observation_tokens >= self.config.reflection_observation_tokens
-        {
-            graph = ctx.host.snapshot_current().await?.session_graph;
-        }
+        let should_advance_memory = pending_message_tokens
+            >= self.config.observation_message_tokens
+            || active_observation_tokens >= self.config.reflection_observation_tokens;
+        let graph = if should_advance_memory {
+            let mut graph = ctx.host.snapshot_current().await?.session_graph;
+            graph = maybe_advance_memory_state(
+                &self.config,
+                &OmRuntimeHost::new(&ctx.session_id, &ctx.host, ctx.direct_completions.clone()),
+                ctx.state.policy(),
+                graph,
+            )
+            .await?;
+            Cow::Owned(graph)
+        } else {
+            Cow::Borrowed(graph)
+        };
 
-        graph = maybe_advance_memory_state(
-            &self.config,
-            &OmRuntimeHost::new(&ctx.session_id, &ctx.host, ctx.direct_completions.clone()),
-            ctx.state.policy(),
-            graph,
-        )
-        .await?;
-
-        let Some(active) = build_graph_state(&graph).active else {
+        let Some(active) = build_graph_state(graph.as_ref()).active else {
             return Ok(input);
         };
         if active.observations.trim().is_empty()

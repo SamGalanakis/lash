@@ -54,6 +54,30 @@ pub trait ProcessRegistry: Send + Sync {
         owner_scope: &ProcessScope,
     ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError>;
 
+    async fn list_live_handle_grants(
+        &self,
+        owner_scope: &ProcessScope,
+    ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
+        Ok(self
+            .list_handle_grants(owner_scope)
+            .await?
+            .into_iter()
+            .filter(|(_, record)| !record.is_terminal())
+            .collect())
+    }
+
+    async fn has_handle_grant(
+        &self,
+        owner_scope: &ProcessScope,
+        process_id: &str,
+    ) -> Result<bool, PluginError> {
+        Ok(self
+            .list_handle_grants(owner_scope)
+            .await?
+            .into_iter()
+            .any(|(grant, _)| grant.process_id == process_id))
+    }
+
     async fn handle_grants_for_process(
         &self,
         process_id: &str,

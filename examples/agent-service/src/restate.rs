@@ -439,13 +439,12 @@ mod restate_tests {
         // way a production deployment does: its first tick folds in the former
         // startup-only recovery sweep, then it drives the registry's
         // non-terminal rows on every poke and poll tick.
-        let process_work_runner =
-            lash::advanced::ProcessWorkRunner::new(Arc::new(
-                lash_restate::RestateProcessIngressRunner::new(
-                    ingress_url.clone(),
-                    Arc::clone(&harness.process_registry),
-                ),
-            ));
+        let process_work_runner = lash::advanced::ProcessWorkRunner::new(Arc::new(
+            lash_restate::RestateProcessIngressRunner::new(
+                ingress_url.clone(),
+                Arc::clone(&harness.process_registry),
+            ),
+        ));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
             restate_sdk::http_server::HttpServer::new(endpoint)

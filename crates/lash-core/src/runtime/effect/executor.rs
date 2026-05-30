@@ -7,12 +7,12 @@ use tokio_util::sync::CancellationToken;
 use crate::AttachmentStore;
 use crate::LlmRequest as CoreLlmRequest;
 use crate::LlmResponse;
+use crate::ProcessRecord;
 use crate::ProcessRegistry;
 use crate::provider::ProviderHandle;
 use crate::runtime::{RuntimeStreamEvent, RuntimeTurnDriver};
 use crate::sansio::LlmCallError;
 use crate::{PluginError, RuntimeError, RuntimeErrorCode};
-use crate::ProcessRecord;
 
 use super::envelope::{
     ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectEnvelope,
@@ -571,8 +571,15 @@ impl InlineRuntimeEffectController {
                 let record = self.start_process(registry, registration, grant).await?;
                 Ok(ProcessEffectOutcome::Start { record })
             }
-            ProcessCommand::List { owner_scope } => {
-                let entries = registry.list_handle_grants(&owner_scope).await?;
+            ProcessCommand::List { owner_scope, mode } => {
+                let entries = match mode {
+                    crate::ProcessListMode::Live => {
+                        registry.list_live_handle_grants(&owner_scope).await?
+                    }
+                    crate::ProcessListMode::All => {
+                        registry.list_handle_grants(&owner_scope).await?
+                    }
+                };
                 Ok(ProcessEffectOutcome::List { entries })
             }
             ProcessCommand::Transfer {
@@ -609,6 +616,16 @@ impl InlineRuntimeEffectController {
                     .request_process_cancel(registry, &process_id, reason)
                     .await?;
                 Ok(ProcessEffectOutcome::Cancel { record })
+            }
+            ProcessCommand::Signal {
+                process_id,
+                request,
+                ..
+            } => {
+                let result = registry.append_event(&process_id, request).await?;
+                Ok(ProcessEffectOutcome::Signal {
+                    event: result.event,
+                })
             }
         }
     }

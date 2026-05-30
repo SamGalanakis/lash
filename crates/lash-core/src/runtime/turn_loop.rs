@@ -267,7 +267,10 @@ impl LashRuntime {
         };
 
         self.mark_phase_begin(RuntimeTurnPhase::FinalizeTurn);
-        let finalized = match plugins.finalize_turn(assembled, manager).await {
+        let finalized = match plugins
+            .finalize_turn_with_phase_probe(assembled, manager, self.turn_phase_probe.clone())
+            .await
+        {
             Ok(finalized) => finalized,
             Err(err) => {
                 self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
@@ -287,6 +290,7 @@ impl LashRuntime {
 
         let mut returned_turn = finalized.turn;
         self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
+        self.mark_phase_begin(RuntimeTurnPhase::FinalCommit);
         let queued_work_completion_trace = queued_work_completions.clone();
         if let Err(err) = turn_pipeline
             .final_commit(
@@ -300,6 +304,7 @@ impl LashRuntime {
             )
             .await
         {
+            self.mark_phase_end(RuntimeTurnPhase::FinalCommit);
             self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
             let context = format!("{abandon_context}_final_commit");
             abandon_runtime_turn_lease_best_effort(
@@ -310,6 +315,7 @@ impl LashRuntime {
             .await;
             return Err(err);
         }
+        self.mark_phase_end(RuntimeTurnPhase::FinalCommit);
 
         emit_session_events_to_sink(events, finalized.events).await;
         self.state = turn_pipeline.into_final_state();
@@ -345,7 +351,9 @@ impl LashRuntime {
                 },
             );
         }
+        self.mark_phase_begin(RuntimeTurnPhase::PostPersistHooks);
         self.emit_turn_persisted_event(&returned_turn).await;
+        self.mark_phase_end(RuntimeTurnPhase::PostPersistHooks);
         self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
 
         self.emit_completed_turn_trace(
@@ -401,14 +409,15 @@ impl LashRuntime {
 
         session
             .plugins()
-            .emit_runtime_event(crate::PluginLifecycleEvent::TurnPersisted(
-                crate::SessionStateChangedContext {
+            .emit_runtime_event_with_phase_probe(
+                crate::PluginLifecycleEvent::TurnPersisted(crate::SessionStateChangedContext {
                     session_id: self.state.session_id.clone(),
                     state: crate::SessionReadView::from_exported_state(&returned_turn.state),
                     host,
                     direct_completions,
-                },
-            ))
+                }),
+                self.turn_phase_probe.clone(),
+            )
             .await;
     }
 
@@ -1112,6 +1121,7 @@ impl LashRuntime {
                     .with_base_render_cache(base_render_cache),
                     ..Default::default()
                 },
+                self.turn_phase_probe.clone(),
             )
             .await
             .map_err(|err| {
@@ -1218,17 +1228,20 @@ impl LashRuntime {
         // across the turn forces `Arc::make_mut` to deep-clone
         // `SessionGraphData`.
         let prepared = {
-            let prepare_turn = plugins.prepare_turn(PrepareTurnRequest {
-                session_id: self.state.session_id.clone(),
-                state: crate::SessionReadView::from_runtime_state(
-                    &self.state,
-                    turn_policy.clone(),
-                    effective_protocol_turn_options.clone(),
-                ),
-                messages,
-                host: manager.clone(),
-                turn_context: turn_context.clone(),
-            });
+            let prepare_turn = plugins.prepare_turn_with_phase_probe(
+                PrepareTurnRequest {
+                    session_id: self.state.session_id.clone(),
+                    state: crate::SessionReadView::from_runtime_state(
+                        &self.state,
+                        turn_policy.clone(),
+                        effective_protocol_turn_options.clone(),
+                    ),
+                    messages,
+                    host: manager.clone(),
+                    turn_context: turn_context.clone(),
+                },
+                self.turn_phase_probe.clone(),
+            );
             tokio::pin!(prepare_turn);
 
             loop {

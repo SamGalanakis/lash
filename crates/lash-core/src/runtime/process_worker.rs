@@ -336,11 +336,34 @@ impl DurableProcessWorker {
         execution_context: ProcessExecutionContext,
         mut lease: ProcessLease,
     ) -> Result<ProcessAwaitOutput, RecoverFailure> {
-        let pending = self.run_process(registration, execution_context, CancellationToken::new());
+        let process_id = registration.id.clone();
+        let cancellation = CancellationToken::new();
+        let cancel_watcher = {
+            let registry = Arc::clone(&self.config.process_registry);
+            let process_id = process_id.clone();
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                match registry
+                    .wait_event_after(&process_id, "process.cancel_requested", 0)
+                    .await
+                {
+                    Ok(_) => cancellation.cancel(),
+                    Err(err) => tracing::warn!(
+                        process_id = %process_id,
+                        error = %err,
+                        "process cancel watcher stopped before observing cancellation",
+                    ),
+                }
+            })
+        };
+        let pending = self.run_process(registration, execution_context, cancellation.clone());
         tokio::pin!(pending);
         loop {
             tokio::select! {
-                outcome = &mut pending => return outcome.map_err(RecoverFailure::Run),
+                outcome = &mut pending => {
+                    cancel_watcher.abort();
+                    return outcome.map_err(RecoverFailure::Run);
+                }
                 _ = tokio::time::sleep(process_lease_renew_interval()) => {
                     match self
                         .config
@@ -349,7 +372,11 @@ impl DurableProcessWorker {
                         .await
                     {
                         Ok(renewed) => lease = renewed,
-                        Err(err) => return Err(RecoverFailure::LeaseLost(err)),
+                        Err(err) => {
+                            cancellation.cancel();
+                            cancel_watcher.abort();
+                            return Err(RecoverFailure::LeaseLost(err));
+                        }
                     }
                 }
             }

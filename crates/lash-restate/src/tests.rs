@@ -620,6 +620,7 @@ async fn restate_controller_lists_and_transfers_grants_through_process_effects()
                 RuntimeEffectCommand::Process {
                     command: ProcessCommand::List {
                         owner_scope: s1.clone(),
+                        mode: lash_core::ProcessListMode::Live,
                     },
                 },
             ),

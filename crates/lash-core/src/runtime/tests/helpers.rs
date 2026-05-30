@@ -202,7 +202,6 @@ impl RecordingTurnEvents {
     }
 }
 
-
 #[derive(Debug)]
 pub(crate) struct MockCall {
     pub(crate) stream_events: Vec<LlmStreamEvent>,

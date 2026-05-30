@@ -75,7 +75,7 @@ struct ProcessControlsTools {
 impl StaticToolExecute for ProcessControlsTools {
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
-            "list_process_handles" => execute_process_list_tool_call(call.context).await,
+            "list_process_handles" => execute_process_list_tool_call(call.context, call.args).await,
             "cancel_process" if self.include_cancel_process => {
                 execute_process_cancel_tool_call(call.context, call.args).await
             }
@@ -88,8 +88,18 @@ pub fn process_list_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "tool:list_process_handles",
         "list_process_handles",
-        "List every process handle granted to this session with its process id, descriptor, and terminal status.",
-        ToolDefinition::default_input_schema(),
+        "List live process handles granted to this session, including `shell.start` handles, with process id, descriptor, and terminal status. Pass history: \"all\" only when terminal historical handles are explicitly needed.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "history": {
+                    "type": "string",
+                    "enum": ["live", "all"],
+                    "description": "`live` lists running handles only. `all` includes terminal historical handles."
+                }
+            },
+            "additionalProperties": false
+        }),
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -111,7 +121,10 @@ pub fn process_list_tool_definition() -> ToolDefinition {
             "additionalProperties": false
         }),
     )
-    .with_examples(vec!["await processes.list({})?".into()])
+    .with_examples(vec![
+        "await processes.list({})?".into(),
+        r#"await processes.list({ history: "all" })?"#.into(),
+    ])
     .with_agent_surface(ToolAgentSurface::new(["processes"], "list"))
     .with_availability(ToolAvailabilityConfig::callable())
     .with_scheduling(ToolScheduling::Parallel)
@@ -129,7 +142,7 @@ pub fn process_cancel_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "tool:cancel_process",
         "cancel_process",
-        "Request cancellation for a durable process by `process_id`.",
+        "Request cancellation for a durable process, including a running `shell.start` process, by `process_id`.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -160,8 +173,22 @@ pub fn process_cancel_tool_definition() -> ToolDefinition {
     .with_scheduling(ToolScheduling::Parallel)
 }
 
-pub async fn execute_process_list_tool_call(context: &lash_core::ToolContext<'_>) -> ToolResult {
-    match context.processes().list_handles().await {
+pub async fn execute_process_list_tool_call(
+    context: &lash_core::ToolContext<'_>,
+    args: &Value,
+) -> ToolResult {
+    let mode = match lash_core::ProcessListMode::from_history_arg(
+        args.get("history").and_then(Value::as_str),
+    ) {
+        Ok(mode) => mode,
+        Err(err) => return ToolResult::err_fmt(err),
+    };
+    let processes = context.processes();
+    let result = match mode {
+        lash_core::ProcessListMode::Live => processes.list_handles().await,
+        lash_core::ProcessListMode::All => processes.list_all_handles().await,
+    };
+    match result {
         Ok(entries) => {
             let entries: Vec<Value> = entries
                 .into_iter()

@@ -675,14 +675,14 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for StandardDriver {
 fn append_model_return_parts(parts: &mut Vec<Part>, model_return: lash_core::ModelToolReturn) {
     for part in model_return.parts {
         match part {
-            lash_core::ModelToolReturnPart::Text(content) => {
-                if content.is_empty() {
+            lash_core::ModelToolReturnPart::Text { text } => {
+                if text.is_empty() {
                     continue;
                 }
                 parts.push(Part {
                     id: String::new(),
                     kind: PartKind::ToolResult,
-                    content,
+                    content: text,
                     attachment: None,
                     tool_call_id: Some(model_return.call_id.clone()),
                     tool_name: Some(model_return.tool_name.clone()),

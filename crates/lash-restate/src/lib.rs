@@ -772,8 +772,15 @@ where
             .await?;
             Ok(ProcessEffectOutcome::Start { record })
         }
-        ProcessCommand::List { owner_scope } => {
-            let entries = registry.list_handle_grants(&owner_scope).await?;
+        ProcessCommand::List { owner_scope, mode } => {
+            let entries = match mode {
+                lash_core::ProcessListMode::Live => {
+                    registry.list_live_handle_grants(&owner_scope).await?
+                }
+                lash_core::ProcessListMode::All => {
+                    registry.list_handle_grants(&owner_scope).await?
+                }
+            };
             Ok(ProcessEffectOutcome::List { entries })
         }
         ProcessCommand::Transfer {
@@ -835,6 +842,16 @@ where
                     RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
                 })?;
             Ok(ProcessEffectOutcome::Cancel { record })
+        }
+        ProcessCommand::Signal {
+            process_id,
+            request,
+            ..
+        } => {
+            let result = registry.append_event(&process_id, request).await?;
+            Ok(ProcessEffectOutcome::Signal {
+                event: result.event,
+            })
         }
     }
 }

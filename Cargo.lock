@@ -2490,7 +2490,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "lash-core",
- "regex",
  "serde",
  "serde_json",
  "tokio",

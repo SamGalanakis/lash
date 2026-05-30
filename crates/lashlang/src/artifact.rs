@@ -22,7 +22,9 @@ pub const LASHLANG_VM_ABI_VERSION: &str = "lashlang-vm-abi-v1";
 /// behind it, and the runtime validates that wiring is internally consistent.
 /// `Inline` covers the in-memory / build-time substrate; `Durable` covers a
 /// crash-recoverable substrate (e.g. a SQLite-backed or Restate-backed impl).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DurabilityTier {
     #[default]

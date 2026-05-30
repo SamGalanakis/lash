@@ -206,6 +206,49 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         Ok(entries)
     }
 
+    async fn list_live_handle_grants(
+        &self,
+        owner_scope: &ProcessScope,
+    ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
+        let grants = self
+            .grants
+            .lock()
+            .await
+            .get(&owner_scope.id())
+            .cloned()
+            .unwrap_or_default();
+        let managed = self.managed.lock().await;
+        let mut entries = grants
+            .into_values()
+            .filter_map(|grant| {
+                managed
+                    .get(&grant.process_id)
+                    .filter(|record| !record.record.is_terminal())
+                    .map(|record| (grant, record.record.clone()))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|(left, _), (right, _)| left.process_id.cmp(&right.process_id));
+        Ok(entries)
+    }
+
+    async fn has_handle_grant(
+        &self,
+        owner_scope: &ProcessScope,
+        process_id: &str,
+    ) -> Result<bool, PluginError> {
+        let owner_scope_id = owner_scope.id();
+        let granted = self
+            .grants
+            .lock()
+            .await
+            .get(&owner_scope_id)
+            .is_some_and(|session_grants| session_grants.contains_key(process_id));
+        if !granted {
+            return Ok(false);
+        }
+        Ok(self.managed.lock().await.contains_key(process_id))
+    }
+
     async fn handle_grants_for_process(
         &self,
         process_id: &str,

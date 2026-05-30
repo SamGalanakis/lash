@@ -280,6 +280,7 @@ mod tests {
         async fn list_visible(
             &self,
             _session_id: &str,
+            _mode: lash_core::ProcessListMode,
             _scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<Vec<lash_core::ProcessHandleGrantEntry>, PluginError> {
             Ok(Vec::new())
@@ -306,6 +307,19 @@ mod tests {
         ) -> Result<lash_core::ProcessRecord, PluginError> {
             Err(PluginError::Session(
                 "process cancellation is unavailable in this test".to_string(),
+            ))
+        }
+
+        async fn signal(
+            &self,
+            _session_id: &str,
+            _process_id: &str,
+            _signal_id: String,
+            _payload: serde_json::Value,
+            _scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<lash_core::ProcessEvent, PluginError> {
+            Err(PluginError::Session(
+                "process signalling is unavailable in this test".to_string(),
             ))
         }
 

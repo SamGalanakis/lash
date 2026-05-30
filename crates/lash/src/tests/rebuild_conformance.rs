@@ -1,7 +1,7 @@
-//! Runs the public [`runtime_rebuild`](crate::testing::conformance::runtime_rebuild)
-//! conformance suite against this crate's store backends. The suite proves the
-//! durable worker reconstructs a trigger-mutated session (across a restart from
-//! cold storage) identically to a live `session().open()`, for every
+//! Runs the public
+//! [`runtime_rebuild_and_worker_recovery`](crate::testing::conformance::runtime_rebuild_and_worker_recovery)
+//! conformance suite against this crate's store backends. The suite proves cold
+//! rebuild of a trigger-mutated session and durable worker recovery across every
 //! `ProcessInput` variant the worker runs.
 //!
 //! Two backends differing in the attachment/artifact tier over a SQLite session
@@ -11,7 +11,7 @@
 //! store, so the session store is SQLite in both.)
 
 use super::*;
-use crate::testing::conformance::{runtime_rebuild, RebuildBackend};
+use crate::testing::conformance::{RuntimeRebuildBackend, runtime_rebuild_and_worker_recovery};
 
 fn fresh_sqlite_session_backend(
     root: &std::path::Path,
@@ -22,7 +22,10 @@ fn fresh_sqlite_session_backend(
 ) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static SCENARIO: AtomicUsize = AtomicUsize::new(0);
-    let dir = root.join(format!("scenario-{}", SCENARIO.fetch_add(1, Ordering::SeqCst)));
+    let dir = root.join(format!(
+        "scenario-{}",
+        SCENARIO.fetch_add(1, Ordering::SeqCst)
+    ));
     std::fs::create_dir_all(&dir).expect("create scenario dir");
     let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         dir.join("sessions"),
@@ -35,12 +38,12 @@ fn fresh_sqlite_session_backend(
 }
 
 #[tokio::test]
-async fn runtime_rebuild_with_in_memory_artifact() {
+async fn runtime_rebuild_and_worker_recovery_with_in_memory_artifact() {
     let root = tempfile::tempdir().expect("tempdir");
     let root_path = root.path().to_path_buf();
-    runtime_rebuild(move || {
+    runtime_rebuild_and_worker_recovery(move || {
         let (_dir, store_factory, registry) = fresh_sqlite_session_backend(&root_path);
-        RebuildBackend {
+        RuntimeRebuildBackend {
             process_registry: registry,
             build_core: Box::new(move |builder| {
                 builder
@@ -55,10 +58,10 @@ async fn runtime_rebuild_with_in_memory_artifact() {
 }
 
 #[tokio::test]
-async fn runtime_rebuild_with_durable_stores() {
+async fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
     let root = tempfile::tempdir().expect("tempdir");
     let root_path = root.path().to_path_buf();
-    runtime_rebuild(move || {
+    runtime_rebuild_and_worker_recovery(move || {
         let (dir, store_factory, registry) = fresh_sqlite_session_backend(&root_path);
         let attachment = Arc::new(crate::persistence::FileAttachmentStore::new(
             dir.join("attachments"),
@@ -67,7 +70,7 @@ async fn runtime_rebuild_with_durable_stores() {
             lash_sqlite_store::Store::open(&dir.join("artifacts.db"))
                 .expect("open durable artifact store"),
         ) as Arc<dyn lash_core::LashlangArtifactStore>;
-        RebuildBackend {
+        RuntimeRebuildBackend {
             process_registry: registry,
             build_core: Box::new(move |builder| {
                 builder

@@ -565,7 +565,7 @@ impl ModelToolReturn {
         Self {
             call_id,
             tool_name,
-            parts: vec![ModelToolReturnPart::Text(content.into())],
+            parts: vec![ModelToolReturnPart::text(content)],
         }
     }
 }
@@ -573,15 +573,21 @@ impl ModelToolReturn {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelToolReturnPart {
-    Text(String),
+    Text { text: String },
     Attachment(AttachmentRef),
+}
+
+impl ModelToolReturnPart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
 }
 
 pub fn model_parts_from_tool_output(output: &ToolCallOutput) -> Vec<ModelToolReturnPart> {
     match &output.outcome {
         ToolCallOutcome::Success(value) => value.model_parts(),
         ToolCallOutcome::Failure(failure) => {
-            let mut parts = vec![ModelToolReturnPart::Text(format_failure_message(failure))];
+            let mut parts = vec![ModelToolReturnPart::text(format_failure_message(failure))];
             if let Some(raw) = &failure.raw {
                 parts.extend(
                     raw.attachments()
@@ -592,7 +598,7 @@ pub fn model_parts_from_tool_output(output: &ToolCallOutput) -> Vec<ModelToolRet
             parts
         }
         ToolCallOutcome::Cancelled(cancellation) => {
-            let mut parts = vec![ModelToolReturnPart::Text(format_cancellation_message(
+            let mut parts = vec![ModelToolReturnPart::text(format_cancellation_message(
                 cancellation,
             ))];
             if let Some(raw) = &cancellation.raw {
@@ -612,10 +618,10 @@ fn push_text_part(parts: &mut Vec<ModelToolReturnPart>, text: impl Into<String>)
     if text.is_empty() {
         return;
     }
-    if let Some(ModelToolReturnPart::Text(existing)) = parts.last_mut() {
+    if let Some(ModelToolReturnPart::Text { text: existing }) = parts.last_mut() {
         existing.push_str(&text);
     } else {
-        parts.push(ModelToolReturnPart::Text(text));
+        parts.push(ModelToolReturnPart::text(text));
     }
 }
 
@@ -695,9 +701,9 @@ mod tests {
         assert_eq!(
             value.model_parts(),
             vec![
-                ModelToolReturnPart::Text("[\"before\",".into()),
+                ModelToolReturnPart::text("[\"before\","),
                 ModelToolReturnPart::Attachment(image_ref("img")),
-                ModelToolReturnPart::Text(",\"after\"]".into()),
+                ModelToolReturnPart::text(",\"after\"]"),
             ]
         );
     }
@@ -720,9 +726,22 @@ mod tests {
         assert_eq!(
             model_parts_from_tool_output(&output),
             vec![
-                ModelToolReturnPart::Text("[Tool execution failed]\nboom".into()),
+                ModelToolReturnPart::text("[Tool execution failed]\nboom"),
                 ModelToolReturnPart::Attachment(attachment),
             ]
+        );
+    }
+
+    #[test]
+    fn model_tool_return_text_part_serializes() {
+        let part = ModelToolReturnPart::text("hello");
+
+        let json = serde_json::to_value(&part).unwrap();
+
+        assert_eq!(json, serde_json::json!({ "type": "text", "text": "hello" }));
+        assert_eq!(
+            serde_json::from_value::<ModelToolReturnPart>(json).unwrap(),
+            part
         );
     }
 

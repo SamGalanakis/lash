@@ -83,11 +83,11 @@ pub(crate) struct PluginContributions {
     pub(crate) assistant_stream_hooks: Vec<RegisteredHook<AssistantStreamHook>>,
     pub(crate) assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
     pub(crate) tool_result_projector: Option<RegisteredExclusiveHook<ToolResultProjector>>,
-    pub(crate) runtime_event_hooks: Vec<PluginLifecycleEventHook>,
+    pub(crate) runtime_event_hooks: Vec<RegisteredHook<PluginLifecycleEventHook>>,
     pub(crate) session_config_mutators: Vec<SessionConfigMutator>,
     pub(crate) plugin_actions: BTreeMap<String, RegisteredPluginAction>,
-    pub(crate) turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
-    pub(crate) history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
+    pub(crate) turn_context_transforms: Vec<(i32, RegisteredHook<Arc<dyn TurnContextTransform>>)>,
+    pub(crate) history_rewriters: Vec<(i32, RegisteredHook<Arc<dyn HistoryRewriter>>)>,
     pub(crate) protocol_session: Option<RegisteredExclusiveHook<Arc<dyn ProtocolSessionPlugin>>>,
     pub(crate) protocol_driver: Option<RegisteredExclusiveHook<Arc<dyn ProtocolDriverPlugin>>>,
     pub(crate) code_executor: Option<RegisteredExclusiveHook<Arc<dyn CodeExecutorPlugin>>>,
@@ -236,7 +236,11 @@ pub struct SessionRegistrations<'a> {
 
 impl SessionRegistrations<'_> {
     pub fn on_event(self, hook: PluginLifecycleEventHook) {
-        self.reg.contributions.runtime_event_hooks.push(hook);
+        push_registered_hook(
+            &mut self.reg.contributions.runtime_event_hooks,
+            &self.reg.registering_plugin_id,
+            hook,
+        );
     }
 
     pub fn config_mutator(self, hook: SessionConfigMutator) {
@@ -298,18 +302,24 @@ pub struct HistoryRegistrations<'a> {
 impl HistoryRegistrations<'_> {
     /// Register a per-turn context transform. Higher priority runs first.
     pub fn prepare_turn(self, priority: i32, transform: Arc<dyn TurnContextTransform>) {
-        self.reg
-            .contributions
-            .turn_context_transforms
-            .push((priority, transform));
+        self.reg.contributions.turn_context_transforms.push((
+            priority,
+            RegisteredHook {
+                plugin_id: current_registration_owner(&self.reg.registering_plugin_id),
+                hook: transform,
+            },
+        ));
     }
 
     /// Register a permanent history rewriter. Higher priority runs first.
     pub fn rewrite(self, priority: i32, rewriter: Arc<dyn HistoryRewriter>) {
-        self.reg
-            .contributions
-            .history_rewriters
-            .push((priority, rewriter));
+        self.reg.contributions.history_rewriters.push((
+            priority,
+            RegisteredHook {
+                plugin_id: current_registration_owner(&self.reg.registering_plugin_id),
+                hook: rewriter,
+            },
+        ));
     }
 }
 

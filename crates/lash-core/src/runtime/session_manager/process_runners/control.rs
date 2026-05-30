@@ -110,6 +110,7 @@ impl ProcessCapability {
         &self,
         current: &CurrentSessionCapability,
         session_id: &str,
+        mode: crate::ProcessListMode,
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
         let Some(registry) = &current.host.process_registry else {
@@ -124,6 +125,7 @@ impl ProcessCapability {
                 crate::ProcessCommand::List {
                     owner_scope: self
                         .process_scope_for_op(session_id, scope.agent_frame_id.as_deref()),
+                    mode,
                 },
                 scope.parent_invocation,
                 scope.effect_controller,
@@ -179,6 +181,55 @@ impl ProcessCapability {
         }
     }
 
+    pub(in crate::runtime::session_manager) async fn signal_process(
+        &self,
+        current: &CurrentSessionCapability,
+        session_id: &str,
+        process_id: &str,
+        signal_id: String,
+        payload: serde_json::Value,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<crate::ProcessEvent, crate::PluginError> {
+        let Some(registry) = &current.host.process_registry else {
+            return Err(crate::PluginError::Session(
+                "process registry is unavailable in this runtime".to_string(),
+            ));
+        };
+        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
+        let visible = registry
+            .list_live_handle_grants(&owner_scope)
+            .await?
+            .into_iter()
+            .any(|(grant, _record)| grant.process_id == process_id);
+        if !visible {
+            return Err(crate::PluginError::Session(format!(
+                "process handle `{process_id}` is not live or visible in this session"
+            )));
+        }
+        let request = crate::ProcessEventAppendRequest::new("process.signal", payload)
+            .with_replay_key(format!("process:{process_id}:signal:{signal_id}"));
+        let outcome = self
+            .execute_process_effect(
+                current,
+                Arc::clone(registry),
+                crate::ProcessCommand::Signal {
+                    process_id: process_id.to_string(),
+                    signal_id,
+                    request,
+                },
+                scope.parent_invocation,
+                scope.effect_controller,
+                scope.turn_lease,
+            )
+            .await?;
+        match outcome {
+            crate::ProcessEffectOutcome::Signal { event } => Ok(event),
+            _ => Err(crate::PluginError::Session(
+                "process signal returned the wrong outcome".to_string(),
+            )),
+        }
+    }
+
     pub(in crate::runtime::session_manager) async fn cancel_all_processes(
         &self,
         current: &CurrentSessionCapability,
@@ -188,7 +239,12 @@ impl ProcessCapability {
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
         let tasks = self
-            .list_process_handles(current, session_id, scope.clone())
+            .list_process_handles(
+                current,
+                session_id,
+                crate::ProcessListMode::Live,
+                scope.clone(),
+            )
             .await?;
         let mut cancelled = Vec::new();
         for (grant, record) in tasks {
@@ -221,21 +277,18 @@ impl ProcessCapability {
         if handle_ids.is_empty() {
             return Ok(());
         }
-        let requested = handle_ids.iter().cloned().collect::<HashSet<_>>();
-        let mut visible = HashSet::new();
         let Some(registry) = &current.host.process_registry else {
             return Err(crate::PluginError::Session(
                 "process registry is unavailable in this runtime".to_string(),
             ));
         };
         let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
-        for (grant, _record) in registry.list_handle_grants(&owner_scope).await? {
-            visible.insert(grant.process_id);
-        }
-        if let Some(missing) = requested.iter().find(|id| !visible.contains(*id)) {
-            return Err(crate::PluginError::Session(format!(
-                "process handle `{missing}` is not live or visible in this session"
-            )));
+        for process_id in handle_ids {
+            if !registry.has_handle_grant(&owner_scope, process_id).await? {
+                return Err(crate::PluginError::Session(format!(
+                    "process handle `{process_id}` is not live or visible in this session"
+                )));
+            }
         }
         Ok(())
     }

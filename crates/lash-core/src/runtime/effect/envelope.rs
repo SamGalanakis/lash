@@ -11,8 +11,8 @@ use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
 use crate::{
     AttachmentCreateMeta, AttachmentRef, AttachmentStore, CheckpointDelivery, ExecResponse,
     LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
-    ProcessExecutionContext, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistration,
-    ProcessScope, ProcessStartGrant,
+    ProcessExecutionContext, ProcessHandleGrantEntry, ProcessListMode, ProcessRecord,
+    ProcessRegistration, ProcessScope, ProcessStartGrant,
 };
 
 use super::executor::RuntimeEffectControllerError;
@@ -355,6 +355,8 @@ pub enum ProcessCommand {
     },
     List {
         owner_scope: ProcessScope,
+        #[serde(default)]
+        mode: ProcessListMode,
     },
     Transfer {
         from_scope: ProcessScope,
@@ -371,6 +373,11 @@ pub enum ProcessCommand {
         process_id: String,
         reason: Option<String>,
     },
+    Signal {
+        process_id: String,
+        signal_id: String,
+        request: crate::ProcessEventAppendRequest,
+    },
 }
 
 fn boxed_process_execution_context_is_empty(context: &ProcessExecutionContext) -> bool {
@@ -383,7 +390,9 @@ impl ProcessCommand {
     pub fn effect_id(&self) -> String {
         match self {
             Self::Start { registration, .. } => format!("process:start:{}", registration.id),
-            Self::List { owner_scope } => format!("process:list:{}", owner_scope.id()),
+            Self::List { owner_scope, mode } => {
+                format!("process:list:{}:{}", owner_scope.id(), mode.as_str())
+            }
             Self::Transfer {
                 from_scope,
                 to_scope,
@@ -400,6 +409,13 @@ impl ProcessCommand {
             Self::DeleteSession { session_id } => format!("process:delete-session:{session_id}"),
             Self::Await { process_id } => format!("process:await:{process_id}"),
             Self::Cancel { process_id, .. } => format!("process:cancel:{process_id}"),
+            Self::Signal {
+                process_id,
+                signal_id,
+                ..
+            } => {
+                format!("process:signal:{process_id}:{signal_id}")
+            }
         }
     }
 }
@@ -423,6 +439,9 @@ pub enum ProcessEffectOutcome {
     },
     Cancel {
         record: ProcessRecord,
+    },
+    Signal {
+        event: crate::ProcessEvent,
     },
 }
 

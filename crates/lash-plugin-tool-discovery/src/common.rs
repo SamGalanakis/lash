@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 pub(crate) const DEFAULT_LIMIT: usize = 10;
 pub(crate) const MAX_LIMIT: usize = 100;
 pub(crate) const LLM_CANDIDATE_LIMIT: usize = 100;
-pub(crate) const DEFAULT_LLM_RERANK_MODEL: &str = "medium";
 pub(crate) const FUZZY_SCORE_CAP: f64 = 1.25;
 pub(crate) const SEMANTIC_CANDIDATE_FLOOR: usize = 50;
 pub(crate) const RRF_K: f64 = 60.0;

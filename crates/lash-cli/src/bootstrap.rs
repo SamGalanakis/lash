@@ -676,11 +676,21 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         .await;
     }
 
-    // Install panic hook that restores the terminal
+    // Install panic hook that restores the terminal. Tokio worker-task panics
+    // also run this hook; those must not tear down the active alternate screen.
+    let terminal_owner_thread = std::thread::current().id();
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        cleanup_terminal();
-        default_hook(info);
+        if should_restore_terminal_for_panic(terminal_owner_thread) {
+            cleanup_terminal();
+            default_hook(info);
+        } else {
+            tracing::error!(
+                thread = ?std::thread::current().name(),
+                panic = %info,
+                "background task panicked"
+            );
+        }
     }));
 
     // Initialize terminal
@@ -706,6 +716,10 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         startup_system_message,
     )
     .await
+}
+
+fn should_restore_terminal_for_panic(terminal_owner_thread: std::thread::ThreadId) -> bool {
+    std::thread::current().id() == terminal_owner_thread
 }
 
 #[cfg(test)]
@@ -755,6 +769,18 @@ mod tests {
             dummy_tool("plan_exit"),
             dummy_tool("showcase"),
         ]
+    }
+
+    #[test]
+    fn terminal_panic_cleanup_is_limited_to_owner_thread() {
+        let owner = std::thread::current().id();
+        assert!(should_restore_terminal_for_panic(owner));
+
+        std::thread::spawn(move || {
+            assert!(!should_restore_terminal_for_panic(owner));
+        })
+        .join()
+        .expect("thread should not panic");
     }
 
     fn plugin_factory_ids_for_autonomous(autonomous: bool) -> Vec<&'static str> {

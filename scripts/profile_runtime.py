@@ -67,7 +67,8 @@ def parse_args() -> argparse.Namespace:
             "rlm_llm_query, rlm_globals, rlm_large_tool_surface, "
             "observational_memory, observational_memory_maintenance, "
             "openai_compat_stream, standard_shell_output, "
-            "tool_discovery_search, embed_standard, embed_rlm, "
+            "tool_discovery_search, openai_responses_sse_parse, "
+            "direct_llm_client, process_list_stress, embed_standard, embed_rlm, "
             "scoped_effect_controller, store_reopen, sqlite_store_reopen, "
             "turn_checkpoint, all."
         ),

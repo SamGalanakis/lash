@@ -539,6 +539,7 @@ impl crate::ProcessService for MockSessionManager {
     async fn list_visible(
         &self,
         session_id: &str,
+        mode: crate::ProcessListMode,
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
         let owner_scope = scope
@@ -546,7 +547,16 @@ impl crate::ProcessService for MockSessionManager {
             .as_deref()
             .map(|frame_id| crate::ProcessScope::for_agent_frame(session_id, frame_id))
             .unwrap_or_else(|| crate::ProcessScope::new(session_id));
-        self.process_registry.list_handle_grants(&owner_scope).await
+        match mode {
+            crate::ProcessListMode::Live => {
+                self.process_registry
+                    .list_live_handle_grants(&owner_scope)
+                    .await
+            }
+            crate::ProcessListMode::All => {
+                self.process_registry.list_handle_grants(&owner_scope).await
+            }
+        }
     }
 
     async fn validate_visible(
@@ -560,17 +570,16 @@ impl crate::ProcessService for MockSessionManager {
             .as_deref()
             .map(|frame_id| crate::ProcessScope::for_agent_frame(session_id, frame_id))
             .unwrap_or_else(|| crate::ProcessScope::new(session_id));
-        let visible = self
-            .process_registry
-            .list_handle_grants(&owner_scope)
-            .await?
-            .into_iter()
-            .map(|(grant, _)| grant.process_id)
-            .collect::<std::collections::HashSet<_>>();
-        if let Some(missing) = handle_ids.iter().find(|id| !visible.contains(*id)) {
-            return Err(PluginError::Session(format!(
-                "process handle `{missing}` is not live or visible in this session"
-            )));
+        for handle_id in handle_ids {
+            if !self
+                .process_registry
+                .has_handle_grant(&owner_scope, handle_id)
+                .await?
+            {
+                return Err(PluginError::Session(format!(
+                    "process handle `{handle_id}` is not live or visible in this session"
+                )));
+            }
         }
         Ok(())
     }
@@ -590,12 +599,32 @@ impl crate::ProcessService for MockSessionManager {
             .await
     }
 
+    async fn signal(
+        &self,
+        _session_id: &str,
+        process_id: &str,
+        signal_id: String,
+        payload: serde_json::Value,
+        _scope: crate::ProcessOpScope<'_>,
+    ) -> Result<crate::ProcessEvent, PluginError> {
+        self.process_registry
+            .append_event(
+                process_id,
+                crate::ProcessEventAppendRequest::new("process.signal", payload)
+                    .with_replay_key(format!("process:{process_id}:signal:{signal_id}")),
+            )
+            .await
+            .map(|result| result.event)
+    }
+
     async fn cancel_all(
         &self,
         session_id: &str,
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        let entries = self.list_visible(session_id, scope.clone()).await?;
+        let entries = self
+            .list_visible(session_id, crate::ProcessListMode::Live, scope.clone())
+            .await?;
         let mut cancelled = Vec::new();
         for (grant, record) in entries {
             if record.is_terminal() {
@@ -1250,14 +1279,14 @@ mod test_protocol_fakes {
                 }
                 for part in &outcome.model_return.parts {
                     match part {
-                        lash_sansio::ModelToolReturnPart::Text(content) => {
-                            if content.is_empty() {
+                        lash_sansio::ModelToolReturnPart::Text { text } => {
+                            if text.is_empty() {
                                 continue;
                             }
                             result_parts.push(Part {
                                 id: String::new(),
                                 kind: PartKind::ToolResult,
-                                content: content.clone(),
+                                content: text.clone(),
                                 attachment: None,
                                 tool_call_id: Some(outcome.call_id.clone()),
                                 tool_name: Some(outcome.tool_name.clone()),

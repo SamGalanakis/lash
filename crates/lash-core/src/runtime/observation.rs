@@ -82,28 +82,49 @@ impl RuntimeObservation {
         let Some(executor) = self.process_registry.as_ref() else {
             return Vec::new();
         };
-        let root_scope = self.process_scope();
-        let mut entries = executor
-            .list_handle_grants(&root_scope)
+        self.list_process_handles_with_mode(executor, crate::ProcessListMode::Live)
             .await
-            .unwrap_or_default();
+    }
+
+    pub async fn list_all_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
+        let Some(executor) = self.process_registry.as_ref() else {
+            return Vec::new();
+        };
+        self.list_process_handles_with_mode(executor, crate::ProcessListMode::All)
+            .await
+    }
+
+    async fn list_process_handles_with_mode(
+        &self,
+        executor: &Arc<dyn crate::ProcessRegistry>,
+        mode: crate::ProcessListMode,
+    ) -> Vec<ProcessHandleGrantEntry> {
+        let root_scope = self.process_scope();
+        let mut entries = list_scope_process_handles(executor, &root_scope, mode).await;
         let agent_frame_id = self.persisted_state.current_agent_frame_id.as_str();
         if !agent_frame_id.is_empty() {
             let frame_scope =
                 crate::ProcessScope::for_agent_frame(self.session_id.as_ref(), agent_frame_id);
             if frame_scope.id() != root_scope.id() {
-                entries.extend(
-                    executor
-                        .list_handle_grants(&frame_scope)
-                        .await
-                        .unwrap_or_default(),
-                );
+                entries.extend(list_scope_process_handles(executor, &frame_scope, mode).await);
                 entries.sort_by(|(left, _), (right, _)| left.process_id.cmp(&right.process_id));
                 entries.dedup_by(|(left, _), (right, _)| left.process_id == right.process_id);
             }
         }
         entries
     }
+}
+
+async fn list_scope_process_handles(
+    executor: &Arc<dyn crate::ProcessRegistry>,
+    scope: &crate::ProcessScope,
+    mode: crate::ProcessListMode,
+) -> Vec<ProcessHandleGrantEntry> {
+    match mode {
+        crate::ProcessListMode::Live => executor.list_live_handle_grants(scope).await,
+        crate::ProcessListMode::All => executor.list_handle_grants(scope).await,
+    }
+    .unwrap_or_default()
 }
 
 #[derive(Clone)]

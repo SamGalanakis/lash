@@ -187,9 +187,11 @@ async fn trigger_install_stores_activation_routes_and_emit_reuses_artifact_refs(
     // registry + artifact store so the trigger-started process runs.
     let worker = crate::DurableProcessWorker::new(
         crate::DurableProcessWorkerConfig::new(
-            Arc::new(crate::PluginHost::new(vec![Arc::new(TriggerRouteTestFactory)])),
+            Arc::new(crate::PluginHost::new(vec![Arc::new(
+                TriggerRouteTestFactory,
+            )])),
             RuntimeCoreConfig::in_memory().with_lashlang_artifact_store(
-                artifact_store.clone() as Arc<dyn lashlang::LashlangArtifactStore>,
+                artifact_store.clone() as Arc<dyn lashlang::LashlangArtifactStore>
             ),
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
             Arc::clone(&registry),

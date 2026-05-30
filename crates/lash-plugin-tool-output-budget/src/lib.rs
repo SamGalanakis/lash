@@ -125,7 +125,7 @@ fn project_model_parts(
 ) -> Vec<ModelToolReturnPart> {
     if ctx.tool_name == "batch" {
         let value = project_batch_value(config, ctx);
-        return vec![ModelToolReturnPart::Text(render_projected_model_value(
+        return vec![ModelToolReturnPart::text(render_projected_model_value(
             &value,
         ))];
     }
@@ -133,7 +133,7 @@ fn project_model_parts(
     match &ctx.output.outcome {
         ToolCallOutcome::Success(value) => project_tool_value_parts(config, ctx, value),
         ToolCallOutcome::Failure(failure) => {
-            let mut parts = vec![ModelToolReturnPart::Text(
+            let mut parts = vec![ModelToolReturnPart::text(
                 lash_core::session_model::format_tool_output_content(&ctx.output),
             )];
             if let Some(raw) = &failure.raw {
@@ -146,7 +146,7 @@ fn project_model_parts(
             parts
         }
         ToolCallOutcome::Cancelled(cancellation) => {
-            let mut parts = vec![ModelToolReturnPart::Text(
+            let mut parts = vec![ModelToolReturnPart::text(
                 lash_core::session_model::format_tool_output_content(&ctx.output),
             )];
             if let Some(raw) = &cancellation.raw {
@@ -176,7 +176,7 @@ fn project_tool_value_parts(
     let mut parts = Vec::new();
     match value {
         ToolValue::String(text) => {
-            parts.push(ModelToolReturnPart::Text(project_text(text, config, ctx)))
+            parts.push(ModelToolReturnPart::text(project_text(text, config, ctx)))
         }
         ToolValue::Attachment(reference) => {
             parts.push(ModelToolReturnPart::Attachment(reference.clone()));
@@ -243,10 +243,10 @@ fn push_text_part(parts: &mut Vec<ModelToolReturnPart>, text: impl Into<String>)
     if text.is_empty() {
         return;
     }
-    if let Some(ModelToolReturnPart::Text(existing)) = parts.last_mut() {
+    if let Some(ModelToolReturnPart::Text { text: existing }) = parts.last_mut() {
         existing.push_str(&text);
     } else {
-        parts.push(ModelToolReturnPart::Text(text));
+        parts.push(ModelToolReturnPart::text(text));
     }
 }
 
@@ -627,7 +627,7 @@ fn render_model_return_parts(parts: &[ModelToolReturnPart]) -> String {
     let mut rendered = String::new();
     for part in parts {
         match part {
-            ModelToolReturnPart::Text(text) => rendered.push_str(text),
+            ModelToolReturnPart::Text { text } => rendered.push_str(text),
             ModelToolReturnPart::Attachment(reference) => {
                 rendered.push_str("[Attachment: ");
                 rendered.push_str(

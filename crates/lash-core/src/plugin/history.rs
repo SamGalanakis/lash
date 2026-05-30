@@ -231,7 +231,7 @@ impl SessionReadView {
         )
     }
 
-    fn session_graph(&self) -> &crate::SessionGraph {
+    pub fn session_graph(&self) -> &crate::SessionGraph {
         match &self.0.graph {
             SessionReadGraph::Owned(graph) => graph,
             SessionReadGraph::Derived { cache, base_graph } => cache.get_or_init(|| {

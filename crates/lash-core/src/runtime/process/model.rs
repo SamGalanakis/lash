@@ -465,6 +465,33 @@ pub struct ProcessHandleGrant {
 
 pub type ProcessHandleGrantEntry = (ProcessHandleGrant, ProcessRecord);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessListMode {
+    #[default]
+    Live,
+    All,
+}
+
+impl ProcessListMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::All => "all",
+        }
+    }
+
+    pub fn from_history_arg(value: Option<&str>) -> Result<Self, String> {
+        match value.unwrap_or("live") {
+            "live" => Ok(Self::Live),
+            "all" => Ok(Self::All),
+            other => Err(format!(
+                "processes.list history must be `live` or `all`, got `{other}`"
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessStartGrant {
     pub owner_scope: ProcessScope,

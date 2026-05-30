@@ -18,6 +18,9 @@ pub(crate) enum RuntimePerfScenario {
     OpenAiCompatStream,
     StandardShellOutput,
     ToolDiscoverySearch,
+    OpenAiResponsesSseParse,
+    DirectLlmClient,
+    ProcessListStress,
     EmbedStandard,
     EmbedRlm,
     ScopedEffectController,
@@ -27,7 +30,7 @@ pub(crate) enum RuntimePerfScenario {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 19] = [
+    pub(crate) const DEFAULTS: [Self; 22] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -41,6 +44,9 @@ impl RuntimePerfScenario {
         Self::OpenAiCompatStream,
         Self::StandardShellOutput,
         Self::ToolDiscoverySearch,
+        Self::OpenAiResponsesSseParse,
+        Self::DirectLlmClient,
+        Self::ProcessListStress,
         Self::EmbedStandard,
         Self::EmbedRlm,
         Self::ScopedEffectController,
@@ -48,7 +54,7 @@ impl RuntimePerfScenario {
         Self::SqliteStoreReopen,
         Self::TurnCheckpoint,
     ];
-    pub(crate) const KNOWN: [Self; 19] = [
+    pub(crate) const KNOWN: [Self; 22] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -62,6 +68,9 @@ impl RuntimePerfScenario {
         Self::OpenAiCompatStream,
         Self::StandardShellOutput,
         Self::ToolDiscoverySearch,
+        Self::OpenAiResponsesSseParse,
+        Self::DirectLlmClient,
+        Self::ProcessListStress,
         Self::EmbedStandard,
         Self::EmbedRlm,
         Self::ScopedEffectController,
@@ -85,6 +94,9 @@ impl RuntimePerfScenario {
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
             "standard_shell_output" => Some(Self::StandardShellOutput),
             "tool_discovery_search" => Some(Self::ToolDiscoverySearch),
+            "openai_responses_sse_parse" => Some(Self::OpenAiResponsesSseParse),
+            "direct_llm_client" => Some(Self::DirectLlmClient),
+            "process_list_stress" => Some(Self::ProcessListStress),
             "embed_standard" => Some(Self::EmbedStandard),
             "embed_rlm" => Some(Self::EmbedRlm),
             "scoped_effect_controller" => Some(Self::ScopedEffectController),
@@ -110,6 +122,9 @@ impl RuntimePerfScenario {
             Self::OpenAiCompatStream => "openai_compat_stream",
             Self::StandardShellOutput => "standard_shell_output",
             Self::ToolDiscoverySearch => "tool_discovery_search",
+            Self::OpenAiResponsesSseParse => "openai_responses_sse_parse",
+            Self::DirectLlmClient => "direct_llm_client",
+            Self::ProcessListStress => "process_list_stress",
             Self::EmbedStandard => "embed_standard",
             Self::EmbedRlm => "embed_rlm",
             Self::ScopedEffectController => "scoped_effect_controller",
@@ -128,6 +143,9 @@ impl RuntimePerfScenario {
             | Self::OpenAiCompatStream
             | Self::StandardShellOutput
             | Self::ToolDiscoverySearch
+            | Self::OpenAiResponsesSseParse
+            | Self::DirectLlmClient
+            | Self::ProcessListStress
             | Self::EmbedStandard
             | Self::ScopedEffectController
             | Self::StoreReopen

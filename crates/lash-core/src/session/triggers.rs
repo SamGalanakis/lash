@@ -75,11 +75,12 @@ pub(crate) async fn emit_host_event(
             .start(
                 session_id,
                 registration,
-                crate::ProcessStartOptions::new()
-                    .with_descriptor(crate::ProcessHandleDescriptor::new(
+                crate::ProcessStartOptions::new().with_descriptor(
+                    crate::ProcessHandleDescriptor::new(
                         Some("lashlang"),
                         Some(route.process_name.as_str()),
-                    )),
+                    ),
+                ),
                 crate::ProcessOpScope::new()
                     .with_parent_invocation(Some(host_event_invocation.clone())),
             )

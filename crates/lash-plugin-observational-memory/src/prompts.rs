@@ -1,5 +1,3 @@
-use regex::Regex;
-
 use lash_core::{MessageRole, PartKind};
 
 use crate::constants::{
@@ -103,10 +101,11 @@ pub(crate) fn parse_memory_output(text: &str) -> ParsedMemoryOutput {
 }
 
 pub(crate) fn capture_xml_block(text: &str, tag: &str) -> Option<String> {
-    let pattern = format!(r"(?s)<{tag}>\s*(.*?)\s*</{tag}>");
-    let re = Regex::new(&pattern).ok()?;
-    let captures = re.captures(text)?;
-    Some(captures.get(1)?.as_str().to_string())
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)?;
+    Some(text[start..start + end].trim().to_string())
 }
 
 pub(crate) fn format_message_for_observer(node: &impl ObservedMessageNode) -> String {

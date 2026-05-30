@@ -315,6 +315,10 @@ impl SessionControl {
         Ok(self.runtime.observe().list_process_handles().await)
     }
 
+    async fn list_all_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+        Ok(self.runtime.observe().list_all_process_handles().await)
+    }
+
     async fn start_process(
         &self,
         registration: lash_core::ProcessRegistration,
@@ -769,6 +773,10 @@ impl ProcessControl {
         self.control.list_process_handles().await
     }
 
+    pub async fn list_all(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+        self.control.list_all_process_handles().await
+    }
+
     pub async fn await_all(&self) -> Result<()> {
         self.control.await_background_work().await
     }
@@ -825,6 +833,10 @@ impl StateControl {
 
     pub async fn list_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
         self.control.list_process_handles().await
+    }
+
+    pub async fn list_all_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+        self.control.list_all_process_handles().await
     }
 
     pub async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {

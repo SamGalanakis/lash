@@ -1,5 +1,14 @@
 use super::*;
 
+fn process_terminal_state_label(record: &ProcessRecord) -> Option<&'static str> {
+    match record.terminal.as_ref().map(|terminal| terminal.state) {
+        None => None,
+        Some(ProcessTerminalState::Completed) => Some("completed"),
+        Some(ProcessTerminalState::Failed) => Some("failed"),
+        Some(ProcessTerminalState::Cancelled) => Some("cancelled"),
+    }
+}
+
 impl SqliteProcessRegistry {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
@@ -43,11 +52,12 @@ impl SqliteProcessRegistry {
     ) -> Result<(), lash_core::PluginError> {
         conn.execute(
             "UPDATE processes
-             SET updated_at_ms = ?2, record_json = ?3
+             SET updated_at_ms = ?2, terminal_state = ?3, record_json = ?4
              WHERE process_id = ?1",
             params![
                 &record.id,
                 record.updated_at_ms as i64,
+                process_terminal_state_label(record),
                 process_encode_json(record)?
             ],
         )
@@ -140,9 +150,9 @@ impl ProcessRegistry for SqliteProcessRegistry {
         tx.execute(
             "INSERT INTO processes (
                 process_id, registration_hash, owner_scope_id, host_profile_id,
-                created_at_ms, updated_at_ms, record_json
+                created_at_ms, updated_at_ms, terminal_state, record_json
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &record.id,
                 &record.registration_hash,
@@ -150,6 +160,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 record.host_profile_id(),
                 record.created_at_ms as i64,
                 record.updated_at_ms as i64,
+                process_terminal_state_label(&record),
                 process_encode_json(&record)?,
             ],
         )
@@ -317,6 +328,72 @@ impl ProcessRegistry for SqliteProcessRegistry {
             ));
         }
         Ok(entries)
+    }
+
+    async fn list_live_handle_grants(
+        &self,
+        owner_scope: &ProcessScope,
+    ) -> Result<Vec<ProcessHandleGrantEntry>, lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        let owner_scope_id = owner_scope.id();
+        let mut stmt = conn
+            .prepare(
+                "SELECT g.process_id, g.descriptor_json, p.record_json
+                 FROM process_handle_grants g
+                 JOIN processes p ON p.process_id = g.process_id
+                 WHERE g.scope_id = ?1 AND p.terminal_state IS NULL
+                 ORDER BY g.process_id ASC",
+            )
+            .map_err(process_sqlite_error)?;
+        let rows = stmt
+            .query_map(params![owner_scope_id.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(process_sqlite_error)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (process_id, descriptor_json, record_json) = row.map_err(process_sqlite_error)?;
+            let descriptor: ProcessHandleDescriptor =
+                serde_json::from_str(&descriptor_json).map_err(process_decode_error)?;
+            let record: ProcessRecord =
+                serde_json::from_str(&record_json).map_err(process_decode_error)?;
+            entries.push((
+                ProcessHandleGrant {
+                    session_id: owner_scope.session_id.clone(),
+                    process_id,
+                    descriptor,
+                },
+                record,
+            ));
+        }
+        Ok(entries)
+    }
+
+    async fn has_handle_grant(
+        &self,
+        owner_scope: &ProcessScope,
+        process_id: &str,
+    ) -> Result<bool, lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        let owner_scope_id = owner_scope.id();
+        let exists = conn
+            .query_row(
+                "SELECT 1
+                 FROM process_handle_grants g
+                 JOIN processes p ON p.process_id = g.process_id
+                 WHERE g.scope_id = ?1 AND g.process_id = ?2
+                 LIMIT 1",
+                params![owner_scope_id.as_str(), process_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(process_sqlite_error)?
+            .is_some();
+        Ok(exists)
     }
 
     async fn handle_grants_for_process(
@@ -642,6 +719,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         let mut stmt = conn
             .prepare(
                 "SELECT record_json FROM processes
+                 WHERE terminal_state IS NULL
                  ORDER BY process_id ASC",
             )
             .map_err(process_sqlite_error)?;
@@ -652,9 +730,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         for row in rows {
             let record: ProcessRecord = serde_json::from_str(&row.map_err(process_sqlite_error)?)
                 .map_err(process_decode_error)?;
-            if !record.is_terminal() {
-                records.push(record);
-            }
+            records.push(record);
         }
         Ok(records)
     }

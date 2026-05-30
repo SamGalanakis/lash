@@ -71,20 +71,18 @@ impl RuntimeExecutionContext<'_> {
                 call: prepared_call.clone(),
             },
         );
-        if let Err(err) = self
-            .dispatch
-            .processes
-            .start(
-                &self.session_id,
-                registration,
-                crate::ProcessStartOptions::new()
-                    .with_descriptor(ProcessHandleDescriptor::new(
-                        Some("tool"),
-                        Some(tool_name.clone()),
-                    )),
-                self.process_scope(self.parent_invocation.clone()),
-            )
-            .await
+        if let Err(err) =
+            self.dispatch
+                .processes
+                .start(
+                    &self.session_id,
+                    registration,
+                    crate::ProcessStartOptions::new().with_descriptor(
+                        ProcessHandleDescriptor::new(Some("tool"), Some(tool_name.clone())),
+                    ),
+                    self.process_scope(self.parent_invocation.clone()),
+                )
+                .await
         {
             return ToolInvocationReply::error(json!(err.to_string()));
         }
