@@ -602,6 +602,23 @@ mod tests {
     }
 
     #[test]
+    fn foreground_sleep_executes_through_runtime_context() {
+        block_on(async {
+            let response = execute_with_lashlang_abilities(
+                r#"
+                sleep for "0ms"
+                submit "awake"
+                "#,
+                lashlang::LashlangAbilities::default().with_sleep(),
+            )
+            .await;
+
+            assert!(response.error.is_none(), "{:?}", response.error);
+            assert_eq!(response.terminal_finish, Some(serde_json::json!("awake")));
+        });
+    }
+
+    #[test]
     fn executor_reports_disabled_lashlang_abilities_at_link_time() {
         struct DisabledCase {
             name: &'static str,
@@ -624,10 +641,10 @@ mod tests {
                 feature: "processes",
             },
             DisabledCase {
-                name: "process sleep",
-                code: r#"process worker() { sleep for "1s" }"#,
-                abilities: lashlang::LashlangAbilities::default().with_processes(),
-                feature: "process sleep",
+                name: "sleep",
+                code: r#"sleep for "1s""#,
+                abilities: lashlang::LashlangAbilities::default(),
+                feature: "sleep",
             },
             DisabledCase {
                 name: "wait signal",
@@ -659,7 +676,8 @@ mod tests {
                 "#,
                 abilities: lashlang::LashlangAbilities::default()
                     .with_processes()
-                    .with_process_lifecycle()
+                    .with_sleep()
+                    .with_process_signals()
                     .with_triggers(),
                 feature: "cron schedules",
             },

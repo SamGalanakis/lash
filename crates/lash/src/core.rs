@@ -757,7 +757,8 @@ pub(crate) fn build_plugin_host_for_mode(
         let abilities = plugin_host
             .lashlang_abilities()
             .with_processes()
-            .with_process_lifecycle();
+            .with_sleep()
+            .with_process_signals();
         plugin_host = plugin_host.with_lashlang_abilities(abilities);
     }
     Ok(plugin_host)

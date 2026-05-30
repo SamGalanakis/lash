@@ -22,7 +22,7 @@ mod effects;
 use control::{VmMode, VmStep};
 use effects::VmEffect;
 
-use super::host::{ExecutionMode, ProcessEventKind, ProcessSleepKind};
+use super::host::{ExecutionMode, ProcessEventKind, SleepKind};
 use super::record::{Record, record_with_capacity};
 use super::schema::{
     ValidationPlan, compile_schema_value, execute_validate_builtin, execute_validation_plan,
@@ -562,21 +562,11 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 }
                 return Ok(Some(VmStep::Effect(VmEffect::Submit)));
             }
-            Instruction::ProcessSleepFor => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "sleep" });
-                }
-                return Ok(Some(VmStep::Effect(VmEffect::ProcessSleep(
-                    ProcessSleepKind::For,
-                ))));
+            Instruction::SleepFor => {
+                return Ok(Some(VmStep::Effect(VmEffect::Sleep(SleepKind::For))));
             }
-            Instruction::ProcessSleepUntil => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "sleep" });
-                }
-                return Ok(Some(VmStep::Effect(VmEffect::ProcessSleep(
-                    ProcessSleepKind::Until,
-                ))));
+            Instruction::SleepUntil => {
+                return Ok(Some(VmStep::Effect(VmEffect::Sleep(SleepKind::Until))));
             }
             Instruction::ProcessWaitSignal => {
                 if self.mode != VmMode::Process {
@@ -1037,8 +1027,8 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             | Instruction::AddAssignIndexSlotNumber { .. }
             | Instruction::AppendAssign(_)
             | Instruction::Submit
-            | Instruction::ProcessSleepFor
-            | Instruction::ProcessSleepUntil
+            | Instruction::SleepFor
+            | Instruction::SleepUntil
             | Instruction::ProcessWaitSignal
             | Instruction::ProcessSignalRun
             | Instruction::ProcessYield

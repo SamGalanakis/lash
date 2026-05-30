@@ -97,13 +97,13 @@ pub(crate) fn tool_retry_sleep_invocation(
     )
 }
 
-pub(crate) fn process_sleep_invocation(
+pub(crate) fn lashlang_sleep_invocation(
     session_id: &str,
     parent: Option<&RuntimeInvocation>,
-    process_id: &str,
+    scope: &str,
     sequence: u64,
 ) -> RuntimeInvocation {
-    let suffix = format!("process:{process_id}:sleep:{sequence}");
+    let suffix = format!("lashlang:{scope}:sleep:{sequence}");
     if let Some(parent) = parent {
         let parent_effect_id = parent.effect_id().unwrap_or("effect");
         return child_effect_invocation(

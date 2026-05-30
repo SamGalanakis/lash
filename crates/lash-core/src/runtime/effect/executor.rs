@@ -403,7 +403,10 @@ impl RuntimeEffectLocalRunner for LocalDirectEffectRunner {
         match envelope.command {
             RuntimeEffectCommand::Direct { request, .. } => Ok(RuntimeEffectOutcome::Direct {
                 result: self
-                    .run_direct_llm_request((*request).into_request(None, None))
+                    .run_direct_llm_request((*request).into_request(
+                        crate::session_model::transport_stream_events(&self.provider, None),
+                        None,
+                    ))
                     .await,
             }),
             RuntimeEffectCommand::Sleep { duration_ms } => {

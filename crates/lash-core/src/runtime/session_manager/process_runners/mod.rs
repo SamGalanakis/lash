@@ -109,7 +109,8 @@ mod tests {
                 resources,
                 ::lashlang::LashlangAbilities::default()
                     .with_processes()
-                    .with_process_lifecycle(),
+                    .with_sleep()
+                    .with_process_signals(),
             ),
         )?;
         ::lashlang::global_in_memory_lashlang_artifact_store()

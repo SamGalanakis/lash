@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_core::{
     AttachmentRef, ExecImage, RuntimeExecutionContext, TextProjectionMetadata, ToolInvocationReply,
@@ -7,7 +8,7 @@ use lash_core::{
 use lash_plugin_tool_output_budget::{ToolOutputBudgetConfig, project_observation_text};
 use lashlang::{
     AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ProcessStart, ProjectedFuture,
-    Record as FlowRecord, Value as FlowValue,
+    Record as FlowRecord, Sleep, Value as FlowValue,
 };
 use serde_json::Value;
 
@@ -23,6 +24,7 @@ pub(super) struct HostBridge<'run> {
     tool_calls: Mutex<Vec<lash_core::ToolCallRecord>>,
     tool_images: Mutex<Vec<ExecImage>>,
     next_tool_index: Mutex<usize>,
+    sleep_sequence: AtomicU64,
 }
 
 impl<'run> HostBridge<'run> {
@@ -41,6 +43,7 @@ impl<'run> HostBridge<'run> {
             tool_calls: Mutex::new(Vec::new()),
             tool_images: Mutex::new(Vec::new()),
             next_tool_index: Mutex::new(0),
+            sleep_sequence: AtomicU64::new(0),
         }
     }
 
@@ -183,6 +186,16 @@ impl HostBridge<'_> {
         }
         Ok(())
     }
+
+    async fn sleep(&self, sleep: Sleep) -> Result<FlowValue, ExecutionHostError> {
+        let duration_ms = lash_core::lashlang_bridge::sleep_duration_ms(sleep.kind, &sleep.value)?;
+        let sequence = self.sleep_sequence.fetch_add(1, Ordering::Relaxed);
+        self.ctx
+            .sleep_lashlang("foreground", sequence, duration_ms)
+            .await
+            .map_err(|err| ExecutionHostError::new(err.to_string()))?;
+        Ok(FlowValue::Null)
+    }
 }
 
 impl ExecutionHost for HostBridge<'_> {
@@ -201,14 +214,13 @@ impl ExecutionHost for HostBridge<'_> {
                 self.print(value).await?;
                 Ok(AbilityResult::Unit)
             }
+            AbilityOp::Sleep(sleep) => self.sleep(sleep).await.map(AbilityResult::Value),
             AbilityOp::ProcessEvent(_) => Err(ExecutionHostError::new(
                 "process events are only available inside lashlang process bodies",
             )),
-            AbilityOp::ProcessSleep(_) | AbilityOp::WaitSignal | AbilityOp::SignalRun(_) => {
-                Err(ExecutionHostError::new(
-                    "process lifecycle primitives are only available inside lashlang process bodies",
-                ))
-            }
+            AbilityOp::WaitSignal | AbilityOp::SignalRun(_) => Err(ExecutionHostError::new(
+                "process lifecycle primitives are only available inside lashlang process bodies",
+            )),
             AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                 Ok(AbilityResult::Value(value))
             }

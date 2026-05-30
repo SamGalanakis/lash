@@ -86,6 +86,90 @@ async fn inherited_child_session_carries_parent_tool_state() {
     );
 }
 
+struct RootOnlyMemoryProbeFactory;
+
+impl crate::plugin::PluginFactory for RootOnlyMemoryProbeFactory {
+    fn id(&self) -> &'static str {
+        "root_only_memory_probe"
+    }
+
+    fn build(
+        &self,
+        ctx: &crate::plugin::PluginSessionContext,
+    ) -> Result<Arc<dyn crate::plugin::SessionPlugin>, crate::PluginError> {
+        Ok(Arc::new(RootOnlyMemoryProbePlugin {
+            active: ctx.is_root_session(),
+        }))
+    }
+}
+
+struct RootOnlyMemoryProbePlugin {
+    active: bool,
+}
+
+impl crate::plugin::SessionPlugin for RootOnlyMemoryProbePlugin {
+    fn id(&self) -> &'static str {
+        "root_only_memory_probe"
+    }
+
+    fn register(&self, reg: &mut crate::plugin::PluginRegistrar) -> Result<(), crate::PluginError> {
+        if self.active {
+            reg.tools().provider(Arc::new(MemoryProbeTool))?;
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn forked_child_session_filters_hidden_tool_state_before_rebind() {
+    let plugin_host = crate::PluginHost::new(vec![Arc::new(RootOnlyMemoryProbeFactory)]);
+    let plugin_session = plugin_host.build_session("root", None).expect("plugins");
+    let mut runtime = LashRuntime::from_embedded_state(
+        standard_test_policy(),
+        test_host_config(),
+        crate::RuntimeServices::new(plugin_session),
+        RuntimeSessionState::default(),
+    )
+    .await
+    .expect("runtime");
+    set_runtime_provider(&mut runtime, mock_provider(Vec::new()).into_handle());
+    let manager = runtime.session_manager().expect("session manager");
+    assert!(
+        manager
+            .tool_state("root")
+            .await
+            .expect("tool state")
+            .contains("memory_probe")
+    );
+
+    let handle = manager
+        .create_session(
+            crate::SessionCreateRequest::child_session(
+                "root",
+                crate::SessionStartPoint::Empty,
+                crate::PluginOptions::default(),
+            )
+            .with_session_id("filtered-child")
+            .with_plugin_source(crate::SessionPluginSource::CurrentSessionFork)
+            .with_tool_access(crate::SessionToolAccess {
+                tools: Vec::new(),
+                hidden_tools: ["memory_probe".to_string()].into_iter().collect(),
+            }),
+        )
+        .await
+        .expect("hidden root-only state should not poison fork");
+
+    let catalog = manager
+        .tool_catalog(&handle.session_id)
+        .await
+        .expect("tool catalog");
+    let tool_names = catalog
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()))
+        .collect::<Vec<_>>();
+    assert!(!tool_names.contains(&"memory_probe"));
+}
+
 #[tokio::test]
 async fn parent_turn_receives_live_child_token_usage_events() {
     let transport = mock_provider(vec![

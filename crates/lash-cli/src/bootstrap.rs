@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::config::LashConfig;
@@ -18,7 +18,7 @@ use lash::tools::{
 };
 use lash::tracing::TraceLevel;
 use lash::{ModelSpec, PluginStack, SessionSpec};
-use lash_core::{PromptLayer, SessionPolicy, ToolState};
+use lash_core::{PromptLayer, SessionPolicy, SessionToolAccess, ToolState};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
@@ -136,10 +136,31 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
         plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
         plugin_stack.push(Arc::new(
             SubagentsPluginFactory::new(capability_registry)
-                .with_session_spec(SessionSpec::inherit()),
+                .with_session_spec(SessionSpec::inherit())
+                .with_tool_access(cli_child_tool_access()),
         ));
     }
     plugin_stack
+}
+
+fn cli_child_tool_access() -> SessionToolAccess {
+    SessionToolAccess {
+        tools: Vec::new(),
+        hidden_tools: cli_child_hidden_tools(),
+    }
+}
+
+fn cli_child_hidden_tools() -> BTreeSet<String> {
+    [
+        "ask",
+        "showcase",
+        "request_user_input",
+        "plan_exit",
+        "update_plan",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
 }
 
 fn autonomous_tool_allowed(name: &str) -> bool {
@@ -931,5 +952,16 @@ mod tests {
         assert!(!snapshot.contains("ask"));
         assert!(!snapshot.contains("plan_exit"));
         assert!(!snapshot.contains("showcase"));
+    }
+
+    #[test]
+    fn cli_child_tool_access_hides_interactive_root_tools() {
+        let hidden = cli_child_hidden_tools();
+
+        assert!(hidden.contains("ask"));
+        assert!(hidden.contains("plan_exit"));
+        assert!(hidden.contains("update_plan"));
+        assert!(hidden.contains("showcase"));
+        assert!(hidden.contains("request_user_input"));
     }
 }

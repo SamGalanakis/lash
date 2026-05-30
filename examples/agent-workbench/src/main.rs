@@ -806,7 +806,8 @@ fn button_trigger_event_type() -> lashlang::TypeExpr {
 fn workbench_lashlang_abilities() -> lashlang::LashlangAbilities {
     lashlang::LashlangAbilities::default()
         .with_processes()
-        .with_process_lifecycle()
+        .with_sleep()
+        .with_process_signals()
         .with_triggers()
 }
 

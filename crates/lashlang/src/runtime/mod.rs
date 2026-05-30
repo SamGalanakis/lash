@@ -38,8 +38,8 @@ pub use entry_points::{
 };
 pub use host::{
     AbilityOp, AbilityResult, ExecutionEnvironment, ExecutionHost, ExecutionHostError,
-    ExecutionMode, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessSleep, ProcessSleepKind,
-    ProcessStart, ResourceOperation,
+    ExecutionMode, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessStart, ResourceOperation,
+    Sleep, SleepKind,
 };
 #[allow(unused_imports)]
 pub(crate) use instruction::*;

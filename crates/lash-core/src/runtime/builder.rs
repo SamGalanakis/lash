@@ -16,11 +16,11 @@ pub(super) fn lashlang_abilities_for_process_registry(
     mut abilities: lashlang::LashlangAbilities,
     process_registry_available: bool,
 ) -> lashlang::LashlangAbilities {
+    abilities = abilities.with_sleep();
     if process_registry_available {
-        abilities.with_processes().with_process_lifecycle()
+        abilities.with_processes().with_process_signals()
     } else {
         abilities.processes = false;
-        abilities.process_sleep = false;
         abilities.process_signals = false;
         abilities
     }

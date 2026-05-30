@@ -1836,6 +1836,54 @@ async fn in_turn_direct_completion_requires_lease_and_journals_under_it() {
 }
 
 #[tokio::test]
+async fn direct_effect_restores_required_streaming_for_provider_execution() {
+    let saw_stream_events = Arc::new(AtomicBool::new(false));
+    let captured = Arc::clone(&saw_stream_events);
+    let transport = TestProvider::builder()
+        .kind("stream-required")
+        .requires_streaming(true)
+        .complete(move |request| {
+            let captured = Arc::clone(&captured);
+            async move {
+                captured.store(request.stream_events.is_some(), Ordering::SeqCst);
+                Ok(LlmResponse {
+                    full_text: "direct answer".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "direct answer".to_string(),
+                        response_meta: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build();
+    let runtime = runtime_with_plugins_and_tools_and_host(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+    )
+    .await;
+
+    let manager = runtime.runtime_session_manager().expect("session manager");
+    let direct = manager.direct_completion_client(
+        RuntimeEffectControllerHandle::shared(Arc::new(InlineRuntimeEffectController::default())),
+        None,
+        None,
+    );
+    let completion = direct
+        .direct_completion(
+            crate::DirectRequest::text("mock-model", "summarize"),
+            "direct-test",
+        )
+        .await
+        .expect("direct completion");
+
+    assert_eq!(completion.text, "direct answer");
+    assert!(saw_stream_events.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() {
     let recorder = RecordingEffectController::default();
     let trace_path = unique_trace_path("direct-llm-completion");

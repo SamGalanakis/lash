@@ -258,7 +258,7 @@ impl LashlangSurface {
 #[serde(default)]
 pub struct LashlangAbilities {
     pub processes: bool,
-    pub process_sleep: bool,
+    pub sleep: bool,
     pub process_signals: bool,
     pub triggers: bool,
     pub schedules: LashlangScheduleAbilities,
@@ -268,7 +268,7 @@ impl LashlangAbilities {
     pub fn union(self, other: Self) -> Self {
         Self {
             processes: self.processes || other.processes,
-            process_sleep: self.process_sleep || other.process_sleep,
+            sleep: self.sleep || other.sleep,
             process_signals: self.process_signals || other.process_signals,
             triggers: self.triggers || other.triggers,
             schedules: LashlangScheduleAbilities {
@@ -282,8 +282,12 @@ impl LashlangAbilities {
         self
     }
 
-    pub fn with_process_lifecycle(mut self) -> Self {
-        self.process_sleep = true;
+    pub fn with_sleep(mut self) -> Self {
+        self.sleep = true;
+        self
+    }
+
+    pub fn with_process_signals(mut self) -> Self {
         self.process_signals = true;
         self
     }
@@ -300,8 +304,9 @@ impl LashlangAbilities {
 
     pub fn all() -> Self {
         Self::default()
+            .with_sleep()
             .with_processes()
-            .with_process_lifecycle()
+            .with_process_signals()
             .with_triggers()
             .with_cron_schedules()
     }
@@ -1026,17 +1031,7 @@ impl<'module> Linker<'module> {
                 Ok(Some(Binding::Value))
             }
             Expr::SleepFor(expr) | Expr::SleepUntil(expr) => {
-                self.ensure_feature(
-                    self.surface.abilities.process_sleep,
-                    "process sleep",
-                    scope.span,
-                )?;
-                if !scope.process_body {
-                    return Err(LinkError::ProcessLifecycleOutsideProcess {
-                        keyword: "sleep",
-                        span: scope.span,
-                    });
-                }
+                self.ensure_feature(self.surface.abilities.sleep, "sleep", scope.span)?;
                 self.validate_expr(expr, scope)?;
                 Ok(Some(Binding::Value))
             }
@@ -1830,17 +1825,24 @@ mod tests {
     }
 
     #[test]
-    fn linked_module_rejects_process_lifecycle_outside_process_body() {
+    fn linked_module_accepts_top_level_sleep() {
         let program = crate::parse("sleep for 1").expect("parse sleep");
 
-        let err =
-            LinkedModule::link(program, full_surface()).expect_err("top-level sleep rejected");
+        LinkedModule::link(program, full_surface()).expect("top-level sleep should link");
+    }
+
+    #[test]
+    fn linked_module_rejects_process_lifecycle_outside_process_body() {
+        let program = crate::parse("payload = wait signal").expect("parse wait signal");
+
+        let err = LinkedModule::link(program, full_surface())
+            .expect_err("top-level process lifecycle should be rejected");
 
         assert!(
             matches!(
                 err,
                 LinkError::ProcessLifecycleOutsideProcess {
-                    keyword: "sleep",
+                    keyword: "wait signal",
                     ..
                 }
             ),
@@ -1903,15 +1905,14 @@ mod tests {
             })
         ));
 
-        let sleep = crate::parse("process worker() { sleep for \"1s\" }")
-            .expect("parse disabled process sleep");
+        let sleep = crate::parse("sleep for \"1s\"").expect("parse disabled sleep");
         assert!(matches!(
             LinkedModule::link(
                 sleep,
-                LashlangSurface::new(resources(), LashlangAbilities::default().with_processes())
+                LashlangSurface::new(resources(), LashlangAbilities::default())
             ),
             Err(LinkError::FeatureDisabled {
-                feature: "process sleep",
+                feature: "sleep",
                 ..
             })
         ));
@@ -2000,7 +2001,8 @@ mod tests {
                     resources(),
                     LashlangAbilities::default()
                         .with_processes()
-                        .with_process_lifecycle()
+                        .with_sleep()
+                        .with_process_signals()
                 )
             ),
             Err(LinkError::FeatureDisabled {

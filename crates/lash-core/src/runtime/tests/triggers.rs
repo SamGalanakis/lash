@@ -46,7 +46,8 @@ impl crate::PluginFactory for TriggerRouteTestFactory {
     fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
         lashlang::LashlangAbilities::default()
             .with_processes()
-            .with_process_lifecycle()
+            .with_sleep()
+            .with_process_signals()
             .with_triggers()
     }
 

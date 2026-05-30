@@ -16,7 +16,7 @@ pub enum AbilityOp {
     Fail(Value),
     StartProcess(Box<ProcessStart>),
     ProcessEvent(ProcessEvent),
-    ProcessSleep(ProcessSleep),
+    Sleep(Sleep),
     WaitSignal,
     SignalRun(ProcessSignal),
 }
@@ -65,14 +65,14 @@ pub struct ProcessEvent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProcessSleepKind {
+pub enum SleepKind {
     For,
     Until,
 }
 
 #[derive(Clone, Debug)]
-pub struct ProcessSleep {
-    pub kind: ProcessSleepKind,
+pub struct Sleep {
+    pub kind: SleepKind,
     pub value: Value,
 }
 

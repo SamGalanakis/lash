@@ -172,8 +172,8 @@ pub(crate) enum Instruction {
         keys: usize,
     },
     AwaitHandle,
-    ProcessSleepFor,
-    ProcessSleepUntil,
+    SleepFor,
+    SleepUntil,
     ProcessWaitSignal,
     ProcessSignalRun,
     AwaitHandleUnwrap,
@@ -309,9 +309,7 @@ impl Instruction {
             Instruction::AwaitHandle
             | Instruction::AwaitHandleUnwrap
             | Instruction::ProcessWaitSignal => InstructionProfileTag::AwaitHandle,
-            Instruction::ProcessSleepFor | Instruction::ProcessSleepUntil => {
-                InstructionProfileTag::ProcessControl
-            }
+            Instruction::SleepFor | Instruction::SleepUntil => InstructionProfileTag::Sleep,
             Instruction::ProcessSignalRun => InstructionProfileTag::ProcessControl,
             Instruction::CancelHandle => InstructionProfileTag::CancelHandle,
             Instruction::Intrinsic(_) => InstructionProfileTag::Intrinsic,
@@ -436,6 +434,7 @@ pub(crate) enum InstructionProfileTag {
     AppendAssign,
     Print,
     Submit,
+    Sleep,
     ProcessControl,
     Pop,
     BeginIter,
@@ -538,6 +537,7 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "append_assign",
     "print",
     "submit",
+    "sleep",
     "process_control",
     "pop",
     "begin_iter",

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::super::host::{
-    AbilityOp, AbilityResult, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessSleep,
-    ProcessSleepKind, ProcessStart, ResourceOperation,
+    AbilityOp, AbilityResult, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessStart,
+    ResourceOperation, Sleep, SleepKind,
 };
 use super::super::{
     ExecutionHost, RuntimeError, Value, error_value, is_process_handle_record,
@@ -17,7 +17,7 @@ pub(super) enum VmEffect {
     ResourceCallUnwrap { operation: usize, argc: usize },
     StartProcess { process: usize, keys: usize },
     AwaitHandle,
-    ProcessSleep(ProcessSleepKind),
+    Sleep(SleepKind),
     WaitSignal,
     SignalRun,
     AwaitHandleUnwrap,
@@ -112,14 +112,14 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 let result = self.await_value(handle).await;
                 self.stack.push(result);
             }
-            VmEffect::ProcessSleep(kind) => {
+            VmEffect::Sleep(kind) => {
                 let value = self.pop_stack()?;
                 self.host
-                    .perform(AbilityOp::ProcessSleep(ProcessSleep { kind, value }))
+                    .perform(AbilityOp::Sleep(Sleep { kind, value }))
                     .await
-                    .and_then(|result| result.into_value("process sleep"))
+                    .and_then(|result| result.into_value("sleep"))
                     .map_err(|err| RuntimeError::ValueError {
-                        message: format!("process sleep failed: {err}"),
+                        message: format!("sleep failed: {err}"),
                     })?;
                 self.last_value = Some(Value::Null);
                 self.stack.push(Value::Null);

@@ -43,6 +43,72 @@ fn static_capability_policy_fields_distinguish_inherit_set_and_clear() {
     assert_eq!(policy.model.variant, None);
 }
 
+struct CustomRequestCapability;
+
+impl Capability for CustomRequestCapability {
+    fn name(&self) -> &str {
+        "custom"
+    }
+
+    fn build_session_request(
+        &self,
+        ctx: SubagentSpawnContext<'_>,
+    ) -> Result<lash_core::SessionCreateRequest, String> {
+        let mut tool_access = ctx.base_tool_access.clone();
+        tool_access.hidden_tools.insert("custom_hidden".to_string());
+        let request = lash_core::SessionCreateRequest::child(
+            ctx.parent_session_id,
+            lash_core::SessionStartPoint::CurrentSession,
+            ctx.base_policy(),
+            lash_core::PluginOptions::default(),
+            "custom-subagent",
+        )
+        .with_plugin_source(lash_core::SessionPluginSource::CurrentHostFresh)
+        .with_tool_access(tool_access);
+        ctx.finalize_request(request, self.name())
+    }
+}
+
+#[test]
+fn capability_can_build_complete_spawn_request() {
+    let registry = CapabilityRegistry::new().with(Arc::new(CustomRequestCapability));
+    let current_snapshot = RuntimeSessionState {
+        policy: SessionPolicy {
+            model: model_spec("parent-model", None, 200_000),
+            ..SessionPolicy::default()
+        },
+        ..RuntimeSessionState::default()
+    };
+    let mut tool_access = lash_core::SessionToolAccess::default();
+    tool_access.hidden_tools.insert("base_hidden".to_string());
+
+    let request = build_spawn_create_request(SpawnCreateRequestInput {
+        registry: &registry,
+        parent_session_id: "root",
+        current_snapshot,
+        session_spec: &SessionSpec::inherit(),
+        tool_access: &tool_access,
+        capability_name: "custom",
+        output_schema: None,
+        seed: Default::default(),
+        parent_subagent: None,
+        caused_by: None,
+    })
+    .expect("custom capability request");
+
+    assert!(matches!(
+        &request.start,
+        lash_core::SessionStartPoint::CurrentSession
+    ));
+    assert_eq!(request.usage_source.as_deref(), Some("custom-subagent"));
+    assert!(request.tool_access.hidden_tools.contains("base_hidden"));
+    assert!(request.tool_access.hidden_tools.contains("custom_hidden"));
+    assert_eq!(
+        request.subagent.expect("subagent context").capability,
+        "custom"
+    );
+}
+
 #[test]
 fn rlm_definitions_expose_spawn_without_mini_api() {
     let registry = default_registry(&BTreeMap::new());
@@ -224,19 +290,20 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         policy: live_policy.clone(),
         ..RuntimeSessionState::default()
     };
+    let tool_access = lash_core::SessionToolAccess::default();
 
     let request = build_spawn_create_request(SpawnCreateRequestInput {
         registry: &registry,
         parent_session_id: "root",
         current_snapshot: current_snapshot.clone(),
         session_spec: &SessionSpec::inherit(),
+        tool_access: &tool_access,
         capability_name: "explore",
         output_schema: None,
         seed: Default::default(),
         parent_subagent: None,
         caused_by: None,
     })
-    .await
     .expect("spawn request");
     let child_policy = request.policy.expect("child policy");
 
@@ -261,6 +328,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         parent_session_id: "root",
         current_snapshot,
         session_spec: &SessionSpec::inherit(),
+        tool_access: &tool_access,
         capability_name: "explore",
         output_schema: Some(json!({
             "type": "object",
@@ -271,7 +339,6 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         parent_subagent: None,
         caused_by: None,
     })
-    .await
     .expect("structured spawn request");
     let structured_policy = structured_request
         .policy
@@ -494,7 +561,8 @@ async fn run_seed_probe(
     let process_abilities = host_plugins
         .lashlang_abilities()
         .with_processes()
-        .with_process_lifecycle();
+        .with_sleep()
+        .with_process_signals();
     let plugins = host_plugins
         .with_lashlang_abilities(process_abilities)
         .build_session("root", None)

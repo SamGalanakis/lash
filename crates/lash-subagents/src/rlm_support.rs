@@ -2,37 +2,41 @@
 
 use lash_core::plugin::PluginError;
 use lash_core::{
-    AssembledTurn, CausalRef, InputItem, PluginOptions, SessionCreateRequest, SessionPolicy,
-    SessionSnapshot, SessionSpec, SessionStartPoint, SessionToolAccess, SubagentSessionContext,
-    ToolDefinition, ToolResult, ToolScheduling, ToolSurfaceContribution, TurnFinish, TurnInput,
-    TurnOutcome, TurnStop,
+    AssembledTurn, CausalRef, InputItem, SessionCreateRequest, SessionSnapshot, SessionSpec,
+    SessionToolAccess, SubagentSessionContext, ToolDefinition, ToolResult, ToolScheduling,
+    ToolSurfaceContribution, TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
-use lash_rlm_types::RlmTermination;
 use serde_json::{Value, json};
 
-use crate::capability::{CapabilityContext, CapabilityRegistry, CapabilityResolution};
+use crate::capability::{CapabilityRegistry, SubagentSpawnContext};
 
 #[cfg(test)]
 pub(crate) fn build_session_policy(
     registry: &CapabilityRegistry,
-    current_policy: &SessionPolicy,
+    current_policy: &lash_core::SessionPolicy,
     capability_name: &str,
-) -> Result<SessionPolicy, String> {
-    let resolution = resolve_capability_spec(registry, current_policy, capability_name)?;
-    Ok(resolution.spec.resolve_against(current_policy))
-}
-
-pub(crate) fn resolve_capability_spec(
-    registry: &CapabilityRegistry,
-    current_policy: &SessionPolicy,
-    capability_name: &str,
-) -> Result<CapabilityResolution, String> {
-    let capability = registry
-        .get(capability_name)
-        .ok_or_else(|| unknown_capability_message(capability_name, registry))?;
-    Ok(capability.resolve(&CapabilityContext {
-        parent_policy: current_policy,
-    }))
+) -> Result<lash_core::SessionPolicy, String> {
+    let current_snapshot = SessionSnapshot {
+        policy: current_policy.clone(),
+        ..Default::default()
+    };
+    let session_spec = SessionSpec::inherit();
+    let tool_access = SessionToolAccess::default();
+    let request = build_spawn_create_request(SpawnCreateRequestInput {
+        registry,
+        parent_session_id: "root",
+        current_snapshot,
+        session_spec: &session_spec,
+        tool_access: &tool_access,
+        capability_name,
+        output_schema: None,
+        seed: Default::default(),
+        parent_subagent: None,
+        caused_by: None,
+    })?;
+    request
+        .policy
+        .ok_or_else(|| "capability did not resolve a child policy".to_string())
 }
 
 pub(crate) struct SpawnCreateRequestInput<'a> {
@@ -40,6 +44,7 @@ pub(crate) struct SpawnCreateRequestInput<'a> {
     pub(crate) parent_session_id: &'a str,
     pub(crate) current_snapshot: SessionSnapshot,
     pub(crate) session_spec: &'a SessionSpec,
+    pub(crate) tool_access: &'a SessionToolAccess,
     pub(crate) capability_name: &'a str,
     pub(crate) output_schema: Option<Value>,
     pub(crate) seed: lash_protocol_rlm::RlmSeed,
@@ -47,7 +52,7 @@ pub(crate) struct SpawnCreateRequestInput<'a> {
     pub(crate) caused_by: Option<CausalRef>,
 }
 
-pub(crate) async fn build_spawn_create_request(
+pub(crate) fn build_spawn_create_request(
     input: SpawnCreateRequestInput<'_>,
 ) -> Result<SessionCreateRequest, String> {
     let SpawnCreateRequestInput {
@@ -55,80 +60,26 @@ pub(crate) async fn build_spawn_create_request(
         parent_session_id,
         current_snapshot,
         session_spec,
+        tool_access,
         capability_name,
         output_schema,
         seed,
         parent_subagent,
         caused_by,
     } = input;
-    let mut policy = session_spec.resolve_against(&current_snapshot.policy);
-    let capability_resolution = resolve_capability_spec(registry, &policy, capability_name)?;
-    policy = capability_resolution.spec.resolve_against(&policy);
-    let termination = match output_schema.clone() {
-        Some(schema) => RlmTermination::SubmitRequired {
-            schema: Some(schema),
-        },
-        None => RlmTermination::default(),
-    };
-    let plugin_options = PluginOptions::typed(
-        lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID,
-        lash_rlm_types::RlmCreateExtras { termination },
-    )
-    .map_err(|err| format!("failed to encode rlm plugin options: {err}"))?;
-
-    let initial_nodes = lash_protocol_rlm::rlm_seed_initial_nodes(seed);
-    let request = SessionCreateRequest::child(
+    let capability = registry
+        .get(capability_name)
+        .ok_or_else(|| unknown_capability_message(capability_name, registry))?;
+    capability.build_session_request(SubagentSpawnContext {
         parent_session_id,
-        SessionStartPoint::Empty,
-        policy,
-        plugin_options,
-        "subagent",
-    )
-    .with_plugin_source(capability_resolution.plugin_source)
-    .with_initial_nodes(initial_nodes);
-    finalize_subagent_create_request(
-        request,
-        parent_session_id,
-        capability_name,
+        parent_snapshot: &current_snapshot,
+        session_spec,
+        base_tool_access: tool_access,
+        output_schema,
+        seed,
         parent_subagent,
         caused_by,
-    )
-}
-
-fn finalize_subagent_create_request(
-    mut request: SessionCreateRequest,
-    parent_session_id: &str,
-    capability_name: &str,
-    parent_subagent: Option<&SubagentSessionContext>,
-    caused_by: Option<CausalRef>,
-) -> Result<SessionCreateRequest, String> {
-    if let Some(caused_by) = caused_by {
-        request = request.with_caused_by(caused_by);
-    }
-    let child_depth = parent_subagent
-        .map(|parent| parent.depth.saturating_add(1))
-        .unwrap_or(1);
-    if child_depth > MAX_SUBAGENT_DEPTH {
-        return Err(format!(
-            "subagent recursion depth exceeded: max depth is {MAX_SUBAGENT_DEPTH}"
-        ));
-    }
-    let mut hidden_tools = request.tool_access.hidden_tools.clone();
-    if child_depth >= MAX_SUBAGENT_DEPTH {
-        hidden_tools.extend(SUBAGENT_SUITE_DENY.iter().map(|name| name.to_string()));
-    }
-    let tools = request.tool_access.tools.clone();
-    Ok(request
-        .with_tool_access(SessionToolAccess {
-            tools,
-            hidden_tools,
-        })
-        .with_subagent_context(SubagentSessionContext {
-            parent_session_id: parent_session_id.to_string(),
-            capability: capability_name.to_string(),
-            depth: child_depth,
-            max_depth: MAX_SUBAGENT_DEPTH,
-        }))
+    })
 }
 
 pub(crate) fn unknown_capability_message(name: &str, registry: &CapabilityRegistry) -> String {
@@ -250,16 +201,6 @@ pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
         "additionalProperties": false
     })
 }
-
-/// Tools that are inert in any subagent session because there is no
-/// human attached to the session: prompts return nothing, UI surfaces
-/// have no thread to render against. Hidden universally on top of
-/// the capability's explicit surface. `update_plan` is
-/// already gated to root-only by `UpdatePlanPluginFactory`, so it is
-/// not listed here.
-pub(crate) const SUBAGENT_SUITE_DENY: &[&str] = &["spawn_agent"];
-
-pub(crate) const MAX_SUBAGENT_DEPTH: u8 = 5;
 
 pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(

@@ -410,7 +410,7 @@ fn write_exports(writer: &mut HashWriter, exports: &ModuleExports) {
 fn write_surface_requirements(writer: &mut HashWriter, requirements: &SurfaceRequirements) {
     writer.atom("abilities");
     writer.bool(requirements.abilities.processes);
-    writer.bool(requirements.abilities.process_sleep);
+    writer.bool(requirements.abilities.sleep);
     writer.bool(requirements.abilities.process_signals);
     writer.bool(requirements.abilities.triggers);
     writer.bool(requirements.abilities.schedules.cron);
@@ -1276,7 +1276,7 @@ impl<'program> RequirementsCollector<'program> {
                 Some(RequirementBinding::Value)
             }
             Expr::SleepFor(expr) | Expr::SleepUntil(expr) => {
-                self.requirements.abilities.process_sleep = true;
+                self.requirements.abilities.sleep = true;
                 self.collect_expr(expr, scope);
                 Some(RequirementBinding::Value)
             }

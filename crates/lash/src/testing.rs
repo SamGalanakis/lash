@@ -83,7 +83,8 @@ trigger remembered on ui.button.pressed as event
     fn rebuild_abilities() -> crate::modes::LashlangAbilities {
         crate::modes::LashlangAbilities::default()
             .with_processes()
-            .with_process_lifecycle()
+            .with_sleep()
+            .with_process_signals()
             .with_triggers()
     }
 

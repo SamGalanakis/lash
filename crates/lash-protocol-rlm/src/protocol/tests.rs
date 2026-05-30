@@ -61,7 +61,7 @@ fn execution_section_hides_processes_when_disabled() {
 }
 
 #[test]
-fn execution_section_hides_process_sleep_and_signals_independently() {
+fn execution_section_hides_sleep_and_signals_independently() {
     let surface = prompt_surface(
         tool_resources(),
         lashlang::LashlangAbilities::default().with_processes(),
@@ -75,12 +75,25 @@ fn execution_section_hides_process_sleep_and_signals_independently() {
 }
 
 #[test]
+fn execution_section_shows_sleep_without_processes() {
+    let surface = prompt_surface(
+        tool_resources(),
+        lashlang::LashlangAbilities::default().with_sleep(),
+    );
+    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+
+    assert!(section.contains("sleep for"));
+    assert!(!section.contains("process name"));
+}
+
+#[test]
 fn execution_section_hides_trigger_and_schedule_language_when_disabled() {
     let surface = prompt_surface(
         tool_resources(),
         lashlang::LashlangAbilities::default()
             .with_processes()
-            .with_process_lifecycle(),
+            .with_sleep()
+            .with_process_signals(),
     );
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 

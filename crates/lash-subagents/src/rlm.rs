@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash_core::{
-    PreparedToolCall, SessionSpec, SubagentSessionContext, ToolArgumentProjectionPolicy, ToolCall,
-    ToolContext, ToolDefinition, ToolPrepareContext, ToolResult, ToolScheduling,
-    sansio::PendingToolCall,
+    PreparedToolCall, SessionSpec, SessionToolAccess, SubagentSessionContext,
+    ToolArgumentProjectionPolicy, ToolCall, ToolContext, ToolDefinition, ToolPrepareContext,
+    ToolResult, ToolScheduling, sansio::PendingToolCall,
 };
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,7 @@ use crate::rlm_support::{
 pub(crate) struct RlmSubagentToolsProvider {
     pub(crate) registry: Arc<CapabilityRegistry>,
     pub(crate) session_spec: SessionSpec,
+    pub(crate) tool_access: SessionToolAccess,
     pub(crate) parent_subagent: Option<SubagentSessionContext>,
     pub(crate) include_submit_error: bool,
 }
@@ -108,6 +109,7 @@ impl RlmSubagentToolsProvider {
                 parent_session_id: context.session_id(),
                 current_snapshot,
                 session_spec: &self.session_spec,
+                tool_access: &self.tool_access,
                 capability_name: &capability_name,
                 output_schema: output_schema.clone(),
                 seed,
@@ -119,7 +121,6 @@ impl RlmSubagentToolsProvider {
                         call_id: call_id.to_string(),
                     }),
             })
-            .await
             .map_err(|err| ToolResult::err(serde_json::json!(err)))?,
         );
         let turn_input = turn_input_for_task(render_task_prompt(&task, output_schema.as_ref()));
