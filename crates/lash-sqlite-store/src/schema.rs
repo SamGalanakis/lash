@@ -12,8 +12,7 @@ pub(crate) fn ensure_process_schema(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     Err(rusqlite::Error::InvalidParameterName(
-        "Unsupported lash process registry schema. Delete the runtime process registry database and start fresh."
-            .to_string(),
+        unsupported_schema_message("process registry", PROCESS_SCHEMA_VERSION, user_version),
     ))
 }
 
@@ -257,7 +256,7 @@ pub(crate) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     Err(rusqlite::Error::InvalidParameterName(
-        unsupported_schema_message(),
+        unsupported_schema_message("session", SCHEMA_VERSION, user_version),
     ))
 }
 
@@ -272,9 +271,18 @@ pub(crate) fn has_user_schema_objects(conn: &Connection) -> rusqlite::Result<boo
     Ok(count > 0)
 }
 
-pub(crate) fn unsupported_schema_message() -> String {
-    "Unsupported lash session schema. This binary supports schema version 1 only; \
-     older databases must be deleted before opening. Delete the session database \
-     and start fresh."
-        .to_string()
+/// Build the error message for an unsupported on-disk schema. The expected and
+/// found `PRAGMA user_version` values are reported accurately (the message used
+/// to hard-code "version 1 only" while [`SCHEMA_VERSION`] had moved to 2). There
+/// is no migration chain — the database must be deleted before reopening.
+pub(crate) fn unsupported_schema_message(
+    database_kind: &str,
+    expected_version: i32,
+    found_version: i32,
+) -> String {
+    format!(
+        "Unsupported lash {database_kind} schema: this binary supports schema version \
+         {expected_version}, but the database reports version {found_version}. There is no \
+         migration chain — delete the {database_kind} database and start fresh."
+    )
 }

@@ -74,7 +74,7 @@ use lash_core::{
     ProcessScope, RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope,
     SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, VacuumReport,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
 /// SQLite-backed store for checkpoint blobs and the canonical session head.
@@ -96,6 +96,7 @@ pub struct SqliteProcessRegistry {
 
 mod attachments;
 mod blobs;
+mod conn;
 mod graph;
 mod leases;
 mod lifecycle;
@@ -104,6 +105,7 @@ mod process_registry;
 mod queued_work;
 mod schema;
 
+use conn::{TxOutcome, lock_conn};
 use leases::*;
 use queued_work::*;
 use schema::{StoreBacking, apply_pragmas, ensure_process_schema, ensure_schema};
