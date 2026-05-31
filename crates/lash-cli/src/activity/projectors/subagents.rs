@@ -33,7 +33,7 @@ fn project_spawn_agent(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
             inline_text(capability_arg)
         ));
     }
-    if let Some(seed_summary) = summarize_seed_arg(ctx.args.get("seed")) {
+    if let Some(seed_summary) = summarize_seed_arg(&ctx.args) {
         detail_lines.push(seed_summary);
     }
     block(
@@ -44,23 +44,17 @@ fn project_spawn_agent(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
     )
 }
 
-/// Summarize a `seed:` arg as a one-line activity detail. Each entry is shown
-/// as `name (projected)` if the value carried the canonical `__projected__`
-/// JSON wrapper (lashlang's wire encoding for `Value::Projected`) at call time,
-/// or just `name` for regular RLM-global entries. Returns `None` when seed is
-/// missing/non-object so the rendering stays quiet.
-fn summarize_seed_arg(seed: Option<&Value>) -> Option<String> {
-    let map = seed?.as_object()?;
-    if map.is_empty() {
+fn summarize_seed_arg(args: &Value) -> Option<String> {
+    let seed = lash_protocol_rlm::RlmSeed::from_tool_args(args).ok()?;
+    if seed.is_empty() {
         return None;
     }
-    let mut parts = Vec::with_capacity(map.len());
-    for (name, value) in map.iter() {
-        if lash_rlm_types::projection_inner(value).is_some() {
-            parts.push(format!("{name} (projected)"));
-        } else {
-            parts.push(name.clone());
-        }
+    let mut parts = Vec::with_capacity(seed.projected.entries.len() + seed.globals.len());
+    for (name, _) in seed.projected.entries {
+        parts.push(format!("{name} (projected)"));
+    }
+    for name in seed.globals.keys() {
+        parts.push(name.clone());
     }
     Some(format!("Seed {}", parts.join(", ")))
 }

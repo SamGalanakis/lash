@@ -970,7 +970,11 @@ fn recovery_worker(
     DurableProcessWorker::new(
         lash_core::DurableProcessWorkerConfig::new(
             Arc::new(plugin_host),
-            lash_core::RuntimeCoreConfig::in_memory().with_host_profile_id("recovery-host"),
+            {
+                let mut config = lash_core::RuntimeHostConfig::in_memory();
+                config.profile.host_profile_id = "recovery-host".to_string();
+                config
+            },
             store_factory,
             registry,
         )

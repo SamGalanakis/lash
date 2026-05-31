@@ -4,7 +4,6 @@ use lash_core::{
     ToolControl, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::projection::RlmSeed;
@@ -75,41 +74,6 @@ fn continue_as_output_schema() -> Value {
     })
 }
 
-pub(crate) fn collect_seed_process_handle_ids(seed: Option<&Value>) -> BTreeSet<String> {
-    fn visit(value: &Value, out: &mut BTreeSet<String>) {
-        if let Some(id) = value
-            .get("__handle__")
-            .and_then(Value::as_str)
-            .filter(|kind| *kind == "process")
-            .and_then(|_| value.get("id"))
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-        {
-            out.insert(id);
-        }
-        match value {
-            Value::Array(items) => {
-                for item in items {
-                    visit(item, out);
-                }
-            }
-            Value::Object(map) => {
-                for value in map.values() {
-                    visit(value, out);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut out = BTreeSet::new();
-    if let Some(seed) = seed {
-        visit(seed, &mut out);
-    }
-    out
-}
-
 pub fn continue_as_input_schema() -> Value {
     json!({
         "type": "object",
@@ -135,7 +99,7 @@ async fn continue_as_switch_frame(
 ) -> Result<ContinueAsResult, String> {
     let task = required_string(args, "task")?;
     let seed = RlmSeed::from_tool_args(args).map_err(|err| format!("continue_as {err}"))?;
-    let referenced_handles = collect_seed_process_handle_ids(args.get("seed"));
+    let referenced_handles = seed.referenced_process_handle_ids();
     let referenced_handles_vec = referenced_handles.into_iter().collect::<Vec<_>>();
     let processes = context.processes();
     processes

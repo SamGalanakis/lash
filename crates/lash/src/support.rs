@@ -9,8 +9,8 @@ pub(crate) use lash_core::runtime::{
 };
 pub(crate) use lash_core::{
     DurabilityTier, DurableProcessWorker, DurableProcessWorkerConfig, LashRuntime, MessageRole,
-    PluginHost, PluginSpec, PluginStack, ProcessWorkPoke, ProcessWorkRunner, RuntimeCoreConfig,
-    RuntimeEnvironment, RuntimeHandle, RuntimeObservation, SessionPolicy, SessionSpec,
+    PluginHost, PluginSpec, PluginStack, ProcessWorkPoke, ProcessWorkRunner, RuntimeEnvironment,
+    RuntimeHandle, RuntimeHostConfig, RuntimeObservation, SessionPolicy, SessionSpec,
 };
 pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;

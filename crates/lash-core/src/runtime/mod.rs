@@ -19,8 +19,8 @@ mod session_ops;
 mod state;
 #[cfg(test)]
 pub(crate) mod tests;
+mod turn_boundary;
 mod turn_commit_draft;
-mod turn_commit_pipeline;
 mod turn_driver;
 mod turn_graph_editor;
 mod turn_loop;
@@ -46,7 +46,7 @@ use crate::plugin::{
 };
 use crate::sansio::{LlmCallError, Response};
 use crate::session_model::{
-    Message, MessageRole, Part, PartKind, PruneState, ResolvedSessionPolicy, SessionEvent,
+    Message, MessageRole, Part, PartKind, PruneState, RuntimeSessionPolicy, SessionEvent,
     SessionPolicy, TokenUsage, fresh_message_id, make_error_event, reassign_part_ids, shared_parts,
     transport_stream_events,
 };
@@ -59,8 +59,8 @@ use crate::{Effect, TurnMachine};
 
 use host::*;
 use session_manager::*;
+use turn_boundary::*;
 use turn_commit_draft::*;
-use turn_commit_pipeline::*;
 use turn_driver::*;
 
 pub(crate) const RUNTIME_TURN_LEASE_TTL_MS: u64 = 15 * 60 * 1000;
@@ -88,7 +88,7 @@ pub use effect::{
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{DurableSubstrateFacet, RuntimeError, RuntimeErrorCode};
-pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeCoreConfig};
+pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeHostConfig};
 pub use in_memory_store::{InMemorySessionStore, InMemorySessionStoreFactory};
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};

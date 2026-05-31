@@ -172,7 +172,7 @@ impl DirectCompletionCapability {
         let usage_source = usage_source.to_string();
         let request_spec = crate::LlmRequestSpec::from_request(
             &request,
-            current.host.core.attachment_store.as_ref(),
+            current.host.core.durability.attachment_store.as_ref(),
         )?;
         let discriminator =
             crate::runtime::causal::direct_request_discriminator(&request_spec, replay, caused_by)?;
@@ -221,7 +221,7 @@ impl DirectCompletionCapability {
                 envelope,
                 crate::RuntimeEffectLocalExecutor::direct(
                     provider,
-                    Arc::clone(&current.host.core.attachment_store),
+                    Arc::clone(&current.host.core.durability.attachment_store),
                 ),
             ),
             |outcome| async move {
@@ -246,7 +246,7 @@ impl DirectCompletionCapability {
         usage_source: &str,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
         let resolved = context.current.resolve_policy()?;
-        let provider = &resolved.provider;
+        let provider = resolved.provider().clone();
         let model = request.model.clone();
         if let Some(variant) = request.model_variant.as_deref() {
             provider
@@ -255,10 +255,10 @@ impl DirectCompletionCapability {
         }
         let replay = request.replay.clone();
         let caused_by = request.caused_by.clone();
-        let normalized = crate::direct::build_llm_request(provider, request, model);
+        let normalized = crate::direct::build_llm_request(&provider, request, model);
         let plan = self.plan_direct_effect(
             &context,
-            resolved.provider,
+            provider,
             normalized,
             usage_source,
             replay.as_ref(),
@@ -280,7 +280,7 @@ impl DirectCompletionCapability {
         let resolved = context.current.resolve_policy()?;
         let plan = self.plan_direct_effect(
             &context,
-            resolved.provider,
+            resolved.binding.provider,
             request,
             usage_source,
             None,

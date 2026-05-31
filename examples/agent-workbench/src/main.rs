@@ -1408,13 +1408,13 @@ mod tests {
                 .store_factory(core_store_factory)
                 .plugin(Arc::new(WorkbenchPluginFactory::new("")))
                 .advanced()
-                .runtime_core_config(
-                    lash::advanced::RuntimeCoreConfig::in_memory()
-                        .with_lashlang_artifact_store(artifact_store_for_core)
-                        .with_effect_controller(Arc::new(
-                            lash::advanced::InlineRuntimeEffectController::default(),
-                        )),
-                )
+                .runtime_host_config({
+                    let mut config = lash::advanced::RuntimeHostConfig::in_memory();
+                    config.durability.lashlang_artifact_store = artifact_store_for_core;
+                    config.control.effect_controller =
+                        Arc::new(lash::advanced::InlineRuntimeEffectController::default());
+                    config
+                })
                 .process_registry(Arc::clone(&process_registry))
                 .build()
                 .expect("build core"),
@@ -1751,13 +1751,13 @@ mod tests {
             .store_factory(session_store_factory)
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .advanced()
-            .runtime_core_config(
-                lash::advanced::RuntimeCoreConfig::in_memory()
-                    .with_lashlang_artifact_store(artifact_store)
-                    .with_effect_controller(Arc::new(
-                        lash::advanced::InlineRuntimeEffectController::default(),
-                    )),
-            )
+            .runtime_host_config({
+                let mut config = lash::advanced::RuntimeHostConfig::in_memory();
+                config.durability.lashlang_artifact_store = artifact_store;
+                config.control.effect_controller =
+                    Arc::new(lash::advanced::InlineRuntimeEffectController::default());
+                config
+            })
             .process_registry(process_registry)
             .build()
             .expect("build core")

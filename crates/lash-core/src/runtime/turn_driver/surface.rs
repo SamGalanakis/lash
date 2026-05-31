@@ -163,7 +163,7 @@ impl RuntimeTurnDriver<'_> {
         };
         self.mark_phase_begin(RuntimeTurnPhase::PromptBuild);
         let prepared_prompt = execution_surface.build_prompt(
-            &self.host.core.prompt,
+            &self.host.core.prompt.prompt,
             &session_policy.prompt,
             self.turn_context.prompt_layer(),
             Some(self.session.prompt_cache()),
@@ -173,7 +173,7 @@ impl RuntimeTurnDriver<'_> {
             run_session_id: session_policy.session_id.clone(),
             autonomous: session_policy.autonomous,
             model: session_policy.model.clone(),
-            generation: generation_options_from_provider(&session_policy.provider),
+            generation: generation_options_from_provider(session_policy.provider()),
             max_turns: session_policy.max_turns,
             sync_execution_surface: execution_surface
                 .turn_driver_preamble
@@ -196,17 +196,17 @@ impl RuntimeTurnDriver<'_> {
             prepared_prompt,
             max_turns: session_policy.max_turns,
             model_variant: session_policy.model.variant.clone(),
-            generation: generation_options_from_provider(&session_policy.provider),
+            generation: generation_options_from_provider(session_policy.provider()),
             emit_llm_trace: false,
             termination: self.protocol_turn_options.clone(),
         });
-        if self.host.core.trace_sink.is_some() {
+        if self.host.core.tracing.trace_sink.is_some() {
             let prompt_hash =
                 lash_trace::sha256_hex(prepared.prepared_prompt.system_prompt.as_bytes());
             let prompt_chars = prepared.prepared_prompt.system_prompt.chars().count();
             crate::trace::emit_trace(
-                &self.host.core.trace_sink,
-                &self.host.core.trace_context,
+                &self.host.core.tracing.trace_sink,
+                &self.host.core.tracing.trace_context,
                 self.trace_context(run_offset),
                 lash_trace::TraceEvent::PromptBuilt {
                     prompt_hash: prompt_hash.clone(),
@@ -240,7 +240,7 @@ impl RuntimeTurnDriver<'_> {
             .await
             .map_err(|err| crate::SessionError::Protocol(err.to_string()))?;
         let prepared_prompt = execution_surface.build_prompt(
-            &self.host.core.prompt,
+            &self.host.core.prompt.prompt,
             &policy.prompt,
             self.turn_context.prompt_layer(),
             Some(self.session.prompt_cache()),
@@ -351,11 +351,11 @@ impl RuntimeTurnDriver<'_> {
 
     pub(super) async fn prepare_provider(
         &mut self,
-        policy: &mut ResolvedSessionPolicy,
+        policy: &mut RuntimeSessionPolicy,
     ) -> Result<String, SessionEvent> {
         let model = policy.model.id.clone();
         if let Some(variant) = policy.model.variant.as_deref()
-            && let Err(message) = policy.provider.validate_variant(&model, variant)
+            && let Err(message) = policy.provider().validate_variant(&model, variant)
         {
             return Err(make_error_event(
                 "llm_provider",

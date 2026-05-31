@@ -152,10 +152,10 @@ async fn abandon_runtime_turn_lease_best_effort(
 }
 
 struct LeasedTurnFinish {
-    turn_pipeline: TurnCommitPipeline,
+    turn_pipeline: TurnBoundary,
     assembler: TurnAssembler,
     new_messages: crate::MessageSequence,
-    policy: ResolvedSessionPolicy,
+    policy: RuntimeSessionPolicy,
     turn_index: usize,
     turn_lease: Option<crate::RuntimeTurnLease>,
     queued_work_completions: Vec<crate::QueuedWorkCompletion>,
@@ -233,14 +233,14 @@ impl LashRuntime {
 
         let last_prompt_usage = assembler
             .last_llm_usage()
-            .and_then(|usage| normalize_prompt_usage(&policy.provider, usage));
+            .and_then(|usage| normalize_prompt_usage(policy.provider(), usage));
         turn_pipeline.state_mut().last_prompt_usage = last_prompt_usage;
         let assembled_state = turn_pipeline.export_state_for_assembly();
         let assembled = assembler.finish(
             assembled_state,
             cancel_state.is_cancelled(),
             None,
-            &self.host.core.termination,
+            &self.host.core.control.termination,
         );
 
         let Some(session) = self.session.as_ref() else {
@@ -345,8 +345,8 @@ impl LashRuntime {
         }
         if !queued_work_completion_trace.is_empty() {
             crate::trace::emit_trace(
-                &self.host.core.trace_sink,
-                &self.host.core.trace_context,
+                &self.host.core.tracing.trace_sink,
+                &self.host.core.tracing.trace_context,
                 lash_trace::TraceContext::default()
                     .for_session(returned_turn.state.session_id.clone())
                     .for_turn_index(returned_turn.state.turn_index)
@@ -376,14 +376,14 @@ impl LashRuntime {
         outcome: &TurnOutcome,
         trace_turn_id: &str,
     ) {
-        if self.host.core.trace_sink.is_none() {
+        if self.host.core.tracing.trace_sink.is_none() {
             return;
         }
 
         let (status, done_reason, agent_frame_switch) = trace_fields_from_outcome(outcome);
         crate::trace::emit_trace(
-            &self.host.core.trace_sink,
-            &self.host.core.trace_context,
+            &self.host.core.tracing.trace_sink,
+            &self.host.core.tracing.trace_context,
             lash_trace::TraceContext::default()
                 .for_session(state.session_id.clone())
                 .for_turn_index(state.turn_index)
@@ -405,7 +405,7 @@ impl LashRuntime {
         };
         let direct_completions = manager.direct_completion_client(
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
-                &self.host.core.effect_controller,
+                &self.host.core.control.effect_controller,
             )),
             None,
             None,
@@ -437,7 +437,7 @@ impl LashRuntime {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let cancel = opts.cancel.clone();
-        let effect_controller = Arc::clone(&self.host.core.effect_controller);
+        let effect_controller = Arc::clone(&self.host.core.control.effect_controller);
         let effect_scope = opts.resolve_effect_scope(effect_controller.as_ref(), &turn_id)?;
         self.stream_turn_with_effect_scope_inner(
             input,
@@ -492,8 +492,8 @@ impl LashRuntime {
         )
         .await;
         crate::trace::emit_trace(
-            &self.host.core.trace_sink,
-            &self.host.core.trace_context,
+            &self.host.core.tracing.trace_sink,
+            &self.host.core.tracing.trace_context,
             lash_trace::TraceContext::default()
                 .for_session(self.state.session_id.clone())
                 .for_turn_index(self.state.turn_index + 1)
@@ -508,7 +508,7 @@ impl LashRuntime {
             },
         );
         let cancel = opts.cancel.clone();
-        let effect_controller = Arc::clone(&self.host.core.effect_controller);
+        let effect_controller = Arc::clone(&self.host.core.control.effect_controller);
         let effect_scope = opts.resolve_effect_scope(effect_controller.as_ref(), &turn_id)?;
         self.stream_turn_with_effect_scope_inner(
             work.input,
@@ -539,6 +539,7 @@ impl LashRuntime {
         if self
             .host
             .core
+            .durability
             .attachment_store
             .persistence()
             .durability_tier()
@@ -548,7 +549,12 @@ impl LashRuntime {
                 crate::DurableSubstrateFacet::AttachmentStore,
             ));
         }
-        if self.host.core.lashlang_artifact_store.durability_tier()
+        if self
+            .host
+            .core
+            .durability
+            .lashlang_artifact_store
+            .durability_tier()
             != crate::DurabilityTier::Durable
         {
             return Err(RuntimeError::durable_substrate_required(
@@ -575,7 +581,7 @@ impl LashRuntime {
         opts: TurnOptions<'_>,
     ) -> Result<AssembledTurn, RuntimeError> {
         let cancel = opts.cancel.clone();
-        let effect_controller = Arc::clone(&self.host.core.effect_controller);
+        let effect_controller = Arc::clone(&self.host.core.control.effect_controller);
         let effect_scope = opts.resolve_effect_scope(effect_controller.as_ref(), turn_id)?;
         self.resume_turn_inner(
             turn_id,
@@ -685,7 +691,7 @@ impl LashRuntime {
             session_id: self.state.session_id.clone(),
             turn_id: turn_id.to_string(),
             turn_index: checkpoint_record.turn_index,
-            turn_pipeline: TurnCommitPipeline::from_state(self.state.clone()),
+            turn_pipeline: TurnBoundary::from_state(self.state.clone()),
             llm_stream_summaries: HashMap::new(),
             next_llm_ordinal: 0,
             session_services: manager,
@@ -834,7 +840,7 @@ impl LashRuntime {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let cancel = opts.cancel.clone();
-        let effect_controller = Arc::clone(&self.host.core.effect_controller);
+        let effect_controller = Arc::clone(&self.host.core.control.effect_controller);
         let effect_scope =
             opts.resolve_effect_scope(effect_controller.as_ref(), &follow_trace_turn_id)?;
         self.stream_turn_with_agent_frames_inner(
@@ -986,7 +992,7 @@ impl LashRuntime {
                     self.state.to_snapshot(),
                     false,
                     None,
-                    &self.host.core.termination,
+                    &self.host.core.control.termination,
                 ));
             }
         };
@@ -995,15 +1001,15 @@ impl LashRuntime {
             .trace_turn_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        if self.host.core.trace_sink.is_some() {
+        if self.host.core.tracing.trace_sink.is_some() {
             let mut trace_metadata = std::collections::BTreeMap::new();
             trace_metadata.insert(
                 "input_item_count".to_string(),
                 serde_json::json!(normalized.len()),
             );
             crate::trace::emit_trace(
-                &self.host.core.trace_sink,
-                &self.host.core.trace_context,
+                &self.host.core.tracing.trace_sink,
+                &self.host.core.tracing.trace_context,
                 lash_trace::TraceContext::default()
                     .for_session(self.state.session_id.clone())
                     .for_turn_index(turn_index)
@@ -1116,7 +1122,7 @@ impl LashRuntime {
             session_graph: manager.graph_service(),
             direct_completions: manager.direct_completion_client(
                 crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
-                    &self.host.core.effect_controller,
+                    &self.host.core.control.effect_controller,
                 )),
                 None,
                 None,
@@ -1290,7 +1296,7 @@ impl LashRuntime {
         if let Some(abort) = prepared.abort {
             drop(event_tx);
 
-            let mut turn_pipeline = TurnCommitPipeline::from_state(self.state.clone());
+            let mut turn_pipeline = TurnBoundary::from_state(self.state.clone());
             turn_pipeline.apply_prepared_messages(&prepared.messages);
             let state = turn_pipeline.into_final_state();
             let issue = TurnIssue {
@@ -1330,10 +1336,10 @@ impl LashRuntime {
                 state.to_snapshot(),
                 cancel.is_cancelled(),
                 Some(issue),
-                &self.host.core.termination,
+                &self.host.core.control.termination,
             ));
         }
-        let mut turn_pipeline = TurnCommitPipeline::from_state(self.state.clone());
+        let mut turn_pipeline = TurnBoundary::from_state(self.state.clone());
         let store = self
             .session
             .as_ref()
@@ -1368,7 +1374,8 @@ impl LashRuntime {
             None
         };
         let resolved_turn_policy = if let Some(provider) = turn_provider_override {
-            ResolvedSessionPolicy::new(turn_policy.clone(), provider)
+            RuntimeSessionPolicy::from_provider(turn_policy.clone(), provider)
+                .map_err(|err| RuntimeError::new("llm_provider", err.to_string()))?
         } else {
             self.host
                 .resolve_session_policy(&self.state.session_id, turn_policy.clone())
@@ -1481,7 +1488,11 @@ impl LashRuntime {
         items: &[InputItem],
         image_blobs: &HashMap<String, Vec<u8>>,
     ) -> Result<Vec<NormalizedItem>, String> {
-        normalize_input_items(items, image_blobs, self.host.core.attachment_store.as_ref())
+        normalize_input_items(
+            items,
+            image_blobs,
+            self.host.core.durability.attachment_store.as_ref(),
+        )
     }
 }
 

@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use crate::ModelSpec;
 use crate::llm::types::{LlmEventSender, LlmStreamEvent};
 use crate::plugin::PluginMessage;
-use crate::provider::ProviderHandle;
+use crate::provider::{ProviderBinding, ProviderHandle, ProviderResolutionError};
 
 pub use lash_sansio::format_tool_output_content;
 pub use lash_sansio::session_model::{
@@ -231,19 +231,26 @@ impl<'de> serde::Deserialize<'de> for SessionPolicy {
 
 /// Runtime-only policy resolved against host-owned live dependencies.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ResolvedSessionPolicy {
+pub struct RuntimeSessionPolicy {
     pub policy: SessionPolicy,
-    pub provider: ProviderHandle,
+    pub binding: ProviderBinding,
 }
 
-impl ResolvedSessionPolicy {
-    pub fn new(policy: SessionPolicy, provider: ProviderHandle) -> Self {
-        Self { policy, provider }
+impl RuntimeSessionPolicy {
+    pub fn new(policy: SessionPolicy, binding: ProviderBinding) -> Self {
+        Self { policy, binding }
     }
 
-    pub fn replace_provider(&mut self, provider: ProviderHandle) {
-        self.policy.provider_id = provider.kind().to_string();
-        self.provider = provider;
+    pub fn from_provider(
+        policy: SessionPolicy,
+        provider: ProviderHandle,
+    ) -> Result<Self, ProviderResolutionError> {
+        let binding = ProviderBinding::new(policy.recorded_provider_id(), provider)?;
+        Ok(Self { policy, binding })
+    }
+
+    pub fn provider(&self) -> &ProviderHandle {
+        &self.binding.provider
     }
 
     pub fn into_policy(self) -> SessionPolicy {
@@ -251,7 +258,7 @@ impl ResolvedSessionPolicy {
     }
 }
 
-impl std::ops::Deref for ResolvedSessionPolicy {
+impl std::ops::Deref for RuntimeSessionPolicy {
     type Target = SessionPolicy;
 
     fn deref(&self) -> &Self::Target {
@@ -259,7 +266,7 @@ impl std::ops::Deref for ResolvedSessionPolicy {
     }
 }
 
-impl std::ops::DerefMut for ResolvedSessionPolicy {
+impl std::ops::DerefMut for RuntimeSessionPolicy {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.policy
     }

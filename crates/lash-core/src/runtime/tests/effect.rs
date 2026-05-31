@@ -68,6 +68,30 @@ fn test_effect_invocation(
     )
 }
 
+fn runtime_host_config_with_effect_controller(
+    effect_controller: Arc<dyn RuntimeEffectController>,
+) -> RuntimeHostConfig {
+    let mut config = RuntimeHostConfig::in_memory();
+    config.control.effect_controller = effect_controller;
+    config
+}
+
+fn runtime_host_config_with_provider(provider: crate::ProviderHandle) -> RuntimeHostConfig {
+    let mut config = RuntimeHostConfig::in_memory();
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(provider));
+    config
+}
+
+fn runtime_host_config_with_durability(
+    attachment_store: Arc<dyn crate::AttachmentStore>,
+    artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+) -> RuntimeHostConfig {
+    let mut config = RuntimeHostConfig::in_memory();
+    config.durability.attachment_store = attachment_store;
+    config.durability.lashlang_artifact_store = artifact_store;
+    config
+}
+
 #[async_trait::async_trait]
 impl RuntimeEffectController for RecordingEffectController {
     async fn execute_effect(
@@ -465,13 +489,11 @@ impl RuntimeEffectController for WrongOutcomeEffectController {
 }
 
 fn host_with_effect_recorder(recorder: RecordingEffectController) -> EmbeddedRuntimeHost {
-    EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory()
-            .with_effect_controller(Arc::new(recorder))
-            .with_provider_resolver(Arc::new(crate::SingleProviderResolver::new(
-                mock_provider(Vec::new()).into_handle(),
-            ))),
-    )
+    let mut config = runtime_host_config_with_effect_controller(Arc::new(recorder));
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+        mock_provider(Vec::new()).into_handle(),
+    ));
+    EmbeddedRuntimeHost::new(config)
 }
 
 #[tokio::test]
@@ -610,11 +632,11 @@ async fn durable_controller_error_abandons_lease_and_preserves_resume_state() {
     let recorder = RecordingEffectController::default();
     let store = Arc::new(RecordingStore::default());
     let transport = mock_provider(Vec::new());
-    let host = EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory().with_effect_controller(
-        Arc::new(FailToolCallController {
+    let host = EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(Arc::new(
+        FailToolCallController {
             inner: recorder.clone(),
-        }),
-    ));
+        },
+    )));
     let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
         Vec::new(),
         Arc::new(EchoTool),
@@ -719,11 +741,11 @@ async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
     let turn_id = "resume-shared-finisher-turn";
     let store = Arc::new(RecordingStore::default());
     let first_recorder = RecordingEffectController::default();
-    let failing_host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory().with_effect_controller(Arc::new(FailToolCallController {
+    let failing_host = EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(
+        Arc::new(FailToolCallController {
             inner: first_recorder,
-        })),
-    );
+        }),
+    ));
     let mut failing_runtime = runtime_with_plugins_and_tools_and_host_and_store(
         Vec::new(),
         Arc::new(EchoTool),
@@ -744,9 +766,9 @@ async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
     assert!(store.runtime_effect_journal_count() >= 1);
 
     let resume_recorder = RecordingEffectController::default();
-    let resume_host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory().with_effect_controller(Arc::new(resume_recorder.clone())),
-    );
+    let resume_host = EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(
+        Arc::new(resume_recorder.clone()),
+    ));
     let mut resume_runtime = runtime_with_plugins_and_tools_and_host_and_store(
         Vec::new(),
         Arc::new(EchoTool),
@@ -1072,10 +1094,9 @@ async fn controller_rejection_fails_turn_explicitly() {
         Vec::new(),
         Arc::new(EmptyTools),
         mock_provider(Vec::new()),
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory()
-                .with_effect_controller(Arc::new(RejectingEffectController)),
-        ),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(Arc::new(
+            RejectingEffectController,
+        ))),
     )
     .await;
 
@@ -1100,10 +1121,9 @@ async fn wrong_controller_outcome_fails_turn_explicitly() {
         Vec::new(),
         Arc::new(EmptyTools),
         mock_provider(Vec::new()),
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory()
-                .with_effect_controller(Arc::new(WrongOutcomeEffectController)),
-        ),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(Arc::new(
+            WrongOutcomeEffectController,
+        ))),
     )
     .await;
 
@@ -1141,7 +1161,7 @@ async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
         Vec::new(),
         Arc::new(EmptyTools),
         transport,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
     )
     .await;
 
@@ -1184,7 +1204,7 @@ async fn durable_controller_rejects_ephemeral_attachment_store_before_turn_runs(
         Vec::new(),
         Arc::new(EmptyTools),
         transport,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
     )
     .await;
     let effect_scope =
@@ -1217,10 +1237,12 @@ async fn durable_controller_rejects_ephemeral_artifact_store_before_turn_runs() 
         Vec::new(),
         Arc::new(EmptyTools),
         done_once_provider(),
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory()
-                .with_attachment_store(Arc::new(DurableInMemoryAttachmentStore::default())),
-        ),
+        EmbeddedRuntimeHost::new({
+            let mut config = RuntimeHostConfig::in_memory();
+            config.durability.attachment_store =
+                Arc::new(DurableInMemoryAttachmentStore::default());
+            config
+        }),
     )
     .await;
     let effect_scope = RuntimeEffectControllerScope::new(&controller, "durable-artifact-turn")
@@ -1255,11 +1277,10 @@ async fn durable_controller_rejects_ephemeral_session_store_before_turn_runs() {
         Vec::new(),
         Arc::new(EmptyTools),
         done_once_provider(),
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory()
-                .with_attachment_store(Arc::new(DurableInMemoryAttachmentStore::default()))
-                .with_lashlang_artifact_store(Arc::new(DurableInMemoryArtifactStore::default())),
-        ),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_durability(
+            Arc::new(DurableInMemoryAttachmentStore::default()),
+            Arc::new(DurableInMemoryArtifactStore::default()),
+        )),
         store,
     )
     .await;
@@ -1294,11 +1315,10 @@ async fn durable_controller_with_all_durable_stores_runs_turn() {
         Vec::new(),
         Arc::new(EmptyTools),
         done_once_provider(),
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory()
-                .with_attachment_store(Arc::new(DurableInMemoryAttachmentStore::default()))
-                .with_lashlang_artifact_store(Arc::new(DurableInMemoryArtifactStore::default())),
-        ),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_durability(
+            Arc::new(DurableInMemoryAttachmentStore::default()),
+            Arc::new(DurableInMemoryArtifactStore::default()),
+        )),
     )
     .await;
     let effect_scope =
@@ -1506,7 +1526,7 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
             attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
         transport,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
     )
     .await;
 
@@ -1680,11 +1700,9 @@ async fn start_exec_without_code_executor_stops_as_runtime_error() {
         .expect("plugins");
     let mut runtime = LashRuntime::from_embedded_state(
         policy,
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory().with_provider_resolver(Arc::new(
-                crate::SingleProviderResolver::new(mock_provider(Vec::new()).into_handle()),
-            )),
-        ),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_provider(
+            mock_provider(Vec::new()).into_handle(),
+        )),
         RuntimeServices::new(plugin_session),
         RuntimeSessionState::default(),
     )
@@ -1740,13 +1758,13 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
             ..LlmResponse::default()
         }),
     }]);
-    let host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory()
-            .with_effect_controller(Arc::new(recorder.clone()))
-            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(
-                trace_path.clone(),
-            )))),
-    );
+    let host = EmbeddedRuntimeHost::new({
+        let mut config = runtime_host_config_with_effect_controller(Arc::new(recorder.clone()));
+        config.tracing.trace_sink = Some(Arc::new(lash_trace::JsonlTraceSink::new(
+            trace_path.clone(),
+        )));
+        config
+    });
     let runtime =
         runtime_with_plugins_and_tools_and_host(Vec::new(), Arc::new(EmptyTools), transport, host)
             .await;
@@ -1804,9 +1822,9 @@ async fn in_turn_direct_completion_requires_lease_and_journals_under_it() {
             ..LlmResponse::default()
         }),
     }]);
-    let host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory().with_effect_controller(Arc::new(recorder.clone())),
-    );
+    let host = EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(Arc::new(
+        recorder.clone(),
+    )));
     let runtime = runtime_with_plugins_and_tools_and_host_and_store(
         Vec::new(),
         Arc::new(EmptyTools),
@@ -1888,7 +1906,7 @@ async fn direct_effect_restores_required_streaming_for_provider_execution() {
         Vec::new(),
         Arc::new(EmptyTools),
         transport,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
     )
     .await;
 
@@ -1931,13 +1949,13 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
             ..LlmResponse::default()
         }),
     }]);
-    let host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory()
-            .with_effect_controller(Arc::new(recorder.clone()))
-            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(
-                trace_path.clone(),
-            )))),
-    );
+    let host = EmbeddedRuntimeHost::new({
+        let mut config = runtime_host_config_with_effect_controller(Arc::new(recorder.clone()));
+        config.tracing.trace_sink = Some(Arc::new(lash_trace::JsonlTraceSink::new(
+            trace_path.clone(),
+        )));
+        config
+    });
     let runtime =
         runtime_with_plugins_and_tools_and_host(Vec::new(), Arc::new(EmptyTools), transport, host)
             .await;
@@ -1990,7 +2008,7 @@ async fn direct_llm_completion_envelope_stores_attachment_refs_not_bytes() {
         Vec::new(),
         Arc::new(EmptyTools),
         mock_provider(Vec::new()),
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
     )
     .await;
 

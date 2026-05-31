@@ -206,11 +206,11 @@ fn emit_direct_llm_trace_started(
     request: &CoreLlmRequest,
     caused_by: Option<&CausalRef>,
 ) -> Option<String> {
-    current.host.core.trace_sink.as_ref()?;
+    current.host.core.tracing.trace_sink.as_ref()?;
     let llm_call_id = uuid::Uuid::new_v4().to_string();
     emit_llm_trace_started(
-        &current.host.core.trace_sink,
-        &current.host.core.trace_context,
+        &current.host.core.tracing.trace_sink,
+        &current.host.core.tracing.trace_context,
         direct_trace_context(&current.session_id, Some(&llm_call_id), caused_by),
         request,
     );
@@ -227,8 +227,8 @@ fn emit_direct_llm_trace_completed(
         return;
     };
     emit_llm_trace_completed(
-        &current.host.core.trace_sink,
-        &current.host.core.trace_context,
+        &current.host.core.tracing.trace_sink,
+        &current.host.core.tracing.trace_context,
         direct_trace_context(&current.session_id, Some(llm_call_id), caused_by),
         response,
         0,
@@ -246,8 +246,8 @@ fn emit_direct_llm_trace_failed(
         return;
     };
     emit_llm_trace_failed(
-        &current.host.core.trace_sink,
-        &current.host.core.trace_context,
+        &current.host.core.tracing.trace_sink,
+        &current.host.core.tracing.trace_context,
         direct_trace_context(&current.session_id, Some(llm_call_id), caused_by),
         LlmTraceFailure::from(err),
         None,

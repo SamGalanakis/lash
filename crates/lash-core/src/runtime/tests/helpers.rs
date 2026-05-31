@@ -229,9 +229,8 @@ pub(crate) fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
 }
 
 pub(crate) fn set_runtime_provider(runtime: &mut LashRuntime, provider: crate::ProviderHandle) {
-    runtime.host.core = runtime.host.core.clone().with_provider_resolver(Arc::new(
-        crate::SingleProviderResolver::new(provider.clone()),
-    ));
+    runtime.host.core.providers.provider_resolver =
+        Arc::new(crate::SingleProviderResolver::new(provider.clone()));
     runtime.policy.provider_id = provider.kind().to_string();
     runtime.state.policy.provider_id = provider.kind().to_string();
     if let Some(frame) = runtime.state.current_agent_frame_mut() {
@@ -249,28 +248,26 @@ pub(crate) fn standard_test_policy() -> SessionPolicy {
 }
 
 pub(crate) fn test_host_config() -> EmbeddedRuntimeHost {
-    EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory().with_provider_resolver(Arc::new(
-            crate::SingleProviderResolver::new(mock_provider(Vec::new()).into_handle()),
-        )),
-    )
+    let mut config = RuntimeHostConfig::in_memory();
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+        mock_provider(Vec::new()).into_handle(),
+    ));
+    EmbeddedRuntimeHost::new(config)
 }
 
 pub(crate) fn test_host_config_with_trace_path(path: PathBuf) -> EmbeddedRuntimeHost {
-    EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory()
-            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(path)))),
-    )
+    let mut config = RuntimeHostConfig::in_memory();
+    config.tracing.trace_sink = Some(Arc::new(lash_trace::JsonlTraceSink::new(path)));
+    EmbeddedRuntimeHost::new(config)
 }
 
 pub(crate) fn test_host_config_with_trace_path_and_stream_events(
     path: PathBuf,
 ) -> EmbeddedRuntimeHost {
-    EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory()
-            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(path))))
-            .with_trace_level(lash_trace::TraceLevel::Extended),
-    )
+    let mut config = RuntimeHostConfig::in_memory();
+    config.tracing.trace_sink = Some(Arc::new(lash_trace::JsonlTraceSink::new(path)));
+    config.tracing.trace_level = lash_trace::TraceLevel::Extended;
+    EmbeddedRuntimeHost::new(config)
 }
 
 #[derive(Clone, Default)]

@@ -42,41 +42,16 @@ impl RuntimeSessionServices {
         wake_target_scope: Option<crate::ProcessScope>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<crate::ToolCallOutput, crate::PluginError> {
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionEvent>(64);
-        let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-        let services = Arc::new(self.clone());
-        let direct_completions = services.direct_completion_client(
-            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
-                &self.current.host.core.effect_controller,
-            )),
-            parent_invocation
-                .as_ref()
-                .and_then(|invocation: &crate::RuntimeInvocation| invocation.scope.turn_id.clone()),
-            self.current.turn_lease.clone(),
-        );
-        let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
-            plugins: Arc::clone(&self.current.plugins),
-            tools: self.current.plugins.tools(),
-            surface: self
-                .current
-                .plugins
-                .tool_surface(&self.current.session_id)?,
-            sessions: services.state_service(),
-            session_lifecycle: services.lifecycle_service(),
-            session_graph: services.graph_service(),
-            processes: services.process_service(),
-            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
-                &self.current.host.core.effect_controller,
-            )),
-            direct_completions: direct_completions.clone(),
-            parent_invocation: parent_invocation.clone(),
-            session_id: self.current.session_id.clone(),
-            agent_frame_id: String::new(),
-            event_tx,
-            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            attachment_store: Arc::clone(&self.current.host.core.attachment_store),
-            turn_context: crate::TurnContext::default(),
-        });
+        let run_context = ProcessRunContext::builder(self)
+            .surface(
+                self.current
+                    .plugins
+                    .tool_surface(&self.current.session_id)?,
+            )
+            .causal_invocation(parent_invocation.clone())
+            .dispatch_parent_invocation(parent_invocation)
+            .build()?;
+        let dispatch = run_context.dispatch();
         let tool_context = crate::ToolContext::from_dispatch(Arc::clone(&dispatch))
             .prepared_call(&call)
             .async_process(registration.id.clone(), cancellation)
@@ -95,7 +70,7 @@ impl RuntimeSessionServices {
         )
         .await;
         drop(dispatch);
-        let _ = event_drain.await;
+        run_context.shutdown().await;
         Ok(outcome.record.output)
     }
 }

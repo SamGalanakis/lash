@@ -6,6 +6,114 @@ mod runner;
 mod session;
 mod tool;
 
+pub(in crate::runtime::session_manager::process_runners) struct ProcessRunContext {
+    dispatch: Arc<crate::tool_dispatch::ToolDispatchContext<'static>>,
+    event_drain: tokio::task::JoinHandle<()>,
+}
+
+impl ProcessRunContext {
+    pub(in crate::runtime::session_manager::process_runners) fn builder(
+        services: &RuntimeSessionServices,
+    ) -> ProcessRunContextBuilder<'_> {
+        ProcessRunContextBuilder {
+            services,
+            surface: None,
+            causal_invocation: None,
+            dispatch_parent_invocation: None,
+        }
+    }
+
+    pub(in crate::runtime::session_manager::process_runners) fn dispatch(
+        &self,
+    ) -> Arc<crate::tool_dispatch::ToolDispatchContext<'static>> {
+        Arc::clone(&self.dispatch)
+    }
+
+    pub(in crate::runtime::session_manager::process_runners) async fn shutdown(self) {
+        drop(self.dispatch);
+        let _ = self.event_drain.await;
+    }
+}
+
+pub(in crate::runtime::session_manager::process_runners) struct ProcessRunContextBuilder<'a> {
+    services: &'a RuntimeSessionServices,
+    surface: Option<Arc<crate::ToolSurface>>,
+    causal_invocation: Option<crate::RuntimeInvocation>,
+    dispatch_parent_invocation: Option<crate::RuntimeInvocation>,
+}
+
+impl<'a> ProcessRunContextBuilder<'a> {
+    pub(in crate::runtime::session_manager::process_runners) fn surface(
+        mut self,
+        surface: Arc<crate::ToolSurface>,
+    ) -> Self {
+        self.surface = Some(surface);
+        self
+    }
+
+    pub(in crate::runtime::session_manager::process_runners) fn causal_invocation(
+        mut self,
+        invocation: Option<crate::RuntimeInvocation>,
+    ) -> Self {
+        self.causal_invocation = invocation;
+        self
+    }
+
+    pub(in crate::runtime::session_manager::process_runners) fn dispatch_parent_invocation(
+        mut self,
+        invocation: Option<crate::RuntimeInvocation>,
+    ) -> Self {
+        self.dispatch_parent_invocation = invocation;
+        self
+    }
+
+    pub(in crate::runtime::session_manager::process_runners) fn build(
+        self,
+    ) -> Result<ProcessRunContext, crate::PluginError> {
+        let surface = self.surface.ok_or_else(|| {
+            crate::PluginError::Session("process run context requires a tool surface".to_string())
+        })?;
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionEvent>(64);
+        let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+        let services = Arc::new(self.services.clone());
+        let direct_completions = services.direct_completion_client(
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
+                &self.services.current.host.core.control.effect_controller,
+            )),
+            self.causal_invocation
+                .as_ref()
+                .and_then(|invocation| invocation.scope.turn_id.clone()),
+            self.services.current.turn_lease.clone(),
+        );
+        let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
+            plugins: Arc::clone(&self.services.current.plugins),
+            tools: self.services.current.plugins.tools(),
+            surface,
+            sessions: services.state_service(),
+            session_lifecycle: services.lifecycle_service(),
+            session_graph: services.graph_service(),
+            processes: services.process_service(),
+            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
+                &self.services.current.host.core.control.effect_controller,
+            )),
+            direct_completions,
+            parent_invocation: self.dispatch_parent_invocation,
+            session_id: self.services.current.session_id.clone(),
+            agent_frame_id: String::new(),
+            event_tx,
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+            attachment_store: Arc::clone(
+                &self.services.current.host.core.durability.attachment_store,
+            ),
+            turn_context: crate::TurnContext::default(),
+        });
+        Ok(ProcessRunContext {
+            dispatch,
+            event_drain,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,25 +317,24 @@ mod tests {
         registry: Arc<dyn crate::ProcessRegistry>,
         factory: Arc<dyn crate::SessionStoreFactory>,
     ) -> crate::DurableProcessWorker {
-        process_worker_with_core(
-            registry,
-            factory,
-            crate::RuntimeCoreConfig::in_memory()
-                .with_host_profile_id("worker-profile")
-                .with_provider_resolver(Arc::new(crate::SingleProviderResolver::new(
-                    mock_provider(vec![MockCall {
-                        stream_events: Vec::new(),
-                        response: Ok(successful_text_response("child done")),
-                    }])
-                    .into_handle(),
-                ))),
-        )
+        process_worker_with_core(registry, factory, {
+            let mut config = crate::RuntimeHostConfig::in_memory();
+            config.profile.host_profile_id = "worker-profile".to_string();
+            config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+                mock_provider(vec![MockCall {
+                    stream_events: Vec::new(),
+                    response: Ok(successful_text_response("child done")),
+                }])
+                .into_handle(),
+            ));
+            config
+        })
     }
 
     fn process_worker_with_core(
         registry: Arc<dyn crate::ProcessRegistry>,
         factory: Arc<dyn crate::SessionStoreFactory>,
-        runtime_core: crate::RuntimeCoreConfig,
+        runtime_host: crate::RuntimeHostConfig,
     ) -> crate::DurableProcessWorker {
         let tools: Arc<dyn crate::ToolProvider> = Arc::new(ProcessEchoTool);
         let plugin_host =
@@ -238,7 +345,7 @@ mod tests {
         crate::DurableProcessWorker::new(
             crate::DurableProcessWorkerConfig::new(
                 Arc::new(plugin_host),
-                runtime_core,
+                runtime_host,
                 factory,
                 registry,
             )
@@ -322,9 +429,12 @@ mod tests {
         let worker = process_worker_with_core(
             Arc::clone(&registry_dyn),
             factory as Arc<dyn crate::SessionStoreFactory>,
-            crate::RuntimeCoreConfig::in_memory()
-                .with_host_profile_id("worker-profile")
-                .with_lashlang_artifact_store(empty_artifact_store),
+            {
+                let mut config = crate::RuntimeHostConfig::in_memory();
+                config.profile.host_profile_id = "worker-profile".to_string();
+                config.durability.lashlang_artifact_store = empty_artifact_store;
+                config
+            },
         );
         let registration = worker_registration(lashlang_process_registration(
             "missing-artifact",
@@ -474,7 +584,14 @@ mod tests {
         crate::DurableProcessWorker::new(
             crate::DurableProcessWorkerConfig::new(
                 Arc::new(plugin_host),
-                crate::RuntimeCoreConfig::in_memory().with_host_profile_id("worker-profile"),
+                {
+                    let mut config = crate::RuntimeHostConfig::in_memory();
+                    config.profile.host_profile_id = "worker-profile".to_string();
+                    config.providers.provider_resolver = Arc::new(
+                        crate::SingleProviderResolver::new(mock_provider(Vec::new()).into_handle()),
+                    );
+                    config
+                },
                 factory,
                 registry,
             )
@@ -759,7 +876,7 @@ mod tests {
             Arc::new(SharedSessionStoreFactory {
                 store: Arc::clone(&store),
             }),
-            crate::RuntimeCoreConfig::in_memory(),
+            crate::RuntimeHostConfig::in_memory(),
         );
         let poke = spawn_inline_process_runners(&worker, 1);
         let manager = RuntimeSessionServices::new(&runtime, true, None, None)
@@ -891,7 +1008,7 @@ mod tests {
         let worker = process_worker_with_core(
             Arc::clone(&registry),
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
-            crate::RuntimeCoreConfig::in_memory(),
+            crate::RuntimeHostConfig::in_memory(),
         );
         let pokes = spawn_inline_process_runners(&worker, 1);
         let manager = RuntimeSessionServices::new(&runtime, true, None, None)
@@ -976,7 +1093,7 @@ mod tests {
     async fn lashlang_process_lifecycle_wait_signal_signal_run_and_sleep() {
         let mut runtime = runtime_with_processes(Vec::new()).await;
         let controller = RecordingProcessEffectController::default();
-        runtime.host.core.effect_controller = Arc::new(controller.clone());
+        runtime.host.core.control.effect_controller = Arc::new(controller.clone());
         let manager = RuntimeSessionServices::new(&runtime, true, None, None)
             .expect("runtime session manager");
         let registry = runtime
@@ -992,8 +1109,11 @@ mod tests {
         let worker = process_worker_with_core(
             Arc::clone(&registry),
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
-            crate::RuntimeCoreConfig::in_memory()
-                .with_effect_controller(Arc::new(controller.clone())),
+            {
+                let mut config = crate::RuntimeHostConfig::in_memory();
+                config.control.effect_controller = Arc::new(controller.clone());
+                config
+            },
         );
         let pokes = spawn_inline_process_runners(&worker, 1);
 
@@ -1124,7 +1244,7 @@ mod tests {
         let worker = process_worker_with_core(
             Arc::clone(&registry),
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
-            crate::RuntimeCoreConfig::in_memory(),
+            crate::RuntimeHostConfig::in_memory(),
         );
         let pokes = spawn_inline_process_runners(&worker, 1);
         let manager = RuntimeSessionServices::new(&runtime, true, None, None)

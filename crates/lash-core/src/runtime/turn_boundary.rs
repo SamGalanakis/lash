@@ -27,7 +27,7 @@ struct ProgressBoundarySnapshot<'a> {
     store: Option<&'a (dyn RuntimePersistence + 'a)>,
 }
 
-pub(super) struct TurnCommitPipeline {
+pub(super) struct TurnBoundary {
     stage: TurnCommitStage,
 }
 
@@ -93,7 +93,7 @@ impl PersistedGraphMark {
     }
 }
 
-impl TurnCommitPipeline {
+impl TurnBoundary {
     pub(super) fn from_state(state: RuntimeSessionState) -> Self {
         Self {
             stage: TurnCommitStage::Drafting(TurnCommitDraft::from_state(state)),
@@ -747,7 +747,7 @@ mod tests {
             .lock()
             .expect("lock graph")
             .extend_node_records(base_graph.nodes.iter().cloned());
-        let mut pipeline = TurnCommitPipeline::from_state(state);
+        let mut pipeline = TurnBoundary::from_state(state);
 
         pipeline
             .prepared_checkpoint(
@@ -794,7 +794,7 @@ mod tests {
                 ..crate::SessionHeadMeta::default()
             })
             .await;
-        let mut pipeline = TurnCommitPipeline::from_state(state);
+        let mut pipeline = TurnBoundary::from_state(state);
 
         let err = pipeline
             .prepared_checkpoint(
@@ -824,7 +824,7 @@ mod tests {
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user), &[]);
         let base_graph = graph.clone();
-        let mut pipeline = TurnCommitPipeline::from_state(state_with_graph(graph));
+        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph));
         let event_delta = vec![
             crate::SessionEventRecord::Conversation(ConversationRecord::from_message(user.clone())),
             crate::SessionEventRecord::Conversation(ConversationRecord::from_message(
@@ -887,7 +887,7 @@ mod tests {
         let user = text_message("u0", MessageRole::User, "hello");
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user), &[]);
-        let mut pipeline = TurnCommitPipeline::from_state(state_with_graph(graph));
+        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph));
         let protocol_event =
             crate::ProtocolEvent::typed("test_protocol", serde_json::json!({"step": "started"}))
                 .expect("protocol event serializes");
@@ -934,7 +934,7 @@ mod tests {
             usage_entry("turn", "gpt", 17),
         ];
         let store = RecordingStore::default();
-        let mut pipeline = TurnCommitPipeline::from_state(state_with_graph(graph.clone()));
+        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph.clone()));
         let returned_state = pipeline.export_state_for_assembly();
 
         pipeline
@@ -973,7 +973,7 @@ mod tests {
         state.tool_state_snapshot = Some(crate::ToolState::default());
         state.plugin_snapshot = Some(crate::PluginSessionSnapshot::default());
         state.execution_state_snapshot = Some(b"runtime".to_vec());
-        let mut pipeline = TurnCommitPipeline::from_state(state);
+        let mut pipeline = TurnBoundary::from_state(state);
         let returned_state = pipeline.export_state_for_assembly();
 
         pipeline

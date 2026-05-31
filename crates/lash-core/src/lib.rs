@@ -36,7 +36,7 @@ pub use attachments::{
     SessionScopedAttachmentStore, StoredAttachment,
 };
 // The Lashlang artifact store is a host-owned durability dependency of
-// `RuntimeCoreConfig`; re-export it so the `lash` facade can name it without a
+// `RuntimeHostConfig`; re-export it so the `lash` facade can name it without a
 // direct `lashlang` dependency.
 pub use chronological::{
     BorrowedChronologicalEntry, BorrowedChronologicalMessage, BorrowedChronologicalPayload,
@@ -198,8 +198,8 @@ pub use plugin::{
 pub use plugin_stack::PluginStack;
 pub use provider::{
     CacheRetention, EmptyProviderResolver, LlmTimeouts, MapProviderResolver, Provider,
-    ProviderComponents, ProviderFactory, ProviderHandle, ProviderModelPolicy, ProviderOptions,
-    ProviderResolutionError, ProviderSpec, ProviderThinkingPolicy, RequestTimeout,
+    ProviderBinding, ProviderComponents, ProviderFactory, ProviderHandle, ProviderModelPolicy,
+    ProviderOptions, ProviderResolutionError, ProviderSpec, ProviderThinkingPolicy, RequestTimeout,
     RuntimeProviderResolver, SingleProviderResolver, StaticModelPolicy,
 };
 #[cfg(any(test, feature = "testing"))]
@@ -221,8 +221,8 @@ pub use runtime::{
     ProcessTerminalState, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
     ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkPoke, ProcessWorkRunner, PromptUsage,
     ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
-    ProtocolTurnExtensionHandle, Residency, RuntimeCoreConfig, RuntimeEnvironment,
-    RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeObservation,
+    ProtocolTurnExtensionHandle, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder,
+    RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeHostConfig, RuntimeObservation,
     SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, SlotPolicy,
     TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink,
     TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions, UnavailableProcessService,
@@ -262,7 +262,7 @@ pub use session_graph::{
 };
 pub use session_model::context::PreparedContext;
 pub use session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord, ToolEvent};
-pub use session_model::{ResolvedSessionPolicy, SessionPolicy, SessionSpec};
+pub use session_model::{RuntimeSessionPolicy, SessionPolicy, SessionSpec};
 pub use store::{
     AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
     RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError, VacuumReport,

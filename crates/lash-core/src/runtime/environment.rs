@@ -10,8 +10,8 @@
 //!
 //! * **CLI interactive (single runtime, default):**
 //!   `RuntimeEnvironment::builder().build()`. The builder seeds an explicit
-//!   in-memory core (`RuntimeCoreConfig::in_memory`); override it with
-//!   `with_runtime_core_config` for durable stores.
+//!   in-memory core (`RuntimeHostConfig::in_memory`); override it with
+//!   `with_runtime_host_config` for durable stores.
 //! * **Long autonomous agent:** set `residency` to `ActivePathOnly`,
 //!   then have the host periodically call
 //!   `runtime.orphaned_node_ids()` + `store.tombstone_nodes(...)` +
@@ -29,7 +29,7 @@ use std::sync::Arc;
 use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
 use super::process::ProcessRegistry;
-use super::{RuntimeCoreConfig, RuntimeEffectController, TerminationPolicy};
+use super::{RuntimeEffectController, RuntimeHostConfig, TerminationPolicy};
 
 /// Where session nodes live at runtime.
 ///
@@ -86,7 +86,7 @@ pub struct RuntimeEnvironment {
     // runner is wired, in which case poking is a no-op.
     pub process_work_poke: Option<super::ProcessWorkPoke>,
 
-    pub core: RuntimeCoreConfig,
+    pub core: RuntimeHostConfig,
 }
 
 impl RuntimeEnvironment {
@@ -118,9 +118,9 @@ pub struct RuntimeEnvironmentBuilder {
 
 impl Default for RuntimeEnvironmentBuilder {
     fn default() -> Self {
-        // `RuntimeCoreConfig` has no `Default`; the builder starts from an
+        // `RuntimeHostConfig` has no `Default`; the builder starts from an
         // explicitly named in-memory core so the choice is visible in source.
-        // The `lash` facade always overrides this via `with_runtime_core_config`
+        // The `lash` facade always overrides this via `with_runtime_host_config`
         // and rejects builds that never named their stores.
         Self {
             env: RuntimeEnvironment {
@@ -129,7 +129,7 @@ impl Default for RuntimeEnvironmentBuilder {
                 process_registry: None,
                 session_store_factory: None,
                 process_work_poke: None,
-                core: RuntimeCoreConfig::in_memory(),
+                core: RuntimeHostConfig::in_memory(),
             },
         }
     }
@@ -176,23 +176,23 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    pub fn with_runtime_core_config(mut self, core: RuntimeCoreConfig) -> Self {
+    pub fn with_runtime_host_config(mut self, core: RuntimeHostConfig) -> Self {
         self.env.core = core;
         self
     }
 
     pub fn with_attachment_store(mut self, store: Arc<dyn crate::AttachmentStore>) -> Self {
-        self.env.core = self.env.core.with_attachment_store(store);
+        self.env.core.durability.attachment_store = store;
         self
     }
 
     pub fn with_prompt_template(mut self, template: crate::PromptTemplate) -> Self {
-        self.env.core = self.env.core.with_prompt_template(template);
+        self.env.core.prompt.prompt.template = Some(template);
         self
     }
 
     pub fn with_prompt_contribution(mut self, contribution: crate::PromptContribution) -> Self {
-        self.env.core = self.env.core.with_prompt_contribution(contribution);
+        self.env.core.prompt.prompt.add_contribution(contribution);
         self
     }
 
@@ -201,37 +201,41 @@ impl RuntimeEnvironmentBuilder {
         slot: crate::PromptSlot,
         contributions: impl IntoIterator<Item = crate::PromptContribution>,
     ) -> Self {
-        self.env.core = self.env.core.with_replaced_prompt_slot(slot, contributions);
+        self.env
+            .core
+            .prompt
+            .prompt
+            .replace_slot(slot, contributions);
         self
     }
 
     pub fn with_cleared_prompt_slot(mut self, slot: crate::PromptSlot) -> Self {
-        self.env.core = self.env.core.with_cleared_prompt_slot(slot);
+        self.env.core.prompt.prompt.clear_slot(slot);
         self
     }
 
     pub fn with_prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
-        self.env.core = self.env.core.with_prompt_layer(prompt);
+        self.env.core.prompt.prompt = prompt;
         self
     }
 
     pub fn with_trace_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
-        self.env.core = self.env.core.with_trace_sink(sink);
+        self.env.core.tracing.trace_sink = sink;
         self
     }
 
     pub fn with_trace_level(mut self, level: TraceLevel) -> Self {
-        self.env.core = self.env.core.with_trace_level(level);
+        self.env.core.tracing.trace_level = level;
         self
     }
 
     pub fn with_trace_context(mut self, context: TraceContext) -> Self {
-        self.env.core = self.env.core.with_trace_context(context);
+        self.env.core.tracing.trace_context = context;
         self
     }
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
-        self.env.core = self.env.core.with_termination(termination);
+        self.env.core.control.termination = termination;
         self
     }
 
@@ -239,7 +243,7 @@ impl RuntimeEnvironmentBuilder {
         mut self,
         effect_controller: Arc<dyn RuntimeEffectController>,
     ) -> Self {
-        self.env.core = self.env.core.with_effect_controller(effect_controller);
+        self.env.core.control.effect_controller = effect_controller;
         self
     }
 
@@ -247,7 +251,7 @@ impl RuntimeEnvironmentBuilder {
         mut self,
         provider_resolver: Arc<dyn crate::RuntimeProviderResolver>,
     ) -> Self {
-        self.env.core = self.env.core.with_provider_resolver(provider_resolver);
+        self.env.core.providers.provider_resolver = provider_resolver;
         self
     }
 
@@ -261,7 +265,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builder_methods_configure_runtime_core() {
+    fn builder_methods_configure_runtime_host() {
         let attachment_store: Arc<dyn crate::AttachmentStore> =
             Arc::new(crate::InMemoryAttachmentStore::new());
         let effect_controller: Arc<dyn RuntimeEffectController> =
@@ -283,37 +287,43 @@ mod tests {
             .with_effect_controller(Arc::clone(&effect_controller))
             .build();
 
-        assert!(Arc::ptr_eq(&env.core.attachment_store, &attachment_store));
-        assert!(env.core.prompt.template.is_some());
-        assert!(env.core.trace_sink.is_some());
-        assert_eq!(env.core.trace_level, TraceLevel::Extended);
-        assert_eq!(env.core.trace_context, trace_context);
+        assert!(Arc::ptr_eq(
+            &env.core.durability.attachment_store,
+            &attachment_store
+        ));
+        assert!(env.core.prompt.prompt.template.is_some());
+        assert!(env.core.tracing.trace_sink.is_some());
+        assert_eq!(env.core.tracing.trace_level, TraceLevel::Extended);
+        assert_eq!(env.core.tracing.trace_context, trace_context);
         assert_eq!(
-            env.core.termination.treat_missing_done_as_failure,
+            env.core.control.termination.treat_missing_done_as_failure,
             termination.treat_missing_done_as_failure
         );
-        assert!(Arc::ptr_eq(&env.core.effect_controller, &effect_controller));
+        assert!(Arc::ptr_eq(
+            &env.core.control.effect_controller,
+            &effect_controller
+        ));
     }
 
     #[test]
-    fn runtime_core_config_replaces_core_config() {
-        let core = RuntimeCoreConfig::in_memory()
-            .with_trace_level(TraceLevel::Extended)
-            .with_termination(TerminationPolicy {
-                treat_missing_done_as_failure: false,
-            });
+    fn runtime_host_config_replaces_core_config() {
+        let mut core = RuntimeHostConfig::in_memory();
+        core.tracing.trace_level = TraceLevel::Extended;
+        core.control.termination = TerminationPolicy {
+            treat_missing_done_as_failure: false,
+        };
 
         let env = RuntimeEnvironment::builder()
             .with_trace_level(TraceLevel::Standard)
-            .with_runtime_core_config(core)
+            .with_runtime_host_config(core)
             .build();
 
-        assert_eq!(env.core.trace_level, TraceLevel::Extended);
-        assert!(!env.core.termination.treat_missing_done_as_failure);
+        assert_eq!(env.core.tracing.trace_level, TraceLevel::Extended);
+        assert!(!env.core.control.termination.treat_missing_done_as_failure);
     }
 
     #[test]
-    fn runtime_environment_does_not_mirror_runtime_core_config_fields() {
+    fn runtime_environment_does_not_mirror_runtime_host_config_fields() {
         let source = std::fs::read_to_string(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/environment.rs"),
         )
@@ -326,7 +336,7 @@ mod tests {
             ["pub ", "trace_context:"].concat(),
             ["pub ", "termination:"].concat(),
             ["pub ", "effect_controller:"].concat(),
-            ["mirror ", "`RuntimeCoreConfig`"].concat(),
+            ["mirror ", "`RuntimeHostConfig`"].concat(),
         ] {
             assert!(
                 !source.contains(&field),

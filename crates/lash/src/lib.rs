@@ -149,13 +149,14 @@ pub mod advanced {
         ProcessInput, ProcessListMode, ProcessOpScope, ProcessRecord, ProcessRegistration,
         ProcessRegistry, ProcessRunHandle, ProcessScope, ProcessScopeId, ProcessService,
         ProcessSessionDeleteReport, ProcessStartOptions, ProcessStatus, ProcessWakeDelivery,
-        ProcessWorkPoke, ProcessWorkRunner, Residency, RuntimeCoreConfig, RuntimeEffectCommand,
+        ProcessWorkPoke, ProcessWorkRunner, Residency, RuntimeEffectCommand,
         RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
         RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
         RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode,
-        RuntimeHandle, RuntimeInvocation, RuntimeObservation, RuntimeScope, RuntimeTurnPhase,
-        RuntimeTurnPhaseProbe, TerminationPolicy, TurnContext, lashlang_process_event_types,
-        process_wake_input_from_event_payload, process_wake_turn_cause, process_wake_turn_text,
+        RuntimeHandle, RuntimeHostConfig, RuntimeInvocation, RuntimeObservation, RuntimeScope,
+        RuntimeTurnPhase, RuntimeTurnPhaseProbe, TerminationPolicy, TurnContext,
+        lashlang_process_event_types, process_wake_input_from_event_payload,
+        process_wake_turn_cause, process_wake_turn_text,
     };
     pub use lash_core::store::{RuntimeTurnCheckpoint, RuntimeTurnLease};
     // Benchmarks and diagnostics still need a semantic harness facade for

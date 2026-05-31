@@ -60,15 +60,17 @@ impl LashRuntime {
                 Arc::new(crate::attachments::PersistenceManifestAdapter(store));
             let scoped: Arc<dyn crate::AttachmentStore> =
                 Arc::new(crate::SessionScopedAttachmentStore::new(
-                    Arc::clone(&host.core.attachment_store),
+                    Arc::clone(&host.core.durability.attachment_store),
                     manifest,
                     state.session_id.clone(),
                 ));
-            host.core = host.core.with_attachment_store(scoped);
+            host.core.durability.attachment_store = scoped;
         }
-        let services = services
-            .with_attachment_store(Arc::clone(&host.core.attachment_store))
-            .with_lashlang_artifact_store(Arc::clone(&host.core.lashlang_artifact_store));
+        let services =
+            services.with_attachment_store(Arc::clone(&host.core.durability.attachment_store));
+        let services = services.with_lashlang_artifact_store(Arc::clone(
+            &host.core.durability.lashlang_artifact_store,
+        ));
         let mut session = Session::new(services.clone(), &state.session_id).await?;
         if let Some(tool_state) = state.tool_state_snapshot.clone() {
             // Cold rebuild restores the exact persisted tool surface, adopting

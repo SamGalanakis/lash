@@ -105,7 +105,7 @@ impl RuntimeTurnDriver<'_> {
             let accepted_turn_inputs = claim.accepted_turn_inputs();
             let materialized = claim
                 .materialize_for_checkpoint_with_attachments(
-                    self.host.core.attachment_store.as_ref(),
+                    self.host.core.durability.attachment_store.as_ref(),
                 )
                 .map_err(|err| {
                     RuntimeError::new(

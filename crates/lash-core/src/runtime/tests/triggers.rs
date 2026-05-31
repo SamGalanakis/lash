@@ -115,9 +115,11 @@ fn trigger_test_source() -> &'static str {
 async fn trigger_install_stores_activation_routes_and_emit_reuses_artifact_refs() {
     let artifact_store = Arc::new(CountingArtifactStore::default());
     let artifact_store_for_host: Arc<dyn lashlang::LashlangArtifactStore> = artifact_store.clone();
-    let host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory().with_lashlang_artifact_store(artifact_store_for_host),
-    );
+    let host = EmbeddedRuntimeHost::new({
+        let mut config = RuntimeHostConfig::in_memory();
+        config.durability.lashlang_artifact_store = artifact_store_for_host;
+        config
+    });
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         vec![Arc::new(TriggerRouteTestFactory)],
         Arc::new(EmptyTools),
@@ -191,9 +193,12 @@ async fn trigger_install_stores_activation_routes_and_emit_reuses_artifact_refs(
             Arc::new(crate::PluginHost::new(vec![Arc::new(
                 TriggerRouteTestFactory,
             )])),
-            RuntimeCoreConfig::in_memory().with_lashlang_artifact_store(
-                artifact_store.clone() as Arc<dyn lashlang::LashlangArtifactStore>
-            ),
+            {
+                let mut config = RuntimeHostConfig::in_memory();
+                config.durability.lashlang_artifact_store =
+                    artifact_store.clone() as Arc<dyn lashlang::LashlangArtifactStore>;
+                config
+            },
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
             Arc::clone(&registry),
         )

@@ -359,6 +359,165 @@ impl<'expr> Iterator for ExprChildren<'expr> {
 
 impl ExactSizeIterator for ExprChildren<'_> {}
 
+pub trait ExprVisitor {
+    fn visit_expr(&mut self, expr: &Expr) {
+        walk_expr(self, expr);
+    }
+}
+
+pub fn walk_expr<V>(visitor: &mut V, expr: &Expr)
+where
+    V: ExprVisitor + ?Sized,
+{
+    for child in expr.children() {
+        visitor.visit_expr(child);
+    }
+}
+
+pub trait ExprFolder {
+    fn fold_expr(&mut self, expr: Expr) -> Expr {
+        fold_expr_children(self, expr)
+    }
+}
+
+pub fn fold_expr_children<F>(folder: &mut F, expr: Expr) -> Expr
+where
+    F: ExprFolder + ?Sized,
+{
+    match expr {
+        Expr::Block(expressions) => Expr::Block(
+            expressions
+                .into_iter()
+                .map(|expr| folder.fold_expr(expr))
+                .collect(),
+        ),
+        Expr::List(items) => Expr::List(
+            items
+                .into_iter()
+                .map(|expr| folder.fold_expr(expr))
+                .collect(),
+        ),
+        Expr::Record(entries) => Expr::Record(
+            entries
+                .into_iter()
+                .map(|(name, value)| (name, folder.fold_expr(value)))
+                .collect(),
+        ),
+        Expr::Assign { target, expr } => Expr::Assign {
+            target: fold_assign_target(folder, target),
+            expr: Box::new(folder.fold_expr(*expr)),
+        },
+        Expr::If {
+            condition,
+            then_block,
+            else_block,
+        } => Expr::If {
+            condition: Box::new(folder.fold_expr(*condition)),
+            then_block: Box::new(folder.fold_expr(*then_block)),
+            else_block: Box::new(folder.fold_expr(*else_block)),
+        },
+        Expr::For {
+            binding,
+            iterable,
+            body,
+        } => Expr::For {
+            binding,
+            iterable: Box::new(folder.fold_expr(*iterable)),
+            body: Box::new(folder.fold_expr(*body)),
+        },
+        Expr::While { condition, body } => Expr::While {
+            condition: Box::new(folder.fold_expr(*condition)),
+            body: Box::new(folder.fold_expr(*body)),
+        },
+        Expr::StartProcess(mut start) => {
+            start.args = start
+                .args
+                .into_iter()
+                .map(|(name, value)| (name, folder.fold_expr(value)))
+                .collect();
+            Expr::StartProcess(start)
+        }
+        Expr::ReceiverCall {
+            receiver,
+            operation,
+            args,
+        } => Expr::ReceiverCall {
+            receiver: Box::new(folder.fold_expr(*receiver)),
+            operation,
+            args: args
+                .into_iter()
+                .map(|expr| folder.fold_expr(expr))
+                .collect(),
+        },
+        Expr::Await(expr) => Expr::Await(Box::new(folder.fold_expr(*expr))),
+        Expr::SleepFor(expr) => Expr::SleepFor(Box::new(folder.fold_expr(*expr))),
+        Expr::SleepUntil(expr) => Expr::SleepUntil(Box::new(folder.fold_expr(*expr))),
+        Expr::SignalRun { run, payload } => Expr::SignalRun {
+            run: Box::new(folder.fold_expr(*run)),
+            payload: Box::new(folder.fold_expr(*payload)),
+        },
+        Expr::ResultUnwrap(expr) => Expr::ResultUnwrap(Box::new(folder.fold_expr(*expr))),
+        Expr::Cancel(expr) => Expr::Cancel(Box::new(folder.fold_expr(*expr))),
+        Expr::Print(expr) => Expr::Print(Box::new(folder.fold_expr(*expr))),
+        Expr::Submit(expr) => Expr::Submit(expr.map(|expr| Box::new(folder.fold_expr(*expr)))),
+        Expr::Yield(expr) => Expr::Yield(Box::new(folder.fold_expr(*expr))),
+        Expr::Wake(expr) => Expr::Wake(Box::new(folder.fold_expr(*expr))),
+        Expr::Finish(expr) => Expr::Finish(expr.map(|expr| Box::new(folder.fold_expr(*expr)))),
+        Expr::Fail(expr) => Expr::Fail(Box::new(folder.fold_expr(*expr))),
+        Expr::BuiltinCall { name, args } => Expr::BuiltinCall {
+            name,
+            args: args
+                .into_iter()
+                .map(|expr| folder.fold_expr(expr))
+                .collect(),
+        },
+        Expr::Field { target, field } => Expr::Field {
+            target: Box::new(folder.fold_expr(*target)),
+            field,
+        },
+        Expr::Index { target, index } => Expr::Index {
+            target: Box::new(folder.fold_expr(*target)),
+            index: Box::new(folder.fold_expr(*index)),
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(folder.fold_expr(*expr)),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(folder.fold_expr(*left)),
+            op,
+            right: Box::new(folder.fold_expr(*right)),
+        },
+        leaf @ (Expr::Null
+        | Expr::Bool(_)
+        | Expr::Number(_)
+        | Expr::String(_)
+        | Expr::Variable(_)
+        | Expr::Break
+        | Expr::Continue
+        | Expr::ResourceRef(_)
+        | Expr::WaitSignal
+        | Expr::TypeLiteral(_)) => leaf,
+    }
+}
+
+fn fold_assign_target<F>(folder: &mut F, target: AssignTarget) -> AssignTarget
+where
+    F: ExprFolder + ?Sized,
+{
+    AssignTarget {
+        root: target.root,
+        steps: target
+            .steps
+            .into_iter()
+            .map(|step| match step {
+                AssignPathStep::Field(field) => AssignPathStep::Field(field),
+                AssignPathStep::Index(index) => AssignPathStep::Index(folder.fold_expr(index)),
+            })
+            .collect(),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypeExpr {
     Any,
@@ -643,5 +802,75 @@ mod tests {
         let iter = block.children();
         assert_eq!(iter.len(), 4);
         assert_eq!(iter.size_hint(), (4, Some(4)));
+    }
+
+    #[test]
+    fn visitor_walks_descendants_through_single_child_boundary() {
+        struct VariableCollector(Vec<String>);
+
+        impl ExprVisitor for VariableCollector {
+            fn visit_expr(&mut self, expr: &Expr) {
+                if let Expr::Variable(name) = expr {
+                    self.0.push(name.to_string());
+                }
+                walk_expr(self, expr);
+            }
+        }
+
+        let expr = Expr::While {
+            condition: Box::new(var("ready")),
+            body: Box::new(Expr::Block(vec![
+                Expr::Assign {
+                    target: AssignTarget {
+                        root: "items".into(),
+                        steps: vec![AssignPathStep::Index(var("idx"))],
+                    },
+                    expr: Box::new(var("value")),
+                },
+                Expr::Submit(Some(Box::new(var("done")))),
+            ])),
+        };
+
+        let mut collector = VariableCollector(Vec::new());
+        collector.visit_expr(&expr);
+
+        assert_eq!(collector.0, ["ready", "idx", "value", "done"]);
+    }
+
+    #[test]
+    fn folder_reconstructs_owned_expr_trees() {
+        struct RenameVariables;
+
+        impl ExprFolder for RenameVariables {
+            fn fold_expr(&mut self, expr: Expr) -> Expr {
+                match expr {
+                    Expr::Variable(name) => Expr::Variable(format!("renamed_{name}").into()),
+                    other => fold_expr_children(self, other),
+                }
+            }
+        }
+
+        let expr = Expr::Assign {
+            target: AssignTarget {
+                root: "items".into(),
+                steps: vec![AssignPathStep::Index(var("idx"))],
+            },
+            expr: Box::new(Expr::List(vec![var("first"), var("second")])),
+        };
+
+        let mut folder = RenameVariables;
+        let folded = folder.fold_expr(expr);
+
+        let Expr::Assign { target, expr } = folded else {
+            panic!("expected assign");
+        };
+        assert!(matches!(
+            target.steps.as_slice(),
+            [AssignPathStep::Index(Expr::Variable(name))] if name.as_str() == "renamed_idx"
+        ));
+        let Expr::List(items) = *expr else {
+            panic!("expected list");
+        };
+        assert_eq!(items, vec![var("renamed_first"), var("renamed_second")]);
     }
 }

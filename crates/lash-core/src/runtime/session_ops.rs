@@ -241,7 +241,7 @@ impl LashRuntime {
             .install_lashlang_trigger_source(
                 source,
                 surface,
-                self.host.core.lashlang_artifact_store.as_ref(),
+                self.host.core.durability.lashlang_artifact_store.as_ref(),
             )
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
         self.stamp_live_plugin_state();

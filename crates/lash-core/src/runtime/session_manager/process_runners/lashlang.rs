@@ -20,6 +20,7 @@ impl RuntimeSessionServices {
             .current
             .host
             .core
+            .durability
             .lashlang_artifact_store
             .get_module_artifact(&module_ref)
         {
@@ -89,7 +90,14 @@ impl RuntimeSessionServices {
                 None,
             );
         }
-        let compiled = match self.current.host.core.lashlang_process_cache.lock() {
+        let compiled = match self
+            .current
+            .host
+            .core
+            .durability
+            .lashlang_process_cache
+            .lock()
+        {
             Ok(mut cache) => cache.get_or_compile(&artifact, &process_ref, &required_surface_ref),
             Err(_) => Err(::lashlang::RuntimeError::ValueError {
                 message: "lashlang compiled process cache lock poisoned".to_string(),
@@ -111,45 +119,23 @@ impl RuntimeSessionServices {
         }
         let mut state = ::lashlang::State::from_snapshot(::lashlang::Snapshot { globals });
 
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionEvent>(64);
-        let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-        let services = Arc::new(self.clone());
-        let direct_completions = services.direct_completion_client(
-            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
-                &self.current.host.core.effect_controller,
-            )),
-            execution_context
-                .causal_invocation
-                .as_ref()
-                .and_then(|invocation| invocation.scope.turn_id.clone()),
-            self.current.turn_lease.clone(),
-        );
-        let dispatch = crate::tool_dispatch::ToolDispatchContext {
-            plugins: Arc::clone(&self.current.plugins),
-            tools: self.current.plugins.tools(),
-            surface: tool_surface,
-            sessions: services.state_service(),
-            session_lifecycle: services.lifecycle_service(),
-            session_graph: services.graph_service(),
-            processes: services.process_service(),
-            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
-                &self.current.host.core.effect_controller,
-            )),
-            direct_completions: direct_completions.clone(),
-            parent_invocation: None,
-            session_id: self.current.session_id.clone(),
-            agent_frame_id: String::new(),
-            event_tx,
-            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            attachment_store: Arc::clone(&self.current.host.core.attachment_store),
-            turn_context: crate::TurnContext::default(),
+        let run_context = ProcessRunContext::builder(self)
+            .surface(tool_surface)
+            .causal_invocation(execution_context.causal_invocation.clone())
+            .build()
+            .map_err(|err| {
+                process_lashlang_failure("process_run_context_failed", err.to_string(), None)
+            });
+        let run_context = match run_context {
+            Ok(run_context) => run_context,
+            Err(output) => return output,
         };
         let mut ctx = crate::RuntimeExecutionContext::new(
             self.current.session_id.clone(),
-            Arc::new(dispatch),
+            run_context.dispatch(),
             lashlang_abilities,
-            Arc::clone(&self.current.host.core.lashlang_artifact_store),
-            Arc::clone(&self.current.host.core.attachment_store),
+            Arc::clone(&self.current.host.core.durability.lashlang_artifact_store),
+            Arc::clone(&self.current.host.core.durability.attachment_store),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
             crate::TurnContext::default(),
@@ -182,7 +168,7 @@ impl RuntimeSessionServices {
         };
         drop(env);
         drop(host);
-        let _ = event_drain.await;
+        run_context.shutdown().await;
         output
     }
 }

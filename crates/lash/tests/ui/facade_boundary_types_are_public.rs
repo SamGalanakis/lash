@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lash::advanced::{AdvancedLashCoreBuilder, RuntimeCoreConfig};
+use lash::advanced::{AdvancedLashCoreBuilder, RuntimeHostConfig};
 use lash::direct::{
     DirectLlmClient, DirectLlmError, DirectRequest, LlmAttachment, LlmEventSender, LlmOutputPart,
     LlmResponse, LlmUsage, TokenUsage,
@@ -215,11 +215,11 @@ fn direct_payload_types_are_nameable(
     let _ = (attachment, event_sender, output, usage, token_usage);
 }
 
-fn advanced_builder_accepts_runtime_core_config(
+fn advanced_builder_accepts_runtime_host_config(
     builder: AdvancedLashCoreBuilder,
-    config: RuntimeCoreConfig,
+    config: RuntimeHostConfig,
 ) -> AdvancedLashCoreBuilder {
-    builder.runtime_core_config(config)
+    builder.runtime_host_config(config)
 }
 
 fn tool_contract_types_are_nameable(
@@ -286,7 +286,7 @@ fn main() {
     let _ = plugin_types_are_nameable();
     let _ = direct_response_type_is_nameable;
     let _ = direct_payload_types_are_nameable;
-    let _ = advanced_builder_accepts_runtime_core_config;
+    let _ = advanced_builder_accepts_runtime_host_config;
     let _ = tool_contract_types_are_nameable;
     let _ = tool_surface_types_are_nameable;
     let _ = message_role_type_is_nameable;

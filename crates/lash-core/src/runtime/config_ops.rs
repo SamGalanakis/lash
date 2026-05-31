@@ -21,13 +21,8 @@ impl LashRuntime {
 
     /// Update provider on the runtime config.
     pub fn set_provider(&mut self, provider: ProviderHandle) {
-        self.host.core = self
-            .host
-            .core
-            .clone()
-            .with_provider_resolver(std::sync::Arc::new(crate::SingleProviderResolver::new(
-                provider.clone(),
-            )));
+        self.host.core.providers.provider_resolver =
+            std::sync::Arc::new(crate::SingleProviderResolver::new(provider.clone()));
         self.policy.provider_id = provider.kind().to_string();
         self.state.policy.provider_id = self.policy.provider_id.clone();
         if let Some(frame) = self.state.current_agent_frame_mut() {
