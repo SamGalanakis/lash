@@ -6,10 +6,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.14", default-features = false }
-lash-tui-extensions = { path = "../lash-tui-extensions", version = "=0.1.0-alpha.14" }
-lash = { package = "lash-runtime", path = "../lash", version = "=0.1.0-alpha.14" }
-lash-tui = { path = "../lash-tui", version = "=0.1.0-alpha.14" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.15", default-features = false }
+lash-tui-extensions = { path = "../lash-tui-extensions", version = "=0.1.0-alpha.15" }
+lash = { package = "lash-runtime", path = "../lash", version = "=0.1.0-alpha.15" }
+lash-tui = { path = "../lash-tui", version = "=0.1.0-alpha.15" }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
