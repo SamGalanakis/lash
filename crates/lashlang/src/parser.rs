@@ -28,6 +28,8 @@ pub enum ParseError {
     ForegroundControlInsideProcess { keyword: &'static str, span: Span },
     #[error("trigger declarations cannot contain code; use `-> process(arg: binding, ...)`")]
     TriggerBodyNotAllowed { span: Span },
+    #[error("expression nesting too deep (limit {limit}); flatten the program")]
+    NestingTooDeep { limit: usize, span: Span },
 }
 
 impl ParseError {
@@ -40,7 +42,8 @@ impl ParseError {
             | Self::UnsupportedLoop { span, .. }
             | Self::ProcessControlOutsideBlock { span, .. }
             | Self::ForegroundControlInsideProcess { span, .. }
-            | Self::TriggerBodyNotAllowed { span } => span.start,
+            | Self::TriggerBodyNotAllowed { span }
+            | Self::NestingTooDeep { span, .. } => span.start,
         }
     }
 }
@@ -52,15 +55,36 @@ pub fn parse(source: &str) -> Result<Program, ParseError> {
         index: 0,
         loop_depth: 0,
         process_depth: 0,
+        nesting_depth: 0,
     }
     .parse_program()
 }
+
+/// Maximum syntactic nesting depth (nested expressions *and* nested blocks).
+/// Bounds recursive-descent stack growth so adversarial model-emitted source
+/// (deeply nested brackets or `if`/`for` bodies) returns a `ParseError` instead
+/// of overflowing the native stack and aborting the host.
+///
+/// The deepest chain is expression nesting: each level descends the full
+/// precedence ladder (`parse_expr` -> ternary -> or -> and -> compare -> add ->
+/// mul -> unary -> postfix -> primary -> grouping -> `parse_expr`), roughly a
+/// dozen native frames carrying the large `Expr` enum. Empirically ~64 levels
+/// parse comfortably on a 2 MiB thread stack while ~128 overflow it, so the
+/// limit is kept well under that cliff. Block nesting (`parse_block` ->
+/// `parse_statement_expr` -> `parse_if`/`parse_for` -> `parse_block`) is a
+/// shallower per-level chain and shares the same budget, so any mix of the two
+/// stays bounded. Real generated programs nest only a handful deep, so this is
+/// ample headroom; capping here also bounds every downstream AST walker
+/// (validate, lower, compile, eval), since the tree can never be deeper than
+/// the parser allowed.
+const MAX_NESTING_DEPTH: usize = 64;
 
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
     loop_depth: usize,
     process_depth: usize,
+    nesting_depth: usize,
 }
 
 impl Parser {
@@ -565,7 +589,34 @@ impl Parser {
         Ok(Expr::Cancel(Box::new(self.parse_expr()?)))
     }
 
+    /// Account for entering one more level of syntactic nesting, rejecting
+    /// input that would recurse deep enough to overflow the native stack.
+    /// Pair every successful call with [`Parser::leave_nesting`].
+    fn enter_nesting(&mut self) -> Result<(), ParseError> {
+        if self.nesting_depth >= MAX_NESTING_DEPTH {
+            return Err(ParseError::NestingTooDeep {
+                limit: MAX_NESTING_DEPTH,
+                span: self.peek().span,
+            });
+        }
+        self.nesting_depth += 1;
+        Ok(())
+    }
+
+    fn leave_nesting(&mut self) {
+        self.nesting_depth -= 1;
+    }
+
     fn parse_block(&mut self) -> Result<Expr, ParseError> {
+        // Nested blocks (`if`/`for` bodies, bare braces) recurse through here
+        // without passing through `parse_expr`, so they need their own guard.
+        self.enter_nesting()?;
+        let result = self.parse_block_inner();
+        self.leave_nesting();
+        result
+    }
+
+    fn parse_block_inner(&mut self) -> Result<Expr, ParseError> {
         self.expect_exact(TokenKind::LBrace, "`{`")?;
         let mut expressions = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
@@ -576,7 +627,13 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_ternary()
+        // Every nested expression (parenthesised, list/record element, index,
+        // ternary, ...) funnels through here, so one depth guard at this
+        // chokepoint bounds total recursive-descent stack growth.
+        self.enter_nesting()?;
+        let result = self.parse_ternary();
+        self.leave_nesting();
+        result
     }
 
     fn parse_ternary(&mut self) -> Result<Expr, ParseError> {
@@ -1456,6 +1513,41 @@ mod tests {
         assert_eq!(expressions.len(), 2);
         assert!(matches!(expressions[0], Expr::Assign { .. }));
         assert!(matches!(expressions[1], Expr::Submit(Some(_))));
+    }
+
+    #[test]
+    fn deeply_nested_input_errors_instead_of_overflowing() {
+        // Adversarial model-emitted source: thousands of nested parens. Must
+        // return a bounded error, not recurse until the native stack aborts.
+        let source = format!("x = {}{}", "(".repeat(5000), ")".repeat(5000));
+        let err = parse(&source).expect_err("over-deep nesting should be rejected");
+        assert!(
+            matches!(err, ParseError::NestingTooDeep { .. }),
+            "expected NestingTooDeep, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nesting_within_limit_still_parses() {
+        // Well below MAX_NESTING_DEPTH — a realistic program must keep working.
+        let source = format!("x = {}1{}", "(".repeat(32), ")".repeat(32));
+        parse(&source).expect("nesting within the limit should parse");
+    }
+
+    #[test]
+    fn deeply_nested_blocks_error_instead_of_overflowing() {
+        // Blocks recurse via parse_if -> parse_block, bypassing the expression
+        // guard; they must hit the same bounded error, not overflow the stack.
+        let source = format!(
+            "{}finish null{}",
+            "if true {\n".repeat(5000),
+            "\n}".repeat(5000)
+        );
+        let err = parse(&source).expect_err("over-deep block nesting should be rejected");
+        assert!(
+            matches!(err, ParseError::NestingTooDeep { .. }),
+            "expected NestingTooDeep, got {err:?}"
+        );
     }
 
     #[test]

@@ -304,10 +304,9 @@ fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: Provider
             );
         }
         Scenario::ReasoningExtraction => {
-            let expected = wire
-                .expected_reasoning_text
-                .as_ref()
-                .unwrap_or_else(|| panic!("[{who}] {scenario:?}: must supply expected_reasoning_text"));
+            let expected = wire.expected_reasoning_text.as_ref().unwrap_or_else(|| {
+                panic!("[{who}] {scenario:?}: must supply expected_reasoning_text")
+            });
             let reasoning_text = parts.iter().find_map(|part| match part {
                 LlmOutputPart::Reasoning { text, .. } => Some(text.clone()),
                 _ => None,
@@ -332,9 +331,10 @@ fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: Provider
             );
         }
         Scenario::StreamingUsageMerge => {
-            let sse = wire.usage_merge_sse.as_ref().unwrap_or_else(|| {
-                panic!("[{who}] {scenario:?}: must supply usage_merge_sse")
-            });
+            let sse = wire
+                .usage_merge_sse
+                .as_ref()
+                .unwrap_or_else(|| panic!("[{who}] {scenario:?}: must supply usage_merge_sse"));
             assert!(
                 sse.len() >= 2,
                 "[{who}] {scenario:?}: usage must be split across ≥2 events to test merging, got {} \
@@ -343,11 +343,13 @@ fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: Provider
             );
             let assembled = n.assemble_stream(sse);
             assert_eq!(
-                assembled.usage.input_tokens, CanonicalUsage::BASE_INPUT,
+                assembled.usage.input_tokens,
+                CanonicalUsage::BASE_INPUT,
                 "[{who}] {scenario:?}: input tokens from an early event must survive the merge"
             );
             assert_eq!(
-                assembled.usage.output_tokens, CanonicalUsage::BASE_OUTPUT,
+                assembled.usage.output_tokens,
+                CanonicalUsage::BASE_OUTPUT,
                 "[{who}] {scenario:?}: output tokens from a later event must merge in, not overwrite \
                  the earlier input count"
             );
