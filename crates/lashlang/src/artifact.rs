@@ -854,12 +854,12 @@ impl NameNormalizer {
     }
 
     fn collect_expr(&mut self, expr: &Expr) {
+        // Local binders are the only nodes that carry naming semantics; every
+        // other node just feeds its sub-expressions back through `collect_expr`,
+        // so the generic arm folds over `Expr::children()`. `Assign` and `For`
+        // stay explicit because they must register their binder name in the
+        // same order the original full walk did.
         match expr {
-            Expr::Block(expressions) => {
-                for expression in expressions {
-                    self.collect_expr(expression);
-                }
-            }
             Expr::Assign { target, expr } => {
                 self.bind_local(target.root.as_str());
                 for step in &target.steps {
@@ -878,79 +878,11 @@ impl NameNormalizer {
                 self.bind_local(binding.as_str());
                 self.collect_expr(body);
             }
-            Expr::If {
-                condition,
-                then_block,
-                else_block,
-            } => {
-                self.collect_expr(condition);
-                self.collect_expr(then_block);
-                self.collect_expr(else_block);
-            }
-            Expr::List(items) => {
-                for item in items {
-                    self.collect_expr(item);
+            _ => {
+                for child in expr.children() {
+                    self.collect_expr(child);
                 }
             }
-            Expr::Record(entries) => {
-                for (_, value) in entries {
-                    self.collect_expr(value);
-                }
-            }
-            Expr::StartProcess(start) => {
-                for (_, value) in &start.args {
-                    self.collect_expr(value);
-                }
-            }
-            Expr::ReceiverCall { receiver, args, .. } => {
-                self.collect_expr(receiver);
-                for arg in args {
-                    self.collect_expr(arg);
-                }
-            }
-            Expr::Await(expr)
-            | Expr::SleepFor(expr)
-            | Expr::SleepUntil(expr)
-            | Expr::ResultUnwrap(expr)
-            | Expr::Cancel(expr)
-            | Expr::Print(expr)
-            | Expr::Yield(expr)
-            | Expr::Wake(expr)
-            | Expr::Fail(expr)
-            | Expr::Unary { expr, .. } => self.collect_expr(expr),
-            Expr::SignalRun { run, payload } => {
-                self.collect_expr(run);
-                self.collect_expr(payload);
-            }
-            Expr::Submit(expr) | Expr::Finish(expr) => {
-                if let Some(expr) = expr {
-                    self.collect_expr(expr);
-                }
-            }
-            Expr::BuiltinCall { args, .. } => {
-                for arg in args {
-                    self.collect_expr(arg);
-                }
-            }
-            Expr::Field { target, .. } => self.collect_expr(target),
-            Expr::Index { target, index } => {
-                self.collect_expr(target);
-                self.collect_expr(index);
-            }
-            Expr::Binary { left, right, .. } => {
-                self.collect_expr(left);
-                self.collect_expr(right);
-            }
-            Expr::Null
-            | Expr::Bool(_)
-            | Expr::Number(_)
-            | Expr::String(_)
-            | Expr::Variable(_)
-            | Expr::Break
-            | Expr::Continue
-            | Expr::ResourceRef(_)
-            | Expr::WaitSignal
-            | Expr::TypeLiteral(_) => {}
         }
     }
 }

@@ -1,5 +1,6 @@
 mod artifact;
 mod ast;
+mod builtins;
 mod graph;
 mod lexer;
 mod linker;

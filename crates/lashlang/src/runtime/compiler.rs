@@ -258,52 +258,21 @@ impl Compiler {
     }
 
     fn resolve_intrinsic(&mut self, name: &str, argc: usize) -> IntrinsicOp {
-        let valid = match name {
-            "len" | "empty" | "keys" | "values" | "trim" | "to_string" | "to_int" | "to_float"
-            | "json_parse" => argc == 1,
-            "contains" | "grep_text" | "starts_with" | "ends_with" | "split" | "join"
-            | "validate" | "ceil_div" | "floor_div" | "push" => argc == 2,
-            "slice" => argc == 3,
-            "find" => argc == 2 || argc == 3,
-            "format" => argc >= 1,
-            "range" => (1..=3).contains(&argc),
-            _ => true,
-        };
-        if !valid {
+        // Unknown names are not arity-checked here; they fall through to
+        // `IntrinsicOp::Unknown`. Known builtins must satisfy their registered
+        // arity or compile to `InvalidArity`.
+        if let Some(builtin) = crate::builtins::lookup(name)
+            && !builtin.arity.accepts(argc)
+        {
             return IntrinsicOp::InvalidArity {
                 name: self.push_name(name),
                 argc,
             };
         }
-        match name {
-            "len" => IntrinsicOp::Len,
-            "empty" => IntrinsicOp::Empty,
-            "keys" => IntrinsicOp::Keys,
-            "values" => IntrinsicOp::Values,
-            "contains" => IntrinsicOp::Contains,
-            "find" => IntrinsicOp::Find(argc),
-            "grep_text" => IntrinsicOp::GrepText,
-            "starts_with" => IntrinsicOp::StartsWith,
-            "ends_with" => IntrinsicOp::EndsWith,
-            "split" => IntrinsicOp::Split,
-            "join" => IntrinsicOp::Join,
-            "trim" => IntrinsicOp::Trim,
-            "slice" => IntrinsicOp::Slice,
-            "to_string" => IntrinsicOp::ToString,
-            "to_int" => IntrinsicOp::ToInt,
-            "to_float" => IntrinsicOp::ToFloat,
-            "json_parse" => IntrinsicOp::JsonParse,
-            "format" => IntrinsicOp::Format(argc),
-            "validate" => IntrinsicOp::Validate,
-            "range" => IntrinsicOp::Range(argc),
-            "ceil_div" => IntrinsicOp::CeilDiv,
-            "floor_div" => IntrinsicOp::FloorDiv,
-            "push" => IntrinsicOp::Push,
-            _ => IntrinsicOp::Unknown {
-                name: self.push_name(name),
-                argc,
-            },
-        }
+        intrinsic_for_builtin(name, argc).unwrap_or_else(|| IntrinsicOp::Unknown {
+            name: self.push_name(name),
+            argc,
+        })
     }
 
     fn compile_program_block(&mut self, program: &Program) {
@@ -614,32 +583,7 @@ impl Compiler {
                     .iter()
                     .map(|arg| self.fold_compile_time_expr(arg))
                     .collect::<Option<Vec<_>>>()?;
-                let builtin = match name.as_str() {
-                    "len" => IntrinsicOp::Len,
-                    "empty" => IntrinsicOp::Empty,
-                    "keys" => IntrinsicOp::Keys,
-                    "values" => IntrinsicOp::Values,
-                    "contains" => IntrinsicOp::Contains,
-                    "find" => IntrinsicOp::Find(args.len()),
-                    "grep_text" => IntrinsicOp::GrepText,
-                    "starts_with" => IntrinsicOp::StartsWith,
-                    "ends_with" => IntrinsicOp::EndsWith,
-                    "split" => IntrinsicOp::Split,
-                    "join" => IntrinsicOp::Join,
-                    "trim" => IntrinsicOp::Trim,
-                    "slice" => IntrinsicOp::Slice,
-                    "to_string" => IntrinsicOp::ToString,
-                    "to_int" => IntrinsicOp::ToInt,
-                    "to_float" => IntrinsicOp::ToFloat,
-                    "json_parse" => IntrinsicOp::JsonParse,
-                    "format" => IntrinsicOp::Format(args.len()),
-                    "validate" => IntrinsicOp::Validate,
-                    "range" => IntrinsicOp::Range(args.len()),
-                    "ceil_div" => IntrinsicOp::CeilDiv,
-                    "floor_div" => IntrinsicOp::FloorDiv,
-                    "push" => IntrinsicOp::Push,
-                    _ => return None,
-                };
+                let builtin = intrinsic_for_builtin(name.as_str(), args.len())?;
                 match builtin {
                     IntrinsicOp::Len => {
                         if values.len() == 1 {
@@ -1279,14 +1223,14 @@ impl Compiler {
                 self.compile_stats.borrow_mut().type_ref_sites += 1;
             }
             TypeExpr::List(inner) => {
-                let kind_idx = self.push_const(Value::String("array".into()));
+                let kind_idx = self.push_const(Value::String(schema_keys::ARRAY.into()));
                 self.code.push(Instruction::PushConst(kind_idx));
                 self.compile_type_expr(inner);
-                let keys = self.push_key_list(["type", "items"].into_iter());
+                let keys = self.push_key_list([schema_keys::TYPE, schema_keys::ITEMS].into_iter());
                 self.code.push(Instruction::BuildRecord(keys));
             }
             TypeExpr::Object(fields) => {
-                let kind_idx = self.push_const(Value::String("object".into()));
+                let kind_idx = self.push_const(Value::String(schema_keys::OBJECT.into()));
                 self.code.push(Instruction::PushConst(kind_idx));
 
                 for field in fields {
@@ -1309,7 +1253,13 @@ impl Compiler {
                 self.code.push(Instruction::PushBool(false));
 
                 let obj_keys = self.push_key_list(
-                    ["type", "properties", "required", "additionalProperties"].into_iter(),
+                    [
+                        schema_keys::TYPE,
+                        schema_keys::PROPERTIES,
+                        schema_keys::REQUIRED,
+                        schema_keys::ADDITIONAL_PROPERTIES,
+                    ]
+                    .into_iter(),
                 );
                 self.code.push(Instruction::BuildRecord(obj_keys));
             }
@@ -1321,7 +1271,7 @@ impl Compiler {
                     self.compile_type_expr(variant);
                 }
                 self.code.push(Instruction::BuildList(variants.len()));
-                let keys = self.push_key_list(["anyOf"].into_iter());
+                let keys = self.push_key_list([schema_keys::ANY_OF].into_iter());
                 self.code.push(Instruction::BuildRecord(keys));
             }
             TypeExpr::Any
@@ -1349,6 +1299,40 @@ impl Compiler {
             _ => unreachable!("patched non-jump instruction"),
         }
     }
+}
+
+/// Maps a builtin name to the [`IntrinsicOp`] the VM dispatches on, threading
+/// `argc` into the arity-carrying ops. Returns `None` for names that are not
+/// builtins (the caller decides whether that is an `Unknown` op or a const-fold
+/// miss). This is the single name -> op authority shared by `resolve_intrinsic`
+/// and the const folder.
+fn intrinsic_for_builtin(name: &str, argc: usize) -> Option<IntrinsicOp> {
+    Some(match name {
+        "len" => IntrinsicOp::Len,
+        "empty" => IntrinsicOp::Empty,
+        "keys" => IntrinsicOp::Keys,
+        "values" => IntrinsicOp::Values,
+        "contains" => IntrinsicOp::Contains,
+        "find" => IntrinsicOp::Find(argc),
+        "grep_text" => IntrinsicOp::GrepText,
+        "starts_with" => IntrinsicOp::StartsWith,
+        "ends_with" => IntrinsicOp::EndsWith,
+        "split" => IntrinsicOp::Split,
+        "join" => IntrinsicOp::Join,
+        "trim" => IntrinsicOp::Trim,
+        "slice" => IntrinsicOp::Slice,
+        "to_string" => IntrinsicOp::ToString,
+        "to_int" => IntrinsicOp::ToInt,
+        "to_float" => IntrinsicOp::ToFloat,
+        "json_parse" => IntrinsicOp::JsonParse,
+        "format" => IntrinsicOp::Format(argc),
+        "validate" => IntrinsicOp::Validate,
+        "range" => IntrinsicOp::Range(argc),
+        "ceil_div" => IntrinsicOp::CeilDiv,
+        "floor_div" => IntrinsicOp::FloorDiv,
+        "push" => IntrinsicOp::Push,
+        _ => return None,
+    })
 }
 
 pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
@@ -1396,81 +1380,41 @@ pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
 }
 
 fn contains_type_literal(expr: &Expr) -> bool {
-    match expr {
-        Expr::TypeLiteral(_) => true,
-        Expr::Block(expressions) => expressions.iter().any(contains_type_literal),
-        Expr::Assign { target, expr } => {
-            assign_target_contains_type_literal(target) || contains_type_literal(expr)
-        }
-        Expr::List(items) => items.iter().any(contains_type_literal),
-        Expr::Record(entries) => entries
-            .iter()
-            .any(|(_, value)| contains_type_literal(value)),
-        Expr::StartProcess(process) => process
-            .args
-            .iter()
-            .any(|(_, value)| contains_type_literal(value)),
-        Expr::ReceiverCall { receiver, args, .. } => {
-            contains_type_literal(receiver) || args.iter().any(contains_type_literal)
-        }
-        Expr::Await(expr)
-        | Expr::SleepFor(expr)
-        | Expr::SleepUntil(expr)
-        | Expr::ResultUnwrap(expr)
-        | Expr::Unary { expr, .. }
-        | Expr::Cancel(expr)
-        | Expr::Print(expr)
-        | Expr::Yield(expr)
-        | Expr::Wake(expr)
-        | Expr::Fail(expr) => contains_type_literal(expr),
-        Expr::SignalRun { run, payload } => {
-            contains_type_literal(run) || contains_type_literal(payload)
-        }
-        Expr::BuiltinCall { args, .. } => args.iter().any(contains_type_literal),
-        Expr::Field { target, .. } => contains_type_literal(target),
-        Expr::Index { target, index } => {
-            contains_type_literal(target) || contains_type_literal(index)
-        }
-        Expr::If {
-            condition,
-            then_block,
-            else_block,
-        } => {
-            contains_type_literal(condition)
-                || contains_type_literal(then_block)
-                || contains_type_literal(else_block)
-        }
-        Expr::Binary { left, right, .. } => {
-            contains_type_literal(left) || contains_type_literal(right)
-        }
-        Expr::For { iterable, body, .. } => {
-            contains_type_literal(iterable) || contains_type_literal(body)
-        }
-        Expr::Submit(expr) | Expr::Finish(expr) => {
-            expr.as_deref().is_some_and(contains_type_literal)
-        }
-        Expr::Break | Expr::Continue | Expr::WaitSignal => false,
-        Expr::Null
-        | Expr::Bool(_)
-        | Expr::Number(_)
-        | Expr::String(_)
-        | Expr::Variable(_)
-        | Expr::ResourceRef(_) => false,
-    }
+    // `TypeLiteral` is the only node that introduces a type literal directly;
+    // every other node contains one only via a child expression. `children()`
+    // already yields an `Assign` target's dynamic index steps, so the generic
+    // structural recursion covers the path-assignment case too.
+    matches!(expr, Expr::TypeLiteral(_)) || expr.children().any(contains_type_literal)
 }
 
-fn assign_target_contains_type_literal(target: &AssignTarget) -> bool {
-    target.steps.iter().any(|step| match step {
-        AssignPathStep::Field(_) => false,
-        AssignPathStep::Index(expr) => contains_type_literal(expr),
-    })
+/// The JSON-Schema vocabulary the language emits. Both the compile-time
+/// builder ([`fold_type`]) and the runtime instruction builder
+/// ([`Compiler::compile_type_expr`]) reference these names so the schema shape
+/// is defined exactly once.
+mod schema_keys {
+    pub(super) const TYPE: &str = "type";
+    pub(super) const ITEMS: &str = "items";
+    pub(super) const PROPERTIES: &str = "properties";
+    pub(super) const REQUIRED: &str = "required";
+    pub(super) const ADDITIONAL_PROPERTIES: &str = "additionalProperties";
+    pub(super) const ANY_OF: &str = "anyOf";
+    pub(super) const ENUM: &str = "enum";
+
+    pub(super) const ARRAY: &str = "array";
+    pub(super) const OBJECT: &str = "object";
+    pub(super) const STRING: &str = "string";
 }
 
 /// Best-effort compile-time construction of a JSON-Schema Value for a
-/// [`TypeExpr`]. Returns `None` when the expression contains a [`TypeExpr::Ref`]
-/// (or a nested composite that contains one) — those must be resolved at
-/// runtime via [`Instruction::ResolveTypeRef`].
+/// [`TypeExpr`]. This is the single authority for the language's type -> schema
+/// shape; the runtime instruction builder mirrors only the dynamic `Ref` paths
+/// and shares the same key vocabulary ([`schema_keys`]).
+///
+/// Returns `None` when the expression contains a [`TypeExpr::Ref`] (or a nested
+/// composite that contains one) — those must be resolved at runtime via
+/// [`Instruction::ResolveTypeRef`].
 fn fold_type(ty: &TypeExpr) -> Option<Value> {
+    use schema_keys::*;
     match ty {
         TypeExpr::Any => Some(interned_scalar_schema(ScalarSchemaKind::Any)),
         TypeExpr::Str => Some(interned_scalar_schema(ScalarSchemaKind::Str)),
@@ -1481,16 +1425,16 @@ fn fold_type(ty: &TypeExpr) -> Option<Value> {
         TypeExpr::Null => Some(interned_scalar_schema(ScalarSchemaKind::Null)),
         TypeExpr::Enum(values) => {
             let mut rec = record_with_capacity(2);
-            rec.insert("type".into(), Value::String("string".into()));
+            rec.insert(TYPE.into(), Value::String(STRING.into()));
             let items: Vec<Value> = values.iter().map(|v| Value::String(v.clone())).collect();
-            rec.insert("enum".into(), Value::List(items.into()));
+            rec.insert(ENUM.into(), Value::List(items.into()));
             Some(Value::Record(Arc::new(rec)))
         }
         TypeExpr::List(inner) => {
             let inner_value = fold_type(inner)?;
             let mut rec = record_with_capacity(2);
-            rec.insert("type".into(), Value::String("array".into()));
-            rec.insert("items".into(), inner_value);
+            rec.insert(TYPE.into(), Value::String(ARRAY.into()));
+            rec.insert(ITEMS.into(), inner_value);
             Some(Value::Record(Arc::new(rec)))
         }
         TypeExpr::Object(fields) => {
@@ -1504,17 +1448,17 @@ fn fold_type(ty: &TypeExpr) -> Option<Value> {
                 .map(|f| Value::String(f.name.clone()))
                 .collect();
             let mut rec = record_with_capacity(4);
-            rec.insert("type".into(), Value::String("object".into()));
-            rec.insert("properties".into(), Value::Record(Arc::new(properties)));
-            rec.insert("required".into(), Value::List(required.into()));
-            rec.insert("additionalProperties".into(), Value::Bool(false));
+            rec.insert(TYPE.into(), Value::String(OBJECT.into()));
+            rec.insert(PROPERTIES.into(), Value::Record(Arc::new(properties)));
+            rec.insert(REQUIRED.into(), Value::List(required.into()));
+            rec.insert(ADDITIONAL_PROPERTIES.into(), Value::Bool(false));
             Some(Value::Record(Arc::new(rec)))
         }
         TypeExpr::Union(variants) => {
             let folded: Option<Vec<Value>> = variants.iter().map(fold_type).collect();
             let folded = folded?;
             let mut rec = record_with_capacity(1);
-            rec.insert("anyOf".into(), Value::List(folded.into()));
+            rec.insert(ANY_OF.into(), Value::List(folded.into()));
             Some(Value::Record(Arc::new(rec)))
         }
         TypeExpr::Ref(_) => None,
@@ -1559,16 +1503,16 @@ fn interned_scalar_schema(kind: ScalarSchemaKind) -> Value {
     let cache = CACHE.get_or_init(|| {
         let build = |ty: &str| {
             let mut rec = record_with_capacity(1);
-            rec.insert("type".into(), Value::String(ty.into()));
+            rec.insert(schema_keys::TYPE.into(), Value::String(ty.into()));
             Value::Record(Arc::new(rec))
         };
         [
             Value::Record(Arc::new(record_with_capacity(0))), // Any == {}
-            build("string"),
+            build(schema_keys::STRING),
             build("integer"),
             build("number"),
             build("boolean"),
-            build("object"),
+            build(schema_keys::OBJECT),
             build("null"),
         ]
     });
