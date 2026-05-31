@@ -4,13 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark light">
-<title>lash · docs</title>
+<title>lash · a Rust runtime for durable LLM agents</title>
+<meta name="description" content="lash is a Rust runtime for durable LLM agents. The runtime is the durable end of the pair; the LLM is the variable call. Per-turn commits, a sans-IO effect controller, two execution modes, and a plugin architecture.">
 <link rel="icon" href="data:,">
 <!-- Paint the page brand-dark immediately so the network gap between
-     this HTML and styles.css (or a meta-refresh hop from lash.run →
-     /main/) never shows a default-white flash. Light-scheme users get
-     the warm-paper bg via prefers-color-scheme. styles.css then takes
-     over with the data-theme-driven palette. -->
+     this HTML and styles.css never shows a default-white flash.
+     Light-scheme users get the warm-paper bg via prefers-color-scheme. -->
 <style>
   html, body { background: #141412; }
   @media (prefers-color-scheme: light) {
@@ -23,16 +22,15 @@
 <link rel="stylesheet" href="./styles.css">
 <script src="./theme.js"></script>
 <script>
-  // landing scene sits in the lower portion of the viewport in flow.
-  // The SVG's sky-rect is transparent so the cover blends seamlessly
-  // with the page background — no visible rectangle boundary.
-  // suppressOutputStrand: keeps the brazier as just a flame, no
-  // strands fanning into the sky — the period of "lash." carries
-  // the sodium-ember visual rhyme to the candle below.
+  // Hero scene config. The cover fills the first viewport behind the
+  // wordmark; scene.js measures the .cover element so the brazier +
+  // figure land at the horizon regardless of viewport ratio.
+  // suppressOutputStrand keeps the brazier a flame, no strands fanning
+  // into the sky — the period of "lash." carries the ember rhyme.
   window.__LASH_SCENE = {
-    aspect: 6 / 16,
-    scaleMin: 1.15,
-    scaleMax: 1.4,
+    aspect: 7 / 16,
+    scaleMin: 1.1,
+    scaleMax: 1.35,
     suppressOutputStrand: true,
     flushBottom: true,
   };
@@ -45,10 +43,11 @@
 <body id="top" class="landing">
   <a class="skip-link" href="#content">skip to content</a>
 
-  <header class="band">
+  <header class="band" data-landing-band>
+    <a class="band__wordmark" href="#top" aria-label="lash — home">lash<span class="slash">.</span></a>
     <div class="band__right">
       <button class="band__btn band__btn--search" type="button" data-cmdk-open aria-label="search docs (ctrl/cmd + k)" title="search docs (ctrl/cmd + k)"><span class="cmdk-label">search</span><span class="cmdk-kbd" aria-hidden="true">⌘K</span></button>
-      <a class="band__btn" href="./architecture/reference.html" aria-label="api reference" title="api reference (rustdoc on docs.rs)"><span>api</span><span aria-hidden="true">↗</span></a>
+      <a class="band__btn" href="./quickstart.html"><span>docs</span><span aria-hidden="true">→</span></a>
       <a class="band__btn band__btn--icon" href="https://github.com/SamGalanakis/lash" target="_blank" rel="noopener" aria-label="lash on GitHub" title="lash on GitHub"><svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2 .37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
       <button class="band__btn" id="theme-toggle" type="button" aria-label="toggle theme" title="toggle light / dark">
         <span class="glyph" id="theme-glyph" aria-hidden="true">◐</span>
@@ -57,38 +56,297 @@
     </div>
   </header>
 
-  <main class="landing__hero" id="content">
-    <h1 class="landing__title">lash<span class="slash">.</span></h1>
-    <p class="landing__tagline">agent runtime</p>
-    <div class="landing__cta-row">
-      <a class="cta" href="./quickstart.html">read the docs <span aria-hidden="true">→</span></a>
+  <section class="hero" id="content">
+    <div class="cover hero__scene" aria-label="A warm-iron twilight landscape. A brazier on a left-side peak, and a dark-robed figure on a right peak raising a dish toward sodium suns overhead.">
+      <svg
+        id="range"
+        class="cover__svg"
+        preserveAspectRatio="xMidYMid slice"
+        xmlns="http://www.w3.org/2000/svg"
+        role="img"
+        aria-label="A warm-iron twilight landscape with a brazier and a robed figure on facing peaks under sodium suns."
+      >
+        <defs>
+          <linearGradient id="skyGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"  stop-color="#141412"/>
+            <stop offset="65%" stop-color="#1a1814"/>
+            <stop offset="100%" stop-color="#221d16"/>
+          </linearGradient>
+        </defs>
+        <rect id="sky-rect" width="100%" height="100%" fill="transparent"/>
+        <g id="g-back"></g>
+        <g id="g-mid"></g>
+        <g id="g-lash-behind"></g>
+        <g id="g-near"></g>
+        <g id="g-lash-front"></g>
+        <g id="g-ground"></g>
+      </svg>
     </div>
+
+    <div class="hero__inner">
+      <p class="hero__eyebrow">rust runtime · durable llm agents</p>
+      <h1 class="hero__wordmark">lash<span class="slash">.</span></h1>
+      <p class="hero__statement">the runtime owns the turn<span class="slash">.</span></p>
+      <p class="hero__lede">Most agent stacks treat the LLM as the runtime and stitch state around it — a database for memory, a queue for retries, a sandbox for code. <em>lash</em> inverts that. The runtime is the durable end of the pair; the model is the variable call it makes. Your app keeps the outer boundaries — storage, auth, transport, product state. lash owns the turn.</p>
+      <div class="hero__cta-row">
+        <a class="cta" href="./quickstart.html">quickstart <span aria-hidden="true">→</span></a>
+        <a class="cta-secondary" href="#embed">add the crate</a>
+        <a class="hero__ghlink" href="https://github.com/SamGalanakis/lash" target="_blank" rel="noopener">github <span aria-hidden="true">↗</span></a>
+      </div>
+      <p class="hero__alpha"><b>alpha</b> · works today, API still moving fast — pin to a commit when you embed.</p>
+    </div>
+
+    <a class="hero__scrollcue" href="#inversion" aria-label="read on">
+      <span>what it is</span>
+      <span class="hero__scrollcue-mark" aria-hidden="true">↓</span>
+    </a>
+  </section>
+
+  <main class="body" id="read">
+
+    <section class="stanza" id="inversion">
+      <div class="stanza__rail">
+        <div class="knot">
+          <span class="knot__bead" aria-hidden="true"></span>
+          <p class="knot__id">§ 01</p>
+          <p class="knot__name">the inversion</p>
+        </div>
+      </div>
+      <div class="stanza__body">
+        <h2 class="stanza__title">the runtime is the durable end</h2>
+        <p class="stanza__lede">An LLM call is nondeterministic and can fail halfway. Treating it as the runtime means rebuilding durability around every model, every provider, every app. lash moves the durable boundary to the side that can actually hold it.</p>
+
+        <div class="ledger">
+          <div class="ledger__cell">
+            <p class="ledger__eyebrow">the usual shape</p>
+            <p class="ledger__body">The model drives. Memory is a database you bolt on, retries are a queue you wire up, code execution is a sandbox you babysit. State lives in whatever the model didn't lose.</p>
+          </div>
+          <div class="ledger__cell ledger__cell--lash">
+            <p class="ledger__eyebrow">lash</p>
+            <p class="ledger__body">The runtime drives. It owns the turn — model calls, modes, tools, plugins, semantic stream events, usage, terminal outcomes. Every completed turn lands as one durable commit. The model is the variable call inside it.</p>
+          </div>
+        </div>
+
+        <p>The split is the whole idea, and it is drawn on purpose:</p>
+        <dl class="defs">
+          <dt>your app owns</dt>
+          <dd>Storage, auth, transport, and product state — the outer boundaries. lash persists only what it needs to resume a turn and rebinds your live handles when a session opens.</dd>
+          <dt>lash owns</dt>
+          <dd>The turn: provider protocol, execution mode, tool dispatch, plugins, the semantic event stream, usage accounting, and the single lease-fenced commit that settles it.</dd>
+        </dl>
+      </div>
+    </section>
+
+    <section class="stanza" id="inside">
+      <div class="stanza__rail">
+        <div class="knot">
+          <span class="knot__bead" aria-hidden="true"></span>
+          <p class="knot__id">§ 02</p>
+          <p class="knot__name">what's inside</p>
+        </div>
+      </div>
+      <div class="stanza__body">
+        <h2 class="stanza__title">what's inside</h2>
+        <p class="stanza__lede">Seven pieces do the work. Each is a real seam in the codebase, not a slogan — follow any of them into the architecture chapters.</p>
+
+        <div class="module-grid">
+          <article class="panel">
+            <small>durable</small>
+            <h3>per-turn commits</h3>
+            <p>Every completed turn lands as one lease-fenced <code>RuntimeCommit</code> against a <code>SessionGraph</code> — graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS. In-flight turns persist separately and replay on resume.</p>
+          </article>
+          <article class="panel">
+            <small>sans-io</small>
+            <h3>effect controller</h3>
+            <p>The <code>RuntimeEffectController</code> is the durable boundary around nondeterministic work. Model calls, tool calls, RLM exec, process control, and checkpoints all cross it as a typed <code>RuntimeInvocation</code> — so a turn can be replayed from the journal exactly once.</p>
+          </article>
+          <article class="panel">
+            <small>modes</small>
+            <h3>two execution modes</h3>
+            <p><code>standard</code> uses the provider's native tool-calling protocol and dispatches the model's parallel tool calls concurrently. <code>rlm</code> runs <code>lashlang</code> programs in a sandboxed VM. Both settle into the same single commit unit.</p>
+          </article>
+          <article class="panel">
+            <small>lashlang</small>
+            <h3>a typed DSL the model emits</h3>
+            <p>A small language the model writes and the runtime executes deterministically. Host capabilities are lowercase module ops — <code>web.search</code>, <code>files.read</code>, <code>agents.spawn</code>. Unavailable abilities still parse but fail at link time and never reach the prompt.</p>
+          </article>
+          <article class="panel">
+            <small>plugins</small>
+            <h3>everything is a plugin</h3>
+            <p>Tools, prompts, planning, UI activity, subagents, memory, history transforms, and tool-output budgeting are all plugins. Host applications compose only what they need through the <code>lash</code> facade.</p>
+          </article>
+          <article class="panel">
+            <small>providers</small>
+            <h3>provider portability</h3>
+            <p>First-party crates for Anthropic, OpenAI Responses, any OpenAI-compatible Chat Completions endpoint, OpenAI Codex, and Google Gemini / Code Assist. MCP servers attach over stdio, streamable-HTTP, or SSE.</p>
+          </article>
+          <article class="panel">
+            <small>tracing</small>
+            <h3>tracing as a sink</h3>
+            <p>JSONL by default with a self-contained HTML viewer for reading a turn back event by event. OpenTelemetry export is one line when you want it.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="stanza" id="embed">
+      <div class="stanza__rail">
+        <div class="knot">
+          <span class="knot__bead" aria-hidden="true"></span>
+          <p class="knot__id">§ 03</p>
+          <p class="knot__name">embed it</p>
+        </div>
+      </div>
+      <div class="stanza__body">
+        <h2 class="stanza__title">embed it</h2>
+        <p class="stanza__lede">The shortest path to a working turn: add the crate, pick a provider, open a session, run one turn. Tools, modes, persistence, and tracing layer on after that.</p>
+
+        <p>The facade ships on crates.io as <code>lash-runtime</code> (the bare name is owned by another project) and is still imported as <code>use lash::…</code>. During the alpha series the versions carry an <code>-alpha.N</code> suffix, so the dep needs the explicit pre-release tag.</p>
+<pre data-lang="cargo.toml"><code>[dependencies]
+lash-runtime         = "=0.1.0-alpha.13"
+lash-provider-openai = "=0.1.0-alpha.13"
+anyhow               = "1"
+tokio                = { version = "1", features = ["full"] }</code></pre>
+
+        <p>One <code>LashCore</code> per app, cloned freely; one <code>LashSession</code> per chat or task; <code>.run()</code> for a single collected turn, <code>.stream(&amp;sink)</code> for live events.</p>
+<pre data-lang="rust"><code>use lash::{provider::ProviderHandle, LashCore, ModelSpec, TurnInput};
+use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
+
+#[tokio::main]
+async fn main() -&gt; anyhow::Result&lt;()&gt; {
+    let api_key = std::env::var("OPENROUTER_API_KEY")?;
+    let provider = ProviderHandle::new(
+        OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL).into_components(),
+    );
+
+    let model = ModelSpec::from_token_limits(
+        "anthropic/claude-sonnet-4.6", None, 200_000, None, None,
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    // one LashCore per app, cloned freely.
+    let core = LashCore::standard()
+        .provider(provider)
+        .model(model)
+        .build()?;
+
+    // one session per chat / task; run one turn; read settled prose.
+    let session = core.session("hello-1").open().await?;
+    let result = session
+        .turn(TurnInput::text("Say hi in one short sentence."))
+        .run()
+        .await?;
+
+    println!("{}", result.assistant_message().unwrap_or_default());
+    Ok(())
+}</code></pre>
+        <a class="stanza__link" href="./quickstart.html">read the quickstart <span class="arrow" aria-hidden="true">→</span></a>
+      </div>
+    </section>
+
+    <section class="stanza" id="workspace">
+      <div class="stanza__rail">
+        <div class="knot">
+          <span class="knot__bead" aria-hidden="true"></span>
+          <p class="knot__id">§ 04</p>
+          <p class="knot__name">the workspace</p>
+        </div>
+      </div>
+      <div class="stanza__body">
+        <h2 class="stanza__title">the workspace</h2>
+        <p class="stanza__lede">lash is a Rust workspace layered from a pure state machine up to an app-facing facade. You depend on the facade and a provider; the rest is there when you need to reach under it.</p>
+        <dl class="defs">
+          <dt>lash-sansio</dt>
+          <dd>The pure turn machine — prompt model, messages, effects, responses, checkpoints, tool contracts, and canonical tool-call output. No Lashlang dependency.</dd>
+          <dt>lash-core</dt>
+          <dd>Async runtime internals: plugin host, protocol build input, providers, persistence, session graph, child-session orchestration, built-in tools, Lashlang host surface.</dd>
+          <dt>lash</dt>
+          <dd>The app-facing facade — runtime construction, sessions, turn streaming, and provider / mode / plugin wiring. Published as <code>lash-runtime</code>.</dd>
+          <dt>lash-protocol-*</dt>
+          <dd><code>standard</code> and <code>rlm</code> protocol plugins — the two execution modes as installable units.</dd>
+          <dt>lashlang</dt>
+          <dd>The RLM execution language: parser, sandboxed VM, and projection. The surface the model writes against.</dd>
+          <dt>lash-cli</dt>
+          <dd>A first-party terminal frontend built on the library — the agent you can run, not just embed.</dd>
+        </dl>
+        <a class="stanza__link" href="./architecture/index.html">read the architecture <span class="arrow" aria-hidden="true">→</span></a>
+      </div>
+    </section>
+
+    <section class="stanza" id="readon">
+      <div class="stanza__rail">
+        <div class="knot">
+          <span class="knot__bead" aria-hidden="true"></span>
+          <p class="knot__id">§ 05</p>
+          <p class="knot__name">read on</p>
+        </div>
+      </div>
+      <div class="stanza__body">
+        <h2 class="stanza__title">read on</h2>
+        <p class="stanza__lede">Five doc tracks, in the order most people want them. Each is a real chapter, not a stub.</p>
+        <div class="listing">
+          <a class="listing__row" href="./quickstart.html">
+            <div class="listing__label">quickstart</div>
+            <div class="listing__body"><p>Add the crate, pick a provider, run one turn. The shortest working path.</p></div>
+          </a>
+          <a class="listing__row" href="./embedding.html">
+            <div class="listing__label">lash api</div>
+            <div class="listing__body"><p>Cores, sessions, turns, and the builder surface for wiring providers, modes, and plugins.</p></div>
+          </a>
+          <a class="listing__row" href="./plugins.html">
+            <div class="listing__label">plugins</div>
+            <div class="listing__body"><p>Tools, prompts, planning, memory, subagents — the seams every host composes.</p></div>
+          </a>
+          <a class="listing__row" href="./persistence.html">
+            <div class="listing__label">persistence</div>
+            <div class="listing__body"><p>The durable session graph and the lease-fenced per-turn commit that settles it.</p></div>
+          </a>
+          <a class="listing__row" href="./architecture/index.html">
+            <div class="listing__label">architecture</div>
+            <div class="listing__body"><p>The system crate by crate — boundaries, the turn machine, the executor, the language.</p></div>
+          </a>
+        </div>
+      </div>
+    </section>
   </main>
 
-  <section class="cover" aria-label="landing footer · twilight landscape">
-    <svg
-      id="range"
-      class="cover__svg"
-      preserveAspectRatio="xMidYMid slice"
-      xmlns="http://www.w3.org/2000/svg"
-      role="img"
-      aria-label="A warm-iron twilight landscape. A brazier on a left-side peak with strands fanning out, and a dark-robed figure on a right peak raising a dish toward sodium suns overhead."
-    >
-      <defs>
-        <linearGradient id="skyGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%"  stop-color="#141412"/>
-          <stop offset="65%" stop-color="#1a1814"/>
-          <stop offset="100%" stop-color="#221d16"/>
-        </linearGradient>
-      </defs>
-      <rect id="sky-rect" width="100%" height="100%" fill="transparent"/>
-      <g id="g-back"></g>
-      <g id="g-mid"></g>
-      <g id="g-lash-behind"></g>
-      <g id="g-near"></g>
-      <g id="g-lash-front"></g>
-      <g id="g-ground"></g>
+  <footer class="landing-foot" aria-label="footer">
+    <svg class="landing-foot__horizon" viewBox="0 0 1440 120" preserveAspectRatio="none" aria-hidden="true">
+      <path class="landing-foot__range landing-foot__range--far" d="M0 96 L160 70 L320 86 L520 58 L720 80 L900 52 L1120 78 L1300 62 L1440 84 L1440 120 L0 120 Z"/>
+      <path class="landing-foot__range landing-foot__range--near" d="M0 116 L220 92 L430 110 L640 84 L860 108 L1080 90 L1280 112 L1440 100 L1440 120 L0 120 Z"/>
+      <circle class="landing-foot__ember" cx="720" cy="40" r="3.2"/>
     </svg>
-  </section>
+    <div class="landing-foot__inner">
+      <div class="landing-foot__mark">
+        <span class="landing-foot__word">lash<span class="slash">.</span></span>
+        <span class="landing-foot__tag">a Rust runtime for durable LLM agents</span>
+      </div>
+      <nav class="landing-foot__links" aria-label="footer links">
+        <a href="./quickstart.html">docs</a>
+        <a href="./architecture/index.html">architecture</a>
+        <a href="https://crates.io/crates/lash-runtime" target="_blank" rel="noopener">crates.io <span aria-hidden="true">↗</span></a>
+        <a href="https://github.com/SamGalanakis/lash" target="_blank" rel="noopener">github <span aria-hidden="true">↗</span></a>
+        <a href="https://github.com/SamGalanakis/lash/blob/main/LICENSE" target="_blank" rel="noopener">license</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script>
+    // Sticky band: stays transparent over the hero, gains its surface
+    // and the wordmark once the hero has scrolled past. Intersection
+    // Observer over the hero sentinel — no scroll-event thrash.
+    (function () {
+      var band = document.querySelector("[data-landing-band]");
+      var hero = document.getElementById("content");
+      if (!band || !hero || !("IntersectionObserver" in window)) {
+        if (band) band.classList.add("is-solid");
+        return;
+      }
+      var io = new IntersectionObserver(function (entries) {
+        band.classList.toggle("is-solid", !entries[0].isIntersecting);
+      }, { rootMargin: "-72px 0px 0px 0px", threshold: 0 });
+      io.observe(hero);
+    })();
+  </script>
 </body>
 </html>
