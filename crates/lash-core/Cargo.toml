@@ -22,9 +22,9 @@ otel-trace = ["lash-trace/otel"]
 testing = []
 
 [dependencies]
-lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.13" }
-lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.13" }
-lashlang = { path = "../lashlang", version = "=0.1.0-alpha.13" }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.14" }
+lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.14" }
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.14" }
 tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
