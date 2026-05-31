@@ -5,7 +5,8 @@ use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
 use super::process::ProcessRegistry;
 use super::{
-    InlineRuntimeEffectController, RuntimeEffectController, SessionStoreFactory, TerminationPolicy,
+    InlineRuntimeEffectController, ProcessWorkPoke, RuntimeEffectController, SessionStoreFactory,
+    TerminationPolicy,
 };
 
 /// Required host configuration for all runtimes.
@@ -15,6 +16,7 @@ pub struct RuntimeCoreConfig {
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     pub lashlang_process_cache: Arc<Mutex<lashlang::CompiledProcessCache>>,
+    pub provider_resolver: Arc<dyn crate::RuntimeProviderResolver>,
     pub prompt: crate::PromptLayer,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
@@ -23,24 +25,49 @@ pub struct RuntimeCoreConfig {
     pub effect_controller: Arc<dyn RuntimeEffectController>,
 }
 
-impl Default for RuntimeCoreConfig {
-    fn default() -> Self {
+impl RuntimeCoreConfig {
+    /// Construct a config with the three host-owned dependencies named
+    /// explicitly.
+    ///
+    /// There is intentionally no `Default`. The effect controller, Lashlang
+    /// artifact store, and attachment store decide a runtime's durability, so
+    /// hosts must choose them rather than silently inheriting in-memory
+    /// implementations. Use [`RuntimeCoreConfig::in_memory`] to opt into the
+    /// in-process / in-memory versions by name.
+    pub fn new(
+        effect_controller: Arc<dyn RuntimeEffectController>,
+        lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+        attachment_store: Arc<dyn crate::AttachmentStore>,
+    ) -> Self {
         Self {
             host_profile_id: "default".to_string(),
-            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
-            lashlang_artifact_store: lashlang::global_in_memory_lashlang_artifact_store(),
+            attachment_store,
+            lashlang_artifact_store,
             lashlang_process_cache: Arc::new(Mutex::new(lashlang::CompiledProcessCache::new())),
+            provider_resolver: Arc::new(crate::EmptyProviderResolver),
             prompt: crate::PromptLayer::new(),
             trace_sink: None,
             trace_level: TraceLevel::Standard,
             trace_context: TraceContext::default(),
             termination: TerminationPolicy::default(),
-            effect_controller: Arc::new(InlineRuntimeEffectController::default()),
+            effect_controller,
         }
     }
-}
 
-impl RuntimeCoreConfig {
+    /// Explicit in-process / in-memory configuration: an
+    /// [`InlineRuntimeEffectController`], the process-global in-memory Lashlang
+    /// artifact store, and an in-memory attachment store.
+    ///
+    /// Convenient for tests and local experiments; not durable. Named so the
+    /// choice is never silent.
+    pub fn in_memory() -> Self {
+        Self::new(
+            Arc::new(InlineRuntimeEffectController::default()),
+            lashlang::global_in_memory_lashlang_artifact_store(),
+            Arc::new(crate::InMemoryAttachmentStore::new()),
+        )
+    }
+
     pub fn with_attachment_store(
         mut self,
         attachment_store: Arc<dyn crate::AttachmentStore>,
@@ -62,6 +89,14 @@ impl RuntimeCoreConfig {
         process_cache: Arc<Mutex<lashlang::CompiledProcessCache>>,
     ) -> Self {
         self.lashlang_process_cache = process_cache;
+        self
+    }
+
+    pub fn with_provider_resolver(
+        mut self,
+        provider_resolver: Arc<dyn crate::RuntimeProviderResolver>,
+    ) -> Self {
+        self.provider_resolver = provider_resolver;
         self
     }
 
@@ -173,6 +208,45 @@ pub(crate) struct RuntimeHost {
     pub core: RuntimeCoreConfig,
     pub session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
+    /// Wakes the host's [`ProcessWorkRunner`](super::ProcessWorkRunner) so a
+    /// successful process start is consumed promptly. Absent when no work runner
+    /// is wired (e.g. a registry-less host); poking is then a no-op.
+    pub process_work_poke: Option<ProcessWorkPoke>,
+}
+
+impl RuntimeHost {
+    pub(crate) fn resolve_session_policy(
+        &self,
+        session_id: &str,
+        policy: crate::SessionPolicy,
+    ) -> Result<crate::ResolvedSessionPolicy, crate::SessionError> {
+        let provider_id = policy.recorded_provider_id();
+        let provider = self
+            .core
+            .provider_resolver
+            .resolve_provider(provider_id)
+            .map_err(|err| match err {
+                crate::ProviderResolutionError::MissingProviderId => {
+                    crate::SessionError::ProviderUnconfigured {
+                        session_id: session_id.to_string(),
+                    }
+                }
+                crate::ProviderResolutionError::UnknownProvider { provider_id } => {
+                    crate::SessionError::ProviderUnavailable {
+                        provider_id,
+                        session_id: session_id.to_string(),
+                    }
+                }
+                crate::ProviderResolutionError::ProviderIdMismatch { expected, actual } => {
+                    crate::SessionError::ProviderMismatch {
+                        expected,
+                        actual,
+                        session_id: session_id.to_string(),
+                    }
+                }
+            })?;
+        Ok(crate::ResolvedSessionPolicy::new(policy, provider))
+    }
 }
 
 impl From<EmbeddedRuntimeHost> for RuntimeHost {
@@ -181,6 +255,7 @@ impl From<EmbeddedRuntimeHost> for RuntimeHost {
             core: value.core,
             session_store_factory: value.session_store_factory,
             process_registry: None,
+            process_work_poke: None,
         }
     }
 }
@@ -191,6 +266,7 @@ impl From<ProcessRuntimeHost> for RuntimeHost {
             core: value.embedded.core,
             session_store_factory: value.embedded.session_store_factory,
             process_registry: Some(value.process_registry),
+            process_work_poke: None,
         }
     }
 }

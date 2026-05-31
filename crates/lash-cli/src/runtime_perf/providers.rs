@@ -9,9 +9,8 @@ use lash_core::llm::types::{
 };
 use lash_core::testing::TestProvider;
 use lash_core::{
-    ProviderComponents, ProviderFactory, ToolAgentSurface, ToolAvailabilityConfig, ToolContract,
-    ToolDefinition, ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
-    register_provider_factory,
+    ToolAgentSurface, ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolManifest,
+    ToolOutputContract, ToolProvider, ToolResult, ToolScheduling,
 };
 
 use super::scenarios::RuntimePerfScenario;
@@ -74,32 +73,6 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
             })
         })
         .build()
-}
-
-pub(crate) fn register_benchmark_provider_factory() {
-    register_provider_factory(Arc::new(BenchmarkProviderFactory));
-}
-
-struct BenchmarkProviderFactory;
-
-impl ProviderFactory for BenchmarkProviderFactory {
-    fn kind(&self) -> &'static str {
-        "benchmark"
-    }
-
-    fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
-        let scenario_name = config
-            .get("scenario")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(RuntimePerfScenario::Standard.name());
-        let scenario = RuntimePerfScenario::parse(scenario_name).ok_or_else(|| {
-            format!("unknown runtime perf benchmark provider scenario `{scenario_name}`")
-        })?;
-        Ok(benchmark_provider(scenario)
-            .into_handle()
-            .components()
-            .clone())
-    }
 }
 
 #[derive(Default)]
@@ -218,7 +191,20 @@ fn benchmark_echo_tool_definition() -> ToolDefinition {
             },
             "additionalProperties": true
         }),
-        serde_json::json!({ "type": "object", "additionalProperties": true }),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": {},
+                "ordinal": {
+                    "anyOf": [
+                        { "type": "integer" },
+                        { "type": "null" }
+                    ]
+                }
+            },
+            "required": ["value", "ordinal"],
+            "additionalProperties": false
+        }),
     )
     .with_scheduling(ToolScheduling::Parallel)
 }
@@ -236,7 +222,15 @@ fn benchmark_slow_tool_definition() -> ToolDefinition {
             },
             "additionalProperties": false
         }),
-        serde_json::json!({ "type": "object", "additionalProperties": true }),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": {},
+                "delay_ms": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["value", "delay_ms"],
+            "additionalProperties": false
+        }),
     )
     .with_scheduling(ToolScheduling::Parallel)
 }

@@ -5,7 +5,7 @@ use lash_core::plugin::{PluginError, PluginLifecycleEvent, RuntimeSessionHost};
 use lash_core::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectCompletion, DirectCompletionClient,
     DirectRequest, Message, MessageRole, Part, PartKind, SessionAppendNode, SessionGraph,
-    SessionReadView, SessionStateChangedContext, SessionStateEnvelope,
+    SessionReadView, SessionSnapshot, SessionStateChangedContext,
 };
 
 use crate::ObservationalMemoryConfig;
@@ -82,7 +82,7 @@ fn post_persist_context_with_completion(
 ) -> SessionStateChangedContext {
     SessionStateChangedContext {
         session_id: session_id.to_string(),
-        state: SessionReadView::from_exported_state(&SessionStateEnvelope {
+        state: SessionReadView::from_snapshot(&SessionSnapshot {
             session_id: session_id.to_string(),
             session_graph: graph,
             policy: lash_core::testing::mock_session_policy(),

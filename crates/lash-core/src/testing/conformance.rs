@@ -13,17 +13,18 @@
 use std::sync::Arc;
 
 use crate::{
-    AgentFrameReason, AgentFrameRecord, ModelSpec, PluginSessionSnapshot, ProtocolTurnOptions,
-    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit, RuntimeEffectJournalRecord,
-    RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence, RuntimeSessionState,
-    RuntimeTurnCompletion, SessionPolicy, SessionReadScope, StoreError, TokenLedgerEntry,
-    TokenUsage, ToolState,
+    AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, DeliveryPolicy, MergeKey,
+    ModelSpec, PluginSessionSnapshot, ProtocolTurnOptions, QueuedWorkBatchDraft,
+    QueuedWorkClaimBoundary, QueuedWorkPayload, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+    RuntimeCommit, RuntimeEffectJournalRecord, RuntimeEffectKind, RuntimeEffectOutcome,
+    RuntimePersistence, RuntimeSessionState, RuntimeTurnCompletion, SessionPolicy,
+    SessionReadScope, SlotPolicy, StoreError, TokenLedgerEntry, TokenUsage, ToolState, TurnInput,
 };
 use crate::{
     LashSchema, ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventSemanticsSpec,
-    ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessRegistration, ProcessRegistry,
-    ProcessScope, ProcessTerminalState, ProcessValueSelector, ProcessWakeDedupeKey,
-    ProcessWakeSpec,
+    ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessLeaseCompletion,
+    ProcessRegistration, ProcessRegistry, ProcessScope, ProcessTerminalState, ProcessValueSelector,
+    ProcessWakeDedupeKey, ProcessWakeSpec,
 };
 
 /// Run the full [`ProcessRegistry`] conformance suite against the backend
@@ -41,6 +42,13 @@ where
     multiple_sessions_can_hold_grants(make()).await;
     processes_can_exist_with_zero_grants(make()).await;
     delete_session_revokes_handles_by_session(make()).await;
+    list_non_terminal_excludes_terminal_processes(make()).await;
+    list_live_handle_grants_excludes_terminal_history(make()).await;
+    active_process_lease_fences_competing_owner(make()).await;
+    superseded_process_lease_cannot_renew(make()).await;
+    renewed_process_lease_survives_original_expiry(make()).await;
+    completed_lease_releases_and_reclaim_bumps_fencing(make()).await;
+    stale_lease_completion_cannot_release_live_lease(make()).await;
 }
 
 fn registration(id: &str) -> ProcessRegistration {
@@ -276,7 +284,7 @@ async fn terminal_and_cancel_events_require_keys(registry: Arc<dyn ProcessRegist
         registry
             .get_process("proc-terminal")
             .await
-            .and_then(|record| record.terminal.map(|terminal| terminal.state)),
+            .and_then(|record| record.status.terminal_state()),
         Some(ProcessTerminalState::Cancelled)
     );
 }
@@ -504,23 +512,288 @@ async fn delete_session_revokes_handles_by_session(registry: Arc<dyn ProcessRegi
     );
 }
 
+async fn list_non_terminal_excludes_terminal_processes(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-live"))
+        .await
+        .expect("register live");
+    registry
+        .register_process(registration("proc-done"))
+        .await
+        .expect("register done");
+    registry
+        .complete_process(
+            "proc-done",
+            ProcessAwaitOutput::Success {
+                value: serde_json::Value::Null,
+                control: None,
+            },
+        )
+        .await
+        .expect("complete done");
+
+    let ids = registry
+        .list_non_terminal()
+        .await
+        .expect("list non-terminal")
+        .into_iter()
+        .map(|record| record.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec!["proc-live".to_string()],
+        "list_non_terminal must exclude terminal processes and be process_id ordered"
+    );
+}
+
+async fn list_live_handle_grants_excludes_terminal_history(registry: Arc<dyn ProcessRegistry>) {
+    let scope = ProcessScope::new("history-owner");
+    for process_id in ["proc-live-grant", "proc-done-grant"] {
+        registry
+            .register_process(registration(process_id))
+            .await
+            .expect("register");
+        registry
+            .grant_handle(
+                &scope,
+                process_id,
+                ProcessHandleDescriptor::new(Some("test"), Some(process_id)),
+            )
+            .await
+            .expect("grant");
+    }
+    registry
+        .complete_process(
+            "proc-done-grant",
+            ProcessAwaitOutput::Success {
+                value: serde_json::Value::Null,
+                control: None,
+            },
+        )
+        .await
+        .expect("complete done");
+
+    let live_ids = registry
+        .list_live_handle_grants(&scope)
+        .await
+        .expect("list live grants")
+        .into_iter()
+        .map(|(grant, _)| grant.process_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        live_ids,
+        vec!["proc-live-grant".to_string()],
+        "list_live_handle_grants must exclude completed historical handles"
+    );
+
+    let all_ids = registry
+        .list_handle_grants(&scope)
+        .await
+        .expect("list all grants")
+        .into_iter()
+        .map(|(grant, _)| grant.process_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        all_ids,
+        vec!["proc-done-grant".to_string(), "proc-live-grant".to_string()],
+        "list_handle_grants remains the explicit all-history path"
+    );
+}
+
+async fn active_process_lease_fences_competing_owner(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-lease-active"))
+        .await
+        .expect("register");
+    registry
+        .claim_process_lease("proc-lease-active", "owner-a", 60_000)
+        .await
+        .expect("first claim");
+    let conflict = registry
+        .claim_process_lease("proc-lease-active", "owner-b", 60_000)
+        .await;
+    assert!(
+        conflict
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains("already leased")),
+        "an active lease must fence a competing owner, got {conflict:?}"
+    );
+    // The original owner may re-claim its own live lease (idempotent ownership).
+    registry
+        .claim_process_lease("proc-lease-active", "owner-a", 60_000)
+        .await
+        .expect("owner re-claims its own live lease");
+}
+
+async fn superseded_process_lease_cannot_renew(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-lease-superseded"))
+        .await
+        .expect("register");
+    let old = registry
+        .claim_process_lease("proc-lease-superseded", "owner-a", 0)
+        .await
+        .expect("old lease");
+    registry
+        .claim_process_lease("proc-lease-superseded", "owner-b", 60_000)
+        .await
+        .expect("new owner claims the expired lease");
+    let stale = registry.renew_process_lease(&old, 60_000).await;
+    assert!(
+        stale
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains("missing or expired")),
+        "a superseded lease must not renew, got {stale:?}"
+    );
+}
+
+async fn renewed_process_lease_survives_original_expiry(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-lease-renew"))
+        .await
+        .expect("register");
+    let lease = registry
+        .claim_process_lease("proc-lease-renew", "owner-a", 20)
+        .await
+        .expect("lease");
+    let renewed = registry
+        .renew_process_lease(&lease, 60_000)
+        .await
+        .expect("renew");
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    registry
+        .renew_process_lease(&renewed, 60_000)
+        .await
+        .expect("a renewed lease survives the original TTL");
+}
+
+async fn completed_lease_releases_and_reclaim_bumps_fencing(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-lease-complete"))
+        .await
+        .expect("register");
+    let first = registry
+        .claim_process_lease("proc-lease-complete", "owner-a", 60_000)
+        .await
+        .expect("first claim");
+    registry
+        .complete_process_lease(&ProcessLeaseCompletion::from_lease(&first))
+        .await
+        .expect("complete lease");
+    let second = registry
+        .claim_process_lease("proc-lease-complete", "owner-b", 60_000)
+        .await
+        .expect("a new owner can claim a released lease");
+    assert!(
+        second.fencing_token > first.fencing_token,
+        "a re-claim must bump the fencing token (was {}, now {})",
+        first.fencing_token,
+        second.fencing_token
+    );
+}
+
+async fn stale_lease_completion_cannot_release_live_lease(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(registration("proc-lease-stale-complete"))
+        .await
+        .expect("register");
+    let old = registry
+        .claim_process_lease("proc-lease-stale-complete", "owner-a", 0)
+        .await
+        .expect("old lease");
+    let current = registry
+        .claim_process_lease("proc-lease-stale-complete", "owner-b", 60_000)
+        .await
+        .expect("new live lease");
+    // A stale completion (old token) must not release the live lease.
+    registry
+        .complete_process_lease(&ProcessLeaseCompletion::from_lease(&old))
+        .await
+        .expect("stale completion is ignored");
+    let conflict = registry
+        .claim_process_lease("proc-lease-stale-complete", "owner-c", 60_000)
+        .await;
+    assert!(
+        conflict
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains("already leased")),
+        "a stale completion must not release the live lease, got {conflict:?}"
+    );
+    // The live owner can still renew.
+    registry
+        .renew_process_lease(&current, 60_000)
+        .await
+        .expect("the live owner can still renew");
+}
+
+/// Attachment-manifest behavior expected from a [`RuntimePersistence`] backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachmentManifestConformance {
+    /// The backend stores and reconciles attachment intent rows.
+    Persistent,
+    /// The backend explicitly has no attachment-write story and uses the no-op
+    /// manifest contract.
+    Noop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimePersistenceConformance {
+    pub attachment_manifest: AttachmentManifestConformance,
+}
+
+impl RuntimePersistenceConformance {
+    pub const fn noop_attachment_manifest() -> Self {
+        Self {
+            attachment_manifest: AttachmentManifestConformance::Noop,
+        }
+    }
+}
+
+impl Default for RuntimePersistenceConformance {
+    fn default() -> Self {
+        Self {
+            attachment_manifest: AttachmentManifestConformance::Persistent,
+        }
+    }
+}
+
 /// Run the [`RuntimePersistence`] durability conformance suite against the
 /// backend produced by `make`. `make` must return a fresh, empty,
 /// single-session store on each call.
 ///
 /// Covers the durability crown jewels: optimistic head CAS, session binding,
-/// checkpoint/usage hydration, lease fencing (claim/renew/abandon/supersede/
-/// expire), lease-guarded journal writes, replay-key journal idempotency, and
-/// atomic final commit that clears the journal only under a live lease (else
-/// preserves resume state). In-flight `RuntimeTurnCheckpoint` round-tripping —
-/// whose hash validation is backend-specific — is exercised per backend.
+/// checkpoint/usage hydration, queued work claim fencing, attachment manifest
+/// intent/commit/GC reconciliation, lease fencing (claim/renew/abandon/
+/// supersede/expire), lease-guarded journal writes, replay-key journal
+/// idempotency, and atomic final commit that clears the journal only under a
+/// live lease (else preserves resume state). In-flight
+/// `RuntimeTurnCheckpoint` round-tripping — whose hash validation is
+/// backend-specific — is exercised per backend.
 pub async fn runtime_persistence<F>(make: F)
+where
+    F: Fn() -> Arc<dyn RuntimePersistence>,
+{
+    runtime_persistence_with_options(make, RuntimePersistenceConformance::default()).await;
+}
+
+pub async fn runtime_persistence_with_options<F>(make: F, options: RuntimePersistenceConformance)
 where
     F: Fn() -> Arc<dyn RuntimePersistence>,
 {
     commit_increments_head_and_round_trips_agent_frames(make()).await;
     commit_rejects_a_different_session_id(make()).await;
     load_hydrates_checkpoint_and_usage(make()).await;
+    match options.attachment_manifest {
+        AttachmentManifestConformance::Persistent => {
+            attachment_manifest_records_intent_and_commit_stamps(make()).await;
+        }
+        AttachmentManifestConformance::Noop => {
+            noop_attachment_manifest_is_explicit_and_empty(make()).await;
+        }
+    }
+    queued_work_source_keys_are_idempotent_and_list_ordered(make()).await;
+    queued_work_claims_respect_boundaries_renewal_and_abandon(make()).await;
+    queued_work_completion_is_lease_guarded(make()).await;
     journal_is_idempotent_and_cleared_on_final_commit(make()).await;
     active_lease_fences_competing_claims(make()).await;
     superseded_lease_cannot_write_or_clear(make()).await;
@@ -540,6 +813,29 @@ fn effect_record(session_id: &str, turn_id: &str, effect: &str) -> RuntimeEffect
         effect_kind: RuntimeEffectKind::Sleep,
         outcome: RuntimeEffectOutcome::Sleep,
         created_at_epoch_ms: 1,
+    }
+}
+
+fn queued_draft(
+    session_id: &str,
+    text: &str,
+    delivery_policy: DeliveryPolicy,
+    slot_policy: SlotPolicy,
+) -> QueuedWorkBatchDraft {
+    QueuedWorkBatchDraft::new(
+        session_id,
+        delivery_policy,
+        slot_policy,
+        vec![QueuedWorkPayload::turn_input(TurnInput::text(text))],
+    )
+}
+
+fn attachment_intent(id: &str) -> AttachmentIntent {
+    AttachmentIntent {
+        attachment_id: AttachmentId::new(id.to_string()),
+        session_id: "root".to_string(),
+        canonical_uri: format!("sha256:{id}"),
+        intent_at_epoch_ms: 100,
     }
 }
 
@@ -665,6 +961,295 @@ async fn load_hydrates_checkpoint_and_usage(store: Arc<dyn RuntimePersistence>) 
     assert_eq!(checkpoint.plugin_snapshot_revision, Some(12));
     assert_eq!(read.token_ledger.len(), 1);
     assert_eq!(read.token_ledger[0].usage.input_tokens, 11);
+}
+
+async fn attachment_manifest_records_intent_and_commit_stamps(store: Arc<dyn RuntimePersistence>) {
+    let committed_by_runtime = AttachmentId::new("runtime-commit".to_string());
+    let committed_out_of_band = AttachmentId::new("manual-commit".to_string());
+    let orphan = AttachmentId::new("orphan".to_string());
+    for id in [&committed_by_runtime, &committed_out_of_band, &orphan] {
+        store
+            .record_intent(attachment_intent(id.as_str()))
+            .expect("record attachment intent");
+    }
+
+    let mut uncommitted = store
+        .list_uncommitted(200)
+        .expect("list uncommitted attachment intents");
+    uncommitted.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
+    assert_eq!(uncommitted.len(), 3);
+
+    store
+        .commit_refs("root", std::slice::from_ref(&committed_out_of_band))
+        .expect("commit attachment ref out of band");
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[])
+                .with_committed_attachments([committed_by_runtime.clone()]),
+        )
+        .await
+        .expect("runtime commit stamps attachment manifest");
+
+    let still_uncommitted = store
+        .list_uncommitted(200)
+        .expect("list remaining uncommitted attachments");
+    assert_eq!(still_uncommitted.len(), 1);
+    assert_eq!(still_uncommitted[0].attachment_id, orphan);
+    assert!(still_uncommitted[0].committed_at_epoch_ms.is_none());
+
+    store.forget(&orphan).expect("forget orphan attachment");
+    assert!(
+        store
+            .list_uncommitted(200)
+            .expect("list after forget")
+            .is_empty()
+    );
+}
+
+async fn noop_attachment_manifest_is_explicit_and_empty(store: Arc<dyn RuntimePersistence>) {
+    let attachment = AttachmentId::new("noop".to_string());
+    store
+        .record_intent(attachment_intent(attachment.as_str()))
+        .expect("noop record intent succeeds");
+    store
+        .commit_refs("root", std::slice::from_ref(&attachment))
+        .expect("noop commit refs succeeds");
+    assert!(
+        store
+            .list_uncommitted(200)
+            .expect("noop list uncommitted")
+            .is_empty(),
+        "declared no-op attachment manifests must not retain intent rows"
+    );
+    store.forget(&attachment).expect("noop forget succeeds");
+}
+
+async fn queued_work_source_keys_are_idempotent_and_list_ordered(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let first = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "first",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_source_key("source:first"),
+        )
+        .await
+        .expect("enqueue first batch");
+    let replay = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "different replay payload",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_source_key("source:first"),
+        )
+        .await
+        .expect("replay first batch");
+    let second = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "second",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue second batch");
+    store
+        .enqueue_queued_work(queued_draft(
+            "other",
+            "other session",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue other session");
+
+    assert_eq!(
+        first.batch_id, replay.batch_id,
+        "replaying a source key must return the original batch"
+    );
+    assert_eq!(first.items[0].item_id, replay.items[0].item_id);
+    let listed = store
+        .list_queued_work("root")
+        .await
+        .expect("list queued work");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.batch_id.as_str(), second.batch_id.as_str()]
+    );
+    assert!(listed[0].enqueue_seq < listed[1].enqueue_seq);
+}
+
+async fn queued_work_claims_respect_boundaries_renewal_and_abandon(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let after_commit = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "after current commit",
+            DeliveryPolicy::AfterCurrentTurnCommit,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue after-commit work");
+    let earliest = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "earliest",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue earliest work");
+
+    assert!(
+        store
+            .claim_ready_queued_work(
+                "root",
+                "owner-a",
+                QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+                60_000,
+                10,
+            )
+            .await
+            .expect("checkpoint claim")
+            .is_none(),
+        "after-current-commit work at the queue head must wait for the idle boundary"
+    );
+
+    let idle_claim = store
+        .claim_ready_queued_work("root", "owner-a", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .await
+        .expect("idle claim")
+        .expect("idle claim exists");
+    assert_eq!(idle_claim.batches.len(), 1);
+    assert_eq!(idle_claim.batches[0].batch_id, after_commit.batch_id);
+
+    let checkpoint_claim = store
+        .claim_ready_queued_work(
+            "root",
+            "owner-b",
+            QueuedWorkClaimBoundary::ActiveTurnCheckpoint,
+            60_000,
+            10,
+        )
+        .await
+        .expect("checkpoint claim after head is leased")
+        .expect("checkpoint claim exists");
+    assert_eq!(checkpoint_claim.batches[0].batch_id, earliest.batch_id);
+
+    store
+        .abandon_queued_work_claim(&idle_claim)
+        .await
+        .expect("abandon idle claim");
+    let reclaimed = store
+        .claim_ready_queued_work("root", "owner-c", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .await
+        .expect("reclaim abandoned work")
+        .expect("reclaimed work exists");
+    assert_eq!(reclaimed.batches[0].batch_id, after_commit.batch_id);
+    assert!(
+        reclaimed.fencing_token > idle_claim.fencing_token,
+        "reclaiming abandoned work must advance the fencing token"
+    );
+
+    let renewed = store
+        .renew_queued_work_claim(&reclaimed, 60_000)
+        .await
+        .expect("renew queued work claim");
+    assert_eq!(renewed.claim_id, reclaimed.claim_id);
+    assert_eq!(renewed.lease_token, reclaimed.lease_token);
+    assert_eq!(renewed.batches[0].batch_id, reclaimed.batches[0].batch_id);
+    assert!(renewed.expires_at_epoch_ms >= reclaimed.expires_at_epoch_ms);
+}
+
+async fn queued_work_completion_is_lease_guarded(store: Arc<dyn RuntimePersistence>) {
+    let first = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "join one",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("joined".to_string())),
+        )
+        .await
+        .expect("enqueue first joined batch");
+    let second = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "join two",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("joined".to_string())),
+        )
+        .await
+        .expect("enqueue second joined batch");
+    let claim = store
+        .claim_ready_queued_work("root", "owner-a", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .await
+        .expect("claim joined batches")
+        .expect("joined claim exists");
+    assert_eq!(
+        claim
+            .batches
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.batch_id.as_str(), second.batch_id.as_str()]
+    );
+
+    let mut stale_completion = claim.completion();
+    stale_completion.lease_token.push_str(":stale");
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    let err = store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[]).completing_queue_claim(stale_completion),
+        )
+        .await
+        .expect_err("stale queued-work completion must fail");
+    assert!(matches!(err, StoreError::QueuedWorkClaimExpired { .. }));
+    assert_eq!(
+        store
+            .list_queued_work("root")
+            .await
+            .expect("stale completion preserves queued work")
+            .len(),
+        2
+    );
+
+    store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[]).completing_queue_claim(claim.completion()),
+        )
+        .await
+        .expect("valid queued-work completion commits");
+    assert!(
+        store
+            .list_queued_work("root")
+            .await
+            .expect("valid completion clears queued work")
+            .is_empty()
+    );
 }
 
 async fn journal_is_idempotent_and_cleared_on_final_commit(store: Arc<dyn RuntimePersistence>) {
@@ -904,4 +1489,209 @@ async fn expired_final_commit_rejects_and_preserves_resume(store: Arc<dyn Runtim
             .expect("load session")
             .is_none()
     );
+}
+
+// ---------------------------------------------------------------------------
+// AttachmentStore conformance
+// ---------------------------------------------------------------------------
+
+use crate::{
+    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier,
+    LashlangArtifactStore,
+};
+use lash_sansio::{AttachmentCreateMeta, ImageMediaType, MediaType};
+
+/// Run the full [`AttachmentStore`] conformance suite against the backend
+/// produced by `make`. `make` must return a fresh, empty store on each call.
+/// `expected_persistence` is the tier this backend declares (`Ephemeral` for
+/// in-memory, `Durable` for file/SQLite-backed).
+pub fn attachment_store<F>(make: F, expected_persistence: AttachmentStorePersistence)
+where
+    F: Fn() -> Arc<dyn AttachmentStore>,
+{
+    attachment_put_get_round_trips_bytes_and_meta(make());
+    attachment_is_content_addressed(make());
+    attachment_get_unknown_is_not_found(make());
+    attachment_reports_declared_persistence(make(), expected_persistence);
+}
+
+fn attachment_meta() -> AttachmentCreateMeta {
+    AttachmentCreateMeta::new(
+        MediaType::Image(ImageMediaType::Png),
+        Some(7),
+        Some(11),
+        Some("pixel".to_string()),
+    )
+}
+
+fn attachment_put_get_round_trips_bytes_and_meta(store: Arc<dyn AttachmentStore>) {
+    let bytes = vec![1u8, 2, 3, 4, 5];
+    let reference = store
+        .put(bytes.clone(), attachment_meta())
+        .expect("put attachment");
+    let stored = store.get(&reference.id).expect("get attachment");
+
+    assert_eq!(stored.bytes, bytes, "bytes must round-trip unchanged");
+    assert_eq!(stored.meta.id, reference.id);
+    assert_eq!(stored.meta.byte_len, bytes.len() as u64);
+    assert_eq!(
+        stored.meta.media_type,
+        MediaType::Image(ImageMediaType::Png)
+    );
+    assert_eq!(stored.meta.width, Some(7));
+    assert_eq!(stored.meta.height, Some(11));
+    assert_eq!(stored.meta.label.as_deref(), Some("pixel"));
+}
+
+fn attachment_is_content_addressed(store: Arc<dyn AttachmentStore>) {
+    let first = store
+        .put(vec![9u8, 9, 9], attachment_meta())
+        .expect("put first");
+    let same = store
+        .put(vec![9u8, 9, 9], attachment_meta())
+        .expect("put identical bytes");
+    let different = store
+        .put(vec![9u8, 9, 8], attachment_meta())
+        .expect("put different bytes");
+
+    assert_eq!(
+        first.id, same.id,
+        "identical bytes must map to the same content-addressed id"
+    );
+    assert_ne!(
+        first.id, different.id,
+        "different bytes must map to different ids"
+    );
+}
+
+fn attachment_get_unknown_is_not_found(store: Arc<dyn AttachmentStore>) {
+    let err = store
+        .get(&AttachmentId::new("sha256:does-not-exist"))
+        .expect_err("get of an unknown id must fail");
+    assert!(
+        matches!(err, AttachmentStoreError::NotFound(_)),
+        "unknown id must map to NotFound, got {err:?}"
+    );
+}
+
+fn attachment_reports_declared_persistence(
+    store: Arc<dyn AttachmentStore>,
+    expected: AttachmentStorePersistence,
+) {
+    assert_eq!(
+        store.persistence(),
+        expected,
+        "persistence tier must match the backend's declared durability"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// LashlangArtifactStore conformance
+// ---------------------------------------------------------------------------
+
+/// Run the full [`LashlangArtifactStore`] conformance suite against the backend
+/// produced by `make`. `make` must return a fresh, empty store on each call.
+/// `expected_tier` is the tier this backend declares (`Inline` for in-memory,
+/// `Durable` for SQLite-backed).
+pub fn lashlang_artifact_store<F>(make: F, expected_tier: DurabilityTier)
+where
+    F: Fn() -> Arc<dyn LashlangArtifactStore>,
+{
+    artifact_put_get_round_trips(make());
+    artifact_get_unknown_is_none(make());
+    artifact_reports_declared_tier(make(), expected_tier);
+}
+
+fn sample_artifact() -> lashlang::ModuleArtifact {
+    let program = lashlang::parse("process echo(value: str) { finish value }")
+        .expect("sample lashlang module parses");
+    lashlang::ModuleArtifact::from_program(program).expect("module artifact builds")
+}
+
+fn artifact_put_get_round_trips(store: Arc<dyn LashlangArtifactStore>) {
+    let artifact = sample_artifact();
+    store
+        .put_module_artifact(&artifact)
+        .expect("put module artifact");
+    let loaded = store
+        .get_module_artifact(&artifact.module_ref)
+        .expect("get module artifact")
+        .expect("artifact present after put");
+
+    assert_eq!(loaded.module_ref, artifact.module_ref);
+    assert_eq!(loaded.required_surface_ref, artifact.required_surface_ref);
+    assert_eq!(loaded.exports, artifact.exports);
+    // A successful `get` already re-ran `verify()` internally; round-tripping
+    // the bytes again must reproduce the identical store encoding.
+    assert_eq!(
+        loaded.to_store_bytes().expect("re-encode loaded artifact"),
+        artifact
+            .to_store_bytes()
+            .expect("re-encode source artifact"),
+        "stored artifact must round-trip byte-identically"
+    );
+}
+
+fn artifact_get_unknown_is_none(store: Arc<dyn LashlangArtifactStore>) {
+    let unknown = sample_artifact().module_ref;
+    let result = store
+        .get_module_artifact(&unknown)
+        .expect("get of an unknown ref must not error");
+    assert!(
+        result.is_none(),
+        "an unknown module ref must return Ok(None), not a backend error"
+    );
+}
+
+fn artifact_reports_declared_tier(store: Arc<dyn LashlangArtifactStore>, expected: DurabilityTier) {
+    assert_eq!(
+        store.durability_tier(),
+        expected,
+        "durability tier must match the backend"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_memory_attachment_store_satisfies_conformance() {
+        attachment_store(
+            || Arc::new(crate::InMemoryAttachmentStore::new()) as Arc<dyn AttachmentStore>,
+            AttachmentStorePersistence::Ephemeral,
+        );
+    }
+
+    #[test]
+    fn in_memory_lashlang_artifact_store_satisfies_conformance() {
+        lashlang_artifact_store(
+            || {
+                Arc::new(crate::InMemoryLashlangArtifactStore::new())
+                    as Arc<dyn LashlangArtifactStore>
+            },
+            DurabilityTier::Inline,
+        );
+    }
+
+    // The corrupt-bytes rejection path is exercised here rather than in the
+    // shared suite: only the in-memory store exposes a raw-bytes injection
+    // seam (`put_raw_module_artifact_bytes`); durable backends re-verify on
+    // read through the same `ModuleArtifact::from_store_bytes` path.
+    #[test]
+    fn in_memory_artifact_store_rejects_corrupted_bytes_on_read() {
+        let store = crate::InMemoryLashlangArtifactStore::new();
+        let artifact = sample_artifact();
+        store.put_raw_module_artifact_bytes(
+            artifact.module_ref.clone(),
+            b"not an artifact".to_vec(),
+        );
+        let err = store
+            .get_module_artifact(&artifact.module_ref)
+            .expect_err("corrupted stored bytes must be rejected on read");
+        assert!(
+            matches!(err, lashlang::ArtifactStoreError::Decode(_)),
+            "tampered bytes must surface a decode error, got {err:?}"
+        );
+    }
 }

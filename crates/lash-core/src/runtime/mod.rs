@@ -6,10 +6,12 @@ mod effect;
 mod environment;
 mod error;
 mod host;
+mod in_memory_store;
 mod io;
 mod lifecycle;
 mod observation;
 mod process;
+mod process_work_runner;
 mod process_worker;
 mod session_api;
 mod session_manager;
@@ -45,8 +47,9 @@ use crate::plugin::{
 };
 use crate::sansio::{LlmCallError, Response};
 use crate::session_model::{
-    Message, MessageRole, Part, PartKind, PruneState, SessionEvent, SessionPolicy, TokenUsage,
-    fresh_message_id, make_error_event, reassign_part_ids, shared_parts, transport_stream_events,
+    Message, MessageRole, Part, PartKind, PruneState, ResolvedSessionPolicy, SessionEvent,
+    SessionPolicy, TokenUsage, fresh_message_id, make_error_event, reassign_part_ids, shared_parts,
+    transport_stream_events,
 };
 use crate::{
     CheckpointKind, PersistentRuntimeServices, PluginActionInvokeError, PromptHookContext,
@@ -85,30 +88,35 @@ pub use effect::{
     RuntimeReplay, RuntimeScope, RuntimeSubject,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
-pub use error::{RuntimeError, RuntimeErrorCode};
+pub use error::{DurableSubstrateFacet, RuntimeError, RuntimeErrorCode};
 pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeCoreConfig};
+pub use in_memory_store::{InMemorySessionStore, InMemorySessionStoreFactory};
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};
 #[cfg(any(test, feature = "testing"))]
 pub use process::TestLocalProcessRegistry;
 pub use process::{
-    PreparedProcessEventAppend, ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest,
-    ProcessEventAppendResult, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
-    ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessOpScope, ProcessProvenance,
+    PROCESS_LEASE_SCHEMA_VERSION, PreparedProcessEventAppend, ProcessAwaitOutput, ProcessEvent,
+    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSemantics,
+    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
+    ProcessLease, ProcessLeaseCompletion, ProcessListMode, ProcessOpScope, ProcessProvenance,
     ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope, ProcessScopeId,
     ProcessService, ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions,
-    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
-    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
+    ProcessStatus, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
+    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec,
     UnavailableProcessService, current_epoch_ms, epoch_ms_from_system_time,
     lashlang_process_event_types, materialize_process_event_semantics,
     prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
     process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
     process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
 };
+pub use process_work_runner::{
+    InlineProcessRunHandle, ProcessRunHandle, ProcessWorkPoke, ProcessWorkRunner,
+};
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
 pub use session_manager::DirectCompletionClient;
-pub use state::{PersistedSessionSnapshot, RuntimeSessionState, SessionStateEnvelope};
+pub use state::RuntimeSessionState;
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
     apply_session_head, normalize_session_graph,
@@ -134,12 +142,16 @@ pub enum RuntimeTurnPhase {
     EffectLoop,
     FinalizeTurn,
     PersistTurn,
+    FinalCommit,
+    PostPersistHooks,
 }
 
 #[doc(hidden)]
 pub trait RuntimeTurnPhaseProbe: Send + Sync {
     fn begin(&self, phase: RuntimeTurnPhase);
     fn end(&self, phase: RuntimeTurnPhase);
+    fn begin_named(&self, _phase: &str) {}
+    fn end_named(&self, _phase: &str) {}
 }
 
 /// Host-provided per-turn input.
@@ -495,7 +507,7 @@ pub struct TurnIssue {
 /// Canonical high-level turn result returned to hosts.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AssembledTurn {
-    pub state: SessionStateEnvelope,
+    pub state: SessionSnapshot,
     pub outcome: crate::TurnOutcome,
     pub assistant_output: AssistantOutput,
     pub execution: ExecutionSummary,
@@ -817,6 +829,12 @@ impl SessionStoreCreateRequest {
 }
 
 pub trait SessionStoreFactory: Send + Sync {
+    /// Durability tier the stores produced by this factory provide; defaults to
+    /// [`DurabilityTier::Inline`].
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        crate::DurabilityTier::Inline
+    }
+
     fn create_store(
         &self,
         request: &SessionStoreCreateRequest,

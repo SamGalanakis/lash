@@ -71,6 +71,21 @@ pub enum SessionError {
     CodeExecutionUnavailable,
     #[error("code execution runtime exited unexpectedly")]
     CodeExecutionRuntimeStopped,
+    #[error(
+        "provider mismatch for session `{session_id}`: persisted provider `{expected}` does not match live provider `{actual}`"
+    )]
+    ProviderMismatch {
+        expected: String,
+        actual: String,
+        session_id: String,
+    },
+    #[error("provider is not configured for session `{session_id}`")]
+    ProviderUnconfigured { session_id: String },
+    #[error("provider `{provider_id}` is not registered for session `{session_id}`")]
+    ProviderUnavailable {
+        provider_id: String,
+        session_id: String,
+    },
     #[error("protocol error: {0}")]
     Protocol(String),
 }

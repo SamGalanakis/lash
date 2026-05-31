@@ -77,17 +77,19 @@ pub mod direct {
 }
 
 pub mod persistence {
+    pub use lash_core::LashlangArtifactStore;
     pub use lash_core::{
         AttachmentStore, BlobRef, DeliveryPolicy, GcReport, GraphCommitDelta,
-        HydratedSessionCheckpoint, MergeKey, PersistedSessionConfig, PersistedSessionRead,
-        PersistedTurnState, ProtocolEvent, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
-        QueuedWorkClaimBoundary, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
+        HydratedSessionCheckpoint, InMemorySessionStore, InMemorySessionStoreFactory, MergeKey,
+        PersistedSessionConfig, PersistedSessionRead, PersistedTurnState, ProtocolEvent,
+        QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
+        QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
         RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
         RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
         RuntimeEffectJournalRecord, RuntimePersistence, RuntimeSessionState, RuntimeTurnCheckpoint,
         RuntimeTurnCompletion, RuntimeTurnLease, RuntimeTurnMachineConfigSnapshot,
         SessionCheckpoint, SessionEventRecord, SessionGraph, SessionHead, SessionHeadMeta,
-        SessionMeta, SessionNodeRecord, SessionReadScope, SessionReadView, SessionStateEnvelope,
+        SessionMeta, SessionNodeRecord, SessionReadScope, SessionReadView, SessionSnapshot,
         SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, TokenLedgerEntry,
         VacuumReport, load_persisted_session_state, load_persisted_session_state_active_path,
         runtime_turn_checkpoint_hash,
@@ -141,15 +143,16 @@ pub mod advanced {
         EmbeddedRuntimeHost, EventSink, InlineRuntimeEffectController, LashRuntime,
         LlmAttachmentSpec, LlmRequestSpec, NoopEventSink, NoopTurnActivitySink,
         PersistentRuntimeServices, PluginMessage, ProcessHandleDescriptor, ProcessHandleGrant,
-        ProcessHandleGrantEntry, ProcessInput, ProcessOpScope, ProcessRecord, ProcessRegistration,
-        ProcessRegistry, ProcessScope, ProcessScopeId, ProcessService, ProcessSessionDeleteReport,
-        ProcessStartOptions, ProcessWakeDelivery, ProtocolSessionExtensionHandle,
+        ProcessHandleGrantEntry, ProcessInput, ProcessListMode, ProcessOpScope, ProcessRecord,
+        ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessScope, ProcessScopeId,
+        ProcessService, ProcessSessionDeleteReport, ProcessStartOptions, ProcessStatus,
+        ProcessWakeDelivery, ProcessWorkPoke, ProcessWorkRunner, ProtocolSessionExtensionHandle,
         ProtocolTurnOptions, Residency, RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand,
         RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
         RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
         RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode,
         RuntimeHandle, RuntimeInvocation, RuntimeObservation, RuntimeTurnCheckpoint,
-        RuntimeTurnLease, SessionEvent, SessionHandle, SessionPolicy, SessionStateEnvelope,
+        RuntimeTurnLease, SessionEvent, SessionHandle, SessionPolicy, SessionSnapshot,
         TerminationPolicy, TurnCause, TurnContext, TurnFinish, TurnOutcome, TurnStop,
         lashlang_process_event_types, process_wake_input_from_event_payload,
         process_wake_turn_cause, process_wake_turn_text, render_turn_causes_prompt,
@@ -176,12 +179,7 @@ pub mod tracing {
 /// Test helpers for embedders. Enable with `lash = { ..., features = ["testing"] }`
 /// to script model responses in integration tests without a live provider.
 #[cfg(any(test, feature = "testing"))]
-pub mod testing {
-    /// Backend-agnostic conformance suites — validate a custom `ProcessRegistry`
-    /// or `RuntimePersistence` against the trait contract.
-    pub use lash_core::testing::conformance;
-    pub use lash_core::testing::{TestProvider, TestProviderBuilder};
-}
+pub mod testing;
 
 pub mod provider {
     pub use lash_core::provider::{
@@ -190,9 +188,8 @@ pub mod provider {
     };
     pub use lash_core::{
         LlmTimeouts, Provider, ProviderComponents, ProviderFactory, ProviderHandle,
-        ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec,
-        ProviderThinkingPolicy, RequestTimeout, StaticModelPolicy, build_provider,
-        provider_factory, register_provider_factory,
+        ProviderModelPolicy, ProviderOptions, ProviderSpec, ProviderThinkingPolicy, RequestTimeout,
+        StaticModelPolicy,
     };
 }
 

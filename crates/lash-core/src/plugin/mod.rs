@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::runtime::{AssembledTurn, RuntimeSessionState};
+use crate::runtime::AssembledTurn;
 use crate::{
     MessageRole, ProtocolTurnOptions, SessionPolicy, ToolAvailability, ToolDefinition,
     ToolManifest, ToolProvider, ToolResult, TurnInput,
@@ -119,7 +119,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{SessionStateEnvelope, ToolDefinition};
+    use crate::{SessionSnapshot, ToolDefinition};
 
     struct MockToolProvider;
 
@@ -388,7 +388,7 @@ mod tests {
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager::default()),
-                state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
+                state: SessionReadView::from_snapshot(&SessionSnapshot::default()),
                 protocol_turn_options: ProtocolTurnOptions::default(),
                 turn_context: crate::TurnContext::default(),
             })

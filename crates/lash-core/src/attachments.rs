@@ -36,6 +36,19 @@ pub enum AttachmentStorePersistence {
     Durable,
 }
 
+impl AttachmentStorePersistence {
+    /// Map the attachment-store persistence signal onto the shared
+    /// [`DurabilityTier`](crate::DurabilityTier): `Ephemeral -> Inline`,
+    /// `Durable -> Durable`. Lets consistency checks read every wired store's
+    /// tier uniformly without a separate `durability_tier()` method here.
+    pub fn durability_tier(self) -> crate::DurabilityTier {
+        match self {
+            Self::Ephemeral => crate::DurabilityTier::Inline,
+            Self::Durable => crate::DurabilityTier::Durable,
+        }
+    }
+}
+
 pub trait AttachmentStore: Send + Sync {
     fn persistence(&self) -> AttachmentStorePersistence {
         AttachmentStorePersistence::Ephemeral

@@ -1,16 +1,21 @@
 use super::*;
 
 impl CurrentSessionCapability {
-    pub(in crate::runtime) async fn current_snapshot_for_store_write(&self) -> SessionSnapshot {
-        let mut state = self.snapshot.to_snapshot();
-        if let Some(store) = &self.store
-            && let Err(err) =
-                crate::store::refresh_persisted_session_state(store.as_ref(), &mut state).await
-        {
-            tracing::warn!("failed to refresh persisted session state: {err}");
+    pub(in crate::runtime) async fn current_snapshot_for_store_write(
+        &self,
+    ) -> Result<RuntimeSessionState, crate::PluginError> {
+        let mut state = self.snapshot.to_runtime_state();
+        if let Some(store) = &self.store {
+            crate::store::refresh_persisted_session_state(store.as_ref(), &mut state)
+                .await
+                .map_err(|err| {
+                    crate::PluginError::Session(format!(
+                        "failed to refresh persisted session state: {err}"
+                    ))
+                })?;
         }
         super::normalize_session_graph(&mut state);
-        state
+        Ok(state)
     }
 
     pub(in crate::runtime::session_manager) async fn snapshot_by_id(
@@ -19,17 +24,16 @@ impl CurrentSessionCapability {
         session_id: &str,
     ) -> Result<SessionSnapshot, crate::PluginError> {
         if session_id == self.session_id {
-            let mut snapshot = self.snapshot.to_snapshot();
-            super::normalize_session_graph(&mut snapshot);
-            self.enrich_current_snapshot(&mut snapshot);
-            return Ok(snapshot);
+            let mut state = self.snapshot.to_runtime_state();
+            super::normalize_session_graph(&mut state);
+            return Ok(state.to_snapshot());
         }
         let runtime = {
             let registry = managed.registry.lock().await;
             registry.get(session_id).cloned()
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
-        Ok(runtime.observe().persisted_state.clone())
+        Ok(runtime.observe().persisted_state.to_snapshot())
     }
 
     pub(in crate::runtime::session_manager) async fn tool_catalog_by_id(
@@ -68,17 +72,6 @@ impl CurrentSessionCapability {
         Ok(Arc::clone(&observation.tool_catalog))
     }
 
-    pub(in crate::runtime::session_manager) fn enrich_current_snapshot(
-        &self,
-        snapshot: &mut SessionSnapshot,
-    ) {
-        let tool_state = self.plugins.tool_registry().export_state();
-        snapshot.tool_state_generation = Some(tool_state.generation());
-        snapshot.tool_state_snapshot = Some(tool_state);
-        snapshot.plugin_snapshot = self.plugins.snapshot().ok();
-        snapshot.plugin_snapshot_revision = Some(self.plugins.snapshot_revision_fingerprint());
-    }
-
     pub(in crate::runtime::session_manager) fn current_tool_registry(
         &self,
     ) -> Result<Arc<crate::ToolRegistry>, crate::PluginError> {
@@ -88,10 +81,9 @@ impl CurrentSessionCapability {
     pub(in crate::runtime::session_manager) async fn snapshot_current(
         &self,
     ) -> Result<SessionSnapshot, crate::PluginError> {
-        let mut snapshot = self.snapshot.to_snapshot();
-        super::normalize_session_graph(&mut snapshot);
-        self.enrich_current_snapshot(&mut snapshot);
-        Ok(snapshot)
+        let mut state = self.snapshot.to_runtime_state();
+        super::normalize_session_graph(&mut state);
+        Ok(state.to_snapshot())
     }
 
     pub(in crate::runtime::session_manager) async fn snapshot_session(

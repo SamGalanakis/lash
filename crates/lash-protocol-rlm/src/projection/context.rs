@@ -346,3 +346,71 @@ fn tool_call_record_key(record: &ToolCallRecord) -> String {
     }
     serde_json::to_string(record).unwrap_or_else(|_| format!("tool:{}", record.tool))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step_projection(output: &str) -> lash_core::ChronologicalProjection {
+        let entry = RlmTrajectoryEntry {
+            id: "rlm_step_0".to_string(),
+            protocol_iteration: 0,
+            reasoning: "thinking".to_string(),
+            code: "print big".to_string(),
+            output: vec![output.to_string()],
+            tool_call_ids: Vec::new(),
+            images: Vec::new(),
+            error: None,
+            final_output: None,
+        };
+        let events = [lash_core::SessionEventRecord::Protocol(rlm_protocol_event(
+            RlmProtocolEvent::RlmTrajectoryEntry(entry),
+        ))];
+        lash_core::ChronologicalProjection::from_turn_view(
+            &events,
+            &lash_core::MessageSequence::default(),
+            &[],
+        )
+    }
+
+    async fn read_index(value: &HistoryProjectedValue, index: i64) -> FlowValue {
+        match value
+            .read_one(ProjectedReadRequest::Index(FlowValue::Number(index as f64)))
+            .await
+        {
+            ProjectedReadResponse::Value(value) => value,
+            other => panic!("expected indexed value, got {other:?}"),
+        }
+    }
+
+    // The history renderer advertises a `full: history[N].output[M]` reference
+    // for truncated outputs (see `truncated_ref` in driver/history.rs). This
+    // proves the contract resolves: indexing the real `history` projection
+    // hands back the FULL, untruncated value the prompt only previewed.
+    #[tokio::test]
+    async fn history_step_output_resolves_full_untruncated_value() {
+        let full = "X".repeat(50_000);
+        let projection = step_projection(&full);
+        let value = HistoryProjectedValue {
+            projection: Arc::new(rlm_history_projection(&projection)),
+        };
+
+        // history[0] -> the serialized RLM step record.
+        let FlowValue::Record(step) = read_index(&value, 0).await else {
+            panic!("history[0] should be a record");
+        };
+        // history[0].output -> the list of per-print outputs.
+        let Some(FlowValue::List(outputs)) = step.get("output") else {
+            panic!("step record should carry an `output` list, got {step:?}");
+        };
+        // history[0].output[0] -> the full untruncated string.
+        let Some(FlowValue::String(text)) = outputs.first() else {
+            panic!("output[0] should be a string");
+        };
+        assert_eq!(
+            text.as_str(),
+            full.as_str(),
+            "re-fetched value must be the full untruncated output"
+        );
+    }
+}

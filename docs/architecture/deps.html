@@ -33,7 +33,7 @@
             <div class="mermaid">
 flowchart TD
   CLI["lash-cli"] --> Config["LashConfig"]
-  Config --> Providers["ProviderSpec -> ProviderHandle"]
+  Config --> Providers["CLI-local ProviderSpec -> ProviderHandle"]
   Providers --> OpenAI["OpenAI-compatible<br/>Responses + Chat Completions"]
   Providers --> Codex["OpenAI Codex OAuth<br/>chatgpt.com backend responses"]
   Providers --> Anthropic["Anthropic Messages<br/>/v1/messages"]

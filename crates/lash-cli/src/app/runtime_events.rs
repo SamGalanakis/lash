@@ -386,7 +386,26 @@ impl App {
                     self.set_status("queued work", None, true);
                 }
             }
-            TurnEvent::CodeBlockCompleted { .. } | TurnEvent::ToolValue { .. } => {}
+            TurnEvent::CodeBlockCompleted { error, success, .. } => {
+                // The lashlang block itself already rendered on
+                // `CodeBlockStarted`. On failure, surface the error right after
+                // it so a failed block isn't silently swallowed. Observations
+                // are intentionally not rendered here.
+                if let Some(message) = error.filter(|_| !success) {
+                    self.finalize_live_markdown();
+                    let changed_idx = self.timeline.len();
+                    let invalidate_from = self.append_invalidation_start();
+                    self.timeline.push(UiTimelineItem::Error(message));
+                    self.invalidate_height_cache_from(
+                        invalidate_from
+                            .min(changed_idx)
+                            .min(self.timeline.len().saturating_sub(1)),
+                    );
+                    self.mark_visible_output();
+                    self.scroll_to_bottom();
+                }
+            }
+            TurnEvent::ToolValue { .. } => {}
         }
     }
 

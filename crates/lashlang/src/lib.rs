@@ -7,11 +7,11 @@ mod parser;
 mod runtime;
 
 pub use artifact::{
-    ArtifactStoreError, ContentHash, InMemoryLashlangArtifactStore, LASHLANG_COMPILER_VERSION,
-    LASHLANG_SEMANTIC_HASH_VERSION, LASHLANG_VM_ABI_VERSION, LashlangArtifactStore, ModuleArtifact,
-    ModuleArtifactError, ModuleExports, ModuleRef, ProcessRef, RequiredSurfaceRef,
-    SurfaceRequirements, canonical_program_ir, global_in_memory_lashlang_artifact_store,
-    surface_requirements_for_program,
+    ArtifactStoreError, ContentHash, DurabilityTier, InMemoryLashlangArtifactStore,
+    LASHLANG_COMPILER_VERSION, LASHLANG_SEMANTIC_HASH_VERSION, LASHLANG_VM_ABI_VERSION,
+    LashlangArtifactStore, ModuleArtifact, ModuleArtifactError, ModuleExports, ModuleRef,
+    ProcessRef, RequiredSurfaceRef, SurfaceRequirements, canonical_program_ir,
+    global_in_memory_lashlang_artifact_store, surface_requirements_for_program,
 };
 pub use ast::{
     AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ProcessDecl, ProcessParam,
@@ -33,12 +33,12 @@ pub use runtime::{
     CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats, ExecutableProgram,
     ExecutionEnvironment, ExecutionHost, ExecutionHostError, ExecutionMode, ExecutionOutcome,
     ExecutionScratch, ImageValue, LASH_TYPE_KEY, ListValue, ProcessEvent, ProcessEventKind,
-    ProcessSignal, ProcessSleep, ProcessSleepKind, ProcessStart, ProfileReport, ProfileStat,
-    ProjectedBindingError, ProjectedBindings, ProjectedFuture, ProjectedHostValue,
-    ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record, ResourceHandle,
-    ResourceOperation, RuntimeError, RuntimeFailure, Snapshot, State, Value, compile,
-    compile_linked, compile_linked_process, compile_module_artifact_process, compile_process,
-    execute, from_json, prewarm, unwrap_type_value,
+    ProcessSignal, ProcessStart, ProfileReport, ProfileStat, ProjectedBindingError,
+    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
+    ProjectedReadResponse, ProjectedValue, Record, ResourceHandle, ResourceOperation, RuntimeError,
+    RuntimeFailure, Sleep, SleepKind, Snapshot, State, Value, compile, compile_linked,
+    compile_linked_process, compile_module_artifact_process, compile_process, execute, from_json,
+    prewarm, unwrap_type_value,
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {

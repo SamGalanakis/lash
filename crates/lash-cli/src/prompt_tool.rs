@@ -157,7 +157,7 @@ fn ask_tool_definition() -> ToolDefinition {
                     }),
                     &["question"],
                 ),
-                json!({ "type": "object", "additionalProperties": true }),
+                ask_output_schema(),
             )
             .with_examples(vec![
                 "await user.ask({ question: \"Which environment should I use?\", options: [\"staging\", \"prod\"] })?"
@@ -169,6 +169,45 @@ fn ask_tool_definition() -> ToolDefinition {
                     .with_aliases(["prompt_user", "request_input"]),
             )
             .with_scheduling(ToolScheduling::Parallel)
+}
+
+fn ask_output_schema() -> serde_json::Value {
+    json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["text"] },
+                    "text": { "type": "string" }
+                },
+                "required": ["kind", "text"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["single"] },
+                    "selection": { "type": "string" },
+                    "note": { "type": "string" }
+                },
+                "required": ["kind", "selection"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["multi"] },
+                    "selections": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "note": { "type": "string" }
+                },
+                "required": ["kind", "selections"],
+                "additionalProperties": false
+            }
+        ]
+    })
 }
 
 pub(crate) fn cli_ask_plugin_factory(prompt: CliPromptBridge) -> Arc<dyn PluginFactory> {
@@ -270,4 +309,21 @@ fn parse_allow_note(args: &serde_json::Value, has_options: bool) -> Result<bool,
         ));
     }
     Ok(allow_note)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ask_contract_documents_prompt_response_variants() {
+        let definition = ask_tool_definition();
+
+        assert!(definition.contract.output_schema["anyOf"].is_array());
+        let rendered = definition.compact_contract().render_signature();
+        assert!(
+            rendered.contains("selection") || rendered.contains("record"),
+            "{rendered}"
+        );
+    }
 }

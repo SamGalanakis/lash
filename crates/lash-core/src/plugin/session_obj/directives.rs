@@ -127,6 +127,14 @@ impl PluginSession {
         &self,
         request: PrepareTurnRequest,
     ) -> Result<TurnPreparation, PluginError> {
+        self.prepare_turn_with_phase_probe(request, None).await
+    }
+
+    pub async fn prepare_turn_with_phase_probe(
+        &self,
+        request: PrepareTurnRequest,
+        phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
+    ) -> Result<TurnPreparation, PluginError> {
         let PrepareTurnRequest {
             session_id,
             state,
@@ -135,12 +143,15 @@ impl PluginSession {
             turn_context,
         } = request;
         let directives = self
-            .before_turn(TurnHookContext {
-                session_id,
-                state,
-                host: host.clone(),
-                turn_context,
-            })
+            .before_turn_with_phase_probe(
+                TurnHookContext {
+                    session_id,
+                    state,
+                    host: host.clone(),
+                    turn_context,
+                },
+                phase_probe.as_ref(),
+            )
             .await?;
         self.apply_turn_directives(
             directives,
@@ -179,18 +190,30 @@ impl PluginSession {
 
     pub async fn finalize_turn(
         &self,
+        turn: AssembledTurn,
+        host: Arc<dyn RuntimeSessionHost>,
+    ) -> Result<TurnFinalization, PluginError> {
+        self.finalize_turn_with_phase_probe(turn, host, None).await
+    }
+
+    pub async fn finalize_turn_with_phase_probe(
+        &self,
         mut turn: AssembledTurn,
         host: Arc<dyn RuntimeSessionHost>,
+        phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     ) -> Result<TurnFinalization, PluginError> {
         let session_id = turn.state.session_id.clone();
         let directives = if self.contributions.after_turn_hooks.is_empty() {
             Vec::new()
         } else {
-            self.after_turn(TurnResultHookContext {
-                session_id: session_id.clone(),
-                turn: Arc::new(crate::plugin::TurnResultSummary::from_assembled(&turn)),
-                host: host.clone(),
-            })
+            self.after_turn_with_phase_probe(
+                TurnResultHookContext {
+                    session_id: session_id.clone(),
+                    turn: Arc::new(crate::plugin::TurnResultSummary::from_assembled(&turn)),
+                    host: host.clone(),
+                },
+                phase_probe.as_ref(),
+            )
             .await?
         };
         let mut events = Vec::new();
@@ -217,8 +240,11 @@ impl PluginSession {
         }
 
         if self.has_runtime_event_hooks() {
-            self.emit_runtime_event(PluginLifecycleEvent::TurnFinalized(Arc::new(turn.clone())))
-                .await;
+            self.emit_runtime_event_with_phase_probe(
+                PluginLifecycleEvent::TurnFinalized(Arc::new(turn.clone())),
+                phase_probe,
+            )
+            .await;
         }
 
         Ok(TurnFinalization { turn, events })

@@ -128,28 +128,6 @@ pub(crate) async fn wait_for_child_exit(state: &ProcessState, timeout: Duration)
     }
 }
 
-pub(crate) async fn wait_for_pipe_buffer_settle(
-    buffer: &Arc<StdMutex<Vec<u8>>>,
-    output_notify: &Arc<Notify>,
-    quiet_period: Duration,
-) {
-    let mut last_len = buffer.lock().unwrap().len();
-    let mut quiet_until = tokio::time::Instant::now() + quiet_period;
-
-    loop {
-        tokio::select! {
-            _ = output_notify.notified() => {
-                let buffer_len = buffer.lock().unwrap().len();
-                if buffer_len != last_len {
-                    last_len = buffer_len;
-                    quiet_until = tokio::time::Instant::now() + quiet_period;
-                }
-            }
-            _ = tokio::time::sleep_until(quiet_until) => break,
-        }
-    }
-}
-
 pub(crate) fn render_buffer_output(
     id: &str,
     buffer: &Arc<StdMutex<Vec<u8>>>,
@@ -256,7 +234,8 @@ pub(crate) fn spawn_async_reader<R>(
     truncated: Arc<AtomicBool>,
     spill: Arc<StdMutex<Option<ShellOutputSpill>>>,
     output_notify: Arc<Notify>,
-) where
+) -> tokio::task::JoinHandle<()>
+where
     R: AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
@@ -296,7 +275,7 @@ pub(crate) fn spawn_async_reader<R>(
             }
         }
         output_notify.notify_waiters();
-    });
+    })
 }
 
 pub(crate) fn spawn_wait_thread(

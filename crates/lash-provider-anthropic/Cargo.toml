@@ -13,6 +13,13 @@ description = "Anthropic API (Claude) provider for lash."
 keywords = ["lash", "agent", "llm", "anthropic", "claude"]
 categories = ["api-bindings", "asynchronous"]
 
+[features]
+# Enables the cross-provider response-normalization conformance test, which
+# needs `lash-llm-transport`'s `testing` module. On by default so the suite
+# runs under a plain `cargo test`.
+default = ["testing"]
+testing = ["lash-llm-transport/testing"]
+
 [dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.13" }
 lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.13" }

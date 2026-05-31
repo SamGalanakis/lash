@@ -1350,6 +1350,52 @@ mod tests {
     }
 
     #[test]
+    fn compact_tool_contract_resolves_local_refs_in_string_or_list_parameters() {
+        let tool = ToolDefinition::raw_with_id(
+            "tool:search_tools",
+            "search_tools",
+            "Search tools",
+            serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$defs": {
+                    "ModuleFilter": {
+                        "anyOf": [
+                            { "type": "string" },
+                            {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            }
+                        ]
+                    }
+                },
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "module": {
+                        "anyOf": [
+                            { "$ref": "#/$defs/ModuleFilter" },
+                            { "type": "null" }
+                        ]
+                    }
+                },
+                "required": ["query"]
+            }),
+            serde_json::json!({
+                "type": "array",
+                "items": { "type": "object" }
+            }),
+        );
+
+        let signature = tool.compact_contract().render_signature();
+
+        assert!(
+            signature.contains("module?: str | list[str] | null"),
+            "{signature}"
+        );
+        assert!(!signature.contains("module?: any"), "{signature}");
+    }
+
+    #[test]
     fn static_output_contract_keeps_existing_compact_docs_and_serde_shape() {
         let tool = ToolDefinition::raw_with_id(
             "tool:read_text",

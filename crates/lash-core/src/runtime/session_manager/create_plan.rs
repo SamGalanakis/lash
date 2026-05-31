@@ -5,7 +5,7 @@ pub(in crate::runtime::session_manager) struct SessionCreatePlan {
     pub(in crate::runtime::session_manager) relation: SessionRelation,
     pub(in crate::runtime::session_manager) parent_session_id: Option<String>,
     pub(in crate::runtime::session_manager) policy: SessionPolicy,
-    pub(in crate::runtime::session_manager) initial_runtime_state: SessionSnapshot,
+    pub(in crate::runtime::session_manager) initial_runtime_state: RuntimeSessionState,
     pub(in crate::runtime::session_manager) plugin_authority:
         crate::plugin::SessionAuthorityContext,
     pub(in crate::runtime::session_manager) plugin_source: crate::SessionPluginSource,
@@ -32,11 +32,11 @@ pub(in crate::runtime::session_manager) async fn resolve_session_create_plan(
     }
 
     let parent_session_id = request.relation.parent_session_id().map(ToOwned::to_owned);
-    let start_snapshot = resolve_start_snapshot(managed, current, &request, &session_id).await?;
-    let policy = resolve_session_policy(current, &request, &start_snapshot, &session_id);
+    let start_state = resolve_start_state(managed, current, &request, &session_id).await?;
+    let policy = resolve_session_policy(current, &request, &start_state, &session_id);
     request.policy = Some(policy.clone());
     let initial_runtime_state =
-        build_runtime_state(session_id.clone(), &request, start_snapshot, &policy);
+        build_runtime_state(session_id.clone(), &request, start_state, &policy);
     let plugin_authority = crate::plugin::SessionAuthorityContext {
         tool_access: request.tool_access.clone(),
         subagent: request.subagent.clone(),
@@ -56,29 +56,32 @@ pub(in crate::runtime::session_manager) async fn resolve_session_create_plan(
     })
 }
 
-async fn resolve_start_snapshot(
+async fn resolve_start_state(
     managed: &ManagedSessionCapability,
     current: &CurrentSessionCapability,
     request: &SessionCreateRequest,
     session_id: &str,
-) -> Result<SessionSnapshot, crate::PluginError> {
+) -> Result<RuntimeSessionState, crate::PluginError> {
     match &request.start {
-        SessionStartPoint::Empty => Ok(SessionSnapshot {
+        SessionStartPoint::Empty => Ok(RuntimeSessionState {
             session_id: session_id.to_string(),
             ..Default::default()
         }),
-        SessionStartPoint::CurrentSession => Ok(current.snapshot.to_snapshot()),
-        SessionStartPoint::ExistingSession { session_id } => {
-            current.snapshot_by_id(managed, session_id).await
+        SessionStartPoint::CurrentSession => Ok(current.snapshot.to_runtime_state()),
+        SessionStartPoint::ExistingSession { session_id } => current
+            .snapshot_by_id(managed, session_id)
+            .await
+            .map(RuntimeSessionState::from_snapshot),
+        SessionStartPoint::Snapshot { snapshot } => {
+            Ok(RuntimeSessionState::from_snapshot((**snapshot).clone()))
         }
-        SessionStartPoint::Snapshot { snapshot } => Ok((**snapshot).clone()),
     }
 }
 
 fn resolve_session_policy(
     current: &CurrentSessionCapability,
     request: &SessionCreateRequest,
-    start_snapshot: &SessionSnapshot,
+    start_state: &RuntimeSessionState,
     session_id: &str,
 ) -> SessionPolicy {
     let mut policy = request
@@ -86,7 +89,7 @@ fn resolve_session_policy(
         .clone()
         .unwrap_or_else(|| match &request.start {
             SessionStartPoint::Empty => current.policy.clone(),
-            _ => start_snapshot.policy.clone(),
+            _ => start_state.policy.clone(),
         });
     if request.relation.parent_session_id().is_some() {
         policy.session_id = Some(session_id.to_string());
@@ -97,9 +100,9 @@ fn resolve_session_policy(
 fn build_runtime_state(
     session_id: String,
     request: &SessionCreateRequest,
-    mut base: SessionSnapshot,
+    mut base: RuntimeSessionState,
     policy: &SessionPolicy,
-) -> SessionSnapshot {
+) -> RuntimeSessionState {
     normalize_session_graph(&mut base);
     base.session_id = session_id;
     base.policy = policy.clone();

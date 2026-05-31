@@ -2,6 +2,40 @@ fn default_root_session_id() -> String {
     "root".to_string()
 }
 
+#[cfg(test)]
+mod persisted_state_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_state_hydrates_provider_id_without_live_provider_rebinding() {
+        let state = persisted_session_state_from_head(
+            SessionHead {
+                session_id: "stored".to_string(),
+                head_revision: 7,
+                agent_frames: Vec::new(),
+                current_agent_frame_id: String::new(),
+                graph: crate::SessionGraph::default(),
+                config: crate::PersistedSessionConfig {
+                    provider_id: "stored-provider".to_string(),
+                    model: crate::ModelSpec::default(),
+                },
+                checkpoint_ref: None,
+                token_ledger: Vec::new(),
+            },
+            None,
+        );
+
+        assert_eq!(state.policy.recorded_provider_id(), "stored-provider");
+        assert!(
+            state
+                .agent_frames
+                .iter()
+                .all(|frame| frame.assignment.policy.recorded_provider_id() == "stored-provider")
+        );
+        assert_eq!(state.head_revision, Some(7));
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error(
@@ -187,7 +221,7 @@ fn persisted_session_config_from_state(
     state: &crate::RuntimeSessionState,
 ) -> crate::PersistedSessionConfig {
     crate::PersistedSessionConfig {
-        provider_id: state.policy.provider.kind().to_string(),
+        provider_id: state.policy.recorded_provider_id().to_string(),
         model: state.policy.model.clone(),
     }
 }
@@ -766,6 +800,7 @@ fn persisted_session_state_from_head(
         graph_replace_required: false,
     };
     state.policy.model = head.config.model.clone();
+    state.policy.provider_id = head.config.provider_id.clone();
     if let Some(checkpoint) = checkpoint {
         state.turn_index = checkpoint.turn_state.turn_index;
         state.token_usage = checkpoint.turn_state.token_usage;
@@ -834,6 +869,12 @@ impl Default for SessionHeadMeta {
 /// [`NoopAttachmentManifest`]'s blanket helpers.
 #[async_trait::async_trait]
 pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
+    /// Durability tier this session store provides; defaults to
+    /// [`DurabilityTier::Inline`].
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        crate::DurabilityTier::Inline
+    }
+
     async fn load_session(
         &self,
         scope: SessionReadScope,
@@ -968,9 +1009,6 @@ pub async fn refresh_persisted_session_state(
     state: &mut crate::RuntimeSessionState,
 ) -> Result<(), StoreError> {
     if let Some(mut fresh) = load_persisted_session_state(store).await? {
-        // The store owns persisted graph/checkpoint/config state, but not
-        // live provider credentials or other runtime-only policy fields.
-        fresh.policy.provider = state.policy.provider.clone();
         fresh.policy.session_id = state.policy.session_id.clone();
         fresh.policy.max_turns = state.policy.max_turns;
         *state = fresh;

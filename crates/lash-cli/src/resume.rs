@@ -149,11 +149,10 @@ async fn apply_graph_resume_state(
     if graph.heal_orphaned_leaf() {
         tracing::warn!("session graph leaf was orphaned on resume; healed to most recent message");
     }
-    let read_view =
-        lash_core::SessionReadView::from_exported_state(&lash_core::SessionStateEnvelope {
-            session_graph: graph.clone(),
-            ..lash_core::SessionStateEnvelope::default()
-        });
+    let read_view = lash_core::SessionReadView::from_snapshot(&lash_core::SessionSnapshot {
+        session_graph: graph.clone(),
+        ..lash_core::SessionSnapshot::default()
+    });
     let messages = read_view.messages().to_vec();
     let _tool_calls = read_view.tool_calls().to_vec();
     *history = messages.clone();
@@ -163,11 +162,14 @@ async fn apply_graph_resume_state(
         .and_then(|checkpoint| checkpoint.tool_state.clone())
         && let Some(session) = runtime.as_ref()
     {
+        // Cold resume restores the persisted snapshot verbatim (adopting its
+        // generation), not a generation-checked delta — a session whose tool
+        // surface reached generation ≥ 2 would be rejected by `apply_state`.
         let _ = session
             .control()
             .tools()
             .advanced()
-            .apply_state(tool_state)
+            .restore_state(tool_state)
             .await;
         if let Ok(state) = session.control().tools().state().await {
             *desired_tool_state = state;

@@ -35,7 +35,12 @@ use crate::routes::{
 };
 use crate::state::{AgentServiceDurability, AppStateData, anyhow_like};
 #[cfg(feature = "restate")]
-use lash_restate::{LashProcessWorkflow, LashProcessWorkflowImpl, RestateCoreProcessRunner};
+use lash::advanced::ProcessWorkRunner;
+#[cfg(feature = "restate")]
+use lash_restate::{
+    LashProcessWorkflow, LashProcessWorkflowImpl, RestateCoreProcessRunner,
+    RestateProcessIngressRunner,
+};
 
 #[tokio::main]
 async fn main() -> anyhow_like::Result<()> {
@@ -84,6 +89,12 @@ async fn main() -> anyhow_like::Result<()> {
     let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         data_dir.join("lash-sessions"),
     ));
+    // Deployment-level Lashlang artifact store (compiled module cache), shared
+    // across the session tree and durable in SQLite.
+    let artifact_store = Arc::new(
+        lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
+            .map_err(|err| err.to_string())?,
+    ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
     let app_db = AppDb::open(&data_dir.join("app.db")).map_err(|err| err.to_string())?;
     #[cfg(feature = "restate")]
     let shared_db = Arc::new(Mutex::new(app_db));
@@ -104,6 +115,7 @@ async fn main() -> anyhow_like::Result<()> {
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )))
+        .lashlang_artifact_store(artifact_store)
         .trace_sink(Some(Arc::new(TeeTraceSink::new([
             Arc::new(StderrTraceSink::default()) as Arc<dyn TraceSink>,
             Arc::new(JsonlTraceSink::new(trace_path)),
@@ -113,6 +125,18 @@ async fn main() -> anyhow_like::Result<()> {
         lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
             .map_err(|err| err.to_string())?,
     ) as Arc<dyn lash::advanced::ProcessRegistry>;
+    // Durable tier: a ProcessWorkRunner over a Restate ingress-client run handle
+    // drives the registry's non-terminal rows to terminal by ingress-submitting
+    // their LashProcessWorkflow (folding in the former startup-only recovery
+    // sweep as its first tick). The Local tier gets the default inline runner
+    // for free — LashCore lazily spawns it on first session open.
+    #[cfg(feature = "restate")]
+    let process_work_runner = (durability == AgentServiceDurability::Restate).then(|| {
+        ProcessWorkRunner::new(Arc::new(RestateProcessIngressRunner::new(
+            restate_ingress_url.clone(),
+            Arc::clone(&process_registry),
+        )))
+    });
     let core = match durability {
         AgentServiceDurability::Local => core_builder
             .advanced()
@@ -123,9 +147,23 @@ async fn main() -> anyhow_like::Result<()> {
         AgentServiceDurability::Restate => {
             #[cfg(feature = "restate")]
             {
+                // Base controller for turns that run outside a Restate
+                // workflow scope; durable turns pass a scoped controller per
+                // turn via `stream_with_effect_scope`. The Restate ingress
+                // runner is the sole executor of out-of-turn/background
+                // processes, so disable the default inline runner and hand the
+                // core its poke (fired after every successful process start).
                 core_builder
                     .advanced()
+                    .effect_controller(Arc::new(InlineRuntimeEffectController::default()))
                     .process_registry(Arc::clone(&process_registry))
+                    .disable_default_process_work_runner()
+                    .with_process_work_runner(
+                        process_work_runner
+                            .as_ref()
+                            .expect("process work runner configured for Restate")
+                            .poke_handle(),
+                    )
                     .build()
                     .map_err(|err| err.to_string())?
             }
@@ -172,7 +210,11 @@ async fn main() -> anyhow_like::Result<()> {
         let endpoint = restate_sdk::endpoint::Endpoint::builder()
             .bind(AgentServiceTurnWorkflowImpl::new(state.clone()).serve())
             .bind(
-                LashProcessWorkflowImpl::new(process_runner, Arc::clone(&process_registry)).serve(),
+                LashProcessWorkflowImpl::new(
+                    Arc::clone(&process_runner),
+                    Arc::clone(&process_registry),
+                )
+                .serve(),
             )
             .build();
         tokio::spawn(async move {
@@ -180,6 +222,14 @@ async fn main() -> anyhow_like::Result<()> {
                 .listen_and_serve(restate_endpoint_addr)
                 .await;
         });
+        // Spawn the wake-driven runner after the workflow endpoint is bound so
+        // its first tick (which folds in the former startup-only recovery
+        // sweep) ingress-submits onto a registered LashProcessWorkflow. The
+        // runner then drives the registry's non-terminal rows on every poke and
+        // poll tick, lease-fencing each submit so a process runs exactly once.
+        process_work_runner
+            .expect("process work runner configured for Restate")
+            .spawn();
         println!("agent-service Restate endpoint listening on http://{restate_endpoint_addr}");
     }
 

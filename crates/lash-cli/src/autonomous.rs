@@ -221,7 +221,7 @@ pub(crate) async fn run_autonomous(
     if persistence.await_background_work {
         session.control().state().await_background_work().await?;
         let state = session.control().state().persist_current().await?;
-        done.result.state = state.into_envelope();
+        done.result.state = state.to_snapshot();
     }
     let cumulative_usage = session.usage_report();
     if let Some(path) = &persistence.turn_usage_json {

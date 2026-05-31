@@ -603,7 +603,7 @@ submit {
   second: results.second.value.claim,
   llm: results.llm.value.text,
   probe: results.probe.value,
-  tools: len(keys(handles.tool))
+  tools: len(handles)
 }
 "#
         }
@@ -630,14 +630,14 @@ agent = start spawn_child(task: "inspect carry-forward", capability: "explore")
 handles = await processes.list({})?
 frame = await control.continue_as({
   task: "continue from compact state",
-  seed: {
-    projected_problem: proj.text,
-    nested_projected: { body: proj.json },
-    computed_summary: format("{0}:{1}", ctx.user, len(history)),
-    live_agent: handles.tool.spawn_one,
-    started_agent: agent
-  }
-})?
+    seed: {
+      projected_problem: proj.text,
+      nested_projected: { body: proj.json },
+      computed_summary: format("{0}:{1}", ctx.user, len(history)),
+      live_agent: handles[0],
+      started_agent: agent
+    }
+  })?
 submit {
   frame_id: frame.frame_id,
   task: frame.task,
@@ -1407,22 +1407,24 @@ fn process_handles_record() -> Value {
     let mut chunk_1 = Record::default();
     chunk_1.insert("__handle__".to_string(), Value::String("process".into()));
     chunk_1.insert("id".to_string(), Value::String("spawn-one".into()));
+    chunk_1.insert("process_id".to_string(), Value::String("spawn-one".into()));
     chunk_1.insert("tool".to_string(), Value::String("spawn_child".into()));
     chunk_1.insert("value".to_string(), spawn_child_value("inspect auth"));
 
     let mut chunk_2 = Record::default();
     chunk_2.insert("__handle__".to_string(), Value::String("process".into()));
     chunk_2.insert("id".to_string(), Value::String("spawn-two".into()));
+    chunk_2.insert("process_id".to_string(), Value::String("spawn-two".into()));
     chunk_2.insert("tool".to_string(), Value::String("spawn_child".into()));
     chunk_2.insert("value".to_string(), spawn_child_value("inspect api"));
 
-    let mut tool = Record::default();
-    tool.insert("spawn_one".to_string(), Value::Record(Arc::new(chunk_1)));
-    tool.insert("spawn_two".to_string(), Value::Record(Arc::new(chunk_2)));
-
-    let mut out = Record::default();
-    out.insert("tool".to_string(), Value::Record(Arc::new(tool)));
-    Value::Record(Arc::new(out))
+    Value::List(
+        vec![
+            Value::Record(Arc::new(chunk_1)),
+            Value::Record(Arc::new(chunk_2)),
+        ]
+        .into(),
+    )
 }
 
 fn spawn_child_value(name: &str) -> Value {

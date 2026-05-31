@@ -259,6 +259,9 @@ fn render_language_section(
     if has_operations {
         bullets.push("- Module operations: call host capabilities through documented lowercase module paths, e.g. `await agents.spawn({ task: task })?`, `await web.search({ query: q })?`, or `await gmail.work.send({ to: to, body: body })?`. Bare calls are builtins only, not tools. `?` aborts the block with sanitized operation metadata if the operation fails.".to_string());
     }
+    if abilities.sleep {
+        bullets.push("- Sleep: pause foreground code or process code with `sleep for \"5s\"` or `sleep until deadline`. Durations accept milliseconds, `ms`, `s`, `m`, or `h`; deadlines accept RFC3339 text or Unix epoch milliseconds.".to_string());
+    }
     if abilities.processes {
         let mut forms = vec![
             "`yield value`",
@@ -266,10 +269,6 @@ fn render_language_section(
             "`finish value`",
             "`fail value`",
         ];
-        if abilities.process_sleep {
-            forms.push("`sleep for \"5s\"`");
-            forms.push("`sleep until deadline`");
-        }
         if abilities.process_signals {
             forms.push("`payload = wait signal`");
             forms.push("`signal run handle with payload`");

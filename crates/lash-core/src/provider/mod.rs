@@ -1,27 +1,27 @@
-//! Provider components and registry for pluggable LLM backends.
+//! Provider components for pluggable LLM backends.
 //!
 //! A provider is split into narrow capabilities: configured state,
 //! request transport, failure classification, and model policy.
 //! [`ProviderHandle`] owns those components and is the executable handle
-//! stored by session policy and host config.
+//! installed by the host for a running session.
 //!
-//! Serialization: [`ProviderHandle`] is the owning handle that
-//! [`SessionPolicy`] stores. It round-trips through [`ProviderSpec`] —
-//! a `{ "type": kind, …config }` JSON object whose shape matches the
-//! legacy `#[serde(tag = "type")]` enum exactly, so existing
-//! `~/.lash/config.json` files load without migration.
+//! [`ProviderSpec`] is only a host/config-file data shape. Runtime
+//! persistence records provider identity separately and never rebuilds a
+//! [`ProviderHandle`] from disk.
 
+mod factory;
 mod handle;
 mod model_policy;
 mod options;
 mod rate_limit;
-mod registry;
+mod resolver;
 mod spec;
 mod support;
 #[cfg(test)]
 mod tests;
 mod traits;
 
+pub use factory::ProviderFactory;
 pub use handle::{ProviderComponents, ProviderHandle, UnconfiguredProvider};
 pub use model_policy::StaticModelPolicy;
 pub use options::{
@@ -31,8 +31,9 @@ pub use options::{
     ResolvedGenerationPolicy, resolve_generation_policy,
 };
 pub use rate_limit::{ProviderRateLimitPermit, ProviderRateLimiter};
-pub use registry::{
-    ProviderFactory, ProviderRegistry, build_provider, provider_factory, register_provider_factory,
+pub use resolver::{
+    EmptyProviderResolver, MapProviderResolver, ProviderResolutionError, RuntimeProviderResolver,
+    SingleProviderResolver,
 };
 pub use spec::ProviderSpec;
 pub use traits::{

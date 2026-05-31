@@ -197,6 +197,58 @@ pub fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_
     })
 }
 
+pub fn path_entry_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string" },
+            "kind": { "type": "string", "enum": ["file", "dir", "symlink", "other"] },
+            "size_bytes": { "type": "integer", "minimum": 0 },
+            "lines": {
+                "anyOf": [
+                    { "type": "integer", "minimum": 0 },
+                    { "type": "null" }
+                ]
+            },
+            "modified_at": {
+                "type": "string",
+                "description": "Modification timestamp formatted as RFC3339 UTC."
+            }
+        },
+        "required": ["path", "kind", "size_bytes", "lines", "modified_at"],
+        "additionalProperties": false,
+    })
+}
+
+pub fn filesystem_entries_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": path_entry_output_schema()
+            },
+            "truncated": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "shown": { "type": "integer", "minimum": 0 },
+                            "total": { "type": "integer", "minimum": 0 },
+                            "omitted": { "type": "integer", "minimum": 0 }
+                        },
+                        "required": ["shown", "total", "omitted"],
+                        "additionalProperties": false
+                    },
+                    { "type": "null" }
+                ]
+            }
+        },
+        "required": ["items", "truncated"],
+        "additionalProperties": false,
+    })
+}
+
 pub fn agent_surface(
     module_path: impl IntoIterator<Item = impl Into<String>>,
     operation: impl Into<String>,

@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use lash::{ModeId, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput};
-use lash_core::{SessionPolicy, SessionStateEnvelope};
+use lash_core::{SessionPolicy, SessionSnapshot};
 use lash_tui_extensions::{
     KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers,
 };
@@ -224,10 +224,10 @@ impl UiSnapshotWorker {
     }
 }
 
-pub(super) fn cleared_session_state(policy: SessionPolicy) -> SessionStateEnvelope {
-    SessionStateEnvelope {
+pub(super) fn cleared_session_state(policy: SessionPolicy) -> SessionSnapshot {
+    SessionSnapshot {
         policy,
-        ..SessionStateEnvelope::default()
+        ..SessionSnapshot::default()
     }
 }
 

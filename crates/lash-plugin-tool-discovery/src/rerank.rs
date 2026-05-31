@@ -5,7 +5,7 @@ use lash_core::{
 };
 use serde_json::{Value, json};
 
-use crate::common::{DEFAULT_LLM_RERANK_MODEL, tokenize};
+use crate::common::tokenize;
 
 /// Domain-specific intent reranking applied to candidate tools *after* the
 /// generic lexical/semantic ranker produces them. The BM25 scorer is kept
@@ -103,16 +103,9 @@ pub(crate) fn llm_rerank_request(
     args: &Value,
     candidates: &[Value],
     limit: usize,
+    model: String,
+    model_variant: Option<String>,
 ) -> DirectRequest {
-    let model = std::env::var("LASH_TOOL_SEARCH_LLM_MODEL")
-        .map(|value| value.trim().to_string())
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_LLM_RERANK_MODEL.to_string());
-    let model_variant = std::env::var("LASH_TOOL_SEARCH_LLM_VARIANT")
-        .map(|value| value.trim().to_string())
-        .ok()
-        .filter(|value| !value.is_empty());
     let candidate_names = candidates
         .iter()
         .filter_map(|candidate| candidate.get("name").and_then(Value::as_str))
@@ -278,15 +271,16 @@ mod tests {
             json!({"name": "search_web", "signature": "await web.search({ query: str })? -> record", "description": "Search web"}),
         ];
 
-        let request = llm_rerank_request(&json!({"query": "find docs"}), &candidates, 2);
-
-        assert_eq!(
-            request.model,
-            std::env::var("LASH_TOOL_SEARCH_LLM_MODEL")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| DEFAULT_LLM_RERANK_MODEL.to_string())
+        let request = llm_rerank_request(
+            &json!({"query": "find docs"}),
+            &candidates,
+            2,
+            "parent-model".to_string(),
+            Some("parent-variant".to_string()),
         );
+
+        assert_eq!(request.model, "parent-model");
+        assert_eq!(request.model_variant.as_deref(), Some("parent-variant"));
         let DirectOutputSpec::JsonSchema(schema) = request.output else {
             panic!("expected json schema output");
         };
@@ -355,6 +349,8 @@ mod tests {
             &json!({"query": "", "exclude": ["read_file"]}),
             &candidates,
             1,
+            "parent-model".to_string(),
+            None,
         );
 
         assert!(

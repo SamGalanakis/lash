@@ -181,6 +181,13 @@ impl PluginHost {
             parent_session_id,
         };
         let session_id = ctx.session_id.clone();
+        let mut tool_snapshot = tool_snapshot;
+        if let Some(snapshot) = &mut tool_snapshot {
+            let hidden_tools = &authority.tool_access.hidden_tools;
+            if !hidden_tools.is_empty() {
+                snapshot.retain(|name, _| !hidden_tools.contains(name));
+            }
+        }
         let mut plugins = Vec::new();
         let mut reg = PluginRegistrar::new();
         for factory in self.factories() {

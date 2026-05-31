@@ -942,11 +942,11 @@ impl Compiler {
             },
             Expr::SleepFor(duration) => {
                 self.compile_expr(duration);
-                self.code.push(Instruction::ProcessSleepFor);
+                self.code.push(Instruction::SleepFor);
             }
             Expr::SleepUntil(deadline) => {
                 self.compile_expr(deadline);
-                self.code.push(Instruction::ProcessSleepUntil);
+                self.code.push(Instruction::SleepUntil);
             }
             Expr::WaitSignal => {
                 self.code.push(Instruction::ProcessWaitSignal);

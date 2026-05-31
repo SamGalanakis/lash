@@ -25,12 +25,10 @@ use crate::output::{
     OUTPUT_QUIET_PERIOD_MS, PollOutcome, ProcessState, ShellOutputSpill, activate_spill,
     clean_terminal_output, exit_status_code, kill_child, progress_chunk, render_buffer_output,
     spawn_async_reader, spawn_reader_thread, spawn_wait_thread, terminate_pipe_process,
-    truncate_exec_output, wait_for_buffer_settle, wait_for_child_exit, wait_for_pipe_buffer_settle,
+    truncate_exec_output, wait_for_buffer_settle, wait_for_child_exit,
 };
 
 pub(crate) const DEFAULT_EXEC_COMMAND_TIMEOUT_MS: u64 = 10 * 60 * 1000;
-pub(crate) const DEFAULT_START_COMMAND_POLL_MS: u64 = 250;
-pub(crate) const DEFAULT_WRITE_STDIN_POLL_MS: u64 = 250;
 const DEFAULT_PTY_SIZE: PtySize = PtySize {
     rows: 24,
     cols: 80,
@@ -92,7 +90,6 @@ pub(crate) struct StartCommandParams {
     pub(crate) shell_path: String,
     pub(crate) login: bool,
     pub(crate) allow_nonzero_exit: bool,
-    pub(crate) poll_ms: u64,
     pub(crate) max_output_tokens: Option<usize>,
 }
 
@@ -285,17 +282,6 @@ impl ShellRuntime {
             output_notify: Arc::clone(&proc.output_notify),
             killer: Arc::clone(&proc.killer),
         })
-    }
-
-    pub(crate) fn output_state(&self, id: &str) -> Result<(usize, usize), String> {
-        let procs = self.processes.lock().unwrap();
-        let proc = procs
-            .get(id)
-            .ok_or_else(|| format!("No process with id: {id}"))?;
-        let buffer_len = proc.buffer.lock().unwrap().len();
-        let buffer_start = *proc.buffer_start.lock().unwrap();
-        let read_cursor = *proc.read_cursor.lock().unwrap();
-        Ok((buffer_start + buffer_len, read_cursor))
     }
 
     fn take_incremental_output(
@@ -560,9 +546,10 @@ impl ShellRuntime {
         let truncated = Arc::new(AtomicBool::new(false));
         let spill = Arc::new(StdMutex::new(None));
         let output_notify = Arc::new(Notify::new());
+        let mut reader_handles = Vec::new();
 
         if let Some(stdout) = stdout {
-            spawn_async_reader(
+            reader_handles.push(spawn_async_reader(
                 id.to_string(),
                 stdout,
                 Arc::clone(&buffer),
@@ -570,10 +557,10 @@ impl ShellRuntime {
                 Arc::clone(&truncated),
                 Arc::clone(&spill),
                 Arc::clone(&output_notify),
-            );
+            ));
         }
         if let Some(stderr) = stderr {
-            spawn_async_reader(
+            reader_handles.push(spawn_async_reader(
                 id.to_string(),
                 stderr,
                 Arc::clone(&buffer),
@@ -581,7 +568,7 @@ impl ShellRuntime {
                 Arc::clone(&truncated),
                 Arc::clone(&spill),
                 Arc::clone(&output_notify),
-            );
+            ));
         }
 
         let deadline = timeout.map(|value| tokio::time::Instant::now() + value);
@@ -595,6 +582,7 @@ impl ShellRuntime {
             {
                 terminate_pipe_process(child_pid);
                 let _ = tokio::time::timeout(Duration::from_millis(500), &mut wait_handle).await;
+                wait_for_pipe_readers(&mut reader_handles).await;
                 return Ok(PollOutcome::Cancelled);
             }
 
@@ -613,12 +601,7 @@ impl ShellRuntime {
             {
                 terminate_pipe_process(child_pid);
                 let _ = tokio::time::timeout(Duration::from_millis(500), &mut wait_handle).await;
-                wait_for_pipe_buffer_settle(
-                    &buffer,
-                    &output_notify,
-                    Duration::from_millis(OUTPUT_QUIET_PERIOD_MS),
-                )
-                .await;
+                wait_for_pipe_readers(&mut reader_handles).await;
                 let (output, original_token_count, full_output_path) = render_buffer_output(
                     id,
                     &buffer,
@@ -648,7 +631,7 @@ impl ShellRuntime {
                             .map_err(|err| format!("Wait task failed: {err}"))?
                             .map(exit_status_code)
                             .unwrap_or(-1);
-                        wait_for_pipe_buffer_settle(&buffer, &output_notify, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)).await;
+                        wait_for_pipe_readers(&mut reader_handles).await;
                         let (output, original_token_count, full_output_path) = render_buffer_output(
                             id,
                             &buffer,
@@ -675,7 +658,7 @@ impl ShellRuntime {
                             .map_err(|err| format!("Wait task failed: {err}"))?
                             .map(exit_status_code)
                             .unwrap_or(-1);
-                        wait_for_pipe_buffer_settle(&buffer, &output_notify, Duration::from_millis(OUTPUT_QUIET_PERIOD_MS)).await;
+                        wait_for_pipe_readers(&mut reader_handles).await;
                         let (output, original_token_count, full_output_path) = render_buffer_output(
                             id,
                             &buffer,
@@ -696,6 +679,12 @@ impl ShellRuntime {
                 }
             }
         }
+    }
+}
+
+async fn wait_for_pipe_readers(handles: &mut Vec<tokio::task::JoinHandle<()>>) {
+    for handle in handles.drain(..) {
+        let _ = tokio::time::timeout(Duration::from_millis(500), handle).await;
     }
 }
 

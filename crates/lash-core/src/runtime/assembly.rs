@@ -17,7 +17,6 @@ use crate::llm::types::{
 use crate::session_model::{MessageRole, PartKind, SessionEvent, TokenUsage};
 use crate::{TurnFinish, TurnOutcome, TurnStop};
 
-use super::state::SessionStateEnvelope;
 use super::usage::TokenLedgerEntry;
 use super::{
     AssembledTurn, AssistantOutput, ExecutionSummary, OutputState, TerminationPolicy, TurnActivity,
@@ -600,7 +599,7 @@ impl TurnAssembler {
 
     pub(super) fn finish(
         mut self,
-        state: SessionStateEnvelope,
+        state: crate::SessionSnapshot,
         interrupted: bool,
         force_runtime_error: Option<TurnIssue>,
         termination: &TerminationPolicy,
@@ -734,7 +733,7 @@ fn render_submitted_value_for_output(value: &serde_json::Value) -> String {
     }
 }
 
-pub(super) fn recovered_assistant_output_from_state(state: &SessionStateEnvelope) -> String {
+pub(super) fn recovered_assistant_output_from_state(state: &crate::SessionSnapshot) -> String {
     let read_model = state.read_model();
     let messages = read_model.messages.as_slice();
     let latest_user_message_idx = messages

@@ -4,10 +4,14 @@ impl RuntimeSessionManager {
     pub(in crate::runtime::session_manager::process_runners) async fn run_process_session_turn(
         &self,
         registration: crate::ProcessRegistration,
-        create_request: crate::SessionCreateRequest,
+        mut create_request: crate::SessionCreateRequest,
         turn_input: crate::TurnInput,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
+        // `ProcessInput::SessionTurn` is durable input. Its `create_request`
+        // carries only persisted policy, so fill an omitted provider_id from
+        // the parent runtime policy before the child session is built.
+        self.inherit_session_turn_provider_id(&mut create_request);
         let child = match self
             .managed
             .create_session(&self.current, &self.usage, create_request)
@@ -64,6 +68,15 @@ impl RuntimeSessionManager {
                     err.to_string(),
                 )),
             ),
+        }
+    }
+
+    fn inherit_session_turn_provider_id(&self, create_request: &mut crate::SessionCreateRequest) {
+        let Some(policy) = create_request.policy.as_mut() else {
+            return;
+        };
+        if policy.recorded_provider_id().is_empty() {
+            policy.provider_id = self.current.policy.provider_id.clone();
         }
     }
 }

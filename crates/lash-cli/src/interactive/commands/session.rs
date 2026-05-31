@@ -81,7 +81,7 @@ fn fallback_policy_for_session_switch(
     )
     .unwrap_or_else(|_| lash_core::ModelSpec::default());
     SessionPolicy {
-        provider: provider.clone(),
+        provider_id: provider.kind().to_string(),
         model,
         ..SessionPolicy::default()
     }

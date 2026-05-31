@@ -4,7 +4,7 @@ use lash::{
     LashCore, ModeId, ModePreset,
     advanced::{PluginMessage, TurnOutcome},
     messages::MessageRole,
-    persistence::SessionStateEnvelope,
+    persistence::SessionSnapshot,
     plugins::{PluginSpec, StaticPluginFactory},
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
 };
@@ -18,7 +18,6 @@ use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
 use super::openai_compat::OpenAiCompatBenchServer;
 use super::providers::{
     BenchmarkEchoTool, BenchmarkLargeToolSurface, benchmark_provider, benchmark_stream_profile,
-    register_benchmark_provider_factory,
 };
 use super::scenarios::RuntimePerfScenario;
 use super::store::{RuntimePerfStore, RuntimePerfStoreFactory};
@@ -161,7 +160,7 @@ impl BenchmarkRuntime {
         Ok(())
     }
 
-    pub(crate) async fn export_state(&self) -> SessionStateEnvelope {
+    pub(crate) async fn export_state(&self) -> SessionSnapshot {
         self.session
             .as_ref()
             .expect("benchmark session")
@@ -400,7 +399,6 @@ pub(crate) async fn build_runtime_with_store(
     scenario: RuntimePerfScenario,
     store: Option<Arc<RuntimePerfStore>>,
 ) -> anyhow::Result<BenchmarkRuntime> {
-    register_benchmark_provider_factory();
     let execution_mode = scenario.execution_mode();
     let standard_context_approach = scenario.standard_context_approach();
     let openai_compat_server = if matches!(scenario, RuntimePerfScenario::OpenAiCompatStream) {
@@ -451,11 +449,17 @@ pub(crate) async fn build_runtime_with_store(
         .default_mode(mode_id.clone())
         .provider(provider)
         .model(benchmark_model_spec())
-        .process_registry(Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::memory()
-                .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-        ))
+        .in_memory_stores()
         .plugins(plugin_stack);
+    // RlmGlobals profiles live per-turn projected bindings. Store-backed turns
+    // reject live mode extensions because they cannot be checkpointed/resumed,
+    // and a durable process registry now requires a durable store factory. This
+    // scenario does not exercise process handles, so leave the registry absent
+    // instead of making the scenario unrunnable.
+    if !matches!(scenario, RuntimePerfScenario::RlmGlobals) {
+        builder =
+            builder.process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default()));
+    }
     if scenario.execution_mode() == ModeId::rlm() {
         builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);
     }
@@ -491,7 +495,6 @@ pub(crate) async fn build_runtime_with_sqlite_store(
     scenario: RuntimePerfScenario,
     root: PathBuf,
 ) -> anyhow::Result<BenchmarkRuntime> {
-    register_benchmark_provider_factory();
     let mode_id = scenario.execution_mode();
     let provider = benchmark_provider(scenario).into_handle();
     let mut plugin_stack = standard_tool_stack(StandardToolStackOptions {
@@ -511,6 +514,7 @@ pub(crate) async fn build_runtime_with_sqlite_store(
         .default_mode(mode_id.clone())
         .provider(provider)
         .model(benchmark_model_spec())
+        .in_memory_stores()
         .process_registry(Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
@@ -709,6 +713,18 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::ToolDiscoverySearch => format!(
             "Turn {} in standard mode. Search the catalog for Gmail email tools, then reply with exactly: runtime perf benchmark ok",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::OpenAiResponsesSseParse => format!(
+            "Turn {} in OpenAI Responses SSE parser benchmark mode. Parse a local Responses stream and verify the benchmark marker.",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::DirectLlmClient => format!(
+            "Turn {} in direct LLM client benchmark mode. Run a direct structured completion and verify the benchmark marker.",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::ProcessListStress => format!(
+            "Turn {} in process-list stress benchmark mode. Compare live process listing with explicit full history and verify the benchmark marker.",
             turn_index + 1
         ),
         RuntimePerfScenario::RlmProcessHandles => format!(

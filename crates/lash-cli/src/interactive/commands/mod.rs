@@ -17,6 +17,40 @@ pub(super) enum ParsedSlashCommand {
     Ui(TuiSlashInvocation),
 }
 
+/// The mutable interactive-loop state a slash command may touch.
+///
+/// Bundling it into one value keeps the dispatcher and command handlers from
+/// threading two dozen individual references through every call. The command
+/// handlers destructure it back into locals at the top, so their bodies are
+/// unchanged; the loop builds one of these (with explicit reborrows) per
+/// dispatch.
+pub(super) struct SlashCommandCtx<'a> {
+    pub(super) terminal: &'a mut Terminal,
+    pub(super) app: &'a mut App,
+    pub(super) logger: &'a mut SessionLogger,
+    pub(super) args: &'a Args,
+    pub(super) paused: &'a Arc<AtomicBool>,
+    pub(super) ui_extensions: &'a TuiExtensions,
+    pub(super) runtime_factory: &'a crate::session_bootstrap::CliSessionOpener,
+    pub(super) lash_config: &'a crate::config::LashConfig,
+    pub(super) runtime: &'a mut Option<LashSession>,
+    pub(super) history: &'a mut Vec<Message>,
+    pub(super) turn_counter: &'a mut usize,
+    pub(super) last_turn: &'a mut Option<TurnReplayPayload>,
+    pub(super) runtime_return_rx: &'a mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
+    pub(super) cancel_token: &'a mut Option<CancellationToken>,
+    pub(super) active_stream_id: &'a mut u64,
+    pub(super) provider: &'a mut ProviderHandle,
+    pub(super) current_model_variant: &'a mut Option<String>,
+    pub(super) current_execution_mode: &'a mut ModeId,
+    pub(super) desired_tool_state: &'a mut ToolState,
+    pub(super) pending_reconfigure: &'a mut bool,
+    pub(super) model_catalog: &'a CachedModelCatalog,
+    pub(super) toolset_hash: &'a mut String,
+    pub(super) app_tx: &'a crate::event::AppEventTx,
+    pub(super) pending_clear_after_return: &'a mut bool,
+}
+
 pub(super) fn parse_slash_command(
     input: &str,
     skills: &SkillCatalog,
@@ -271,98 +305,49 @@ pub(super) async fn dispatch_next_queued_turn(
     Ok(true)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_parsed_slash_command(
     command: ParsedSlashCommand,
-    terminal: &mut Terminal,
-    app: &mut App,
-    logger: &mut SessionLogger,
-    args: &Args,
-    paused: &Arc<AtomicBool>,
-    ui_extensions: &TuiExtensions,
-    runtime_factory: &crate::session_bootstrap::CliSessionOpener,
-    lash_config: &crate::config::LashConfig,
-    runtime: &mut Option<LashSession>,
-    history: &mut Vec<Message>,
-    turn_counter: &mut usize,
-    last_turn: &mut Option<TurnReplayPayload>,
-    runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
-    cancel_token: &mut Option<CancellationToken>,
-    active_stream_id: &mut u64,
-    provider: &mut ProviderHandle,
-    current_model_variant: &mut Option<String>,
-    current_execution_mode: &mut ModeId,
-    desired_tool_state: &mut ToolState,
-    pending_reconfigure: &mut bool,
-    model_catalog: &CachedModelCatalog,
-    toolset_hash: &mut String,
-    app_tx: &crate::event::AppEventTx,
-    pending_clear_after_return: &mut bool,
+    ctx: SlashCommandCtx<'_>,
 ) -> anyhow::Result<bool> {
     match command {
-        ParsedSlashCommand::Builtin(command) => {
-            handle_slash_command(
-                command,
-                terminal,
-                app,
-                logger,
-                args,
-                paused,
-                runtime_factory,
-                lash_config,
-                runtime,
-                history,
-                turn_counter,
-                last_turn,
-                runtime_return_rx,
-                cancel_token,
-                active_stream_id,
-                provider,
-                current_model_variant,
-                current_execution_mode,
-                desired_tool_state,
-                pending_reconfigure,
-                model_catalog,
-                toolset_hash,
-                app_tx,
-                pending_clear_after_return,
-            )
-            .await
-        }
+        ParsedSlashCommand::Builtin(command) => handle_slash_command(command, ctx).await,
         ParsedSlashCommand::Ui(command) => {
-            handle_ui_command(command, app, ui_extensions, runtime).await;
+            handle_ui_command(command, ctx.app, ctx.ui_extensions, ctx.runtime).await;
             Ok(false)
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_slash_command(
     cmd: command::Command,
-    terminal: &mut Terminal,
-    app: &mut App,
-    logger: &mut SessionLogger,
-    _args: &Args,
-    paused: &Arc<AtomicBool>,
-    runtime_factory: &crate::session_bootstrap::CliSessionOpener,
-    _lash_config: &crate::config::LashConfig,
-    runtime: &mut Option<LashSession>,
-    history: &mut Vec<Message>,
-    turn_counter: &mut usize,
-    last_turn: &mut Option<TurnReplayPayload>,
-    runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
-    cancel_token: &mut Option<CancellationToken>,
-    active_stream_id: &mut u64,
-    provider: &mut ProviderHandle,
-    current_model_variant: &mut Option<String>,
-    current_execution_mode: &mut ModeId,
-    desired_tool_state: &mut ToolState,
-    pending_reconfigure: &mut bool,
-    model_catalog: &CachedModelCatalog,
-    toolset_hash: &mut String,
-    app_tx: &crate::event::AppEventTx,
-    pending_clear_after_return: &mut bool,
+    ctx: SlashCommandCtx<'_>,
 ) -> anyhow::Result<bool> {
+    let SlashCommandCtx {
+        terminal,
+        app,
+        logger,
+        args: _args,
+        paused,
+        ui_extensions: _,
+        runtime_factory,
+        lash_config: _lash_config,
+        runtime,
+        history,
+        turn_counter,
+        last_turn,
+        runtime_return_rx,
+        cancel_token,
+        active_stream_id,
+        provider,
+        current_model_variant,
+        current_execution_mode,
+        desired_tool_state,
+        pending_reconfigure,
+        model_catalog,
+        toolset_hash,
+        app_tx,
+        pending_clear_after_return,
+    } = ctx;
     match cmd {
         command::Command::Exit => Ok(true),
         command::Command::Clear => {

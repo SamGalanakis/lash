@@ -202,7 +202,6 @@ async fn main() -> Result<()> {
                 proposer_max_context_tokens,
                 proposer_prompt,
             } => {
-                lash_providers_builtin::register_all();
                 let project = Arc::new(load_clbench_config(config).await?);
                 let train = project.trainset().await?;
                 if train.is_empty() {

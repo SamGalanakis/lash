@@ -21,37 +21,40 @@ impl LashRuntime {
             state.session_id = uuid::Uuid::new_v4().to_string();
         }
         // Defaulted state (e.g. `RuntimeSessionState::default()` used
-        // by fresh-session constructors) carries an unconfigured policy.
+        // by fresh-session constructors) carries an empty policy.
         // Fill it in from the caller's policy so tests and hosts that
-        // pass a real policy alongside default state don't trip the
-        // explicit model-spec guard below.
-        let state_policy_was_unconfigured = state.policy.provider.kind() == "unconfigured";
+        // pass a real policy alongside default state don't trip the explicit
+        // model-spec guard below.
+        let state_policy_was_unconfigured = state.policy.recorded_provider_id().is_empty()
+            && state.policy.model.id.trim().is_empty();
         if state_policy_was_unconfigured {
             state.policy = policy.clone();
         }
         state.ensure_agent_frame_initialized();
-        if policy.provider.kind() != "unconfigured"
-            && let Some(frame) = state.current_agent_frame_mut()
-            && frame.assignment.policy.provider.kind() == "unconfigured"
+        let state_policy = state.policy.clone();
+        if let Some(frame) = state.current_agent_frame_mut()
+            && frame.assignment.policy.recorded_provider_id().is_empty()
+            && frame.assignment.policy.model.id.trim().is_empty()
         {
-            frame.assignment.policy = policy.clone();
+            frame.assignment.policy = state_policy;
         }
         state.policy = state.effective_policy().clone();
         state.protocol_turn_options = state.effective_protocol_turn_options().clone();
         normalize_session_graph(&mut state);
+        let policy = state.effective_policy().clone();
         if policy.model.id.trim().is_empty() {
             return Err(SessionError::Protocol(
                 "session policy missing model spec; hosts must supply explicit model metadata"
                     .to_string(),
             ));
         }
+        let mut host = host;
         // When a persistent backend is wired in, wrap the attachment
         // store so every `put` records a write-ahead intent row first.
         // Crashes between put and the next turn commit then surface as
         // uncommitted manifest rows that GC can reconcile. Ephemeral
         // (no-store) runtimes use the inner store directly — there's
         // nothing to reconcile against.
-        let mut host = host;
         if let Some(store) = services.store.clone() {
             let manifest: Arc<dyn crate::AttachmentManifest> =
                 Arc::new(crate::attachments::PersistenceManifestAdapter(store));
@@ -67,10 +70,19 @@ impl LashRuntime {
             .with_attachment_store(Arc::clone(&host.core.attachment_store))
             .with_lashlang_artifact_store(Arc::clone(&host.core.lashlang_artifact_store));
         let mut session = Session::new(services.clone(), &state.session_id).await?;
-        if let Some(tool_state) = state.tool_state_snapshot.clone()
-            && let Err(err) = session.plugins().tool_registry().apply_state(tool_state)
-        {
-            tracing::warn!("failed to restore tool state from checkpoint: {err}");
+        if let Some(tool_state) = state.tool_state_snapshot.clone() {
+            // Cold rebuild restores the exact persisted tool surface, adopting
+            // the snapshot's generation. `apply_state` (a delta-apply that
+            // requires `snapshot.generation == base` and bumps) would reject a
+            // session whose surface reached generation ≥ 2 onto a fresh base-1
+            // registry — the worker-rebuild / restart divergence. `restore_state`
+            // adopts the snapshot's generation wholesale, so any generation
+            // rebuilds.
+            session
+                .plugins()
+                .tool_registry()
+                .restore_state(tool_state)
+                .map_err(|err| SessionError::Protocol(err.to_string()))?;
         }
         session.refresh_tool_surface().await?;
         if let Some(snapshot) = state.plugin_snapshot.clone() {
@@ -152,6 +164,62 @@ impl LashRuntime {
         Self::from_host_state(policy, host.into(), services.into_runtime_services(), state).await
     }
 
+    /// Assemble a runtime from already-resolved parts: the single place that maps
+    /// `(store, process_registry)` to the right host/services constructor, applies
+    /// residency, and stamps it onto the runtime.
+    ///
+    /// Every construction path — the live open (`from_environment`), the worker
+    /// rebuild (`EmbeddedRuntimeBuilder::build`), and child-session
+    /// materialization — routes through here so the store/registry wiring and
+    /// residency cannot drift between them. That drift previously shipped: the
+    /// worker rebuild silently kept the full graph and skipped the persisted
+    /// tool-surface restore that the live path applied.
+    pub(crate) async fn assemble_runtime(
+        policy: SessionPolicy,
+        embedded_host: EmbeddedRuntimeHost,
+        plugin_session: Arc<crate::PluginSession>,
+        store: Option<Arc<dyn crate::store::RuntimePersistence>>,
+        process_registry: Option<Arc<dyn ProcessRegistry>>,
+        mut state: RuntimeSessionState,
+        residency: Residency,
+    ) -> Result<Self, SessionError> {
+        // ActivePathOnly without a store is a data-loss footgun: trimming drops
+        // orphans from RAM with nowhere to reload them from.
+        if matches!(residency, Residency::ActivePathOnly) && store.is_none() {
+            return Err(SessionError::Protocol(
+                "Residency::ActivePathOnly requires a persistent store — \
+                 without one, trimmed orphans are irrecoverable"
+                    .to_string(),
+            ));
+        }
+        // Heal FIRST (against the full resident set), then trim to the residency.
+        // `from_host_state` normalizes again, which is safe on a trimmed graph.
+        normalize_session_graph(&mut state);
+        apply_residency_on_load(&mut state, residency);
+        let mut runtime = match (store, process_registry) {
+            (Some(store), Some(registry)) => {
+                let host = ProcessRuntimeHost::new(embedded_host, registry);
+                let services = PersistentRuntimeServices::new(plugin_session, store);
+                Self::from_persistent_background_state(policy, host, services, state).await?
+            }
+            (Some(store), None) => {
+                let services = PersistentRuntimeServices::new(plugin_session, store);
+                Self::from_persistent_embedded_state(policy, embedded_host, services, state).await?
+            }
+            (None, Some(registry)) => {
+                let host = ProcessRuntimeHost::new(embedded_host, registry);
+                let services = RuntimeServices::new(plugin_session);
+                Self::from_background_state(policy, host, services, state).await?
+            }
+            (None, None) => {
+                let services = RuntimeServices::new(plugin_session);
+                Self::from_embedded_state(policy, embedded_host, services, state).await?
+            }
+        };
+        runtime.residency = residency;
+        Ok(runtime)
+    }
+
     /// Embedder-preferred constructor: build a `LashRuntime` from a
     /// shared `RuntimeEnvironment`.
     ///
@@ -170,24 +238,9 @@ impl LashRuntime {
     pub async fn from_environment(
         env: &RuntimeEnvironment,
         policy: SessionPolicy,
-        mut state: RuntimeSessionState,
+        state: RuntimeSessionState,
         store: Option<Arc<dyn crate::store::RuntimePersistence>>,
     ) -> Result<Self, SessionError> {
-        // ActivePathOnly without a store is a data-loss footgun: trim
-        // drops orphans from RAM with nowhere to reload them from.
-        if matches!(env.residency, Residency::ActivePathOnly) && store.is_none() {
-            return Err(SessionError::Protocol(
-                "Residency::ActivePathOnly requires a persistent store — \
-                 without one, trimmed orphans are irrecoverable"
-                    .to_string(),
-            ));
-        }
-        // Heal FIRST (against the full resident set), then trim.
-        // `heal_orphaned_leaf` is driven by `normalize_session_graph`
-        // which runs again inside `from_host_state`. Running it here
-        // too lets us trim safely before delegating.
-        normalize_session_graph(&mut state);
-        apply_residency_on_load(&mut state, env.residency);
         let plugin_host = env.plugin_host.as_ref().ok_or_else(|| {
             SessionError::Protocol(
                 "RuntimeEnvironment.plugin_host is required for from_environment".to_string(),
@@ -206,28 +259,19 @@ impl LashRuntime {
         if let Some(factory) = env.session_store_factory.as_ref() {
             embedded = embedded.with_session_store_factory(Arc::clone(factory));
         }
-        let mut runtime = if let Some(store) = store {
-            let services = PersistentRuntimeServices::new(plugin_session, store);
-            match env.process_registry.as_ref().cloned() {
-                Some(process_registry) => {
-                    let host = ProcessRuntimeHost::new(embedded, process_registry);
-                    Self::from_persistent_background_state(policy, host, services, state).await?
-                }
-                None => {
-                    Self::from_persistent_embedded_state(policy, embedded, services, state).await?
-                }
-            }
-        } else {
-            let services = RuntimeServices::new(plugin_session);
-            match env.process_registry.as_ref().cloned() {
-                Some(process_registry) => {
-                    let host = ProcessRuntimeHost::new(embedded, process_registry);
-                    Self::from_background_state(policy, host, services, state).await?
-                }
-                None => Self::from_embedded_state(policy, embedded, services, state).await?,
-            }
-        };
-        runtime.residency = env.residency;
+        let mut runtime = Self::assemble_runtime(
+            policy,
+            embedded,
+            plugin_session,
+            store,
+            env.process_registry.as_ref().cloned(),
+            state,
+            env.residency,
+        )
+        .await?;
+        // Thread the host's process-work poke onto this session's host so the
+        // process control seam can wake the runner after a successful start.
+        runtime.host.process_work_poke = env.process_work_poke.clone();
         Ok(runtime)
     }
 

@@ -53,11 +53,11 @@ fn timeline_items_from_test_read_view(
         .cloned()
         .collect::<Vec<_>>();
     graph.append_active_read_delta(&missing_messages, tool_calls);
-    let state = lash_core::SessionStateEnvelope {
+    let state = lash_core::SessionSnapshot {
         session_graph: graph,
-        ..lash_core::SessionStateEnvelope::default()
+        ..lash_core::SessionSnapshot::default()
     };
-    let read_view = lash_core::SessionReadView::from_exported_state(&state);
+    let read_view = lash_core::SessionReadView::from_snapshot(&state);
     timeline_from_read_view(&read_view, ui_state)
         .items()
         .to_vec()
@@ -1111,13 +1111,15 @@ fn activity_detail_lines_are_visible_at_l0() {
     let blocks = state.project_tool_call(
         "list_process_handles",
         serde_json::json!({}),
-        serde_json::json!({
-            "processes": [{
+        serde_json::json!([
+            {
+                "__handle__": "process",
+                "id": "build-process",
                 "process_id": "build-process",
                 "descriptor": { "kind": "tool", "label": "build" },
-                "terminal": "running",
-            }],
-        }),
+                "status": "running",
+            }
+        ]),
         true,
         3,
     );

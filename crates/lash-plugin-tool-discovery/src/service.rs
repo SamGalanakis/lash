@@ -75,7 +75,16 @@ impl ToolDiscoveryToolsProvider {
             .unwrap_or_default();
         let candidates = rerank_payment_action_intent(query, candidates);
 
-        let request = llm_rerank_request(args, &candidates, limit);
+        let model = match context.sessions().model().await {
+            Ok(model) => model,
+            Err(err) => {
+                return ToolResult::err_fmt(format_args!(
+                    "search_tools could not resolve parent model: {err}"
+                ));
+            }
+        };
+        let request =
+            llm_rerank_request(args, &candidates, limit, model.model, model.model_variant);
         let completion = match context
             .direct_completions()
             .complete(request, "search_tools")
@@ -137,6 +146,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeSessionManager {
+        snapshot: SessionSnapshot,
         catalog: Vec<Value>,
         direct_response: Mutex<Option<String>>,
         direct_requests: Mutex<Vec<lash_core::DirectRequest>>,
@@ -145,14 +155,14 @@ mod tests {
     #[async_trait::async_trait]
     impl RuntimeSessionHost for FakeSessionManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
-            Err(PluginError::Session("unused".to_string()))
+            Ok(self.snapshot.clone())
         }
 
         async fn snapshot_session(
             &self,
             _session_id: &str,
         ) -> Result<SessionSnapshot, PluginError> {
-            Err(PluginError::Session("unused".to_string()))
+            Ok(self.snapshot.clone())
         }
 
         async fn tool_catalog(&self, _session_id: &str) -> Result<Vec<Value>, PluginError> {
@@ -178,6 +188,13 @@ mod tests {
         async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
+    }
+
+    fn snapshot_with_model(model: &str, variant: Option<&str>) -> SessionSnapshot {
+        let mut snapshot = SessionSnapshot::default();
+        snapshot.policy.model.id = model.to_string();
+        snapshot.policy.model.variant = variant.map(str::to_string);
+        snapshot
     }
 
     fn discovery_context(host: Arc<FakeSessionManager>) -> lash_core::ToolContext<'static> {
@@ -331,6 +348,7 @@ mod tests {
     #[tokio::test]
     async fn search_tools_reranks_candidates_with_direct_completion() {
         let host = Arc::new(FakeSessionManager {
+            snapshot: snapshot_with_model("gpt-5.5", Some("medium")),
             catalog: vec![
                 catalog_tool_with_metadata("read_file", "Read file contents", None, vec!["cat"]),
                 catalog_tool_with_metadata("search_web", "Search the web", None, vec!["web"]),
@@ -366,6 +384,7 @@ mod tests {
             .lock()
             .expect("direct requests lock poisoned");
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].model, "medium");
+        assert_eq!(requests[0].model, "gpt-5.5");
+        assert_eq!(requests[0].model_variant.as_deref(), Some("medium"));
     }
 }

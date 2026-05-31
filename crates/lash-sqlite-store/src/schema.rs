@@ -162,8 +162,12 @@ CREATE TABLE IF NOT EXISTS processes (
     host_profile_id       TEXT NOT NULL,
     created_at_ms         INTEGER NOT NULL,
     updated_at_ms         INTEGER NOT NULL,
+    status                TEXT NOT NULL,
     record_json           TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_processes_status
+    ON processes(status);
 
 CREATE TABLE IF NOT EXISTS process_events (
     process_id        TEXT NOT NULL,
@@ -203,9 +207,19 @@ CREATE INDEX IF NOT EXISTS idx_process_handle_grants_session
 CREATE INDEX IF NOT EXISTS idx_process_handle_grants_process
     ON process_handle_grants(process_id);
 
+CREATE TABLE IF NOT EXISTS process_leases (
+    process_id       TEXT PRIMARY KEY,
+    lease_owner_id   TEXT,
+    lease_token      TEXT,
+    lease_fencing_token  INTEGER NOT NULL DEFAULT 0,
+    lease_claimed_at_ms  INTEGER NOT NULL DEFAULT 0,
+    lease_expires_at_ms  INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (process_id) REFERENCES processes(process_id) ON DELETE CASCADE
+);
+
 ";
 
-pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 3;
+pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StoreBacking {

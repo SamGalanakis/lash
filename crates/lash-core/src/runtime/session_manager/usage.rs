@@ -88,7 +88,7 @@ impl UsageCapability {
 
     pub(in crate::runtime::session_manager) fn merge_drained_token_ledger(
         &self,
-        state: &mut SessionSnapshot,
+        state: &mut RuntimeSessionState,
     ) -> Vec<TokenLedgerEntry> {
         let drained = self.drain_token_ledger();
         for entry in drained.iter().cloned() {
@@ -107,7 +107,7 @@ impl UsageCapability {
         let Some(store) = &current.store else {
             return Ok(());
         };
-        let mut state = current.current_snapshot_for_store_write().await;
+        let mut state = current.current_snapshot_for_store_write().await?;
         let drained = self.drain_token_ledger();
         if drained.is_empty() {
             return Ok(());
@@ -116,10 +116,11 @@ impl UsageCapability {
             merge_ledger_entry(&mut state.token_ledger, entry);
         }
         let commit = crate::store::RuntimeCommit::persisted_state(&state, &drained);
-        match store.commit_runtime_state(commit).await {
-            Ok(result) => state.apply_persisted_commit_result(result),
-            Err(err) => tracing::warn!("failed to persist current usage ledger: {err}"),
-        }
+        let result = store
+            .commit_runtime_state(commit)
+            .await
+            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        state.apply_persisted_commit_result(result);
         Ok(())
     }
 }

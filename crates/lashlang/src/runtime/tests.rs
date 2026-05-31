@@ -45,7 +45,7 @@ impl ExecutionHost for Host {
 struct RecordingProcessHost {
     starts: Mutex<Vec<ProcessStart>>,
     events: Mutex<Vec<ProcessEvent>>,
-    sleeps: Mutex<Vec<ProcessSleep>>,
+    sleeps: Mutex<Vec<Sleep>>,
     signals: Mutex<Vec<ProcessSignal>>,
 }
 
@@ -66,7 +66,7 @@ impl ExecutionHost for RecordingProcessHost {
                 self.events.lock().expect("events lock").push(event);
                 Ok(AbilityResult::Unit)
             }
-            AbilityOp::ProcessSleep(sleep) => {
+            AbilityOp::Sleep(sleep) => {
                 self.sleeps.lock().expect("sleeps lock").push(sleep);
                 Ok(AbilityResult::Value(Value::Null))
             }
@@ -545,8 +545,8 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
             keys_snapshot(chunk, keys)
         ),
         Instruction::AwaitHandle => "await_handle".to_string(),
-        Instruction::ProcessSleepFor => "process_sleep_for".to_string(),
-        Instruction::ProcessSleepUntil => "process_sleep_until".to_string(),
+        Instruction::SleepFor => "sleep_for".to_string(),
+        Instruction::SleepUntil => "sleep_until".to_string(),
         Instruction::ProcessWaitSignal => "process_wait_signal".to_string(),
         Instruction::ProcessSignalRun => "process_signal_run".to_string(),
         Instruction::AwaitHandleUnwrap => "await_handle_unwrap".to_string(),
@@ -3414,7 +3414,7 @@ async fn process_lifecycle_controls_sleep_wait_and_signal() {
     );
     let sleeps = host.sleeps.lock().expect("sleeps lock");
     assert_eq!(sleeps.len(), 1);
-    assert_eq!(sleeps[0].kind, ProcessSleepKind::For);
+    assert_eq!(sleeps[0].kind, SleepKind::For);
     assert_eq!(sleeps[0].value, Value::Number(5.0));
     let signals = host.signals.lock().expect("signals lock");
     assert_eq!(signals.len(), 1);
@@ -3461,7 +3461,6 @@ async fn foreground_rejects_programmatic_process_controls() {
     for (keyword, stmt) in [
         ("yield", Expr::Yield(Box::new(Expr::String("event".into())))),
         ("wake", Expr::Wake(Box::new(Expr::String("event".into())))),
-        ("sleep", Expr::SleepFor(Box::new(Expr::Number(1.0)))),
         ("wait signal", Expr::WaitSignal),
         (
             "signal run",
@@ -3484,6 +3483,22 @@ async fn foreground_rejects_programmatic_process_controls() {
             .expect_err("foreground mode should reject process controls");
         assert_eq!(err, RuntimeError::ProcessControlOutsideProcess { keyword });
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn foreground_sleep_runs_as_regular_effect() {
+    let host = RecordingProcessHost::default();
+    let program = Program::block(vec![Expr::SleepFor(Box::new(Expr::Number(1.0)))]);
+    let mut state = State::new();
+
+    let outcome = execute_program(&program, &mut state, &host)
+        .await
+        .expect("foreground sleep should run");
+
+    assert_eq!(outcome, ExecutionOutcome::Continued);
+    let sleeps = host.sleeps.lock().expect("sleeps lock");
+    assert_eq!(sleeps.len(), 1);
+    assert_eq!(sleeps[0].kind, SleepKind::For);
 }
 
 #[tokio::test(flavor = "current_thread")]

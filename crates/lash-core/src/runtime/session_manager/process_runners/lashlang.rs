@@ -166,6 +166,7 @@ impl RuntimeSessionManager {
             store: self.current.store.clone(),
             cancellation: cancellation.clone(),
             sleep_sequence: AtomicU64::new(0),
+            event_sequence: AtomicU64::new(0),
             signal_sequence: tokio::sync::Mutex::new(0),
         };
         let env = ::lashlang::ExecutionEnvironment::new(&host).process();
@@ -193,6 +194,11 @@ struct LashlangProcessHost<'run> {
     store: Option<Arc<dyn crate::RuntimePersistence>>,
     cancellation: tokio_util::sync::CancellationToken,
     sleep_sequence: AtomicU64,
+    /// Per-execution ordinal for wake/yield emissions. Deterministic replay
+    /// re-issues `process_event` calls in the same order, so the Nth emission
+    /// gets the same ordinal — and thus the same replay key — across a
+    /// crash-recovery re-run, making the append idempotent on redelivery.
+    event_sequence: AtomicU64,
     signal_sequence: tokio::sync::Mutex<u64>,
 }
 
@@ -298,6 +304,11 @@ impl LashlangProcessHost<'_> {
             ::lashlang::ProcessEventKind::Yield => "process.yield",
             ::lashlang::ProcessEventKind::Wake => "process.wake",
         };
+        // Deterministic per-emission key: a crash-recovery re-run replays the
+        // process from the start, re-issuing wake/yield events in the same order,
+        // so the Nth emission keys to the same value and the append dedupes
+        // instead of redelivering a duplicate wake/yield.
+        let ordinal = self.event_sequence.fetch_add(1, Ordering::Relaxed);
         let result = self
             .registry
             .append_event(
@@ -306,6 +317,7 @@ impl LashlangProcessHost<'_> {
                     event_type,
                     crate::lashlang_bridge::process_event_payload(&event.value)?,
                 )
+                .with_replay_key(format!("process:{}:event:{ordinal}", self.process_id))
                 .with_optional_wake_target_scope(self.wake_target_scope.clone()),
             )
             .await
@@ -320,14 +332,15 @@ impl LashlangProcessHost<'_> {
         Ok(())
     }
 
-    async fn process_sleep(
+    async fn sleep(
         &self,
-        sleep: ::lashlang::ProcessSleep,
+        sleep: ::lashlang::Sleep,
     ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
-        let duration_ms = sleep_duration_ms(sleep.kind, &sleep.value)?;
+        let duration_ms = crate::lashlang_bridge::sleep_duration_ms(sleep.kind, &sleep.value)?;
         let sequence = self.sleep_sequence.fetch_add(1, Ordering::Relaxed);
+        let scope = format!("process:{}", self.process_id);
         self.ctx
-            .sleep_lashlang_process(&self.process_id, sequence, duration_ms)
+            .sleep_lashlang(&scope, sequence, duration_ms)
             .await
             .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
         Ok(::lashlang::Value::Null)
@@ -403,8 +416,8 @@ impl ::lashlang::ExecutionHost for LashlangProcessHost<'_> {
                 self.process_event(event).await?;
                 Ok(::lashlang::AbilityResult::Unit)
             }
-            ::lashlang::AbilityOp::ProcessSleep(sleep) => self
-                .process_sleep(sleep)
+            ::lashlang::AbilityOp::Sleep(sleep) => self
+                .sleep(sleep)
                 .await
                 .map(::lashlang::AbilityResult::Value),
             ::lashlang::AbilityOp::WaitSignal => self
@@ -433,74 +446,6 @@ fn protocol_reply_to_lashlang_value(
     reply: crate::ToolInvocationReply,
 ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
     crate::lashlang_bridge::protocol_tool_reply_to_lashlang_value(reply)
-}
-
-fn sleep_duration_ms(
-    kind: ::lashlang::ProcessSleepKind,
-    value: &::lashlang::Value,
-) -> Result<u64, ::lashlang::ExecutionHostError> {
-    match kind {
-        ::lashlang::ProcessSleepKind::For => duration_value_ms(value),
-        ::lashlang::ProcessSleepKind::Until => {
-            let target = deadline_value_ms(value)?;
-            let now = chrono::Utc::now().timestamp_millis();
-            Ok(target.saturating_sub(now.max(0) as u64))
-        }
-    }
-}
-
-fn duration_value_ms(value: &::lashlang::Value) -> Result<u64, ::lashlang::ExecutionHostError> {
-    match value {
-        ::lashlang::Value::Number(value) if value.is_finite() && *value >= 0.0 => {
-            Ok(value.round() as u64)
-        }
-        ::lashlang::Value::String(value) => parse_duration_ms(value),
-        other => Err(::lashlang::ExecutionHostError::new(format!(
-            "`sleep for` expects a non-negative millisecond number or duration string, got {other}"
-        ))),
-    }
-}
-
-fn deadline_value_ms(value: &::lashlang::Value) -> Result<u64, ::lashlang::ExecutionHostError> {
-    match value {
-        ::lashlang::Value::Number(value) if value.is_finite() && *value >= 0.0 => {
-            Ok(value.round() as u64)
-        }
-        ::lashlang::Value::String(value) => chrono::DateTime::parse_from_rfc3339(value)
-            .map(|deadline| deadline.timestamp_millis().max(0) as u64)
-            .map_err(|err| {
-                ::lashlang::ExecutionHostError::new(format!(
-                    "`sleep until` expects RFC3339 text or Unix epoch milliseconds: {err}"
-                ))
-            }),
-        other => Err(::lashlang::ExecutionHostError::new(format!(
-            "`sleep until` expects RFC3339 text or Unix epoch milliseconds, got {other}"
-        ))),
-    }
-}
-
-fn parse_duration_ms(value: &str) -> Result<u64, ::lashlang::ExecutionHostError> {
-    let value = value.trim();
-    let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
-        (number, 1.0)
-    } else if let Some(number) = value.strip_suffix('s') {
-        (number, 1_000.0)
-    } else if let Some(number) = value.strip_suffix('m') {
-        (number, 60_000.0)
-    } else if let Some(number) = value.strip_suffix('h') {
-        (number, 3_600_000.0)
-    } else {
-        (value, 1.0)
-    };
-    let parsed = number.trim().parse::<f64>().map_err(|err| {
-        ::lashlang::ExecutionHostError::new(format!("invalid duration `{value}`: {err}"))
-    })?;
-    if !parsed.is_finite() || parsed < 0.0 {
-        return Err(::lashlang::ExecutionHostError::new(format!(
-            "invalid non-negative duration `{value}`"
-        )));
-    }
-    Ok((parsed * multiplier).round() as u64)
 }
 
 fn process_id_from_lashlang_handle(
@@ -537,8 +482,8 @@ fn lashlang_surface_satisfies_requirements(
     if abilities.processes && !current_abilities.processes {
         return Err("processes are not available".to_string());
     }
-    if abilities.process_sleep && !current_abilities.process_sleep {
-        return Err("process sleep is not available".to_string());
+    if abilities.sleep && !current_abilities.sleep {
+        return Err("sleep is not available".to_string());
     }
     if abilities.process_signals && !current_abilities.process_signals {
         return Err("process signals are not available".to_string());

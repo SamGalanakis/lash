@@ -10,6 +10,7 @@ pub struct ToolProcessControl<'run> {
     pub(super) processes: Arc<dyn crate::ProcessService>,
     pub(super) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
+    pub(super) tool_call_id: Option<String>,
 }
 
 impl ToolProcessControl<'_> {
@@ -20,9 +21,55 @@ impl ToolProcessControl<'_> {
             .with_agent_frame_id(Some(self.agent_frame_id.clone()))
     }
 
+    /// Start a process owned by this session and registered to wake it,
+    /// returning its durable record. Routes through the same
+    /// [`crate::ProcessService::start`] path the runtime uses for every other
+    /// process start, so the child is provider-re-supplied, durable, and
+    /// recoverable through the worker.
+    pub async fn start(
+        &self,
+        registration: crate::ProcessRegistration,
+        descriptor: crate::ProcessHandleDescriptor,
+    ) -> Result<crate::ProcessRecord, PluginError> {
+        self.processes
+            .start(
+                &self.session_id,
+                registration,
+                crate::ProcessStartOptions::new().with_descriptor(descriptor),
+                self.process_scope(),
+            )
+            .await
+    }
+
+    /// Await a process started from this session to its terminal output.
+    pub async fn await_process(
+        &self,
+        process_id: &str,
+    ) -> Result<crate::ProcessAwaitOutput, PluginError> {
+        self.processes
+            .await_process(process_id, self.process_scope())
+            .await
+    }
+
     pub async fn list_handles(&self) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
         self.processes
-            .list_visible(&self.session_id, self.process_scope())
+            .list_visible(
+                &self.session_id,
+                crate::ProcessListMode::Live,
+                self.process_scope(),
+            )
+            .await
+    }
+
+    pub async fn list_all_handles(
+        &self,
+    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
+        self.processes
+            .list_visible(
+                &self.session_id,
+                crate::ProcessListMode::All,
+                self.process_scope(),
+            )
             .await
     }
 
@@ -35,6 +82,26 @@ impl ToolProcessControl<'_> {
     pub async fn cancel(&self, process_id: &str) -> Result<ProcessRecord, PluginError> {
         self.processes
             .cancel(&self.session_id, process_id, self.process_scope())
+            .await
+    }
+
+    pub async fn signal(
+        &self,
+        process_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<crate::ProcessEvent, PluginError> {
+        let signal_id = self
+            .tool_call_id
+            .clone()
+            .unwrap_or_else(|| format!("adhoc-{}", uuid::Uuid::new_v4()));
+        self.processes
+            .signal(
+                &self.session_id,
+                process_id,
+                signal_id,
+                payload,
+                self.process_scope(),
+            )
             .await
     }
 

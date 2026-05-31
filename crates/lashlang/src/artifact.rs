@@ -15,6 +15,23 @@ pub const LASHLANG_SEMANTIC_HASH_VERSION: &str = "lashlang-semantic-v1";
 pub const LASHLANG_COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const LASHLANG_VM_ABI_VERSION: &str = "lashlang-vm-abi-v1";
 
+/// Durability tier of an execution path's wired substrate.
+///
+/// Durability is a property established by what the host wired, not a mode
+/// flag: each runtime trait reports the tier of the concrete implementation
+/// behind it, and the runtime validates that wiring is internally consistent.
+/// `Inline` covers the in-memory / build-time substrate; `Durable` covers a
+/// crash-recoverable substrate (e.g. a SQLite-backed or Restate-backed impl).
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DurabilityTier {
+    #[default]
+    Inline,
+    Durable,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ContentHash(String);
@@ -233,6 +250,11 @@ impl From<ModuleArtifactError> for ArtifactStoreError {
 }
 
 pub trait LashlangArtifactStore: Send + Sync {
+    /// Durability tier this artifact store provides; defaults to [`DurabilityTier::Inline`].
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Inline
+    }
+
     fn put_module_artifact(&self, artifact: &ModuleArtifact) -> Result<(), ArtifactStoreError>;
 
     fn get_module_artifact(
@@ -388,7 +410,7 @@ fn write_exports(writer: &mut HashWriter, exports: &ModuleExports) {
 fn write_surface_requirements(writer: &mut HashWriter, requirements: &SurfaceRequirements) {
     writer.atom("abilities");
     writer.bool(requirements.abilities.processes);
-    writer.bool(requirements.abilities.process_sleep);
+    writer.bool(requirements.abilities.sleep);
     writer.bool(requirements.abilities.process_signals);
     writer.bool(requirements.abilities.triggers);
     writer.bool(requirements.abilities.schedules.cron);
@@ -1254,7 +1276,7 @@ impl<'program> RequirementsCollector<'program> {
                 Some(RequirementBinding::Value)
             }
             Expr::SleepFor(expr) | Expr::SleepUntil(expr) => {
-                self.requirements.abilities.process_sleep = true;
+                self.requirements.abilities.sleep = true;
                 self.collect_expr(expr, scope);
                 Some(RequirementBinding::Value)
             }

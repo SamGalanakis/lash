@@ -1,5 +1,9 @@
 use super::*;
 
+fn process_status_label(record: &ProcessRecord) -> &'static str {
+    record.status.label()
+}
+
 impl SqliteProcessRegistry {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
@@ -43,11 +47,12 @@ impl SqliteProcessRegistry {
     ) -> Result<(), lash_core::PluginError> {
         conn.execute(
             "UPDATE processes
-             SET updated_at_ms = ?2, record_json = ?3
+             SET updated_at_ms = ?2, status = ?3, record_json = ?4
              WHERE process_id = ?1",
             params![
                 &record.id,
                 record.updated_at_ms as i64,
+                process_status_label(record),
                 process_encode_json(record)?
             ],
         )
@@ -77,10 +82,46 @@ impl SqliteProcessRegistry {
         })
         .transpose()
     }
+
+    fn load_process_lease_conn(
+        conn: &Connection,
+        process_id: &str,
+    ) -> Result<Option<ProcessLease>, lash_core::PluginError> {
+        conn.query_row(
+            "SELECT lease_owner_id, lease_token, lease_fencing_token,
+                    lease_claimed_at_ms, lease_expires_at_ms
+             FROM process_leases
+             WHERE process_id = ?1",
+            params![process_id],
+            |row| {
+                let owner_id: Option<String> = row.get(0)?;
+                let lease_token: Option<String> = row.get(1)?;
+                let (Some(owner_id), Some(lease_token)) = (owner_id, lease_token) else {
+                    return Ok(None);
+                };
+                Ok(Some(ProcessLease {
+                    schema_version: PROCESS_LEASE_SCHEMA_VERSION,
+                    process_id: process_id.to_string(),
+                    owner_id,
+                    lease_token,
+                    fencing_token: row.get::<_, i64>(2)? as u64,
+                    claimed_at_epoch_ms: row.get::<_, i64>(3)? as u64,
+                    expires_at_epoch_ms: row.get::<_, i64>(4)? as u64,
+                }))
+            },
+        )
+        .optional()
+        .map(|lease| lease.flatten())
+        .map_err(process_sqlite_error)
+    }
 }
 
 #[async_trait::async_trait]
 impl ProcessRegistry for SqliteProcessRegistry {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
     async fn register_process(
         &self,
         registration: ProcessRegistration,
@@ -104,9 +145,9 @@ impl ProcessRegistry for SqliteProcessRegistry {
         tx.execute(
             "INSERT INTO processes (
                 process_id, registration_hash, owner_scope_id, host_profile_id,
-                created_at_ms, updated_at_ms, record_json
+                created_at_ms, updated_at_ms, status, record_json
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &record.id,
                 &record.registration_hash,
@@ -114,6 +155,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 record.host_profile_id(),
                 record.created_at_ms as i64,
                 record.updated_at_ms as i64,
+                process_status_label(&record),
                 process_encode_json(&record)?,
             ],
         )
@@ -283,6 +325,72 @@ impl ProcessRegistry for SqliteProcessRegistry {
         Ok(entries)
     }
 
+    async fn list_live_handle_grants(
+        &self,
+        owner_scope: &ProcessScope,
+    ) -> Result<Vec<ProcessHandleGrantEntry>, lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        let owner_scope_id = owner_scope.id();
+        let mut stmt = conn
+            .prepare(
+                "SELECT g.process_id, g.descriptor_json, p.record_json
+                 FROM process_handle_grants g
+                 JOIN processes p ON p.process_id = g.process_id
+                 WHERE g.scope_id = ?1 AND p.status = 'running'
+                 ORDER BY g.process_id ASC",
+            )
+            .map_err(process_sqlite_error)?;
+        let rows = stmt
+            .query_map(params![owner_scope_id.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(process_sqlite_error)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (process_id, descriptor_json, record_json) = row.map_err(process_sqlite_error)?;
+            let descriptor: ProcessHandleDescriptor =
+                serde_json::from_str(&descriptor_json).map_err(process_decode_error)?;
+            let record: ProcessRecord =
+                serde_json::from_str(&record_json).map_err(process_decode_error)?;
+            entries.push((
+                ProcessHandleGrant {
+                    session_id: owner_scope.session_id.clone(),
+                    process_id,
+                    descriptor,
+                },
+                record,
+            ));
+        }
+        Ok(entries)
+    }
+
+    async fn has_handle_grant(
+        &self,
+        owner_scope: &ProcessScope,
+        process_id: &str,
+    ) -> Result<bool, lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        let owner_scope_id = owner_scope.id();
+        let exists = conn
+            .query_row(
+                "SELECT 1
+                 FROM process_handle_grants g
+                 JOIN processes p ON p.process_id = g.process_id
+                 WHERE g.scope_id = ?1 AND g.process_id = ?2
+                 LIMIT 1",
+                params![owner_scope_id.as_str(), process_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(process_sqlite_error)?
+            .is_some();
+        Ok(exists)
+    }
+
     async fn handle_grants_for_process(
         &self,
         process_id: &str,
@@ -443,8 +551,8 @@ impl ProcessRegistry for SqliteProcessRegistry {
             ],
         )
         .map_err(process_sqlite_error)?;
-        if let Some(terminal) = prepared.terminal_update.clone() {
-            record.terminal = Some(terminal);
+        if let Some(status) = prepared.status_update.clone() {
+            record.status = status;
         }
         record.updated_at_ms = prepared.occurred_at_ms;
         Self::save_process_conn(&tx, &record)?;
@@ -544,8 +652,8 @@ impl ProcessRegistry for SqliteProcessRegistry {
             let record = self.get_process(process_id).await.ok_or_else(|| {
                 lash_core::PluginError::Session(format!("unknown process `{process_id}`"))
             })?;
-            if let Some(terminal) = record.terminal {
-                return Ok(terminal.await_output);
+            if let Some(await_output) = record.status.await_output() {
+                return Ok(await_output.clone());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -600,4 +708,165 @@ impl ProcessRegistry for SqliteProcessRegistry {
         .map_err(process_sqlite_error)?;
         Ok(())
     }
+
+    async fn list_non_terminal(&self) -> Result<Vec<ProcessRecord>, lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT record_json FROM processes
+                 WHERE status = 'running'
+                 ORDER BY process_id ASC",
+            )
+            .map_err(process_sqlite_error)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(process_sqlite_error)?;
+        let mut records = Vec::new();
+        for row in rows {
+            let record: ProcessRecord = serde_json::from_str(&row.map_err(process_sqlite_error)?)
+                .map_err(process_decode_error)?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    async fn claim_process_lease(
+        &self,
+        process_id: &str,
+        owner_id: &str,
+        lease_ttl_ms: u64,
+    ) -> Result<ProcessLease, lash_core::PluginError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(process_sqlite_error)?;
+        if Self::load_process_conn(&tx, process_id)?.is_none() {
+            return Err(lash_core::PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        let now = current_epoch_ms();
+        let current = Self::load_process_lease_conn(&tx, process_id)?;
+        if let Some(current) = current.as_ref()
+            && current.expires_at_epoch_ms > now
+            && current.owner_id != owner_id
+        {
+            return Err(process_lease_conflict(process_id, current));
+        }
+        // Read the raw fencing token directly: a completed/abandoned lease nulls
+        // the owner/token columns but retains the monotonically-increasing
+        // `lease_fencing_token`, so a re-claim never reuses a stale writer's
+        // token (mirrors `claim_runtime_turn_lease`).
+        let fencing_token: u64 = tx
+            .query_row(
+                "SELECT lease_fencing_token FROM process_leases WHERE process_id = ?1",
+                params![process_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(process_sqlite_error)?
+            .unwrap_or(0) as u64
+            + 1;
+        let lease = ProcessLease {
+            schema_version: PROCESS_LEASE_SCHEMA_VERSION,
+            process_id: process_id.to_string(),
+            owner_id: owner_id.to_string(),
+            lease_token: format!(
+                "{:x}",
+                Sha256::digest(format!("{process_id}:{owner_id}:{now}:{fencing_token}").as_bytes())
+            ),
+            fencing_token,
+            claimed_at_epoch_ms: now,
+            expires_at_epoch_ms: now.saturating_add(lease_ttl_ms),
+        };
+        tx.execute(
+            "INSERT INTO process_leases (
+                process_id, lease_owner_id, lease_token, lease_fencing_token,
+                lease_claimed_at_ms, lease_expires_at_ms
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(process_id) DO UPDATE SET
+                lease_owner_id = excluded.lease_owner_id,
+                lease_token = excluded.lease_token,
+                lease_fencing_token = excluded.lease_fencing_token,
+                lease_claimed_at_ms = excluded.lease_claimed_at_ms,
+                lease_expires_at_ms = excluded.lease_expires_at_ms",
+            params![
+                lease.process_id,
+                lease.owner_id,
+                lease.lease_token,
+                lease.fencing_token as i64,
+                lease.claimed_at_epoch_ms as i64,
+                lease.expires_at_epoch_ms as i64,
+            ],
+        )
+        .map_err(process_sqlite_error)?;
+        tx.commit().map_err(process_sqlite_error)?;
+        Ok(lease)
+    }
+
+    async fn renew_process_lease(
+        &self,
+        lease: &ProcessLease,
+        lease_ttl_ms: u64,
+    ) -> Result<ProcessLease, lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        let now = current_epoch_ms();
+        let live = Self::load_process_lease_conn(&conn, &lease.process_id)?.filter(|current| {
+            current.lease_token == lease.lease_token && current.expires_at_epoch_ms > now
+        });
+        if live.is_none() {
+            return Err(process_lease_expired(&lease.process_id));
+        }
+        let renewed = ProcessLease {
+            expires_at_epoch_ms: now.saturating_add(lease_ttl_ms),
+            ..lease.clone()
+        };
+        conn.execute(
+            "UPDATE process_leases
+             SET lease_expires_at_ms = ?2
+             WHERE process_id = ?1 AND lease_token = ?3",
+            params![
+                renewed.process_id,
+                renewed.expires_at_epoch_ms as i64,
+                renewed.lease_token,
+            ],
+        )
+        .map_err(process_sqlite_error)?;
+        Ok(renewed)
+    }
+
+    async fn complete_process_lease(
+        &self,
+        completion: &ProcessLeaseCompletion,
+    ) -> Result<(), lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE process_leases
+             SET lease_owner_id = NULL,
+                 lease_token = NULL,
+                 lease_claimed_at_ms = 0,
+                 lease_expires_at_ms = 0
+             WHERE process_id = ?1 AND lease_token = ?2",
+            params![completion.process_id, completion.lease_token],
+        )
+        .map_err(process_sqlite_error)?;
+        Ok(())
+    }
+}
+
+/// Loud, stable error for a fenced process-lease claim. Mirrors
+/// [`StoreError::RuntimeTurnLeaseConflict`](lash_core::StoreError) on the
+/// `PluginError` channel the [`ProcessRegistry`] trait returns.
+fn process_lease_conflict(process_id: &str, current: &ProcessLease) -> lash_core::PluginError {
+    lash_core::PluginError::Session(format!(
+        "process `{process_id}` is already leased by `{}` until {}",
+        current.owner_id, current.expires_at_epoch_ms
+    ))
+}
+
+/// Loud, stable error for a superseded or expired process lease. Mirrors
+/// [`StoreError::RuntimeTurnLeaseExpired`](lash_core::StoreError).
+fn process_lease_expired(process_id: &str) -> lash_core::PluginError {
+    lash_core::PluginError::Session(format!(
+        "process lease for `{process_id}` is missing or expired"
+    ))
 }

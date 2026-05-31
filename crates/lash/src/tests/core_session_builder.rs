@@ -263,6 +263,8 @@ async fn rlm_mode_config_lashlang_abilities_drive_prompt_surface() -> Result<()>
         .default_mode(ModeId::rlm())
         .provider(provider)
         .model(mock_model_spec())
+        .in_memory_stores()
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("rlm-abilities-prompt").open().await?;
@@ -369,6 +371,7 @@ async fn explicit_dual_mode_install_allows_standard_parent_and_rlm_child() -> Re
         .default_mode(ModeId::standard())
         .provider(mock_provider())
         .model(mock_model_spec())
+        .in_memory_stores()
         .build()?;
 
     let parent = core.session("main").standard().open().await?;
@@ -396,7 +399,7 @@ async fn store_factory_reopens_persisted_session_state() -> Result<()> {
     let mut state = RuntimeSessionState {
         session_id: "persisted".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -417,6 +420,225 @@ async fn store_factory_reopens_persisted_session_state() -> Result<()> {
     let messages = reopened.read_view().messages().to_vec();
     assert_eq!(messages.len(), 1);
     assert_eq!(message_text(&messages[0]), "already stored");
+    Ok(())
+}
+
+#[test]
+fn session_policy_serializes_provider_id_without_provider_config() -> Result<()> {
+    let provider = crate::testing::TestProvider::builder()
+        .kind("secret-provider")
+        .serialize_config(|| serde_json::json!({ "api_key": "should-not-persist" }))
+        .build()
+        .into_handle();
+    let policy = lash_core::SessionPolicy {
+        provider_id: provider.kind().to_string(),
+        model: mock_model_spec(),
+        ..Default::default()
+    };
+
+    let value = serde_json::to_value(&policy)?;
+    assert_eq!(value["provider_id"], "secret-provider");
+    assert!(value.get("provider").is_none());
+    assert!(!value.to_string().contains("should-not-persist"));
+
+    let decoded: lash_core::SessionPolicy = serde_json::from_value(value)?;
+    assert_eq!(decoded.recorded_provider_id(), "secret-provider");
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_provider_id_rebinds_to_live_provider_on_open() -> Result<()> {
+    let mut state = RuntimeSessionState {
+        session_id: "provider-rebind".to_string(),
+        policy: lash_core::SessionPolicy {
+            provider_id: "embed-test".to_string(),
+            model: mock_model_spec(),
+            ..Default::default()
+        },
+        current_agent_frame_id: String::new(),
+        agent_frames: Vec::new(),
+        ..Default::default()
+    };
+    state.ensure_agent_frame_initialized();
+    state.append_active_conversation_messages(&[text_message(
+        lash_core::MessageRole::User,
+        "stored",
+    )]);
+    let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
+    let core = LashCore::standard()
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(ReusableStoreFactory { store }))
+        .build()?;
+
+    let reopened = core.session("provider-rebind").open().await?;
+    let persisted = reopened.control().state().persist_current().await?;
+
+    assert_eq!(persisted.policy.recorded_provider_id(), "embed-test");
+    assert!(
+        persisted
+            .agent_frames
+            .iter()
+            .all(|frame| frame.assignment.policy.recorded_provider_id() == "embed-test")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_provider_id_mismatch_fails_at_turn_execution() -> Result<()> {
+    let mut state = RuntimeSessionState {
+        session_id: "provider-mismatch".to_string(),
+        policy: lash_core::SessionPolicy {
+            provider_id: "other-provider".to_string(),
+            model: mock_model_spec(),
+            ..Default::default()
+        },
+        current_agent_frame_id: String::new(),
+        agent_frames: Vec::new(),
+        ..Default::default()
+    };
+    state.ensure_agent_frame_initialized();
+    let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
+    let core = LashCore::standard()
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(ReusableStoreFactory { store }))
+        .build()?;
+
+    let session = core.session("provider-mismatch").open().await?;
+    let err = match session.run(TurnInput::text("must not run")).await {
+        Ok(_) => panic!("provider mismatch should fail at turn execution"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(
+        err,
+        EmbedError::Runtime(lash_core::RuntimeError {
+            code: lash_core::RuntimeErrorCode::Other(code),
+            message,
+        }) if code == "llm_provider"
+            && message.contains("other-provider")
+            && message.contains("provider-mismatch")
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_frame_provider_id_mismatch_fails_at_turn_execution() -> Result<()> {
+    let mut state = RuntimeSessionState {
+        session_id: "frame-provider-mismatch".to_string(),
+        policy: lash_core::SessionPolicy {
+            provider_id: "embed-test".to_string(),
+            model: mock_model_spec(),
+            ..Default::default()
+        },
+        current_agent_frame_id: String::new(),
+        agent_frames: Vec::new(),
+        ..Default::default()
+    };
+    state.ensure_agent_frame_initialized();
+    state
+        .current_agent_frame_mut()
+        .expect("initial frame")
+        .assignment
+        .policy
+        .provider_id = "other-provider".to_string();
+    let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
+    let core = LashCore::standard()
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(ReusableStoreFactory { store }))
+        .build()?;
+
+    let session = core.session("frame-provider-mismatch").open().await?;
+    let err = match session.run(TurnInput::text("must not run")).await {
+        Ok(_) => panic!("agent-frame provider mismatch should fail at turn execution"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(
+        err,
+        EmbedError::Runtime(lash_core::RuntimeError {
+            code: lash_core::RuntimeErrorCode::Other(code),
+            message,
+        }) if code == "llm_provider"
+            && message.contains("other-provider")
+            && message.contains("frame-provider-mismatch")
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn refreshed_head_provider_id_mismatch_fails_before_turn() -> Result<()> {
+    let mut state = RuntimeSessionState {
+        session_id: "refresh-provider-mismatch".to_string(),
+        policy: lash_core::SessionPolicy {
+            provider_id: "embed-test".to_string(),
+            model: mock_model_spec(),
+            ..Default::default()
+        },
+        current_agent_frame_id: String::new(),
+        agent_frames: Vec::new(),
+        ..Default::default()
+    };
+    state.ensure_agent_frame_initialized();
+    let store = Arc::new(SnapshotStore::with_state(state));
+    let core = LashCore::standard()
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .build()?;
+    let runtime_store: Arc<dyn lash_core::RuntimePersistence> = store.clone();
+    let session = core
+        .session("refresh-provider-mismatch")
+        .store(runtime_store)
+        .open()
+        .await?;
+
+    store.set_head_provider_id("other-provider");
+    let err = match session.run(TurnInput::text("must not run")).await {
+        Ok(_) => panic!("head-refresh provider mismatch should fail before turn"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(
+        err,
+        EmbedError::Runtime(lash_core::RuntimeError {
+            code: lash_core::RuntimeErrorCode::Other(code),
+            message,
+        }) if code == "llm_provider"
+            && message.contains("other-provider")
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_provider_persists_reopens_and_runs_second_turn() -> Result<()> {
+    let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::default());
+    let core = LashCore::standard()
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .build()?;
+
+    let first = core
+        .session("provider-reload")
+        .store(Arc::clone(&store))
+        .open()
+        .await?;
+    first.run(TurnInput::text("first")).await?;
+    drop(first);
+
+    let reopened = core
+        .session("provider-reload")
+        .store(Arc::clone(&store))
+        .open()
+        .await?;
+    let second = reopened.run(TurnInput::text("second")).await?;
+
+    assert_eq!(assistant_prose(&second.activities), "echo: second");
+    assert_eq!(
+        reopened.policy_snapshot().recorded_provider_id(),
+        "embed-test"
+    );
     Ok(())
 }
 
@@ -446,7 +668,7 @@ async fn active_path_residency_opens_with_active_path_scope() -> Result<()> {
     let mut state = RuntimeSessionState {
         session_id: "active-path".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -491,7 +713,7 @@ async fn keep_all_residency_opens_with_full_graph_scope() -> Result<()> {
     let mut state = RuntimeSessionState {
         session_id: "keep-all".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -521,7 +743,7 @@ async fn store_session_id_mismatch_is_rejected() -> Result<()> {
     let state = RuntimeSessionState {
         session_id: "actual-session".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -554,7 +776,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     let mut state = RuntimeSessionState {
         session_id: "manual-state".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -736,7 +958,7 @@ async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Re
     let mut explicit_state = RuntimeSessionState {
         session_id: "store-precedence".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -778,11 +1000,11 @@ async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Re
 #[test]
 fn turn_result_total_usage_sums_parent_and_children() {
     use lash_core::{
-        ExecutionSummary, OutputState, SessionPolicy, SessionStateEnvelope, TurnFinish, TurnOutcome,
+        ExecutionSummary, OutputState, SessionPolicy, SessionSnapshot, TurnFinish, TurnOutcome,
     };
 
     let result = TurnResult {
-        state: SessionStateEnvelope {
+        state: SessionSnapshot {
             session_id: "s".to_string(),
             policy: SessionPolicy::default(),
             ..Default::default()
@@ -838,4 +1060,262 @@ fn turn_result_total_usage_sums_parent_and_children() {
     assert_eq!(total.reasoning_tokens, 1);
     // Parent's own usage is unchanged.
     assert_eq!(result.usage.input_tokens, 10);
+}
+
+// =============================================================================
+// Phase-A: facade build store peer-coherence (durable substrate consistency)
+// =============================================================================
+//
+// `LashCore::builder().build()` validates store peer-coherence only — it never
+// inspects the effect controller (the build-time controller is inline by
+// construction; the durable controller is per-invocation). These tests use the
+// real durable backends so the durability tier each store reports is the
+// production tier, not a faked one:
+//
+// - durable session store factory => `lash_sqlite_store::SqliteSessionStoreFactory`
+// - durable attachment store       => `lash::FileAttachmentStore`
+// - durable artifact store         => `lash_sqlite_store::Store`
+// - durable process registry       => `lash_sqlite_store::SqliteProcessRegistry`
+//
+// Ephemeral peers are the named in-memory implementations.
+
+/// A builder with a mode + model + provider already named, ready for the
+/// peer-coherence dependency under test.
+fn peer_coherence_builder() -> crate::core::LashCoreBuilder {
+    LashCore::builder()
+        .install_mode(ModePreset::standard())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+}
+
+fn durable_session_store_factory(dir: &std::path::Path) -> Arc<dyn lash_core::SessionStoreFactory> {
+    Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        dir.join("sessions"),
+    ))
+}
+
+fn durable_attachment_store(dir: &std::path::Path) -> Arc<dyn lash_core::AttachmentStore> {
+    Arc::new(crate::persistence::FileAttachmentStore::new(
+        dir.join("attachments"),
+    ))
+}
+
+/// `LashCore` is not `Debug`, so `Result::expect_err` is unavailable; this
+/// extracts the build error or panics with the given message.
+fn expect_build_error(
+    result: std::result::Result<LashCore, EmbedError>,
+    message: &str,
+) -> EmbedError {
+    match result {
+        Ok(_) => panic!("{message}"),
+        Err(err) => err,
+    }
+}
+
+fn durable_artifact_store(dir: &std::path::Path) -> Arc<dyn lash_core::LashlangArtifactStore> {
+    Arc::new(
+        lash_sqlite_store::Store::open(&dir.join("artifacts.db"))
+            .expect("open durable artifact store"),
+    )
+}
+
+#[tokio::test]
+async fn durable_session_store_rejects_ephemeral_attachment_store_at_build() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let result = peer_coherence_builder()
+        .in_memory_stores()
+        .store_factory(durable_session_store_factory(dir.path()))
+        // Explicit ephemeral attachment store overrides the in-memory default
+        // so the coherence check reads its Inline tier.
+        .attachment_store(Arc::new(lash_core::InMemoryAttachmentStore::new()))
+        .lashlang_artifact_store(durable_artifact_store(dir.path()))
+        .build();
+    let err = expect_build_error(
+        result,
+        "durable session store + ephemeral attachment store must be rejected",
+    );
+
+    assert!(matches!(
+        err,
+        EmbedError::DurableStorePeerRequired {
+            facet: "attachment store"
+        }
+    ));
+}
+
+#[tokio::test]
+async fn durable_session_store_rejects_ephemeral_artifact_store_at_build() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let result = peer_coherence_builder()
+        .in_memory_stores()
+        .store_factory(durable_session_store_factory(dir.path()))
+        .attachment_store(durable_attachment_store(dir.path()))
+        // Explicit ephemeral artifact store; durable attachment clears the first
+        // facet so the artifact facet is the one that must fail.
+        .lashlang_artifact_store(Arc::new(lash_core::InMemoryLashlangArtifactStore::new()))
+        .build();
+    let err = expect_build_error(
+        result,
+        "durable session store + ephemeral artifact store must be rejected",
+    );
+
+    assert!(matches!(
+        err,
+        EmbedError::DurableStorePeerRequired {
+            facet: "artifact store"
+        }
+    ));
+}
+
+#[tokio::test]
+async fn durable_process_registry_rejects_missing_durable_store_factory_at_build() {
+    // A durable process registry is meaningless without a durable session store
+    // behind it. With no store factory (the in-memory default), the session
+    // store tier is unknown/non-durable, so the registry must be rejected.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
+            .expect("open durable registry"),
+    );
+    let result = peer_coherence_builder()
+        .in_memory_stores()
+        .process_registry(registry)
+        .build();
+    let err = expect_build_error(
+        result,
+        "durable process registry without durable store factory must be rejected",
+    );
+
+    assert!(matches!(
+        err,
+        EmbedError::DurableProcessRegistryRequiresStoreFactory
+    ));
+}
+
+#[tokio::test]
+async fn all_durable_stores_build_successfully() -> Result<()> {
+    // Positive control: a coherent durable wiring (durable session store +
+    // durable attachment + durable artifact + durable process registry) builds
+    // without error.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
+            .expect("open durable registry"),
+    );
+    peer_coherence_builder()
+        .effect_controller(Arc::new(lash_core::InlineRuntimeEffectController::default()))
+        .store_factory(durable_session_store_factory(dir.path()))
+        .attachment_store(durable_attachment_store(dir.path()))
+        .lashlang_artifact_store(durable_artifact_store(dir.path()))
+        .process_registry(registry)
+        .build()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn durable_registry_with_only_child_store_factory_builds() -> Result<()> {
+    // C2 regression: the CLI wires a durable process registry + a durable *child*
+    // store factory (managed child sessions) and NO root `store_factory`. Since
+    // `build()` installs `child_store_factory.or(store_factory)` as the session
+    // store, this wiring is durable end-to-end and must build. The coherence
+    // guard and the work-runner resolver therefore have to read that same
+    // effective factory; reading `store_factory` alone wrongly rejected it with
+    // `DurableProcessRegistryRequiresStoreFactory` even though `build()` would
+    // wire the child factory durably.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
+            .expect("open durable registry"),
+    );
+    peer_coherence_builder()
+        .effect_controller(Arc::new(lash_core::InlineRuntimeEffectController::default()))
+        .child_store_factory(durable_session_store_factory(dir.path()))
+        .attachment_store(durable_attachment_store(dir.path()))
+        .lashlang_artifact_store(durable_artifact_store(dir.path()))
+        .process_registry(registry)
+        .build()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_memory_stores_build_successfully() -> Result<()> {
+    // The durable-first guard must not regress inline/in-memory hosts: an
+    // all-ephemeral build (the named in-memory implementations) succeeds,
+    // including the explicit in-memory session store factory that backs
+    // ephemeral process execution.
+    peer_coherence_builder()
+        .in_memory_stores()
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn process_registry_without_work_runner_fails_loudly() {
+    // Decision 4 (the loud guard): a registry configured with the default runner
+    // disabled and no explicit runner wired must fail loudly at build rather than
+    // silently leaving non-terminal processes with no executor.
+    let result = peer_coherence_builder()
+        .in_memory_stores()
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .disable_default_process_work_runner()
+        .build();
+    let err = expect_build_error(
+        result,
+        "registry + disabled default runner + no explicit runner must be rejected",
+    );
+    assert!(matches!(err, EmbedError::ProcessRegistryWithoutWorkRunner));
+}
+
+#[tokio::test]
+async fn default_process_work_runner_spawns_when_registry_and_store_factory_present() -> Result<()>
+{
+    // Zero-ceremony path: a registry + a store factory (so the inline worker can
+    // rebuild session runtimes) and no explicit runner spawns the default inline
+    // `ProcessWorkRunner` on first `session().open()`. The runner's actual
+    // lease-protected execution of out-of-turn processes is covered in lash-core
+    // (`process_work_runner_drives_directly_registered_process_to_terminal_on_poke`
+    // and `concurrent_workers_run_a_directly_registered_process_exactly_once`).
+    let state = RuntimeSessionState {
+        session_id: "main".to_string(),
+        policy: lash_core::SessionPolicy {
+            provider_id: mock_provider().kind().to_string(),
+            model: mock_model_spec(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
+    let core = peer_coherence_builder()
+        .in_memory_stores()
+        .store_factory(Arc::new(ReusableStoreFactory { store }))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build()?;
+    core.session("main").open().await?;
+    assert!(
+        core.process_work_runner.poke().await.is_some(),
+        "the default inline runner must spawn when a registry + store factory are wired"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn registry_without_store_factory_fails_loudly() {
+    // A registry but no store factory: the default work runner rebuilds a
+    // session runtime per process and cannot do so without a store factory, so
+    // build must fail loudly rather than silently leave processes unexecuted
+    // (a process started in such a host would otherwise hang forever).
+    let result = peer_coherence_builder()
+        .in_memory_stores()
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build();
+    let err = expect_build_error(
+        result,
+        "a process registry with no store factory must be rejected",
+    );
+    assert!(matches!(
+        err,
+        EmbedError::ProcessRegistryRequiresStoreFactory
+    ));
 }

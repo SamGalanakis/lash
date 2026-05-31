@@ -153,7 +153,7 @@ impl RuntimeEffectController for RecordingEffectController {
                         model_return: crate::ModelToolReturn {
                             call_id: call.call_id,
                             tool_name: call.tool_name,
-                            parts: vec![crate::ModelToolReturnPart::Text("ok".to_string())],
+                            parts: vec![crate::ModelToolReturnPart::text("ok")],
                         },
                         output,
                         duration_ms: 0,
@@ -173,7 +173,6 @@ impl RuntimeEffectController for RecordingEffectController {
             }
             RuntimeEffectCommand::ExecCode { .. } => Ok(RuntimeEffectOutcome::ExecCode {
                 result: Ok(crate::ExecResponse {
-                    output: String::new(),
                     observations: Vec::new(),
                     observation_truncation: Vec::new(),
                     tool_calls: Vec::new(),
@@ -290,6 +289,27 @@ impl RuntimeEffectController for ProcessJournalController {
                         )),
                     },
                 }),
+                ProcessCommand::Signal { process_id, .. } => Ok(RuntimeEffectOutcome::Process {
+                    result: ProcessEffectOutcome::Signal {
+                        event: crate::ProcessEvent {
+                            process_id,
+                            sequence: 1,
+                            event_type: "process.signal".to_string(),
+                            payload: serde_json::json!({}),
+                            invocation: crate::RuntimeInvocation {
+                                scope: crate::RuntimeScope::new("test-session"),
+                                subject: crate::RuntimeSubject::Process {
+                                    process_id: "test-process".to_string(),
+                                },
+                                caused_by: None,
+                                replay: None,
+                                checkpoint_hash: None,
+                            },
+                            semantics: crate::ProcessEventSemantics::default(),
+                            occurred_at: std::time::SystemTime::UNIX_EPOCH,
+                        },
+                    },
+                }),
             },
             other => Err(RuntimeEffectControllerError::new(
                 "unexpected_effect",
@@ -327,6 +347,10 @@ struct DurableAttachmentRequiredController;
 
 #[async_trait::async_trait]
 impl RuntimeEffectController for DurableAttachmentRequiredController {
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        crate::DurabilityTier::Durable
+    }
+
     fn requires_durable_attachment_store(&self) -> bool {
         true
     }
@@ -338,6 +362,77 @@ impl RuntimeEffectController for DurableAttachmentRequiredController {
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         local_executor.execute(envelope).await
     }
+}
+
+/// An attachment store that reports a durable persistence tier while keeping the
+/// in-memory backing. Lets the durable-substrate scope checks reach the
+/// artifact/session facets without standing up a real durable backend.
+#[derive(Default)]
+struct DurableInMemoryAttachmentStore {
+    inner: crate::InMemoryAttachmentStore,
+}
+
+impl crate::AttachmentStore for DurableInMemoryAttachmentStore {
+    fn persistence(&self) -> crate::AttachmentStorePersistence {
+        crate::AttachmentStorePersistence::Durable
+    }
+
+    fn put(
+        &self,
+        bytes: Vec<u8>,
+        meta: lash_sansio::AttachmentCreateMeta,
+    ) -> Result<lash_sansio::AttachmentRef, crate::AttachmentStoreError> {
+        self.inner.put(bytes, meta)
+    }
+
+    fn get(
+        &self,
+        id: &lash_sansio::AttachmentId,
+    ) -> Result<crate::StoredAttachment, crate::AttachmentStoreError> {
+        self.inner.get(id)
+    }
+}
+
+/// A Lashlang artifact store that reports a durable tier over in-memory storage.
+#[derive(Default)]
+struct DurableInMemoryArtifactStore {
+    inner: lashlang::InMemoryLashlangArtifactStore,
+}
+
+impl lashlang::LashlangArtifactStore for DurableInMemoryArtifactStore {
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        crate::DurabilityTier::Durable
+    }
+
+    fn put_module_artifact(
+        &self,
+        artifact: &lashlang::ModuleArtifact,
+    ) -> Result<(), lashlang::ArtifactStoreError> {
+        self.inner.put_module_artifact(artifact)
+    }
+
+    fn get_module_artifact(
+        &self,
+        module_ref: &lashlang::ModuleRef,
+    ) -> Result<Option<lashlang::ModuleArtifact>, lashlang::ArtifactStoreError> {
+        self.inner.get_module_artifact(module_ref)
+    }
+}
+
+/// Build the single-turn mock transport shared by the durable-substrate scope
+/// tests.
+fn done_once_provider() -> TestProvider {
+    mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "Done".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "Done".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }])
 }
 
 struct RejectingEffectController;
@@ -371,7 +466,11 @@ impl RuntimeEffectController for WrongOutcomeEffectController {
 
 fn host_with_effect_recorder(recorder: RecordingEffectController) -> EmbeddedRuntimeHost {
     EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::default().with_effect_controller(Arc::new(recorder)),
+        RuntimeCoreConfig::in_memory()
+            .with_effect_controller(Arc::new(recorder))
+            .with_provider_resolver(Arc::new(crate::SingleProviderResolver::new(
+                mock_provider(Vec::new()).into_handle(),
+            ))),
     )
 }
 
@@ -511,7 +610,7 @@ async fn durable_controller_error_abandons_lease_and_preserves_resume_state() {
     let recorder = RecordingEffectController::default();
     let store = Arc::new(RecordingStore::default());
     let transport = mock_provider(Vec::new());
-    let host = EmbeddedRuntimeHost::new(RuntimeCoreConfig::default().with_effect_controller(
+    let host = EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory().with_effect_controller(
         Arc::new(FailToolCallController {
             inner: recorder.clone(),
         }),
@@ -621,7 +720,7 @@ async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
     let store = Arc::new(RecordingStore::default());
     let first_recorder = RecordingEffectController::default();
     let failing_host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::default().with_effect_controller(Arc::new(FailToolCallController {
+        RuntimeCoreConfig::in_memory().with_effect_controller(Arc::new(FailToolCallController {
             inner: first_recorder,
         })),
     );
@@ -646,7 +745,7 @@ async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
 
     let resume_recorder = RecordingEffectController::default();
     let resume_host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::default().with_effect_controller(Arc::new(resume_recorder.clone())),
+        RuntimeCoreConfig::in_memory().with_effect_controller(Arc::new(resume_recorder.clone())),
     );
     let mut resume_runtime = runtime_with_plugins_and_tools_and_host_and_store(
         Vec::new(),
@@ -769,7 +868,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         "turn-process",
         1,
         0,
-        "process:list:scope-a",
+        "process:list:scope-a:live",
         RuntimeEffectKind::Process,
         "root:turn-process:1:0:process:list",
     );
@@ -778,6 +877,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         RuntimeEffectCommand::Process {
             command: ProcessCommand::List {
                 owner_scope: ProcessScope::new("scope-a"),
+                mode: crate::ProcessListMode::Live,
             },
         },
     );
@@ -824,6 +924,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
             RuntimeEffectCommand::Process {
                 command: ProcessCommand::List {
                     owner_scope: ProcessScope::new("scope-b"),
+                    mode: crate::ProcessListMode::Live,
                 },
             },
         ),
@@ -972,7 +1073,7 @@ async fn controller_rejection_fails_turn_explicitly() {
         Arc::new(EmptyTools),
         mock_provider(Vec::new()),
         EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::default()
+            RuntimeCoreConfig::in_memory()
                 .with_effect_controller(Arc::new(RejectingEffectController)),
         ),
     )
@@ -1000,7 +1101,7 @@ async fn wrong_controller_outcome_fails_turn_explicitly() {
         Arc::new(EmptyTools),
         mock_provider(Vec::new()),
         EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::default()
+            RuntimeCoreConfig::in_memory()
                 .with_effect_controller(Arc::new(WrongOutcomeEffectController)),
         ),
     )
@@ -1040,7 +1141,7 @@ async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
         Vec::new(),
         Arc::new(EmptyTools),
         transport,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
+        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
     )
     .await;
 
@@ -1083,7 +1184,7 @@ async fn durable_controller_rejects_ephemeral_attachment_store_before_turn_runs(
         Vec::new(),
         Arc::new(EmptyTools),
         transport,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
+        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
     )
     .await;
     let effect_scope =
@@ -1101,8 +1202,119 @@ async fn durable_controller_rejects_ephemeral_attachment_store_before_turn_runs(
 
     assert_eq!(
         err.code,
-        crate::RuntimeErrorCode::DurableAttachmentStoreRequired
+        crate::RuntimeErrorCode::DurableSubstrateRequired {
+            facet: crate::DurableSubstrateFacet::AttachmentStore,
+        }
     );
+}
+
+#[tokio::test]
+async fn durable_controller_rejects_ephemeral_artifact_store_before_turn_runs() {
+    // Durable attachment store clears the first facet check, so the scope
+    // boundary must reject on the ephemeral Lashlang artifact store next.
+    let controller = DurableAttachmentRequiredController;
+    let mut runtime = runtime_with_plugins_and_tools_and_host(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        done_once_provider(),
+        EmbeddedRuntimeHost::new(
+            RuntimeCoreConfig::in_memory()
+                .with_attachment_store(Arc::new(DurableInMemoryAttachmentStore::default())),
+        ),
+    )
+    .await;
+    let effect_scope = RuntimeEffectControllerScope::new(&controller, "durable-artifact-turn")
+        .expect("effect scope");
+
+    let err = runtime
+        .stream_turn(
+            TurnInput::text("hello"),
+            TurnOptions::new(CancellationToken::new())
+                .with_events(&NoopEventSink)
+                .with_effect_scope(effect_scope),
+        )
+        .await
+        .expect_err("ephemeral artifact store should be rejected");
+
+    assert_eq!(
+        err.code,
+        crate::RuntimeErrorCode::DurableSubstrateRequired {
+            facet: crate::DurableSubstrateFacet::ArtifactStore,
+        }
+    );
+}
+
+#[tokio::test]
+async fn durable_controller_rejects_ephemeral_session_store_before_turn_runs() {
+    // Durable attachment + artifact stores clear the first two facet checks, so
+    // an ephemeral (default-tier) session store backing the turn must be the
+    // facet that fails. The in-memory `RecordingStore` reports the Inline tier.
+    let controller = DurableAttachmentRequiredController;
+    let store = Arc::new(RecordingStore::default());
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        done_once_provider(),
+        EmbeddedRuntimeHost::new(
+            RuntimeCoreConfig::in_memory()
+                .with_attachment_store(Arc::new(DurableInMemoryAttachmentStore::default()))
+                .with_lashlang_artifact_store(Arc::new(DurableInMemoryArtifactStore::default())),
+        ),
+        store,
+    )
+    .await;
+    let effect_scope = RuntimeEffectControllerScope::new(&controller, "durable-session-turn")
+        .expect("effect scope");
+
+    let err = runtime
+        .stream_turn(
+            TurnInput::text("hello"),
+            TurnOptions::new(CancellationToken::new())
+                .with_events(&NoopEventSink)
+                .with_effect_scope(effect_scope),
+        )
+        .await
+        .expect_err("ephemeral session store should be rejected");
+
+    assert_eq!(
+        err.code,
+        crate::RuntimeErrorCode::DurableSubstrateRequired {
+            facet: crate::DurableSubstrateFacet::SessionStore,
+        }
+    );
+}
+
+#[tokio::test]
+async fn durable_controller_with_all_durable_stores_runs_turn() {
+    // Positive control: a durable controller wired against fully durable stores
+    // must NOT be rejected by the scope boundary — the check is a loud guard
+    // against ephemeral substrate, not a blanket veto on durable controllers.
+    let controller = DurableAttachmentRequiredController;
+    let mut runtime = runtime_with_plugins_and_tools_and_host(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        done_once_provider(),
+        EmbeddedRuntimeHost::new(
+            RuntimeCoreConfig::in_memory()
+                .with_attachment_store(Arc::new(DurableInMemoryAttachmentStore::default()))
+                .with_lashlang_artifact_store(Arc::new(DurableInMemoryArtifactStore::default())),
+        ),
+    )
+    .await;
+    let effect_scope =
+        RuntimeEffectControllerScope::new(&controller, "durable-ok-turn").expect("effect scope");
+
+    let turn = runtime
+        .stream_turn(
+            TurnInput::text("hello"),
+            TurnOptions::new(CancellationToken::new())
+                .with_events(&NoopEventSink)
+                .with_effect_scope(effect_scope),
+        )
+        .await
+        .expect("durable controller + all-durable stores should run");
+
+    assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
 }
 
 #[tokio::test]
@@ -1294,7 +1506,7 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
             attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
         transport,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
+        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
     )
     .await;
 
@@ -1407,7 +1619,7 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
 async fn exec_and_execution_surface_effects_cross_controller_once() {
     let recorder = RecordingEffectController::default();
     let policy = SessionPolicy {
-        provider: mock_provider(Vec::new()).into_handle(),
+        provider_id: "mock".to_string(),
         model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
             .expect("valid model spec"),
         ..SessionPolicy::default()
@@ -1455,7 +1667,7 @@ async fn exec_and_execution_surface_effects_cross_controller_once() {
 #[tokio::test]
 async fn start_exec_without_code_executor_stops_as_runtime_error() {
     let policy = SessionPolicy {
-        provider: mock_provider(Vec::new()).into_handle(),
+        provider_id: "mock".to_string(),
         model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
             .expect("valid model spec"),
         ..SessionPolicy::default()
@@ -1468,7 +1680,11 @@ async fn start_exec_without_code_executor_stops_as_runtime_error() {
         .expect("plugins");
     let mut runtime = LashRuntime::from_embedded_state(
         policy,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
+        EmbeddedRuntimeHost::new(
+            RuntimeCoreConfig::in_memory().with_provider_resolver(Arc::new(
+                crate::SingleProviderResolver::new(mock_provider(Vec::new()).into_handle()),
+            )),
+        ),
         RuntimeServices::new(plugin_session),
         RuntimeSessionState::default(),
     )
@@ -1525,7 +1741,7 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
         }),
     }]);
     let host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::default()
+        RuntimeCoreConfig::in_memory()
             .with_effect_controller(Arc::new(recorder.clone()))
             .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(
                 trace_path.clone(),
@@ -1589,7 +1805,7 @@ async fn in_turn_direct_completion_requires_lease_and_journals_under_it() {
         }),
     }]);
     let host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::default().with_effect_controller(Arc::new(recorder.clone())),
+        RuntimeCoreConfig::in_memory().with_effect_controller(Arc::new(recorder.clone())),
     );
     let runtime = runtime_with_plugins_and_tools_and_host_and_store(
         Vec::new(),
@@ -1627,6 +1843,54 @@ async fn in_turn_direct_completion_requires_lease_and_journals_under_it() {
 }
 
 #[tokio::test]
+async fn direct_effect_restores_required_streaming_for_provider_execution() {
+    let saw_stream_events = Arc::new(AtomicBool::new(false));
+    let captured = Arc::clone(&saw_stream_events);
+    let transport = TestProvider::builder()
+        .kind("stream-required")
+        .requires_streaming(true)
+        .complete(move |request| {
+            let captured = Arc::clone(&captured);
+            async move {
+                captured.store(request.stream_events.is_some(), Ordering::SeqCst);
+                Ok(LlmResponse {
+                    full_text: "direct answer".to_string(),
+                    parts: vec![LlmOutputPart::Text {
+                        text: "direct answer".to_string(),
+                        response_meta: None,
+                    }],
+                    ..LlmResponse::default()
+                })
+            }
+        })
+        .build();
+    let runtime = runtime_with_plugins_and_tools_and_host(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+    )
+    .await;
+
+    let manager = runtime.runtime_session_manager().expect("session manager");
+    let direct = manager.direct_completion_client(
+        RuntimeEffectControllerHandle::shared(Arc::new(InlineRuntimeEffectController::default())),
+        None,
+        None,
+    );
+    let completion = direct
+        .direct_completion(
+            crate::DirectRequest::text("mock-model", "summarize"),
+            "direct-test",
+        )
+        .await
+        .expect("direct completion");
+
+    assert_eq!(completion.text, "direct answer");
+    assert!(saw_stream_events.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() {
     let recorder = RecordingEffectController::default();
     let trace_path = unique_trace_path("direct-llm-completion");
@@ -1648,7 +1912,7 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
         }),
     }]);
     let host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::default()
+        RuntimeCoreConfig::in_memory()
             .with_effect_controller(Arc::new(recorder.clone()))
             .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(
                 trace_path.clone(),
@@ -1706,7 +1970,7 @@ async fn direct_llm_completion_envelope_stores_attachment_refs_not_bytes() {
         Vec::new(),
         Arc::new(EmptyTools),
         mock_provider(Vec::new()),
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
+        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
     )
     .await;
 
@@ -1891,8 +2155,7 @@ impl crate::plugin::CodeExecutorPlugin for EffectControllerTestCodeExecutor {
         _request: crate::ExecRequest,
     ) -> Result<crate::ExecResponse, crate::SessionError> {
         Ok(crate::ExecResponse {
-            output: "exec output".to_string(),
-            observations: Vec::new(),
+            observations: vec!["exec output".to_string()],
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
@@ -1990,7 +2253,7 @@ impl lash_sansio::ProtocolDriverHandle<crate::HostTurnProtocol> for EffectContro
         match result {
             Ok(response) => vec![crate::DriverAction::Finish(TurnOutcome::Finished(
                 TurnFinish::SubmittedValue {
-                    value: serde_json::json!(response.output),
+                    value: serde_json::json!(response.observations.join("\n")),
                 },
             ))],
             Err(error) => vec![

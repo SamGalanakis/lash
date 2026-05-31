@@ -7,15 +7,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash_core::{
-    PreparedToolCall, SessionSpec, SubagentSessionContext, ToolArgumentProjectionPolicy, ToolCall,
-    ToolContext, ToolDefinition, ToolPrepareContext, ToolResult, ToolScheduling,
-    sansio::PendingToolCall,
+    PreparedToolCall, SessionSpec, SessionToolAccess, SubagentSessionContext,
+    ToolArgumentProjectionPolicy, ToolCall, ToolContext, ToolDefinition, ToolPrepareContext,
+    ToolResult, ToolScheduling, sansio::PendingToolCall,
 };
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::SubagentSessionConfigurator;
 use crate::capability::CapabilityRegistry;
 use crate::rlm_support::{
     self, SpawnCreateRequestInput, build_spawn_create_request, capability_list_for_description,
@@ -27,17 +26,58 @@ use crate::rlm_support::{
 pub(crate) struct RlmSubagentToolsProvider {
     pub(crate) registry: Arc<CapabilityRegistry>,
     pub(crate) session_spec: SessionSpec,
-    pub(crate) configurator: Arc<dyn SubagentSessionConfigurator>,
+    pub(crate) tool_access: SessionToolAccess,
     pub(crate) parent_subagent: Option<SubagentSessionContext>,
     pub(crate) include_submit_error: bool,
 }
 
 impl RlmSubagentToolsProvider {
+    /// A subagent spawn *is* a process that runs a child lash session: decode the
+    /// journaled create request + task, emit one generic
+    /// `ProcessInput::SessionTurn`, and await its handle. Going through the
+    /// process worker (rather than any bespoke session-lifecycle code in this
+    /// crate) is what re-supplies the live parent provider, gives the child
+    /// durability, and makes it recoverable — the same generic path every other
+    /// background session turn takes.
     async fn spawn_agent(&self, _args: &Value, context: &ToolContext<'_>) -> Result<Value, String> {
         let prepared: PreparedSpawnAgent = context
             .decode_prepared_payload()
             .map_err(|err| format!("spawn_agent was not prepared correctly: {err}"))?;
-        run_child_session(context, *prepared.create_request, prepared.turn_input).await
+
+        if context
+            .sessions()
+            .tool_catalog()
+            .await
+            .ok()
+            .is_some_and(|catalog| {
+                catalog.iter().all(|tool| {
+                    tool.get("name").and_then(serde_json::Value::as_str) != Some("spawn_agent")
+                })
+            })
+        {
+            return Err("subagent spawning is unavailable in this session".to_string());
+        }
+
+        let registration = lash_core::ProcessRegistration::new(
+            prepared.process_id.clone(),
+            lash_core::ProcessInput::SessionTurn {
+                create_request: prepared.create_request,
+                turn_input: Box::new(prepared.turn_input),
+                output_contract: lash_core::ToolOutputContract::Static,
+            },
+        );
+        let descriptor = lash_core::ProcessHandleDescriptor::new(Some("subagent"), Some("spawn"));
+        context
+            .processes()
+            .start(registration, descriptor)
+            .await
+            .map_err(|err| format!("failed to start subagent process: {err}"))?;
+        let output = context
+            .processes()
+            .await_process(&prepared.process_id)
+            .await
+            .map_err(|err| format!("subagent failed while executing its task: {err}"))?;
+        child_task_result(output)
     }
 
     async fn prepare_spawn_agent(
@@ -69,6 +109,7 @@ impl RlmSubagentToolsProvider {
                 parent_session_id: context.session_id(),
                 current_snapshot,
                 session_spec: &self.session_spec,
+                tool_access: &self.tool_access,
                 capability_name: &capability_name,
                 output_schema: output_schema.clone(),
                 seed,
@@ -79,13 +120,17 @@ impl RlmSubagentToolsProvider {
                         session_id: context.session_id().to_string(),
                         call_id: call_id.to_string(),
                     }),
-                configurator: self.configurator.as_ref(),
             })
-            .await
             .map_err(|err| ToolResult::err(serde_json::json!(err)))?,
         );
         let turn_input = turn_input_for_task(render_task_prompt(&task, output_schema.as_ref()));
+        // Mint the child's process identity here, in the prepared (journaled)
+        // payload, so it is stable across replay — the durable layer keys the
+        // child session turn by this persisted `process_id` end-to-end. The
+        // parent tool-call id is unique per call and always non-empty.
+        let process_id = format!("process:subagent:{}", call.call_id);
         let payload = serde_json::to_value(PreparedSpawnAgent {
+            process_id,
             create_request,
             turn_input,
         })
@@ -102,40 +147,32 @@ impl RlmSubagentToolsProvider {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PreparedSpawnAgent {
+    process_id: String,
     create_request: Box<lash_core::SessionCreateRequest>,
     turn_input: lash_core::TurnInput,
 }
 
-async fn run_child_session(
-    context: &ToolContext<'_>,
-    create_request: lash_core::SessionCreateRequest,
-    turn_input: lash_core::TurnInput,
-) -> Result<Value, String> {
-    if context
-        .sessions()
-        .tool_catalog()
-        .await
-        .ok()
-        .is_some_and(|catalog| {
-            catalog.iter().all(|tool| {
-                tool.get("name").and_then(serde_json::Value::as_str) != Some("spawn_agent")
-            })
-        })
-    {
-        return Err("subagent spawning is unavailable in this session".to_string());
+/// Project the awaited subagent process output back onto the spawn tool's
+/// result. The generic `SessionTurn` runner wraps the child's terminal
+/// `AssembledTurn` in its success value; recover it and apply the existing
+/// `task_result_value` mapping so the spawn surface is unchanged. A child that
+/// terminated via `submit_error` (or otherwise failed) surfaces as a tool error
+/// carrying its reason.
+fn child_task_result(output: lash_core::ProcessAwaitOutput) -> Result<Value, String> {
+    match output {
+        lash_core::ProcessAwaitOutput::Success { value, .. } => {
+            let turn: lash_core::AssembledTurn = value
+                .get("turn")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|err| format!("subagent process output was malformed: {err}"))?
+                .ok_or_else(|| "subagent process output was missing its turn".to_string())?;
+            Ok(task_result_value(&turn))
+        }
+        lash_core::ProcessAwaitOutput::Failure { message, .. } => Err(message),
+        lash_core::ProcessAwaitOutput::Cancelled { message, .. } => Err(message),
     }
-
-    let child = context
-        .sessions()
-        .create_session(create_request)
-        .await
-        .map_err(|err| format!("failed to create subagent session: {err}"))?;
-    let turn = context
-        .sessions()
-        .start_turn(&child.session_id, turn_input)
-        .await
-        .map_err(|err| format!("subagent failed while executing its task: {err}"))?;
-    Ok(task_result_value(&turn))
 }
 
 #[async_trait]

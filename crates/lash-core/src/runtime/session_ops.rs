@@ -8,35 +8,46 @@ use std::sync::Arc;
 use crate::{PluginActionInvokeError, SessionError};
 
 use super::LashRuntime;
-use super::state::{
-    RuntimeSessionState, SessionStateEnvelope, append_session_nodes_to_state,
-    normalize_session_graph,
-};
+use super::state::{RuntimeSessionState, append_session_nodes_to_state, normalize_session_graph};
 
 impl LashRuntime {
     /// Replace the host-owned state envelope.
-    pub fn set_persisted_state(&mut self, state: RuntimeSessionState) {
+    pub fn set_persisted_state(&mut self, state: RuntimeSessionState) -> Result<(), SessionError> {
         let mut state = state;
         normalize_session_graph(&mut state);
         if let Some(session) = self.session.as_ref() {
             session.invalidate_runtime_caches();
-            let snapshot = state.plugin_snapshot.clone().unwrap_or_default();
-            if let Err(err) = session.plugins().restore(&snapshot) {
-                tracing::warn!("failed to restore plugin snapshot in set_state: {err}");
+            // Restore the persisted tool surface so the live registry matches the
+            // state being installed (mirrors `from_host_state`). Without this the
+            // registry keeps its prior generation/tools and silently diverges from
+            // `state`. `restore_state` adopts the snapshot's generation, so a
+            // surface that reached generation >= 2 restores cleanly.
+            if let Some(tool_state) = state.tool_state_snapshot.clone() {
+                session
+                    .plugins()
+                    .tool_registry()
+                    .restore_state(tool_state)
+                    .map_err(|err| SessionError::Protocol(err.to_string()))?;
             }
+            let snapshot = state.plugin_snapshot.clone().unwrap_or_default();
+            session
+                .plugins()
+                .restore(&snapshot)
+                .map_err(|err| SessionError::Protocol(err.to_string()))?;
             state.plugin_snapshot_revision =
                 Some(session.plugins().snapshot_revision_fingerprint());
         }
         self.policy = state.policy.clone();
         self.protocol_turn_options = state.protocol_turn_options.clone();
         self.state = state;
+        Ok(())
     }
 
     pub async fn append_session_nodes(
         &mut self,
         request: crate::AppendSessionNodesRequest,
     ) -> Result<crate::AppendSessionNodesResult, SessionError> {
-        self.refresh_session_graph_from_store().await;
+        self.refresh_session_graph_from_store().await?;
         if let Some(required) = request.requires_ancestor_node_id.as_deref()
             && !self.state.session_graph.active_path_contains(required)
         {
@@ -118,10 +129,10 @@ impl LashRuntime {
     pub async fn branch_to_node(
         &mut self,
         node_id: Option<String>,
-    ) -> Result<SessionStateEnvelope, SessionError> {
+    ) -> Result<crate::SessionSnapshot, SessionError> {
         let mut state = self.export_state();
         state.session_graph.branch_to(node_id);
-        let mut persisted_state = RuntimeSessionState::from_state(state);
+        let mut persisted_state = RuntimeSessionState::from_snapshot(state);
         normalize_session_graph(&mut persisted_state);
 
         let policy = persisted_state.policy.clone();

@@ -1,3 +1,5 @@
+#[cfg(feature = "testing")]
+pub mod conformance;
 pub mod streaming;
 pub mod timeouts;
 pub mod util;

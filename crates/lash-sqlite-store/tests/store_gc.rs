@@ -1,12 +1,11 @@
 use lash_core::{
-    AttachmentId, AttachmentIntent, AttachmentManifest, HostTurnProtocol,
-    HydratedSessionCheckpoint, ModelSpec, PersistedSessionConfig, PersistedTurnState,
-    PluginSessionSnapshot, PreparedPrompt, PromptContext, ProtocolTurnOptions,
+    HostTurnProtocol, HydratedSessionCheckpoint, ModelSpec, PersistedSessionConfig,
+    PersistedTurnState, PluginSessionSnapshot, PreparedPrompt, PromptContext, ProtocolTurnOptions,
     RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit, RuntimeEffectJournalRecord,
     RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence, RuntimeSessionState,
     RuntimeTurnCheckpoint, RuntimeTurnMachineConfigSnapshot, SessionGraph, SessionHead,
-    SessionPolicy, SessionStoreCreateRequest, SessionStoreFactory, TokenUsage, ToolState,
-    TurnDriverConfig, TurnDriverPreamble,
+    SessionPolicy, SessionStoreCreateRequest, SessionStoreFactory, StoreError, TokenUsage,
+    ToolState, TurnDriverConfig, TurnDriverPreamble,
 };
 use lash_sqlite_store::{
     BlobArtifactDescriptor, BuiltinBlobProfile, SqliteSessionStoreFactory, Store, StoreGcPolicy,
@@ -273,6 +272,31 @@ async fn abandon_runtime_turn_lease_releases_owner_and_preserves_resume_data() {
         .expect("new owner can claim abandoned turn");
 }
 
+// Checkpoint hash validation is backend-specific (only durable backends hash
+// the stored turn state), so it lives here rather than in the shared
+// `runtime_persistence` conformance suite. The happy-path round-trip is
+// covered above; this asserts the integrity guard actually fires when a
+// checkpoint's declared hash doesn't match its contents.
+#[tokio::test]
+async fn save_runtime_turn_checkpoint_rejects_hash_mismatch() {
+    let store = Store::memory().expect("store");
+    let lease = store
+        .claim_runtime_turn_lease("root", "turn-hash", "owner-a", 60_000)
+        .await
+        .expect("lease");
+    let mut checkpoint = runtime_turn_checkpoint("root", "turn-hash");
+    checkpoint.checkpoint_hash = "sha256:deadbeef-not-the-real-hash".to_string();
+
+    let err = store
+        .save_runtime_turn_checkpoint(&lease, checkpoint)
+        .await
+        .expect_err("a checkpoint whose hash doesn't match its contents must be rejected");
+    assert!(
+        matches!(err, StoreError::RuntimeTurnCheckpointHashMismatch { .. }),
+        "expected RuntimeTurnCheckpointHashMismatch, got {err:?}"
+    );
+}
+
 struct NoopDriver;
 
 impl lash_sansio::ProtocolDriverHandle<HostTurnProtocol> for NoopDriver {
@@ -398,78 +422,6 @@ fn runtime_effect_record(
         outcome: RuntimeEffectOutcome::Sleep,
         created_at_epoch_ms: 1,
     }
-}
-
-#[tokio::test]
-async fn attachment_manifest_records_intent_and_commit_stamps_atomically() {
-    let store = Store::memory().expect("store");
-    let attachment_a = AttachmentId::new("aaaa".to_string());
-    let attachment_b = AttachmentId::new("bbbb".to_string());
-
-    AttachmentManifest::record_intent(
-        &store,
-        AttachmentIntent {
-            attachment_id: attachment_a.clone(),
-            session_id: "root".to_string(),
-            canonical_uri: "sha256:aaaa".to_string(),
-            intent_at_epoch_ms: 100,
-        },
-    )
-    .expect("intent a");
-    AttachmentManifest::record_intent(
-        &store,
-        AttachmentIntent {
-            attachment_id: attachment_b.clone(),
-            session_id: "root".to_string(),
-            canonical_uri: "sha256:bbbb".to_string(),
-            intent_at_epoch_ms: 100,
-        },
-    )
-    .expect("intent b");
-
-    // Both are uncommitted; both surface when sweeping for intents
-    // older than 200.
-    let uncommitted = AttachmentManifest::list_uncommitted(&store, 200).expect("list");
-    assert_eq!(uncommitted.len(), 2);
-
-    // Commit one of them via a RuntimeCommit that names it. The other
-    // remains uncommitted so a later GC sweep can reconcile it.
-    let commit = RuntimeCommit {
-        session_id: "root".to_string(),
-        expected_head_revision: Some(0),
-        config: PersistedSessionConfig::default(),
-        agent_frames: Vec::new(),
-        current_agent_frame_id: String::new(),
-        graph: lash_core::GraphCommitDelta::ReplaceFull(SessionGraph::default()),
-        checkpoint: HydratedSessionCheckpoint {
-            turn_state: PersistedTurnState::default(),
-            tool_state_ref: None,
-            tool_state: None,
-            plugin_snapshot_ref: None,
-            plugin_snapshot_revision: None,
-            plugin_snapshot: None,
-            execution_state_ref: None,
-            execution_state: None,
-        },
-        usage_deltas: Vec::new(),
-        completed_turn: None,
-        completed_queue_claims: Vec::new(),
-        committed_attachment_ids: vec![attachment_a.clone()],
-    };
-    store
-        .commit_runtime_state(commit)
-        .await
-        .expect("commit succeeds");
-
-    let still_uncommitted = AttachmentManifest::list_uncommitted(&store, 200).expect("list");
-    assert_eq!(still_uncommitted.len(), 1);
-    assert_eq!(still_uncommitted[0].attachment_id, attachment_b);
-    assert!(still_uncommitted[0].committed_at_epoch_ms.is_none());
-
-    // Forget the orphan after the GC removes its bytes.
-    AttachmentManifest::forget(&store, &attachment_b).expect("forget");
-    let after_forget = AttachmentManifest::list_uncommitted(&store, 200).expect("list");
-    assert!(after_forget.is_empty());
 }
 
 fn unique_temp_dir(name: &str) -> std::path::PathBuf {

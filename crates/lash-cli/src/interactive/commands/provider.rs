@@ -505,7 +505,7 @@ pub(super) fn handle_logout(app: &mut App, provider: &ProviderHandle) -> anyhow:
                     ),
                     Err(e) => push_system_message(
                         app,
-                        format!("Failed to save updated provider registry: {}", e),
+                        format!("Failed to save updated provider config: {}", e),
                     ),
                 }
             }

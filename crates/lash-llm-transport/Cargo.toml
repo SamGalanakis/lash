@@ -13,6 +13,11 @@ description = "HTTP transport layer used by lash provider crates."
 keywords = ["lash", "agent", "llm", "transport", "http"]
 categories = ["asynchronous", "network-programming"]
 
+[features]
+# Exposes the cross-provider response-normalization conformance suite
+# (`conformance`). Provider crates enable it as a dev-dependency feature.
+testing = []
+
 [dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.13", default-features = false }
 lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.13" }

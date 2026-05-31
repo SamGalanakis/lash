@@ -46,7 +46,8 @@ impl crate::PluginFactory for TriggerRouteTestFactory {
     fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
         lashlang::LashlangAbilities::default()
             .with_processes()
-            .with_process_lifecycle()
+            .with_sleep()
+            .with_process_signals()
             .with_triggers()
     }
 
@@ -115,7 +116,7 @@ async fn trigger_install_stores_activation_routes_and_emit_reuses_artifact_refs(
     let artifact_store = Arc::new(CountingArtifactStore::default());
     let artifact_store_for_host: Arc<dyn lashlang::LashlangArtifactStore> = artifact_store.clone();
     let host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::default().with_lashlang_artifact_store(artifact_store_for_host),
+        RuntimeCoreConfig::in_memory().with_lashlang_artifact_store(artifact_store_for_host),
     );
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         vec![Arc::new(TriggerRouteTestFactory)],
@@ -181,6 +182,27 @@ async fn trigger_install_stores_activation_routes_and_emit_reuses_artifact_refs(
         .expect("emit host event");
     assert_eq!(report.started_process_ids.len(), 1);
     assert_eq!(artifact_store.put_count(), 1);
+
+    // The inline controller now only registers the process row; the
+    // lease-protected worker is the sole executor. Drive it over the same
+    // registry + artifact store so the trigger-started process runs.
+    let worker = crate::DurableProcessWorker::new(
+        crate::DurableProcessWorkerConfig::new(
+            Arc::new(crate::PluginHost::new(vec![Arc::new(
+                TriggerRouteTestFactory,
+            )])),
+            RuntimeCoreConfig::in_memory().with_lashlang_artifact_store(
+                artifact_store.clone() as Arc<dyn lashlang::LashlangArtifactStore>
+            ),
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
+            Arc::clone(&registry),
+        )
+        .with_session_policy(crate::runtime::tests::helpers::standard_test_policy()),
+    );
+    worker
+        .drive_pending_processes()
+        .await
+        .expect("drive pending processes");
 
     let process_id = &report.started_process_ids[0];
     registry

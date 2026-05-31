@@ -9,12 +9,10 @@ homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "Built-in provider registry for lash: OpenAI-compatible, Anthropic, Google, Codex."
+description = "Built-in provider metadata for lash: OpenAI-compatible, Anthropic, Google, Codex."
 keywords = ["lash", "agent", "llm", "openai", "anthropic"]
 categories = ["api-bindings", "asynchronous"]
 
+# This crate exposes only static provider-kind metadata (`provider_kinds()`); it
+# does not depend on the provider crates themselves (those deps were unused).
 [dependencies]
-lash-provider-anthropic = { path = "../lash-provider-anthropic", version = "=0.1.0-alpha.13" }
-lash-provider-codex = { path = "../lash-provider-codex", version = "=0.1.0-alpha.13" }
-lash-provider-google = { path = "../lash-provider-google", version = "=0.1.0-alpha.13" }
-lash-provider-openai = { path = "../lash-provider-openai", version = "=0.1.0-alpha.13" }

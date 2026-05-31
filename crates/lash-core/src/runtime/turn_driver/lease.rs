@@ -117,7 +117,7 @@ impl<'run> RuntimeTurnDriver<'run> {
             checkpoint,
             protocol_turn_options: self.protocol_turn_options.clone(),
             turn_prompt_layer: self.turn_context.prompt_layer().clone(),
-            provider_id: self.policy.provider.kind().to_string(),
+            provider_id: self.policy.recorded_provider_id().to_string(),
             model: self.policy.model.clone(),
             updated_at_epoch_ms: current_epoch_ms(),
         };

@@ -103,7 +103,6 @@ impl crate::ProcessService for RuntimeSessionManager {
             .start_process(
                 &self.current,
                 &self.managed,
-                Arc::new(self.clone()),
                 session_id,
                 registration,
                 options,
@@ -125,10 +124,11 @@ impl crate::ProcessService for RuntimeSessionManager {
     async fn list_visible(
         &self,
         session_id: &str,
+        mode: crate::ProcessListMode,
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
         self.processes
-            .list_process_handles(&self.current, session_id, scope)
+            .list_process_handles(&self.current, session_id, mode, scope)
             .await
     }
 
@@ -162,6 +162,26 @@ impl crate::ProcessService for RuntimeSessionManager {
                 Arc::new(self.clone()),
                 session_id,
                 process_id,
+                scope,
+            )
+            .await
+    }
+
+    async fn signal(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        signal_id: String,
+        payload: serde_json::Value,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<crate::ProcessEvent, crate::PluginError> {
+        self.processes
+            .signal_process(
+                &self.current,
+                session_id,
+                process_id,
+                signal_id,
+                payload,
                 scope,
             )
             .await

@@ -20,16 +20,16 @@ pub(in crate::runtime::session_manager) use usage::{
 
 #[derive(Clone)]
 enum CurrentSnapshot {
-    Owned(SessionSnapshot),
+    Owned(RuntimeSessionState),
     ReadModel {
-        meta: SessionSnapshot,
+        meta: RuntimeSessionState,
         messages: Arc<Vec<Message>>,
         tool_calls: Arc<Vec<ToolCallRecord>>,
     },
 }
 
 impl CurrentSnapshot {
-    fn to_snapshot(&self) -> SessionSnapshot {
+    fn to_runtime_state(&self) -> RuntimeSessionState {
         match self {
             Self::Owned(snapshot) => snapshot.clone(),
             Self::ReadModel {
@@ -106,8 +106,8 @@ pub(super) struct RuntimeSessionManager {
 }
 
 impl CurrentSessionCapability {
-    fn snapshot_meta_without_graph(runtime: &LashRuntime) -> SessionSnapshot {
-        SessionSnapshot {
+    fn snapshot_meta_without_graph(runtime: &LashRuntime) -> RuntimeSessionState {
+        RuntimeSessionState {
             session_id: runtime.state.session_id.clone(),
             policy: runtime.state.policy.clone(),
             agent_frames: runtime.state.agent_frames.clone(),
@@ -156,6 +156,12 @@ impl CurrentSessionCapability {
             store: runtime.services.store.clone(),
             turn_lease,
         }
+    }
+
+    fn resolve_policy(&self) -> Result<ResolvedSessionPolicy, crate::PluginError> {
+        self.host
+            .resolve_session_policy(&self.session_id, self.policy.clone())
+            .map_err(|err| crate::PluginError::Session(err.to_string()))
     }
 }
 

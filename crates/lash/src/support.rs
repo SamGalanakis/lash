@@ -5,9 +5,10 @@ pub(crate) use std::sync::{Arc, Mutex as StdMutex};
 pub(crate) use async_trait::async_trait;
 pub(crate) use lash_core::plugin::StaticPluginFactory;
 pub(crate) use lash_core::{
-    DurableProcessWorkerConfig, LashRuntime, MessageRole, PluginHost, PluginSpec, PluginStack,
-    RuntimeCoreConfig, RuntimeEnvironment, RuntimeHandle, RuntimeObservation, RuntimeSessionState,
-    SessionPolicy, SessionSpec,
+    DurabilityTier, DurableProcessWorker, DurableProcessWorkerConfig, LashRuntime, MessageRole,
+    PluginHost, PluginSpec, PluginStack, ProcessWorkPoke, ProcessWorkRunner, RuntimeCoreConfig,
+    RuntimeEnvironment, RuntimeHandle, RuntimeObservation, RuntimeSessionState, SessionPolicy,
+    SessionSpec,
 };
 pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;
@@ -21,7 +22,7 @@ pub(crate) use lash_core::{
     PluginMessage, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistry, ProcessScope,
     ProtocolTurnOptions, ProviderHandle, Residency, RewriteTrigger, RuntimeEffectController,
     RuntimeEffectControllerScope, RuntimeErrorCode, RuntimePersistence, SessionCreateRequest,
-    SessionError, SessionHandle, SessionReadView, SessionStateEnvelope, SessionStoreCreateRequest,
+    SessionError, SessionHandle, SessionReadView, SessionSnapshot, SessionStoreCreateRequest,
     SessionStoreFactory, SessionUsageReport, TerminationPolicy, ToolAvailability, ToolCallRecord,
     ToolManifest, ToolProvider, ToolResult, ToolSourceHandle, TurnActivitySink, TurnOutcome,
 };

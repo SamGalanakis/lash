@@ -10,7 +10,8 @@ impl LashRuntime {
             let snapshot = session.plugins().tool_registry().export_state();
             self.state.tool_state_generation = Some(snapshot.generation());
             self.state.tool_state_snapshot = Some(snapshot);
-            self.state.plugin_snapshot = session.plugins().snapshot().ok();
+            let captured = session.plugins().snapshot();
+            crate::runtime::state::store_plugin_snapshot(&mut self.state.plugin_snapshot, captured);
             self.state.plugin_snapshot_revision =
                 Some(session.plugins().snapshot_revision_fingerprint());
         } else {
@@ -49,8 +50,8 @@ impl LashRuntime {
     /// Export current session state for inspection/UI purposes.
     /// This keeps persistence-heavy snapshots untouched; callers that need a
     /// fully persisted view should use `export_persisted_state`.
-    pub fn export_state(&self) -> SessionStateEnvelope {
-        self.state.export_state()
+    pub fn export_state(&self) -> crate::SessionSnapshot {
+        self.state.to_snapshot()
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
@@ -66,8 +67,11 @@ impl LashRuntime {
         self.state.clone()
     }
 
-    pub fn apply_persistence_state(&mut self, state: RuntimeSessionState) {
-        self.set_persisted_state(state);
+    pub fn apply_persistence_state(
+        &mut self,
+        state: RuntimeSessionState,
+    ) -> Result<(), SessionError> {
+        self.set_persisted_state(state)
     }
 
     pub(crate) fn export_graph_first_state(&self) -> RuntimeSessionState {
@@ -86,7 +90,8 @@ impl LashRuntime {
             let snapshot = session.plugins().tool_registry().export_state();
             state.tool_state_generation = Some(snapshot.generation());
             state.tool_state_snapshot = Some(snapshot);
-            state.plugin_snapshot = session.plugins().snapshot().ok();
+            let captured = session.plugins().snapshot();
+            crate::runtime::state::store_plugin_snapshot(&mut state.plugin_snapshot, captured);
             state.plugin_snapshot_revision =
                 Some(session.plugins().snapshot_revision_fingerprint());
         }
@@ -105,18 +110,18 @@ impl LashRuntime {
 
     pub async fn await_background_work(&mut self) -> Result<(), SessionError> {
         if self.process_sync_needed.swap(false, Ordering::AcqRel) {
-            self.refresh_session_graph_from_store().await;
+            self.refresh_session_graph_from_store().await?;
         }
         Ok(())
     }
 
-    pub(super) async fn refresh_session_graph_from_store(&mut self) {
+    pub(super) async fn refresh_session_graph_from_store(&mut self) -> Result<(), SessionError> {
         let Some(store) = self
             .session
             .as_ref()
             .and_then(|session| session.history_store())
         else {
-            return;
+            return Ok(());
         };
         let scope = match self.residency {
             crate::Residency::KeepAll => crate::store::SessionReadScope::FullGraph,
@@ -124,19 +129,17 @@ impl LashRuntime {
                 leaf_node_id: self.state.session_graph.leaf_node_id.clone(),
             },
         };
-        let read = match store.load_session(scope).await {
-            Ok(Some(read)) => read,
-            Ok(None) => return,
-            Err(err) => {
-                tracing::warn!("failed to refresh session graph from store: {err}");
-                return;
-            }
+        let Some(read) = store.load_session(scope).await.map_err(|err| {
+            SessionError::Protocol(format!("failed to refresh session graph from store: {err}"))
+        })?
+        else {
+            return Ok(());
         };
         let has_newer_graph = self.state.head_revision != Some(read.head_revision)
             || read.graph.leaf_node_id != self.state.session_graph.leaf_node_id
             || read.checkpoint_ref != self.state.checkpoint_ref;
         if !has_newer_graph {
-            return;
+            return Ok(());
         }
         let head = crate::store::SessionHead {
             session_id: read.session_id.clone(),
@@ -150,6 +153,9 @@ impl LashRuntime {
         };
         apply_session_head(&mut self.state, &head);
         apply_session_checkpoint(&mut self.state, read.checkpoint);
+        self.policy = self.state.effective_policy().clone();
+        self.protocol_turn_options = self.state.effective_protocol_turn_options().clone();
+        Ok(())
     }
 
     pub(super) fn runtime_session_manager(
@@ -248,7 +254,7 @@ impl LashRuntime {
             state: self.read_view(),
             host: manager,
         };
-        let input = crate::HistoryState::from_state(&self.state.export_state());
+        let input = crate::HistoryState::from_snapshot(&self.state.to_snapshot());
         let baseline_messages = input.messages.len();
         let outcome = plugin_session
             .rewrite_history(&ctx, input)
@@ -263,7 +269,11 @@ impl LashRuntime {
                 .replace_active_read_state(&outcome.messages, &outcome.tool_calls);
             if let Some(session) = self.session.as_ref() {
                 self.state.tool_state_snapshot = Some(session.tool_registry().export_state());
-                self.state.plugin_snapshot = session.plugins().snapshot().ok();
+                let captured = session.plugins().snapshot();
+                crate::runtime::state::store_plugin_snapshot(
+                    &mut self.state.plugin_snapshot,
+                    captured,
+                );
                 self.state.plugin_snapshot_revision =
                     Some(session.plugins().snapshot_revision_fingerprint());
             }

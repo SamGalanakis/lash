@@ -15,15 +15,10 @@ impl ProcessCapability {
             .unwrap_or_else(|| crate::ProcessScope::new(session_id))
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "process start composes current session, managed session, runner, target, registration, options, and scoped effect context"
-    )]
     pub(in crate::runtime::session_manager) async fn start_process(
         &self,
         current: &CurrentSessionCapability,
         managed: &ManagedSessionCapability,
-        runner: Arc<dyn crate::runtime::effect::ProcessRunner>,
         session_id: &str,
         registration: crate::ProcessRegistration,
         options: crate::ProcessStartOptions,
@@ -49,16 +44,10 @@ impl ProcessCapability {
             )
             .with_caused_by(caused_by),
         );
-        let wake_target_scope = options
-            .wake_session_id
-            .as_deref()
-            .map(|session_id| {
-                self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref())
-            })
-            .unwrap_or_else(|| creator_scope.clone());
-        let execution_context = options
-            .execution_context(&scope)
-            .with_wake_target_scope(wake_target_scope);
+        // The wake target is the creator scope, persisted in the process
+        // provenance; the worker derives it from there on execution. (Start no
+        // longer carries a wake target — a process always wakes its creator.)
+        let execution_context = options.execution_context(&scope);
         let outcome = self
             .execute_process_effect(
                 current,
@@ -73,7 +62,6 @@ impl ProcessCapability {
                         }),
                     execution_context: Box::new(execution_context),
                 },
-                Some(runner),
                 scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
@@ -105,7 +93,6 @@ impl ProcessCapability {
                 crate::ProcessCommand::Await {
                     process_id: process_id.to_string(),
                 },
-                None,
                 scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
@@ -123,6 +110,7 @@ impl ProcessCapability {
         &self,
         current: &CurrentSessionCapability,
         session_id: &str,
+        mode: crate::ProcessListMode,
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
         let Some(registry) = &current.host.process_registry else {
@@ -137,8 +125,8 @@ impl ProcessCapability {
                 crate::ProcessCommand::List {
                     owner_scope: self
                         .process_scope_for_op(session_id, scope.agent_frame_id.as_deref()),
+                    mode,
                 },
-                None,
                 scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
@@ -180,7 +168,6 @@ impl ProcessCapability {
                     process_id: process_id.to_string(),
                     reason: Some("requested by host".to_string()),
                 },
-                None,
                 scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
@@ -194,6 +181,55 @@ impl ProcessCapability {
         }
     }
 
+    pub(in crate::runtime::session_manager) async fn signal_process(
+        &self,
+        current: &CurrentSessionCapability,
+        session_id: &str,
+        process_id: &str,
+        signal_id: String,
+        payload: serde_json::Value,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<crate::ProcessEvent, crate::PluginError> {
+        let Some(registry) = &current.host.process_registry else {
+            return Err(crate::PluginError::Session(
+                "process registry is unavailable in this runtime".to_string(),
+            ));
+        };
+        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
+        let visible = registry
+            .list_live_handle_grants(&owner_scope)
+            .await?
+            .into_iter()
+            .any(|(grant, _record)| grant.process_id == process_id);
+        if !visible {
+            return Err(crate::PluginError::Session(format!(
+                "process handle `{process_id}` is not live or visible in this session"
+            )));
+        }
+        let request = crate::ProcessEventAppendRequest::new("process.signal", payload)
+            .with_replay_key(format!("process:{process_id}:signal:{signal_id}"));
+        let outcome = self
+            .execute_process_effect(
+                current,
+                Arc::clone(registry),
+                crate::ProcessCommand::Signal {
+                    process_id: process_id.to_string(),
+                    signal_id,
+                    request,
+                },
+                scope.parent_invocation,
+                scope.effect_controller,
+                scope.turn_lease,
+            )
+            .await?;
+        match outcome {
+            crate::ProcessEffectOutcome::Signal { event } => Ok(event),
+            _ => Err(crate::PluginError::Session(
+                "process signal returned the wrong outcome".to_string(),
+            )),
+        }
+    }
+
     pub(in crate::runtime::session_manager) async fn cancel_all_processes(
         &self,
         current: &CurrentSessionCapability,
@@ -203,7 +239,12 @@ impl ProcessCapability {
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
         let tasks = self
-            .list_process_handles(current, session_id, scope.clone())
+            .list_process_handles(
+                current,
+                session_id,
+                crate::ProcessListMode::Live,
+                scope.clone(),
+            )
             .await?;
         let mut cancelled = Vec::new();
         for (grant, record) in tasks {
@@ -236,21 +277,18 @@ impl ProcessCapability {
         if handle_ids.is_empty() {
             return Ok(());
         }
-        let requested = handle_ids.iter().cloned().collect::<HashSet<_>>();
-        let mut visible = HashSet::new();
         let Some(registry) = &current.host.process_registry else {
             return Err(crate::PluginError::Session(
                 "process registry is unavailable in this runtime".to_string(),
             ));
         };
         let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
-        for (grant, _record) in registry.list_handle_grants(&owner_scope).await? {
-            visible.insert(grant.process_id);
-        }
-        if let Some(missing) = requested.iter().find(|id| !visible.contains(*id)) {
-            return Err(crate::PluginError::Session(format!(
-                "process handle `{missing}` is not live or visible in this session"
-            )));
+        for process_id in handle_ids {
+            if !registry.has_handle_grant(&owner_scope, process_id).await? {
+                return Err(crate::PluginError::Session(format!(
+                    "process handle `{process_id}` is not live or visible in this session"
+                )));
+            }
         }
         Ok(())
     }
@@ -285,7 +323,6 @@ impl ProcessCapability {
                     ),
                     process_ids,
                 },
-                None,
                 scope.parent_invocation,
                 scope.effect_controller,
                 scope.turn_lease,
@@ -375,21 +412,17 @@ impl ProcessCapability {
         }
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "journaled process effects keep registry, command, runner, invocation, controller, and turn lease explicit"
-    )]
     async fn execute_process_effect(
         &self,
         current: &CurrentSessionCapability,
         registry: Arc<dyn crate::ProcessRegistry>,
         command: crate::ProcessCommand,
-        runner: Option<Arc<dyn crate::runtime::effect::ProcessRunner>>,
         parent_invocation: Option<crate::RuntimeInvocation>,
         effect_controller: Option<&dyn crate::RuntimeEffectController>,
         scope_turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Result<crate::ProcessEffectOutcome, crate::PluginError> {
         let effect_id = command.effect_id();
+        let is_start = matches!(command, crate::ProcessCommand::Start { .. });
         let invocation = crate::runtime::causal::process_effect_invocation(
             &current.session_id,
             parent_invocation,
@@ -399,7 +432,24 @@ impl ProcessCapability {
             invocation,
             crate::RuntimeEffectCommand::Process { command },
         );
-        let controller = effect_controller.unwrap_or(current.host.core.effect_controller.as_ref());
+        // Route through the controller the host explicitly wired for this
+        // execution path; never silently substitute a fallback. A turn scope
+        // supplies its per-turn (durable in a durable deployment) controller via
+        // `scope.effect_controller`. Out of turn there is no scope controller, so
+        // we use the host's build-time controller, which the host chose by name
+        // (`RuntimeCoreConfig::new`/`in_memory`).
+        //
+        // A `Start` only *registers* the process row through the controller: the
+        // registry's non-terminal row is the durable work queue, and the
+        // lease-protected `ProcessWorkRunner` is the sole executor. After a
+        // successful start we poke that runner (see below) so consumption is
+        // prompt; poking is idempotent (the runner skips leased/terminal rows and
+        // the durable submit is keyed-idempotent), so the same seam serves
+        // in-turn-inline, trigger, host-event, and cron starts uniformly.
+        let controller = match effect_controller {
+            Some(controller) => controller,
+            None => current.host.core.effect_controller.as_ref(),
+        };
         let turn_lease = scope_turn_lease.as_ref().or(current.turn_lease.as_ref());
         // Process registry/workflow idempotency is the replay boundary when a
         // process control call is issued outside an active turn lease.
@@ -409,9 +459,17 @@ impl ProcessCapability {
             turn_lease,
             controller,
             envelope,
-            crate::RuntimeEffectLocalExecutor::process(registry, runner),
+            crate::RuntimeEffectLocalExecutor::process_control(registry),
         )
         .await?;
+        // Wake the work runner so the freshly registered row is consumed
+        // promptly; absent a wired runner (a registry-less host) the poke is a
+        // no-op.
+        if is_start {
+            if let Some(poke) = current.host.process_work_poke.as_ref() {
+                poke.poke();
+            }
+        }
         outcome.into_process().map_err(crate::PluginError::from)
     }
 }

@@ -6,10 +6,12 @@
 
 use std::collections::BTreeMap;
 
-use lash_core::ProviderHandle;
-use lash_core::ProviderSpec;
-use lash_core::provider::build_provider;
+use lash_core::{ProviderFactory, ProviderHandle, ProviderSpec};
 use lash_plugin_mcp::McpServerConfig;
+use lash_provider_anthropic::AnthropicProviderFactory;
+use lash_provider_codex::CodexProviderFactory;
+use lash_provider_google::GoogleOAuthProviderFactory;
+use lash_provider_openai::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
 use serde::{Deserialize, Serialize};
 
 /// Auxiliary service secrets that are independent of LLM provider auth.
@@ -150,9 +152,9 @@ impl LashConfig {
         );
     }
 
-    /// Materialize the active provider via the global registry.
+    /// Materialize the active provider with the providers compiled into the CLI.
     pub fn build_active_provider(&self) -> Result<ProviderHandle, String> {
-        build_provider(self.active_provider_spec()).map(ProviderHandle::new)
+        materialize_provider_spec(self.active_provider_spec())
     }
 
     /// Load from the given config path. Returns `None` if missing or
@@ -204,6 +206,21 @@ impl LashConfig {
         }
         Ok(())
     }
+}
+
+pub(crate) fn materialize_provider_spec(spec: &ProviderSpec) -> Result<ProviderHandle, String> {
+    let components = match spec.kind.as_str() {
+        "anthropic" => AnthropicProviderFactory.deserialize(spec.config.clone()),
+        "openai" => OpenAiProviderFactory.deserialize(spec.config.clone()),
+        "openai-compatible" => OpenAiCompatibleProviderFactory.deserialize(spec.config.clone()),
+        "codex" => CodexProviderFactory.deserialize(spec.config.clone()),
+        "google_oauth" => GoogleOAuthProviderFactory.deserialize(spec.config.clone()),
+        other => Err(format!(
+            "provider `{}` is not supported by this CLI build",
+            other
+        )),
+    }?;
+    Ok(ProviderHandle::new(components))
 }
 
 #[cfg(test)]

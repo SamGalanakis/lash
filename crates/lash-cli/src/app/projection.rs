@@ -230,6 +230,12 @@ fn append_rlm_trajectory_items(
             append_tool_call_record_items(timeline, record, activity_state);
         }
     }
+    // Mirror the live path (`CodeBlockCompleted`): a failed block keeps its
+    // code on screen with the error rendered after it, so scrollback shows the
+    // same thing the turn did.
+    if let Some(error) = &entry.error {
+        timeline.push(UiTimelineItem::Error(error.clone()));
+    }
     if let Some(final_output) = &entry.final_output {
         let _ = push_assistant_text_item(timeline, &render_submitted_value(final_output));
     }

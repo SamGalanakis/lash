@@ -49,9 +49,8 @@ impl Clone for ProviderComponents {
     }
 }
 
-/// Owning handle to provider components. Session state + config store this
-/// so we can add Clone / Serialize / Deserialize impls without running
-/// into orphan-rule conflicts.
+/// Owning handle to provider components. This is an executable transport
+/// handle supplied by the host, not a persistence format.
 pub struct ProviderHandle {
     components: ProviderComponents,
 }
@@ -205,24 +204,6 @@ impl PartialEq for ProviderHandle {
 
 impl Eq for ProviderHandle {}
 
-impl Serialize for ProviderHandle {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.to_spec().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ProviderHandle {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let spec = ProviderSpec::deserialize(deserializer)?;
-        if spec.kind == "unconfigured" {
-            return Ok(ProviderHandle::default());
-        }
-        build_provider(&spec)
-            .map(ProviderHandle::new)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 impl Default for ProviderHandle {
     fn default() -> Self {
         Self::new(UnconfiguredProvider::default().into_components())
@@ -265,7 +246,7 @@ impl Provider for UnconfiguredProvider {
 
     async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         Err(LlmTransportError::new(
-            "no provider configured: host must install a provider factory and set SessionPolicy.provider before running a turn",
+            "no provider configured: host must set SessionPolicy.provider before running a turn",
         ))
     }
 

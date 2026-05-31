@@ -29,7 +29,6 @@ tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "r
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
 schemars = { workspace = true, features = ["derive"] }
-jsonschema = { workspace = true }
 async-trait = { workspace = true }
 arc-swap = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }

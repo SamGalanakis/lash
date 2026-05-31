@@ -11,13 +11,14 @@ pub(crate) fn autoresearch_tool(
     name: &str,
     description: impl Into<String>,
     input_schema: Value,
+    output_schema: Value,
 ) -> ToolDefinition {
     ToolDefinition::raw(
         format!("tool:{name}"),
         name,
         description,
         input_schema,
-        json!({ "type": "object", "additionalProperties": true }),
+        output_schema,
     )
     .with_availability(lash_core::ToolAvailabilityConfig::off())
     .with_scheduling(ToolScheduling::Parallel)
@@ -81,6 +82,7 @@ impl AutoresearchTools {
                     "required": ["name", "metric_name"],
                     "additionalProperties": false
                 }),
+                init_experiment_output_schema(),
             ),
             autoresearch_tool(
                 "run_experiment",
@@ -105,6 +107,7 @@ impl AutoresearchTools {
                     "required": ["command"],
                     "additionalProperties": false
                 }),
+                run_experiment_output_schema(),
             ),
             autoresearch_tool(
                 "log_experiment",
@@ -136,6 +139,7 @@ impl AutoresearchTools {
                     "required": ["commit", "metric", "status", "description"],
                     "additionalProperties": false
                 }),
+                log_experiment_output_schema(),
             ),
         ]
     }
@@ -403,6 +407,86 @@ impl AutoresearchTools {
     fn summary(&self) -> Result<StatusSummary, String> {
         full_summary_from_runtime(&self.workdir, &self.state).map_err(|err| err.to_string())
     }
+}
+
+fn init_experiment_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "segment": { "type": "integer", "minimum": 0 },
+            "status": status_summary_output_schema()
+        },
+        "required": ["segment", "status"],
+        "additionalProperties": false
+    })
+}
+
+fn log_experiment_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "status": status_summary_output_schema()
+        },
+        "required": ["status"],
+        "additionalProperties": false
+    })
+}
+
+fn run_experiment_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "command": { "type": "string" },
+            "exit_code": nullable_schema(json!({ "type": "integer" })),
+            "duration_seconds": { "type": "number", "minimum": 0 },
+            "passed": { "type": "boolean" },
+            "crashed": { "type": "boolean" },
+            "timed_out": { "type": "boolean" },
+            "tail_output": { "type": "string" },
+            "checks_pass": nullable_schema(json!({ "type": "boolean" })),
+            "checks_timed_out": nullable_schema(json!({ "type": "boolean" })),
+            "checks_output": nullable_schema(json!({ "type": "string" })),
+            "checks_duration_seconds": nullable_schema(json!({ "type": "number", "minimum": 0 })),
+            "parsed_metrics": {
+                "type": "object",
+                "additionalProperties": { "type": "number" }
+            },
+            "parsed_primary": nullable_schema(json!({ "type": "number" })),
+            "metric_name": nullable_schema(json!({ "type": "string" })),
+            "metric_unit": { "type": "string" }
+        },
+        "required": [
+            "command",
+            "exit_code",
+            "duration_seconds",
+            "passed",
+            "crashed",
+            "timed_out",
+            "tail_output",
+            "checks_pass",
+            "checks_timed_out",
+            "checks_output",
+            "checks_duration_seconds",
+            "parsed_metrics",
+            "parsed_primary",
+            "metric_name",
+            "metric_unit"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn status_summary_output_schema() -> Value {
+    serde_json::to_value(schemars::schema_for!(StatusSummary)).unwrap_or_else(|_| {
+        json!({
+            "type": "object",
+            "additionalProperties": true
+        })
+    })
+}
+
+fn nullable_schema(schema: Value) -> Value {
+    json!({ "anyOf": [schema, { "type": "null" }] })
 }
 
 #[derive(Clone, Debug)]

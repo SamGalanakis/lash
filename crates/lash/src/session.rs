@@ -7,6 +7,7 @@ pub struct SessionBuilder {
     pub(crate) mode: Option<ModeId>,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) store: Option<Arc<dyn RuntimePersistence>>,
+    pub(crate) provider: Option<ProviderHandle>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
     pub(crate) plugin_factories: Vec<Arc<dyn PluginFactory>>,
 }
@@ -28,7 +29,8 @@ impl SessionBuilder {
     }
 
     pub fn provider(mut self, provider: ProviderHandle) -> Self {
-        self.spec = self.spec.provider(provider);
+        self.spec = self.spec.provider_id(provider.kind());
+        self.provider = Some(provider);
         self
     }
 
@@ -117,7 +119,9 @@ impl SessionBuilder {
                 requested: self.session_id,
             });
         }
+        let recorded_provider_id = state.policy.recorded_provider_id().to_string();
         state.policy = policy.clone();
+        state.policy.provider_id = recorded_provider_id;
         Self::normalize_tool_state(&mut state);
         self.open_resolved(policy, mode, state, store).await
     }
@@ -154,7 +158,9 @@ impl SessionBuilder {
                         requested: self.session_id.clone(),
                     });
                 }
+                let recorded_provider_id = state.policy.recorded_provider_id().to_string();
                 state.policy = policy.clone();
+                state.policy.provider_id = recorded_provider_id;
                 Self::normalize_tool_state(&mut state);
                 state
             }
@@ -223,6 +229,11 @@ impl SessionBuilder {
         store: Option<Arc<dyn RuntimePersistence>>,
     ) -> Result<LashSession> {
         let mut env = self.core.env.clone();
+        if let Some(provider) = self.provider.clone().or_else(|| self.core.provider.clone()) {
+            env.core = env
+                .core
+                .with_provider_resolver(Arc::new(lash_core::SingleProviderResolver::new(provider)));
+        }
         let plugin_host = build_plugin_host_for_mode(
             &self.core.modes,
             &mode,
@@ -231,6 +242,11 @@ impl SessionBuilder {
             env.process_registry.is_some(),
         )?;
         env.plugin_host = Some(Arc::new(plugin_host));
+        // Lazily spawn the default process work runner (Decision 3: deferred to
+        // the first open so a tokio runtime is guaranteed; idempotent via the
+        // shared once-guard) and thread its poke onto this session's host so the
+        // process control seam can wake the runner after a successful start.
+        env.process_work_poke = self.core.process_work_runner.poke().await;
         let runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
         let handle = RuntimeHandle::new(runtime);
         Ok(LashSession {
@@ -466,6 +482,10 @@ impl ObservableSession {
 
     pub async fn list_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
         self.snapshot().list_process_handles().await
+    }
+
+    pub async fn list_all_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
+        self.snapshot().list_all_process_handles().await
     }
 
     pub fn process_scope(&self) -> ProcessScope {

@@ -2,10 +2,9 @@ use std::sync::Arc;
 
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
-    EmbeddedRuntimeHost, LashRuntime, PersistentRuntimeServices, PluginStack, ProcessRegistry,
-    ProcessRuntimeHost, RuntimeCoreConfig, RuntimeEffectController, RuntimePersistence,
-    RuntimeServices, RuntimeSessionState, SessionError, SessionPolicy, SessionStoreFactory,
-    TerminationPolicy,
+    EmbeddedRuntimeHost, LashRuntime, PluginStack, ProcessRegistry, Residency, RuntimeCoreConfig,
+    RuntimeEffectController, RuntimePersistence, RuntimeSessionState, SessionError, SessionPolicy,
+    SessionStoreFactory, TerminationPolicy,
 };
 
 enum PluginSource {
@@ -17,11 +16,11 @@ pub(super) fn lashlang_abilities_for_process_registry(
     mut abilities: lashlang::LashlangAbilities,
     process_registry_available: bool,
 ) -> lashlang::LashlangAbilities {
+    abilities = abilities.with_sleep();
     if process_registry_available {
-        abilities.with_processes().with_process_lifecycle()
+        abilities.with_processes().with_process_signals()
     } else {
         abilities.processes = false;
-        abilities.process_sleep = false;
         abilities.process_signals = false;
         abilities
     }
@@ -36,6 +35,7 @@ pub struct EmbeddedRuntimeBuilder {
     session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     store: Option<Arc<dyn RuntimePersistence>>,
     process_registry: Option<Arc<dyn ProcessRegistry>>,
+    residency: Residency,
 }
 
 impl Default for EmbeddedRuntimeBuilder {
@@ -45,10 +45,14 @@ impl Default for EmbeddedRuntimeBuilder {
             policy: None,
             initial_state: None,
             plugin_source: PluginSource::Host(PluginHost::empty()),
-            core: RuntimeCoreConfig::default(),
+            // `RuntimeCoreConfig` has no `Default`; start from an explicitly
+            // named in-memory core. Callers that need durable stores override
+            // it with `with_runtime_core`.
+            core: RuntimeCoreConfig::in_memory(),
             session_store_factory: None,
             store: None,
             process_registry: None,
+            residency: Residency::default(),
         }
     }
 }
@@ -171,6 +175,14 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    pub fn with_provider_resolver(
+        mut self,
+        provider_resolver: Arc<dyn crate::RuntimeProviderResolver>,
+    ) -> Self {
+        self.core = self.core.with_provider_resolver(provider_resolver);
+        self
+    }
+
     pub fn with_session_store_factory(
         mut self,
         session_store_factory: Arc<dyn SessionStoreFactory>,
@@ -194,6 +206,17 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    /// Trim a rebuilt session's resident graph to match the host's residency.
+    ///
+    /// Defaults to [`Residency::KeepAll`]. Setting [`Residency::ActivePathOnly`]
+    /// makes a rebuilt runtime (e.g. a durable worker reconstructing a session to
+    /// run a background process) keep only the active path resident, matching the
+    /// live runtime's behavior instead of silently retaining the full graph.
+    pub fn with_residency(mut self, residency: Residency) -> Self {
+        self.residency = residency;
+        self
+    }
+
     fn resolve_state_from_defaults(&self) -> RuntimeSessionState {
         let mut state = self.initial_state.clone().unwrap_or_default();
         if let Some(session_id) = &self.session_id {
@@ -213,7 +236,12 @@ impl EmbeddedRuntimeBuilder {
                     state.session_id = session_id.clone();
                 }
                 if let Some(policy) = &self.policy {
-                    state.policy = policy.clone();
+                    let recorded_provider_id = state.policy.recorded_provider_id().to_string();
+                    state.policy.provider_id = recorded_provider_id;
+                    state.policy.session_id = policy.session_id.clone();
+                    if state.policy.model.id.trim().is_empty() {
+                        state.policy.model = policy.model.clone();
+                    }
                 }
                 state
             });
@@ -232,7 +260,12 @@ impl EmbeddedRuntimeBuilder {
                     )));
                 }
                 if let Some(policy) = &self.policy {
-                    state.policy = policy.clone();
+                    let recorded_provider_id = state.policy.recorded_provider_id().to_string();
+                    state.policy.provider_id = recorded_provider_id;
+                    state.policy.session_id = policy.session_id.clone();
+                    if state.policy.model.id.trim().is_empty() {
+                        state.policy.model = policy.model.clone();
+                    }
                 }
                 return Ok(state);
             }
@@ -268,44 +301,18 @@ impl EmbeddedRuntimeBuilder {
         let plugins = self.resolve_plugins(&state)?;
         let embedded_host = EmbeddedRuntimeHost::new(self.core)
             .with_session_store_factory_option(self.session_store_factory.clone());
-        match (self.store, self.process_registry) {
-            (Some(store), Some(process_registry)) => {
-                LashRuntime::from_persistent_background_state(
-                    state.policy.clone(),
-                    ProcessRuntimeHost::new(embedded_host, process_registry),
-                    PersistentRuntimeServices::new(plugins, store),
-                    state,
-                )
-                .await
-            }
-            (Some(store), None) => {
-                LashRuntime::from_persistent_embedded_state(
-                    state.policy.clone(),
-                    embedded_host,
-                    PersistentRuntimeServices::new(plugins, store),
-                    state,
-                )
-                .await
-            }
-            (None, Some(process_registry)) => {
-                LashRuntime::from_background_state(
-                    state.policy.clone(),
-                    ProcessRuntimeHost::new(embedded_host, process_registry),
-                    RuntimeServices::new(plugins),
-                    state,
-                )
-                .await
-            }
-            (None, None) => {
-                LashRuntime::from_embedded_state(
-                    state.policy.clone(),
-                    embedded_host,
-                    RuntimeServices::new(plugins),
-                    state,
-                )
-                .await
-            }
-        }
+        // `assemble_runtime` owns the (store, registry) wiring + residency so the
+        // worker rebuild cannot drift from the live open path.
+        LashRuntime::assemble_runtime(
+            state.policy.clone(),
+            embedded_host,
+            plugins,
+            self.store,
+            self.process_registry,
+            state,
+            self.residency,
+        )
+        .await
     }
 
     pub async fn build_ephemeral(mut self) -> Result<LashRuntime, SessionError> {

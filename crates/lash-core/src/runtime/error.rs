@@ -1,3 +1,28 @@
+/// Durable substrate that a durable execution path requires but the host wired
+/// as ephemeral.
+///
+/// Names the failing facet so a [`RuntimeErrorCode::DurableSubstrateRequired`]
+/// can be matched and serialized losslessly per facet, while still subsuming the
+/// older attachment-only signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DurableSubstrateFacet {
+    AttachmentStore,
+    ArtifactStore,
+    SessionStore,
+}
+
+impl DurableSubstrateFacet {
+    /// Stable per-facet error-code string (the full
+    /// `durable_substrate_required:*` code surfaced in traces and host errors).
+    fn as_code(self) -> &'static str {
+        match self {
+            Self::AttachmentStore => "durable_substrate_required:attachment_store",
+            Self::ArtifactStore => "durable_substrate_required:artifact_store",
+            Self::SessionStore => "durable_substrate_required:session_store",
+        }
+    }
+}
+
 /// Stable runtime error code.
 ///
 /// Codes serialize as the same snake_case strings exposed in traces and host
@@ -6,7 +31,15 @@
 pub enum RuntimeErrorCode {
     MissingEffectScopeTurnId,
     EffectScopeTurnIdMismatch,
-    DurableAttachmentStoreRequired,
+    /// A process (re-)execution was handed an empty/non-persisted process id.
+    /// Process execution identity is the persisted `process_id`; a retry that
+    /// cannot present that stable id has lost its idempotency anchor.
+    MissingProcessExecutionId,
+    /// A durable execution path was wired against an ephemeral store for the
+    /// named facet. Subsumes the former `DurableAttachmentStoreRequired`.
+    DurableSubstrateRequired {
+        facet: DurableSubstrateFacet,
+    },
     RuntimeTurnResumeStoreRequired,
     RuntimeTurnCheckpointLoad,
     RuntimeTurnCheckpointMissing,
@@ -35,7 +68,8 @@ impl RuntimeErrorCode {
         match self {
             Self::MissingEffectScopeTurnId => "missing_effect_scope_turn_id",
             Self::EffectScopeTurnIdMismatch => "effect_scope_turn_id_mismatch",
-            Self::DurableAttachmentStoreRequired => "durable_attachment_store_required",
+            Self::MissingProcessExecutionId => "missing_process_execution_id",
+            Self::DurableSubstrateRequired { facet } => facet.as_code(),
             Self::RuntimeTurnResumeStoreRequired => "runtime_turn_resume_store_required",
             Self::RuntimeTurnCheckpointLoad => "runtime_turn_checkpoint_load",
             Self::RuntimeTurnCheckpointMissing => "runtime_turn_checkpoint_missing",
@@ -74,7 +108,16 @@ impl From<&str> for RuntimeErrorCode {
         match code {
             "missing_effect_scope_turn_id" => Self::MissingEffectScopeTurnId,
             "effect_scope_turn_id_mismatch" => Self::EffectScopeTurnIdMismatch,
-            "durable_attachment_store_required" => Self::DurableAttachmentStoreRequired,
+            "missing_process_execution_id" => Self::MissingProcessExecutionId,
+            "durable_substrate_required:attachment_store" => Self::DurableSubstrateRequired {
+                facet: DurableSubstrateFacet::AttachmentStore,
+            },
+            "durable_substrate_required:artifact_store" => Self::DurableSubstrateRequired {
+                facet: DurableSubstrateFacet::ArtifactStore,
+            },
+            "durable_substrate_required:session_store" => Self::DurableSubstrateRequired {
+                facet: DurableSubstrateFacet::SessionStore,
+            },
             "runtime_turn_resume_store_required" => Self::RuntimeTurnResumeStoreRequired,
             "runtime_turn_checkpoint_load" => Self::RuntimeTurnCheckpointLoad,
             "runtime_turn_checkpoint_missing" => Self::RuntimeTurnCheckpointMissing,
@@ -145,6 +188,34 @@ impl RuntimeError {
     pub fn is_code(&self, code: RuntimeErrorCode) -> bool {
         self.code == code
     }
+
+    /// Build the loud error raised when a durable execution path was wired
+    /// against an ephemeral store for `facet`.
+    pub fn durable_substrate_required(facet: DurableSubstrateFacet) -> Self {
+        let facet_label = match facet {
+            DurableSubstrateFacet::AttachmentStore => "attachment store",
+            DurableSubstrateFacet::ArtifactStore => "lashlang artifact store",
+            DurableSubstrateFacet::SessionStore => "session store",
+        };
+        Self::new(
+            RuntimeErrorCode::DurableSubstrateRequired { facet },
+            format!("durable effect controllers require a durable {facet_label}"),
+        )
+    }
+
+    /// Build the loud error raised when a process (re-)execution is handed an
+    /// empty/non-persisted id.
+    ///
+    /// Process execution identity is the persisted `process_id`, so a retry
+    /// must present that stable id — mirroring how
+    /// [`RuntimeEffectControllerScope::new`](crate::RuntimeEffectControllerScope)
+    /// rejects an empty turn id.
+    pub fn missing_process_execution_id() -> Self {
+        Self::new(
+            RuntimeErrorCode::MissingProcessExecutionId,
+            "process execution requires a non-empty persisted process id",
+        )
+    }
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -157,7 +228,34 @@ impl std::error::Error for RuntimeError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeError, RuntimeErrorCode};
+    use super::{DurableSubstrateFacet, RuntimeError, RuntimeErrorCode};
+
+    #[test]
+    fn durable_substrate_required_round_trips_per_facet() {
+        for facet in [
+            DurableSubstrateFacet::AttachmentStore,
+            DurableSubstrateFacet::ArtifactStore,
+            DurableSubstrateFacet::SessionStore,
+        ] {
+            let err = RuntimeError::durable_substrate_required(facet);
+            let json = serde_json::to_value(&err).expect("serialize runtime error");
+            let decoded: RuntimeError = serde_json::from_value(json).expect("decode runtime error");
+            assert_eq!(
+                decoded.code,
+                RuntimeErrorCode::DurableSubstrateRequired { facet }
+            );
+        }
+    }
+
+    #[test]
+    fn missing_process_execution_id_round_trips() {
+        let err = RuntimeError::missing_process_execution_id();
+        assert_eq!(err.code, RuntimeErrorCode::MissingProcessExecutionId);
+        let json = serde_json::to_value(&err).expect("serialize runtime error");
+        assert_eq!(json["code"], "missing_process_execution_id");
+        let decoded: RuntimeError = serde_json::from_value(json).expect("decode runtime error");
+        assert_eq!(decoded.code, RuntimeErrorCode::MissingProcessExecutionId);
+    }
 
     #[test]
     fn runtime_error_code_serializes_as_stable_string() {

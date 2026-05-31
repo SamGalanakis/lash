@@ -1,7 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex, Once};
+use std::sync::Mutex;
 
 use crate::rlm_support::{
     SpawnCreateRequestInput, build_session_policy, build_spawn_create_request,
@@ -24,49 +23,9 @@ fn model_spec(
         .expect("valid model spec")
 }
 
-static SEED_PROBE_FACTORY: Once = Once::new();
-static SEED_PROBE_NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-static SEED_PROBE_STATES: LazyLock<Mutex<BTreeMap<String, Arc<SeedProbeState>>>> =
-    LazyLock::new(|| Mutex::new(BTreeMap::new()));
-
 struct SeedProbeState {
     parent_response: String,
     captured_child_prompt: Arc<Mutex<Option<String>>>,
-}
-
-struct SeedProbeProviderFactory;
-
-impl lash_core::ProviderFactory for SeedProbeProviderFactory {
-    fn kind(&self) -> &'static str {
-        "seed-probe"
-    }
-
-    fn deserialize(
-        &self,
-        config: serde_json::Value,
-    ) -> Result<lash_core::ProviderComponents, String> {
-        let id = config
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "seed-probe provider config missing `id`".to_string())?
-            .to_string();
-        let state = SEED_PROBE_STATES
-            .lock()
-            .expect("seed probe states")
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| format!("unknown seed-probe provider state `{id}`"))?;
-        Ok(seed_probe_provider(id, state)
-            .into_handle()
-            .components()
-            .clone())
-    }
-}
-
-fn ensure_seed_probe_provider_factory() {
-    SEED_PROBE_FACTORY.call_once(|| {
-        lash_core::register_provider_factory(Arc::new(SeedProbeProviderFactory));
-    });
 }
 
 #[test]
@@ -82,6 +41,72 @@ fn static_capability_policy_fields_distinguish_inherit_set_and_clear() {
 
     assert_eq!(policy.model.id, "child-model");
     assert_eq!(policy.model.variant, None);
+}
+
+struct CustomRequestCapability;
+
+impl Capability for CustomRequestCapability {
+    fn name(&self) -> &str {
+        "custom"
+    }
+
+    fn build_session_request(
+        &self,
+        ctx: SubagentSpawnContext<'_>,
+    ) -> Result<lash_core::SessionCreateRequest, String> {
+        let mut tool_access = ctx.base_tool_access.clone();
+        tool_access.hidden_tools.insert("custom_hidden".to_string());
+        let request = lash_core::SessionCreateRequest::child(
+            ctx.parent_session_id,
+            lash_core::SessionStartPoint::CurrentSession,
+            ctx.base_policy(),
+            lash_core::PluginOptions::default(),
+            "custom-subagent",
+        )
+        .with_plugin_source(lash_core::SessionPluginSource::CurrentHostFresh)
+        .with_tool_access(tool_access);
+        ctx.finalize_request(request, self.name())
+    }
+}
+
+#[test]
+fn capability_can_build_complete_spawn_request() {
+    let registry = CapabilityRegistry::new().with(Arc::new(CustomRequestCapability));
+    let current_snapshot = RuntimeSessionState {
+        policy: SessionPolicy {
+            model: model_spec("parent-model", None, 200_000),
+            ..SessionPolicy::default()
+        },
+        ..RuntimeSessionState::default()
+    };
+    let mut tool_access = lash_core::SessionToolAccess::default();
+    tool_access.hidden_tools.insert("base_hidden".to_string());
+
+    let request = build_spawn_create_request(SpawnCreateRequestInput {
+        registry: &registry,
+        parent_session_id: "root",
+        current_snapshot: current_snapshot.to_snapshot(),
+        session_spec: &SessionSpec::inherit(),
+        tool_access: &tool_access,
+        capability_name: "custom",
+        output_schema: None,
+        seed: Default::default(),
+        parent_subagent: None,
+        caused_by: None,
+    })
+    .expect("custom capability request");
+
+    assert!(matches!(
+        &request.start,
+        lash_core::SessionStartPoint::CurrentSession
+    ));
+    assert_eq!(request.usage_source.as_deref(), Some("custom-subagent"));
+    assert!(request.tool_access.hidden_tools.contains("base_hidden"));
+    assert!(request.tool_access.hidden_tools.contains("custom_hidden"));
+    assert_eq!(
+        request.subagent.expect("subagent context").capability,
+        "custom"
+    );
 }
 
 #[test]
@@ -239,24 +264,13 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
     // resolves against the *live* policy, not the factory's stale
     // one. The final child policy inherits the live policy's explicit
     // model spec.
-    fn tiered_provider(tag: &'static str) -> lash_core::testing::TestProvider {
-        let kind = match tag {
-            "stale" => "stale-stub",
-            "live" => "live-stub",
-            _ => "stub",
-        };
-        lash_core::testing::TestProvider::builder()
-            .kind(kind)
-            .complete_error("stub")
-            .build()
-    }
     let stale_policy = SessionPolicy {
-        provider: tiered_provider("stale").into_handle(),
+        provider_id: "stale-stub".to_string(),
         model: model_spec("stale-parent", None, 200_000),
         ..SessionPolicy::default()
     };
     let live_policy = SessionPolicy {
-        provider: tiered_provider("live").into_handle(),
+        provider_id: "live-stub".to_string(),
         model: model_spec("live-parent", None, 1234),
         ..SessionPolicy::default()
     };
@@ -265,21 +279,20 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         policy: live_policy.clone(),
         ..RuntimeSessionState::default()
     };
+    let tool_access = lash_core::SessionToolAccess::default();
 
-    let noop = NoopSubagentSessionConfigurator;
     let request = build_spawn_create_request(SpawnCreateRequestInput {
         registry: &registry,
         parent_session_id: "root",
-        current_snapshot: current_snapshot.clone(),
+        current_snapshot: current_snapshot.to_snapshot(),
         session_spec: &SessionSpec::inherit(),
+        tool_access: &tool_access,
         capability_name: "explore",
         output_schema: None,
         seed: Default::default(),
         parent_subagent: None,
         caused_by: None,
-        configurator: &noop,
     })
-    .await
     .expect("spawn request");
     let child_policy = request.policy.expect("child policy");
 
@@ -290,7 +303,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
     let stale_choice = build_session_policy(&registry, &stale_policy, "explore")
         .expect("stale policy")
         .model;
-    assert_eq!(child_policy.provider, live_policy.provider);
+    assert_eq!(child_policy.provider_id, live_policy.provider_id);
     assert_eq!(
         child_policy.model.context_window_tokens(),
         live_policy.model.context_window_tokens()
@@ -302,8 +315,9 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
     let structured_request = build_spawn_create_request(SpawnCreateRequestInput {
         registry: &registry,
         parent_session_id: "root",
-        current_snapshot,
+        current_snapshot: current_snapshot.to_snapshot(),
         session_spec: &SessionSpec::inherit(),
+        tool_access: &tool_access,
         capability_name: "explore",
         output_schema: Some(json!({
             "type": "object",
@@ -313,9 +327,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         seed: Default::default(),
         parent_subagent: None,
         caused_by: None,
-        configurator: &noop,
     })
-    .await
     .expect("structured spawn request");
     let structured_policy = structured_request
         .policy
@@ -471,11 +483,12 @@ submit result
     );
 }
 
-fn seed_probe_provider(id: String, state: Arc<SeedProbeState>) -> lash_core::testing::TestProvider {
-    let config_id = id.clone();
+fn seed_probe_provider(state: Arc<SeedProbeState>) -> lash_core::testing::TestProvider {
+    // The child subagent inherits the parent's live provider handle through the
+    // runtime (deployment-level binding); there is no factory rematerialization,
+    // so this provider needs no serializable config.
     lash_core::testing::TestProvider::builder()
         .kind("seed-probe")
-        .serialize_config(move || json!({ "id": config_id.clone() }))
         .complete(move |request| {
             let state = Arc::clone(&state);
             async move { complete_seed_probe_request(state, request).await }
@@ -516,21 +529,12 @@ async fn run_seed_probe(
     parent_response: &'static str,
     input: TurnInput,
 ) -> (lash_core::TurnOutcome, String) {
-    ensure_seed_probe_provider_factory();
     let captured_child_prompt: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let state = Arc::new(SeedProbeState {
         parent_response: parent_response.to_string(),
         captured_child_prompt: Arc::clone(&captured_child_prompt),
     });
-    let provider_id = format!(
-        "seed-probe-{}",
-        SEED_PROBE_NEXT_ID.fetch_add(1, Ordering::SeqCst)
-    );
-    SEED_PROBE_STATES
-        .lock()
-        .expect("seed probe states")
-        .insert(provider_id.clone(), Arc::clone(&state));
-    let provider = seed_probe_provider(provider_id.clone(), Arc::clone(&state));
+    let provider = seed_probe_provider(Arc::clone(&state)).into_handle();
 
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::default()),
@@ -541,25 +545,48 @@ async fn run_seed_probe(
             ))),
         ))),
     ];
-    let host = PluginHost::new(factories);
-    let process_abilities = host
+    let registry = Arc::new(TestLocalProcessRegistry::default());
+    let host_plugins = PluginHost::new(factories.clone());
+    let process_abilities = host_plugins
         .lashlang_abilities()
         .with_processes()
-        .with_process_lifecycle();
-    let plugins = host
+        .with_sleep()
+        .with_process_signals();
+    let plugins = host_plugins
         .with_lashlang_abilities(process_abilities)
         .build_session("root", None)
         .expect("plugin session");
     let host = ProcessRuntimeHost::new(
-        lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
-        Arc::new(TestLocalProcessRegistry::default()),
+        lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory().with_provider_resolver(
+            Arc::new(lash_core::SingleProviderResolver::new(provider.clone())),
+        )),
+        Arc::clone(&registry) as Arc<dyn lash_core::ProcessRegistry>,
     );
     let policy = SessionPolicy {
-        provider: provider.into_handle(),
+        provider_id: provider.kind().to_string(),
         model: model_spec("seed-probe-model", None, 64_000),
         max_turns: Some(4),
         ..SessionPolicy::default()
     };
+    // `agents.spawn(...)` starts a SessionTurn (subagent) process that the
+    // lease-protected worker executes — not inline. A SINGLE inline runner over
+    // the same registry + an explicit in-memory store factory runs it (and
+    // provider re-supply reaches the child). One runner suffices even for the
+    // nested case here (`handle = start spawn_child` then `await handle`) because
+    // the worker runs each process on its own task, so the parent's await never
+    // parks the runner away from the child.
+    let worker = lash_core::DurableProcessWorker::new(
+        lash_core::DurableProcessWorkerConfig::from_plugin_factories(
+            factories,
+            RuntimeCoreConfig::in_memory().with_provider_resolver(Arc::new(
+                lash_core::SingleProviderResolver::new(provider.clone()),
+            )),
+            Arc::new(lash_core::InMemorySessionStoreFactory::new()),
+            Arc::clone(&registry) as Arc<dyn lash_core::ProcessRegistry>,
+        )
+        .with_session_policy(policy.clone()),
+    );
+    let _poke = lash_core::ProcessWorkRunner::inline(worker).spawn();
     let mut runtime = LashRuntime::from_background_state(
         policy.clone(),
         host,
@@ -583,10 +610,6 @@ async fn run_seed_probe(
         .expect("captured prompt")
         .clone()
         .expect("child prompt was captured");
-    SEED_PROBE_STATES
-        .lock()
-        .expect("seed probe states")
-        .remove(&provider_id);
     (turn.outcome, prompt)
 }
 

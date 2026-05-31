@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use lash_core::{ProcessRegistry, RuntimePersistence};
+use lash_core::{DurabilityTier, LashlangArtifactStore, ProcessRegistry, RuntimePersistence};
 use lash_sqlite_store::{SqliteProcessRegistry, Store};
 
 #[tokio::test]
@@ -22,4 +22,12 @@ async fn sqlite_store_satisfies_runtime_persistence_conformance() {
         Arc::new(Store::memory().expect("memory store")) as Arc<dyn RuntimePersistence>
     })
     .await;
+}
+
+#[test]
+fn sqlite_store_satisfies_lashlang_artifact_store_conformance() {
+    lash_core::testing::conformance::lashlang_artifact_store(
+        || Arc::new(Store::memory().expect("memory store")) as Arc<dyn LashlangArtifactStore>,
+        DurabilityTier::Durable,
+    );
 }

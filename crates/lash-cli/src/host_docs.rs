@@ -243,8 +243,8 @@ mod tests {
             .collect_prompt_contributions(lash_core::PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(lash_core::testing::MockSessionManager::default()),
-                state: lash_core::SessionReadView::from_exported_state(
-                    &lash_core::SessionStateEnvelope::default(),
+                state: lash_core::SessionReadView::from_snapshot(
+                    &lash_core::SessionSnapshot::default(),
                 ),
                 protocol_turn_options: lash_core::ProtocolTurnOptions::default(),
                 turn_context: lash_core::TurnContext::default(),

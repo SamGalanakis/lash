@@ -116,6 +116,14 @@ mod tests {
             "{rendered_signature}"
         );
         assert!(
+            rendered_signature.contains("module?: str | list[str] | null"),
+            "{rendered_signature}"
+        );
+        assert!(
+            rendered_signature.contains("exclude?: str | list[str] | null"),
+            "{rendered_signature}"
+        );
+        assert!(
             rendered_signature.contains("-> list[record{"),
             "{rendered_signature}"
         );

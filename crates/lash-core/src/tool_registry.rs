@@ -485,6 +485,35 @@ impl ToolRegistry {
         Ok(state.generation)
     }
 
+    /// Restore a persisted [`ToolState`] snapshot onto a freshly-built registry,
+    /// adopting the snapshot's generation verbatim.
+    ///
+    /// Unlike [`apply_state`](Self::apply_state) — which applies an incremental
+    /// *delta* expected at the current generation and bumps it by one — a
+    /// restore reconstructs the exact persisted state regardless of the fresh
+    /// registry's base generation, and does **not** bump. This is idempotent: a
+    /// snapshot exported at generation `G` restores to generation `G`, so a
+    /// re-export round-trips. Cold rebuilds (the durable process worker, session
+    /// resume) restore a session whose tool surface reached generation `G ≥ 2`
+    /// onto a base registry at generation 1 — `apply_state` would reject that
+    /// (`expected G, actual 1`); `restore_state` adopts `G`. Entries are still
+    /// rebound to the live sources, so source identity is reconnected.
+    pub fn restore_state(&self, snapshot: ToolState) -> Result<u64, ReconfigureError> {
+        validate_unique_manifest_entries(snapshot.entries().values())?;
+        let rebound_tools = {
+            let sources = self.sources.read().expect("tool source lock poisoned");
+            rebind_tool_state_entries(snapshot.entries(), &sources)?
+        };
+
+        let mut state = self
+            .state
+            .write()
+            .expect("tool registry state lock poisoned");
+        state.tools = rebound_tools;
+        state.generation = snapshot.generation();
+        Ok(state.generation)
+    }
+
     pub fn add_tool_provider(
         &self,
         provider: Arc<dyn ToolProvider>,
@@ -1472,6 +1501,49 @@ mod tests {
                 .manifest()
                 .effective_availability(),
             crate::ToolAvailability::Off
+        );
+    }
+
+    #[test]
+    fn restore_state_adopts_generation_at_or_above_three() {
+        // Cold rebuild ratchet: a session whose tool surface advanced to
+        // generation >= 3 restores onto a fresh base-1 registry. `restore_state`
+        // adopts the snapshot's generation verbatim; `apply_state` (a gen-matched
+        // delta) rejects it. This is the exact divergence the durable worker /
+        // session resume rebuild relies on `restore_state` to absorb.
+        let source = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("source registry");
+        let snapshot = source.export_state().with_generation(3);
+
+        let target = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("target registry");
+        assert_eq!(
+            target.generation(),
+            1,
+            "a fresh registry starts at generation 1"
+        );
+        let restored = target
+            .restore_state(snapshot.clone())
+            .expect("restore adopts the snapshot generation");
+        assert_eq!(restored, 3, "restore returns the adopted generation");
+        assert_eq!(
+            target.generation(),
+            3,
+            "restore adopts gen 3 onto a base-1 registry without bumping"
+        );
+        // A re-export round-trips at the same generation (idempotent).
+        assert_eq!(target.export_state().generation(), 3);
+
+        // apply_state on the same high-generation snapshot is rejected — proving
+        // the rebuild would have failed without restore_state.
+        let fresh = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("fresh registry");
+        assert!(
+            matches!(
+                fresh.apply_state(snapshot),
+                Err(ReconfigureError::GenerationMismatch {
+                    expected: 3,
+                    actual: 1
+                })
+            ),
+            "apply_state must reject a gen-3 snapshot on a base-1 registry"
         );
     }
 

@@ -89,8 +89,8 @@ impl SessionControl {
         .await
     }
 
-    async fn export_state(&self) -> lash_core::SessionStateEnvelope {
-        self.runtime.observe().read_view.to_owned_state()
+    async fn export_state(&self) -> lash_core::SessionSnapshot {
+        self.runtime.observe().read_view.to_snapshot()
     }
 
     async fn append_messages(&self, messages: Vec<PluginMessage>) -> Result<()> {
@@ -128,9 +128,9 @@ impl SessionControl {
         .await
     }
 
-    async fn set_persisted_state(&self, state: RuntimeSessionState) {
+    async fn set_persisted_state(&self, state: RuntimeSessionState) -> Result<()> {
         self.with_writer(async |runtime: &mut LashRuntime| {
-            runtime.set_persisted_state(state);
+            runtime.set_persisted_state(state).map_err(Into::into)
         })
         .await
     }
@@ -195,7 +195,7 @@ impl SessionControl {
     async fn branch_to_node(
         &self,
         target_leaf: Option<String>,
-    ) -> Result<lash_core::SessionStateEnvelope> {
+    ) -> Result<lash_core::SessionSnapshot> {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
                 .branch_to_node(target_leaf)
@@ -315,6 +315,10 @@ impl SessionControl {
         Ok(self.runtime.observe().list_process_handles().await)
     }
 
+    async fn list_all_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+        Ok(self.runtime.observe().list_all_process_handles().await)
+    }
+
     async fn start_process(
         &self,
         registration: lash_core::ProcessRegistration,
@@ -395,6 +399,16 @@ impl SessionControl {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
                 .apply_tool_state(state)
+                .await
+                .map_err(EmbedError::from)
+        })
+        .await
+    }
+
+    async fn restore_tool_state(&self, state: ToolState) -> Result<u64> {
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .restore_tool_state(state)
                 .await
                 .map_err(EmbedError::from)
         })
@@ -680,6 +694,17 @@ impl AdvancedToolsControl {
     pub async fn apply_state(&self, state: ToolState) -> Result<u64> {
         self.control.apply_tool_state(state).await
     }
+
+    /// Restore a persisted tool-state snapshot, adopting its generation.
+    ///
+    /// Use this when re-applying a snapshot read from durable storage (session
+    /// resume), not an edited delta: it reconstructs the exact persisted surface
+    /// idempotently rather than requiring the snapshot to match the current
+    /// generation. A cold resume of a session whose surface reached generation
+    /// ≥ 2 needs this — [`apply_state`](Self::apply_state) would reject it.
+    pub async fn restore_state(&self, state: ToolState) -> Result<u64> {
+        self.control.restore_tool_state(state).await
+    }
 }
 
 #[derive(Clone)]
@@ -748,6 +773,10 @@ impl ProcessControl {
         self.control.list_process_handles().await
     }
 
+    pub async fn list_all(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+        self.control.list_all_process_handles().await
+    }
+
     pub async fn await_all(&self) -> Result<()> {
         self.control.await_background_work().await
     }
@@ -767,7 +796,7 @@ pub struct StateControl {
 }
 
 impl StateControl {
-    pub async fn export(&self) -> lash_core::SessionStateEnvelope {
+    pub async fn export(&self) -> lash_core::SessionSnapshot {
         self.control.export_state().await
     }
 
@@ -783,14 +812,14 @@ impl StateControl {
         self.control.append_plugin_body(plugin_type, body).await
     }
 
-    pub async fn set_persisted(&self, state: RuntimeSessionState) {
+    pub async fn set_persisted(&self, state: RuntimeSessionState) -> Result<()> {
         self.control.set_persisted_state(state).await
     }
 
     pub async fn branch_to_node(
         &self,
         target_leaf: Option<String>,
-    ) -> Result<lash_core::SessionStateEnvelope> {
+    ) -> Result<lash_core::SessionSnapshot> {
         self.control.branch_to_node(target_leaf).await
     }
 
@@ -804,6 +833,10 @@ impl StateControl {
 
     pub async fn list_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
         self.control.list_process_handles().await
+    }
+
+    pub async fn list_all_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+        self.control.list_all_process_handles().await
     }
 
     pub async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {

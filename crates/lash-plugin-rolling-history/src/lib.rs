@@ -25,8 +25,8 @@ use lash_core::plugin::{
     TurnTransformContext,
 };
 use lash_core::{
-    InputItem, Message, MessageOrigin, MessageRole, Part, PartKind, PromptUsage,
-    SessionStateEnvelope, ToolCallRecord, TurnInput,
+    InputItem, Message, MessageOrigin, MessageRole, Part, PartKind, PromptUsage, SessionSnapshot,
+    ToolCallRecord, TurnInput,
 };
 use lash_plugin_tool_output_budget::{
     DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES, DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES,
@@ -530,7 +530,7 @@ fn referenced_tool_call_ids(messages: &[Message]) -> HashSet<String> {
 
 async fn summarize_compaction_prefix(
     session_id: &str,
-    state: &SessionStateEnvelope,
+    state: &SessionSnapshot,
     prefix_messages: Vec<Message>,
     instructions: Option<&str>,
     host: Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost>,
@@ -539,7 +539,7 @@ async fn summarize_compaction_prefix(
         return Ok(None);
     }
 
-    let mut snapshot = lash_core::RuntimeSessionState::from_state(state.clone());
+    let mut snapshot = lash_core::RuntimeSessionState::from_snapshot(state.clone());
     snapshot.policy.max_turns = Some(1);
     let mut messages = prefix_messages;
     strip_all_image_attachments(&mut messages, COMPACTED_IMAGE_PLACEHOLDER);
@@ -567,7 +567,7 @@ async fn summarize_compaction_prefix(
     let request = SessionCreateRequest::child(
         session_id,
         SessionStartPoint::Snapshot {
-            snapshot: Box::new(snapshot),
+            snapshot: Box::new(snapshot.to_snapshot()),
         },
         policy,
         PluginOptions::default(),
@@ -646,7 +646,7 @@ fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usiz
 
 async fn compact_messages_core(
     session_id: &str,
-    state: &SessionStateEnvelope,
+    state: &SessionSnapshot,
     messages: &[Message],
     instructions: Option<&str>,
     host: Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost>,
@@ -767,7 +767,7 @@ impl TurnContextTransform for RollingTurnTransform {
         let prefix_messages = messages[prefix_len..cut_point].to_vec();
         let Some(summary) = summarize_compaction_prefix(
             &ctx.session_id,
-            &state.to_owned_state(),
+            &state.to_snapshot(),
             prefix_messages,
             None,
             host,
@@ -810,7 +810,7 @@ impl HistoryRewriter for RollingHistoryRewriter {
             RewriteTrigger::Manual { instructions } => {
                 if let Some(compacted) = compact_messages_core(
                     &session_id,
-                    &ctx.state.to_owned_state(),
+                    &ctx.state.to_snapshot(),
                     &input.messages,
                     instructions.as_deref(),
                     host,
@@ -833,7 +833,7 @@ impl HistoryRewriter for RollingHistoryRewriter {
                 }
                 if let Some(compacted) = compact_messages_core(
                     &session_id,
-                    &ctx.state.to_owned_state(),
+                    &ctx.state.to_snapshot(),
                     &input.messages,
                     None,
                     host,
@@ -969,7 +969,7 @@ mod tests {
 
     fn build_turn_ctx(
         session_id: &str,
-        state: SessionStateEnvelope,
+        state: SessionSnapshot,
         prompt_usage: Option<PromptUsage>,
         max_context_tokens: Option<usize>,
         host: Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost>,
@@ -1033,7 +1033,7 @@ mod tests {
         messages.push(text_message("u2", MessageRole::User, "recent"));
         messages.push(text_message("u3", MessageRole::User, "latest"));
 
-        let mut state = SessionStateEnvelope {
+        let mut state = SessionSnapshot {
             policy: SessionPolicy::default(),
             ..Default::default()
         };
@@ -1079,7 +1079,7 @@ mod tests {
             text_message("u2", MessageRole::User, "latest"),
         ];
 
-        let state = SessionStateEnvelope::default();
+        let state = SessionSnapshot::default();
         let host: Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost> =
             Arc::new(mock_manager());
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
@@ -1116,7 +1116,7 @@ mod tests {
         let manager = Arc::new(mock_manager());
         let host: Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost> = manager.clone();
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
-        let state = SessionStateEnvelope {
+        let state = SessionSnapshot {
             session_id: "root".to_string(),
             policy: SessionPolicy::default(),
             ..Default::default()

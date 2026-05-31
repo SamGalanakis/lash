@@ -150,7 +150,7 @@ fn apply_patch_tool_definition() -> ToolDefinition {
                     }),
                     &["input"],
                 ),
-                serde_json::json!({ "type": "object", "additionalProperties": true }),
+                apply_patch_output_schema(),
             )
             .with_examples(vec![
                 "await files.patch({ input: \"*** Begin Patch\\n*** Add File: hello.txt\\n+hello\\n*** End Patch\" })?"
@@ -164,6 +164,39 @@ fn apply_patch_tool_definition() -> ToolDefinition {
                 &["patch", "edit_file"],
             ))
             .with_scheduling(ToolScheduling::Serial)
+}
+
+fn apply_patch_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "summary": { "type": "string" },
+            "added": { "type": "integer", "minimum": 0 },
+            "removed": { "type": "integer", "minimum": 0 },
+            "files": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "status": { "type": "string", "enum": ["added", "deleted", "modified", "moved"] },
+                        "added": { "type": "integer", "minimum": 0 },
+                        "removed": { "type": "integer", "minimum": 0 },
+                        "diff": { "type": "string" },
+                        "from_path": { "type": "string" }
+                    },
+                    "required": ["path", "status", "added", "removed", "diff"],
+                    "additionalProperties": false
+                }
+            },
+            "diff": {
+                "type": "string",
+                "description": "Combined diff preview capped to the first three changed files."
+            }
+        },
+        "required": ["summary", "added", "removed", "files", "diff"],
+        "additionalProperties": false
+    })
 }
 
 #[cfg(test)]
@@ -940,6 +973,19 @@ mod tests {
 
     fn run_patch(dir: &TempDir, input: impl AsRef<str>) -> ToolResult {
         apply_patch(input.as_ref(), Some(dir.path().to_str().unwrap()))
+    }
+
+    #[test]
+    fn apply_patch_contract_documents_result_shape() {
+        let definition = apply_patch_tool_definition();
+
+        assert_eq!(
+            definition.contract.output_schema["properties"]["files"]["type"],
+            serde_json::json!("array")
+        );
+        let rendered = definition.compact_contract().render_signature();
+        assert!(rendered.contains("files"), "{rendered}");
+        assert!(rendered.contains("summary"), "{rendered}");
     }
 
     #[test]

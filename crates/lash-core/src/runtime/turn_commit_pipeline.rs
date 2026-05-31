@@ -58,7 +58,7 @@ impl TurnCommitStage {
 }
 
 struct FinalCommitInput<'a> {
-    returned_state: &'a crate::SessionStateEnvelope,
+    returned_state: &'a crate::SessionSnapshot,
     tool_calls: &'a [ToolCallRecord],
     plugins: Option<&'a PluginSession>,
     execution_state_snapshot: Option<Option<Vec<u8>>>,
@@ -271,8 +271,8 @@ impl TurnCommitPipeline {
         }
     }
 
-    pub(super) fn export_state_for_assembly(&mut self) -> crate::SessionStateEnvelope {
-        self.final_state_mut().export_state()
+    pub(super) fn export_state_for_assembly(&mut self) -> crate::SessionSnapshot {
+        self.final_state_mut().to_snapshot()
     }
 
     pub(super) fn apply_event_delta(
@@ -321,7 +321,7 @@ impl TurnCommitPipeline {
         })
         .await
         .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
-        returned_turn.state = self.final_state_mut().export_state();
+        returned_turn.state = self.final_state_mut().to_snapshot();
         Ok(())
     }
 
@@ -396,7 +396,7 @@ impl TurnCommitPipeline {
             completed_queue_claims,
         } = input;
         let state = self.final_state_mut();
-        state.apply_exported_state(returned_state);
+        state.apply_snapshot(returned_state);
         for entry in usage_deltas.iter().cloned() {
             merge_ledger_entry(&mut state.token_ledger, entry);
         }

@@ -479,6 +479,24 @@ mod tests {
     }
 
     #[test]
+    fn truncated_rlm_step_output_emits_full_reference() {
+        // The render half of the re-fetch contract: a truncated step output
+        // shows a preview plus a `full: history[0].output[0]` handle. The
+        // resolve half — that the handle returns the full untruncated value —
+        // is covered by `history_step_output_resolves_full_untruncated_value`
+        // in projection::context.
+        let projector = projector(10);
+        let history = projector.format_history(&projection_from_events(&[step_event(
+            0,
+            "print big",
+            "abcdefghijklmnopqrstuvwxyz",
+        )]));
+
+        assert!(history.contains("full: history[0].output[0]"));
+        assert!(history.contains("... (16 characters omitted) ..."));
+    }
+
+    #[test]
     fn plugin_origin_is_not_rendered_in_history() {
         let projector = projector(100);
         let event = SessionEventRecord::Conversation(ConversationRecord {

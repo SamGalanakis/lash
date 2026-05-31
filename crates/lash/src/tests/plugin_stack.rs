@@ -151,7 +151,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
     let state = RuntimeSessionState {
         session_id: "persisted-tools".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -242,6 +242,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
                         .provider(standard_provider)
                         .model(mock_model_spec())
                         .tools(Arc::new(LongTextTools))
+                        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
                         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
                         .configure_plugins(|plugins| {
                             plugins.replace(projection.clone());
@@ -282,6 +283,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
                         ]))
                         .model(mock_model_spec())
                         .tools(Arc::new(LongTextTools))
+                        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
                         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
                         .configure_plugins(|plugins| {
                             plugins.replace(projection);

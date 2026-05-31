@@ -153,21 +153,21 @@ async fn maybe_spawn_post_persist_memory_maintenance(
     config: ObservationalMemoryConfig,
     ctx: SessionStateChangedContext,
 ) -> Result<(), PluginError> {
-    let graph = ctx.state.to_owned_state().session_graph;
+    let graph = ctx.state.session_graph();
     if !should_run_async_maintenance(&config, &graph) {
         return Ok(());
     }
-    run_async_maintenance(config, graph, ctx).await
+    run_async_maintenance(config, graph, &ctx).await
 }
 
 async fn run_async_maintenance(
     config: ObservationalMemoryConfig,
-    graph: lash_core::SessionGraph,
-    ctx: SessionStateChangedContext,
+    graph: &lash_core::SessionGraph,
+    ctx: &SessionStateChangedContext,
 ) -> Result<(), PluginError> {
     let om_host = OmRuntimeHost::new(&ctx.session_id, &ctx.host, ctx.direct_completions.clone());
-    maybe_buffer_observations(&config, &om_host, ctx.state.policy(), &graph).await?;
-    maybe_buffer_reflection(&config, &om_host, ctx.state.policy(), &graph).await?;
+    maybe_buffer_observations(&config, &om_host, ctx.state.policy(), graph).await?;
+    maybe_buffer_reflection(&config, &om_host, ctx.state.policy(), graph).await?;
     Ok(())
 }
 

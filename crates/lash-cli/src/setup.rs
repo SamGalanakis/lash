@@ -255,9 +255,9 @@ async fn run_setup_inner(
                         .and_then(|cfg| cfg.provider_spec(kind))
                         .cloned()
                     {
-                        match lash_core::build_provider(&saved_spec) {
-                            Ok(boxed) => {
-                                provider = Some(ProviderHandle::new(boxed));
+                        match crate::config::materialize_provider_spec(&saved_spec) {
+                            Ok(handle) => {
+                                provider = Some(handle);
                                 app.active_kind = Some(kind.to_string());
                                 app.step = if tavily_key.is_some() {
                                     SetupStep::Done

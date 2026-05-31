@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::config::LashConfig;
@@ -18,7 +18,7 @@ use lash::tools::{
 };
 use lash::tracing::TraceLevel;
 use lash::{ModelSpec, PluginStack, SessionSpec};
-use lash_core::{PromptLayer, SessionPolicy, ToolState};
+use lash_core::{PromptLayer, SessionPolicy, SessionToolAccess, ToolState};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
@@ -136,10 +136,31 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
         plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
         plugin_stack.push(Arc::new(
             SubagentsPluginFactory::new(capability_registry)
-                .with_session_spec(SessionSpec::inherit()),
+                .with_session_spec(SessionSpec::inherit())
+                .with_tool_access(cli_child_tool_access()),
         ));
     }
     plugin_stack
+}
+
+fn cli_child_tool_access() -> SessionToolAccess {
+    SessionToolAccess {
+        tools: Vec::new(),
+        hidden_tools: cli_child_hidden_tools(),
+    }
+}
+
+fn cli_child_hidden_tools() -> BTreeSet<String> {
+    [
+        "ask",
+        "showcase",
+        "request_user_input",
+        "plan_exit",
+        "update_plan",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
 }
 
 fn autonomous_tool_allowed(name: &str) -> bool {
@@ -274,7 +295,6 @@ fn cli_prompt_config(autonomous: bool, execution_mode: &ModeId) -> PromptLayer {
 }
 
 pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
-    lash_providers_builtin::register_all();
     // Handle --reset before any TUI/provider setup
     if args.reset {
         use std::io::Write;
@@ -572,7 +592,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let prompt_layer = cli_prompt_config(autonomous, &execution_mode);
     let session_policy = SessionPolicy {
         model: model_spec,
-        provider: active_provider.clone(),
+        provider_id: active_provider.kind().to_string(),
         session_id: run_session_id.clone(),
         autonomous,
         prompt: prompt_layer.clone(),
@@ -624,6 +644,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         plugin_stack.clone(),
         prompt_layer,
         Arc::new(FileAttachmentStore::new(crate::paths::attachments_dir())),
+        active_provider.clone(),
         trace_path,
         trace_level,
         Arc::new(
@@ -677,11 +698,21 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         .await;
     }
 
-    // Install panic hook that restores the terminal
+    // Install panic hook that restores the terminal. Tokio worker-task panics
+    // also run this hook; those must not tear down the active alternate screen.
+    let terminal_owner_thread = std::thread::current().id();
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        cleanup_terminal();
-        default_hook(info);
+        if should_restore_terminal_for_panic(terminal_owner_thread) {
+            cleanup_terminal();
+            default_hook(info);
+        } else {
+            tracing::error!(
+                thread = ?std::thread::current().name(),
+                panic = %info,
+                "background task panicked"
+            );
+        }
     }));
 
     // Initialize terminal
@@ -707,6 +738,10 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         startup_system_message,
     )
     .await
+}
+
+fn should_restore_terminal_for_panic(terminal_owner_thread: std::thread::ThreadId) -> bool {
+    std::thread::current().id() == terminal_owner_thread
 }
 
 #[cfg(test)]
@@ -756,6 +791,18 @@ mod tests {
             dummy_tool("plan_exit"),
             dummy_tool("showcase"),
         ]
+    }
+
+    #[test]
+    fn terminal_panic_cleanup_is_limited_to_owner_thread() {
+        let owner = std::thread::current().id();
+        assert!(should_restore_terminal_for_panic(owner));
+
+        std::thread::spawn(move || {
+            assert!(!should_restore_terminal_for_panic(owner));
+        })
+        .join()
+        .expect("thread should not panic");
     }
 
     fn plugin_factory_ids_for_autonomous(autonomous: bool) -> Vec<&'static str> {
@@ -906,5 +953,16 @@ mod tests {
         assert!(!snapshot.contains("ask"));
         assert!(!snapshot.contains("plan_exit"));
         assert!(!snapshot.contains("showcase"));
+    }
+
+    #[test]
+    fn cli_child_tool_access_hides_interactive_root_tools() {
+        let hidden = cli_child_hidden_tools();
+
+        assert!(hidden.contains("ask"));
+        assert!(hidden.contains("plan_exit"));
+        assert!(hidden.contains("update_plan"));
+        assert!(hidden.contains("showcase"));
+        assert!(hidden.contains("request_user_input"));
     }
 }

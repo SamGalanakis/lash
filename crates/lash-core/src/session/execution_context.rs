@@ -292,7 +292,6 @@ impl<'run> RuntimeExecutionContext<'run> {
                 &self.session_id,
                 registration,
                 crate::ProcessStartOptions::new()
-                    .with_wake_session_id(self.session_id.clone())
                     .with_descriptor(crate::ProcessHandleDescriptor::new(Some("lashlang"), label)),
                 self.process_scope(self.parent_invocation.clone()),
             )
@@ -305,17 +304,17 @@ impl<'run> RuntimeExecutionContext<'run> {
         }
     }
 
-    pub(crate) async fn sleep_lashlang_process(
+    pub async fn sleep_lashlang(
         &self,
-        process_id: &str,
+        scope: &str,
         sequence: u64,
         duration_ms: u64,
     ) -> Result<(), crate::RuntimeEffectControllerError> {
         let cancellation = self.cancellation_token.clone().unwrap_or_default();
-        let invocation = crate::runtime::causal::process_sleep_invocation(
+        let invocation = crate::runtime::causal::lashlang_sleep_invocation(
             &self.session_id,
             self.parent_invocation.as_ref(),
-            process_id,
+            scope,
             sequence,
         );
         let outcome = self
@@ -550,8 +549,9 @@ mod tests {
             "session".to_string(),
             dispatch,
             lashlang::LashlangAbilities::default()
+                .with_sleep()
                 .with_processes()
-                .with_process_lifecycle(),
+                .with_process_signals(),
             Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
@@ -562,7 +562,7 @@ mod tests {
         let surface = ctx.lashlang_surface();
 
         assert!(surface.abilities.processes);
-        assert!(surface.abilities.process_sleep);
+        assert!(surface.abilities.sleep);
         assert!(surface.abilities.process_signals);
         assert!(!surface.abilities.triggers);
         assert!(!surface.abilities.schedules.cron);

@@ -107,6 +107,9 @@ impl CodexProvider {
     /// raw status.
     fn codex_error_summary(status: u16, body_text: &str) -> Option<String> {
         let parsed: Value = serde_json::from_str(body_text).ok()?;
+        if let Some(detail) = parsed.get("detail").and_then(|v| v.as_str()) {
+            return Some(format!("Codex request failed with {status}: {detail}"));
+        }
         let err = parsed.get("error")?;
         let code = err
             .get("code")
@@ -253,7 +256,6 @@ impl CodexProvider {
             "instructions": instructions,
             "input": input,
             "tools": tools,
-            "max_output_tokens": policy.max_output_tokens,
             "parallel_tool_calls": !req.tools.is_empty(),
             "stream": stream,
             "store": false,
@@ -693,15 +695,9 @@ fn default_codex_options() -> ProviderOptions {
     }
 }
 
-/// Factory that registers [`CodexProvider`] with lash's global
-/// provider registry.
+/// Factory that materializes [`CodexProvider`] from a host-owned
+/// [`ProviderSpec`](lash_core::ProviderSpec).
 pub struct CodexProviderFactory;
-
-impl CodexProviderFactory {
-    pub fn register() {
-        lash_core::register_provider_factory(std::sync::Arc::new(Self));
-    }
-}
 
 impl ProviderFactory for CodexProviderFactory {
     fn kind(&self) -> &'static str {
@@ -825,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_output_token_cap_prefers_request_then_provider() {
+    fn codex_request_omits_output_token_cap() {
         let provider = CodexProvider::new("access", "refresh", 0).with_options(ProviderOptions {
             max_output_tokens: Some(9_999),
             ..ProviderOptions::default()
@@ -836,12 +832,22 @@ mod tests {
                 false,
             )
             .unwrap();
-        assert_eq!(provider_limited["max_output_tokens"], 9_999);
+        assert!(provider_limited.get("max_output_tokens").is_none());
 
         let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
         req.generation.output_token_cap = NonZeroUsize::new(2_048);
         let request_limited = provider.build_request_body(&req, false).unwrap();
-        assert_eq!(request_limited["max_output_tokens"], 2_048);
+        assert!(request_limited.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn codex_error_summary_uses_top_level_detail() {
+        let summary =
+            CodexProvider::codex_error_summary(400, r#"{"detail":"Unsupported parameter: foo"}"#);
+        assert_eq!(
+            summary.as_deref(),
+            Some("Codex request failed with 400: Unsupported parameter: foo")
+        );
     }
 
     #[test]
@@ -1093,5 +1099,157 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// Cross-provider response-normalization conformance. Codex shares OpenAI's
+    /// Responses-API normalizers (`shared::*`), so this wires those into the
+    /// shared suite with Responses-API wire fixtures.
+    #[cfg(feature = "testing")]
+    mod conformance {
+        use super::super::{PROVIDER, shared};
+        use lash_core::llm::types::{LlmOutputPart, LlmTerminalReason, LlmUsage};
+        use lash_llm_transport::conformance::{
+            CanonicalUsage as U, ProviderNormalizer, ProviderWire, Scenario, StreamAssembly,
+            provider_conformance,
+        };
+        use serde_json::{Value, json};
+
+        struct CodexNormalizer;
+
+        impl ProviderNormalizer for CodexNormalizer {
+            fn name(&self) -> &str {
+                "codex-responses"
+            }
+
+            fn wire_for(&self, scenario: Scenario) -> Option<ProviderWire> {
+                let wire = match scenario {
+                    Scenario::PlainTextStop => ProviderWire::body(json!({
+                        "status": "completed",
+                        "output": [{
+                            "type": "message", "id": "msg_1", "status": "completed",
+                            "content": [{ "type": "output_text", "text": "hello" }]
+                        }],
+                        "usage": { "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT }
+                    })),
+                    Scenario::OutputCapped => ProviderWire::body(json!({
+                        "status": "incomplete",
+                        "incomplete_details": { "reason": "max_output_tokens" },
+                        "output": [{
+                            "type": "message", "id": "msg_1", "status": "incomplete",
+                            "content": [{ "type": "output_text", "text": "trunc" }]
+                        }]
+                    })),
+                    Scenario::ContentFilter => ProviderWire::body(json!({
+                        "status": "incomplete",
+                        "incomplete_details": { "reason": "content_filter" },
+                        "output": []
+                    })),
+                    Scenario::ToolUse => ProviderWire::body(json!({
+                        "status": "completed",
+                        "output": [{
+                            "type": "function_call", "id": "fc_1", "call_id": "call_1",
+                            "name": "lookup", "arguments": "{\"q\":\"x\"}", "status": "completed"
+                        }]
+                    }))
+                    .with_tool_call_stream(
+                        vec![
+                            r#"{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}"#.to_string(),
+                            // arguments deliberately split across two delta events
+                            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"q\":"}"#.to_string(),
+                            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"\"x\"}"}"#.to_string(),
+                            r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}","status":"completed"}}"#.to_string(),
+                        ],
+                        "lookup",
+                        json!({ "q": "x" }),
+                    ),
+                    Scenario::UsageCacheHit => ProviderWire::body(json!({
+                        "status": "completed",
+                        "output": [{
+                            "type": "message", "id": "msg_1", "status": "completed",
+                            "content": [{ "type": "output_text", "text": "ok" }]
+                        }],
+                        "usage": {
+                            "input_tokens": U::BASE_INPUT,
+                            "output_tokens": U::BASE_OUTPUT,
+                            "input_tokens_details": { "cached_tokens": U::CACHED_INPUT }
+                        }
+                    })),
+                    Scenario::UsageReasoning => ProviderWire::body(json!({
+                        "status": "completed",
+                        "output": [{
+                            "type": "message", "id": "msg_1", "status": "completed",
+                            "content": [{ "type": "output_text", "text": "ok" }]
+                        }],
+                        "usage": {
+                            "input_tokens": U::BASE_INPUT,
+                            "output_tokens": U::BASE_OUTPUT,
+                            "output_tokens_details": { "reasoning_tokens": U::REASONING }
+                        }
+                    })),
+                    Scenario::ReasoningExtraction => ProviderWire::body(json!({
+                        "status": "completed",
+                        "output": [
+                            {
+                                "type": "reasoning", "id": "rs_1",
+                                "summary": [{ "type": "summary_text", "text": "thinking about it" }]
+                            },
+                            {
+                                "type": "message", "id": "msg_1", "status": "completed",
+                                "content": [{ "type": "output_text", "text": "answer" }]
+                            }
+                        ]
+                    }))
+                    .with_reasoning_text("thinking about it"),
+                    Scenario::StreamingUsageMerge => {
+                        ProviderWire::body(json!({})).with_usage_merge_stream(vec![
+                            // input arrives on an early event
+                            format!(
+                                r#"{{"type":"response.output_text.delta","delta":"hi","usage":{{"input_tokens":{}}}}}"#,
+                                U::BASE_INPUT
+                            ),
+                            // output arrives on a later event; merge must keep input
+                            format!(
+                                r#"{{"type":"response.output_text.delta","delta":"!","usage":{{"output_tokens":{}}}}}"#,
+                                U::BASE_OUTPUT
+                            ),
+                        ])
+                    }
+                };
+                Some(wire)
+            }
+
+            fn parts_from_wire(&self, body: &Value) -> Vec<LlmOutputPart> {
+                shared::response_parts_from_value(body)
+            }
+
+            fn usage_from_wire(&self, body: &Value) -> LlmUsage {
+                shared::usage_from_response_value(body)
+            }
+
+            fn terminal_from_wire(
+                &self,
+                body: &Value,
+                parts: &[LlmOutputPart],
+            ) -> LlmTerminalReason {
+                shared::terminal_reason_from_response_value(body, parts)
+            }
+
+            fn assemble_stream(&self, sse_events: &[String]) -> StreamAssembly {
+                let mut state = shared::ResponsesStreamState::default();
+                for raw in sse_events {
+                    shared::process_sse_event(PROVIDER, raw, &mut state, None)
+                        .expect("responses sse event parses");
+                }
+                StreamAssembly {
+                    parts: state.response_parts(),
+                    usage: state.usage.clone(),
+                }
+            }
+        }
+
+        #[test]
+        fn codex_satisfies_provider_conformance() {
+            provider_conformance(&CodexNormalizer);
+        }
     }
 }

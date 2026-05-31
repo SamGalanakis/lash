@@ -25,7 +25,7 @@ pub fn batch_tool_definition() -> ToolDefinition {
             }),
             &["tool_calls"],
         ),
-        serde_json::json!({ "type": "object", "additionalProperties": true }),
+        batch_output_schema(),
     )
     .with_examples(vec![
             r#"await tools.batch({ tool_calls: [{ tool: "read_file", parameters: { path: "src/main.rs" } }, { tool: "grep", parameters: { query: "ToolProvider crates/lash/src/" } }] })?"#.to_string(),
@@ -37,6 +37,32 @@ pub fn batch_tool_definition() -> ToolDefinition {
     .with_scheduling(ToolScheduling::Parallel)
 }
 
+fn batch_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": { "type": "integer", "minimum": 0 },
+                        "tool": { "type": "string" },
+                        "success": { "type": "boolean" },
+                        "duration_ms": { "type": "integer", "minimum": 0 },
+                        "result": {},
+                        "error": {}
+                    },
+                    "required": ["index", "tool", "success", "duration_ms"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["results"],
+        "additionalProperties": false
+    })
+}
+
 fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -44,4 +70,21 @@ fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json
         "required": required,
         "additionalProperties": false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_contract_documents_results_array() {
+        let definition = batch_tool_definition();
+
+        assert_eq!(
+            definition.contract.output_schema["required"],
+            serde_json::json!(["results"])
+        );
+        let rendered = definition.compact_contract().render_signature();
+        assert!(rendered.contains("results"), "{rendered}");
+    }
 }

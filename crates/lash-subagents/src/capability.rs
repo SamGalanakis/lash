@@ -1,50 +1,120 @@
 //! Pluggable capability model for subagents.
 //!
-//! A `Capability` describes how to translate an `agents.spawn({ capability: "name" })`
-//! call into the model, plugin source, tool surface, and recursion authority
-//! of the spawned session. Built-in `explore` / `peer` tiers are tiny
-//! `TierCapability` instances; downstream code can register arbitrary
-//! additional impls (different model lookup, dynamic inheritance,
-//! config-driven, ...) without touching the spawn pipeline.
+//! A `Capability` describes how to translate an
+//! `agents.spawn({ capability: "name" })` call into the complete child session
+//! request. Built-in `explore` / `peer` tiers are tiny `TierCapability`
+//! instances; downstream code can register arbitrary additional impls
+//! (different model lookup, dynamic inheritance, config-driven surfaces, ...)
+//! without touching the spawn pipeline.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use lash_core::{ModelSpec, SessionPluginSource, SessionPolicy, SessionSpec};
+use lash_core::{
+    CausalRef, ModelSpec, PluginOptions, SessionCreateRequest, SessionPluginSource, SessionPolicy,
+    SessionSnapshot, SessionSpec, SessionStartPoint, SessionToolAccess, SubagentSessionContext,
+};
+use lash_rlm_types::RlmTermination;
+use serde_json::Value;
+
+const MAX_SUBAGENT_DEPTH: u8 = 5;
+const RECURSIVE_SUBAGENT_TOOL: &str = "spawn_agent";
 
 pub fn default_explore_plugin_source() -> TierPluginSource {
     TierPluginSource::CurrentHostFresh
 }
 
-/// State the registry exposes to a `Capability` while it resolves a spawn.
-pub struct CapabilityContext<'a> {
-    pub parent_policy: &'a SessionPolicy,
-}
-
 pub trait Capability: Send + Sync {
     fn name(&self) -> &str;
-    fn resolve(&self, ctx: &CapabilityContext<'_>) -> CapabilityResolution;
+    fn build_session_request(
+        &self,
+        ctx: SubagentSpawnContext<'_>,
+    ) -> Result<SessionCreateRequest, String>;
 }
 
-#[derive(Clone, Debug)]
-pub struct CapabilityResolution {
-    pub spec: SessionSpec,
-    pub plugin_source: SessionPluginSource,
+/// State exposed to a `Capability` while it resolves a spawn.
+pub struct SubagentSpawnContext<'a> {
+    pub parent_session_id: &'a str,
+    pub parent_snapshot: &'a SessionSnapshot,
+    pub session_spec: &'a SessionSpec,
+    pub base_tool_access: &'a SessionToolAccess,
+    pub output_schema: Option<Value>,
+    pub seed: lash_protocol_rlm::RlmSeed,
+    pub parent_subagent: Option<&'a SubagentSessionContext>,
+    pub caused_by: Option<CausalRef>,
 }
 
-impl CapabilityResolution {
-    pub fn current_host_fresh(spec: SessionSpec) -> Self {
-        Self {
-            spec,
-            plugin_source: SessionPluginSource::CurrentHostFresh,
-        }
+impl SubagentSpawnContext<'_> {
+    pub fn base_policy(&self) -> SessionPolicy {
+        self.session_spec
+            .resolve_against(&self.parent_snapshot.policy)
     }
 
-    pub fn current_session_fork(spec: SessionSpec) -> Self {
-        Self {
-            spec,
-            plugin_source: SessionPluginSource::CurrentSessionFork,
+    pub fn rlm_request(
+        &self,
+        capability_name: &str,
+        spec: &SessionSpec,
+        plugin_source: SessionPluginSource,
+    ) -> Result<SessionCreateRequest, String> {
+        let mut policy = self.base_policy();
+        policy = spec.resolve_against(&policy);
+        let termination = match self.output_schema.clone() {
+            Some(schema) => RlmTermination::SubmitRequired {
+                schema: Some(schema),
+            },
+            None => RlmTermination::default(),
+        };
+        let plugin_options = PluginOptions::typed(
+            lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID,
+            lash_rlm_types::RlmCreateExtras { termination },
+        )
+        .map_err(|err| format!("failed to encode rlm plugin options: {err}"))?;
+
+        let initial_nodes = lash_protocol_rlm::rlm_seed_initial_nodes(self.seed.clone());
+        let request = SessionCreateRequest::child(
+            self.parent_session_id,
+            SessionStartPoint::Empty,
+            policy,
+            plugin_options,
+            "subagent",
+        )
+        .with_plugin_source(plugin_source)
+        .with_tool_access(self.base_tool_access.clone())
+        .with_initial_nodes(initial_nodes);
+        self.finalize_request(request, capability_name)
+    }
+
+    pub fn finalize_request(
+        &self,
+        mut request: SessionCreateRequest,
+        capability_name: &str,
+    ) -> Result<SessionCreateRequest, String> {
+        if let Some(caused_by) = self.caused_by.clone() {
+            request = request.with_caused_by(caused_by);
         }
+        let child_depth = self
+            .parent_subagent
+            .map(|parent| parent.depth.saturating_add(1))
+            .unwrap_or(1);
+        if child_depth > MAX_SUBAGENT_DEPTH {
+            return Err(format!(
+                "subagent recursion depth exceeded: max depth is {MAX_SUBAGENT_DEPTH}"
+            ));
+        }
+        let mut tool_access = request.tool_access.clone();
+        if child_depth >= MAX_SUBAGENT_DEPTH {
+            tool_access
+                .hidden_tools
+                .insert(RECURSIVE_SUBAGENT_TOOL.to_string());
+        }
+        Ok(request
+            .with_tool_access(tool_access)
+            .with_subagent_context(SubagentSessionContext {
+                parent_session_id: self.parent_session_id.to_string(),
+                capability: capability_name.to_string(),
+                depth: child_depth,
+                max_depth: MAX_SUBAGENT_DEPTH,
+            }))
     }
 }
 
@@ -52,19 +122,21 @@ impl CapabilityResolution {
 /// they want and do not need provider-tier lookup.
 pub struct StaticCapability {
     name: String,
-    resolution: CapabilityResolution,
+    spec: SessionSpec,
+    plugin_source: SessionPluginSource,
 }
 
 impl StaticCapability {
     pub fn new(name: impl Into<String>, spec: SessionSpec) -> Self {
         Self {
             name: name.into(),
-            resolution: CapabilityResolution::current_host_fresh(spec),
+            spec,
+            plugin_source: SessionPluginSource::CurrentHostFresh,
         }
     }
 
     pub fn with_plugin_source(mut self, plugin_source: SessionPluginSource) -> Self {
-        self.resolution.plugin_source = plugin_source;
+        self.plugin_source = plugin_source;
         self
     }
 }
@@ -74,13 +146,16 @@ impl Capability for StaticCapability {
         &self.name
     }
 
-    fn resolve(&self, _ctx: &CapabilityContext<'_>) -> CapabilityResolution {
-        self.resolution.clone()
+    fn build_session_request(
+        &self,
+        ctx: SubagentSpawnContext<'_>,
+    ) -> Result<SessionCreateRequest, String> {
+        ctx.rlm_request(&self.name, &self.spec, self.plugin_source)
     }
 }
 
 /// How a tier picks plugin instances relative to the parent session.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum TierPluginSource {
     CurrentHostFresh,
     CurrentSessionFork,
@@ -115,14 +190,22 @@ impl Capability for TierCapability {
         &self.name
     }
 
-    fn resolve(&self, ctx: &CapabilityContext<'_>) -> CapabilityResolution {
-        let model = pick_tier_model(self, ctx.parent_policy);
+    fn build_session_request(
+        &self,
+        ctx: SubagentSpawnContext<'_>,
+    ) -> Result<SessionCreateRequest, String> {
+        let policy = ctx.base_policy();
+        let model = pick_tier_model(self, &policy);
         let spec = SessionSpec::inherit().model(model);
-        match self.plugin_source {
-            TierPluginSource::CurrentHostFresh => CapabilityResolution::current_host_fresh(spec),
-            TierPluginSource::CurrentSessionFork => {
-                CapabilityResolution::current_session_fork(spec)
-            }
+        ctx.rlm_request(&self.name, &spec, self.plugin_source.into())
+    }
+}
+
+impl From<TierPluginSource> for SessionPluginSource {
+    fn from(source: TierPluginSource) -> Self {
+        match source {
+            TierPluginSource::CurrentHostFresh => Self::CurrentHostFresh,
+            TierPluginSource::CurrentSessionFork => Self::CurrentSessionFork,
         }
     }
 }
@@ -195,8 +278,6 @@ impl CapabilityRegistry {
 /// subagents that scan, summarise, or verify without mutating state. The
 /// `peer` tier is a parallel-self with the parent's full affordances:
 /// edits, recursion, anything the parent can do, in a fresh window.
-/// Interactive-only tools (`ask`, `showcase`, `plan_exit`) are stripped from every subagent surface regardless of
-/// capability — see `subagent_surface_contribution`.
 pub fn default_registry(tier_models: &BTreeMap<String, ModelSpec>) -> CapabilityRegistry {
     let model_for = |name: &str| tier_models.get(name).cloned();
     let mut registry = CapabilityRegistry::new();

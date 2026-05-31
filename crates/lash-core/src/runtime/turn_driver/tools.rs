@@ -35,7 +35,7 @@ fn cancelled_completed_tool_call(
         model_return: crate::ModelToolReturn {
             call_id,
             tool_name,
-            parts: vec![crate::ModelToolReturnPart::Text(
+            parts: vec![crate::ModelToolReturnPart::text(
                 "[Tool execution cancelled]\ntool call cancelled".to_string(),
             )],
         },

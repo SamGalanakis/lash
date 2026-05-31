@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use lash_core::{
-    Message, MessageRole, Part, PartKind, PruneState, SessionReadView, SessionStateEnvelope,
+    Message, MessageRole, Part, PartKind, PruneState, SessionReadView, SessionSnapshot,
     ToolCallOutput, ToolCallRecord, ToolCancellation, ToolFailure, ToolFailureClass, ToolResult,
     TurnActivity, TurnEvent,
 };
@@ -154,11 +154,11 @@ pub(crate) fn build_projection_read_view(turn_count: usize) -> SessionReadView {
     }
 
     graph.append_active_read_delta(&[], &tool_calls);
-    let state = SessionStateEnvelope {
+    let state = SessionSnapshot {
         session_graph: graph,
-        ..SessionStateEnvelope::default()
+        ..SessionSnapshot::default()
     };
-    SessionReadView::from_exported_state(&state)
+    SessionReadView::from_snapshot(&state)
 }
 
 fn live_activity_event(index: usize) -> TurnEvent {
@@ -213,13 +213,15 @@ fn live_activity_event(index: usize) -> TurnEvent {
             call_id: Some(format!("process-{index}")),
             name: "list_process_handles".to_string(),
             args: json!({}),
-            output: ToolCallOutput::success(json!({
-                "processes": [{
+            output: ToolCallOutput::success(json!([
+                {
+                    "__handle__": "process",
+                    "id": "tool-call-app-log",
                     "process_id": "tool-call-app-log",
                     "descriptor": { "kind": "tool", "label": "app_log" },
-                    "terminal": "running"
-                }]
-            })),
+                    "status": "running"
+                }
+            ])),
             duration_ms: 2,
         },
         9 => TurnEvent::ToolCallCompleted {

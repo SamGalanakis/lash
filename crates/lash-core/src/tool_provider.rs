@@ -240,6 +240,7 @@ impl<'run> ToolContext<'run> {
             processes: Arc::clone(&self.processes),
             effect_controller: self.effect_controller.clone(),
             parent_invocation: self.parent_invocation.clone(),
+            tool_call_id: self.tool_call_id.clone(),
         }
     }
 
@@ -305,6 +306,23 @@ impl<'run> ToolContext<'run> {
     ) -> Self {
         self.async_process_id = Some(process_id.into());
         self.cancellation_token = Some(cancellation_token);
+        self
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn with_process_events_for_testing(
+        mut self,
+        process_id: impl Into<String>,
+        registry: Arc<dyn crate::ProcessRegistry>,
+    ) -> Self {
+        self.process_events = Some(ToolProcessEventContext {
+            process_id: process_id.into(),
+            registry,
+            wake_target_scope: None,
+            store: None,
+            host: Arc::clone(&self.host),
+        });
         self
     }
 

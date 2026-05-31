@@ -31,7 +31,6 @@ impl LashSchema {
     }
 
     pub fn validate(&self, value: &Value) -> Result<(), String> {
-        let _ = jsonschema::JSONSchema::compile(&self.schema);
         validate_schema("", &self.schema, value)
     }
 }

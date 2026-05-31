@@ -1,7 +1,8 @@
 use super::support::*;
 
-/// Serialised form of a provider's configuration. Round-trips with
-/// [`ProviderHandle`] via `ProviderHandle::to_spec` / `build_provider`.
+/// Serialised form of a provider's host-owned configuration. Runtime
+/// persistence stores only provider ids; this type is for app/user config
+/// files that need credentials.
 ///
 /// Wire shape is a flat JSON object: a `type` field plus the
 /// provider-specific config keys. This matches the legacy

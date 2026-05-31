@@ -5,8 +5,8 @@ use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolSched
 
 use lash_tool_support::{
     FS_DEFAULTS_PREAMBLE, StaticToolExecute, StaticToolProvider, build_path_entry,
-    filesystem_entries_result, object_schema, parse_optional_bool, parse_optional_usize_arg,
-    require_str, rg_file_list, run_blocking,
+    filesystem_entries_output_schema, filesystem_entries_result, object_schema,
+    parse_optional_bool, parse_optional_usize_arg, require_str, rg_file_list, run_blocking,
 };
 
 /// Find files by glob pattern.
@@ -159,7 +159,7 @@ fn glob_tool_definition() -> ToolDefinition {
                     }),
                     &["pattern"],
                 ),
-                serde_json::json!({ "type": "object", "additionalProperties": true }),
+                filesystem_entries_output_schema(),
             )
             .with_examples(vec![
                 r#"await files.glob({ pattern: "**/*.rs", path: "crates/lash/src", limit: 50 })?"#.into(),
@@ -191,6 +191,19 @@ mod tests {
             .and_then(|v| v.as_array())
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn glob_contract_documents_result_shape() {
+        let definition = glob_tool_definition();
+        assert_eq!(definition.contract.output_schema["type"], json!("object"));
+        assert!(definition.contract.output_schema["properties"]["items"].is_object());
+        assert!(
+            definition
+                .compact_contract()
+                .render_signature()
+                .contains("items")
+        );
     }
 
     #[tokio::test]

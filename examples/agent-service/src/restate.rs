@@ -422,18 +422,29 @@ mod restate_tests {
         } else {
             local_addr
         };
+        let process_runner = Arc::new(lash_restate::RestateCoreProcessRunner::new(
+            harness.process_worker.clone(),
+        ));
         let endpoint = restate_sdk::endpoint::Endpoint::builder()
             .bind(AgentServiceTurnWorkflowImpl::new(state.clone()).serve())
             .bind(
                 lash_restate::LashProcessWorkflowImpl::new(
-                    Arc::new(lash_restate::RestateCoreProcessRunner::new(
-                        harness.process_worker.clone(),
-                    )),
+                    Arc::clone(&process_runner),
                     Arc::clone(&harness.process_registry),
                 )
                 .serve(),
             )
             .build();
+        // Wake-driven runner over a Restate ingress-client run handle, the same
+        // way a production deployment does: its first tick folds in the former
+        // startup-only recovery sweep, then it drives the registry's
+        // non-terminal rows on every poke and poll tick.
+        let process_work_runner = lash::advanced::ProcessWorkRunner::new(Arc::new(
+            lash_restate::RestateProcessIngressRunner::new(
+                ingress_url.clone(),
+                Arc::clone(&harness.process_registry),
+            ),
+        ));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
             restate_sdk::http_server::HttpServer::new(endpoint)
@@ -442,6 +453,7 @@ mod restate_tests {
                 })
                 .await;
         });
+        process_work_runner.spawn();
 
         wait_for_endpoint_socket(local_probe_addr).await;
         register_restate_deployment(&admin_url, &endpoint_url).await;

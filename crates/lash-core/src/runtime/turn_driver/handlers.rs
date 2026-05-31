@@ -227,7 +227,7 @@ impl RuntimeTurnDriver<'_> {
                     code_correlation_id.clone(),
                     TurnEvent::CodeBlockCompleted {
                         language: "lashlang".to_string(),
-                        output: output.output.clone(),
+                        output: output.observations.join("\n"),
                         error: output.error.clone(),
                         success: output.error.is_none(),
                         duration_ms: output.duration_ms,
@@ -258,13 +258,14 @@ impl RuntimeTurnDriver<'_> {
         }
         if let Ok(output) = &result {
             if self.host.core.trace_sink.is_some() {
+                let observations_text = output.observations.join("\n");
                 self.emit_protocol_diagnostic_trace(
                     iteration,
                     "exec_code_completed",
                     serde_json::json!({
                         "duration_ms": output.duration_ms,
-                        "output": output.output,
-                        "output_chars": output.output.chars().count(),
+                        "output": observations_text,
+                        "output_chars": observations_text.chars().count(),
                         "observation_count": output.observations.len(),
                         "observation_truncation": output.observation_truncation,
                         "error": output.error,

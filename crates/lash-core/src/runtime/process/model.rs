@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::events::{ProcessEventType, ProcessTerminalSemantics, default_process_event_types};
+use super::events::{
+    ProcessAwaitOutput, ProcessEventType, ProcessTerminalSemantics, ProcessTerminalState,
+    default_process_event_types,
+};
 use super::time::current_epoch_ms;
 use super::validation::{
     ensure_core_event_types, process_registration_hash, validate_process_registration,
@@ -180,7 +183,6 @@ impl<'scope> ProcessOpScope<'scope> {
 #[derive(Clone, Debug, Default)]
 pub struct ProcessStartOptions {
     pub descriptor: Option<ProcessHandleDescriptor>,
-    pub wake_session_id: Option<String>,
 }
 
 impl ProcessStartOptions {
@@ -195,11 +197,6 @@ impl ProcessStartOptions {
 
     pub fn with_optional_descriptor(mut self, descriptor: Option<ProcessHandleDescriptor>) -> Self {
         self.descriptor = descriptor;
-        self
-    }
-
-    pub fn with_wake_session_id(mut self, session_id: impl Into<String>) -> Self {
-        self.wake_session_id = Some(session_id.into());
         self
     }
 
@@ -326,6 +323,76 @@ impl ProcessRegistration {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ProcessStatus {
+    #[default]
+    Running,
+    Completed {
+        await_output: ProcessAwaitOutput,
+    },
+    Failed {
+        await_output: ProcessAwaitOutput,
+    },
+    Cancelled {
+        await_output: ProcessAwaitOutput,
+    },
+}
+
+impl ProcessStatus {
+    pub fn from_terminal(terminal: ProcessTerminalSemantics) -> Self {
+        match terminal.state {
+            ProcessTerminalState::Completed => Self::Completed {
+                await_output: terminal.await_output,
+            },
+            ProcessTerminalState::Failed => Self::Failed {
+                await_output: terminal.await_output,
+            },
+            ProcessTerminalState::Cancelled => Self::Cancelled {
+                await_output: terminal.await_output,
+            },
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, Self::Running)
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed { .. } => "completed",
+            Self::Failed { .. } => "failed",
+            Self::Cancelled { .. } => "cancelled",
+        }
+    }
+
+    pub fn terminal_state(&self) -> Option<ProcessTerminalState> {
+        match self {
+            Self::Running => None,
+            Self::Completed { .. } => Some(ProcessTerminalState::Completed),
+            Self::Failed { .. } => Some(ProcessTerminalState::Failed),
+            Self::Cancelled { .. } => Some(ProcessTerminalState::Cancelled),
+        }
+    }
+
+    pub fn await_output(&self) -> Option<&ProcessAwaitOutput> {
+        match self {
+            Self::Running => None,
+            Self::Completed { await_output }
+            | Self::Failed { await_output }
+            | Self::Cancelled { await_output } => Some(await_output),
+        }
+    }
+
+    pub fn terminal_semantics(&self) -> Option<ProcessTerminalSemantics> {
+        Some(ProcessTerminalSemantics {
+            state: self.terminal_state()?,
+            await_output: self.await_output()?.clone(),
+        })
+    }
+}
+
 /// Durable process row. Session-visible addressability lives in
 /// [`ProcessHandleGrant`], not in the process record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -342,8 +409,8 @@ pub struct ProcessRecord {
     pub updated_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<ProcessExternalRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal: Option<ProcessTerminalSemantics>,
+    #[serde(default)]
+    pub status: ProcessStatus,
 }
 
 impl ProcessRecord {
@@ -370,12 +437,12 @@ impl ProcessRecord {
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             external_ref: None,
-            terminal: None,
+            status: ProcessStatus::Running,
         }
     }
 
     pub fn is_terminal(&self) -> bool {
-        self.terminal.is_some()
+        self.status.is_terminal()
     }
 
     pub fn owner_scope_id(&self) -> ProcessScopeId {
@@ -384,6 +451,55 @@ impl ProcessRecord {
 
     pub fn host_profile_id(&self) -> &str {
         &self.provenance.host_profile_id
+    }
+}
+
+/// Wire-format version stamped on every persisted [`ProcessLease`].
+///
+/// Bump when the on-wire shape of `ProcessLease` changes in a way that older
+/// code cannot safely deserialize. Mirrors
+/// [`RUNTIME_TURN_LEASE_SCHEMA_VERSION`](crate::RUNTIME_TURN_LEASE_SCHEMA_VERSION)
+/// and follows the same upgrade semantics.
+pub const PROCESS_LEASE_SCHEMA_VERSION: u32 = 1;
+
+/// Durable lease over a non-terminal background process.
+///
+/// This is the process-domain analogue of
+/// [`RuntimeTurnLease`](crate::RuntimeTurnLease): the lease pair
+/// `(owner_id, lease_token)` plus `fencing_token` are how lash guarantees that
+/// one non-terminal process is re-executed by exactly one worker at a time —
+/// even after a crash, even across two workers that both sweep the same
+/// registry for recoverable work. The durable backend
+/// (`lash-sqlite-store`) uses these to serialize concurrent claims on the same
+/// `process_id`; future distributed durable backends use the *same* fields to
+/// coordinate workers that don't share a file system.
+///
+/// **This is not single-process theatre.** The owner / fencing-token /
+/// lease-token triple is the public contract that lets any backend detect and
+/// reject stale writers. Treat it as load-bearing, not defensive.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcessLease {
+    pub schema_version: u32,
+    pub process_id: ProcessId,
+    pub owner_id: String,
+    pub lease_token: String,
+    pub fencing_token: u64,
+    pub claimed_at_epoch_ms: u64,
+    pub expires_at_epoch_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcessLeaseCompletion {
+    pub process_id: ProcessId,
+    pub lease_token: String,
+}
+
+impl ProcessLeaseCompletion {
+    pub fn from_lease(lease: &ProcessLease) -> Self {
+        Self {
+            process_id: lease.process_id.clone(),
+            lease_token: lease.lease_token.clone(),
+        }
     }
 }
 
@@ -421,6 +537,33 @@ pub struct ProcessHandleGrant {
 }
 
 pub type ProcessHandleGrantEntry = (ProcessHandleGrant, ProcessRecord);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessListMode {
+    #[default]
+    Live,
+    All,
+}
+
+impl ProcessListMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::All => "all",
+        }
+    }
+
+    pub fn from_history_arg(value: Option<&str>) -> Result<Self, String> {
+        match value.unwrap_or("live") {
+            "live" => Ok(Self::Live),
+            "all" => Ok(Self::All),
+            other => Err(format!(
+                "processes.list history must be `live` or `all`, got `{other}`"
+            )),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessStartGrant {

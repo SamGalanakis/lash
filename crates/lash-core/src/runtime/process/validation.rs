@@ -3,11 +3,11 @@ use std::collections::HashSet;
 use crate::plugin::PluginError;
 
 use super::events::{
-    ProcessEvent, ProcessEventAppendRequest, ProcessEventSemanticsSpec, ProcessTerminalSemantics,
-    ProcessTerminalState, ProcessWakeDelivery, default_process_event_types,
+    ProcessEvent, ProcessEventAppendRequest, ProcessEventSemanticsSpec, ProcessTerminalState,
+    ProcessWakeDelivery, default_process_event_types,
 };
 use super::materialization::materialize_process_event_semantics;
-use super::model::{ProcessRecord, ProcessRegistration};
+use super::model::{ProcessRecord, ProcessRegistration, ProcessStatus};
 use super::time::system_time_from_epoch_ms;
 use super::wake::process_wake_delivery;
 
@@ -15,7 +15,7 @@ use super::wake::process_wake_delivery;
 pub struct PreparedProcessEventAppend {
     pub event: ProcessEvent,
     pub payload_hash: String,
-    pub terminal_update: Option<ProcessTerminalSemantics>,
+    pub status_update: Option<ProcessStatus>,
     pub wake_delivery: Option<ProcessWakeDelivery>,
     pub occurred_at_ms: u64,
     pub replayed: bool,
@@ -52,7 +52,7 @@ pub fn prepare_process_event_append(
             return Ok(PreparedProcessEventAppend {
                 event: existing,
                 payload_hash,
-                terminal_update: None,
+                status_update: None,
                 wake_delivery,
                 occurred_at_ms,
                 replayed: true,
@@ -85,7 +85,7 @@ pub fn prepare_process_event_append(
         &request.payload,
         &declared.semantics,
     )?;
-    if semantics.terminal.is_some() && record.terminal.is_some() {
+    if semantics.terminal.is_some() && record.is_terminal() {
         return Err(PluginError::Session(format!(
             "process `{process_id}` is already terminal"
         )));
@@ -123,7 +123,7 @@ pub fn prepare_process_event_append(
     Ok(PreparedProcessEventAppend {
         event,
         payload_hash,
-        terminal_update: semantics.terminal,
+        status_update: semantics.terminal.map(ProcessStatus::from_terminal),
         wake_delivery,
         occurred_at_ms,
         replayed: false,

@@ -1,8 +1,8 @@
 use crate::plugin::PluginError;
 
-use super::events::ProcessAwaitOutput;
+use super::events::{ProcessAwaitOutput, ProcessEvent};
 use super::model::{
-    ProcessHandleGrantEntry, ProcessOpScope, ProcessRecord, ProcessRegistration,
+    ProcessHandleGrantEntry, ProcessListMode, ProcessOpScope, ProcessRecord, ProcessRegistration,
     ProcessStartOptions,
 };
 
@@ -25,6 +25,7 @@ pub trait ProcessService: Send + Sync {
     async fn list_visible(
         &self,
         session_id: &str,
+        mode: ProcessListMode,
         scope: ProcessOpScope<'_>,
     ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError>;
 
@@ -41,6 +42,15 @@ pub trait ProcessService: Send + Sync {
         process_id: &str,
         scope: ProcessOpScope<'_>,
     ) -> Result<ProcessRecord, PluginError>;
+
+    async fn signal(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        signal_id: String,
+        payload: serde_json::Value,
+        scope: ProcessOpScope<'_>,
+    ) -> Result<ProcessEvent, PluginError>;
 
     async fn cancel_all(
         &self,
@@ -93,6 +103,7 @@ impl ProcessService for UnavailableProcessService {
     async fn list_visible(
         &self,
         _session_id: &str,
+        _mode: ProcessListMode,
         _scope: ProcessOpScope<'_>,
     ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
         Err(PluginError::Session(
@@ -122,12 +133,27 @@ impl ProcessService for UnavailableProcessService {
         ))
     }
 
+    async fn signal(
+        &self,
+        _session_id: &str,
+        _process_id: &str,
+        _signal_id: String,
+        _payload: serde_json::Value,
+        _scope: ProcessOpScope<'_>,
+    ) -> Result<ProcessEvent, PluginError> {
+        Err(PluginError::Session(
+            "process signalling is unavailable in this runtime".to_string(),
+        ))
+    }
+
     async fn cancel_all(
         &self,
         session_id: &str,
         scope: ProcessOpScope<'_>,
     ) -> Result<Vec<ProcessRecord>, PluginError> {
-        let entries = self.list_visible(session_id, scope.clone()).await?;
+        let entries = self
+            .list_visible(session_id, ProcessListMode::Live, scope.clone())
+            .await?;
         let mut cancelled = Vec::new();
         for (grant, record) in entries {
             if record.is_terminal() {

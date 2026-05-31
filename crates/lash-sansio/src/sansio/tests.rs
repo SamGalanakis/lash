@@ -204,7 +204,6 @@ fn roundtrip_checkpoint(checkpoint: TurnCheckpoint) -> TurnCheckpoint {
 
 fn empty_exec_response() -> crate::ExecResponse {
     crate::ExecResponse {
-        output: String::new(),
         observations: Vec::new(),
         observation_truncation: Vec::new(),
         tool_calls: Vec::new(),
@@ -230,7 +229,7 @@ fn completed_tool(
         model_return: ModelToolReturn {
             call_id: call_id.to_string(),
             tool_name: tool_name.to_string(),
-            parts: vec![ModelToolReturnPart::Text(format!("{tool_name} result"))],
+            parts: vec![ModelToolReturnPart::text(format!("{tool_name} result"))],
         },
         duration_ms: 1,
         replay: None,

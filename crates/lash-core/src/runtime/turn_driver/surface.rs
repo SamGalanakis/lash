@@ -136,7 +136,7 @@ impl RuntimeTurnDriver<'_> {
             };
         }
 
-        let mut session_policy = self.runtime_session_policy();
+        let mut session_policy = self.policy.clone();
         let model = match self.prepare_provider(&mut session_policy).await {
             Ok(model) => model,
             Err(event) => {
@@ -234,7 +234,7 @@ impl RuntimeTurnDriver<'_> {
             return Ok(None);
         }
 
-        let policy = self.policy.clone();
+        let policy = self.policy.policy.clone();
         let execution_surface = self
             .prepare_execution_surface(&policy, self.turn_index, machine.message_sequence())
             .await
@@ -336,17 +336,13 @@ impl RuntimeTurnDriver<'_> {
             .await
     }
 
-    fn runtime_session_policy(&self) -> SessionPolicy {
-        self.policy.clone()
-    }
-
     pub(super) fn checkpoint_state_view(
         &self,
         messages: crate::MessageSequence,
         _protocol_iteration: usize,
     ) -> crate::SessionReadView {
         self.turn_pipeline.read_view(
-            self.policy.clone(),
+            self.policy.policy.clone(),
             self.turn_index,
             self.protocol_turn_options.clone(),
             messages,
@@ -355,7 +351,7 @@ impl RuntimeTurnDriver<'_> {
 
     pub(super) async fn prepare_provider(
         &mut self,
-        policy: &mut SessionPolicy,
+        policy: &mut ResolvedSessionPolicy,
     ) -> Result<String, SessionEvent> {
         let model = policy.model.id.clone();
         if let Some(variant) = policy.model.variant.as_deref()

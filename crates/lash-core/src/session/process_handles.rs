@@ -18,7 +18,7 @@ impl RuntimeExecutionContext<'_> {
     pub(super) fn process_status_value(status: &crate::ProcessRecord) -> serde_json::Value {
         json!({
             "process_id": status.id,
-            "terminal": terminal_status_label(status.terminal.as_ref()),
+            "status": status.status.label(),
         })
     }
 
@@ -71,21 +71,18 @@ impl RuntimeExecutionContext<'_> {
                 call: prepared_call.clone(),
             },
         );
-        if let Err(err) = self
-            .dispatch
-            .processes
-            .start(
-                &self.session_id,
-                registration,
-                crate::ProcessStartOptions::new()
-                    .with_wake_session_id(self.session_id.clone())
-                    .with_descriptor(ProcessHandleDescriptor::new(
-                        Some("tool"),
-                        Some(tool_name.clone()),
-                    )),
-                self.process_scope(self.parent_invocation.clone()),
-            )
-            .await
+        if let Err(err) =
+            self.dispatch
+                .processes
+                .start(
+                    &self.session_id,
+                    registration,
+                    crate::ProcessStartOptions::new().with_descriptor(
+                        ProcessHandleDescriptor::new(Some("tool"), Some(tool_name.clone())),
+                    ),
+                    self.process_scope(self.parent_invocation.clone()),
+                )
+                .await
         {
             return ToolInvocationReply::error(json!(err.to_string()));
         }
@@ -219,15 +216,6 @@ impl RuntimeExecutionContext<'_> {
             Err(err) => ToolInvocationReply::error(json!(err.to_string())).output,
         };
         Self::recorded_process_reply(call_id, "cancel_process", args, output, started)
-    }
-}
-
-fn terminal_status_label(terminal: Option<&crate::ProcessTerminalSemantics>) -> &'static str {
-    match terminal.map(|terminal| terminal.state) {
-        None => "running",
-        Some(crate::ProcessTerminalState::Completed) => "completed",
-        Some(crate::ProcessTerminalState::Failed) => "failed",
-        Some(crate::ProcessTerminalState::Cancelled) => "cancelled",
     }
 }
 

@@ -2,6 +2,10 @@ use super::*;
 
 #[async_trait::async_trait]
 impl RuntimePersistence for Store {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
     async fn load_session(
         &self,
         scope: SessionReadScope,
