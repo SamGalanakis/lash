@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use lash_core::PreparedContext;
+use lash_core::plugin::ToolResultProjectionContext;
 use lash_core::plugin::{
     HistoryError, HistoryRewriter, HistoryState, PluginError, PluginFactory, PluginOptions,
     PluginRegistrar, PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
@@ -30,6 +31,8 @@ use lash_core::{
 };
 use lash_plugin_tool_output_budget::{
     DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES, DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES,
+    ToolOutputBudgetConfig, ToolOutputBudgetMode, TruncationDirection, TruncationUnit,
+    WindowedTruncation, project_tool_result_text, truncate_windowed,
 };
 
 fn tool_spill_dir() -> std::path::PathBuf {
@@ -123,79 +126,36 @@ fn strip_ansi_escapes(text: &str) -> String {
     out
 }
 
-#[derive(Clone, Copy)]
-enum TruncationDirection {
-    Head,
-    Tail,
-}
-
 fn tool_result_truncation_direction(tool_name: &str) -> TruncationDirection {
     match tool_name {
-        "exec_command" | "write_stdin" | "batch" => TruncationDirection::Tail,
+        "exec_command" | "write_stdin" => TruncationDirection::Tail,
         _ => TruncationDirection::Head,
     }
 }
 
+/// Truncate a tool-result preview using the one canonical windowed
+/// truncation core (shared with the tool-output-budget projector). This
+/// crate always budgets in bytes against the shared default caps and
+/// supplies its own retained-output hint.
 fn truncate_tool_result_preview(
     text: &str,
     direction: TruncationDirection,
     output_path: Option<&Path>,
 ) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let total_bytes = text.len();
-    if lines.len() <= TOOL_RESULT_MAX_LINES && total_bytes <= TOOL_RESULT_MAX_BYTES {
-        return text.to_string();
-    }
-
-    let mut out = Vec::new();
-    let mut bytes = 0usize;
-    let mut hit_bytes = false;
-
-    match direction {
-        TruncationDirection::Head => {
-            for (idx, line) in lines.iter().enumerate().take(TOOL_RESULT_MAX_LINES) {
-                let size = line.len() + usize::from(idx > 0);
-                if bytes + size > TOOL_RESULT_MAX_BYTES {
-                    hit_bytes = true;
-                    break;
-                }
-                out.push(*line);
-                bytes += size;
-            }
-        }
-        TruncationDirection::Tail => {
-            for (idx, line) in lines.iter().rev().take(TOOL_RESULT_MAX_LINES).enumerate() {
-                let size = line.len() + usize::from(idx > 0);
-                if bytes + size > TOOL_RESULT_MAX_BYTES {
-                    hit_bytes = true;
-                    break;
-                }
-                out.push(*line);
-                bytes += size;
-            }
-            out.reverse();
-        }
-    }
-
-    let preview = out.join("\n");
-    let removed = if hit_bytes {
-        total_bytes.saturating_sub(preview.len())
-    } else {
-        lines.len().saturating_sub(out.len())
-    };
-    let unit = if hit_bytes { "bytes" } else { "lines" };
     let retained_hint = match output_path {
         Some(path) => retained_output_hint(path),
         None => "The tool output was truncated. No separate full-output file was written for this result.".to_string(),
     };
-    match direction {
-        TruncationDirection::Head => {
-            format!("{preview}\n\n...{removed} {unit} truncated...\n\n{retained_hint}")
-        }
-        TruncationDirection::Tail => {
-            format!("...{removed} {unit} truncated...\n\n{retained_hint}\n\n{preview}")
-        }
-    }
+    truncate_windowed(
+        text,
+        &WindowedTruncation {
+            max_lines: TOOL_RESULT_MAX_LINES,
+            max_bytes: TOOL_RESULT_MAX_BYTES,
+            direction,
+            unit: TruncationUnit::Bytes,
+            hint: &retained_hint,
+        },
+    )
 }
 
 fn tool_result_needs_truncation(text: &str) -> bool {
@@ -212,7 +172,9 @@ fn retained_output_hint(path: &Path) -> String {
 fn normalize_tool_result_content(record: &ToolCallRecord) -> String {
     let rendered = lash_core::session_model::format_tool_output_content(&record.output);
     match record.tool.as_str() {
-        "exec_command" | "write_stdin" | "batch" => strip_ansi_escapes(&rendered),
+        // `batch` is rendered via the structured projector (see
+        // `render_structured_tool_result`) and never reaches this path.
+        "exec_command" | "write_stdin" => strip_ansi_escapes(&rendered),
         _ => rendered,
     }
 }
@@ -273,7 +235,44 @@ fn existing_tool_output_path(record: &ToolCallRecord) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Budget config mirroring this crate's shared truncation caps, used to
+/// drive the tool-output-budget structured projector for `batch` results.
+fn tool_result_budget_config() -> ToolOutputBudgetConfig {
+    ToolOutputBudgetConfig {
+        mode: ToolOutputBudgetMode::Bytes,
+        limit: TOOL_RESULT_MAX_BYTES,
+        max_lines: TOOL_RESULT_MAX_LINES,
+    }
+}
+
+/// `true` for tool results whose structure must be preserved through the
+/// budget plugin's structure-aware projector rather than flattened to an
+/// opaque string and tail-truncated.
+fn uses_structured_projection(record: &ToolCallRecord) -> bool {
+    record.tool == "batch"
+}
+
+/// Render a structured (`batch`) tool result via the one canonical
+/// projector, which recurses into each child with the correct per-child
+/// truncation direction instead of cutting the flattened JSON mid-value.
+fn render_structured_tool_result(record: &ToolCallRecord) -> String {
+    project_tool_result_text(
+        &tool_result_budget_config(),
+        ToolResultProjectionContext {
+            session_id: String::new(),
+            call_id: record.call_id.clone().unwrap_or_default(),
+            tool_name: record.tool.clone(),
+            args: record.args.clone(),
+            output: record.output.clone(),
+            duration_ms: record.duration_ms,
+        },
+    )
+}
+
 fn render_tool_result_preview(record: &ToolCallRecord) -> String {
+    if uses_structured_projection(record) {
+        return render_structured_tool_result(record);
+    }
     let normalized = normalize_tool_result_content(record);
     truncate_tool_result_preview(
         &normalized,
@@ -283,6 +282,9 @@ fn render_tool_result_preview(record: &ToolCallRecord) -> String {
 }
 
 fn render_tool_result_preview_for_session(record: &ToolCallRecord) -> String {
+    if uses_structured_projection(record) {
+        return render_structured_tool_result(record);
+    }
     let normalized = normalize_tool_result_content(record);
     let existing_output_path = existing_tool_output_path(record);
     if tool_result_needs_truncation(&normalized) {
@@ -960,6 +962,79 @@ mod tests {
 
         let preview = render_tool_result_preview_for_session(&record);
         assert!(preview.contains("Full output saved to: /tmp/existing-shell-output.log"));
+    }
+
+    #[test]
+    fn batch_result_preview_preserves_structure_not_flattened_tail() {
+        // A batch result must be rendered through the structured projector
+        // (valid JSON with per-child results) rather than flattened to an
+        // opaque string and tail-truncated, which would cut JSON
+        // mid-structure and lose the leading children.
+        let record = ToolCallRecord {
+            call_id: Some("batch-1".to_string()),
+            tool: "batch".to_string(),
+            args: json!({}),
+            output: lash_core::ToolCallOutput::success(json!({
+                "results": [
+                    {"tool": "read_file", "success": true, "duration_ms": 1, "result": "child A payload"},
+                    {"tool": "grep", "success": false, "duration_ms": 1, "error": "boom"}
+                ]
+            })),
+            duration_ms: 2,
+        };
+
+        let preview = render_tool_result_preview_for_session(&record);
+        let value: serde_json::Value =
+            serde_json::from_str(&preview).expect("batch preview must be valid JSON");
+        let results = value
+            .get("results")
+            .and_then(|v| v.as_array())
+            .expect("results array");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].get("result"), Some(&json!("child A payload")));
+        assert_eq!(results[1].get("error"), Some(&json!("boom")));
+    }
+
+    #[test]
+    fn truncation_matches_tool_output_budget_for_identical_input() {
+        // Both plugins must produce byte-for-byte identical truncation for
+        // identical input + identical caps + identical hint, proving they
+        // share the one canonical `truncate_windowed` implementation.
+        let text = format!("{}\nend", "0123456789abcdef".repeat(2_000));
+        let hint = retained_output_hint(Path::new("/tmp/full-output.txt"));
+
+        for direction in [TruncationDirection::Head, TruncationDirection::Tail] {
+            let via_rolling_history = truncate_tool_result_preview(
+                &text,
+                direction,
+                Some(Path::new("/tmp/full-output.txt")),
+            );
+            let via_budget = truncate_windowed(
+                &text,
+                &WindowedTruncation {
+                    max_lines: TOOL_RESULT_MAX_LINES,
+                    max_bytes: TOOL_RESULT_MAX_BYTES,
+                    direction,
+                    unit: TruncationUnit::Bytes,
+                    hint: &hint,
+                },
+            );
+            assert_eq!(via_rolling_history, via_budget);
+            assert!(via_rolling_history.contains("bytes truncated"));
+        }
+    }
+
+    #[test]
+    fn over_long_single_line_is_truncated_not_dropped() {
+        // Regression: a single line bigger than the whole byte budget used
+        // to be dropped (empty preview); it must now be cut at a char
+        // boundary so content is not silently lost.
+        let text = "x".repeat(TOOL_RESULT_MAX_BYTES * 4);
+        let preview = truncate_tool_result_preview(&text, TruncationDirection::Head, None);
+        let head = preview.split("\n\n...").next().expect("preview head");
+        assert!(!head.is_empty());
+        assert!(head.chars().all(|c| c == 'x'));
+        assert!(head.len() <= TOOL_RESULT_MAX_BYTES);
     }
 
     use lash_core::testing::{MockSessionManager, mock_assembled_turn as empty_turn};
