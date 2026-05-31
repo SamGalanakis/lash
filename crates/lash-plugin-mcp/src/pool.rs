@@ -7,15 +7,18 @@
 //!
 //! The wire-level transport is provided by the official [`rmcp`] SDK.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::RwLock;
 
 use base64::Engine;
+use http::{HeaderName, HeaderValue};
 use rmcp::model::{CallToolRequestParams, ClientInfo, Content, Implementation, RawContent};
 use rmcp::service::{RoleClient, RunningService, ServiceExt};
 use rmcp::transport::child_process::TokioChildProcess;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+};
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -166,19 +169,30 @@ impl McpConnectionPool {
             }
         };
 
-        let response = timeout(call_timeout, async {
+        // Clone the peer handle while briefly holding the lock, then release it
+        // before issuing the request. `rmcp::Peer` is a cheap, cloneable handle
+        // (an mpsc sender plus an internal request-id provider) that supports
+        // concurrent in-flight requests, so holding the mutex across the network
+        // await would needlessly serialize parallel tool calls to the same
+        // server (these tools advertise `ToolScheduling::Parallel`) and risk a
+        // guard held across `.await`.
+        let peer = {
             let service_guard = entry.service.lock().await;
-            let Some(service) = service_guard.as_ref() else {
-                return Err(McpError::Protocol(format!(
-                    "MCP server `{server_name}` is not connected"
-                )));
-            };
+            match service_guard.as_ref() {
+                Some(service) => service.peer().clone(),
+                None => {
+                    return ToolResult::err_fmt(McpError::Protocol(format!(
+                        "MCP server `{server_name}` is not connected"
+                    )));
+                }
+            }
+        };
+
+        let response = timeout(call_timeout, async {
             let mut params = CallToolRequestParams::default();
             params.name = original_name.clone().into();
             params.arguments = arguments;
-            service
-                .peer()
-                .call_tool(params)
+            peer.call_tool(params)
                 .await
                 .map_err(|err| McpError::Protocol(err.to_string()))
         })
@@ -232,10 +246,17 @@ impl McpEntry {
             timeout_ms: config.startup_timeout().as_millis() as u64,
         })??;
 
-        let tools = service
-            .peer()
-            .list_all_tools()
+        // Bound the discovery call so a server that completes the handshake but
+        // then hangs on `tools/list` surfaces a timeout instead of blocking
+        // `connect` (and the whole pool construction) indefinitely. Discovery
+        // happens during startup, so the startup budget is the natural bound.
+        let discovery_timeout = config.startup_timeout();
+        let tools = timeout(discovery_timeout, service.peer().list_all_tools())
             .await
+            .map_err(|_| McpError::StartupTimeout {
+                server: server_name.clone(),
+                timeout_ms: discovery_timeout.as_millis() as u64,
+            })?
             .map_err(|err| McpError::Protocol(format!("list_tools failed: {err}")))?;
         let imported_tools = import_tools(&server_name, tools);
 
@@ -293,16 +314,52 @@ async fn connect_service(
                 McpError::Protocol(format!("MCP handshake with `{server_name}`: {err}"))
             })
         }
-        McpServerConfig::StreamableHttp { url, .. } => {
-            let transport = StreamableHttpClientTransport::from_uri(url.clone());
+        McpServerConfig::StreamableHttp { url, headers, .. } => {
+            let custom_headers = build_http_headers(server_name, headers)?;
+            let config = StreamableHttpClientTransportConfig::with_uri(url.as_str())
+                .custom_headers(custom_headers);
+            let transport = StreamableHttpClientTransport::from_config(config);
             client_info.serve(transport).await.map_err(|err| {
                 McpError::Protocol(format!("MCP handshake with `{server_name}`: {err}"))
             })
         }
-        McpServerConfig::Sse { url: _, .. } => Err(McpError::Config(format!(
-            "SSE transport for MCP server `{server_name}` is not yet wired up in this build"
+        // The legacy HTTP+SSE client transport (deprecated in the MCP spec in
+        // favour of streamable HTTP) is not provided by the `rmcp` SDK we
+        // depend on, so there is nothing to wire up here. Fail with a clear,
+        // actionable error rather than panicking, and point operators at the
+        // supported transport — modern SSE-capable servers are reachable via
+        // `streamable_http`, which itself negotiates SSE responses.
+        McpServerConfig::Sse { .. } => Err(McpError::Config(format!(
+            "MCP server `{server_name}` uses the legacy `sse` transport, which is not supported \
+             by this build. Use the `streamable_http` transport instead (it speaks the current \
+             MCP HTTP transport and handles SSE responses)."
         ))),
     }
+}
+
+/// Translate a config `headers` map into the `http` header types `rmcp`'s
+/// streamable-HTTP transport expects, failing with a clear config error on a
+/// malformed name or value. Header names are case-insensitive per HTTP, so a
+/// configured `Authorization` reaches the server as `authorization`.
+fn build_http_headers(
+    server_name: &str,
+    headers: &BTreeMap<String, String>,
+) -> Result<HashMap<HeaderName, HeaderValue>, McpError> {
+    let mut out = HashMap::with_capacity(headers.len());
+    for (name, value) in headers {
+        let header_name = HeaderName::try_from(name.as_str()).map_err(|err| {
+            McpError::Config(format!(
+                "MCP server `{server_name}` has invalid HTTP header name `{name}`: {err}"
+            ))
+        })?;
+        let header_value = HeaderValue::try_from(value.as_str()).map_err(|err| {
+            McpError::Config(format!(
+                "MCP server `{server_name}` has invalid value for HTTP header `{name}`: {err}"
+            ))
+        })?;
+        out.insert(header_name, header_value);
+    }
+    Ok(out)
 }
 
 fn import_tools(
@@ -448,5 +505,214 @@ impl Drop for McpConnectionPool {
         // (rmcp drops the transport, which kills the child process or
         // closes the HTTP connection). For a graceful shutdown, callers
         // should call `shutdown_all` themselves.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the header-drop bug: custom/auth headers configured for
+    /// an HTTP MCP server must be translated into the `http` header types the
+    /// transport actually sends. Before the fix, `connect_service` called
+    /// `from_uri` and dropped the configured `headers` map entirely, so an
+    /// `Authorization` header never reached the server.
+    #[test]
+    fn build_http_headers_carries_configured_headers() {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer secret-token".to_string(),
+        );
+        headers.insert("X-Tenant".to_string(), "acme".to_string());
+
+        let built = build_http_headers("api", &headers).expect("valid headers convert");
+
+        assert_eq!(
+            built
+                .get(&HeaderName::from_static("authorization"))
+                .map(|v| v.to_str().unwrap()),
+            Some("Bearer secret-token"),
+            "configured Authorization header must be carried through to the transport"
+        );
+        assert_eq!(
+            built
+                .get(&HeaderName::from_static("x-tenant"))
+                .map(|v| v.to_str().unwrap()),
+            Some("acme")
+        );
+        assert_eq!(built.len(), 2);
+    }
+
+    #[test]
+    fn build_http_headers_empty_map_is_empty() {
+        let built = build_http_headers("api", &BTreeMap::new()).expect("empty converts");
+        assert!(built.is_empty());
+    }
+
+    #[test]
+    fn build_http_headers_rejects_malformed_name() {
+        let mut headers = BTreeMap::new();
+        headers.insert("Bad Header Name".to_string(), "x".to_string());
+        let err = build_http_headers("api", &headers).expect_err("malformed name rejected");
+        assert!(
+            matches!(err, McpError::Config(_)),
+            "expected a config error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn build_http_headers_rejects_malformed_value() {
+        let mut headers = BTreeMap::new();
+        // A newline is not a legal header value byte.
+        headers.insert("X-Bad".to_string(), "line1\nline2".to_string());
+        let err = build_http_headers("api", &headers).expect_err("malformed value rejected");
+        assert!(
+            matches!(err, McpError::Config(_)),
+            "expected a config error, got {err:?}"
+        );
+    }
+
+    /// The legacy `sse` transport is unsupported by the rmcp build we depend
+    /// on. It must surface a clear, non-panicking config error (not a `todo!()`
+    /// or silent success) so operators know to switch to `streamable_http`.
+    #[tokio::test]
+    async fn sse_transport_reports_clear_unsupported_error() {
+        let err = connect_service("legacy", &McpServerConfig::sse("http://localhost:9/sse"))
+            .await
+            .expect_err("sse transport must error, not connect");
+        match err {
+            McpError::Config(msg) => {
+                assert!(
+                    msg.contains("streamable_http"),
+                    "error should point operators at the supported transport: {msg}"
+                );
+            }
+            other => panic!("expected a config error for sse, got {other:?}"),
+        }
+    }
+
+    /// Regression for the missing discovery timeout: a server that completes
+    /// the handshake but then hangs on `tools/list` must surface a
+    /// `StartupTimeout` rather than blocking `connect` forever.
+    #[tokio::test]
+    async fn discovery_hang_surfaces_startup_timeout() {
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "demo", "version": "1.0.0" }
+            }
+        });
+
+        // Respond to `initialize`, swallow `notifications/initialized`, read the
+        // `tools/list` request line, then hang (never respond) by blocking on
+        // stdin. The short startup timeout must trip.
+        let script = "\
+            read -r _; printf '%s\\n' \"$RESP1\"; \
+            read -r _; \
+            read -r _; \
+            cat >/dev/null"
+            .to_string();
+
+        let mut env = BTreeMap::new();
+        env.insert("RESP1".to_string(), initialize.to_string());
+
+        let config = McpServerConfig::Stdio {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), script],
+            env,
+            cwd: None,
+            startup_timeout_ms: 750,
+            call_timeout_ms: 10_000,
+        };
+
+        match McpEntry::connect("hangs".to_string(), config).await {
+            Err(McpError::StartupTimeout { .. }) => {}
+            Err(other) => panic!("expected StartupTimeout from a hung tools/list, got {other:?}"),
+            Ok(_) => panic!("a hung tools/list must not connect"),
+        }
+    }
+
+    /// Regression for the service mutex held across the network await: two
+    /// concurrent `tools/call` requests to the same server must be able to be
+    /// in flight at once. The mock refuses to answer the first call until it
+    /// has read the second request line, so a serializing implementation (lock
+    /// held across `.await`) would deadlock and time out, while the concurrent
+    /// implementation completes both calls.
+    #[tokio::test]
+    async fn concurrent_calls_are_not_serialized_by_the_service_mutex() {
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "demo", "version": "1.0.0" }
+            }
+        });
+        let list = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [{
+                    "name": "ping",
+                    "description": "Ping",
+                    "inputSchema": { "type": "object", "properties": {} }
+                }]
+            }
+        });
+        // rmcp assigns request ids 2 and 3 to the two concurrent calls. The
+        // mock reads BOTH request lines before emitting EITHER response, which
+        // is only possible if both requests are in flight concurrently.
+        let call2 = json!({ "jsonrpc": "2.0", "id": 2, "result": { "content": [{ "type": "text", "text": "pong" }] } });
+        let call3 = json!({ "jsonrpc": "2.0", "id": 3, "result": { "content": [{ "type": "text", "text": "pong" }] } });
+
+        let script = "\
+            read -r _; printf '%s\\n' \"$RESP1\"; \
+            read -r _; \
+            read -r _; printf '%s\\n' \"$RESP2\"; \
+            read -r _; \
+            read -r _; \
+            printf '%s\\n' \"$RESP3\"; \
+            printf '%s\\n' \"$RESP4\"; \
+            cat >/dev/null"
+            .to_string();
+
+        let mut env = BTreeMap::new();
+        env.insert("RESP1".to_string(), initialize.to_string());
+        env.insert("RESP2".to_string(), list.to_string());
+        env.insert("RESP3".to_string(), call2.to_string());
+        env.insert("RESP4".to_string(), call3.to_string());
+
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "svc".to_string(),
+            McpServerConfig::Stdio {
+                command: "sh".to_string(),
+                args: vec!["-c".to_string(), script],
+                env,
+                cwd: None,
+                startup_timeout_ms: 10_000,
+                call_timeout_ms: 5_000,
+            },
+        );
+
+        let pool = McpConnectionPool::connect(servers)
+            .await
+            .expect("connects to concurrency mock");
+
+        let ctx = lash_core::testing::mock_tool_context();
+        let args = json!({});
+        let (a, b) = tokio::join!(
+            pool.call_tool("mcp__svc__ping", &args, &ctx),
+            pool.call_tool("mcp__svc__ping", &args, &ctx),
+        );
+        assert!(a.is_success(), "first concurrent call failed: {a:?}");
+        assert!(b.is_success(), "second concurrent call failed: {b:?}");
+
+        pool.shutdown_all().await;
     }
 }
