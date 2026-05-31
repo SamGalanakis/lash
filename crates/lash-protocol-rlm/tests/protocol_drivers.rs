@@ -731,7 +731,6 @@ fn submit_required_rlm_exec_error_at_max_turns_stops_without_retry() {
     machine.handle_response(Response::ExecResult {
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
@@ -856,8 +855,7 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
     machine.handle_response(Response::ExecResult {
         id: exec_effect.expect("exec").0,
         result: Ok(lash_sansio::ExecResponse {
-            output: "hi\n".to_string(),
-            observations: Vec::new(),
+            observations: vec!["hi\n".to_string()],
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
@@ -872,9 +870,8 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
     let trajectory = machine_trajectory(&machine);
     let entry = trajectory.last().expect("rlm trajectory entry");
     assert_eq!(entry.code, "print \"hi\"");
-    // Raw lashlang stdout (rare) is folded into the trajectory's
-    // `output: Vec<String>` as a single anonymous entry alongside any
-    // `print` results.
+    // Each `print` observation lands in the trajectory's
+    // `output: Vec<String>` as one entry.
     assert_eq!(entry.output, vec!["hi\n".to_string()]);
     assert!(entry.final_output.is_none());
 
@@ -924,7 +921,6 @@ fn rlm_empty_turn_options_use_submit_required_default() {
     machine.handle_response(Response::ExecResult {
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
@@ -1092,8 +1088,7 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
     restored.handle_response(Response::ExecResult {
         id: restored_exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: "hi\n".to_string(),
-            observations: Vec::new(),
+            observations: vec!["hi\n".to_string()],
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
@@ -1146,7 +1141,6 @@ fn rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes()
     machine.handle_response(Response::ExecResult {
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: String::new(),
             observations: vec!["fanout done".to_string()],
             observation_truncation: Vec::new(),
             tool_calls: vec![
@@ -1243,7 +1237,6 @@ fn rlm_exec_result_stores_tool_call_ids_without_replayed_tool_events() {
     machine.handle_response(Response::ExecResult {
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: vec![lash_core::ToolCallRecord {
@@ -1304,7 +1297,6 @@ fn rlm_exec_any_tool_control_frame_switch_is_terminal() {
     machine.handle_response(Response::ExecResult {
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: vec![lash_core::ToolCallRecord {
@@ -1382,7 +1374,6 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
     machine.handle_response(Response::ExecResult {
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: vec![lash_core::ToolCallRecord {
@@ -1468,7 +1459,6 @@ fn typed_rlm_finish_emits_turn_outcome_and_done() {
     machine.handle_response(Response::ExecResult {
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
@@ -1539,7 +1529,6 @@ fn prose_or_submit_allows_submit_value() {
     machine.handle_response(Response::ExecResult {
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
@@ -1614,7 +1603,6 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
     machine.handle_response(Response::ExecResult {
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
@@ -1689,7 +1677,6 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
     machine.handle_response(Response::ExecResult {
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
@@ -1762,7 +1749,6 @@ fn typed_rlm_schema_mismatch_checks_any_of() {
     machine.handle_response(Response::ExecResult {
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
-            output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),

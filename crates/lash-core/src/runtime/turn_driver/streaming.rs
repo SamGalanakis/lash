@@ -336,7 +336,7 @@ impl RuntimeTurnDriver<'_> {
                             request_body: None,
                         }),
                     };
-                    self.policy.install_provider(provider_after);
+                    self.policy.replace_provider(provider_after);
                     if let Err(err) = self
                         .drain_provider_stream_queue(event_tx, &mut llm_stream_rx, &mut stream_state)
                         .await

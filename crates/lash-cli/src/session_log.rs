@@ -10,7 +10,7 @@ use lash_core::ToolCallRecord;
 use lash_core::session_model::Message;
 #[cfg(test)]
 use lash_core::session_model::{MessageRole, PartKind};
-use lash_core::{SessionStateEnvelope, TokenUsage};
+use lash_core::{SessionSnapshot, TokenUsage};
 use lash_sqlite_store::Store;
 
 use crate::app::{
@@ -327,10 +327,10 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
         .ok_or_else(|| anyhow::anyhow!("Could not load session metadata for {}", filename))?;
     let head = store.load_session_head().unwrap_or_default();
     let checkpoint_ref = head.checkpoint_ref.clone();
-    let state = SessionStateEnvelope {
+    let state = SessionSnapshot {
         session_id: head.session_id,
         session_graph: head.graph,
-        ..SessionStateEnvelope::default()
+        ..SessionSnapshot::default()
     };
     let read_view = state.read_view();
     let messages = read_view.messages().to_vec();

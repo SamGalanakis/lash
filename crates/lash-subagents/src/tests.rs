@@ -85,7 +85,7 @@ fn capability_can_build_complete_spawn_request() {
     let request = build_spawn_create_request(SpawnCreateRequestInput {
         registry: &registry,
         parent_session_id: "root",
-        current_snapshot,
+        current_snapshot: current_snapshot.to_snapshot(),
         session_spec: &SessionSpec::inherit(),
         tool_access: &tool_access,
         capability_name: "custom",
@@ -264,24 +264,13 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
     // resolves against the *live* policy, not the factory's stale
     // one. The final child policy inherits the live policy's explicit
     // model spec.
-    fn tiered_provider(tag: &'static str) -> lash_core::testing::TestProvider {
-        let kind = match tag {
-            "stale" => "stale-stub",
-            "live" => "live-stub",
-            _ => "stub",
-        };
-        lash_core::testing::TestProvider::builder()
-            .kind(kind)
-            .complete_error("stub")
-            .build()
-    }
     let stale_policy = SessionPolicy {
-        provider: tiered_provider("stale").into_handle(),
+        provider_id: "stale-stub".to_string(),
         model: model_spec("stale-parent", None, 200_000),
         ..SessionPolicy::default()
     };
     let live_policy = SessionPolicy {
-        provider: tiered_provider("live").into_handle(),
+        provider_id: "live-stub".to_string(),
         model: model_spec("live-parent", None, 1234),
         ..SessionPolicy::default()
     };
@@ -295,7 +284,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
     let request = build_spawn_create_request(SpawnCreateRequestInput {
         registry: &registry,
         parent_session_id: "root",
-        current_snapshot: current_snapshot.clone(),
+        current_snapshot: current_snapshot.to_snapshot(),
         session_spec: &SessionSpec::inherit(),
         tool_access: &tool_access,
         capability_name: "explore",
@@ -314,7 +303,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
     let stale_choice = build_session_policy(&registry, &stale_policy, "explore")
         .expect("stale policy")
         .model;
-    assert_eq!(child_policy.provider, live_policy.provider);
+    assert_eq!(child_policy.provider_id, live_policy.provider_id);
     assert_eq!(
         child_policy.model.context_window_tokens(),
         live_policy.model.context_window_tokens()
@@ -326,7 +315,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
     let structured_request = build_spawn_create_request(SpawnCreateRequestInput {
         registry: &registry,
         parent_session_id: "root",
-        current_snapshot,
+        current_snapshot: current_snapshot.to_snapshot(),
         session_spec: &SessionSpec::inherit(),
         tool_access: &tool_access,
         capability_name: "explore",
@@ -545,7 +534,7 @@ async fn run_seed_probe(
         parent_response: parent_response.to_string(),
         captured_child_prompt: Arc::clone(&captured_child_prompt),
     });
-    let provider = seed_probe_provider(Arc::clone(&state));
+    let provider = seed_probe_provider(Arc::clone(&state)).into_handle();
 
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::default()),
@@ -568,11 +557,13 @@ async fn run_seed_probe(
         .build_session("root", None)
         .expect("plugin session");
     let host = ProcessRuntimeHost::new(
-        lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory().with_provider_resolver(
+            Arc::new(lash_core::SingleProviderResolver::new(provider.clone())),
+        )),
         Arc::clone(&registry) as Arc<dyn lash_core::ProcessRegistry>,
     );
     let policy = SessionPolicy {
-        provider: provider.into_handle(),
+        provider_id: provider.kind().to_string(),
         model: model_spec("seed-probe-model", None, 64_000),
         max_turns: Some(4),
         ..SessionPolicy::default()
@@ -587,7 +578,9 @@ async fn run_seed_probe(
     let worker = lash_core::DurableProcessWorker::new(
         lash_core::DurableProcessWorkerConfig::from_plugin_factories(
             factories,
-            RuntimeCoreConfig::in_memory(),
+            RuntimeCoreConfig::in_memory().with_provider_resolver(Arc::new(
+                lash_core::SingleProviderResolver::new(provider.clone()),
+            )),
             Arc::new(lash_core::InMemorySessionStoreFactory::new()),
             Arc::clone(&registry) as Arc<dyn lash_core::ProcessRegistry>,
         )

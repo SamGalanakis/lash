@@ -173,7 +173,6 @@ impl RuntimeEffectController for RecordingEffectController {
             }
             RuntimeEffectCommand::ExecCode { .. } => Ok(RuntimeEffectOutcome::ExecCode {
                 result: Ok(crate::ExecResponse {
-                    output: String::new(),
                     observations: Vec::new(),
                     observation_truncation: Vec::new(),
                     tool_calls: Vec::new(),
@@ -467,7 +466,11 @@ impl RuntimeEffectController for WrongOutcomeEffectController {
 
 fn host_with_effect_recorder(recorder: RecordingEffectController) -> EmbeddedRuntimeHost {
     EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory().with_effect_controller(Arc::new(recorder)),
+        RuntimeCoreConfig::in_memory()
+            .with_effect_controller(Arc::new(recorder))
+            .with_provider_resolver(Arc::new(crate::SingleProviderResolver::new(
+                mock_provider(Vec::new()).into_handle(),
+            ))),
     )
 }
 
@@ -1616,7 +1619,7 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
 async fn exec_and_execution_surface_effects_cross_controller_once() {
     let recorder = RecordingEffectController::default();
     let policy = SessionPolicy {
-        provider: mock_provider(Vec::new()).into_handle(),
+        provider_id: "mock".to_string(),
         model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
             .expect("valid model spec"),
         ..SessionPolicy::default()
@@ -1664,7 +1667,7 @@ async fn exec_and_execution_surface_effects_cross_controller_once() {
 #[tokio::test]
 async fn start_exec_without_code_executor_stops_as_runtime_error() {
     let policy = SessionPolicy {
-        provider: mock_provider(Vec::new()).into_handle(),
+        provider_id: "mock".to_string(),
         model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
             .expect("valid model spec"),
         ..SessionPolicy::default()
@@ -1677,7 +1680,11 @@ async fn start_exec_without_code_executor_stops_as_runtime_error() {
         .expect("plugins");
     let mut runtime = LashRuntime::from_embedded_state(
         policy,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        EmbeddedRuntimeHost::new(
+            RuntimeCoreConfig::in_memory().with_provider_resolver(Arc::new(
+                crate::SingleProviderResolver::new(mock_provider(Vec::new()).into_handle()),
+            )),
+        ),
         RuntimeServices::new(plugin_session),
         RuntimeSessionState::default(),
     )
@@ -2148,8 +2155,7 @@ impl crate::plugin::CodeExecutorPlugin for EffectControllerTestCodeExecutor {
         _request: crate::ExecRequest,
     ) -> Result<crate::ExecResponse, crate::SessionError> {
         Ok(crate::ExecResponse {
-            output: "exec output".to_string(),
-            observations: Vec::new(),
+            observations: vec!["exec output".to_string()],
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
@@ -2247,7 +2253,7 @@ impl lash_sansio::ProtocolDriverHandle<crate::HostTurnProtocol> for EffectContro
         match result {
             Ok(response) => vec![crate::DriverAction::Finish(TurnOutcome::Finished(
                 TurnFinish::SubmittedValue {
-                    value: serde_json::json!(response.output),
+                    value: serde_json::json!(response.observations.join("\n")),
                 },
             ))],
             Err(error) => vec![

@@ -1377,4 +1377,159 @@ mod tests {
             .expect("body");
         assert_eq!(provider_limited_body["max_tokens"], 9999);
     }
+
+    /// Cross-provider response-normalization conformance. Anthropic is
+    /// streaming-first (no non-streaming `parts_from_value`), so each scenario's
+    /// `body` carries the SSE event sequence as a JSON array of strings, and all
+    /// three accessors replay it through `process_sse_event` + `finalize`.
+    /// Anthropic reports no separate reasoning-token count (`parse_usage`
+    /// hardcodes `reasoning_tokens: 0`), so it opts out of `UsageReasoning`.
+    #[cfg(feature = "testing")]
+    mod conformance {
+        use super::*;
+        use lash_llm_transport::conformance::{
+            CanonicalUsage as U, ProviderNormalizer, ProviderWire, Scenario, StreamAssembly,
+            provider_conformance,
+        };
+        use serde_json::{Value, json};
+
+        struct AnthropicNormalizer;
+
+        // Replay a `body` that encodes a JSON array of SSE event strings through
+        // the streaming parser and finalize into normalized outputs.
+        fn replay(body: &Value) -> (Vec<LlmOutputPart>, LlmUsage, LlmTerminalReason) {
+            let mut state = StreamState::default();
+            if let Some(events) = body.as_array() {
+                for event in events {
+                    let raw = event.as_str().expect("sse event is a string");
+                    AnthropicProvider::process_sse_event(raw, &mut state, None, true)
+                        .expect("anthropic sse event parses");
+                }
+            }
+            let (parts, _text, usage, terminal) = AnthropicProvider::finalize(state);
+            (parts, usage, terminal)
+        }
+
+        // Build the SSE event array for a plain single-text-block message with a
+        // given stop_reason and message_start usage block.
+        fn text_message(stop_reason: &str, text: &str, usage: Value) -> Value {
+            json!([
+                json!({ "type": "message_start", "message": { "usage": usage } }).to_string(),
+                json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text" } }).to_string(),
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": text } }).to_string(),
+                json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+                json!({ "type": "message_delta", "delta": { "stop_reason": stop_reason } }).to_string(),
+            ])
+        }
+
+        impl ProviderNormalizer for AnthropicNormalizer {
+            fn name(&self) -> &str {
+                "anthropic"
+            }
+
+            fn wire_for(&self, scenario: Scenario) -> Option<ProviderWire> {
+                let wire = match scenario {
+                    Scenario::PlainTextStop => ProviderWire::body(text_message(
+                        "end_turn",
+                        "hello",
+                        json!({ "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT }),
+                    )),
+                    Scenario::OutputCapped => ProviderWire::body(text_message(
+                        "max_tokens",
+                        "trunc",
+                        json!({ "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT }),
+                    )),
+                    Scenario::ContentFilter => ProviderWire::body(text_message(
+                        "refusal",
+                        "",
+                        json!({ "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT }),
+                    )),
+                    Scenario::ToolUse => {
+                        let events = json!([
+                            json!({ "type": "message_start", "message": { "usage": { "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT } } }).to_string(),
+                            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "call_1", "name": "lookup", "input": {} } }).to_string(),
+                            // arguments deliberately split across two delta events
+                            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{\"q\":" } }).to_string(),
+                            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "\"x\"}" } }).to_string(),
+                            json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+                            json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } }).to_string(),
+                        ]);
+                        ProviderWire::body(events.clone()).with_tool_call_stream(
+                            events
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|v| v.as_str().unwrap().to_string())
+                                .collect(),
+                            "lookup",
+                            json!({ "q": "x" }),
+                        )
+                    }
+                    Scenario::UsageCacheHit => ProviderWire::body(text_message(
+                        "end_turn",
+                        "ok",
+                        // Anthropic's input_tokens is net of cache; the suite's
+                        // canonical input is the gross total, so split it.
+                        json!({
+                            "input_tokens": U::BASE_INPUT - U::CACHED_INPUT,
+                            "output_tokens": U::BASE_OUTPUT,
+                            "cache_read_input_tokens": U::CACHED_INPUT
+                        }),
+                    )),
+                    // Anthropic does not report a separate reasoning-token count.
+                    Scenario::UsageReasoning => return None,
+                    Scenario::ReasoningExtraction => ProviderWire::body(json!([
+                        json!({ "type": "message_start", "message": { "usage": { "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT } } }).to_string(),
+                        json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking" } }).to_string(),
+                        json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "thinking about it" } }).to_string(),
+                        json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+                        json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text" } }).to_string(),
+                        json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "answer" } }).to_string(),
+                        json!({ "type": "content_block_stop", "index": 1 }).to_string(),
+                        json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" } }).to_string(),
+                    ]))
+                    .with_reasoning_text("thinking about it"),
+                    Scenario::StreamingUsageMerge => ProviderWire::body(Value::Null)
+                        .with_usage_merge_stream(vec![
+                            // input arrives in message_start
+                            json!({ "type": "message_start", "message": { "usage": { "input_tokens": U::BASE_INPUT } } }).to_string(),
+                            // output arrives later in message_delta; merge must keep input
+                            json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": U::BASE_OUTPUT } }).to_string(),
+                        ]),
+                };
+                Some(wire)
+            }
+
+            fn parts_from_wire(&self, body: &Value) -> Vec<LlmOutputPart> {
+                replay(body).0
+            }
+
+            fn usage_from_wire(&self, body: &Value) -> LlmUsage {
+                replay(body).1
+            }
+
+            fn terminal_from_wire(
+                &self,
+                body: &Value,
+                _parts: &[LlmOutputPart],
+            ) -> LlmTerminalReason {
+                replay(body).2
+            }
+
+            fn assemble_stream(&self, sse_events: &[String]) -> StreamAssembly {
+                let mut state = StreamState::default();
+                for raw in sse_events {
+                    AnthropicProvider::process_sse_event(raw, &mut state, None, true)
+                        .expect("anthropic sse event parses");
+                }
+                let (parts, _text, usage, _terminal) = AnthropicProvider::finalize(state);
+                StreamAssembly { parts, usage }
+            }
+        }
+
+        #[test]
+        fn anthropic_satisfies_provider_conformance() {
+            provider_conformance(&AnthropicNormalizer);
+        }
+    }
 }

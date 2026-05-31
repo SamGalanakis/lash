@@ -4,8 +4,8 @@ use lash_core::{
     RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit, RuntimeEffectJournalRecord,
     RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence, RuntimeSessionState,
     RuntimeTurnCheckpoint, RuntimeTurnMachineConfigSnapshot, SessionGraph, SessionHead,
-    SessionPolicy, SessionStoreCreateRequest, SessionStoreFactory, TokenUsage, ToolState,
-    TurnDriverConfig, TurnDriverPreamble,
+    SessionPolicy, SessionStoreCreateRequest, SessionStoreFactory, StoreError, TokenUsage,
+    ToolState, TurnDriverConfig, TurnDriverPreamble,
 };
 use lash_sqlite_store::{
     BlobArtifactDescriptor, BuiltinBlobProfile, SqliteSessionStoreFactory, Store, StoreGcPolicy,
@@ -270,6 +270,31 @@ async fn abandon_runtime_turn_lease_releases_owner_and_preserves_resume_data() {
         .claim_runtime_turn_lease("root", "turn-abandon", "owner-b", 60_000)
         .await
         .expect("new owner can claim abandoned turn");
+}
+
+// Checkpoint hash validation is backend-specific (only durable backends hash
+// the stored turn state), so it lives here rather than in the shared
+// `runtime_persistence` conformance suite. The happy-path round-trip is
+// covered above; this asserts the integrity guard actually fires when a
+// checkpoint's declared hash doesn't match its contents.
+#[tokio::test]
+async fn save_runtime_turn_checkpoint_rejects_hash_mismatch() {
+    let store = Store::memory().expect("store");
+    let lease = store
+        .claim_runtime_turn_lease("root", "turn-hash", "owner-a", 60_000)
+        .await
+        .expect("lease");
+    let mut checkpoint = runtime_turn_checkpoint("root", "turn-hash");
+    checkpoint.checkpoint_hash = "sha256:deadbeef-not-the-real-hash".to_string();
+
+    let err = store
+        .save_runtime_turn_checkpoint(&lease, checkpoint)
+        .await
+        .expect_err("a checkpoint whose hash doesn't match its contents must be rejected");
+    assert!(
+        matches!(err, StoreError::RuntimeTurnCheckpointHashMismatch { .. }),
+        "expected RuntimeTurnCheckpointHashMismatch, got {err:?}"
+    );
 }
 
 struct NoopDriver;

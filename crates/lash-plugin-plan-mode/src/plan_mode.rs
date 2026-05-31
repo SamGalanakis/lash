@@ -466,12 +466,48 @@ fn plan_exit_tool_definition() -> ToolDefinition {
         "tool:plan_exit",
         "plan_exit",
         "Ask whether to exit plan mode.",
-        ToolDefinition::default_input_schema(),
-        serde_json::json!({ "type": "object", "additionalProperties": true }),
+        plan_exit_input_schema(),
+        plan_exit_output_schema(),
     )
     .with_examples(vec!["plan_exit()".into()])
     .with_availability(lash_core::ToolAvailabilityConfig::off())
     .with_scheduling(ToolScheduling::Parallel)
+}
+
+fn plan_exit_input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    })
+}
+
+fn plan_exit_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "approved": { "type": "boolean" },
+            "plan_path": { "type": "string" },
+            "answer": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["single"] },
+                    "selection": { "type": "string" },
+                    "note": { "type": "string" }
+                },
+                "required": ["kind", "selection"],
+                "additionalProperties": false
+            },
+            "execution_mode": {
+                "type": "string",
+                "enum": ["current_session", "fresh_context"]
+            },
+            "confirmation_display": { "type": "string" },
+            "next_turn_input": { "type": "string" }
+        },
+        "required": ["approved", "plan_path"],
+        "additionalProperties": false
+    })
 }
 
 pub struct PlanModePluginFactory {
@@ -542,7 +578,7 @@ impl SessionPlugin for PlanModePlugin {
                     if !should_inject {
                         return Ok(Vec::new());
                     }
-                    state.ensure_plan_path_from_state(&ctx.state.to_owned_state())?
+                    state.ensure_plan_path_from_state(&ctx.state.to_snapshot())?
                 };
                 seed_plan_template(&plan_path).map_err(PluginError::Session)?;
                 let report = read_plan_report(&plan_path).map_err(PluginError::Session)?;
@@ -571,7 +607,7 @@ impl SessionPlugin for PlanModePlugin {
                     if !should_inject {
                         return Ok(Vec::new());
                     }
-                    state.ensure_plan_path_from_state(&ctx.state.to_owned_state())?
+                    state.ensure_plan_path_from_state(&ctx.state.to_snapshot())?
                 };
                 seed_plan_template(&plan_path).map_err(PluginError::Session)?;
                 let report = read_plan_report(&plan_path).map_err(PluginError::Session)?;
@@ -829,8 +865,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        PLAN_TEMPLATE, plan_exit_fresh_context_input, plan_exit_next_turn_input, read_plan_report,
+        PLAN_TEMPLATE, plan_exit_fresh_context_input, plan_exit_next_turn_input,
+        plan_exit_tool_definition, read_plan_report,
     };
+
+    #[test]
+    fn plan_exit_contract_documents_decision_result() {
+        let definition = plan_exit_tool_definition();
+
+        assert_eq!(
+            definition.contract.input_schema["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            definition.contract.output_schema["required"],
+            serde_json::json!(["approved", "plan_path"])
+        );
+        assert!(
+            definition
+                .contract
+                .output_schema
+                .to_string()
+                .contains("execution_mode")
+        );
+    }
 
     #[test]
     fn plan_exit_next_turn_input_appends_user_note() {

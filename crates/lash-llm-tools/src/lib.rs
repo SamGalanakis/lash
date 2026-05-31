@@ -375,7 +375,7 @@ mod tests {
     use async_trait::async_trait;
     use lash_core::plugin::runtime_host::RuntimeSessionHost;
     use lash_core::plugin::{PluginError, SessionHandle};
-    use lash_core::{RuntimeSessionState, SessionCreateRequest, ToolCall};
+    use lash_core::{RuntimeSessionState, SessionCreateRequest, SessionSnapshot, ToolCall};
 
     fn model_spec(model: &str, variant: Option<&str>) -> lash_core::ModelSpec {
         lash_core::ModelSpec::from_token_limits(
@@ -397,15 +397,15 @@ mod tests {
 
     #[async_trait]
     impl RuntimeSessionHost for DirectCompletionManager {
-        async fn snapshot_current(&self) -> Result<RuntimeSessionState, PluginError> {
-            Ok(self.snapshot.clone())
+        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
+            Ok(self.snapshot.to_snapshot())
         }
 
         async fn snapshot_session(
             &self,
             _session_id: &str,
-        ) -> Result<RuntimeSessionState, PluginError> {
-            Ok(self.snapshot.clone())
+        ) -> Result<SessionSnapshot, PluginError> {
+            Ok(self.snapshot.to_snapshot())
         }
         async fn tool_catalog(
             &self,

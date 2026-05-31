@@ -18,7 +18,7 @@ fn assembler_uses_last_semantic_assistant_prose_group() {
     assembler.push(&SessionEvent::Done);
 
     let out = assembler.finish(
-        default_state().export_state(),
+        default_state().to_snapshot(),
         false,
         None,
         &TerminationPolicy::default(),
@@ -52,7 +52,7 @@ fn assembler_coalesces_semantic_assistant_prose_with_same_correlation_id() {
     assembler.push(&SessionEvent::Done);
 
     let out = assembler.finish(
-        default_state().export_state(),
+        default_state().to_snapshot(),
         false,
         None,
         &TerminationPolicy::default(),
@@ -90,7 +90,7 @@ fn assembler_rewrites_assistant_message_outcome_to_last_semantic_prose_group() {
     assembler.push(&SessionEvent::Done);
 
     let out = assembler.finish(
-        default_state().export_state(),
+        default_state().to_snapshot(),
         false,
         None,
         &TerminationPolicy::default(),
@@ -115,7 +115,7 @@ fn assembler_uses_assistant_message_outcome_without_recovery_issue_when_no_strea
     assembler.push(&SessionEvent::Done);
 
     let out = assembler.finish(
-        default_state().export_state(),
+        default_state().to_snapshot(),
         false,
         None,
         &TerminationPolicy::default(),
@@ -152,7 +152,7 @@ fn assembler_uses_submitted_value_for_assistant_output_when_semantic_prose_strea
     assembler.push(&SessionEvent::Done);
 
     let out = assembler.finish(
-        default_state().export_state(),
+        default_state().to_snapshot(),
         false,
         None,
         &TerminationPolicy::default(),
@@ -185,7 +185,7 @@ fn assembler_keeps_tool_value_when_semantic_prose_streamed() {
     assembler.push(&SessionEvent::Done);
 
     let out = assembler.finish(
-        default_state().export_state(),
+        default_state().to_snapshot(),
         false,
         None,
         &TerminationPolicy::default(),
@@ -211,7 +211,7 @@ fn interrupted_assembler_does_not_finish_with_semantic_assistant_prose() {
     ));
 
     let out = assembler.finish(
-        default_state().export_state(),
+        default_state().to_snapshot(),
         true,
         None,
         &TerminationPolicy::default(),
@@ -248,7 +248,7 @@ fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() 
     let mut assembler = TurnAssembler::default();
     assembler.push(&SessionEvent::Done);
     let out = assembler.finish(
-        state.export_state(),
+        state.to_snapshot(),
         false,
         None,
         &TerminationPolicy::default(),
@@ -313,7 +313,7 @@ fn interrupted_assembler_does_not_reuse_assistant_before_latest_user_message() {
     );
 
     let out = TurnAssembler::default().finish(
-        state.export_state(),
+        state.to_snapshot(),
         true,
         None,
         &TerminationPolicy::default(),
@@ -357,7 +357,7 @@ fn assembler_prefers_state_output_when_streamed_text_is_a_truncated_prefix() {
     });
     assembler.push(&SessionEvent::Done);
     let out = assembler.finish(
-        state.export_state(),
+        state.to_snapshot(),
         false,
         None,
         &TerminationPolicy::default(),
@@ -422,7 +422,7 @@ fn assembler_state_output_excludes_tool_call_payload() {
     );
     let assembler = TurnAssembler::default();
     let out = assembler.finish(
-        state.export_state(),
+        state.to_snapshot(),
         true,
         None,
         &TerminationPolicy::default(),
@@ -458,7 +458,7 @@ fn assembler_marks_tool_failure() {
     });
     assembler.push(&SessionEvent::Done);
     let out = assembler.finish(
-        default_state().export_state(),
+        default_state().to_snapshot(),
         false,
         None,
         &TerminationPolicy::default(),
@@ -478,7 +478,7 @@ fn assembler_marks_missing_done_as_failure() {
         content: "partial".to_string(),
     });
     let out = assembler.finish(
-        default_state().export_state(),
+        default_state().to_snapshot(),
         false,
         None,
         &TerminationPolicy::default(),
@@ -517,7 +517,7 @@ fn assembler_detects_max_turn_message() {
     let mut assembler = TurnAssembler::default();
     assembler.push(&SessionEvent::Done);
     let out = assembler.finish(
-        state.export_state(),
+        state.to_snapshot(),
         false,
         None,
         &TerminationPolicy::default(),

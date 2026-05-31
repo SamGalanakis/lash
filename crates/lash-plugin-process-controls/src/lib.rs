@@ -88,38 +88,19 @@ pub fn process_list_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "tool:list_process_handles",
         "list_process_handles",
-        "List live process handles granted to this session, including `shell.start` handles, with process id, descriptor, and terminal status. Pass history: \"all\" only when terminal historical handles are explicitly needed.",
+        "List live process handles granted to this session, including `shell.start` handles, with process id, descriptor, and lifecycle status. Pass history: \"all\" only when completed historical handles are explicitly needed.",
         serde_json::json!({
             "type": "object",
             "properties": {
                 "history": {
                     "type": "string",
                     "enum": ["live", "all"],
-                    "description": "`live` lists running handles only. `all` includes terminal historical handles."
+                    "description": "`live` lists running handles only. `all` includes completed historical handles."
                 }
             },
             "additionalProperties": false
         }),
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "processes": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "process_id": { "type": "string" },
-                            "descriptor": { "type": "object", "additionalProperties": true },
-                            "terminal": { "type": "string" }
-                        },
-                        "required": ["process_id", "descriptor", "terminal"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["processes"],
-            "additionalProperties": false
-        }),
+        process_list_output_schema(),
     )
     .with_examples(vec![
         "await processes.list({})?".into(),
@@ -158,9 +139,12 @@ pub fn process_cancel_tool_definition() -> ToolDefinition {
             "type": "object",
             "properties": {
                 "process_id": { "type": "string" },
-                "terminal": { "type": "string" }
+                "status": {
+                    "type": "string",
+                    "enum": ["running", "completed", "failed", "cancelled"]
+                }
             },
-            "required": ["process_id", "terminal"],
+            "required": ["process_id", "status"],
             "additionalProperties": false
         }),
     )
@@ -193,17 +177,63 @@ pub async fn execute_process_list_tool_call(
             let entries: Vec<Value> = entries
                 .into_iter()
                 .map(|(grant, process)| {
-                    serde_json::json!({
-                        "process_id": process.id,
-                        "descriptor": grant.descriptor,
-                        "terminal": terminal_label(process.terminal.as_ref()),
-                    })
+                    let mut handle = lash_core::lashlang_bridge::process_handle_json(&process.id);
+                    if let Some(object) = handle.as_object_mut() {
+                        object.insert("process_id".to_string(), serde_json::json!(process.id));
+                        object.insert(
+                            "descriptor".to_string(),
+                            serde_json::json!(grant.descriptor),
+                        );
+                        object.insert(
+                            "status".to_string(),
+                            serde_json::json!(process.status.label()),
+                        );
+                    }
+                    handle
                 })
                 .collect();
-            ToolResult::ok(serde_json::json!({ "processes": entries }))
+            ToolResult::ok(serde_json::json!(entries))
         }
         Err(err) => ToolResult::err_fmt(err.to_string()),
     }
+}
+
+fn process_list_output_schema() -> Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "__handle__": {
+                    "type": "string",
+                    "enum": ["process"],
+                    "description": "Handle marker; pass the whole record where a process handle is needed."
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Process handle id."
+                },
+                "process_id": {
+                    "type": "string",
+                    "description": "Same process id, repeated for tools that ask for process_id."
+                },
+                "descriptor": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string" },
+                        "label": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["running", "completed", "failed", "cancelled"]
+                }
+            },
+            "required": ["__handle__", "id", "process_id", "descriptor", "status"],
+            "additionalProperties": false
+        }
+    })
 }
 
 pub async fn execute_process_cancel_tool_call(
@@ -225,18 +255,9 @@ pub async fn execute_process_cancel_tool_call(
     match processes.cancel(id).await {
         Ok(status) => ToolResult::ok(serde_json::json!({
             "process_id": status.id,
-            "terminal": terminal_label(status.terminal.as_ref()),
+            "status": status.status.label(),
         })),
         Err(err) => ToolResult::err_fmt(err.to_string()),
-    }
-}
-
-fn terminal_label(terminal: Option<&lash_core::ProcessTerminalSemantics>) -> &'static str {
-    match terminal.map(|terminal| terminal.state) {
-        None => "running",
-        Some(lash_core::ProcessTerminalState::Completed) => "completed",
-        Some(lash_core::ProcessTerminalState::Failed) => "failed",
-        Some(lash_core::ProcessTerminalState::Cancelled) => "cancelled",
     }
 }
 
@@ -256,10 +277,30 @@ mod tests {
 
     #[test]
     fn cancel_process_definition_is_callable_when_registered() {
+        let definition = process_cancel_tool_definition();
         assert_eq!(
-            process_cancel_tool_definition().effective_availability(),
+            definition.effective_availability(),
             lash_core::ToolAvailability::Callable
         );
+        let rendered = definition.compact_contract().render_signature();
+        assert!(rendered.contains("status: enum["), "{rendered}");
+        assert!(!rendered.contains("terminal:"), "{rendered}");
+    }
+
+    #[test]
+    fn list_process_contract_returns_handle_array() {
+        let definition = process_list_tool_definition();
+
+        assert_eq!(
+            definition.contract.output_schema["type"],
+            serde_json::json!("array")
+        );
+        let rendered = definition.compact_contract().render_signature();
+        assert!(rendered.contains("-> list[record{"), "{rendered}");
+        assert!(rendered.contains("__handle__"), "{rendered}");
+        assert!(rendered.contains("process_id"), "{rendered}");
+        assert!(rendered.contains("status: enum["), "{rendered}");
+        assert!(!rendered.contains("terminal:"), "{rendered}");
     }
 
     #[test]

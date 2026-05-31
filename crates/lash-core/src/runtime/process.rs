@@ -23,7 +23,7 @@ pub use model::{
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
     ProcessLease, ProcessLeaseCompletion, ProcessListMode, ProcessOpScope, ProcessProvenance,
     ProcessRecord, ProcessRegistration, ProcessScope, ProcessScopeId, ProcessSessionDeleteReport,
-    ProcessStartGrant, ProcessStartOptions,
+    ProcessStartGrant, ProcessStartOptions, ProcessStatus,
 };
 pub use registry::ProcessRegistry;
 pub use service::{ProcessService, UnavailableProcessService};

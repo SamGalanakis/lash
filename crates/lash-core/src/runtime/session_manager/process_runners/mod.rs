@@ -212,7 +212,15 @@ mod tests {
         process_worker_with_core(
             registry,
             factory,
-            crate::RuntimeCoreConfig::in_memory().with_host_profile_id("worker-profile"),
+            crate::RuntimeCoreConfig::in_memory()
+                .with_host_profile_id("worker-profile")
+                .with_provider_resolver(Arc::new(crate::SingleProviderResolver::new(
+                    mock_provider(vec![MockCall {
+                        stream_events: Vec::new(),
+                        response: Ok(successful_text_response("child done")),
+                    }])
+                    .into_handle(),
+                ))),
         )
     }
 
@@ -698,14 +706,7 @@ mod tests {
                 if value == serde_json::json!({ "value": "linked" })
         ));
 
-        let child_policy = crate::SessionPolicy {
-            provider: mock_provider(vec![MockCall {
-                stream_events: Vec::new(),
-                response: Ok(successful_text_response("child done")),
-            }])
-            .into_handle(),
-            ..standard_test_policy()
-        };
+        let child_policy = standard_test_policy();
         let session_registration = worker_registration(crate::ProcessRegistration::new(
             "worker-session",
             crate::ProcessInput::SessionTurn {

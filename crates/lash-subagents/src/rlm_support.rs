@@ -218,10 +218,21 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
             "required": ["reason"],
             "additionalProperties": false
         }),
-        json!({ "type": "object", "additionalProperties": true }),
+        submit_error_output_schema(),
     )
     .with_agent_surface(lash_core::ToolAgentSurface::new(["tools"], "submit_error"))
     .with_scheduling(ToolScheduling::Serial)
+}
+
+fn submit_error_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "reason": { "type": "string" }
+        },
+        "required": ["reason"],
+        "additionalProperties": false
+    })
 }
 
 pub(crate) fn submit_error_tool_result(args: &Value) -> ToolResult {

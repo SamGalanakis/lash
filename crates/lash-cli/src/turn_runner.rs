@@ -147,7 +147,7 @@ async fn runtime_error_turn_result(session: &LashSession, message: String) -> la
         .persist_current()
         .await
         .unwrap_or_else(|_| RuntimeSessionState::default());
-    let state = state.into_envelope();
+    let state = state.to_snapshot();
     lash::TurnResult {
         execution: ExecutionSummary {
             had_tool_calls: false,

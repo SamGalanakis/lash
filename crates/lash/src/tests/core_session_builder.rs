@@ -399,7 +399,7 @@ async fn store_factory_reopens_persisted_session_state() -> Result<()> {
     let mut state = RuntimeSessionState {
         session_id: "persisted".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -431,7 +431,7 @@ fn session_policy_serializes_provider_id_without_provider_config() -> Result<()>
         .build()
         .into_handle();
     let policy = lash_core::SessionPolicy {
-        provider,
+        provider_id: provider.kind().to_string(),
         model: mock_model_spec(),
         ..Default::default()
     };
@@ -442,7 +442,6 @@ fn session_policy_serializes_provider_id_without_provider_config() -> Result<()>
     assert!(!value.to_string().contains("should-not-persist"));
 
     let decoded: lash_core::SessionPolicy = serde_json::from_value(value)?;
-    assert_eq!(decoded.provider.kind(), "unconfigured");
     assert_eq!(decoded.recorded_provider_id(), "secret-provider");
     Ok(())
 }
@@ -475,19 +474,18 @@ async fn persisted_provider_id_rebinds_to_live_provider_on_open() -> Result<()> 
     let reopened = core.session("provider-rebind").open().await?;
     let persisted = reopened.control().state().persist_current().await?;
 
-    assert_eq!(persisted.policy.provider.kind(), "embed-test");
     assert_eq!(persisted.policy.recorded_provider_id(), "embed-test");
     assert!(
         persisted
             .agent_frames
             .iter()
-            .all(|frame| frame.assignment.policy.provider.kind() == "embed-test")
+            .all(|frame| frame.assignment.policy.recorded_provider_id() == "embed-test")
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn persisted_provider_id_mismatch_fails_at_session_open() -> Result<()> {
+async fn persisted_provider_id_mismatch_fails_at_turn_execution() -> Result<()> {
     let mut state = RuntimeSessionState {
         session_id: "provider-mismatch".to_string(),
         policy: lash_core::SessionPolicy {
@@ -507,26 +505,26 @@ async fn persisted_provider_id_mismatch_fails_at_session_open() -> Result<()> {
         .store_factory(Arc::new(ReusableStoreFactory { store }))
         .build()?;
 
-    let err = match core.session("provider-mismatch").open().await {
-        Ok(_) => panic!("provider mismatch should fail at open"),
+    let session = core.session("provider-mismatch").open().await?;
+    let err = match session.run(TurnInput::text("must not run")).await {
+        Ok(_) => panic!("provider mismatch should fail at turn execution"),
         Err(err) => err,
     };
 
     assert!(matches!(
         err,
-        EmbedError::Session(lash_core::SessionError::ProviderMismatch {
-            expected,
-            actual,
-            session_id
-        }) if expected == "other-provider"
-            && actual == "embed-test"
-            && session_id == "provider-mismatch"
+        EmbedError::Runtime(lash_core::RuntimeError {
+            code: lash_core::RuntimeErrorCode::Other(code),
+            message,
+        }) if code == "llm_provider"
+            && message.contains("other-provider")
+            && message.contains("provider-mismatch")
     ));
     Ok(())
 }
 
 #[tokio::test]
-async fn agent_frame_provider_id_mismatch_fails_at_session_open() -> Result<()> {
+async fn agent_frame_provider_id_mismatch_fails_at_turn_execution() -> Result<()> {
     let mut state = RuntimeSessionState {
         session_id: "frame-provider-mismatch".to_string(),
         policy: lash_core::SessionPolicy {
@@ -552,20 +550,20 @@ async fn agent_frame_provider_id_mismatch_fails_at_session_open() -> Result<()> 
         .store_factory(Arc::new(ReusableStoreFactory { store }))
         .build()?;
 
-    let err = match core.session("frame-provider-mismatch").open().await {
-        Ok(_) => panic!("agent-frame provider mismatch should fail at open"),
+    let session = core.session("frame-provider-mismatch").open().await?;
+    let err = match session.run(TurnInput::text("must not run")).await {
+        Ok(_) => panic!("agent-frame provider mismatch should fail at turn execution"),
         Err(err) => err,
     };
 
     assert!(matches!(
         err,
-        EmbedError::Session(lash_core::SessionError::ProviderMismatch {
-            expected,
-            actual,
-            session_id
-        }) if expected == "other-provider"
-            && actual == "embed-test"
-            && session_id == "frame-provider-mismatch"
+        EmbedError::Runtime(lash_core::RuntimeError {
+            code: lash_core::RuntimeErrorCode::Other(code),
+            message,
+        }) if code == "llm_provider"
+            && message.contains("other-provider")
+            && message.contains("frame-provider-mismatch")
     ));
     Ok(())
 }
@@ -607,8 +605,7 @@ async fn refreshed_head_provider_id_mismatch_fails_before_turn() -> Result<()> {
         EmbedError::Runtime(lash_core::RuntimeError {
             code: lash_core::RuntimeErrorCode::Other(code),
             message,
-        }) if code == "session_head_refresh"
-            && message.contains("provider mismatch")
+        }) if code == "llm_provider"
             && message.contains("other-provider")
     ));
     Ok(())
@@ -638,7 +635,10 @@ async fn explicit_provider_persists_reopens_and_runs_second_turn() -> Result<()>
     let second = reopened.run(TurnInput::text("second")).await?;
 
     assert_eq!(assistant_prose(&second.activities), "echo: second");
-    assert_eq!(reopened.policy_snapshot().provider.kind(), "embed-test");
+    assert_eq!(
+        reopened.policy_snapshot().recorded_provider_id(),
+        "embed-test"
+    );
     Ok(())
 }
 
@@ -668,7 +668,7 @@ async fn active_path_residency_opens_with_active_path_scope() -> Result<()> {
     let mut state = RuntimeSessionState {
         session_id: "active-path".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -713,7 +713,7 @@ async fn keep_all_residency_opens_with_full_graph_scope() -> Result<()> {
     let mut state = RuntimeSessionState {
         session_id: "keep-all".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -743,7 +743,7 @@ async fn store_session_id_mismatch_is_rejected() -> Result<()> {
     let state = RuntimeSessionState {
         session_id: "actual-session".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -776,7 +776,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     let mut state = RuntimeSessionState {
         session_id: "manual-state".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -958,7 +958,7 @@ async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Re
     let mut explicit_state = RuntimeSessionState {
         session_id: "store-precedence".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },
@@ -1000,11 +1000,11 @@ async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Re
 #[test]
 fn turn_result_total_usage_sums_parent_and_children() {
     use lash_core::{
-        ExecutionSummary, OutputState, SessionPolicy, SessionStateEnvelope, TurnFinish, TurnOutcome,
+        ExecutionSummary, OutputState, SessionPolicy, SessionSnapshot, TurnFinish, TurnOutcome,
     };
 
     let result = TurnResult {
-        state: SessionStateEnvelope {
+        state: SessionSnapshot {
             session_id: "s".to_string(),
             policy: SessionPolicy::default(),
             ..Default::default()
@@ -1280,7 +1280,7 @@ async fn default_process_work_runner_spawns_when_registry_and_store_factory_pres
     let state = RuntimeSessionState {
         session_id: "main".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },

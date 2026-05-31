@@ -36,7 +36,7 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
         "continue_as",
         "Tail-call into a fresh RLM AgentFrame inside the current session with a clean window.\n\nThe new frame inherits **nothing** implicitly — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected in the new frame (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `control.continue_as(...)` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the new frame must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the new frame needs in scope; leave bulky raw output behind.\n- If live async work is needed after the switch, include its handle in `seed` (for example from `processes.list(...)`). Referenced handles transfer to the new frame and can be awaited there. Live handles not included in `seed` are cancelled when `control.continue_as(...)` succeeds.",
         continue_as_input_schema(),
-        json!({ "type": "object", "additionalProperties": true }),
+        continue_as_output_schema(),
     )
     .with_examples(vec![
         r#"await control.continue_as({ task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } })?"#.into(),
@@ -47,6 +47,32 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     ))
     .with_availability(ToolAvailabilityConfig::callable())
     .with_scheduling(ToolScheduling::Parallel)
+}
+
+fn continue_as_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "frame_id": { "type": "string" },
+            "task": { "type": "string" },
+            "seed_keys": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "projected_count": { "type": "integer", "minimum": 0 },
+            "global_count": { "type": "integer", "minimum": 0 },
+            "handle_count": { "type": "integer", "minimum": 0 }
+        },
+        "required": [
+            "frame_id",
+            "task",
+            "seed_keys",
+            "projected_count",
+            "global_count",
+            "handle_count"
+        ],
+        "additionalProperties": false
+    })
 }
 
 pub(crate) fn collect_seed_process_handle_ids(seed: Option<&Value>) -> BTreeSet<String> {
@@ -186,13 +212,34 @@ mod tests {
     use lash_core::plugin::runtime_host::RuntimeSessionHost;
     use lash_core::plugin::{PluginError, SessionHandle};
     use lash_core::{
-        RuntimeSessionState, SessionAppendNode, SessionCreateRequest, SessionPolicy, ToolProvider,
+        RuntimeSessionState, SessionAppendNode, SessionCreateRequest, SessionPolicy,
+        SessionSnapshot, ToolProvider,
     };
     use lash_rlm_types::{RlmProtocolEvent, RlmTermination};
 
     fn model_spec(model: &str) -> lash_core::ModelSpec {
         lash_core::ModelSpec::from_token_limits(model, None, 200_000, None, None)
             .expect("valid test model spec")
+    }
+
+    #[test]
+    fn continue_as_contract_documents_switch_result() {
+        let definition = continue_as_tool_definition();
+
+        assert_eq!(
+            definition.contract.output_schema["required"],
+            json!([
+                "frame_id",
+                "task",
+                "seed_keys",
+                "projected_count",
+                "global_count",
+                "handle_count"
+            ])
+        );
+        let rendered = definition.compact_contract().render_signature();
+        assert!(rendered.contains("frame_id"), "{rendered}");
+        assert!(rendered.contains("handle_count"), "{rendered}");
     }
 
     #[derive(Default)]
@@ -215,15 +262,15 @@ mod tests {
 
     #[async_trait]
     impl RuntimeSessionHost for BatonManager {
-        async fn snapshot_current(&self) -> Result<RuntimeSessionState, PluginError> {
-            Ok(self.snapshot.clone())
+        async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
+            Ok(self.snapshot.to_snapshot())
         }
 
         async fn snapshot_session(
             &self,
             _session_id: &str,
-        ) -> Result<RuntimeSessionState, PluginError> {
-            Ok(self.snapshot.clone())
+        ) -> Result<SessionSnapshot, PluginError> {
+            Ok(self.snapshot.to_snapshot())
         }
         async fn tool_catalog(
             &self,

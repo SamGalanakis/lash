@@ -60,15 +60,14 @@ use lash_core::{
     ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessLease,
     ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
-    ProcessTerminalState, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
-    QueuedWorkClaimBoundary, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
-    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
-    RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
-    RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnLease,
-    SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo,
-    SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError,
-    VacuumReport, ensure_supported_schema_version, prepare_process_event_append,
-    prepare_process_registration,
+    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
+    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+    RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
+    RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
+    RuntimeTurnLease, SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta,
+    SessionPickerInfo, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
+    SlotPolicy, StoreError, VacuumReport, ensure_supported_schema_version,
+    prepare_process_event_append, prepare_process_registration,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};

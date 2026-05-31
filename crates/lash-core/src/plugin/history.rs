@@ -5,9 +5,8 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::SessionPolicy;
-use crate::SessionStateEnvelope;
 use crate::runtime::RuntimeSessionState;
+use crate::{SessionPolicy, SessionSnapshot};
 
 use super::PluginError;
 
@@ -43,8 +42,8 @@ pub struct HistoryState {
 }
 
 impl HistoryState {
-    pub fn from_state(state: &SessionStateEnvelope) -> Self {
-        let read_view = state.read_view();
+    pub fn from_snapshot(snapshot: &SessionSnapshot) -> Self {
+        let read_view = snapshot.read_view();
         Self {
             messages: read_view.messages().to_vec(),
             tool_calls: read_view.tool_calls().to_vec(),
@@ -75,14 +74,14 @@ struct SessionReadMeta {
 }
 
 impl SessionReadMeta {
-    fn from_state_ref(state: &SessionStateEnvelope) -> Self {
+    fn from_snapshot_ref(snapshot: &SessionSnapshot) -> Self {
         Self {
-            session_id: state.session_id.clone(),
-            policy: state.policy.clone(),
-            turn_index: state.turn_index,
-            token_usage: state.token_usage.clone(),
-            last_prompt_usage: state.last_prompt_usage.clone(),
-            protocol_turn_options: state.protocol_turn_options.clone(),
+            session_id: snapshot.session_id.clone(),
+            policy: snapshot.policy.clone(),
+            turn_index: snapshot.turn_index,
+            token_usage: snapshot.token_usage.clone(),
+            last_prompt_usage: snapshot.last_prompt_usage.clone(),
+            protocol_turn_options: snapshot.protocol_turn_options.clone(),
         }
     }
 
@@ -115,8 +114,8 @@ impl SessionReadMeta {
         self
     }
 
-    fn to_owned_state(&self, session_graph: crate::SessionGraph) -> SessionStateEnvelope {
-        SessionStateEnvelope {
+    fn to_snapshot(&self, session_graph: crate::SessionGraph) -> SessionSnapshot {
+        SessionSnapshot {
             session_id: self.session_id.clone(),
             policy: self.policy.clone(),
             agent_frames: Vec::new(),
@@ -126,6 +125,13 @@ impl SessionReadMeta {
             token_usage: self.token_usage.clone(),
             last_prompt_usage: self.last_prompt_usage.clone(),
             protocol_turn_options: self.protocol_turn_options.clone(),
+            tool_state_ref: None,
+            tool_state_generation: None,
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: None,
+            execution_state_ref: None,
+            token_ledger: Vec::new(),
+            checkpoint_ref: None,
         }
     }
 }
@@ -163,11 +169,11 @@ impl SessionReadView {
         }))
     }
 
-    pub fn from_exported_state(state: &SessionStateEnvelope) -> Self {
-        let read_model = state.read_model();
+    pub fn from_snapshot(snapshot: &SessionSnapshot) -> Self {
+        let read_model = snapshot.read_model();
         Self(Arc::new(SessionReadState {
-            meta: SessionReadMeta::from_state_ref(state),
-            graph: SessionReadGraph::Owned(state.session_graph.clone()),
+            meta: SessionReadMeta::from_snapshot_ref(snapshot),
+            graph: SessionReadGraph::Owned(snapshot.session_graph.clone()),
             read_model,
             chronological_projection: OnceLock::new(),
         }))
@@ -301,8 +307,8 @@ impl SessionReadView {
         &self.0.meta.protocol_turn_options
     }
 
-    pub fn to_owned_state(&self) -> SessionStateEnvelope {
-        self.0.meta.to_owned_state(self.session_graph().clone())
+    pub fn to_snapshot(&self) -> SessionSnapshot {
+        self.0.meta.to_snapshot(self.session_graph().clone())
     }
 }
 

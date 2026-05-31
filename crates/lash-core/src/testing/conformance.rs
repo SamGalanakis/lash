@@ -284,7 +284,7 @@ async fn terminal_and_cancel_events_require_keys(registry: Arc<dyn ProcessRegist
         registry
             .get_process("proc-terminal")
             .await
-            .and_then(|record| record.terminal.map(|terminal| terminal.state)),
+            .and_then(|record| record.status.terminal_state()),
         Some(ProcessTerminalState::Cancelled)
     );
 }
@@ -583,7 +583,7 @@ async fn list_live_handle_grants_excludes_terminal_history(registry: Arc<dyn Pro
     assert_eq!(
         live_ids,
         vec!["proc-live-grant".to_string()],
-        "list_live_handle_grants must exclude terminal historical handles"
+        "list_live_handle_grants must exclude completed historical handles"
     );
 
     let all_ids = registry
@@ -1489,4 +1489,209 @@ async fn expired_final_commit_rejects_and_preserves_resume(store: Arc<dyn Runtim
             .expect("load session")
             .is_none()
     );
+}
+
+// ---------------------------------------------------------------------------
+// AttachmentStore conformance
+// ---------------------------------------------------------------------------
+
+use crate::{
+    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier,
+    LashlangArtifactStore,
+};
+use lash_sansio::{AttachmentCreateMeta, ImageMediaType, MediaType};
+
+/// Run the full [`AttachmentStore`] conformance suite against the backend
+/// produced by `make`. `make` must return a fresh, empty store on each call.
+/// `expected_persistence` is the tier this backend declares (`Ephemeral` for
+/// in-memory, `Durable` for file/SQLite-backed).
+pub fn attachment_store<F>(make: F, expected_persistence: AttachmentStorePersistence)
+where
+    F: Fn() -> Arc<dyn AttachmentStore>,
+{
+    attachment_put_get_round_trips_bytes_and_meta(make());
+    attachment_is_content_addressed(make());
+    attachment_get_unknown_is_not_found(make());
+    attachment_reports_declared_persistence(make(), expected_persistence);
+}
+
+fn attachment_meta() -> AttachmentCreateMeta {
+    AttachmentCreateMeta::new(
+        MediaType::Image(ImageMediaType::Png),
+        Some(7),
+        Some(11),
+        Some("pixel".to_string()),
+    )
+}
+
+fn attachment_put_get_round_trips_bytes_and_meta(store: Arc<dyn AttachmentStore>) {
+    let bytes = vec![1u8, 2, 3, 4, 5];
+    let reference = store
+        .put(bytes.clone(), attachment_meta())
+        .expect("put attachment");
+    let stored = store.get(&reference.id).expect("get attachment");
+
+    assert_eq!(stored.bytes, bytes, "bytes must round-trip unchanged");
+    assert_eq!(stored.meta.id, reference.id);
+    assert_eq!(stored.meta.byte_len, bytes.len() as u64);
+    assert_eq!(
+        stored.meta.media_type,
+        MediaType::Image(ImageMediaType::Png)
+    );
+    assert_eq!(stored.meta.width, Some(7));
+    assert_eq!(stored.meta.height, Some(11));
+    assert_eq!(stored.meta.label.as_deref(), Some("pixel"));
+}
+
+fn attachment_is_content_addressed(store: Arc<dyn AttachmentStore>) {
+    let first = store
+        .put(vec![9u8, 9, 9], attachment_meta())
+        .expect("put first");
+    let same = store
+        .put(vec![9u8, 9, 9], attachment_meta())
+        .expect("put identical bytes");
+    let different = store
+        .put(vec![9u8, 9, 8], attachment_meta())
+        .expect("put different bytes");
+
+    assert_eq!(
+        first.id, same.id,
+        "identical bytes must map to the same content-addressed id"
+    );
+    assert_ne!(
+        first.id, different.id,
+        "different bytes must map to different ids"
+    );
+}
+
+fn attachment_get_unknown_is_not_found(store: Arc<dyn AttachmentStore>) {
+    let err = store
+        .get(&AttachmentId::new("sha256:does-not-exist"))
+        .expect_err("get of an unknown id must fail");
+    assert!(
+        matches!(err, AttachmentStoreError::NotFound(_)),
+        "unknown id must map to NotFound, got {err:?}"
+    );
+}
+
+fn attachment_reports_declared_persistence(
+    store: Arc<dyn AttachmentStore>,
+    expected: AttachmentStorePersistence,
+) {
+    assert_eq!(
+        store.persistence(),
+        expected,
+        "persistence tier must match the backend's declared durability"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// LashlangArtifactStore conformance
+// ---------------------------------------------------------------------------
+
+/// Run the full [`LashlangArtifactStore`] conformance suite against the backend
+/// produced by `make`. `make` must return a fresh, empty store on each call.
+/// `expected_tier` is the tier this backend declares (`Inline` for in-memory,
+/// `Durable` for SQLite-backed).
+pub fn lashlang_artifact_store<F>(make: F, expected_tier: DurabilityTier)
+where
+    F: Fn() -> Arc<dyn LashlangArtifactStore>,
+{
+    artifact_put_get_round_trips(make());
+    artifact_get_unknown_is_none(make());
+    artifact_reports_declared_tier(make(), expected_tier);
+}
+
+fn sample_artifact() -> lashlang::ModuleArtifact {
+    let program = lashlang::parse("process echo(value: str) { finish value }")
+        .expect("sample lashlang module parses");
+    lashlang::ModuleArtifact::from_program(program).expect("module artifact builds")
+}
+
+fn artifact_put_get_round_trips(store: Arc<dyn LashlangArtifactStore>) {
+    let artifact = sample_artifact();
+    store
+        .put_module_artifact(&artifact)
+        .expect("put module artifact");
+    let loaded = store
+        .get_module_artifact(&artifact.module_ref)
+        .expect("get module artifact")
+        .expect("artifact present after put");
+
+    assert_eq!(loaded.module_ref, artifact.module_ref);
+    assert_eq!(loaded.required_surface_ref, artifact.required_surface_ref);
+    assert_eq!(loaded.exports, artifact.exports);
+    // A successful `get` already re-ran `verify()` internally; round-tripping
+    // the bytes again must reproduce the identical store encoding.
+    assert_eq!(
+        loaded.to_store_bytes().expect("re-encode loaded artifact"),
+        artifact
+            .to_store_bytes()
+            .expect("re-encode source artifact"),
+        "stored artifact must round-trip byte-identically"
+    );
+}
+
+fn artifact_get_unknown_is_none(store: Arc<dyn LashlangArtifactStore>) {
+    let unknown = sample_artifact().module_ref;
+    let result = store
+        .get_module_artifact(&unknown)
+        .expect("get of an unknown ref must not error");
+    assert!(
+        result.is_none(),
+        "an unknown module ref must return Ok(None), not a backend error"
+    );
+}
+
+fn artifact_reports_declared_tier(store: Arc<dyn LashlangArtifactStore>, expected: DurabilityTier) {
+    assert_eq!(
+        store.durability_tier(),
+        expected,
+        "durability tier must match the backend"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_memory_attachment_store_satisfies_conformance() {
+        attachment_store(
+            || Arc::new(crate::InMemoryAttachmentStore::new()) as Arc<dyn AttachmentStore>,
+            AttachmentStorePersistence::Ephemeral,
+        );
+    }
+
+    #[test]
+    fn in_memory_lashlang_artifact_store_satisfies_conformance() {
+        lashlang_artifact_store(
+            || {
+                Arc::new(crate::InMemoryLashlangArtifactStore::new())
+                    as Arc<dyn LashlangArtifactStore>
+            },
+            DurabilityTier::Inline,
+        );
+    }
+
+    // The corrupt-bytes rejection path is exercised here rather than in the
+    // shared suite: only the in-memory store exposes a raw-bytes injection
+    // seam (`put_raw_module_artifact_bytes`); durable backends re-verify on
+    // read through the same `ModuleArtifact::from_store_bytes` path.
+    #[test]
+    fn in_memory_artifact_store_rejects_corrupted_bytes_on_read() {
+        let store = crate::InMemoryLashlangArtifactStore::new();
+        let artifact = sample_artifact();
+        store.put_raw_module_artifact_bytes(
+            artifact.module_ref.clone(),
+            b"not an artifact".to_vec(),
+        );
+        let err = store
+            .get_module_artifact(&artifact.module_ref)
+            .expect_err("corrupted stored bytes must be rejected on read");
+        assert!(
+            matches!(err, lashlang::ArtifactStoreError::Decode(_)),
+            "tampered bytes must surface a decode error, got {err:?}"
+        );
+    }
 }

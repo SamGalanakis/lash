@@ -8,6 +8,7 @@ pub struct LashCore {
     pub(crate) default_mode: ModeId,
     pub(crate) store_factory: Option<Arc<dyn SessionStoreFactory>>,
     pub(crate) plugin_factories: Arc<Vec<Arc<dyn PluginFactory>>>,
+    pub(crate) provider: Option<ProviderHandle>,
     /// Shared resolution of the process work runner. The poke it yields is
     /// threaded onto every session's host so the process control seam can wake
     /// the runner after a successful start. Shared across `LashCore` clones so
@@ -115,6 +116,7 @@ impl LashCore {
             mode: None,
             parent_session_id: None,
             store: None,
+            provider: None,
             active_plugins: Vec::new(),
             plugin_factories: Vec::new(),
         }
@@ -224,6 +226,7 @@ pub struct LashCoreBuilder {
     pub(crate) modes: BTreeMap<ModeId, ModePreset>,
     pub(crate) default_mode: Option<ModeId>,
     session_spec: SessionSpec,
+    provider: Option<ProviderHandle>,
     pub(crate) store_factory: Option<Arc<dyn SessionStoreFactory>>,
     child_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     // `RuntimeCoreConfig` has no `Default`: the three host-owned durability
@@ -277,7 +280,8 @@ impl LashCoreBuilder {
     }
 
     pub fn provider(mut self, provider: ProviderHandle) -> Self {
-        self.session_spec = self.session_spec.provider(provider);
+        self.session_spec = self.session_spec.provider_id(provider.kind());
+        self.provider = Some(provider);
         self
     }
 
@@ -562,7 +566,16 @@ impl LashCoreBuilder {
         if !self.modes.contains_key(&default_mode) {
             return Err(EmbedError::DefaultModeNotInstalled { mode: default_mode });
         }
-        let provider = self.session_spec.provider.clone().unwrap_or_default();
+        let provider_id = self
+            .session_spec
+            .provider_id
+            .clone()
+            .or_else(|| {
+                self.provider
+                    .as_ref()
+                    .map(|provider| provider.kind().to_string())
+            })
+            .unwrap_or_default();
         let model = self
             .session_spec
             .model
@@ -570,14 +583,18 @@ impl LashCoreBuilder {
             .ok_or(EmbedError::MissingModelSpec)?;
 
         let base_policy = SessionPolicy {
-            provider,
+            provider_id,
             model,
             max_turns: self.session_spec.max_turns.flatten(),
             ..SessionPolicy::default()
         };
         let policy = self.session_spec.resolve_against(&base_policy);
 
-        let core = self.resolve_runtime_core_config()?;
+        let mut core = self.resolve_runtime_core_config()?;
+        if let Some(provider) = self.provider.clone() {
+            core = core
+                .with_provider_resolver(Arc::new(lash_core::SingleProviderResolver::new(provider)));
+        }
 
         let plugin_factories = if let Some(plugin_host) = self.plugin_host {
             plugin_host.factories().to_vec()
@@ -647,6 +664,7 @@ impl LashCoreBuilder {
             default_mode,
             store_factory: self.store_factory,
             plugin_factories: Arc::new(plugin_factories),
+            provider: self.provider,
             process_work_runner: Arc::new(ProcessWorkRunnerSlot::new(process_work_runner)),
         })
     }

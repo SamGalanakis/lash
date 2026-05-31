@@ -12,8 +12,8 @@ use lash_core::plugin::{
 };
 use lash_core::{
     AssembledTurn, MessageRole, PluginHost, RuntimeSessionState, SessionCreateRequest,
-    SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot, SessionStateEnvelope,
-    ToolDefinition, ToolRegistry, ToolResult, TurnHookContext, TurnResultHookContext,
+    SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot, ToolDefinition, ToolRegistry,
+    ToolResult, TurnHookContext, TurnResultHookContext,
 };
 
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
@@ -111,19 +111,19 @@ macro_rules! impl_plan_test_host {
 }
 
 fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
-    RuntimeSessionState::from_state(SessionStateEnvelope {
+    SessionSnapshot {
         session_id: "root".to_string(),
         policy: SessionPolicy {
             session_id: Some(run_session_id.to_string()),
             ..Default::default()
         },
         ..Default::default()
-    })
+    }
 }
 
 fn mock_read_view(run_session_id: &str) -> SessionReadView {
-    let snapshot = mock_snapshot(run_session_id);
-    SessionReadView::from_persisted_state(&snapshot)
+    let state = RuntimeSessionState::from_snapshot(mock_snapshot(run_session_id));
+    SessionReadView::from_persisted_state(&state)
 }
 
 fn test_tool(

@@ -191,7 +191,20 @@ fn benchmark_echo_tool_definition() -> ToolDefinition {
             },
             "additionalProperties": true
         }),
-        serde_json::json!({ "type": "object", "additionalProperties": true }),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": {},
+                "ordinal": {
+                    "anyOf": [
+                        { "type": "integer" },
+                        { "type": "null" }
+                    ]
+                }
+            },
+            "required": ["value", "ordinal"],
+            "additionalProperties": false
+        }),
     )
     .with_scheduling(ToolScheduling::Parallel)
 }
@@ -209,7 +222,15 @@ fn benchmark_slow_tool_definition() -> ToolDefinition {
             },
             "additionalProperties": false
         }),
-        serde_json::json!({ "type": "object", "additionalProperties": true }),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": {},
+                "delay_ms": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["value", "delay_ms"],
+            "additionalProperties": false
+        }),
     )
     .with_scheduling(ToolScheduling::Parallel)
 }

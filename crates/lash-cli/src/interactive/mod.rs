@@ -391,7 +391,7 @@ pub(crate) async fn run_app(
                             let preserved_policy = rt.policy_snapshot();
                             rt.control()
                                 .state()
-                                .set_persisted(lash_core::RuntimeSessionState::from_state(
+                                .set_persisted(lash_core::RuntimeSessionState::from_snapshot(
                                     cleared_session_state(preserved_policy),
                                 ))
                                 .await?;

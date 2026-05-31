@@ -212,11 +212,6 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
                         .filter_map(|record| record.call_id.clone()),
                 );
                 state.images.extend(response.printed_images);
-                if !response.output.is_empty() {
-                    // Raw lashlang-runtime stdout (rare); treat as an
-                    // anonymous output entry alongside the typed prints.
-                    state.output.push(response.output);
-                }
                 for observation in response.observations {
                     if !observation.is_empty() {
                         state.output.push(observation);

@@ -16,6 +16,7 @@ pub struct RuntimeCoreConfig {
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     pub lashlang_process_cache: Arc<Mutex<lashlang::CompiledProcessCache>>,
+    pub provider_resolver: Arc<dyn crate::RuntimeProviderResolver>,
     pub prompt: crate::PromptLayer,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
@@ -43,6 +44,7 @@ impl RuntimeCoreConfig {
             attachment_store,
             lashlang_artifact_store,
             lashlang_process_cache: Arc::new(Mutex::new(lashlang::CompiledProcessCache::new())),
+            provider_resolver: Arc::new(crate::EmptyProviderResolver),
             prompt: crate::PromptLayer::new(),
             trace_sink: None,
             trace_level: TraceLevel::Standard,
@@ -87,6 +89,14 @@ impl RuntimeCoreConfig {
         process_cache: Arc<Mutex<lashlang::CompiledProcessCache>>,
     ) -> Self {
         self.lashlang_process_cache = process_cache;
+        self
+    }
+
+    pub fn with_provider_resolver(
+        mut self,
+        provider_resolver: Arc<dyn crate::RuntimeProviderResolver>,
+    ) -> Self {
+        self.provider_resolver = provider_resolver;
         self
     }
 
@@ -202,6 +212,41 @@ pub(crate) struct RuntimeHost {
     /// successful process start is consumed promptly. Absent when no work runner
     /// is wired (e.g. a registry-less host); poking is then a no-op.
     pub process_work_poke: Option<ProcessWorkPoke>,
+}
+
+impl RuntimeHost {
+    pub(crate) fn resolve_session_policy(
+        &self,
+        session_id: &str,
+        policy: crate::SessionPolicy,
+    ) -> Result<crate::ResolvedSessionPolicy, crate::SessionError> {
+        let provider_id = policy.recorded_provider_id();
+        let provider = self
+            .core
+            .provider_resolver
+            .resolve_provider(provider_id)
+            .map_err(|err| match err {
+                crate::ProviderResolutionError::MissingProviderId => {
+                    crate::SessionError::ProviderUnconfigured {
+                        session_id: session_id.to_string(),
+                    }
+                }
+                crate::ProviderResolutionError::UnknownProvider { provider_id } => {
+                    crate::SessionError::ProviderUnavailable {
+                        provider_id,
+                        session_id: session_id.to_string(),
+                    }
+                }
+                crate::ProviderResolutionError::ProviderIdMismatch { expected, actual } => {
+                    crate::SessionError::ProviderMismatch {
+                        expected,
+                        actual,
+                        session_id: session_id.to_string(),
+                    }
+                }
+            })?;
+        Ok(crate::ResolvedSessionPolicy::new(policy, provider))
+    }
 }
 
 impl From<EmbeddedRuntimeHost> for RuntimeHost {

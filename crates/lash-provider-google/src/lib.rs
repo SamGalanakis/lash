@@ -1471,4 +1471,125 @@ mod tests {
             9999
         );
     }
+
+    /// Cross-provider response-normalization conformance. Wraps this crate's
+    /// (private) Gemini parsers in a `ProviderNormalizer`. Gemini materializes
+    /// tool-call arguments whole rather than streaming them across chunks, so
+    /// it opts out of the `ToolUse` chunk-assembly scenario (the suite logs the
+    /// skip) — that's a real provider difference, not a gap.
+    #[cfg(feature = "testing")]
+    mod conformance {
+        use super::*;
+        use lash_llm_transport::conformance::{
+            CanonicalUsage as U, ProviderNormalizer, ProviderWire, Scenario, StreamAssembly,
+            provider_conformance,
+        };
+
+        struct GoogleNormalizer;
+
+        impl ProviderNormalizer for GoogleNormalizer {
+            fn name(&self) -> &str {
+                "google-gemini"
+            }
+
+            fn wire_for(&self, scenario: Scenario) -> Option<ProviderWire> {
+                let wire = match scenario {
+                    Scenario::PlainTextStop => ProviderWire::body(json!({
+                        "candidates": [{
+                            "content": { "parts": [{ "text": "hello" }] },
+                            "finishReason": "STOP"
+                        }],
+                        "usageMetadata": {
+                            "promptTokenCount": U::BASE_INPUT,
+                            "candidatesTokenCount": U::BASE_OUTPUT
+                        }
+                    })),
+                    Scenario::OutputCapped => ProviderWire::body(json!({
+                        "candidates": [{
+                            "content": { "parts": [{ "text": "trunc" }] },
+                            "finishReason": "MAX_TOKENS"
+                        }]
+                    })),
+                    Scenario::ContentFilter => ProviderWire::body(json!({
+                        "candidates": [{ "content": { "parts": [] }, "finishReason": "SAFETY" }]
+                    })),
+                    // Gemini returns a complete `functionCall` (args as a whole
+                    // JSON object) rather than streaming arguments across
+                    // events, so the cross-chunk assembly scenario does not
+                    // apply. Opt out explicitly.
+                    Scenario::ToolUse => return None,
+                    Scenario::UsageCacheHit => ProviderWire::body(json!({
+                        "candidates": [{
+                            "content": { "parts": [{ "text": "ok" }] },
+                            "finishReason": "STOP"
+                        }],
+                        "usageMetadata": {
+                            "promptTokenCount": U::BASE_INPUT,
+                            "candidatesTokenCount": U::BASE_OUTPUT,
+                            "cachedContentTokenCount": U::CACHED_INPUT
+                        }
+                    })),
+                    Scenario::UsageReasoning => ProviderWire::body(json!({
+                        "candidates": [{
+                            "content": { "parts": [{ "text": "ok" }] },
+                            "finishReason": "STOP"
+                        }],
+                        "usageMetadata": {
+                            "promptTokenCount": U::BASE_INPUT,
+                            "candidatesTokenCount": U::BASE_OUTPUT,
+                            "thoughtsTokenCount": U::REASONING
+                        }
+                    })),
+                    Scenario::ReasoningExtraction => ProviderWire::body(json!({
+                        "candidates": [{
+                            "content": { "parts": [
+                                { "text": "thinking about it", "thought": true },
+                                { "text": "answer" }
+                            ] },
+                            "finishReason": "STOP"
+                        }]
+                    }))
+                    .with_reasoning_text("thinking about it"),
+                    // Gemini replaces the usage block on each streaming event
+                    // rather than merging incrementally, so the merge scenario
+                    // does not apply. Opt out explicitly.
+                    Scenario::StreamingUsageMerge => return None,
+                };
+                Some(wire)
+            }
+
+            fn parts_from_wire(&self, body: &Value) -> Vec<LlmOutputPart> {
+                GoogleOAuthProvider::response_parts_from_value(body)
+            }
+
+            fn usage_from_wire(&self, body: &Value) -> LlmUsage {
+                // `usage_from_event` reads `event.response.usageMetadata`; the
+                // unwrapped body carries `usageMetadata` at the top level, so
+                // re-wrap it exactly as the non-streaming path does.
+                let meta = body.get("usageMetadata").cloned().unwrap_or(Value::Null);
+                GoogleOAuthProvider::usage_from_event(&json!({
+                    "response": { "usageMetadata": meta }
+                }))
+            }
+
+            fn terminal_from_wire(
+                &self,
+                body: &Value,
+                parts: &[LlmOutputPart],
+            ) -> LlmTerminalReason {
+                GoogleOAuthProvider::terminal_reason_from_value(body, parts)
+            }
+
+            fn assemble_stream(&self, _sse_events: &[String]) -> StreamAssembly {
+                // Unused: Google opts out of both streaming scenarios (tool-arg
+                // chunk assembly and incremental usage merge).
+                StreamAssembly::default()
+            }
+        }
+
+        #[test]
+        fn google_satisfies_provider_conformance() {
+            provider_conformance(&GoogleNormalizer);
+        }
+    }
 }

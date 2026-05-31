@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use lash_core::{ToolCall, ToolDefinition, ToolResult, ToolRetryPolicy, ToolScheduling};
 use lash_tool_support::{
     FS_DEFAULTS_PREAMBLE, StaticToolExecute, StaticToolProvider, build_path_entry,
-    filesystem_entries_result, object_schema, parse_optional_bool, parse_optional_usize_arg,
-    rg_file_list, run_blocking,
+    filesystem_entries_output_schema, filesystem_entries_result, object_schema,
+    parse_optional_bool, parse_optional_usize_arg, rg_file_list, run_blocking,
 };
 
 /// List filesystem entries in a directory tree.
@@ -140,7 +140,7 @@ fn ls_tool_definition() -> ToolDefinition {
                     }),
                     &[],
                 ),
-                serde_json::json!({ "type": "object", "additionalProperties": true }),
+                filesystem_entries_output_schema(),
             )
             .with_examples(vec![
                 r#"await files.list({ path: ".", depth: 1, limit: 100 })?"#.into(),
@@ -203,6 +203,19 @@ mod tests {
             .and_then(|v| v.as_array())
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn ls_contract_documents_result_shape() {
+        let definition = ls_tool_definition();
+        assert_eq!(definition.contract.output_schema["type"], json!("object"));
+        assert!(definition.contract.output_schema["properties"]["items"].is_object());
+        assert!(
+            definition
+                .compact_contract()
+                .render_signature()
+                .contains("items")
+        );
     }
 
     #[tokio::test]

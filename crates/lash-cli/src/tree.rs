@@ -69,7 +69,7 @@ pub async fn switch_to_tree_selection(
     app.invalidate_height_cache();
     app.scroll_to_bottom();
 
-    let mut persistence_state = lash_core::RuntimeSessionState::from_state(state);
+    let mut persistence_state = lash_core::RuntimeSessionState::from_snapshot(state);
     persist_committed_runtime_state(logger.store().as_ref(), &mut persistence_state).await;
 
     Ok(())

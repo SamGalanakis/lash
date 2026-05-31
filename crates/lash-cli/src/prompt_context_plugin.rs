@@ -210,8 +210,8 @@ mod tests {
     use lash_core::plugin::PromptHookContext;
     use lash_core::testing::{MockSessionManager, mock_assembled_turn};
     use lash_core::{
-        PluginHost, PromptSlot, RuntimeSessionState, SessionPolicy, SessionReadView,
-        SessionSnapshot, SessionStateEnvelope,
+        PluginHost, PromptSlot, SessionPolicy, SessionReadView,
+        SessionSnapshot,
     };
 
     struct StaticInstructionSource {
@@ -230,14 +230,14 @@ mod tests {
     }
 
     fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
-        RuntimeSessionState::from_state(SessionStateEnvelope {
+        SessionSnapshot {
             session_id: "root".to_string(),
             policy: SessionPolicy {
                 session_id: Some(run_session_id.to_string()),
                 ..Default::default()
             },
             ..Default::default()
-        })
+        }
     }
 
     fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
@@ -263,7 +263,7 @@ mod tests {
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(mock_session_manager("run-session")),
-                state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
+                state: SessionReadView::from_snapshot(&SessionSnapshot::default()),
                 protocol_turn_options: lash_core::ProtocolTurnOptions::default(),
                 turn_context: lash_core::TurnContext::default(),
             })

@@ -20,7 +20,7 @@ pub(super) use trace::protocol_step_trace_event;
 
 pub(super) struct RuntimeTurnDriver<'a> {
     pub(super) session: Session,
-    pub(super) policy: SessionPolicy,
+    pub(super) policy: ResolvedSessionPolicy,
     pub(super) host: RuntimeHost,
     pub(super) effect_scope: RuntimeEffectControllerScope<'a>,
     pub(super) session_id: String,

@@ -1000,8 +1000,8 @@ fn terminal_value_text(value: &Value) -> String {
 
 fn terminal_label(record: &lash::advanced::ProcessRecord) -> String {
     record
-        .terminal
-        .as_ref()
+        .status
+        .terminal_semantics()
         .map(|terminal| format!("{:?}", terminal.state).to_ascii_lowercase())
         .unwrap_or_else(|| "running".to_string())
 }

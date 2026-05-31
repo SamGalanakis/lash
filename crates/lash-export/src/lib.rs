@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use lash_core::{ChronologicalEntry, SessionGraph, SessionMeta, SessionStateEnvelope};
+use lash_core::{ChronologicalEntry, SessionGraph, SessionMeta, SessionSnapshot};
 use lash_sqlite_store::Store;
 
 pub mod html;
@@ -63,9 +63,9 @@ pub fn load_session_from_paths(store_path: &Path, trace_path: &Path) -> Result<L
     let graph = head
         .map(|head| head.graph)
         .unwrap_or_else(|| load_graph(&store));
-    let state = SessionStateEnvelope {
+    let state = SessionSnapshot {
         session_graph: graph,
-        ..SessionStateEnvelope::default()
+        ..SessionSnapshot::default()
     };
     let chronological = state.read_view().chronological_projection().into_entries();
     let llm_prompts = trace::load_prompts_from_trace(trace_path)?;

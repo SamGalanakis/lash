@@ -151,7 +151,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
     let state = RuntimeSessionState {
         session_id: "persisted-tools".to_string(),
         policy: lash_core::SessionPolicy {
-            provider: mock_provider(),
+            provider_id: mock_provider().kind().to_string(),
             model: mock_model_spec(),
             ..Default::default()
         },

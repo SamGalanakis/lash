@@ -50,8 +50,8 @@ impl LashRuntime {
     /// Export current session state for inspection/UI purposes.
     /// This keeps persistence-heavy snapshots untouched; callers that need a
     /// fully persisted view should use `export_persisted_state`.
-    pub fn export_state(&self) -> SessionStateEnvelope {
-        self.state.export_state()
+    pub fn export_state(&self) -> crate::SessionSnapshot {
+        self.state.to_snapshot()
     }
 
     pub fn read_view(&self) -> crate::SessionReadView {
@@ -151,7 +151,7 @@ impl LashRuntime {
             checkpoint_ref: read.checkpoint_ref.clone(),
             token_ledger: merge_usage_delta_entries(read.token_ledger),
         };
-        apply_session_head(&mut self.state, &head, &self.policy.provider)?;
+        apply_session_head(&mut self.state, &head);
         apply_session_checkpoint(&mut self.state, read.checkpoint);
         self.policy = self.state.effective_policy().clone();
         self.protocol_turn_options = self.state.effective_protocol_turn_options().clone();
@@ -254,7 +254,7 @@ impl LashRuntime {
             state: self.read_view(),
             host: manager,
         };
-        let input = crate::HistoryState::from_state(&self.state.export_state());
+        let input = crate::HistoryState::from_snapshot(&self.state.to_snapshot());
         let baseline_messages = input.messages.len();
         let outcome = plugin_session
             .rewrite_history(&ctx, input)

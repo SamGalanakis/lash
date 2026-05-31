@@ -603,7 +603,7 @@ submit value
     let running_app_lookup = processes.iter().any(|(grant, record)| {
         grant.descriptor.kind.as_deref() == Some("lashlang")
             && grant.descriptor.label.as_deref() == Some("lookup")
-            && record.terminal.is_none()
+            && !record.status.is_terminal()
     });
     assert!(
         running_app_lookup,

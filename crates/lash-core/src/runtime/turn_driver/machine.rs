@@ -125,7 +125,7 @@ impl RuntimeTurnDriver<'_> {
             .turn_pipeline
             .progress_boundary(
                 &mut self.session,
-                self.policy.clone(),
+                self.policy.policy.clone(),
                 self.turn_index,
                 messages,
                 event_delta,

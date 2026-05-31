@@ -230,6 +230,7 @@ impl FieldDoc {
 }
 
 pub(crate) fn schema_parameter_docs(schema: &serde_json::Value) -> Vec<ParameterDoc> {
+    let schema = resolve_schema_refs(schema);
     let required_order = schema
         .get("required")
         .and_then(serde_json::Value::as_array)
@@ -270,12 +271,76 @@ pub(crate) fn schema_parameter_docs(schema: &serde_json::Value) -> Vec<Parameter
 }
 
 pub(crate) fn return_field_metadata(schema: &serde_json::Value) -> Vec<serde_json::Value> {
+    let schema = resolve_schema_refs(schema);
     let mut fields = Vec::new();
-    collect_return_fields("", schema, true, &mut fields);
+    collect_return_fields("", &schema, true, &mut fields);
     merge_return_fields(fields)
         .into_iter()
         .map(FieldDoc::into_value)
         .collect()
+}
+
+fn resolve_schema_refs(schema: &serde_json::Value) -> serde_json::Value {
+    let mut resolving = Vec::new();
+    resolve_schema_ref_value(schema, schema, &mut resolving)
+}
+
+fn resolve_schema_ref_value(
+    root: &serde_json::Value,
+    schema: &serde_json::Value,
+    resolving: &mut Vec<String>,
+) -> serde_json::Value {
+    match schema {
+        serde_json::Value::Object(map) => {
+            if let Some(reference) = map.get("$ref").and_then(serde_json::Value::as_str)
+                && let Some(pointer) = reference.strip_prefix('#')
+            {
+                if resolving.iter().any(|active| active == reference) {
+                    return serde_json::json!({});
+                }
+                if let Some(target) = root.pointer(pointer) {
+                    resolving.push(reference.to_string());
+                    let mut resolved = resolve_schema_ref_value(root, target, resolving);
+                    resolving.pop();
+
+                    let sibling_count = map.keys().filter(|key| key.as_str() != "$ref").count();
+                    if sibling_count == 0 {
+                        return resolved;
+                    }
+                    if let serde_json::Value::Object(resolved_map) = &mut resolved {
+                        for (key, value) in map {
+                            if key == "$ref" {
+                                continue;
+                            }
+                            resolved_map.insert(
+                                key.clone(),
+                                resolve_schema_ref_value(root, value, resolving),
+                            );
+                        }
+                        return resolved;
+                    }
+                }
+            }
+
+            serde_json::Value::Object(
+                map.iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            resolve_schema_ref_value(root, value, resolving),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .map(|value| resolve_schema_ref_value(root, value, resolving))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 fn collect_return_fields(
@@ -606,6 +671,11 @@ fn schema_type_label(schema: &serde_json::Value) -> String {
 }
 
 pub(crate) fn compact_schema_label(schema: &serde_json::Value) -> String {
+    let schema = resolve_schema_refs(schema);
+    compact_schema_label_resolved(&schema)
+}
+
+fn compact_schema_label_resolved(schema: &serde_json::Value) -> String {
     if let Some(any_of) = schema
         .get("anyOf")
         .or_else(|| schema.get("oneOf"))
@@ -613,7 +683,7 @@ pub(crate) fn compact_schema_label(schema: &serde_json::Value) -> String {
     {
         let labels = any_of
             .iter()
-            .map(compact_schema_label)
+            .map(compact_schema_label_resolved)
             .collect::<std::collections::BTreeSet<_>>();
         let joined = labels.into_iter().collect::<Vec<_>>().join(" | ");
         return if joined.is_empty() {
@@ -628,7 +698,7 @@ pub(crate) fn compact_schema_label(schema: &serde_json::Value) -> String {
             .iter()
             .filter_map(serde_json::Value::as_str)
             .filter(|ty| *ty != "null")
-            .map(|ty| compact_schema_label(&serde_json::json!({ "type": ty })))
+            .map(|ty| compact_schema_label_resolved(&serde_json::json!({ "type": ty })))
             .collect::<std::collections::BTreeSet<_>>();
         let mut out = if labels.is_empty() {
             "any".to_string()
@@ -644,7 +714,7 @@ pub(crate) fn compact_schema_label(schema: &serde_json::Value) -> String {
     match schema.get("type").and_then(serde_json::Value::as_str) {
         Some("array") => schema
             .get("items")
-            .map(compact_schema_label)
+            .map(compact_schema_label_resolved)
             .filter(|value| !value.is_empty())
             .map(|item| format!("list[{item}]"))
             .unwrap_or_else(|| "list[any]".to_string()),

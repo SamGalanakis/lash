@@ -7,6 +7,7 @@ pub struct SessionBuilder {
     pub(crate) mode: Option<ModeId>,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) store: Option<Arc<dyn RuntimePersistence>>,
+    pub(crate) provider: Option<ProviderHandle>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
     pub(crate) plugin_factories: Vec<Arc<dyn PluginFactory>>,
 }
@@ -28,7 +29,8 @@ impl SessionBuilder {
     }
 
     pub fn provider(mut self, provider: ProviderHandle) -> Self {
-        self.spec = self.spec.provider(provider);
+        self.spec = self.spec.provider_id(provider.kind());
+        self.provider = Some(provider);
         self
     }
 
@@ -227,6 +229,11 @@ impl SessionBuilder {
         store: Option<Arc<dyn RuntimePersistence>>,
     ) -> Result<LashSession> {
         let mut env = self.core.env.clone();
+        if let Some(provider) = self.provider.clone().or_else(|| self.core.provider.clone()) {
+            env.core = env
+                .core
+                .with_provider_resolver(Arc::new(lash_core::SingleProviderResolver::new(provider)));
+        }
         let plugin_host = build_plugin_host_for_mode(
             &self.core.modes,
             &mode,

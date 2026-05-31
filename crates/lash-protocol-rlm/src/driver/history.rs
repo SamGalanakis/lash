@@ -1,3 +1,26 @@
+//! RLM history rendering: turns the chronological turn view into the LLM
+//! message sequence the model sees each iteration.
+//!
+//! Contract:
+//! - **Message roles.** Each prior step is a chat message, not one packed
+//!   blob. User messages and tool calls render as `User`; prior RLM steps and
+//!   protocol events render as `Assistant` (see `borrowed_history_entry_llm_role`).
+//! - **Cache fence.** The last history message is marked with a
+//!   `cache_breakpoint` (`mark_last_history_text_cache_breakpoint`) so the
+//!   provider can reuse the stable history prefix across iterations. Only the
+//!   volatile `=== CURRENT ITERATION ===` tail — iteration number, turn
+//!   events, finalization, required-output schema, context budget — is appended
+//!   uncached by `append_current_iteration_message`.
+//! - **Re-fetch handle.** Outputs longer than `max_output_chars` are
+//!   head/tail truncated and tagged with `full: history[N].output[M]`
+//!   (`truncated_ref`). That handle resolves: the `history` projected binding
+//!   carries the full untruncated value, so the model can recover it by
+//!   re-printing the reference. Proven by
+//!   `projection::context::tests::history_step_output_resolves_full_untruncated_value`.
+//! - **Variables.** The live variable namespace is surfaced separately as the
+//!   "Bound Variables" prompt contribution (`crate::rlm_support::render_bound_variables`),
+//!   not here — history carries the trajectory, not current globals.
+
 use std::collections::HashSet;
 use std::{fmt::Write as _, sync::Arc};
 

@@ -88,7 +88,7 @@ impl UsageCapability {
 
     pub(in crate::runtime::session_manager) fn merge_drained_token_ledger(
         &self,
-        state: &mut SessionSnapshot,
+        state: &mut RuntimeSessionState,
     ) -> Vec<TokenLedgerEntry> {
         let drained = self.drain_token_ledger();
         for entry in drained.iter().cloned() {

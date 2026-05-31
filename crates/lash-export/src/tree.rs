@@ -344,9 +344,9 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
 }
 
 fn build_chronological(graph: SessionGraph) -> Vec<ChronologicalEntry> {
-    let state = lash_core::SessionStateEnvelope {
+    let state = lash_core::SessionSnapshot {
         session_graph: graph,
-        ..lash_core::SessionStateEnvelope::default()
+        ..lash_core::SessionSnapshot::default()
     };
     state.read_view().chronological_projection().into_entries()
 }

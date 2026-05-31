@@ -21,8 +21,8 @@ use crate::provider::{Provider, ProviderComponents, ProviderHandle, ProviderMode
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, ExecutionSummary, ModelSpec, OutputState, ProcessRegistry,
-    ProviderOptions, RuntimeSessionState, SessionPolicy, SessionStateEnvelope, TokenUsage,
-    TurnFinish, TurnInput, TurnOutcome, TurnStop, UnavailableProcessService,
+    ProviderOptions, RuntimeSessionState, SessionPolicy, TokenUsage, TurnFinish, TurnInput,
+    TurnOutcome, TurnStop, UnavailableProcessService,
 };
 
 type CompletionFuture =
@@ -203,13 +203,7 @@ impl ProviderModelPolicy for TestProvider {
 /// + model used by lash's in-tree tests.
 pub fn mock_session_policy() -> SessionPolicy {
     SessionPolicy {
-        provider: TestProvider::builder()
-            .kind("stub")
-            .complete_error(
-                "TestProvider::complete was called; tests must supply a real provider or mock",
-            )
-            .build()
-            .into_handle(),
+        provider_id: "stub".to_string(),
         model: ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
             .expect("valid mock model spec"),
         ..Default::default()
@@ -348,7 +342,7 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
 /// Build an empty `AssembledTurn` whose assistant text is `summary`.
 pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
     AssembledTurn {
-        state: SessionStateEnvelope {
+        state: SessionSnapshot {
             session_id: session_id.to_string(),
             policy: SessionPolicy::default(),
             ..Default::default()
@@ -389,7 +383,7 @@ pub struct MockSessionManager {
 impl Default for MockSessionManager {
     fn default() -> Self {
         Self {
-            snapshot: RuntimeSessionState::default(),
+            snapshot: RuntimeSessionState::default().to_snapshot(),
             tool_catalog: Vec::new(),
             turn: mock_assembled_turn("root", ""),
             tool_registry: None,

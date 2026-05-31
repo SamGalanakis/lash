@@ -22,7 +22,7 @@ pub(crate) use lash_core::{
     PluginMessage, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistry, ProcessScope,
     ProtocolTurnOptions, ProviderHandle, Residency, RewriteTrigger, RuntimeEffectController,
     RuntimeEffectControllerScope, RuntimeErrorCode, RuntimePersistence, SessionCreateRequest,
-    SessionError, SessionHandle, SessionReadView, SessionStateEnvelope, SessionStoreCreateRequest,
+    SessionError, SessionHandle, SessionReadView, SessionSnapshot, SessionStoreCreateRequest,
     SessionStoreFactory, SessionUsageReport, TerminationPolicy, ToolAvailability, ToolCallRecord,
     ToolManifest, ToolProvider, ToolResult, ToolSourceHandle, TurnActivitySink, TurnOutcome,
 };

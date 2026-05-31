@@ -28,7 +28,6 @@ pub struct TextProjectionMetadata {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExecResponse {
-    pub output: String,
     pub observations: Vec<String>,
     pub observation_truncation: Vec<TextProjectionMetadata>,
     pub tool_calls: Vec<ToolCallRecord>,

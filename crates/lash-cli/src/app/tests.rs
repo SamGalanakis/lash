@@ -88,11 +88,11 @@ fn test_read_view(
         .cloned()
         .collect::<Vec<_>>();
     graph.append_active_read_delta(&missing_messages, tool_calls);
-    let state = lash_core::SessionStateEnvelope {
+    let state = lash_core::SessionSnapshot {
         session_graph: graph,
-        ..lash_core::SessionStateEnvelope::default()
+        ..lash_core::SessionSnapshot::default()
     };
-    lash_core::SessionReadView::from_exported_state(&state)
+    lash_core::SessionReadView::from_snapshot(&state)
 }
 
 fn timeline_items_from_test_read_view(

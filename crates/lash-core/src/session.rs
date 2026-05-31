@@ -81,6 +81,11 @@ pub enum SessionError {
     },
     #[error("provider is not configured for session `{session_id}`")]
     ProviderUnconfigured { session_id: String },
+    #[error("provider `{provider_id}` is not registered for session `{session_id}`")]
+    ProviderUnavailable {
+        provider_id: String,
+        session_id: String,
+    },
     #[error("protocol error: {0}")]
     Protocol(String),
 }

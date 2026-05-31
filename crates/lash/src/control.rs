@@ -89,8 +89,8 @@ impl SessionControl {
         .await
     }
 
-    async fn export_state(&self) -> lash_core::SessionStateEnvelope {
-        self.runtime.observe().read_view.to_owned_state()
+    async fn export_state(&self) -> lash_core::SessionSnapshot {
+        self.runtime.observe().read_view.to_snapshot()
     }
 
     async fn append_messages(&self, messages: Vec<PluginMessage>) -> Result<()> {
@@ -195,7 +195,7 @@ impl SessionControl {
     async fn branch_to_node(
         &self,
         target_leaf: Option<String>,
-    ) -> Result<lash_core::SessionStateEnvelope> {
+    ) -> Result<lash_core::SessionSnapshot> {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
                 .branch_to_node(target_leaf)
@@ -796,7 +796,7 @@ pub struct StateControl {
 }
 
 impl StateControl {
-    pub async fn export(&self) -> lash_core::SessionStateEnvelope {
+    pub async fn export(&self) -> lash_core::SessionSnapshot {
         self.control.export_state().await
     }
 
@@ -819,7 +819,7 @@ impl StateControl {
     pub async fn branch_to_node(
         &self,
         target_leaf: Option<String>,
-    ) -> Result<lash_core::SessionStateEnvelope> {
+    ) -> Result<lash_core::SessionSnapshot> {
         self.control.branch_to_node(target_leaf).await
     }
 

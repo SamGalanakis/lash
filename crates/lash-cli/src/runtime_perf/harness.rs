@@ -4,7 +4,7 @@ use lash::{
     LashCore, ModeId, ModePreset,
     advanced::{PluginMessage, TurnOutcome},
     messages::MessageRole,
-    persistence::SessionStateEnvelope,
+    persistence::SessionSnapshot,
     plugins::{PluginSpec, StaticPluginFactory},
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
 };
@@ -160,7 +160,7 @@ impl BenchmarkRuntime {
         Ok(())
     }
 
-    pub(crate) async fn export_state(&self) -> SessionStateEnvelope {
+    pub(crate) async fn export_state(&self) -> SessionSnapshot {
         self.session
             .as_ref()
             .expect("benchmark session")

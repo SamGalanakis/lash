@@ -162,12 +162,12 @@ CREATE TABLE IF NOT EXISTS processes (
     host_profile_id       TEXT NOT NULL,
     created_at_ms         INTEGER NOT NULL,
     updated_at_ms         INTEGER NOT NULL,
-    terminal_state        TEXT,
+    status                TEXT NOT NULL,
     record_json           TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_processes_terminal_state
-    ON processes(terminal_state);
+CREATE INDEX IF NOT EXISTS idx_processes_status
+    ON processes(status);
 
 CREATE TABLE IF NOT EXISTS process_events (
     process_id        TEXT NOT NULL,
@@ -219,7 +219,7 @@ CREATE TABLE IF NOT EXISTS process_leases (
 
 ";
 
-pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 5;
+pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StoreBacking {

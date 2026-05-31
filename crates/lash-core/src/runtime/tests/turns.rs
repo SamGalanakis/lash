@@ -101,12 +101,62 @@ async fn session_config_change_hook_receives_context_window_updates() {
     let changes = observed.lock().await;
     assert_eq!(changes.len(), 1);
     let (previous, current) = &changes[0];
-    assert_eq!(previous.provider.kind(), "mock");
-    assert_eq!(current.provider.kind(), "alt");
+    assert_eq!(previous.provider_id, "mock");
+    assert_eq!(current.provider_id, "alt");
     assert_eq!(current.model.id, "alt-model");
     assert_ne!(
         previous.context_window_tokens(),
         current.context_window_tokens()
+    );
+}
+
+#[tokio::test]
+async fn turn_provider_override_does_not_persist_into_session_policy_or_agent_frame() {
+    let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
+    let alt_provider = TestProvider::builder()
+        .kind("alt")
+        .complete(|_| async {
+            Ok(LlmResponse {
+                full_text: "alt response".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "alt response".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            })
+        })
+        .build()
+        .into_handle();
+    let mut turn_context = crate::TurnContext::default();
+    turn_context.set_provider(alt_provider);
+
+    let turn = runtime
+        .run_turn_assembled(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "use override".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                protocol_turn_options: None,
+                trace_turn_id: None,
+                protocol_extension: None,
+                turn_context,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    assert_eq!(turn.assistant_output.safe_text, "alt response");
+    assert_eq!(turn.state.policy.recorded_provider_id(), "mock");
+    assert_eq!(runtime.policy.recorded_provider_id(), "mock");
+    assert_eq!(runtime.state.policy.recorded_provider_id(), "mock");
+    assert!(
+        runtime.state.agent_frames.iter().all(|frame| frame
+            .assignment
+            .policy
+            .recorded_provider_id()
+            == "mock")
     );
 }
 

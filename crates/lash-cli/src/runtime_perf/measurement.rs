@@ -1171,26 +1171,29 @@ fn process_list_stress_registration(
 }
 
 fn process_list_tool_payload(entries: &[lash_core::ProcessHandleGrantEntry]) -> serde_json::Value {
-    let entries = entries
-        .iter()
-        .map(|(grant, process)| {
-            serde_json::json!({
-                "process_id": process.id.as_str(),
-                "descriptor": &grant.descriptor,
-                "terminal": process_terminal_label(process.terminal.as_ref()),
+    serde_json::Value::Array(
+        entries
+            .iter()
+            .map(|(grant, process)| {
+                let mut handle = lash_core::lashlang_bridge::process_handle_json(&process.id);
+                if let Some(object) = handle.as_object_mut() {
+                    object.insert(
+                        "process_id".to_string(),
+                        serde_json::json!(process.id.as_str()),
+                    );
+                    object.insert(
+                        "descriptor".to_string(),
+                        serde_json::json!(&grant.descriptor),
+                    );
+                    object.insert(
+                        "status".to_string(),
+                        serde_json::json!(process.status.label()),
+                    );
+                }
+                handle
             })
-        })
-        .collect::<Vec<_>>();
-    serde_json::json!({ "processes": entries })
-}
-
-fn process_terminal_label(terminal: Option<&lash_core::ProcessTerminalSemantics>) -> &'static str {
-    match terminal.map(|terminal| terminal.state) {
-        None => "running",
-        Some(lash_core::ProcessTerminalState::Completed) => "completed",
-        Some(lash_core::ProcessTerminalState::Failed) => "failed",
-        Some(lash_core::ProcessTerminalState::Cancelled) => "cancelled",
-    }
+            .collect(),
+    )
 }
 
 const OPENAI_RESPONSES_SSE_CHUNK_COUNT: usize = 256;
@@ -1919,7 +1922,6 @@ fn checkpoint_pending_exec(
     restored.handle_response(Response::ExecResult {
         id,
         result: Ok(ExecResponse {
-            output: "runtime perf benchmark ok".to_string(),
             observations: vec![
                 "checkpoint observation: resumed after ExecCode effect boundary".to_string(),
             ],

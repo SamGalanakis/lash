@@ -799,11 +799,11 @@ mod fork_tests {
             .turn_state;
         assert_eq!(child_turn.turn_index, 1);
 
-        let child_state = lash_core::SessionStateEnvelope {
+        let child_state = lash_core::SessionSnapshot {
             session_graph: child_graph,
-            ..lash_core::SessionStateEnvelope::default()
+            ..lash_core::SessionSnapshot::default()
         };
-        let child_view = lash_core::SessionReadView::from_exported_state(&child_state);
+        let child_view = lash_core::SessionReadView::from_snapshot(&child_state);
         assert_eq!(child_view.messages().len(), 1);
         assert_eq!(child_view.messages()[0].parts[0].content, "hello");
     }

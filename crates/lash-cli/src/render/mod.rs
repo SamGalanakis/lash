@@ -270,7 +270,7 @@ pub fn process_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'
         theme::text_faint_style().add_modifier(Modifier::Dim),
     )]));
     for task in &app.processes {
-        let state = match task.terminal {
+        let state = match task.status.terminal_state() {
             None => "running",
             Some(lash_core::ProcessTerminalState::Completed) => "success",
             Some(lash_core::ProcessTerminalState::Failed) => "error",
@@ -278,12 +278,12 @@ pub fn process_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'
         };
         let producer = task.kind.as_str();
         let elapsed_duration = task
-            .terminal_duration
+            .status_duration
             .unwrap_or_else(|| task.first_seen.elapsed());
         let elapsed =
             crate::util::format_duration_ms_if_visible(elapsed_duration.as_millis() as u64)
                 .unwrap_or_else(|| "0:00".to_string());
-        let state_style = match task.terminal {
+        let state_style = match task.status.terminal_state() {
             None => theme::turn_status_state(),
             Some(lash_core::ProcessTerminalState::Completed) => theme::tool_success(),
             Some(lash_core::ProcessTerminalState::Failed)

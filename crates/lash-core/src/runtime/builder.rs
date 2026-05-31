@@ -175,6 +175,14 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    pub fn with_provider_resolver(
+        mut self,
+        provider_resolver: Arc<dyn crate::RuntimeProviderResolver>,
+    ) -> Self {
+        self.core = self.core.with_provider_resolver(provider_resolver);
+        self
+    }
+
     pub fn with_session_store_factory(
         mut self,
         session_store_factory: Arc<dyn SessionStoreFactory>,
@@ -229,7 +237,6 @@ impl EmbeddedRuntimeBuilder {
                 }
                 if let Some(policy) = &self.policy {
                     let recorded_provider_id = state.policy.recorded_provider_id().to_string();
-                    state.policy.provider = policy.provider.clone();
                     state.policy.provider_id = recorded_provider_id;
                     state.policy.session_id = policy.session_id.clone();
                     if state.policy.model.id.trim().is_empty() {
@@ -254,7 +261,6 @@ impl EmbeddedRuntimeBuilder {
                 }
                 if let Some(policy) = &self.policy {
                     let recorded_provider_id = state.policy.recorded_provider_id().to_string();
-                    state.policy.provider = policy.provider.clone();
                     state.policy.provider_id = recorded_provider_id;
                     state.policy.session_id = policy.session_id.clone();
                     if state.policy.model.id.trim().is_empty() {

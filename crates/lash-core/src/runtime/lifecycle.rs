@@ -20,19 +20,12 @@ impl LashRuntime {
         if state.session_id.is_empty() {
             state.session_id = uuid::Uuid::new_v4().to_string();
         }
-        // Provider configuration is validated lazily, not at construction: a
-        // runtime rebuilt only to run a tool/lashlang process makes no LLM call
-        // and needs no provider, and an unconfigured provider used for a real
-        // turn fails clearly at the call site (the default `ProviderHandle`
-        // `complete` returns "no provider configured"). Rejecting unconfigured
-        // here breaks durable-worker recovery of non-LLM processes.
-        let live_provider = policy.provider.clone();
         // Defaulted state (e.g. `RuntimeSessionState::default()` used
-        // by fresh-session constructors) carries an unconfigured policy.
+        // by fresh-session constructors) carries an empty policy.
         // Fill it in from the caller's policy so tests and hosts that
-        // pass a real policy alongside default state don't trip the
-        // explicit model-spec guard below.
-        let state_policy_was_unconfigured = state.policy.recorded_provider_id() == "unconfigured"
+        // pass a real policy alongside default state don't trip the explicit
+        // model-spec guard below.
+        let state_policy_was_unconfigured = state.policy.recorded_provider_id().is_empty()
             && state.policy.model.id.trim().is_empty();
         if state_policy_was_unconfigured {
             state.policy = policy.clone();
@@ -40,12 +33,11 @@ impl LashRuntime {
         state.ensure_agent_frame_initialized();
         let state_policy = state.policy.clone();
         if let Some(frame) = state.current_agent_frame_mut()
-            && frame.assignment.policy.recorded_provider_id() == "unconfigured"
+            && frame.assignment.policy.recorded_provider_id().is_empty()
             && frame.assignment.policy.model.id.trim().is_empty()
         {
             frame.assignment.policy = state_policy;
         }
-        state.rebind_provider(&live_provider)?;
         state.policy = state.effective_policy().clone();
         state.protocol_turn_options = state.effective_protocol_turn_options().clone();
         normalize_session_graph(&mut state);

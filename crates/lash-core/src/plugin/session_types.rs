@@ -13,7 +13,88 @@ pub struct SessionHandle {
     pub policy: SessionPolicy,
 }
 
-pub type SessionSnapshot = RuntimeSessionState;
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SessionSnapshot {
+    pub session_id: String,
+    #[serde(default)]
+    pub policy: SessionPolicy,
+    #[serde(default)]
+    pub agent_frames: Vec<AgentFrameRecord>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub current_agent_frame_id: AgentFrameId,
+    #[serde(default)]
+    pub session_graph: crate::SessionGraph,
+    #[serde(default)]
+    pub turn_index: usize,
+    #[serde(default)]
+    pub token_usage: crate::TokenUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_usage: Option<crate::PromptUsage>,
+    #[serde(default)]
+    pub protocol_turn_options: ProtocolTurnOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_state_ref: Option<crate::store::BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_state_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_snapshot_ref: Option<crate::store::BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_snapshot_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state_ref: Option<crate::store::BlobRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_ledger: Vec<crate::TokenLedgerEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_ref: Option<crate::store::BlobRef>,
+}
+
+impl SessionSnapshot {
+    pub(crate) fn read_model(&self) -> crate::session_graph::SessionReadModel {
+        let current_agent_frame_is_initial = self
+            .agent_frames
+            .iter()
+            .find(|frame| frame.frame_id == self.current_agent_frame_id)
+            .map(|frame| frame.previous_frame_id.is_none())
+            .unwrap_or(true);
+        self.session_graph.read_model_for_agent_frame(
+            &self.current_agent_frame_id,
+            current_agent_frame_is_initial,
+        )
+    }
+
+    pub fn read_view(&self) -> crate::SessionReadView {
+        crate::SessionReadView::from_snapshot(self)
+    }
+
+    pub fn replace_active_read_state(
+        &mut self,
+        messages: &[crate::Message],
+        tool_calls: &[crate::ToolCallRecord],
+    ) {
+        self.session_graph
+            .replace_active_read_state_for_agent_frame(
+                &self.current_agent_frame_id,
+                messages,
+                tool_calls,
+            );
+    }
+
+    pub fn replace_active_tool_calls(&mut self, tool_calls: &[crate::ToolCallRecord]) {
+        self.session_graph.replace_active_tool_calls(tool_calls);
+    }
+
+    pub fn append_active_read_delta(
+        &mut self,
+        messages: &[crate::Message],
+        tool_calls: &[crate::ToolCallRecord],
+    ) {
+        self.session_graph.append_active_read_delta_for_agent_frame(
+            &self.current_agent_frame_id,
+            messages,
+            tool_calls,
+        );
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

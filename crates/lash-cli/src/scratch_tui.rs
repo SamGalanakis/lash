@@ -694,7 +694,7 @@ fn process_summary(app: &App) -> Option<String> {
     let running = app
         .processes
         .iter()
-        .filter(|task| task.terminal.is_none())
+        .filter(|task| !task.status.is_terminal())
         .count();
     match running {
         0 => None,

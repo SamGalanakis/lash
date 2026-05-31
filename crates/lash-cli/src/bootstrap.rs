@@ -592,7 +592,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let prompt_layer = cli_prompt_config(autonomous, &execution_mode);
     let session_policy = SessionPolicy {
         model: model_spec,
-        provider: active_provider.clone(),
+        provider_id: active_provider.kind().to_string(),
         session_id: run_session_id.clone(),
         autonomous,
         prompt: prompt_layer.clone(),
@@ -644,6 +644,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         plugin_stack.clone(),
         prompt_layer,
         Arc::new(FileAttachmentStore::new(crate::paths::attachments_dir())),
+        active_provider.clone(),
         trace_path,
         trace_level,
         Arc::new(

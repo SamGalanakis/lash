@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use lash::{LashCore, LashSession, ModeId, ModePreset, PluginStack};
+use lash_core::provider::ProviderHandle;
 use lash_core::{
     AttachmentStore, PersistedSessionConfig, ProcessRegistry, RuntimePersistence,
     RuntimeSessionState, SessionGraph, SessionHead, SessionPolicy,
@@ -58,6 +59,7 @@ pub(crate) struct CliSessionOpener {
     plugin_stack: PluginStack,
     prompt_layer: lash_core::PromptLayer,
     attachment_store: Arc<dyn AttachmentStore>,
+    provider: ProviderHandle,
     trace_jsonl_path: Option<PathBuf>,
     trace_level: lash::tracing::TraceLevel,
     process_registry: Arc<dyn ProcessRegistry>,
@@ -237,6 +239,7 @@ impl CliSessionOpener {
         plugin_stack: PluginStack,
         prompt_layer: lash_core::PromptLayer,
         attachment_store: Arc<dyn AttachmentStore>,
+        provider: ProviderHandle,
         trace_jsonl_path: Option<PathBuf>,
         trace_level: lash::tracing::TraceLevel,
         process_registry: Arc<dyn ProcessRegistry>,
@@ -245,6 +248,7 @@ impl CliSessionOpener {
             plugin_stack,
             prompt_layer,
             attachment_store,
+            provider,
             trace_jsonl_path,
             trace_level,
             process_registry,
@@ -283,7 +287,7 @@ impl CliSessionOpener {
             .install_mode(ModePreset::standard())
             .install_mode(ModePreset::rlm())
             .default_mode(host_config.execution_mode.clone())
-            .provider(policy.provider.clone())
+            .provider(self.provider.clone())
             .model(policy.model.clone())
             .child_store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
                 bootstrap.sessions_dir().to_path_buf(),

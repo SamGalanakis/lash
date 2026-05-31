@@ -21,15 +21,17 @@ impl LashRuntime {
 
     /// Update provider on the runtime config.
     pub fn set_provider(&mut self, provider: ProviderHandle) {
-        self.policy.install_provider(provider);
-        self.state
-            .policy
-            .install_provider(self.policy.provider.clone());
+        self.host.core = self
+            .host
+            .core
+            .clone()
+            .with_provider_resolver(std::sync::Arc::new(crate::SingleProviderResolver::new(
+                provider.clone(),
+            )));
+        self.policy.provider_id = provider.kind().to_string();
+        self.state.policy.provider_id = self.policy.provider_id.clone();
         if let Some(frame) = self.state.current_agent_frame_mut() {
-            frame
-                .assignment
-                .policy
-                .install_provider(self.policy.provider.clone());
+            frame.assignment.policy.provider_id = self.policy.provider_id.clone();
         }
     }
 
@@ -50,7 +52,7 @@ impl LashRuntime {
     ) {
         let previous = self.session_policy();
         if let Some(provider) = provider {
-            self.policy.install_provider(provider);
+            self.set_provider(provider);
         }
         if let Some(model) = model {
             self.policy.model = model;

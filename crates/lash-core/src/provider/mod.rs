@@ -14,6 +14,7 @@ mod handle;
 mod model_policy;
 mod options;
 mod rate_limit;
+mod resolver;
 mod spec;
 mod support;
 #[cfg(test)]
@@ -30,6 +31,10 @@ pub use options::{
     ResolvedGenerationPolicy, resolve_generation_policy,
 };
 pub use rate_limit::{ProviderRateLimitPermit, ProviderRateLimiter};
+pub use resolver::{
+    EmptyProviderResolver, MapProviderResolver, ProviderResolutionError, RuntimeProviderResolver,
+    SingleProviderResolver,
+};
 pub use spec::ProviderSpec;
 pub use traits::{
     DefaultProviderFailureClassifier, Provider, ProviderFailureClassifier, ProviderModelPolicy,

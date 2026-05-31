@@ -975,7 +975,6 @@ fn recovery_worker(
             registry,
         )
         .with_session_policy(lash_core::SessionPolicy {
-            provider: lash_core::ProviderHandle::default(),
             model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
                 .expect("model spec"),
             ..lash_core::SessionPolicy::default()
@@ -1096,7 +1095,6 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
             session_id: "root".to_string(),
             relation: lash_core::SessionRelation::default(),
             policy: lash_core::SessionPolicy {
-                provider: lash_core::ProviderHandle::default(),
                 model: lash_core::ModelSpec::from_token_limits(
                     "mock-model",
                     None,

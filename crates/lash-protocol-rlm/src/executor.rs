@@ -70,7 +70,6 @@ async fn execute_code_inner(
         Ok(program) => program,
         Err(err) => {
             return ExecResponse {
-                output: String::new(),
                 observations: Vec::new(),
                 observation_truncation: Vec::new(),
                 tool_calls: Vec::new(),
@@ -86,7 +85,6 @@ async fn execute_code_inner(
         Ok(linked) => linked,
         Err(err) => {
             return ExecResponse {
-                output: String::new(),
                 observations: Vec::new(),
                 observation_truncation: Vec::new(),
                 tool_calls: Vec::new(),
@@ -103,7 +101,6 @@ async fn execute_code_inner(
             Ok(report) => Some(format_trigger_install_observation(&report)),
             Err(err) => {
                 return ExecResponse {
-                    output: String::new(),
                     observations: Vec::new(),
                     observation_truncation: Vec::new(),
                     tool_calls: Vec::new(),
@@ -120,7 +117,6 @@ async fn execute_code_inner(
     };
     if let Err(err) = ctx.put_lashlang_module_artifact(&linked.artifact) {
         return ExecResponse {
-            output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
@@ -135,7 +131,6 @@ async fn execute_code_inner(
         && let Some(observation) = trigger_observation.clone()
     {
         return ExecResponse {
-            output: String::new(),
             observations: vec![observation],
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
@@ -152,7 +147,6 @@ async fn execute_code_inner(
         rehydrate_projected_globals(&mut state.rlm, Arc::clone(&projection_resolver)).await
     {
         return ExecResponse {
-            output: String::new(),
             observations: trigger_observation.into_iter().collect(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
@@ -169,7 +163,6 @@ async fn execute_code_inner(
             Ok(projected) => projected,
             Err(err) => {
                 return ExecResponse {
-                    output: String::new(),
                     observations: trigger_observation.into_iter().collect(),
                     observation_truncation: Vec::new(),
                     tool_calls: Vec::new(),
@@ -206,7 +199,6 @@ async fn execute_code_inner(
                 collected.observations.insert(0, observation);
             }
             return ExecResponse {
-                output: String::new(),
                 observations: collected.observations,
                 observation_truncation: collected.observation_truncation,
                 tool_calls: collected.tool_calls,
@@ -224,7 +216,6 @@ async fn execute_code_inner(
                 collected.observations.insert(0, observation);
             }
             return ExecResponse {
-                output: String::new(),
                 observations: collected.observations,
                 observation_truncation: collected.observation_truncation,
                 tool_calls: collected.tool_calls,
@@ -245,7 +236,6 @@ async fn execute_code_inner(
         collected.observations.insert(0, observation);
     }
     ExecResponse {
-        output: String::new(),
         observations: collected.observations,
         observation_truncation: collected.observation_truncation,
         tool_calls: collected.tool_calls,

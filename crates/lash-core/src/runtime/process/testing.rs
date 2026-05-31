@@ -352,8 +352,8 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             });
         }
         let event = prepared.event;
-        if let Some(terminal) = prepared.terminal_update.clone() {
-            record.record.terminal = Some(terminal);
+        if let Some(status) = prepared.status_update.clone() {
+            record.record.status = status;
         }
         record.record.updated_at_ms = prepared.occurred_at_ms;
         record.events.push(event.clone());
@@ -447,12 +447,8 @@ impl ProcessRegistry for TestLocalProcessRegistry {
                         "unknown process `{process_id}`"
                     )));
                 };
-                if let Some(terminal) = record
-                    .events
-                    .iter()
-                    .find_map(|event| event.semantics.terminal.clone())
-                {
-                    return Ok(terminal.await_output);
+                if let Some(await_output) = record.record.status.await_output() {
+                    return Ok(await_output.clone());
                 }
                 Arc::clone(&record.notify)
             };

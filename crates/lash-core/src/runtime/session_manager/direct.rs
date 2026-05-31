@@ -162,13 +162,13 @@ impl DirectCompletionCapability {
     fn plan_direct_effect(
         &self,
         context: &DirectInvocationContext<'_>,
+        provider: crate::ProviderHandle,
         request: crate::LlmRequest,
         usage_source: &str,
         replay: Option<&crate::RuntimeReplay>,
         caused_by: Option<&crate::CausalRef>,
     ) -> Result<DirectEffectPlan, crate::PluginError> {
         let current = context.current;
-        let provider = current.policy.provider.clone();
         let usage_source = usage_source.to_string();
         let request_spec = crate::LlmRequestSpec::from_request(
             &request,
@@ -245,7 +245,8 @@ impl DirectCompletionCapability {
         request: crate::DirectRequest,
         usage_source: &str,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
-        let provider = &context.current.policy.provider;
+        let resolved = context.current.resolve_policy()?;
+        let provider = &resolved.provider;
         let model = request.model.clone();
         if let Some(variant) = request.model_variant.as_deref() {
             provider
@@ -257,6 +258,7 @@ impl DirectCompletionCapability {
         let normalized = crate::direct::build_llm_request(provider, request, model);
         let plan = self.plan_direct_effect(
             &context,
+            resolved.provider,
             normalized,
             usage_source,
             replay.as_ref(),
@@ -275,7 +277,15 @@ impl DirectCompletionCapability {
         request: crate::LlmRequest,
         usage_source: &str,
     ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
-        let plan = self.plan_direct_effect(&context, request, usage_source, None, None)?;
+        let resolved = context.current.resolve_policy()?;
+        let plan = self.plan_direct_effect(
+            &context,
+            resolved.provider,
+            request,
+            usage_source,
+            None,
+            None,
+        )?;
         let (response, usage) = self.run_direct_effect(context, plan, None).await?;
         Ok(crate::DirectLlmCompletion { response, usage })
     }

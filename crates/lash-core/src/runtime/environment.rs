@@ -243,6 +243,14 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
+    pub fn with_provider_resolver(
+        mut self,
+        provider_resolver: Arc<dyn crate::RuntimeProviderResolver>,
+    ) -> Self {
+        self.env.core = self.env.core.with_provider_resolver(provider_resolver);
+        self
+    }
+
     pub fn build(self) -> RuntimeEnvironment {
         self.env
     }

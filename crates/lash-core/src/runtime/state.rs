@@ -1,144 +1,20 @@
-//! Session state envelopes and persistence helpers.
+//! Runtime session state and persistence helpers.
 //!
-//! Extracted from `runtime/mod.rs`. `SessionStateEnvelope` and
-//! `RuntimeSessionState` keep their original public paths via `pub use`
-//! in `mod.rs`; the helper functions are `pub(super)` so sibling runtime
-//! modules (`mod.rs`, `session_manager.rs`) can reach them via
-//! `super::*`.
+//! `RuntimeSessionState` is the runtime-private mutable state shape. Public
+//! host/plugin reads use `SessionSnapshot` from the plugin API instead.
 
 use lash_sansio::PromptUsage;
 
-use crate::provider::ProviderHandle;
 use crate::session_model::{Message, SessionPolicy, TokenUsage, plugin_message_to_message};
-use crate::{PersistedTurnState, SessionError, ToolCallRecord};
+use crate::{PersistedTurnState, SessionSnapshot, ToolCallRecord};
 
 use super::usage::TokenLedgerEntry;
-
-/// Serializable session read-model exported to hosts and plugins.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct SessionStateEnvelope {
-    pub session_id: String,
-    #[serde(default)]
-    pub policy: SessionPolicy,
-    #[serde(default)]
-    pub agent_frames: Vec<crate::AgentFrameRecord>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub current_agent_frame_id: crate::AgentFrameId,
-    #[serde(default)]
-    pub session_graph: crate::SessionGraph,
-    #[serde(default)]
-    pub turn_index: usize,
-    #[serde(default)]
-    pub token_usage: TokenUsage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_prompt_usage: Option<PromptUsage>,
-    #[serde(default)]
-    pub protocol_turn_options: crate::ProtocolTurnOptions,
-}
-
-impl SessionStateEnvelope {
-    pub(crate) fn read_model(&self) -> crate::session_graph::SessionReadModel {
-        self.session_graph.read_model_for_agent_frame(
-            &self.current_agent_frame_id,
-            self.agent_frames
-                .iter()
-                .find(|frame| frame.frame_id == self.current_agent_frame_id)
-                .map(|frame| frame.previous_frame_id.is_none())
-                .unwrap_or(true),
-        )
-    }
-
-    pub fn replace_active_read_state(
-        &mut self,
-        messages: &[Message],
-        tool_calls: &[ToolCallRecord],
-    ) {
-        self.session_graph
-            .replace_active_read_state(messages, tool_calls);
-    }
-
-    pub fn replace_active_tool_calls(&mut self, tool_calls: &[ToolCallRecord]) {
-        self.session_graph.replace_active_tool_calls(tool_calls);
-    }
-
-    pub fn append_active_read_delta(
-        &mut self,
-        messages: &[Message],
-        tool_calls: &[ToolCallRecord],
-    ) {
-        self.session_graph
-            .append_active_read_delta(messages, tool_calls);
-    }
-
-    pub fn read_view(&self) -> crate::SessionReadView {
-        crate::SessionReadView::from_exported_state(self)
-    }
-}
-
-impl Default for SessionStateEnvelope {
-    fn default() -> Self {
-        Self {
-            session_id: "root".to_string(),
-            policy: SessionPolicy::default(),
-            agent_frames: default_agent_frames("root", &SessionPolicy::default()),
-            current_agent_frame_id: default_agent_frame_id("root"),
-            session_graph: crate::SessionGraph::default(),
-            turn_index: 0,
-            token_usage: TokenUsage::default(),
-            last_prompt_usage: None,
-            protocol_turn_options: crate::ProtocolTurnOptions::default(),
-        }
-    }
-}
-
-/// Plain-data view of the **persistable** subset of a
-/// [`RuntimeSessionState`]. Hosts and store backends that want to
-/// inspect "what would be persisted right now" use this — it never
-/// carries runtime-only scratch fields (`head_revision`,
-/// `graph_replace_required`, the dirty `*_snapshot` write buffers).
-///
-/// Build one via [`RuntimeSessionState::persisted_snapshot`]. The
-/// shape mirrors the persisted fields of `RuntimeSessionState` 1:1;
-/// adding a field here is also a contract change for every backend's
-/// on-disk layout, so do it deliberately.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct PersistedSessionSnapshot {
-    pub session_id: String,
-    pub policy: SessionPolicy,
-    #[serde(default)]
-    pub agent_frames: Vec<crate::AgentFrameRecord>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub current_agent_frame_id: crate::AgentFrameId,
-    pub session_graph: crate::SessionGraph,
-    pub turn_index: usize,
-    pub token_usage: TokenUsage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_prompt_usage: Option<PromptUsage>,
-    pub protocol_turn_options: crate::ProtocolTurnOptions,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_state_ref: Option<crate::store::BlobRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_state_generation: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_snapshot_ref: Option<crate::store::BlobRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_snapshot_revision: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_state_ref: Option<crate::store::BlobRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub token_ledger: Vec<TokenLedgerEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint_ref: Option<crate::store::BlobRef>,
-}
 
 /// The runtime's view of a session: the persistable snapshot fields
 /// **plus** scratch fields the runtime tracks but never persists
 /// (head-revision CAS guard, pending dirty-write buffers, replace-graph
-/// flag). The non-persisted fields are marked `#[serde(skip)]` so the
-/// type still round-trips correctly when used directly as a wire
-/// format, but `persisted_snapshot()` is the preferred way to extract
-/// "what gets saved" — it returns a separate value type and rules out
-/// runtime-only fields by construction.
+/// flag). Public serialization goes through [`RuntimeSessionState::to_snapshot`],
+/// which drops runtime-only fields by construction.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeSessionState {
     pub session_id: String,
@@ -194,68 +70,47 @@ pub struct RuntimeSessionState {
     pub graph_replace_required: bool,
 }
 
-impl From<RuntimeSessionState> for SessionStateEnvelope {
-    fn from(state: RuntimeSessionState) -> Self {
-        state.into_envelope()
-    }
-}
-
 impl RuntimeSessionState {
-    pub fn from_state(state: SessionStateEnvelope) -> Self {
+    pub fn from_snapshot(snapshot: SessionSnapshot) -> Self {
         let mut state = Self {
-            session_id: state.session_id,
-            policy: state.policy,
-            agent_frames: state.agent_frames,
-            current_agent_frame_id: state.current_agent_frame_id,
-            session_graph: state.session_graph,
-            turn_index: state.turn_index,
-            token_usage: state.token_usage,
-            last_prompt_usage: state.last_prompt_usage,
-            protocol_turn_options: state.protocol_turn_options,
-            tool_state_ref: None,
-            tool_state_generation: None,
+            session_id: snapshot.session_id,
+            policy: snapshot.policy,
+            agent_frames: snapshot.agent_frames,
+            current_agent_frame_id: snapshot.current_agent_frame_id,
+            session_graph: snapshot.session_graph,
+            turn_index: snapshot.turn_index,
+            token_usage: snapshot.token_usage,
+            last_prompt_usage: snapshot.last_prompt_usage,
+            protocol_turn_options: snapshot.protocol_turn_options,
+            tool_state_ref: snapshot.tool_state_ref,
+            tool_state_generation: snapshot.tool_state_generation,
             tool_state_snapshot: None,
-            plugin_snapshot_ref: None,
-            plugin_snapshot_revision: None,
+            plugin_snapshot_ref: snapshot.plugin_snapshot_ref,
+            plugin_snapshot_revision: snapshot.plugin_snapshot_revision,
             plugin_snapshot: None,
-            execution_state_ref: None,
+            execution_state_ref: snapshot.execution_state_ref,
             execution_state_snapshot: None,
-            token_ledger: Vec::new(),
-            checkpoint_ref: None,
+            token_ledger: snapshot.token_ledger,
+            checkpoint_ref: snapshot.checkpoint_ref,
             head_revision: None,
             graph_replace_required: false,
         };
+        for frame in &mut state.agent_frames {
+            frame.execution_state_snapshot = None;
+        }
         state.ensure_agent_frame_initialized();
         state
     }
 
-    pub(crate) fn rebind_provider(
-        &mut self,
-        live_provider: &ProviderHandle,
-    ) -> Result<(), SessionError> {
-        let session_id = if self.session_id.is_empty() {
-            "root"
-        } else {
-            &self.session_id
+    pub fn to_snapshot(&self) -> SessionSnapshot {
+        let mut agent_frames = self.agent_frames.clone();
+        for frame in &mut agent_frames {
+            frame.execution_state_snapshot = None;
         }
-        .to_string();
-        rebind_policy_provider(&session_id, &mut self.policy, live_provider)?;
-        for frame in &mut self.agent_frames {
-            rebind_policy_provider(&session_id, &mut frame.assignment.policy, live_provider)?;
-        }
-        Ok(())
-    }
-
-    /// Return the persistable subset of this runtime state as a
-    /// plain-data [`PersistedSessionSnapshot`]. Runtime-only scratch
-    /// fields (`head_revision`, `graph_replace_required`, the dirty
-    /// `*_snapshot` write buffers) are dropped on purpose — they
-    /// don't belong on the wire.
-    pub fn persisted_snapshot(&self) -> PersistedSessionSnapshot {
-        PersistedSessionSnapshot {
+        SessionSnapshot {
             session_id: self.session_id.clone(),
             policy: self.policy.clone(),
-            agent_frames: self.agent_frames.clone(),
+            agent_frames,
             current_agent_frame_id: self.current_agent_frame_id.clone(),
             session_graph: self.session_graph.clone(),
             turn_index: self.turn_index,
@@ -272,50 +127,24 @@ impl RuntimeSessionState {
         }
     }
 
-    pub fn export_state(&self) -> SessionStateEnvelope {
-        SessionStateEnvelope {
-            session_id: self.session_id.clone(),
-            policy: self.policy.clone(),
-            agent_frames: self.agent_frames.clone(),
-            current_agent_frame_id: self.current_agent_frame_id.clone(),
-            session_graph: self.session_graph.clone(),
-            turn_index: self.turn_index,
-            token_usage: self.token_usage.clone(),
-            last_prompt_usage: self.last_prompt_usage.clone(),
-            protocol_turn_options: self.protocol_turn_options.clone(),
-        }
-    }
-
-    /// Owned conversion into the persistable read-model envelope.
-    ///
-    /// Like [`Self::export_state`] but consumes `self` and moves the
-    /// persistable fields out instead of cloning. Use this when the
-    /// `RuntimeSessionState` is no longer needed afterwards.
-    pub fn into_envelope(self) -> SessionStateEnvelope {
-        SessionStateEnvelope {
-            session_id: self.session_id,
-            policy: self.policy,
-            agent_frames: self.agent_frames,
-            current_agent_frame_id: self.current_agent_frame_id,
-            session_graph: self.session_graph,
-            turn_index: self.turn_index,
-            token_usage: self.token_usage,
-            last_prompt_usage: self.last_prompt_usage,
-            protocol_turn_options: self.protocol_turn_options,
-        }
-    }
-
-    pub fn apply_exported_state(&mut self, state: &SessionStateEnvelope) {
-        self.session_id = state.session_id.clone();
-        self.policy = state.policy.clone();
-        self.agent_frames = state.agent_frames.clone();
-        self.current_agent_frame_id = state.current_agent_frame_id.clone();
+    pub fn apply_snapshot(&mut self, snapshot: &SessionSnapshot) {
+        self.session_id = snapshot.session_id.clone();
+        self.policy = snapshot.policy.clone();
+        self.agent_frames = snapshot.agent_frames.clone();
+        self.current_agent_frame_id = snapshot.current_agent_frame_id.clone();
         self.ensure_agent_frame_initialized();
-        self.session_graph = state.session_graph.clone();
-        self.turn_index = state.turn_index;
-        self.token_usage = state.token_usage.clone();
-        self.last_prompt_usage = state.last_prompt_usage.clone();
-        self.protocol_turn_options = state.protocol_turn_options.clone();
+        self.session_graph = snapshot.session_graph.clone();
+        self.turn_index = snapshot.turn_index;
+        self.token_usage = snapshot.token_usage.clone();
+        self.last_prompt_usage = snapshot.last_prompt_usage.clone();
+        self.protocol_turn_options = snapshot.protocol_turn_options.clone();
+        self.tool_state_ref = snapshot.tool_state_ref.clone();
+        self.tool_state_generation = snapshot.tool_state_generation;
+        self.plugin_snapshot_ref = snapshot.plugin_snapshot_ref.clone();
+        self.plugin_snapshot_revision = snapshot.plugin_snapshot_revision;
+        self.execution_state_ref = snapshot.execution_state_ref.clone();
+        self.token_ledger = snapshot.token_ledger.clone();
+        self.checkpoint_ref = snapshot.checkpoint_ref.clone();
     }
 
     pub fn stamp_runtime_state(
@@ -500,34 +329,6 @@ pub(crate) fn store_plugin_snapshot(
     }
 }
 
-fn rebind_policy_provider(
-    session_id: &str,
-    policy: &mut SessionPolicy,
-    live_provider: &ProviderHandle,
-) -> Result<(), SessionError> {
-    let expected = policy.recorded_provider_id().trim().to_string();
-    let actual = live_provider.kind();
-    // Lazy provider validation: install an unconfigured live handle rather than
-    // rejecting it — a process-only runtime (durable-worker recovery of a
-    // tool/lashlang process) needs no provider, and a real LLM call against an
-    // unconfigured provider fails clearly at the call site. Only a configured
-    // live provider whose kind disagrees with the persisted id is a genuine
-    // mismatch.
-    if actual == "unconfigured" || expected.is_empty() || expected == "unconfigured" {
-        policy.install_provider(live_provider.clone());
-        return Ok(());
-    }
-    if expected != actual {
-        return Err(SessionError::ProviderMismatch {
-            expected,
-            actual: actual.to_string(),
-            session_id: session_id.to_string(),
-        });
-    }
-    policy.install_provider(live_provider.clone());
-    Ok(())
-}
-
 impl RuntimeSessionState {
     pub fn current_agent_frame(&self) -> Option<&crate::AgentFrameRecord> {
         self.agent_frames
@@ -647,6 +448,71 @@ impl Default for RuntimeSessionState {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_snapshot_serialization_excludes_runtime_only_fields_and_round_trips() {
+        let mut state = RuntimeSessionState {
+            session_id: "snapshot-test".to_string(),
+            policy: SessionPolicy {
+                provider_id: "mock".to_string(),
+                ..SessionPolicy::default()
+            },
+            tool_state_snapshot: Some(crate::ToolState::default()),
+            plugin_snapshot: Some(crate::PluginSessionSnapshot::default()),
+            execution_state_snapshot: Some(vec![1, 2, 3]),
+            head_revision: Some(42),
+            graph_replace_required: true,
+            ..RuntimeSessionState::default()
+        };
+        state.ensure_agent_frame_initialized();
+        if let Some(frame) = state.current_agent_frame_mut() {
+            frame.execution_state_snapshot = Some(vec![4, 5, 6]);
+        }
+
+        let value = serde_json::to_value(state.to_snapshot()).expect("serialize snapshot");
+
+        for runtime_key in [
+            "head_revision",
+            "graph_replace_required",
+            "tool_state_snapshot",
+            "plugin_snapshot",
+            "execution_state_snapshot",
+        ] {
+            assert!(
+                value.get(runtime_key).is_none(),
+                "snapshot unexpectedly exposed {runtime_key}"
+            );
+        }
+        assert!(
+            value["agent_frames"]
+                .as_array()
+                .expect("agent frames")
+                .iter()
+                .all(|frame| frame.get("execution_state_snapshot").is_none())
+        );
+
+        let snapshot: SessionSnapshot = serde_json::from_value(value).expect("round-trip snapshot");
+        let hydrated = RuntimeSessionState::from_snapshot(snapshot);
+
+        assert_eq!(hydrated.session_id, "snapshot-test");
+        assert_eq!(hydrated.policy.recorded_provider_id(), "mock");
+        assert!(hydrated.head_revision.is_none());
+        assert!(!hydrated.graph_replace_required);
+        assert!(hydrated.tool_state_snapshot.is_none());
+        assert!(hydrated.plugin_snapshot.is_none());
+        assert!(hydrated.execution_state_snapshot.is_none());
+        assert!(
+            hydrated
+                .agent_frames
+                .iter()
+                .all(|frame| frame.execution_state_snapshot.is_none())
+        );
+    }
+}
+
 pub(super) fn apply_persisted_session_config(
     policy: &mut SessionPolicy,
     config: &crate::PersistedSessionConfig,
@@ -696,8 +562,7 @@ pub(super) fn apply_session_checkpoint(
 pub(super) fn apply_session_head(
     state: &mut RuntimeSessionState,
     head: &crate::store::SessionHead,
-    live_provider: &ProviderHandle,
-) -> Result<(), SessionError> {
+) {
     state.session_graph = head.graph.clone();
     state.agent_frames = head.agent_frames.clone();
     state.current_agent_frame_id = head.current_agent_frame_id.clone();
@@ -715,8 +580,6 @@ pub(super) fn apply_session_head(
     state.head_revision = Some(head.head_revision);
     state.graph_replace_required = false;
     apply_persisted_session_config(&mut state.policy, &head.config);
-    state.rebind_provider(live_provider)?;
-    Ok(())
 }
 
 pub(super) fn append_session_nodes_to_state(

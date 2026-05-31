@@ -8,16 +8,12 @@ use std::sync::Arc;
 use crate::{PluginActionInvokeError, SessionError};
 
 use super::LashRuntime;
-use super::state::{
-    RuntimeSessionState, SessionStateEnvelope, append_session_nodes_to_state,
-    normalize_session_graph,
-};
+use super::state::{RuntimeSessionState, append_session_nodes_to_state, normalize_session_graph};
 
 impl LashRuntime {
     /// Replace the host-owned state envelope.
     pub fn set_persisted_state(&mut self, state: RuntimeSessionState) -> Result<(), SessionError> {
         let mut state = state;
-        state.rebind_provider(&self.policy.provider)?;
         normalize_session_graph(&mut state);
         if let Some(session) = self.session.as_ref() {
             session.invalidate_runtime_caches();
@@ -133,10 +129,10 @@ impl LashRuntime {
     pub async fn branch_to_node(
         &mut self,
         node_id: Option<String>,
-    ) -> Result<SessionStateEnvelope, SessionError> {
+    ) -> Result<crate::SessionSnapshot, SessionError> {
         let mut state = self.export_state();
         state.session_graph.branch_to(node_id);
-        let mut persisted_state = RuntimeSessionState::from_state(state);
+        let mut persisted_state = RuntimeSessionState::from_snapshot(state);
         normalize_session_graph(&mut persisted_state);
 
         let policy = persisted_state.policy.clone();

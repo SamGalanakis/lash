@@ -18,4 +18,5 @@ lash-core = { path = "../lash-core", version = "=0.1.0-alpha.13", default-featur
 serde_json = { workspace = true }
 
 [dev-dependencies]
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.13", features = ["testing"] }
 tempfile = { workspace = true }

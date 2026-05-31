@@ -499,7 +499,6 @@ impl StandardShell {
                 }
             })
         };
-        let output_schema = json!({ "type": "object", "additionalProperties": true });
         vec![
             ToolDefinition::raw(
                 "tool:exec_command",
@@ -515,7 +514,7 @@ impl StandardShell {
                     });
                     object_schema(properties, &["cmd"])
                 },
-                output_schema.clone(),
+                shell_exec_output_schema(),
             )
             .with_examples(vec![
                 r#"await shell.exec({ cmd: "cargo test -p lash-protocol-rlm", timeout_ms: 600000 })?"#.into(),
@@ -532,7 +531,7 @@ impl StandardShell {
                 "start_command",
                 start_command_description,
                 object_schema(command_common("Shell command to start."), &["cmd"]),
-                output_schema.clone(),
+                shell_start_output_schema(),
             )
             .with_examples(vec![
                 r#"await shell.start({ cmd: "python -m http.server 8000" })?"#.into(),
@@ -566,7 +565,7 @@ impl StandardShell {
                     }),
                     &["process_id"],
                 ),
-                output_schema,
+                shell_write_output_schema(),
             )
             .with_examples(vec![
                 r#"await shell.write({ process_id: "call-shell-1", chars: "status\n" })?"#.into(),
@@ -608,6 +607,55 @@ impl StandardShell {
             _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
         }
     }
+}
+
+fn shell_exec_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "output": { "type": "string" },
+            "status": { "type": "string", "enum": ["completed", "timed_out"] },
+            "done": { "type": "boolean" },
+            "running": { "type": "boolean" },
+            "wall_time_seconds": { "type": "number", "minimum": 0 },
+            "exit_code": { "type": "integer" },
+            "timed_out": { "type": "boolean" },
+            "error": { "type": "string" },
+            "original_token_count": { "type": "integer", "minimum": 0 },
+            "full_output_path": { "type": "string" }
+        },
+        "required": ["output", "status", "done", "running", "wall_time_seconds"],
+        "additionalProperties": false
+    })
+}
+
+fn shell_start_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "__handle__": { "type": "string", "enum": ["process"] },
+            "id": { "type": "string" },
+            "process_id": { "type": "string" },
+            "status": { "type": "string", "enum": ["running"] },
+            "done": { "type": "boolean" },
+            "running": { "type": "boolean" }
+        },
+        "required": ["__handle__", "id", "process_id", "status", "done", "running"],
+        "additionalProperties": false
+    })
+}
+
+fn shell_write_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "process_id": { "type": "string" },
+            "status": { "type": "string", "enum": ["signalled"] },
+            "sequence": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["process_id", "status", "sequence"],
+        "additionalProperties": false
+    })
 }
 
 fn parse_process_id(args: &serde_json::Value) -> Result<String, ToolResult> {
@@ -1474,6 +1522,42 @@ mod tests {
         let defs = shell.tool_definitions();
         assert_eq!(defs.len(), 3);
         assert!(defs.iter().all(|def| !def.description().is_empty()));
+    }
+
+    #[test]
+    fn shell_definitions_document_distinct_result_shapes() {
+        let shell = StandardShell::default();
+        let defs = shell.tool_definitions();
+        let exec = defs
+            .iter()
+            .find(|definition| definition.name() == "exec_command")
+            .expect("exec_command definition");
+        let start = defs
+            .iter()
+            .find(|definition| definition.name() == "start_command")
+            .expect("start_command definition");
+        let write = defs
+            .iter()
+            .find(|definition| definition.name() == "write_stdin")
+            .expect("write_stdin definition");
+
+        assert!(
+            exec.compact_contract()
+                .render_signature()
+                .contains("exit_code")
+        );
+        assert!(
+            start
+                .compact_contract()
+                .render_signature()
+                .contains("__handle__")
+        );
+        assert!(
+            write
+                .compact_contract()
+                .render_signature()
+                .contains("sequence")
+        );
     }
 
     #[test]

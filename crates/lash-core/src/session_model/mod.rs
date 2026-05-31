@@ -134,16 +134,9 @@ pub(crate) fn plugin_message_to_message(plugin_message: &PluginMessage) -> Messa
     }
 }
 
-/// Resolved session policy for a running session.
-///
-/// `provider` is the live transport handle supplied by the host. Serde paths
-/// persist only `provider_id`; decoded state carries an unconfigured placeholder
-/// until the session-open path binds it to the host-supplied live handle.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionPolicy {
     pub model: ModelSpec,
-    pub provider: ProviderHandle,
-    #[doc(hidden)]
     pub provider_id: String,
     pub session_id: Option<String>,
     pub autonomous: bool,
@@ -152,18 +145,8 @@ pub struct SessionPolicy {
 }
 
 impl SessionPolicy {
-    pub fn install_provider(&mut self, provider: ProviderHandle) {
-        self.provider_id = provider.kind().to_string();
-        self.provider = provider;
-    }
-
     pub fn recorded_provider_id(&self) -> &str {
-        let configured = self.provider_id.trim();
-        if configured.is_empty() {
-            self.provider.kind()
-        } else {
-            configured
-        }
+        self.provider_id.trim()
     }
 
     pub fn model_id(&self) -> &str {
@@ -237,7 +220,6 @@ impl<'de> serde::Deserialize<'de> for SessionPolicy {
         let wire = Wire::deserialize(value).map_err(serde::de::Error::custom)?;
         Ok(Self {
             model: wire.model,
-            provider: ProviderHandle::default(),
             provider_id: wire.provider_id,
             session_id: wire.session_id,
             autonomous: wire.autonomous,
@@ -247,15 +229,51 @@ impl<'de> serde::Deserialize<'de> for SessionPolicy {
     }
 }
 
+/// Runtime-only policy resolved against host-owned live dependencies.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResolvedSessionPolicy {
+    pub policy: SessionPolicy,
+    pub provider: ProviderHandle,
+}
+
+impl ResolvedSessionPolicy {
+    pub fn new(policy: SessionPolicy, provider: ProviderHandle) -> Self {
+        Self { policy, provider }
+    }
+
+    pub fn replace_provider(&mut self, provider: ProviderHandle) {
+        self.policy.provider_id = provider.kind().to_string();
+        self.provider = provider;
+    }
+
+    pub fn into_policy(self) -> SessionPolicy {
+        self.policy
+    }
+}
+
+impl std::ops::Deref for ResolvedSessionPolicy {
+    type Target = SessionPolicy;
+
+    fn deref(&self) -> &Self::Target {
+        &self.policy
+    }
+}
+
+impl std::ops::DerefMut for ResolvedSessionPolicy {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.policy
+    }
+}
+
 /// Reusable session configuration overlay.
 ///
 /// `SessionSpec` is the public configuration shape for callers that want to
 /// describe either a root session or a child session without constructing the
-/// resolved runtime-only [`SessionPolicy`] directly.
+/// persisted [`SessionPolicy`] directly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionSpec {
     inherit: bool,
-    pub provider: Option<ProviderHandle>,
+    pub provider_id: Option<String>,
     pub model: Option<ModelSpec>,
     pub max_turns: Option<Option<usize>>,
     pub prompt: Option<crate::PromptLayer>,
@@ -267,7 +285,7 @@ impl SessionSpec {
     pub fn new() -> Self {
         Self {
             inherit: false,
-            provider: None,
+            provider_id: None,
             model: None,
             max_turns: None,
             prompt: None,
@@ -287,8 +305,8 @@ impl SessionSpec {
         self.inherit
     }
 
-    pub fn provider(mut self, provider: ProviderHandle) -> Self {
-        self.provider = Some(provider);
+    pub fn provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = Some(provider_id.into());
         self
     }
 
@@ -314,8 +332,8 @@ impl SessionSpec {
 
     pub fn resolve_against(&self, base: &SessionPolicy) -> SessionPolicy {
         let mut policy = base.clone();
-        if let Some(provider) = self.provider.as_ref() {
-            policy.install_provider(provider.clone());
+        if let Some(provider_id) = self.provider_id.as_ref() {
+            policy.provider_id = provider_id.clone();
         }
         if let Some(model) = self.model.as_ref() {
             policy.model = model.clone();
@@ -389,5 +407,20 @@ mod tests {
             err.to_string()
                 .contains("legacy serialized provider config is not supported")
         );
+    }
+
+    #[test]
+    fn session_policy_serializes_provider_id_without_provider_handle() {
+        let policy = SessionPolicy {
+            provider_id: "mock-provider".to_string(),
+            model: ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+                .expect("valid test model"),
+            ..SessionPolicy::default()
+        };
+
+        let value = serde_json::to_value(&policy).expect("serialize policy");
+
+        assert_eq!(value["provider_id"], "mock-provider");
+        assert!(value.get("provider").is_none());
     }
 }

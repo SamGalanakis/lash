@@ -308,9 +308,7 @@ impl SessionPlugin for UpdatePlanPlugin {
 mod tests {
     use super::*;
     use lash_core::testing::{MockSessionManager, test_standard_protocol_factories};
-    use lash_core::{
-        PluginHost, PromptHookContext, PromptSlot, SessionReadView, SessionStateEnvelope,
-    };
+    use lash_core::{PluginHost, PromptHookContext, PromptSlot, SessionReadView, SessionSnapshot};
 
     #[tokio::test]
     async fn validates_shape() {
@@ -421,7 +419,7 @@ mod tests {
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager::default()),
-                state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
+                state: SessionReadView::from_snapshot(&SessionSnapshot::default()),
                 protocol_turn_options: lash_core::ProtocolTurnOptions::default(),
                 turn_context: lash_core::TurnContext::default(),
             })
@@ -454,7 +452,7 @@ mod tests {
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "child".to_string(),
                 host: Arc::new(MockSessionManager::default()),
-                state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
+                state: SessionReadView::from_snapshot(&SessionSnapshot::default()),
                 protocol_turn_options: lash_core::ProtocolTurnOptions::default(),
                 turn_context: lash_core::TurnContext::default(),
             })

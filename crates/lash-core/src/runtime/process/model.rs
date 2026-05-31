@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::events::{ProcessEventType, ProcessTerminalSemantics, default_process_event_types};
+use super::events::{
+    ProcessAwaitOutput, ProcessEventType, ProcessTerminalSemantics, ProcessTerminalState,
+    default_process_event_types,
+};
 use super::time::current_epoch_ms;
 use super::validation::{
     ensure_core_event_types, process_registration_hash, validate_process_registration,
@@ -320,6 +323,76 @@ impl ProcessRegistration {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ProcessStatus {
+    #[default]
+    Running,
+    Completed {
+        await_output: ProcessAwaitOutput,
+    },
+    Failed {
+        await_output: ProcessAwaitOutput,
+    },
+    Cancelled {
+        await_output: ProcessAwaitOutput,
+    },
+}
+
+impl ProcessStatus {
+    pub fn from_terminal(terminal: ProcessTerminalSemantics) -> Self {
+        match terminal.state {
+            ProcessTerminalState::Completed => Self::Completed {
+                await_output: terminal.await_output,
+            },
+            ProcessTerminalState::Failed => Self::Failed {
+                await_output: terminal.await_output,
+            },
+            ProcessTerminalState::Cancelled => Self::Cancelled {
+                await_output: terminal.await_output,
+            },
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, Self::Running)
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed { .. } => "completed",
+            Self::Failed { .. } => "failed",
+            Self::Cancelled { .. } => "cancelled",
+        }
+    }
+
+    pub fn terminal_state(&self) -> Option<ProcessTerminalState> {
+        match self {
+            Self::Running => None,
+            Self::Completed { .. } => Some(ProcessTerminalState::Completed),
+            Self::Failed { .. } => Some(ProcessTerminalState::Failed),
+            Self::Cancelled { .. } => Some(ProcessTerminalState::Cancelled),
+        }
+    }
+
+    pub fn await_output(&self) -> Option<&ProcessAwaitOutput> {
+        match self {
+            Self::Running => None,
+            Self::Completed { await_output }
+            | Self::Failed { await_output }
+            | Self::Cancelled { await_output } => Some(await_output),
+        }
+    }
+
+    pub fn terminal_semantics(&self) -> Option<ProcessTerminalSemantics> {
+        Some(ProcessTerminalSemantics {
+            state: self.terminal_state()?,
+            await_output: self.await_output()?.clone(),
+        })
+    }
+}
+
 /// Durable process row. Session-visible addressability lives in
 /// [`ProcessHandleGrant`], not in the process record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -336,8 +409,8 @@ pub struct ProcessRecord {
     pub updated_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<ProcessExternalRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal: Option<ProcessTerminalSemantics>,
+    #[serde(default)]
+    pub status: ProcessStatus,
 }
 
 impl ProcessRecord {
@@ -364,12 +437,12 @@ impl ProcessRecord {
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             external_ref: None,
-            terminal: None,
+            status: ProcessStatus::Running,
         }
     }
 
     pub fn is_terminal(&self) -> bool {
-        self.terminal.is_some()
+        self.status.is_terminal()
     }
 
     pub fn owner_scope_id(&self) -> ProcessScopeId {

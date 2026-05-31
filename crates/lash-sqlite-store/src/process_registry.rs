@@ -1,12 +1,7 @@
 use super::*;
 
-fn process_terminal_state_label(record: &ProcessRecord) -> Option<&'static str> {
-    match record.terminal.as_ref().map(|terminal| terminal.state) {
-        None => None,
-        Some(ProcessTerminalState::Completed) => Some("completed"),
-        Some(ProcessTerminalState::Failed) => Some("failed"),
-        Some(ProcessTerminalState::Cancelled) => Some("cancelled"),
-    }
+fn process_status_label(record: &ProcessRecord) -> &'static str {
+    record.status.label()
 }
 
 impl SqliteProcessRegistry {
@@ -52,12 +47,12 @@ impl SqliteProcessRegistry {
     ) -> Result<(), lash_core::PluginError> {
         conn.execute(
             "UPDATE processes
-             SET updated_at_ms = ?2, terminal_state = ?3, record_json = ?4
+             SET updated_at_ms = ?2, status = ?3, record_json = ?4
              WHERE process_id = ?1",
             params![
                 &record.id,
                 record.updated_at_ms as i64,
-                process_terminal_state_label(record),
+                process_status_label(record),
                 process_encode_json(record)?
             ],
         )
@@ -150,7 +145,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         tx.execute(
             "INSERT INTO processes (
                 process_id, registration_hash, owner_scope_id, host_profile_id,
-                created_at_ms, updated_at_ms, terminal_state, record_json
+                created_at_ms, updated_at_ms, status, record_json
              )
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -160,7 +155,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 record.host_profile_id(),
                 record.created_at_ms as i64,
                 record.updated_at_ms as i64,
-                process_terminal_state_label(&record),
+                process_status_label(&record),
                 process_encode_json(&record)?,
             ],
         )
@@ -341,7 +336,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                 "SELECT g.process_id, g.descriptor_json, p.record_json
                  FROM process_handle_grants g
                  JOIN processes p ON p.process_id = g.process_id
-                 WHERE g.scope_id = ?1 AND p.terminal_state IS NULL
+                 WHERE g.scope_id = ?1 AND p.status = 'running'
                  ORDER BY g.process_id ASC",
             )
             .map_err(process_sqlite_error)?;
@@ -556,8 +551,8 @@ impl ProcessRegistry for SqliteProcessRegistry {
             ],
         )
         .map_err(process_sqlite_error)?;
-        if let Some(terminal) = prepared.terminal_update.clone() {
-            record.terminal = Some(terminal);
+        if let Some(status) = prepared.status_update.clone() {
+            record.status = status;
         }
         record.updated_at_ms = prepared.occurred_at_ms;
         Self::save_process_conn(&tx, &record)?;
@@ -657,8 +652,8 @@ impl ProcessRegistry for SqliteProcessRegistry {
             let record = self.get_process(process_id).await.ok_or_else(|| {
                 lash_core::PluginError::Session(format!("unknown process `{process_id}`"))
             })?;
-            if let Some(terminal) = record.terminal {
-                return Ok(terminal.await_output);
+            if let Some(await_output) = record.status.await_output() {
+                return Ok(await_output.clone());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -719,7 +714,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
         let mut stmt = conn
             .prepare(
                 "SELECT record_json FROM processes
-                 WHERE terminal_state IS NULL
+                 WHERE status = 'running'
                  ORDER BY process_id ASC",
             )
             .map_err(process_sqlite_error)?;

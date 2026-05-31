@@ -27,15 +27,10 @@ impl ToolProjector for ProcessProjector {
 }
 
 fn project_list_process_handles(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
-    let processes = ctx
-        .result
-        .get("processes")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let processes = ctx.result.as_array().cloned().unwrap_or_default();
     let running = processes
         .iter()
-        .filter(|process| process.get("terminal").and_then(Value::as_str) == Some("running"))
+        .filter(|process| process.get("status").and_then(Value::as_str) == Some("running"))
         .count();
     let status = if !ctx.success {
         ActivityStatus::Failed
@@ -101,8 +96,8 @@ fn project_cancel_process(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
 }
 
 fn process_list_detail_line(process: &Value) -> Option<String> {
-    let terminal = process
-        .get("terminal")
+    let status = process
+        .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let descriptor = process.get("descriptor").unwrap_or(&Value::Null);
@@ -117,7 +112,7 @@ fn process_list_detail_line(process: &Value) -> Option<String> {
         .unwrap_or("process");
     Some(format!(
         "{} · {} · {}",
-        inline_text(terminal),
+        inline_text(status),
         inline_text(kind),
         inline_text(label)
     ))
@@ -128,8 +123,8 @@ fn process_stop_detail_lines(result: &Value, success: bool) -> Vec<String> {
         return error_lines(result);
     }
 
-    let terminal = result
-        .get("terminal")
+    let status = result
+        .get("status")
         .and_then(Value::as_str)
         .unwrap_or("cancelled");
     let process_id = result
@@ -139,7 +134,7 @@ fn process_stop_detail_lines(result: &Value, success: bool) -> Vec<String> {
 
     vec![format!(
         "{} · {}",
-        inline_text(terminal),
+        inline_text(status),
         inline_text(process_id)
     )]
 }
@@ -171,13 +166,15 @@ mod tests {
         let blocks = state.project_tool_call(
             "list_process_handles",
             json!({}),
-            json!({
-                "processes": [{
+            json!([
+                {
+                    "__handle__": "process",
+                    "id": "call-123",
                     "process_id": "call-123",
                     "descriptor": { "kind": "tool", "label": "slow_tool" },
-                    "terminal": "running"
-                }]
-            }),
+                    "status": "running"
+                }
+            ]),
             true,
             24,
         );
@@ -200,7 +197,7 @@ mod tests {
             }),
             json!({
                 "process_id": "tool-call-123",
-                "terminal": "cancelled",
+                "status": "cancelled",
             }),
             true,
             5,

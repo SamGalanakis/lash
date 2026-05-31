@@ -317,7 +317,7 @@ fn grep_tool_definition() -> ToolDefinition {
                     }),
                     &["query"],
                 ),
-                json!({ "type": "object", "additionalProperties": true }),
+                grep_output_schema(),
             )
             .with_examples(vec![
                 r#"await files.grep({ query: "ToolProvider", path: "crates/lash/src" })?"#.into(),
@@ -331,6 +331,135 @@ fn grep_tool_definition() -> ToolDefinition {
             ))
             .with_scheduling(ToolScheduling::Parallel)
             .with_retry_policy(ToolRetryPolicy::safe(2, 50, 150))
+}
+
+fn grep_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string" },
+            "query_used": {
+                "type": "string",
+                "description": "The concrete query executed after path/constraint/fuzzy broadening."
+            },
+            "broadened_from": nullable_schema(json!({ "type": "string" })),
+            "regex_fallback_error": nullable_schema(json!({ "type": "string" })),
+            "matches": {
+                "type": "array",
+                "items": grep_match_output_schema()
+            },
+            "files": {
+                "type": "array",
+                "items": grep_file_output_schema()
+            },
+            "count": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Total matching lines found, including results not shown due to limit/cursor."
+            },
+            "shown": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Number of match records included in this response."
+            },
+            "files_with_matches": { "type": "integer", "minimum": 0 },
+            "truncated": { "type": "boolean" },
+            "cursor": nullable_schema(json!({ "type": "string" })),
+            "suggested_path": nullable_schema(json!({ "type": "string" })),
+            "approximate": {
+                "type": "boolean",
+                "description": "True when a fuzzy fallback produced the matches."
+            },
+            "timed_out": { "type": "boolean" },
+            "cancelled": { "type": "boolean" },
+            "error": nullable_schema(json!({
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string" },
+                    "message": { "type": "string" },
+                    "stage": { "type": "string" }
+                },
+                "required": ["kind", "message", "stage"],
+                "additionalProperties": true
+            }))
+        },
+        "required": [
+            "query",
+            "query_used",
+            "broadened_from",
+            "regex_fallback_error",
+            "matches",
+            "files",
+            "count",
+            "shown",
+            "files_with_matches",
+            "truncated",
+            "cursor",
+            "suggested_path",
+            "approximate",
+            "timed_out",
+            "cancelled",
+            "error"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn grep_match_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string" },
+            "line": { "type": "integer", "minimum": 1 },
+            "column": { "type": "integer", "minimum": 1 },
+            "byte_column": { "type": "integer", "minimum": 0 },
+            "excerpt": { "type": "string" },
+            "match": { "type": "string" },
+            "ranges": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "start": { "type": "integer", "minimum": 0 },
+                        "end": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["start", "end"],
+                    "additionalProperties": false
+                }
+            },
+            "is_definition": { "type": "boolean" }
+        },
+        "required": [
+            "path",
+            "line",
+            "column",
+            "byte_column",
+            "excerpt",
+            "match",
+            "ranges",
+            "is_definition"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn grep_file_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string" },
+            "count": { "type": "integer", "minimum": 0 },
+            "size_bytes": { "type": "integer", "minimum": 0 },
+            "is_binary": { "type": "boolean" },
+            "git_status": nullable_schema(json!({ "type": "string" }))
+        },
+        "required": ["path", "count", "size_bytes", "is_binary", "git_status"],
+        "additionalProperties": false
+    })
+}
+
+fn nullable_schema(schema: serde_json::Value) -> serde_json::Value {
+    json!({ "anyOf": [schema, { "type": "null" }] })
 }
 
 impl Grep {
@@ -1429,6 +1558,19 @@ mod tests {
         assert!(properties.contains_key("limit"));
         assert!(!properties.contains_key("maxResults"));
         assert_eq!(properties["limit"]["default"], serde_json::json!(20));
+    }
+
+    #[test]
+    fn grep_contract_documents_result_shape() {
+        let definition = grep_tool_definition();
+
+        assert_eq!(definition.contract.output_schema["type"], json!("object"));
+        assert!(definition.contract.output_schema["properties"]["matches"].is_object());
+        assert!(definition.contract.output_schema["properties"]["count"].is_object());
+        assert!(definition.contract.output_schema["properties"]["cursor"].is_object());
+        let rendered = definition.compact_contract().render_signature();
+        assert!(rendered.contains("matches"), "{rendered}");
+        assert!(rendered.contains("count"), "{rendered}");
     }
 
     #[tokio::test]

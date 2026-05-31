@@ -178,7 +178,7 @@ impl PlanModeState {
 
     pub(crate) fn ensure_plan_path_from_state(
         &mut self,
-        state: &lash_core::SessionStateEnvelope,
+        state: &lash_core::SessionSnapshot,
     ) -> Result<PathBuf, PluginError> {
         if let Some(path) = self.plan_path() {
             return Ok(path);

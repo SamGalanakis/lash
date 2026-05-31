@@ -74,7 +74,11 @@ impl SnapshotStore {
         let Some(read) = read.as_mut() else {
             panic!("snapshot store has no session head");
         };
-        read.config.provider_id = provider_id.into();
+        let provider_id = provider_id.into();
+        read.config.provider_id = provider_id.clone();
+        for frame in &mut read.agent_frames {
+            frame.assignment.policy.provider_id = provider_id.clone();
+        }
         read.head_revision += 1;
     }
 

@@ -204,7 +204,6 @@ fn roundtrip_checkpoint(checkpoint: TurnCheckpoint) -> TurnCheckpoint {
 
 fn empty_exec_response() -> crate::ExecResponse {
     crate::ExecResponse {
-        output: String::new(),
         observations: Vec::new(),
         observation_truncation: Vec::new(),
         tool_calls: Vec::new(),

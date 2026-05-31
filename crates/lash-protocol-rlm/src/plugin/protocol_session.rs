@@ -143,7 +143,7 @@ mod tests {
     impl lash_core::plugin::runtime_host::RuntimeSessionHost for NoopPromptManager {
         async fn snapshot_current(
             &self,
-        ) -> Result<lash_core::RuntimeSessionState, lash_core::plugin::PluginError> {
+        ) -> Result<lash_core::SessionSnapshot, lash_core::plugin::PluginError> {
             Err(lash_core::plugin::PluginError::Session(
                 "not used".to_string(),
             ))
@@ -152,7 +152,7 @@ mod tests {
         async fn snapshot_session(
             &self,
             _session_id: &str,
-        ) -> Result<lash_core::RuntimeSessionState, lash_core::plugin::PluginError> {
+        ) -> Result<lash_core::SessionSnapshot, lash_core::plugin::PluginError> {
             Err(lash_core::plugin::PluginError::Session(
                 "not used".to_string(),
             ))
@@ -239,7 +239,7 @@ mod tests {
             continue_as_soft_warn_tokens: Some(100_000),
             ..Default::default()
         });
-        let state = lash_core::SessionStateEnvelope {
+        let state = lash_core::SessionSnapshot {
             token_usage: lash_core::TokenUsage {
                 input_tokens: 120_292,
                 ..Default::default()
@@ -250,7 +250,7 @@ mod tests {
             .soft_warn_directives(lash_core::plugin::CheckpointHookContext {
                 session_id: "root".to_string(),
                 checkpoint: lash_core::CheckpointKind::AfterWork,
-                state: lash_core::SessionReadView::from_exported_state(&state),
+                state: lash_core::SessionReadView::from_snapshot(&state),
                 host: Arc::new(NoopPromptManager),
             })
             .expect("warning directives");

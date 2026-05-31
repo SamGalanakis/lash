@@ -574,7 +574,7 @@ pub(crate) async fn stream_prepared_agent_frame_run(
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnResult {
-    pub state: SessionStateEnvelope,
+    pub state: SessionSnapshot,
     pub outcome: TurnOutcome,
     pub assistant_output: AssistantOutput,
     /// Parent's own LLM tokens for this turn. Does **not** include child

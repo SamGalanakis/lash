@@ -155,7 +155,7 @@ struct LeasedTurnFinish {
     turn_pipeline: TurnCommitPipeline,
     assembler: TurnAssembler,
     new_messages: crate::MessageSequence,
-    policy: SessionPolicy,
+    policy: ResolvedSessionPolicy,
     turn_index: usize,
     turn_lease: Option<crate::RuntimeTurnLease>,
     queued_work_completions: Vec<crate::QueuedWorkCompletion>,
@@ -244,7 +244,7 @@ impl LashRuntime {
         );
 
         let Some(session) = self.session.as_ref() else {
-            self.state.apply_exported_state(&assembled.state);
+            self.state.apply_snapshot(&assembled.state);
             self.emit_completed_turn_trace(&assembled.state, &assembled.outcome, &trace_turn_id);
             return Ok(assembled);
         };
@@ -366,7 +366,7 @@ impl LashRuntime {
 
     fn emit_completed_turn_trace(
         &self,
-        state: &SessionStateEnvelope,
+        state: &SessionSnapshot,
         outcome: &TurnOutcome,
         trace_turn_id: &str,
     ) {
@@ -412,7 +412,7 @@ impl LashRuntime {
             .emit_runtime_event_with_phase_probe(
                 crate::PluginLifecycleEvent::TurnPersisted(crate::SessionStateChangedContext {
                     session_id: self.state.session_id.clone(),
-                    state: crate::SessionReadView::from_exported_state(&returned_turn.state),
+                    state: crate::SessionReadView::from_snapshot(&returned_turn.state),
                     host,
                     direct_completions,
                 }),
@@ -625,13 +625,13 @@ impl LashRuntime {
                     format!("no in-flight runtime turn checkpoint found for `{turn_id}`"),
                 )
             })?;
-        if checkpoint_record.provider_id != self.policy.provider.kind() {
+        if checkpoint_record.provider_id != self.policy.recorded_provider_id() {
             return Err(RuntimeError::new(
                 RuntimeErrorCode::RuntimeTurnResumeProviderMismatch,
                 format!(
                     "checkpoint requires provider `{}`, current runtime has `{}`",
                     checkpoint_record.provider_id,
-                    self.policy.provider.kind()
+                    self.policy.recorded_provider_id()
                 ),
             ));
         }
@@ -659,6 +659,10 @@ impl LashRuntime {
         let mut turn_policy = self.state.effective_policy().clone();
         turn_policy.model = checkpoint_record.model.clone();
         turn_policy.max_turns = checkpoint_record.machine_config.max_turns;
+        let resolved_turn_policy = self
+            .host
+            .resolve_session_policy(&self.state.session_id, turn_policy)
+            .map_err(|err| RuntimeError::new("llm_provider", err.to_string()))?;
         self.protocol_turn_options = checkpoint_record.protocol_turn_options.clone();
         let resume_turn_index = checkpoint_record.turn_index;
         let resume_protocol_iteration = checkpoint_record.protocol_iteration;
@@ -670,7 +674,7 @@ impl LashRuntime {
             .expect("lash runtime session must be available");
         let mut driver = RuntimeTurnDriver {
             session,
-            policy: turn_policy.clone(),
+            policy: resolved_turn_policy,
             host: self.host.clone(),
             effect_scope,
             session_id: self.state.session_id.clone(),
@@ -974,7 +978,7 @@ impl LashRuntime {
                 assembler.push(&SessionEvent::Done);
                 emit_session_event_to_sink(events, SessionEvent::Done).await;
                 return Ok(assembler.finish(
-                    self.state.export_state(),
+                    self.state.to_snapshot(),
                     false,
                     None,
                     &self.host.core.termination,
@@ -1199,8 +1203,9 @@ impl LashRuntime {
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
         let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
         let mut turn_policy = self.state.effective_policy().clone();
-        if let Some(provider) = turn_context.provider().cloned() {
-            turn_policy.install_provider(provider);
+        let turn_provider_override = turn_context.provider().cloned();
+        if let Some(provider) = turn_provider_override.as_ref() {
+            turn_policy.provider_id = provider.kind().to_string();
         }
         if let Some(model) = turn_context.model_spec() {
             turn_policy.model = model.clone();
@@ -1311,7 +1316,7 @@ impl LashRuntime {
             assembler.push(&SessionEvent::Done);
             emit_session_event_to_sink(events, SessionEvent::Done).await;
             return Ok(assembler.finish(
-                state.export_state(),
+                state.to_snapshot(),
                 cancel.is_cancelled(),
                 Some(issue),
                 &self.host.core.termination,
@@ -1351,6 +1356,13 @@ impl LashRuntime {
         } else {
             None
         };
+        let resolved_turn_policy = if let Some(provider) = turn_provider_override {
+            ResolvedSessionPolicy::new(turn_policy.clone(), provider)
+        } else {
+            self.host
+                .resolve_session_policy(&self.state.session_id, turn_policy.clone())
+                .map_err(|err| RuntimeError::new("llm_provider", err.to_string()))?
+        };
         let manager = self
             .runtime_session_manager_for_turn_with_lease(
                 Some(child_usage_event_relay.clone()),
@@ -1366,7 +1378,7 @@ impl LashRuntime {
             .expect("lash runtime session must be available");
         let mut driver = RuntimeTurnDriver {
             session,
-            policy: turn_policy.clone(),
+            policy: resolved_turn_policy,
             host: self.host.clone(),
             effect_scope,
             session_id: self.state.session_id.clone(),

@@ -126,7 +126,7 @@ pub(crate) trait ReadModelState {
     fn read_model(&self) -> crate::session_graph::SessionReadModel;
 }
 
-impl ReadModelState for SessionStateEnvelope {
+impl ReadModelState for SessionSnapshot {
     fn read_model(&self) -> crate::session_graph::SessionReadModel {
         self.read_model()
     }
@@ -142,7 +142,7 @@ pub(crate) trait ReadModelStateMut: ReadModelState {
     fn append_message(&mut self, message: Message);
 }
 
-impl ReadModelStateMut for SessionStateEnvelope {
+impl ReadModelStateMut for SessionSnapshot {
     fn append_message(&mut self, message: Message) {
         self.session_graph.append_message(message);
     }
@@ -229,16 +229,19 @@ pub(crate) fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
 }
 
 pub(crate) fn set_runtime_provider(runtime: &mut LashRuntime, provider: crate::ProviderHandle) {
-    runtime.policy.provider = provider.clone();
-    runtime.state.policy.provider = provider.clone();
+    runtime.host.core = runtime.host.core.clone().with_provider_resolver(Arc::new(
+        crate::SingleProviderResolver::new(provider.clone()),
+    ));
+    runtime.policy.provider_id = provider.kind().to_string();
+    runtime.state.policy.provider_id = provider.kind().to_string();
     if let Some(frame) = runtime.state.current_agent_frame_mut() {
-        frame.assignment.policy.provider = provider;
+        frame.assignment.policy.provider_id = provider.kind().to_string();
     }
 }
 
 pub(crate) fn standard_test_policy() -> SessionPolicy {
     SessionPolicy {
-        provider: mock_provider(Vec::new()).into_handle(),
+        provider_id: "mock".to_string(),
         model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
             .expect("valid model spec"),
         ..SessionPolicy::default()
@@ -246,7 +249,11 @@ pub(crate) fn standard_test_policy() -> SessionPolicy {
 }
 
 pub(crate) fn test_host_config() -> EmbeddedRuntimeHost {
-    EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory())
+    EmbeddedRuntimeHost::new(
+        RuntimeCoreConfig::in_memory().with_provider_resolver(Arc::new(
+            crate::SingleProviderResolver::new(mock_provider(Vec::new()).into_handle()),
+        )),
+    )
 }
 
 pub(crate) fn test_host_config_with_trace_path(path: PathBuf) -> EmbeddedRuntimeHost {
