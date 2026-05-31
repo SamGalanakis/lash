@@ -14,8 +14,8 @@ keywords = ["lash", "agent", "sqlite", "persistence", "store"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.13" }
-lashlang = { path = "../lashlang", version = "=0.1.0-alpha.13" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.14" }
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.14" }
 async-trait = { workspace = true }
 flate2 = "1"
 rmp-serde = "1"
@@ -27,7 +27,7 @@ tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.13", features = ["testing"] }
-lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.13" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.14", features = ["testing"] }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.14" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
