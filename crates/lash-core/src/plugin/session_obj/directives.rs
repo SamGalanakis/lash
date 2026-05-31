@@ -49,7 +49,8 @@ fn append_plugin_messages(
 
 async fn interpret_directive(
     emitted: PluginOwned<PluginDirective>,
-    host: &Arc<dyn RuntimeSessionHost>,
+    session_lifecycle: &Arc<dyn SessionLifecycleService>,
+    session_graph: &Arc<dyn SessionGraphService>,
     policy: PluginDirectivePolicy,
 ) -> Result<DirectiveAction, PluginError> {
     match emitted.value {
@@ -63,7 +64,8 @@ async fn interpret_directive(
             Ok(DirectiveAction::EnqueueMessages(messages))
         }
         PluginDirective::CreateSession { request } => {
-            host.create_session(*request)
+            session_lifecycle
+                .create_session(*request)
                 .await
                 .map_err(|err| PluginError::Session(err.to_string()))?;
             Ok(DirectiveAction::None)
@@ -78,14 +80,15 @@ async fn interpret_directive(
             payload,
             context,
         } => {
-            host.emit_trace_event(
-                *context,
-                lash_trace::TraceEvent::Custom {
-                    name: format!("plugin.{}.{}", emitted.plugin_id, name),
-                    payload,
-                },
-            )
-            .await?;
+            session_graph
+                .emit_trace_event(
+                    *context,
+                    lash_trace::TraceEvent::Custom {
+                        name: format!("plugin.{}.{}", emitted.plugin_id, name),
+                        payload,
+                    },
+                )
+                .await?;
             Ok(DirectiveAction::None)
         }
         PluginDirective::ReplaceToolArgs { .. } | PluginDirective::ShortCircuitTool { .. } => Err(
@@ -99,14 +102,15 @@ impl PluginSession {
         &self,
         directives: Vec<PluginOwned<PluginDirective>>,
         mut messages: crate::MessageSequence,
-        host: Arc<dyn RuntimeSessionHost>,
+        session_lifecycle: Arc<dyn SessionLifecycleService>,
+        session_graph: Arc<dyn SessionGraphService>,
         policy: PluginDirectivePolicy,
     ) -> Result<TurnPreparation, PluginError> {
         let mut events = Vec::new();
         let mut abort = None;
 
         for emitted in directives {
-            match interpret_directive(emitted, &host, policy).await? {
+            match interpret_directive(emitted, &session_lifecycle, &session_graph, policy).await? {
                 DirectiveAction::Abort(next) => abort = Some(next),
                 DirectiveAction::EnqueueMessages(plugin_messages) => {
                     append_plugin_messages(&mut messages, &plugin_messages);
@@ -139,7 +143,9 @@ impl PluginSession {
             session_id,
             state,
             messages,
-            host,
+            sessions,
+            session_lifecycle,
+            session_graph,
             turn_context,
         } = request;
         let directives = self
@@ -147,7 +153,7 @@ impl PluginSession {
                 TurnHookContext {
                     session_id,
                     state,
-                    host: host.clone(),
+                    sessions,
                     turn_context,
                 },
                 phase_probe.as_ref(),
@@ -156,7 +162,8 @@ impl PluginSession {
         self.apply_turn_directives(
             directives,
             messages,
-            host,
+            session_lifecycle,
+            session_graph,
             PluginDirectivePolicy::BEFORE_TURN,
         )
         .await
@@ -172,7 +179,13 @@ impl PluginSession {
         let mut abort = None;
 
         for emitted in directives {
-            match interpret_directive(emitted, &ctx.host, PluginDirectivePolicy::CHECKPOINT).await?
+            match interpret_directive(
+                emitted,
+                &ctx.session_lifecycle,
+                &ctx.session_graph,
+                PluginDirectivePolicy::CHECKPOINT,
+            )
+            .await?
             {
                 DirectiveAction::Abort(next) => abort = Some(next),
                 DirectiveAction::EnqueueMessages(queued) => messages.extend(queued),
@@ -191,15 +204,20 @@ impl PluginSession {
     pub async fn finalize_turn(
         &self,
         turn: AssembledTurn,
-        host: Arc<dyn RuntimeSessionHost>,
+        sessions: Arc<dyn SessionStateService>,
+        session_lifecycle: Arc<dyn SessionLifecycleService>,
+        session_graph: Arc<dyn SessionGraphService>,
     ) -> Result<TurnFinalization, PluginError> {
-        self.finalize_turn_with_phase_probe(turn, host, None).await
+        self.finalize_turn_with_phase_probe(turn, sessions, session_lifecycle, session_graph, None)
+            .await
     }
 
     pub async fn finalize_turn_with_phase_probe(
         &self,
         mut turn: AssembledTurn,
-        host: Arc<dyn RuntimeSessionHost>,
+        sessions: Arc<dyn SessionStateService>,
+        session_lifecycle: Arc<dyn SessionLifecycleService>,
+        session_graph: Arc<dyn SessionGraphService>,
         phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     ) -> Result<TurnFinalization, PluginError> {
         let session_id = turn.state.session_id.clone();
@@ -210,7 +228,7 @@ impl PluginSession {
                 TurnResultHookContext {
                     session_id: session_id.clone(),
                     turn: Arc::new(crate::plugin::TurnResultSummary::from_assembled(&turn)),
-                    host: host.clone(),
+                    sessions,
                 },
                 phase_probe.as_ref(),
             )
@@ -219,7 +237,14 @@ impl PluginSession {
         let mut events = Vec::new();
         let mut updated_messages: Option<crate::MessageSequence> = None;
         for emitted in directives {
-            match interpret_directive(emitted, &host, PluginDirectivePolicy::AFTER_TURN).await? {
+            match interpret_directive(
+                emitted,
+                &session_lifecycle,
+                &session_graph,
+                PluginDirectivePolicy::AFTER_TURN,
+            )
+            .await?
+            {
                 DirectiveAction::Abort(_) => unreachable!("after_turn policy rejects abort"),
                 DirectiveAction::EnqueueMessages(plugin_messages) => {
                     let messages = updated_messages.get_or_insert_with(|| {

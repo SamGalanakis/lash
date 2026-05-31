@@ -209,11 +209,13 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
-    use lash_core::plugin::runtime_host::RuntimeSessionHost;
+    use lash_core::plugin::runtime_host::{
+        SessionGraphService, SessionLifecycleService, SessionStateService,
+    };
     use lash_core::plugin::{PluginError, SessionHandle};
+    use lash_core::runtime::RuntimeSessionState;
     use lash_core::{
-        RuntimeSessionState, SessionAppendNode, SessionCreateRequest, SessionPolicy,
-        SessionSnapshot, ToolProvider,
+        SessionAppendNode, SessionCreateRequest, SessionPolicy, SessionSnapshot, ToolProvider,
     };
     use lash_rlm_types::{RlmProtocolEvent, RlmTermination};
 
@@ -261,7 +263,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl RuntimeSessionHost for BatonManager {
+    impl SessionStateService for BatonManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
             Ok(self.snapshot.to_snapshot())
         }
@@ -278,7 +280,10 @@ mod tests {
         ) -> Result<Vec<serde_json::Value>, PluginError> {
             Ok(Vec::new())
         }
+    }
 
+    #[async_trait]
+    impl SessionLifecycleService for BatonManager {
         async fn create_session(
             &self,
             request: SessionCreateRequest,
@@ -299,6 +304,9 @@ mod tests {
             Ok(())
         }
     }
+
+    #[async_trait]
+    impl SessionGraphService for BatonManager {}
 
     #[async_trait]
     impl lash_core::ProcessService for BatonManager {
@@ -415,11 +423,15 @@ mod tests {
         manager: Arc<BatonManager>,
         args: &Value,
     ) -> ToolResult {
-        let host: Arc<dyn RuntimeSessionHost> = manager.clone();
+        let sessions: Arc<dyn SessionStateService> = manager.clone();
+        let session_lifecycle: Arc<dyn SessionLifecycleService> = manager.clone();
+        let session_graph: Arc<dyn SessionGraphService> = manager.clone();
         let processes: Arc<dyn lash_core::ProcessService> = manager;
         let context = lash_core::ToolContext::__for_testing(
             "test-session".to_string(),
-            host,
+            sessions,
+            session_lifecycle,
+            session_graph,
             processes,
             Arc::new(lash_core::InMemoryAttachmentStore::new()),
             lash_core::DirectCompletionClient::from_fn(|_, _| {

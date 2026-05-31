@@ -143,7 +143,7 @@ async fn ensure_plan_path<H>(
     host: &Arc<H>,
 ) -> Result<PathBuf, PluginError>
 where
-    H: lash_core::plugin::runtime_host::RuntimeSessionHost + ?Sized,
+    H: lash_core::plugin::runtime_host::SessionStateService + ?Sized,
 {
     if let Some(path) = state
         .lock()
@@ -205,7 +205,7 @@ async fn ensure_plan_report<H>(
     seed_if_missing: bool,
 ) -> Result<PlanReport, PluginError>
 where
-    H: lash_core::plugin::runtime_host::RuntimeSessionHost + ?Sized,
+    H: lash_core::plugin::runtime_host::SessionStateService + ?Sized,
 {
     let path = ensure_plan_path(state, session_id, host).await?;
     if seed_if_missing {
@@ -224,7 +224,7 @@ async fn sync_plan_exit_tool_state<H>(
     enabled: bool,
 ) -> Result<(), PluginError>
 where
-    H: lash_core::plugin::runtime_host::RuntimeSessionHost + ?Sized,
+    H: lash_core::plugin::runtime_host::SessionStateService + ?Sized,
 {
     let availability = if enabled {
         Some(lash_core::ToolAvailability::Showcased)
@@ -248,7 +248,7 @@ async fn set_plan_mode_enabled_state<H>(
     enabled: bool,
 ) -> Result<bool, PluginError>
 where
-    H: lash_core::plugin::runtime_host::RuntimeSessionHost + ?Sized,
+    H: lash_core::plugin::runtime_host::SessionStateService + ?Sized,
 {
     let previous = {
         let mut guard = state
@@ -855,8 +855,9 @@ where
                 Err(_) => return Err(PluginActionFailure::new("plan mode state poisoned")),
             };
             let enabled =
-                set_plan_mode_enabled_state(&state, &session_id, &ctx.host, target_enabled).await?;
-            let report = ensure_plan_report(&state, &session_id, &ctx.host, enabled).await?;
+                set_plan_mode_enabled_state(&state, &session_id, &ctx.sessions, target_enabled)
+                    .await?;
+            let report = ensure_plan_report(&state, &session_id, &ctx.sessions, enabled).await?;
             Ok(plan_mode_payload(&session_id, enabled, Some(&report)))
         }
     })

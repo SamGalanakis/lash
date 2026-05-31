@@ -515,84 +515,29 @@ impl<'module> Linker<'module> {
     }
 
     fn link_program(&mut self) -> Result<Program, LinkError> {
-        self.validate()?;
-        let mut scope = Scope::new(true, false, None);
-        let main = self.lower_expr(&self.program.main, &mut scope)?.0;
+        // Single walk: collect declaration metadata, then lower (and validate)
+        // declarations in source order, then lower main. Declaration errors
+        // therefore still surface before main errors, matching the prior
+        // two-pass (validate-then-lower) ordering.
+        self.collect_declarations()?;
         let declarations = self
             .program
             .declarations
             .iter()
-            .map(|declaration| self.lower_declaration(declaration))
+            .enumerate()
+            .map(|(index, declaration)| {
+                let span = self.program.declaration_spans.get(index).copied();
+                self.lower_declaration(declaration, span)
+            })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut scope = Scope::new(true, false, None);
+        let main = self.lower_expr(&self.program.main, &mut scope)?.0;
         Ok(Program {
             declarations,
             main,
             declaration_spans: self.program.declaration_spans.clone(),
             expression_spans: self.program.expression_spans.clone(),
         })
-    }
-
-    fn validate(&mut self) -> Result<(), LinkError> {
-        self.collect_declarations()?;
-        for (index, declaration) in self.program.declarations.iter().enumerate() {
-            let span = self.program.declaration_spans.get(index).copied();
-            match declaration {
-                Declaration::Process(process) => self.validate_process(process, span)?,
-                Declaration::Trigger(trigger) => {
-                    self.ensure_feature(self.surface.abilities.triggers, "triggers", span)?;
-                    self.ensure_feature(self.surface.abilities.processes, "processes", span)?;
-                    let payload_ty = match &trigger.source {
-                        TriggerSource::Binding { resource, event } => {
-                            let resource = self.validate_resource_ref(resource, span)?;
-                            self.trigger_event_payload(
-                                resource.resource_type.as_str(),
-                                event.as_str(),
-                                span,
-                            )?
-                        }
-                        TriggerSource::Each {
-                            resource_type,
-                            event,
-                            ..
-                        } => self.trigger_event_payload(
-                            resource_type.as_str(),
-                            event.as_str(),
-                            span,
-                        )?,
-                    };
-                    self.validate_trigger(trigger, &payload_ty, span)?;
-                }
-                Declaration::Schedule(schedule) => {
-                    if matches!(schedule.cadence, ScheduleCadence::Cron { .. })
-                        && !self.surface.abilities.schedules.cron
-                    {
-                        return Err(LinkError::FeatureDisabled {
-                            feature: "cron schedules",
-                            span,
-                        });
-                    }
-                    let mut scope = Scope::new(false, false, span);
-                    scope.bind(schedule.tick_binding.as_str(), Binding::Value);
-                    match &schedule.cadence {
-                        ScheduleCadence::Cron {
-                            expression,
-                            options,
-                        } => {
-                            self.validate_expr(expression, &mut scope)?;
-                            for (_, option) in options {
-                                self.validate_expr(option, &mut scope)?;
-                            }
-                        }
-                    }
-                    self.validate_expr(&schedule.body, &mut scope)?;
-                }
-                Declaration::Type(_) => {}
-            }
-        }
-
-        let mut top_level = Scope::new(true, false, None);
-        self.validate_expr(&self.program.main, &mut top_level)?;
-        Ok(())
     }
 
     fn collect_declarations(&mut self) -> Result<(), LinkError> {
@@ -625,25 +570,6 @@ impl<'module> Linker<'module> {
                 });
             }
         }
-        Ok(())
-    }
-
-    fn validate_process(&self, process: &ProcessDecl, span: Option<Span>) -> Result<(), LinkError> {
-        self.ensure_feature(self.surface.abilities.processes, "processes", span)?;
-        let mut scope = Scope::new(false, true, span);
-        let mut seen = BTreeSet::new();
-        for param in &process.params {
-            if !seen.insert(param.name.to_string()) {
-                return Err(LinkError::DuplicateProcessParam {
-                    name: param.name.to_string(),
-                    span,
-                });
-            }
-            scope.bind(param.name.as_str(), self.binding_for_type(&param.ty));
-        }
-        scope.bind("input", Binding::Value);
-        scope.bind("inputs", Binding::Value);
-        self.validate_expr(&process.body, &mut scope)?;
         Ok(())
     }
 
@@ -900,291 +826,6 @@ impl<'module> Linker<'module> {
         }
     }
 
-    fn validate_expr(&self, expr: &Expr, scope: &mut Scope) -> Result<Option<Binding>, LinkError> {
-        match expr {
-            Expr::Block(expressions) => {
-                let mut last = None;
-                for expression in expressions {
-                    last = self.validate_expr(expression, scope)?;
-                }
-                Ok(last)
-            }
-            Expr::Null
-            | Expr::Bool(_)
-            | Expr::Number(_)
-            | Expr::String(_)
-            | Expr::Break
-            | Expr::Continue
-            | Expr::TypeLiteral(_) => Ok(Some(Binding::Value)),
-            Expr::Variable(name) => {
-                if let Some(binding) = scope.get(name) {
-                    return Ok(Some(binding));
-                }
-                if let Some(resource) = self.resolve_module_expr(expr, scope) {
-                    return Ok(Some(Binding::Resource {
-                        resource_type: resource.resource_type.to_string(),
-                    }));
-                }
-                if scope.allow_unknown_globals {
-                    return Ok(Some(Binding::Value));
-                }
-                Err(LinkError::UnknownName {
-                    name: name.to_string(),
-                    span: scope.span,
-                })
-            }
-            Expr::List(items) => {
-                for item in items {
-                    self.validate_expr(item, scope)?;
-                }
-                Ok(Some(Binding::Value))
-            }
-            Expr::Record(entries) => {
-                for (_, value) in entries {
-                    self.validate_expr(value, scope)?;
-                }
-                Ok(Some(Binding::Value))
-            }
-            Expr::Assign { target, expr } => {
-                for step in &target.steps {
-                    if let AssignPathStep::Index(index) = step {
-                        self.validate_expr(index, scope)?;
-                    }
-                }
-                let binding = self.validate_expr(expr, scope)?.unwrap_or(Binding::Value);
-                if target.steps.is_empty() {
-                    scope.bind(target.root.as_str(), binding);
-                } else if scope.get(&target.root).is_none() && !scope.allow_unknown_globals {
-                    return Err(LinkError::UnknownName {
-                        name: target.root.to_string(),
-                        span: scope.span,
-                    });
-                }
-                Ok(Some(Binding::Value))
-            }
-            Expr::If {
-                condition,
-                then_block,
-                else_block,
-            } => {
-                self.validate_expr(condition, scope)?;
-                let mut then_scope = scope.clone();
-                self.validate_expr(then_block, &mut then_scope)?;
-                let mut else_scope = scope.clone();
-                self.validate_expr(else_block, &mut else_scope)?;
-                scope.merge_from(then_scope);
-                scope.merge_from(else_scope);
-                Ok(Some(Binding::Value))
-            }
-            Expr::For {
-                binding,
-                iterable,
-                body,
-            } => {
-                self.validate_expr(iterable, scope)?;
-                let previous = scope.bind(binding.as_str(), Binding::Value);
-                self.validate_expr(body, scope)?;
-                scope.restore(binding.as_str(), previous);
-                Ok(Some(Binding::Value))
-            }
-            Expr::StartProcess(start) => {
-                self.ensure_feature(self.surface.abilities.processes, "processes", scope.span)?;
-                let Some(process) = self.program.process(start.process.as_str()) else {
-                    return Err(LinkError::UnknownProcess {
-                        name: start.process.to_string(),
-                        span: scope.span,
-                    });
-                };
-                let mut seen = BTreeSet::new();
-                for (arg, value) in &start.args {
-                    if !seen.insert(arg.to_string()) {
-                        return Err(LinkError::DuplicateProcessArgument {
-                            arg: arg.to_string(),
-                            span: scope.span,
-                        });
-                    }
-                    let Some(param) = process.params.iter().find(|param| param.name == *arg) else {
-                        return Err(LinkError::UnexpectedProcessArgument {
-                            process: process.name.to_string(),
-                            arg: arg.to_string(),
-                            span: scope.span,
-                        });
-                    };
-                    let binding = self.validate_expr(value, scope)?;
-                    self.validate_process_arg_binding(
-                        process.name.as_str(),
-                        arg.as_str(),
-                        &param.ty,
-                        binding.as_ref(),
-                        scope.span,
-                    )?;
-                }
-                for param in &process.params {
-                    if !seen.contains(param.name.as_str()) {
-                        return Err(LinkError::MissingProcessArgument {
-                            process: process.name.to_string(),
-                            arg: param.name.to_string(),
-                            span: scope.span,
-                        });
-                    }
-                }
-                Ok(Some(Binding::Value))
-            }
-            Expr::SleepFor(expr) | Expr::SleepUntil(expr) => {
-                self.ensure_feature(self.surface.abilities.sleep, "sleep", scope.span)?;
-                self.validate_expr(expr, scope)?;
-                Ok(Some(Binding::Value))
-            }
-            Expr::WaitSignal => {
-                self.ensure_feature(
-                    self.surface.abilities.process_signals,
-                    "process signals",
-                    scope.span,
-                )?;
-                if !scope.process_body {
-                    return Err(LinkError::ProcessLifecycleOutsideProcess {
-                        keyword: "wait signal",
-                        span: scope.span,
-                    });
-                }
-                Ok(Some(Binding::Value))
-            }
-            Expr::SignalRun { run, payload } => {
-                self.ensure_feature(
-                    self.surface.abilities.process_signals,
-                    "process signals",
-                    scope.span,
-                )?;
-                if !scope.process_body {
-                    return Err(LinkError::ProcessLifecycleOutsideProcess {
-                        keyword: "signal run",
-                        span: scope.span,
-                    });
-                }
-                self.validate_expr(run, scope)?;
-                self.validate_expr(payload, scope)?;
-                Ok(Some(Binding::Value))
-            }
-            Expr::ResourceRef(resource) => {
-                let resource = self.validate_resource_ref(resource, scope.span)?;
-                Ok(Some(Binding::Resource {
-                    resource_type: resource.resource_type.to_string(),
-                }))
-            }
-            Expr::ReceiverCall {
-                receiver,
-                operation,
-                args,
-            } => {
-                let receiver_binding =
-                    if let Some(resource) = self.resolve_module_expr(receiver, scope) {
-                        Some(Binding::Resource {
-                            resource_type: resource.resource_type.to_string(),
-                        })
-                    } else {
-                        self.validate_expr(receiver, scope)?
-                    };
-                let Some(Binding::Resource { resource_type }) = receiver_binding else {
-                    if let Some(path) = module_path_for_expr(receiver) {
-                        let suggestions = self
-                            .surface
-                            .resources
-                            .operation_suggestions_for_prefix(&path, operation.as_str());
-                        if !suggestions.is_empty() {
-                            return Err(LinkError::AmbiguousModuleOperation {
-                                module_path: module_path_key(&path),
-                                operation: operation.to_string(),
-                                suggestions,
-                                span: scope.span,
-                            });
-                        }
-                    }
-                    return Err(LinkError::UnresolvedReceiver {
-                        operation: operation.to_string(),
-                        span: scope.span,
-                    });
-                };
-                if self
-                    .surface
-                    .resources
-                    .resolve_operation(&resource_type, operation)
-                    .is_none()
-                {
-                    return Err(LinkError::UnknownResourceOperation {
-                        resource_type,
-                        operation: operation.to_string(),
-                        span: scope.span,
-                    });
-                }
-                for arg in args {
-                    self.validate_expr(arg, scope)?;
-                }
-                Ok(Some(Binding::Value))
-            }
-            Expr::Await(expr)
-            | Expr::ResultUnwrap(expr)
-            | Expr::Cancel(expr)
-            | Expr::Print(expr)
-            | Expr::Yield(expr)
-            | Expr::Wake(expr)
-            | Expr::Fail(expr)
-            | Expr::Unary { expr, .. } => {
-                self.validate_expr(expr, scope)?;
-                Ok(Some(Binding::Value))
-            }
-            Expr::Submit(expr) | Expr::Finish(expr) => {
-                if let Some(expr) = expr {
-                    self.validate_expr(expr, scope)?;
-                }
-                Ok(Some(Binding::Value))
-            }
-            Expr::BuiltinCall { name, args } => {
-                if !is_builtin(name.as_str()) {
-                    if let Some(suggestion) = self
-                        .surface
-                        .resources
-                        .operation_suggestions_for_host(name.as_str())
-                        .into_iter()
-                        .next()
-                    {
-                        return Err(LinkError::BareToolCall {
-                            name: name.to_string(),
-                            suggestion,
-                            span: scope.span,
-                        });
-                    }
-                    return Err(LinkError::UnknownBuiltin {
-                        name: name.to_string(),
-                        span: scope.span,
-                    });
-                }
-                for arg in args {
-                    self.validate_expr(arg, scope)?;
-                }
-                Ok(Some(Binding::Value))
-            }
-            Expr::Field { target, .. } => {
-                if let Some(resource) = self.resolve_module_expr(expr, scope) {
-                    return Ok(Some(Binding::Resource {
-                        resource_type: resource.resource_type.to_string(),
-                    }));
-                }
-                self.validate_expr(target, scope)?;
-                Ok(Some(Binding::Value))
-            }
-            Expr::Index { target, index } => {
-                self.validate_expr(target, scope)?;
-                self.validate_expr(index, scope)?;
-                Ok(Some(Binding::Value))
-            }
-            Expr::Binary { left, right, .. } => {
-                self.validate_expr(left, scope)?;
-                self.validate_expr(right, scope)?;
-                Ok(Some(Binding::Value))
-            }
-        }
-    }
-
     fn validate_resource_ref(
         &self,
         resource: &ResourceRefExpr,
@@ -1210,12 +851,24 @@ impl<'module> Linker<'module> {
             })
     }
 
-    fn lower_declaration(&self, declaration: &Declaration) -> Result<Declaration, LinkError> {
+    fn lower_declaration(
+        &self,
+        declaration: &Declaration,
+        span: Option<Span>,
+    ) -> Result<Declaration, LinkError> {
         Ok(match declaration {
             Declaration::Type(type_decl) => Declaration::Type(type_decl.clone()),
             Declaration::Process(process) => {
-                let mut scope = Scope::new(false, true, None);
+                self.ensure_feature(self.surface.abilities.processes, "processes", span)?;
+                let mut scope = Scope::new(false, true, span);
+                let mut seen = BTreeSet::new();
                 for param in &process.params {
+                    if !seen.insert(param.name.to_string()) {
+                        return Err(LinkError::DuplicateProcessParam {
+                            name: param.name.to_string(),
+                            span,
+                        });
+                    }
                     scope.bind(param.name.as_str(), self.binding_for_type(&param.ty));
                 }
                 scope.bind("input", Binding::Value);
@@ -1229,28 +882,52 @@ impl<'module> Linker<'module> {
                 })
             }
             Declaration::Trigger(trigger) => {
-                let source = match &trigger.source {
-                    TriggerSource::Binding { resource, event } => TriggerSource::Binding {
-                        resource: self.validate_resource_ref(resource, None)?,
-                        event: event.clone(),
-                    },
+                self.ensure_feature(self.surface.abilities.triggers, "triggers", span)?;
+                self.ensure_feature(self.surface.abilities.processes, "processes", span)?;
+                let (source, payload_ty) = match &trigger.source {
+                    TriggerSource::Binding { resource, event } => {
+                        let resource = self.validate_resource_ref(resource, span)?;
+                        let payload_ty = self.trigger_event_payload(
+                            resource.resource_type.as_str(),
+                            event.as_str(),
+                            span,
+                        )?;
+                        (
+                            TriggerSource::Binding {
+                                resource,
+                                event: event.clone(),
+                            },
+                            payload_ty,
+                        )
+                    }
                     TriggerSource::Each {
                         resource_type,
                         event,
                         resource_binding,
-                    } => TriggerSource::Each {
-                        resource_type: resource_type.clone(),
-                        event: event.clone(),
-                        resource_binding: resource_binding.clone(),
-                    },
+                    } => {
+                        let payload_ty = self.trigger_event_payload(
+                            resource_type.as_str(),
+                            event.as_str(),
+                            span,
+                        )?;
+                        (
+                            TriggerSource::Each {
+                                resource_type: resource_type.clone(),
+                                event: event.clone(),
+                                resource_binding: resource_binding.clone(),
+                            },
+                            payload_ty,
+                        )
+                    }
                 };
+                self.validate_trigger(trigger, &payload_ty, span)?;
                 let args = trigger
                     .args
                     .iter()
                     .map(|(name, arg)| {
                         let arg = match arg {
                             TriggerArg::ResourceRef(resource) => {
-                                TriggerArg::ResourceRef(self.validate_resource_ref(resource, None)?)
+                                TriggerArg::ResourceRef(self.validate_resource_ref(resource, span)?)
                             }
                             TriggerArg::EventBinding(name) => {
                                 TriggerArg::EventBinding(name.clone())
@@ -1271,7 +948,15 @@ impl<'module> Linker<'module> {
                 })
             }
             Declaration::Schedule(schedule) => {
-                let mut scope = Scope::new(false, false, None);
+                if matches!(schedule.cadence, ScheduleCadence::Cron { .. })
+                    && !self.surface.abilities.schedules.cron
+                {
+                    return Err(LinkError::FeatureDisabled {
+                        feature: "cron schedules",
+                        span,
+                    });
+                }
+                let mut scope = Scope::new(false, false, span);
                 scope.bind(schedule.tick_binding.as_str(), Binding::Value);
                 let cadence = match &schedule.cadence {
                     ScheduleCadence::Cron {
@@ -1324,7 +1009,20 @@ impl<'module> Linker<'module> {
                 }
                 (Expr::Block(lowered), last)
             }
-            Expr::Variable(name) => (Expr::Variable(name.clone()), scope.get(name)),
+            Expr::Variable(name) => {
+                if let Some(binding) = scope.get(name) {
+                    (Expr::Variable(name.clone()), Some(binding))
+                } else if scope.allow_unknown_globals {
+                    // Top-level unknown globals are permitted; they surface as
+                    // runtime errors rather than link errors.
+                    (Expr::Variable(name.clone()), Some(Binding::Value))
+                } else {
+                    return Err(LinkError::UnknownName {
+                        name: name.to_string(),
+                        span: scope.span,
+                    });
+                }
+            }
             Expr::Null
             | Expr::Bool(_)
             | Expr::Number(_)
@@ -1362,6 +1060,11 @@ impl<'module> Linker<'module> {
                         target.root.as_str(),
                         binding.clone().unwrap_or(Binding::Value),
                     );
+                } else if scope.get(&target.root).is_none() && !scope.allow_unknown_globals {
+                    return Err(LinkError::UnknownName {
+                        name: target.root.to_string(),
+                        span: scope.span,
+                    });
                 }
                 (
                     Expr::Assign {
@@ -1410,17 +1113,68 @@ impl<'module> Linker<'module> {
                     Some(Binding::Value),
                 )
             }
-            Expr::StartProcess(start) => (
-                Expr::StartProcess(crate::ast::ProcessStartExpr {
-                    process: start.process.clone(),
-                    args: start
-                        .args
-                        .iter()
-                        .map(|(name, value)| Ok((name.clone(), self.lower_expr(value, scope)?.0)))
-                        .collect::<Result<Vec<_>, LinkError>>()?,
-                }),
-                Some(Binding::Value),
-            ),
+            Expr::While { condition, body } => {
+                let condition = self.lower_expr(condition, scope)?.0;
+                let body = self.lower_expr(body, scope)?.0;
+                (
+                    Expr::While {
+                        condition: Box::new(condition),
+                        body: Box::new(body),
+                    },
+                    Some(Binding::Value),
+                )
+            }
+            Expr::StartProcess(start) => {
+                self.ensure_feature(self.surface.abilities.processes, "processes", scope.span)?;
+                let Some(process) = self.program.process(start.process.as_str()) else {
+                    return Err(LinkError::UnknownProcess {
+                        name: start.process.to_string(),
+                        span: scope.span,
+                    });
+                };
+                let mut seen = BTreeSet::new();
+                let mut lowered_args = Vec::with_capacity(start.args.len());
+                for (arg, value) in &start.args {
+                    if !seen.insert(arg.to_string()) {
+                        return Err(LinkError::DuplicateProcessArgument {
+                            arg: arg.to_string(),
+                            span: scope.span,
+                        });
+                    }
+                    let Some(param) = process.params.iter().find(|param| param.name == *arg) else {
+                        return Err(LinkError::UnexpectedProcessArgument {
+                            process: process.name.to_string(),
+                            arg: arg.to_string(),
+                            span: scope.span,
+                        });
+                    };
+                    let (lowered, binding) = self.lower_expr(value, scope)?;
+                    self.validate_process_arg_binding(
+                        process.name.as_str(),
+                        arg.as_str(),
+                        &param.ty,
+                        binding.as_ref(),
+                        scope.span,
+                    )?;
+                    lowered_args.push((arg.clone(), lowered));
+                }
+                for param in &process.params {
+                    if !seen.contains(param.name.as_str()) {
+                        return Err(LinkError::MissingProcessArgument {
+                            process: process.name.to_string(),
+                            arg: param.name.to_string(),
+                            span: scope.span,
+                        });
+                    }
+                }
+                (
+                    Expr::StartProcess(crate::ast::ProcessStartExpr {
+                        process: start.process.clone(),
+                        args: lowered_args,
+                    }),
+                    Some(Binding::Value),
+                )
+            }
             Expr::ResourceRef(resource) => {
                 let resource = self.validate_resource_ref(resource, scope.span)?;
                 (
@@ -1435,29 +1189,55 @@ impl<'module> Linker<'module> {
                 operation,
                 args,
             } => {
-                let (receiver, resource_type) =
+                let (lowered_receiver, resource_type) =
                     if let Some(resource) = self.resolve_module_expr(receiver, scope) {
                         (
                             Expr::ResourceRef(resource.clone()),
-                            resource.resource_type.to_string(),
+                            Some(resource.resource_type.to_string()),
                         )
                     } else {
-                        let (receiver, binding) = self.lower_expr(receiver, scope)?;
+                        let (lowered_receiver, binding) = self.lower_expr(receiver, scope)?;
                         let resource_type = match binding {
-                            Some(Binding::Resource { resource_type }) => resource_type,
-                            _ => String::new(),
+                            Some(Binding::Resource { resource_type }) => Some(resource_type),
+                            _ => None,
                         };
-                        (receiver, resource_type)
+                        (lowered_receiver, resource_type)
                     };
-                let host_operation = self
+                let Some(resource_type) = resource_type else {
+                    if let Some(path) = module_path_for_expr(receiver) {
+                        let suggestions = self
+                            .surface
+                            .resources
+                            .operation_suggestions_for_prefix(&path, operation.as_str());
+                        if !suggestions.is_empty() {
+                            return Err(LinkError::AmbiguousModuleOperation {
+                                module_path: module_path_key(&path),
+                                operation: operation.to_string(),
+                                suggestions,
+                                span: scope.span,
+                            });
+                        }
+                    }
+                    return Err(LinkError::UnresolvedReceiver {
+                        operation: operation.to_string(),
+                        span: scope.span,
+                    });
+                };
+                let Some(host_operation) = self
                     .surface
                     .resources
                     .resolve_operation(&resource_type, operation)
                     .map(|binding| binding.host_operation.clone())
-                    .unwrap_or_else(|| operation.to_string());
+                else {
+                    return Err(LinkError::UnknownResourceOperation {
+                        resource_type,
+                        operation: operation.to_string(),
+                        span: scope.span,
+                    });
+                };
                 (
                     Expr::ReceiverCall {
-                        receiver: Box::new(receiver),
+                        receiver: Box::new(lowered_receiver),
                         operation: host_operation.into(),
                         args: args
                             .iter()
@@ -1471,22 +1251,54 @@ impl<'module> Linker<'module> {
                 Expr::Await(Box::new(self.lower_expr(inner, scope)?.0)),
                 Some(Binding::Value),
             ),
-            Expr::SleepFor(inner) => (
-                Expr::SleepFor(Box::new(self.lower_expr(inner, scope)?.0)),
-                Some(Binding::Value),
-            ),
-            Expr::SleepUntil(inner) => (
-                Expr::SleepUntil(Box::new(self.lower_expr(inner, scope)?.0)),
-                Some(Binding::Value),
-            ),
-            Expr::WaitSignal => (Expr::WaitSignal, Some(Binding::Value)),
-            Expr::SignalRun { run, payload } => (
-                Expr::SignalRun {
-                    run: Box::new(self.lower_expr(run, scope)?.0),
-                    payload: Box::new(self.lower_expr(payload, scope)?.0),
-                },
-                Some(Binding::Value),
-            ),
+            Expr::SleepFor(inner) => {
+                self.ensure_feature(self.surface.abilities.sleep, "sleep", scope.span)?;
+                (
+                    Expr::SleepFor(Box::new(self.lower_expr(inner, scope)?.0)),
+                    Some(Binding::Value),
+                )
+            }
+            Expr::SleepUntil(inner) => {
+                self.ensure_feature(self.surface.abilities.sleep, "sleep", scope.span)?;
+                (
+                    Expr::SleepUntil(Box::new(self.lower_expr(inner, scope)?.0)),
+                    Some(Binding::Value),
+                )
+            }
+            Expr::WaitSignal => {
+                self.ensure_feature(
+                    self.surface.abilities.process_signals,
+                    "process signals",
+                    scope.span,
+                )?;
+                if !scope.process_body {
+                    return Err(LinkError::ProcessLifecycleOutsideProcess {
+                        keyword: "wait signal",
+                        span: scope.span,
+                    });
+                }
+                (Expr::WaitSignal, Some(Binding::Value))
+            }
+            Expr::SignalRun { run, payload } => {
+                self.ensure_feature(
+                    self.surface.abilities.process_signals,
+                    "process signals",
+                    scope.span,
+                )?;
+                if !scope.process_body {
+                    return Err(LinkError::ProcessLifecycleOutsideProcess {
+                        keyword: "signal run",
+                        span: scope.span,
+                    });
+                }
+                (
+                    Expr::SignalRun {
+                        run: Box::new(self.lower_expr(run, scope)?.0),
+                        payload: Box::new(self.lower_expr(payload, scope)?.0),
+                    },
+                    Some(Binding::Value),
+                )
+            }
             Expr::ResultUnwrap(inner) => (
                 Expr::ResultUnwrap(Box::new(self.lower_expr(inner, scope)?.0)),
                 Some(Binding::Value),
@@ -1535,16 +1347,37 @@ impl<'module> Linker<'module> {
                 Expr::Fail(Box::new(self.lower_expr(inner, scope)?.0)),
                 Some(Binding::Value),
             ),
-            Expr::BuiltinCall { name, args } => (
-                Expr::BuiltinCall {
-                    name: name.clone(),
-                    args: args
-                        .iter()
-                        .map(|arg| self.lower_expr(arg, scope).map(|(expr, _)| expr))
-                        .collect::<Result<Vec<_>, _>>()?,
-                },
-                Some(Binding::Value),
-            ),
+            Expr::BuiltinCall { name, args } => {
+                if !crate::builtins::is_builtin(name.as_str()) {
+                    if let Some(suggestion) = self
+                        .surface
+                        .resources
+                        .operation_suggestions_for_host(name.as_str())
+                        .into_iter()
+                        .next()
+                    {
+                        return Err(LinkError::BareToolCall {
+                            name: name.to_string(),
+                            suggestion,
+                            span: scope.span,
+                        });
+                    }
+                    return Err(LinkError::UnknownBuiltin {
+                        name: name.to_string(),
+                        span: scope.span,
+                    });
+                }
+                (
+                    Expr::BuiltinCall {
+                        name: name.clone(),
+                        args: args
+                            .iter()
+                            .map(|arg| self.lower_expr(arg, scope).map(|(expr, _)| expr))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    },
+                    Some(Binding::Value),
+                )
+            }
             Expr::Field { target, field } => (
                 Expr::Field {
                     target: Box::new(self.lower_expr(target, scope)?.0),
@@ -1686,35 +1519,6 @@ fn module_path_for_expr(expr: &Expr) -> Option<Vec<AstString>> {
         Expr::ResourceRef(resource) => Some(resource.path.clone()),
         _ => None,
     }
-}
-
-fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "len"
-            | "empty"
-            | "keys"
-            | "values"
-            | "trim"
-            | "to_string"
-            | "to_int"
-            | "to_float"
-            | "json_parse"
-            | "contains"
-            | "grep_text"
-            | "starts_with"
-            | "ends_with"
-            | "split"
-            | "join"
-            | "validate"
-            | "ceil_div"
-            | "floor_div"
-            | "push"
-            | "slice"
-            | "find"
-            | "format"
-            | "range"
-    )
 }
 
 fn is_resolved_type_assignable(source: &TypeExpr, target: &TypeExpr) -> bool {
@@ -2246,6 +2050,105 @@ mod tests {
         assert_ne!(
             base.required_surface_ref,
             changed_requirement.required_surface_ref
+        );
+    }
+
+    // --- behaviour-pinning tests for the single linking walk -------------
+    //
+    // These lock in the error *set*, *ordering*, and *spans* the linker
+    // produced when validation and lowering were two separate passes, so the
+    // fold into one walk stays behaviour-preserving.
+
+    #[test]
+    fn declaration_errors_surface_before_main_errors() {
+        // The process body references an unknown name AND the main block
+        // references a different unknown name. The declaration error must win.
+        let program = crate::parse(
+            r#"
+            process scan() { finish missing_in_body }
+            submit missing_in_main
+            "#,
+        )
+        .expect("parse");
+        let err = LinkedModule::link(program, full_surface())
+            .expect_err("both bodies reference unknowns");
+        assert!(
+            matches!(&err, LinkError::UnknownName { name, .. } if name == "missing_in_body"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_name_in_process_body_carries_declaration_span() {
+        let program = crate::parse("process scan() { finish missing }").expect("parse");
+        let err = LinkedModule::link(program, full_surface()).expect_err("unknown name");
+        let LinkError::UnknownName { name, span } = &err else {
+            panic!("expected UnknownName, got {err:?}");
+        };
+        assert_eq!(name, "missing");
+        assert!(span.is_some(), "declaration-body error should carry a span");
+    }
+
+    #[test]
+    fn linker_reproduces_full_error_set() {
+        // One representative source per error variant that the expression walk
+        // is responsible for raising.
+        // Top-level scope allows unknown globals (they become runtime errors),
+        // so unknown-name checks must be exercised inside a process body.
+        type ErrorCase = (&'static str, fn(&LinkError) -> bool);
+        let cases: &[ErrorCase] = &[
+            (
+                "process scan() { finish missing }",
+                |err| matches!(err, LinkError::UnknownName { name, .. } if name == "missing"),
+            ),
+            (
+                "process scan() { missing[0] = 1 }",
+                |err| matches!(err, LinkError::UnknownName { name, .. } if name == "missing"),
+            ),
+            (
+                "submit not_a_builtin(1)",
+                |err| matches!(err, LinkError::UnknownBuiltin { name, .. } if name == "not_a_builtin"),
+            ),
+            (
+                "x = 1\nsubmit x.read_file({})",
+                |err| matches!(err, LinkError::UnresolvedReceiver { operation, .. } if operation == "read_file"),
+            ),
+            (
+                "process scan() { finish 1 }\nstart scan(extra: 1)",
+                |err| matches!(err, LinkError::UnexpectedProcessArgument { arg, .. } if arg == "extra"),
+            ),
+            (
+                "process scan(needed: str) { finish needed }\nstart scan()",
+                |err| matches!(err, LinkError::MissingProcessArgument { arg, .. } if arg == "needed"),
+            ),
+            (
+                "start ghost()",
+                |err| matches!(err, LinkError::UnknownProcess { name, .. } if name == "ghost"),
+            ),
+        ];
+
+        for (source, predicate) in cases {
+            let program =
+                crate::parse(source).unwrap_or_else(|err| panic!("parse {source:?}: {err}"));
+            let err = LinkedModule::link(program, full_surface())
+                .err()
+                .unwrap_or_else(|| panic!("{source:?} should fail to link"));
+            assert!(predicate(&err), "unexpected error for {source:?}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_resource_operation_still_rejected_after_receiver_resolves() {
+        let program = crate::parse(
+            r#"
+            process scan(tool: Tools) { finish await tool.does_not_exist({})? }
+            "#,
+        )
+        .expect("parse");
+        let err = LinkedModule::link(program, full_surface()).expect_err("operation missing");
+        assert!(
+            matches!(&err, LinkError::UnknownResourceOperation { operation, .. } if operation == "does_not_exist"),
+            "{err:?}"
         );
     }
 

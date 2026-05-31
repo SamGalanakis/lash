@@ -1,4 +1,5 @@
-use lash_core::RuntimeSessionState;
+use lash_core::runtime::RuntimeSessionState;
+use lash_core::store::RuntimeCommit;
 use lash_sqlite_store::Store;
 
 pub(crate) async fn persist_committed_runtime_state(
@@ -7,7 +8,7 @@ pub(crate) async fn persist_committed_runtime_state(
 ) {
     match lash_core::RuntimePersistence::commit_runtime_state(
         store,
-        lash_core::RuntimeCommit::persisted_state(state, &[]),
+        RuntimeCommit::persisted_state(state, &[]),
     )
     .await
     {

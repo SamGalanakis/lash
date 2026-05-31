@@ -155,71 +155,8 @@ fn test_surface() -> lashlang::LashlangSurface {
 }
 
 fn program_contains_start_process(expr: &lashlang::Expr) -> bool {
-    match expr {
-        lashlang::Expr::StartProcess(_) => true,
-        lashlang::Expr::Block(expressions) | lashlang::Expr::List(expressions) => {
-            expressions.iter().any(program_contains_start_process)
-        }
-        lashlang::Expr::Record(entries) => entries
-            .iter()
-            .any(|(_, expr)| program_contains_start_process(expr)),
-        lashlang::Expr::Assign { target, expr } => {
-            target.steps.iter().any(|step| match step {
-                lashlang::AssignPathStep::Field(_) => false,
-                lashlang::AssignPathStep::Index(index) => program_contains_start_process(index),
-            }) || program_contains_start_process(expr)
-        }
-        lashlang::Expr::If {
-            condition,
-            then_block,
-            else_block,
-        } => {
-            program_contains_start_process(condition)
-                || program_contains_start_process(then_block)
-                || program_contains_start_process(else_block)
-        }
-        lashlang::Expr::For { iterable, body, .. } => {
-            program_contains_start_process(iterable) || program_contains_start_process(body)
-        }
-        lashlang::Expr::ReceiverCall { receiver, args, .. } => {
-            program_contains_start_process(receiver)
-                || args.iter().any(program_contains_start_process)
-        }
-        lashlang::Expr::Await(expr)
-        | lashlang::Expr::SleepFor(expr)
-        | lashlang::Expr::SleepUntil(expr)
-        | lashlang::Expr::ResultUnwrap(expr)
-        | lashlang::Expr::Cancel(expr)
-        | lashlang::Expr::Print(expr)
-        | lashlang::Expr::Yield(expr)
-        | lashlang::Expr::Wake(expr)
-        | lashlang::Expr::Fail(expr)
-        | lashlang::Expr::Unary { expr, .. } => program_contains_start_process(expr),
-        lashlang::Expr::Submit(expr) | lashlang::Expr::Finish(expr) => {
-            expr.as_deref().is_some_and(program_contains_start_process)
-        }
-        lashlang::Expr::SignalRun { run, payload } => {
-            program_contains_start_process(run) || program_contains_start_process(payload)
-        }
-        lashlang::Expr::BuiltinCall { args, .. } => args.iter().any(program_contains_start_process),
-        lashlang::Expr::Field { target, .. } => program_contains_start_process(target),
-        lashlang::Expr::Index { target, index } => {
-            program_contains_start_process(target) || program_contains_start_process(index)
-        }
-        lashlang::Expr::Binary { left, right, .. } => {
-            program_contains_start_process(left) || program_contains_start_process(right)
-        }
-        lashlang::Expr::Null
-        | lashlang::Expr::Bool(_)
-        | lashlang::Expr::Number(_)
-        | lashlang::Expr::String(_)
-        | lashlang::Expr::Variable(_)
-        | lashlang::Expr::Break
-        | lashlang::Expr::Continue
-        | lashlang::Expr::ResourceRef(_)
-        | lashlang::Expr::WaitSignal
-        | lashlang::Expr::TypeLiteral(_) => false,
-    }
+    matches!(expr, lashlang::Expr::StartProcess(_))
+        || expr.children().any(program_contains_start_process)
 }
 
 fn program_len(program: &lashlang::Program) -> usize {
@@ -843,6 +780,107 @@ async fn continue_skips_to_next_iteration() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn while_loop_runs_until_condition_is_false() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        n = 0
+        seen = []
+        while n < 4 {
+          seen = seen + [n]
+          n = n + 1
+        }
+        submit { n: n, seen: seen }
+        "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("while loop should run"),
+    );
+
+    let record = value.as_record().expect("expected record");
+    assert_eq!(record["n"], Value::Number(4.0));
+    assert_eq!(
+        record["seen"],
+        Value::List(
+            vec![
+                Value::Number(0.0),
+                Value::Number(1.0),
+                Value::Number(2.0),
+                Value::Number(3.0),
+            ]
+            .into()
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn break_exits_while_loop() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        n = 0
+        while true {
+          n = n + 1
+          if n == 3 {
+            break
+          }
+        }
+        submit n
+        "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("break should exit while"),
+    );
+
+    assert_eq!(value, Value::Number(3.0));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continue_skips_to_next_while_condition() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        n = 0
+        seen = []
+        while n < 5 {
+          n = n + 1
+          if n == 2 {
+            continue
+          }
+          if n == 4 {
+            continue
+          }
+          seen = seen + [n]
+        }
+        submit seen
+        "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("continue should jump to while condition"),
+    );
+
+    assert_eq!(
+        value,
+        Value::List(vec![Value::Number(1.0), Value::Number(3.0), Value::Number(5.0)].into())
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn nested_loop_control_targets_nearest_loop() {
     let host = TestHost::default();
     let mut state = State::new();
@@ -870,6 +908,52 @@ async fn nested_loop_control_targets_nearest_loop() {
         )
         .await
         .expect("execution should succeed"),
+    );
+
+    assert_eq!(
+        value,
+        Value::List(
+            vec![
+                Value::String("1:1".to_string().into()),
+                Value::String("outer=1".to_string().into()),
+                Value::String("2:1".to_string().into()),
+                Value::String("outer=2".to_string().into()),
+            ]
+            .into()
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn nested_for_and_while_loop_control_targets_nearest_loop() {
+    let host = TestHost::default();
+    let mut state = State::new();
+
+    let value = finished(
+        execute(
+            r#"
+        seen = []
+        for outer in [1, 2] {
+          inner = 0
+          while inner < 3 {
+            inner = inner + 1
+            if inner == 2 {
+              continue
+            }
+            if inner == 3 {
+              break
+            }
+            seen = seen + [format("{}:{}", outer, inner)]
+          }
+          seen = seen + [format("outer={}", outer)]
+        }
+        submit seen
+        "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("nested for/while control should run"),
     );
 
     assert_eq!(

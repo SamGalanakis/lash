@@ -1,3 +1,5 @@
+use lash::PromptLayerSink;
+
 fn main() {
     let template = lash::prompt::PromptTemplate::new(vec![
         lash::prompt::PromptTemplateSection::untitled(vec![

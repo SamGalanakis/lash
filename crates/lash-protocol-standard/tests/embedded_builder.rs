@@ -36,7 +36,7 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
 async fn embedded_runtime_builder_loads_state_from_store() {
     let store = Arc::new(Store::memory().expect("store"));
     let checkpoint_ref = store
-        .put_checkpoint(&lash_core::HydratedSessionCheckpoint {
+        .put_checkpoint(&lash_core::store::HydratedSessionCheckpoint {
             turn_state: PersistedTurnState {
                 turn_index: 3,
                 token_usage: TokenUsage {

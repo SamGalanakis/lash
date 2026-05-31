@@ -1,5 +1,57 @@
 use super::*;
 
+/// Shared lease-fencing predicate for both turn leases and process leases.
+///
+/// A lease holder may keep operating only while the *currently stored* lease
+/// still carries the holder's `lease_token` and has not expired. The
+/// `current` argument is whatever lease (if any) is presently persisted for
+/// the key; `expected_token` / `now` are the holder's claimed token and the
+/// current clock. Returns `true` when the holder still owns a live lease.
+///
+/// This is the one place the "stored token matches and is unexpired" rule
+/// lives — `claim_runtime_turn_lease`, `claim_process_lease`,
+/// `renew_*`, and the commit-time completion checks all defer to it instead of
+/// re-deriving the comparison (it previously appeared verbatim in both lease
+/// families, with a comment noting one "mirrors" the other).
+pub(crate) fn guard_lease<L: LeaseFence>(
+    current: Option<&L>,
+    expected_token: &str,
+    now: u64,
+) -> bool {
+    match current {
+        Some(current) => {
+            current.lease_token() == expected_token && current.expires_at_epoch_ms() > now
+        }
+        None => false,
+    }
+}
+
+/// Minimal view of a persisted lease that [`guard_lease`] needs. Implemented by
+/// both [`RuntimeTurnLease`] and [`ProcessLease`] so the fencing predicate is
+/// written once.
+pub(crate) trait LeaseFence {
+    fn lease_token(&self) -> &str;
+    fn expires_at_epoch_ms(&self) -> u64;
+}
+
+impl LeaseFence for RuntimeTurnLease {
+    fn lease_token(&self) -> &str {
+        &self.lease_token
+    }
+    fn expires_at_epoch_ms(&self) -> u64 {
+        self.expires_at_epoch_ms
+    }
+}
+
+impl LeaseFence for ProcessLease {
+    fn lease_token(&self) -> &str {
+        &self.lease_token
+    }
+    fn expires_at_epoch_ms(&self) -> u64 {
+        self.expires_at_epoch_ms
+    }
+}
+
 pub(crate) fn load_runtime_turn_lease_from_conn(
     conn: &Connection,
     session_id: &str,
@@ -40,15 +92,9 @@ pub(crate) fn ensure_runtime_turn_lease_conn(
     lease: &RuntimeTurnLease,
 ) -> Result<(), StoreError> {
     let now = current_epoch_ms();
-    let Some(current) = load_runtime_turn_lease_from_conn(conn, &lease.session_id, &lease.turn_id)
-        .map_err(sqlite_error)?
-    else {
-        return Err(StoreError::RuntimeTurnLeaseExpired {
-            session_id: lease.session_id.clone(),
-            turn_id: lease.turn_id.clone(),
-        });
-    };
-    if current.lease_token != lease.lease_token || current.expires_at_epoch_ms <= now {
+    let current = load_runtime_turn_lease_from_conn(conn, &lease.session_id, &lease.turn_id)
+        .map_err(sqlite_error)?;
+    if !guard_lease(current.as_ref(), &lease.lease_token, now) {
         return Err(StoreError::RuntimeTurnLeaseExpired {
             session_id: lease.session_id.clone(),
             turn_id: lease.turn_id.clone(),
@@ -59,19 +105,13 @@ pub(crate) fn ensure_runtime_turn_lease_conn(
 
 pub(crate) fn ensure_runtime_turn_completion_conn(
     conn: &Connection,
-    completed: &lash_core::RuntimeTurnCompletion,
+    completed: &lash_core::store::RuntimeTurnCompletion,
 ) -> Result<(), StoreError> {
     let now = current_epoch_ms();
-    let Some(current) =
+    let current =
         load_runtime_turn_lease_from_conn(conn, &completed.session_id, &completed.turn_id)
-            .map_err(sqlite_error)?
-    else {
-        return Err(StoreError::RuntimeTurnLeaseExpired {
-            session_id: completed.session_id.clone(),
-            turn_id: completed.turn_id.clone(),
-        });
-    };
-    if current.lease_token != completed.lease_token || current.expires_at_epoch_ms <= now {
+            .map_err(sqlite_error)?;
+    if !guard_lease(current.as_ref(), &completed.lease_token, now) {
         return Err(StoreError::RuntimeTurnLeaseExpired {
             session_id: completed.session_id.clone(),
             turn_id: completed.turn_id.clone(),

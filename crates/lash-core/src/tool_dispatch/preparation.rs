@@ -90,7 +90,7 @@ pub(crate) async fn prepare_tool_call_with_context(
             args.clone(),
             manifest.argument_projection.clone(),
             context.turn_context.clone(),
-            Arc::clone(&context.host),
+            Arc::clone(&context.sessions),
         ))
         .await
     {
@@ -139,7 +139,7 @@ pub(crate) async fn prepare_tool_call_with_context(
     pending.args = args.clone();
     let prepare_context = ToolPrepareContext::new(
         context.session_id.clone(),
-        Arc::clone(&context.host),
+        Arc::clone(&context.sessions),
         context.turn_context.clone(),
         tool_call_id,
     );

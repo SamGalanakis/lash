@@ -1,5 +1,6 @@
 pub use crate::session::SessionConfigPatch;
 use crate::support::*;
+use lash_core::runtime::{QueuedWorkBatchDraft, QueuedWorkPayload};
 pub use lash_core::{AcceptedInjectedTurnInput, PluginAction};
 
 #[derive(Clone)]
@@ -339,12 +340,12 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {
+    async fn session_state_service(&self) -> Result<Arc<dyn SessionStateService>> {
         self.runtime
             .writer()
             .lock()
             .await
-            .session_manager()
+            .session_state_service()
             .map_err(Into::into)
     }
 
@@ -470,17 +471,17 @@ impl SessionControl {
     async fn create_child_session(&self, request: SessionCreateRequest) -> Result<SessionHandle> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
-        let manager = runtime.session_manager()?;
-        manager.create_session(request).await.map_err(Into::into)
+        let lifecycle = runtime.session_lifecycle_service()?;
+        lifecycle.create_session(request).await.map_err(Into::into)
     }
 
     async fn start_child_turn(&self, session_id: &str, input: TurnInput) -> Result<AssembledTurn> {
-        let manager = {
+        let lifecycle = {
             let writer = self.runtime.writer();
             let runtime = writer.lock().await;
-            runtime.session_manager()?
+            runtime.session_lifecycle_service()?
         };
-        manager
+        lifecycle
             .start_turn(session_id, input)
             .await
             .map_err(Into::into)
@@ -489,8 +490,11 @@ impl SessionControl {
     async fn close_child_session(&self, session_id: &str) -> Result<()> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
-        let manager = runtime.session_manager()?;
-        manager.close_session(session_id).await.map_err(Into::into)
+        let lifecycle = runtime.session_lifecycle_service()?;
+        lifecycle
+            .close_session(session_id)
+            .await
+            .map_err(Into::into)
     }
 
     async fn activate_managed_session(&self, session_id: &str) -> Result<()> {
@@ -520,11 +524,11 @@ impl SessionControl {
             let source_key = input.id.map(|id| format!("injection:{id}"));
             let turn_input = turn_input_from_plugin_message(input.message);
             lash_core::ensure_durable_turn_input(&turn_input).map_err(EmbedError::Runtime)?;
-            let mut draft = lash_core::QueuedWorkBatchDraft::new(
+            let mut draft = QueuedWorkBatchDraft::new(
                 observation.session_id().to_string(),
                 lash_core::DeliveryPolicy::EarliestSafeBoundary,
                 lash_core::SlotPolicy::Join,
-                vec![lash_core::QueuedWorkPayload::turn_input(turn_input)],
+                vec![QueuedWorkPayload::turn_input(turn_input)],
             );
             draft.source_key = source_key;
             store.enqueue_queued_work(draft).await.map_err(|err| {
@@ -823,32 +827,12 @@ impl StateControl {
         self.control.branch_to_node(target_leaf).await
     }
 
-    pub async fn await_background_work(&self) -> Result<()> {
-        self.control.await_background_work().await
-    }
-
     pub async fn persist_current(&self) -> Result<RuntimeSessionState> {
         self.control.persist_current_state().await
     }
 
-    pub async fn list_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
-        self.control.list_process_handles().await
-    }
-
-    pub async fn list_all_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
-        self.control.list_all_process_handles().await
-    }
-
-    pub async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {
-        self.control.session_manager().await
-    }
-
-    pub async fn cancel_process(&self, process_id: &str) -> Result<ProcessRecord> {
-        self.control.cancel_process(process_id).await
-    }
-
-    pub async fn cancel_all_processes(&self) -> Result<Vec<ProcessRecord>> {
-        self.control.cancel_all_processes().await
+    pub async fn session_state_service(&self) -> Result<Arc<dyn SessionStateService>> {
+        self.control.session_state_service().await
     }
 
     pub async fn snapshot_execution(&self) -> Result<Option<Vec<u8>>> {

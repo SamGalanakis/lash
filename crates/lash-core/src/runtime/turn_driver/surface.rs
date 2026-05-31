@@ -265,7 +265,7 @@ impl RuntimeTurnDriver<'_> {
             .plugins()
             .collect_prompt_contributions(PromptHookContext {
                 session_id: self.session_id.clone(),
-                host: self.session_manager.clone(),
+                sessions: self.session_services.state_service(),
                 state: self.turn_pipeline.read_view(
                     session_policy.clone(),
                     turn_index,
@@ -303,7 +303,7 @@ impl RuntimeTurnDriver<'_> {
         let latest_prompt_usage = self.turn_pipeline.state_mut().last_prompt_usage.clone();
         let effect_controller =
             crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
-        let direct_completions = self.session_manager.direct_completion_client(
+        let direct_completions = self.session_services.direct_completion_client(
             effect_controller.clone_scoped(),
             Some(self.turn_id.clone()),
             self.turn_lease.clone(),
@@ -319,9 +319,9 @@ impl RuntimeTurnDriver<'_> {
             .before_llm_call(
                 crate::ProtocolBeforeLlmCallContext {
                     session_id: self.session_id.clone(),
-                    host: self.session_manager.clone()
-                        as Arc<dyn crate::plugin::RuntimeSessionHost>,
-                    processes: self.session_manager.clone() as Arc<dyn crate::ProcessService>,
+                    sessions: self.session_services.state_service(),
+                    session_graph: self.session_services.graph_service(),
+                    processes: self.session_services.process_service(),
                     state: self.checkpoint_state_view(
                         machine.message_sequence(),
                         machine.protocol_iteration(),

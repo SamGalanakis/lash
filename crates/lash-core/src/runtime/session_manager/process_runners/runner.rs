@@ -2,7 +2,7 @@ use super::*;
 use std::sync::Arc;
 
 #[async_trait::async_trait]
-impl crate::runtime::effect::ProcessRunner for RuntimeSessionManager {
+impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
     async fn run_process(
         &self,
         registration: crate::ProcessRegistration,

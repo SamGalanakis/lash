@@ -418,7 +418,7 @@ mod tests {
         let contributions = session
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
-                host: Arc::new(MockSessionManager::default()),
+                sessions: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::from_snapshot(&SessionSnapshot::default()),
                 protocol_turn_options: lash_core::ProtocolTurnOptions::default(),
                 turn_context: lash_core::TurnContext::default(),
@@ -451,7 +451,7 @@ mod tests {
         let contributions = session
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "child".to_string(),
-                host: Arc::new(MockSessionManager::default()),
+                sessions: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::from_snapshot(&SessionSnapshot::default()),
                 protocol_turn_options: lash_core::ProtocolTurnOptions::default(),
                 turn_context: lash_core::TurnContext::default(),

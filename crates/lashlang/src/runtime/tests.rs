@@ -276,10 +276,6 @@ async fn golden_lashlang_diagnostic_corpus_is_exact() {
 
     let mut cases = Vec::new();
     cases.push(diagnostic_case(
-        "parse_unsupported_while",
-        format_parse_diagnostic("x = 0\nwhile x < 3 {\n  x = x + 1\n}"),
-    ));
-    cases.push(diagnostic_case(
         "parse_inline_if",
         format_parse_diagnostic("submit if true { 1 }"),
     ));
@@ -3379,6 +3375,48 @@ async fn process_controls_emit_events_and_terminal_outcomes() {
     assert_eq!(events[0].value, Value::String("checkpoint".into()));
     assert_eq!(events[1].kind, ProcessEventKind::Wake);
     assert_eq!(events[1].value, Value::String("ready".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn while_runs_inside_process_body() {
+    let program = crate::parse(
+        r#"
+        process count_to(limit: int) {
+          n = 0
+          while n < limit {
+            n = n + 1
+          }
+          finish n
+        }
+        "#,
+    )
+    .expect("process with while should parse");
+    let compiled = crate::compile_process(&program, "count_to").expect("process should compile");
+    let mut state = State::new();
+    state
+        .globals
+        .insert("limit".to_string(), Value::Number(4.0));
+
+    let outcome = execute_compiled_process(&compiled, &mut state, &RecordingProcessHost::default())
+        .await
+        .expect("process while should run");
+
+    assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(4.0)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn value_position_while_leaves_null() {
+    let program = Program::block(vec![Expr::Submit(Some(Box::new(Expr::While {
+        condition: Box::new(Expr::Bool(false)),
+        body: Box::new(Expr::Block(Vec::new())),
+    })))]);
+    let mut state = State::new();
+
+    let outcome = execute_program(&program, &mut state, &Host)
+        .await
+        .expect("value-position while should run");
+
+    assert_eq!(outcome, ExecutionOutcome::Finished(Value::Null));
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -12,6 +12,8 @@ use lash_core::plugin::{
     AssistantStreamHookContext, AssistantStreamTransform, PluginError, PluginRegistrar,
 };
 
+use crate::fence_scan::{FENCE_LANG, body_has_closing_fence, first_lashlang_fence_span};
+
 /// Install the stream-mask / fence-close-abort hooks on the given
 /// registrar. Called by [`crate::plugin::RlmProtocolPlugin::register`] when
 /// the session is active.
@@ -46,21 +48,7 @@ pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError
                 {
                     let mut detector = state.lock().expect("fence detector lock");
                     if detector.inside_fence {
-                        let mut spliced = response.full_text.clone();
-                        if !spliced.is_empty() && !spliced.ends_with('\n') {
-                            spliced.push('\n');
-                        }
-                        spliced.push_str("```lashlang\n");
-                        spliced.push_str(&detector.fence_body);
-                        if !detector.fence_closed {
-                            // Stream aborted or ended before we saw a
-                            // closing fence — append one ourselves so
-                            // the driver can still parse and execute.
-                            if !spliced.ends_with('\n') {
-                                spliced.push('\n');
-                            }
-                            spliced.push_str("```");
-                        }
+                        let spliced = detector.splice_into(&response.full_text);
                         response.full_text = spliced.clone();
                         // The RLM driver reads `response.parts` (not
                         // `full_text`) when it builds the assistant_text
@@ -138,6 +126,41 @@ impl FenceDetector {
         self.fence_closed = false;
     }
 
+    /// Reconstruct a complete ` ```lashlang … ``` ` block by splicing
+    /// the suppressed fence body back onto the visible text. The
+    /// streaming hook hides the body from every delta chunk, so the
+    /// driver — which re-parses the assistant text to decide whether to
+    /// execute — would otherwise see fence-free prose and fall into the
+    /// "no fence → finish turn" branch.
+    ///
+    /// The opener is rebuilt with exactly `opener_len` backticks (not a
+    /// hardcoded three): when the model opens a 4-backtick fence so its
+    /// body can contain a literal ` ``` `, downgrading the splice to
+    /// three backticks made the embedded triple prematurely close the
+    /// reconstructed block, truncating the executed code.
+    fn splice_into(&self, visible: &str) -> String {
+        debug_assert!(self.inside_fence);
+        let ticks = "`".repeat(self.opener_len.max(3));
+        let mut spliced = visible.to_string();
+        if !spliced.is_empty() && !spliced.ends_with('\n') {
+            spliced.push('\n');
+        }
+        spliced.push_str(&ticks);
+        spliced.push_str(FENCE_LANG);
+        spliced.push('\n');
+        spliced.push_str(&self.fence_body);
+        if !self.fence_closed {
+            // Stream aborted or ended before we saw a closing fence —
+            // append one ourselves (matching the opener length) so the
+            // driver can still parse and execute.
+            if !spliced.ends_with('\n') {
+                spliced.push('\n');
+            }
+            spliced.push_str(&ticks);
+        }
+        spliced
+    }
+
     fn process_chunk(&mut self, chunk: &str) -> AssistantStreamTransform {
         if self.inside_fence {
             if self.fence_closed {
@@ -150,7 +173,7 @@ impl FenceDetector {
                 };
             }
             self.fence_body.push_str(chunk);
-            if has_closing_fence(&self.fence_body, self.opener_len) {
+            if body_has_closing_fence(&self.fence_body, self.opener_len) {
                 self.fence_closed = true;
                 // Signal the runtime: stop the LLM stream, we have the
                 // full block.
@@ -191,7 +214,7 @@ impl FenceDetector {
 
             if !initial_body.is_empty() {
                 self.fence_body.push_str(&initial_body);
-                if has_closing_fence(&self.fence_body, self.opener_len) {
+                if body_has_closing_fence(&self.fence_body, self.opener_len) {
                     self.fence_closed = true;
                     return AssistantStreamTransform {
                         chunk: String::new(),
@@ -244,33 +267,6 @@ fn non_empty_reasoning_delta(text: String) -> Vec<String> {
     }
 }
 
-/// Return `true` when `text` (the accumulated fence body) contains a
-/// closing run of at least `opener_len` consecutive backticks. Must
-/// stay in lockstep with `first_lashlang_fence_span` in `protocol.rs`:
-/// CommonMark variable-length fences — a 4-backtick opener requires a
-/// 4+-backtick closer.
-fn has_closing_fence(text: &str, opener_len: usize) -> bool {
-    if opener_len == 0 {
-        return false;
-    }
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'`' {
-            let start = i;
-            while i < bytes.len() && bytes[i] == b'`' {
-                i += 1;
-            }
-            if i - start >= opener_len {
-                return true;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    false
-}
-
 /// Locate a complete ` ```lashlang ` opener in `text`. Returns
 /// `(fence_start, body_start, opener_len)` where `fence_start` is the
 /// offset of the opening backtick run, `body_start` is the first byte
@@ -278,34 +274,13 @@ fn has_closing_fence(text: &str, opener_len: usize) -> bool {
 /// tag isn't newline-terminated yet — in which case the body is still
 /// empty), and `opener_len` is the number of backticks in the opener
 /// (≥3, used to validate the closer length).
+///
+/// Delegates to [`first_lashlang_fence_span`] so the streaming mask and
+/// the finalize path recognize *exactly* the same openers — including
+/// an opener that sits at end-of-text with no trailing newline.
 fn find_fence_opener(text: &str) -> Option<(usize, usize, usize)> {
-    let mut search_from = 0usize;
-    while let Some(rel) = text[search_from..].find("```") {
-        let pos = search_from + rel;
-        let opener_len = text.as_bytes()[pos..]
-            .iter()
-            .take_while(|&&b| b == b'`')
-            .count();
-        let after_ticks = pos + opener_len;
-        let after = &text[after_ticks..];
-        let line_end = after.find('\n').unwrap_or(after.len());
-        let lang = after[..line_end].trim();
-        if lang == "lashlang" {
-            // Skip the trailing `\n` so body_start lands on the first
-            // byte of the actual body. When the lang line isn't
-            // terminated yet, line_end == after.len() and body_start
-            // sits at end-of-text, which is correct (empty initial
-            // body).
-            let body_start = if line_end < after.len() {
-                after_ticks + line_end + 1
-            } else {
-                after_ticks + line_end
-            };
-            return Some((pos, body_start, opener_len));
-        }
-        search_from = after_ticks;
-    }
-    None
+    let span = first_lashlang_fence_span(text)?;
+    Some((span.open_start, span.body_start, span.opener_len))
 }
 
 fn possible_fence_opener_suffix_len(text: &str) -> usize {
@@ -321,7 +296,6 @@ fn suffix_can_be_fence_opener_prefix(suffix: &str) -> bool {
     if suffix.is_empty() {
         return false;
     }
-    const LANG: &str = "lashlang";
 
     // Count leading backticks in the suffix. If everything in the
     // suffix is backticks, it could still grow into a longer opener
@@ -338,7 +312,7 @@ fn suffix_can_be_fence_opener_prefix(suffix: &str) -> bool {
         return false;
     }
     let after_padding = after_ticks.trim_start_matches(' ');
-    after_padding.is_empty() || LANG.starts_with(after_padding)
+    after_padding.is_empty() || FENCE_LANG.starts_with(after_padding)
 }
 
 #[cfg(test)]
@@ -531,5 +505,102 @@ mod tests {
         let t = d.process_chunk("Result.\n");
         assert_eq!(t.chunk, "");
         assert_eq!(t.reasoning_deltas, vec!["Result.\n"]);
+    }
+
+    /// Drive a detector across `chunks` exactly as the stream hook
+    /// would, then run the response-hook splice. Returns the
+    /// reconstructed `full_text` the driver re-parses (the visible
+    /// stream stays empty because the mask suppresses every chunk once
+    /// inside the fence, so we accumulate the reasoning deltas as the
+    /// visible lead-in).
+    fn stream_and_splice(chunks: &[&str]) -> String {
+        let mut d = FenceDetector::new();
+        let mut visible = String::new();
+        for chunk in chunks {
+            let t = d.process_chunk(chunk);
+            for delta in t.reasoning_deltas {
+                visible.push_str(&delta);
+            }
+        }
+        if d.inside_fence {
+            d.splice_into(&visible)
+        } else {
+            visible
+        }
+    }
+
+    #[test]
+    fn splice_reconstructs_plain_triple_backtick_block() {
+        // 3-backtick round-trip: the spliced text must re-parse to the
+        // exact code the model wrote.
+        let spliced = stream_and_splice(&["Quick check.\n\n```lashlang\nprint \"hi\"\n```\n"]);
+        let span = first_lashlang_fence_span(&spliced).expect("spliced block parses");
+        let code = spliced[span.body_start..span.body_end].trim_end_matches('\n');
+        assert_eq!(code, "print \"hi\"");
+        assert!(span.is_closed());
+    }
+
+    #[test]
+    fn splice_preserves_four_backtick_fence_with_embedded_triple() {
+        // Regression: a 4-backtick opener lets the body carry a literal
+        // ``` run. The splice used to hardcode a 3-backtick opener, so
+        // re-parsing closed the block at the embedded triple and
+        // truncated the executed code to `print "`. The opener length
+        // must round-trip.
+        let spliced =
+            stream_and_splice(&["````lashlang\n", "print \"```\"\n", "submit 1\n", "````"]);
+        let span = first_lashlang_fence_span(&spliced).expect("spliced block parses");
+        assert_eq!(span.opener_len, 4, "opener length must survive the splice");
+        let code = spliced[span.body_start..span.body_end].trim_end_matches('\n');
+        assert_eq!(
+            code, "print \"```\"\nsubmit 1",
+            "embedded triple-backticks must not prematurely close the block"
+        );
+    }
+
+    #[test]
+    fn stream_and_finalize_agree_on_opener_at_end_of_text() {
+        // Before the scanner was unified the two paths disagreed on a
+        // language tag that sits at end-of-text with no trailing
+        // newline ("…```lashlang"): the streaming detector entered the
+        // fence, but the finalize extractor's `body_start > text.len()`
+        // guard returned None, so the same response was a block on one
+        // path and prose on the other. Both must now agree.
+        let opener_at_eof = "Plan.\n\n```lashlang";
+
+        // Streaming path: detector enters the fence.
+        let mut d = FenceDetector::new();
+        d.process_chunk(opener_at_eof);
+        assert!(
+            d.inside_fence,
+            "streaming path must detect the end-of-text opener"
+        );
+
+        // Finalize path: the shared scanner detects the same opener.
+        assert!(
+            first_lashlang_fence_span(opener_at_eof).is_some(),
+            "finalize path must detect the same end-of-text opener"
+        );
+
+        // And the spliced reconstruction is itself a valid block the
+        // driver can extract.
+        let spliced = d.splice_into("Plan.");
+        assert!(first_lashlang_fence_span(&spliced).is_some());
+    }
+
+    #[test]
+    fn splice_closes_unterminated_fence_with_matching_opener_length() {
+        // Stream ended mid-block with a 4-backtick opener: the synthetic
+        // closer must also be 4 backticks, or the embedded triple would
+        // be mistaken for the closer.
+        let spliced = stream_and_splice(&["````lashlang\n", "print \"```\"\n", "submit 1\n"]);
+        let span = first_lashlang_fence_span(&spliced).expect("spliced block parses");
+        assert_eq!(span.opener_len, 4);
+        assert!(
+            span.is_closed(),
+            "unterminated stream gets a synthetic closer"
+        );
+        let code = spliced[span.body_start..span.body_end].trim_end_matches('\n');
+        assert_eq!(code, "print \"```\"\nsubmit 1");
     }
 }

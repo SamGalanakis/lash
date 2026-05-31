@@ -109,7 +109,8 @@ impl<'a> ProtocolSessionContext<'a> {
 
 pub struct ProtocolBeforeLlmCallContext<'run> {
     pub session_id: String,
-    pub host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+    pub sessions: Arc<dyn crate::plugin::SessionStateService>,
+    pub session_graph: Arc<dyn crate::plugin::SessionGraphService>,
     pub processes: Arc<dyn crate::ProcessService>,
     pub state: SessionReadView,
     pub latest_prompt_usage: Option<PromptUsage>,

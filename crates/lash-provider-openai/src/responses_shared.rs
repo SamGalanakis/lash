@@ -553,22 +553,29 @@ pub fn terminal_reason_from_response_value(
 ) -> LlmTerminalReason {
     let incomplete_details = value
         .get("incomplete_details")
-        .or_else(|| value.get("incompleteDetails"));
-    if incomplete_details
-        .and_then(|details| details.get("reason").and_then(Value::as_str))
-        .is_some_and(|reason| matches!(reason, "content_filter" | "safety"))
-    {
-        return LlmTerminalReason::ContentFilter;
-    }
-    if value.get("status").and_then(Value::as_str) == Some("incomplete")
-        || incomplete_details.is_some_and(|details| !details.is_null())
-    {
-        return LlmTerminalReason::OutputLimit;
+        .or_else(|| value.get("incompleteDetails"))
+        .filter(|details| !details.is_null());
+    let incomplete_reason =
+        incomplete_details.and_then(|details| details.get("reason").and_then(Value::as_str));
+    // Switch on the documented `incomplete_details.reason` rather than treating
+    // every `incomplete` status as an output-token cap: only the token-limit
+    // reasons are an OutputLimit, safety reasons are a ContentFilter, and any
+    // other reason is a genuine provider failure.
+    match incomplete_reason {
+        Some("max_output_tokens" | "max_tokens") => return LlmTerminalReason::OutputLimit,
+        Some("content_filter" | "safety") => return LlmTerminalReason::ContentFilter,
+        Some(_) => return LlmTerminalReason::ProviderError,
+        None => {}
     }
     if value.get("status").and_then(Value::as_str) == Some("cancelled") {
         return LlmTerminalReason::Cancelled;
     }
     if value.get("status").and_then(Value::as_str) == Some("failed") {
+        return LlmTerminalReason::ProviderError;
+    }
+    // An `incomplete` status with no recognizable reason: prefer the assembled
+    // parts (ToolUse/Stop) when present, otherwise surface a provider error.
+    if value.get("status").and_then(Value::as_str) == Some("incomplete") && parts.is_empty() {
         return LlmTerminalReason::ProviderError;
     }
     terminal_reason_from_parts(parts)

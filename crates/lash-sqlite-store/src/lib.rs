@@ -41,9 +41,9 @@
 //!
 //! [`RuntimePersistence`]: lash_core::RuntimePersistence
 //! [`AttachmentManifest`]: lash_core::AttachmentManifest
-//! [`RuntimeTurnCheckpoint`]: lash_core::RuntimeTurnCheckpoint
-//! [`RuntimeTurnLease`]: lash_core::RuntimeTurnLease
-//! [`RuntimeEffectJournalRecord`]: lash_core::RuntimeEffectJournalRecord
+//! [`RuntimeTurnCheckpoint`]: lash_core::store::RuntimeTurnCheckpoint
+//! [`RuntimeTurnLease`]: lash_core::store::RuntimeTurnLease
+//! [`RuntimeEffectJournalRecord`]: lash_core::store::RuntimeEffectJournalRecord
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -53,23 +53,28 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
+use lash_core::runtime::{
+    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
+    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, prepare_process_event_append,
+    prepare_process_registration,
+};
+use lash_core::store::{
+    GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
+    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
+    RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
+    RuntimeEffectJournalRecord, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionCheckpoint,
+    SessionHead, SessionHeadMeta, ensure_supported_schema_version,
+};
 use lash_core::{
     AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef,
-    DeliveryPolicy, DurabilityTier, GcReport, GraphCommitDelta, HydratedSessionCheckpoint,
-    MergeKey, PROCESS_LEASE_SCHEMA_VERSION, PersistedSessionRead, ProcessAwaitOutput, ProcessEvent,
-    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
-    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessLease,
-    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
-    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
-    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
-    RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
-    RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
-    RuntimeTurnLease, SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta,
-    SessionPickerInfo, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
-    SlotPolicy, StoreError, VacuumReport, ensure_supported_schema_version,
-    prepare_process_event_append, prepare_process_registration,
+    DeliveryPolicy, DurabilityTier, GcReport, MergeKey, PROCESS_LEASE_SCHEMA_VERSION,
+    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
+    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
+    ProcessLease, ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
+    ProcessScope, RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope,
+    SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, VacuumReport,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
 /// SQLite-backed store for checkpoint blobs and the canonical session head.
@@ -91,6 +96,7 @@ pub struct SqliteProcessRegistry {
 
 mod attachments;
 mod blobs;
+mod conn;
 mod graph;
 mod leases;
 mod lifecycle;
@@ -99,6 +105,7 @@ mod process_registry;
 mod queued_work;
 mod schema;
 
+use conn::{TxOutcome, lock_conn};
 use leases::*;
 use queued_work::*;
 use schema::{StoreBacking, apply_pragmas, ensure_process_schema, ensure_schema};

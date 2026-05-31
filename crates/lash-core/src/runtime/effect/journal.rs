@@ -180,10 +180,18 @@ async fn apply_direct_llm_result(
         Ok(response) => {
             emit_direct_llm_trace_completed(current, llm_call_id.as_deref(), caused_by, &response);
             let usage = token_usage_from_llm(&response.usage);
+            // Record into the shared token ledger only. The ledger is the same
+            // `Arc` the turn loop drains at turn-commit time (`turn_loop.rs`),
+            // so this usage is persisted exactly once by the lease-fenced turn
+            // commit pipeline. We deliberately do NOT commit here:
+            //   * an out-of-band `commit_runtime_state` mid-turn races the
+            //     owning turn's CAS and can bump the head from under it;
+            //   * on journal replay this `apply` runs again with the cached
+            //     outcome, and an incremental persist would double-merge the
+            //     usage into the already-persisted state. Recording (without
+            //     persisting) is replay-safe: it just rebuilds the in-memory
+            //     ledger that the single turn-commit drain then persists.
             usage_capability.record_token_usage(usage_source, usage_model, &usage);
-            usage_capability
-                .persist_current_usage_ledger(current)
-                .await?;
             Ok((response, usage))
         }
         Err(err) => {

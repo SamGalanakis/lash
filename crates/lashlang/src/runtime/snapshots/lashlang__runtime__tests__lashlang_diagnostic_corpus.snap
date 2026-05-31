@@ -1,17 +1,7 @@
 ---
 source: crates/lashlang/src/runtime/tests.rs
-assertion_line: 312
 expression: "cases.join(\"\\n\\n---\\n\\n\")"
 ---
-parse_unsupported_while
-unsupported `while` loop; use bounded `for` loops over ranges or lists
---> line 2, column 1
-while x < 3 {
-^
-hint: use bounded `for` loops over ranges or lists
-
----
-
 parse_inline_if
 unexpected `if`
 --> line 1, column 8
@@ -31,7 +21,7 @@ hint: `for` is a statement. Put it on its own line, not inside an expression or 
 ---
 
 parse_loop_control_outside_loop
-`break` can only be used inside a `for` loop
+`break` can only be used inside a loop
 --> line 1, column 1
 break
 ^

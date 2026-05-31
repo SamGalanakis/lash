@@ -31,7 +31,7 @@ impl Store {
     }
 
     pub fn load_picker_info(&self) -> Option<SessionPickerInfo> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         let meta = conn
             .query_row(
                 "SELECT session_id, cwd, relation_json
@@ -89,7 +89,7 @@ impl Store {
     }
 
     pub fn save_session_head_meta(&self, meta: SessionHeadMeta) {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         let head_json = encode_json(&meta);
         if let Err(err) = conn.execute(
             "INSERT OR REPLACE INTO session_head (singleton, session_id, head_json, head_revision)
@@ -101,7 +101,7 @@ impl Store {
     }
 
     pub fn load_session_head_meta(&self) -> Option<SessionHeadMeta> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         load_session_head_meta_from_conn(&conn)
     }
 
@@ -161,7 +161,7 @@ impl Store {
     }
 
     pub fn save_session_meta(&self, meta: SessionMeta) {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         let relation_json = serde_json::to_string(&meta.relation).ok();
         if let Err(err) = conn.execute(
             "INSERT OR REPLACE INTO session_meta
@@ -185,7 +185,7 @@ impl Store {
     }
 
     pub fn load_session_meta(&self) -> Option<SessionMeta> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         load_session_meta_from_conn(&conn)
     }
 }

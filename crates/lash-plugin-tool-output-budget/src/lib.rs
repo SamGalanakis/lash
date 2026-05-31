@@ -48,6 +48,174 @@ enum ProjectionDirection {
     Tail,
 }
 
+/// Which end of the output a windowed truncation keeps.
+///
+/// `Head` keeps the leading lines (the common case); `Tail` keeps the
+/// trailing lines (used for streaming command output where the end is
+/// the interesting part). This is the public mirror of the budget
+/// plugin's internal `ProjectionDirection`, exported so other plugins
+/// (e.g. rolling-history) can share the one canonical truncation core
+/// instead of forking it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TruncationDirection {
+    Head,
+    Tail,
+}
+
+impl From<ProjectionDirection> for TruncationDirection {
+    fn from(direction: ProjectionDirection) -> Self {
+        match direction {
+            ProjectionDirection::Head => TruncationDirection::Head,
+            ProjectionDirection::Tail => TruncationDirection::Tail,
+        }
+    }
+}
+
+/// The unit reported in the `...N <unit> truncated...` marker when a
+/// windowed truncation hits its byte budget (rather than its line cap).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TruncationUnit {
+    /// Report removed *characters*, labelled `bytes`.
+    Bytes,
+    /// Report an approximate removed *token* count, labelled `tokens`.
+    Tokens,
+}
+
+impl TruncationUnit {
+    fn label(self) -> &'static str {
+        match self {
+            TruncationUnit::Bytes => "bytes",
+            TruncationUnit::Tokens => "tokens",
+        }
+    }
+}
+
+/// Parameters for [`truncate_windowed`], the single canonical
+/// head/tail-window + byte-cap truncation implementation shared by the
+/// tool-output-budget projector and the rolling-history compaction
+/// plugin.
+#[derive(Clone, Copy, Debug)]
+pub struct WindowedTruncation<'a> {
+    /// Maximum number of lines retained in the preview window.
+    pub max_lines: usize,
+    /// Maximum number of bytes retained in the preview window.
+    pub max_bytes: usize,
+    /// Which end of the output to keep.
+    pub direction: TruncationDirection,
+    /// The unit reported in the byte-budget truncation marker.
+    pub unit: TruncationUnit,
+    /// Trailing hint text appended to (Head) / prepended to (Tail) the
+    /// preview, explaining the truncation and where the full output is.
+    pub hint: &'a str,
+}
+
+/// The canonical head/tail-window + byte-cap truncation core.
+///
+/// Returns `text` unchanged when it already fits within `max_lines` and
+/// `max_bytes`. Otherwise keeps a preview window from the configured end
+/// and wraps it with a `...N <unit> truncated...` marker plus the
+/// caller-supplied `hint`.
+///
+/// A single line that is itself larger than `max_bytes` is truncated at
+/// a UTF-8 char boundary rather than dropped, so over-long lines never
+/// silently disappear and the function never panics on multi-byte text.
+pub fn truncate_windowed(text: &str, opts: &WindowedTruncation) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let total_bytes = text.len();
+    if lines.len() <= opts.max_lines && total_bytes <= opts.max_bytes {
+        return text.to_string();
+    }
+
+    let mut preview_lines: Vec<String> = Vec::new();
+    let mut bytes = 0usize;
+    let mut hit_budget = false;
+
+    let mut push_line = |line: &str, bytes: &mut usize, hit_budget: &mut bool| -> bool {
+        // `separator` accounts for the `\n` re-joined between lines; the
+        // first retained line carries no separator.
+        let separator = usize::from(!preview_lines.is_empty());
+        let remaining = opts.max_bytes.saturating_sub(*bytes + separator);
+        if line.len() + separator <= opts.max_bytes.saturating_sub(*bytes) {
+            preview_lines.push(line.to_string());
+            *bytes += line.len() + separator;
+            true
+        } else if preview_lines.is_empty() && remaining > 0 {
+            // A lone line longer than the whole budget: truncate it at a
+            // char boundary instead of dropping it entirely.
+            let cut = char_floor(line, remaining);
+            if cut == 0 {
+                *hit_budget = true;
+                return false;
+            }
+            preview_lines.push(line[..cut].to_string());
+            *bytes += cut;
+            *hit_budget = true;
+            false
+        } else {
+            *hit_budget = true;
+            false
+        }
+    };
+
+    match opts.direction {
+        TruncationDirection::Head => {
+            for line in lines.iter().take(opts.max_lines) {
+                if !push_line(line, &mut bytes, &mut hit_budget) {
+                    break;
+                }
+            }
+        }
+        TruncationDirection::Tail => {
+            for line in lines.iter().rev().take(opts.max_lines) {
+                if !push_line(line, &mut bytes, &mut hit_budget) {
+                    break;
+                }
+            }
+            preview_lines.reverse();
+        }
+    }
+
+    let preview = preview_lines.join("\n");
+    let (removed, unit) = if hit_budget {
+        let removed = match opts.unit {
+            TruncationUnit::Bytes => {
+                u64::try_from(text.chars().count().saturating_sub(preview.chars().count()))
+                    .unwrap_or(u64::MAX)
+            }
+            TruncationUnit::Tokens => {
+                approx_tokens_from_byte_count(total_bytes.saturating_sub(preview.len()))
+            }
+        };
+        (removed, opts.unit.label())
+    } else {
+        (
+            u64::try_from(lines.len().saturating_sub(preview_lines.len())).unwrap_or(u64::MAX),
+            "lines",
+        )
+    };
+    let hint = opts.hint;
+    match opts.direction {
+        TruncationDirection::Head => {
+            format!("{preview}\n\n...{removed} {unit} truncated...\n\n{hint}")
+        }
+        TruncationDirection::Tail => {
+            format!("...{removed} {unit} truncated...\n\n{hint}\n\n{preview}")
+        }
+    }
+}
+
+/// Largest byte offset `<= max` that lands on a UTF-8 char boundary.
+fn char_floor(text: &str, max: usize) -> usize {
+    if max >= text.len() {
+        return text.len();
+    }
+    let mut cut = max;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    cut
+}
+
 pub struct ToolOutputBudgetPluginFactory {
     config: ToolOutputBudgetConfig,
 }
@@ -117,6 +285,24 @@ fn project_tool_result(
         tool_name: ctx.tool_name.clone(),
         parts,
     }
+}
+
+/// Project a tool result into the rendered model-facing text using the
+/// canonical projector — including the structure-aware `batch` path that
+/// recurses into each child result with the correct per-child truncation
+/// direction.
+///
+/// Exposed so other plugins (e.g. rolling-history) can reuse the one
+/// canonical batch/structured projection instead of flattening batched
+/// output to an opaque string and tail-truncating it (which cuts JSON
+/// mid-structure and loses per-child windowing). Attachments are rendered
+/// inline using the same `[Attachment: …]` placeholder the budget plugin
+/// uses internally.
+pub fn project_tool_result_text(
+    config: &ToolOutputBudgetConfig,
+    ctx: ToolResultProjectionContext,
+) -> String {
+    render_model_return_parts(&project_tool_result(config, ctx).parts)
 }
 
 fn project_model_parts(
@@ -349,63 +535,19 @@ fn truncate_text_with_hint(
     if !needs_truncation(text, config) {
         return text.to_string();
     }
-    let lines: Vec<&str> = text.lines().collect();
-    let mut preview_lines = Vec::new();
-    let mut bytes = 0usize;
-    let mut hit_budget = false;
-
-    match direction {
-        ProjectionDirection::Head => {
-            for (idx, line) in lines.iter().enumerate().take(config.max_lines) {
-                let size = line.len() + usize::from(idx > 0);
-                if bytes + size > max_bytes {
-                    hit_budget = true;
-                    break;
-                }
-                preview_lines.push(*line);
-                bytes += size;
-            }
-        }
-        ProjectionDirection::Tail => {
-            for (idx, line) in lines.iter().rev().take(config.max_lines).enumerate() {
-                let size = line.len() + usize::from(idx > 0);
-                if bytes + size > max_bytes {
-                    hit_budget = true;
-                    break;
-                }
-                preview_lines.push(*line);
-                bytes += size;
-            }
-            preview_lines.reverse();
-        }
-    }
-
-    let preview = preview_lines.join("\n");
-    let removed = if hit_budget {
-        removed_units(
-            config.mode,
-            text.len().saturating_sub(bytes),
-            text.chars().count().saturating_sub(preview.chars().count()),
-        )
-    } else {
-        u64::try_from(lines.len().saturating_sub(preview_lines.len())).unwrap_or(u64::MAX)
-    };
-    let unit = if hit_budget {
-        match config.mode {
-            ToolOutputBudgetMode::Bytes => "bytes",
-            ToolOutputBudgetMode::Tokens => "tokens",
-        }
-    } else {
-        "lines"
-    };
-    match direction {
-        ProjectionDirection::Head => {
-            format!("{preview}\n\n...{removed} {unit} truncated...\n\n{hint}")
-        }
-        ProjectionDirection::Tail => {
-            format!("...{removed} {unit} truncated...\n\n{hint}\n\n{preview}")
-        }
-    }
+    truncate_windowed(
+        text,
+        &WindowedTruncation {
+            max_lines: config.max_lines,
+            max_bytes,
+            direction: direction.into(),
+            unit: match config.mode {
+                ToolOutputBudgetMode::Bytes => TruncationUnit::Bytes,
+                ToolOutputBudgetMode::Tokens => TruncationUnit::Tokens,
+            },
+            hint: &hint,
+        },
+    )
 }
 
 fn format_truncation_marker(mode: ToolOutputBudgetMode, removed: u64) -> String {
@@ -690,6 +832,66 @@ fn batch_child_args(batch_args: &serde_json::Value, index: usize) -> serde_json:
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn windowed_truncation_truncates_over_long_single_line_instead_of_dropping_it() {
+        // A single line longer than the whole byte budget must be cut at a
+        // char boundary, not dropped (which would leave an empty preview).
+        let line = "x".repeat(1000);
+        let got = truncate_windowed(
+            &line,
+            &WindowedTruncation {
+                max_lines: 400,
+                max_bytes: 64,
+                direction: TruncationDirection::Head,
+                unit: TruncationUnit::Bytes,
+                hint: "hint",
+            },
+        );
+        let preview = got.split("\n\n...").next().expect("preview");
+        assert!(!preview.is_empty(), "preview must not be empty: {got:?}");
+        assert!(preview.len() <= 64);
+        assert!(preview.chars().all(|c| c == 'x'));
+        assert!(got.contains("bytes truncated"));
+    }
+
+    #[test]
+    fn windowed_truncation_never_splits_a_multibyte_char() {
+        // Budget lands mid-way through a 3-byte char; must back off to a
+        // boundary rather than panic or emit invalid UTF-8.
+        let line = "★".repeat(100); // each '★' is 3 bytes
+        let got = truncate_windowed(
+            &line,
+            &WindowedTruncation {
+                max_lines: 400,
+                max_bytes: 10, // not a multiple of 3
+                direction: TruncationDirection::Head,
+                unit: TruncationUnit::Bytes,
+                hint: "hint",
+            },
+        );
+        let preview = got.split("\n\n...").next().expect("preview");
+        assert!(!preview.is_empty());
+        assert!(preview.chars().all(|c| c == '★'));
+        assert_eq!(preview.len() % 3, 0, "must cut on a char boundary");
+        assert!(preview.len() <= 10);
+    }
+
+    #[test]
+    fn windowed_truncation_returns_input_unchanged_when_within_budget() {
+        let text = "a\nb\nc";
+        let got = truncate_windowed(
+            text,
+            &WindowedTruncation {
+                max_lines: 400,
+                max_bytes: 1024,
+                direction: TruncationDirection::Head,
+                unit: TruncationUnit::Bytes,
+                hint: "hint",
+            },
+        );
+        assert_eq!(got, text);
+    }
 
     #[test]
     fn truncates_strings_with_terminal_style_marker() {

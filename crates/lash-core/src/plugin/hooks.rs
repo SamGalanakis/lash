@@ -39,7 +39,7 @@ pub type AssistantResponseHook = Arc<
 #[derive(Clone)]
 pub struct PromptHookContext {
     pub session_id: String,
-    pub host: Arc<dyn RuntimeSessionHost>,
+    pub sessions: Arc<dyn SessionStateService>,
     pub state: SessionReadView,
     pub protocol_turn_options: ProtocolTurnOptions,
     pub turn_context: crate::TurnContext,
@@ -49,7 +49,7 @@ pub struct PromptHookContext {
 pub struct TurnHookContext {
     pub session_id: String,
     pub state: SessionReadView,
-    pub host: Arc<dyn RuntimeSessionHost>,
+    pub sessions: Arc<dyn SessionStateService>,
     pub turn_context: crate::TurnContext,
 }
 
@@ -58,14 +58,15 @@ pub struct SessionConfigChangedContext {
     pub session_id: String,
     pub previous: SessionPolicy,
     pub current: SessionPolicy,
-    pub host: Arc<dyn RuntimeSessionHost>,
+    pub sessions: Arc<dyn SessionStateService>,
 }
 
 #[derive(Clone)]
 pub struct SessionStateChangedContext {
     pub session_id: String,
     pub state: SessionReadView,
-    pub host: Arc<dyn RuntimeSessionHost>,
+    pub sessions: Arc<dyn SessionStateService>,
+    pub session_graph: Arc<dyn SessionGraphService>,
     pub direct_completions: crate::DirectCompletionClient<'static>,
 }
 
@@ -111,7 +112,7 @@ pub struct ToolCallHookContext {
     pub args: serde_json::Value,
     pub argument_projection: crate::ToolArgumentProjectionPolicy,
     pub turn_context: crate::TurnContext,
-    pub(crate) host: Arc<dyn RuntimeSessionHost>,
+    pub(crate) sessions: Arc<dyn SessionStateService>,
 }
 
 impl ToolCallHookContext {
@@ -121,7 +122,7 @@ impl ToolCallHookContext {
         args: serde_json::Value,
         argument_projection: crate::ToolArgumentProjectionPolicy,
         turn_context: crate::TurnContext,
-        host: Arc<dyn RuntimeSessionHost>,
+        sessions: Arc<dyn SessionStateService>,
     ) -> Self {
         Self {
             session_id,
@@ -129,12 +130,12 @@ impl ToolCallHookContext {
             args,
             argument_projection,
             turn_context,
-            host,
+            sessions,
         }
     }
 
     pub async fn session_snapshot(&self) -> Result<SessionSnapshot, PluginError> {
-        self.host.snapshot_session(&self.session_id).await
+        self.sessions.snapshot_session(&self.session_id).await
     }
 
     pub async fn set_tools_availability(
@@ -142,7 +143,7 @@ impl ToolCallHookContext {
         names: &[String],
         availability: Option<crate::ToolAvailability>,
     ) -> Result<u64, PluginError> {
-        self.host
+        self.sessions
             .set_tools_availability(&self.session_id, names, availability)
             .await
     }
@@ -156,7 +157,7 @@ pub struct ToolResultHookContext {
     pub result: ToolResult,
     pub duration_ms: u64,
     pub turn_context: crate::TurnContext,
-    pub(crate) host: Arc<dyn RuntimeSessionHost>,
+    pub(crate) sessions: Arc<dyn SessionStateService>,
 }
 
 impl ToolResultHookContext {
@@ -167,7 +168,7 @@ impl ToolResultHookContext {
         result: ToolResult,
         duration_ms: u64,
         turn_context: crate::TurnContext,
-        host: Arc<dyn RuntimeSessionHost>,
+        sessions: Arc<dyn SessionStateService>,
     ) -> Self {
         Self {
             session_id,
@@ -176,12 +177,12 @@ impl ToolResultHookContext {
             result,
             duration_ms,
             turn_context,
-            host,
+            sessions,
         }
     }
 
     pub async fn session_snapshot(&self) -> Result<SessionSnapshot, PluginError> {
-        self.host.snapshot_session(&self.session_id).await
+        self.sessions.snapshot_session(&self.session_id).await
     }
 
     pub async fn set_tools_availability(
@@ -189,7 +190,7 @@ impl ToolResultHookContext {
         names: &[String],
         availability: Option<crate::ToolAvailability>,
     ) -> Result<u64, PluginError> {
-        self.host
+        self.sessions
             .set_tools_availability(&self.session_id, names, availability)
             .await
     }
@@ -209,7 +210,7 @@ pub struct ToolResultProjectionContext {
 pub struct TurnResultHookContext {
     pub session_id: String,
     pub turn: Arc<TurnResultSummary>,
-    pub host: Arc<dyn RuntimeSessionHost>,
+    pub sessions: Arc<dyn SessionStateService>,
 }
 
 #[derive(Clone)]
@@ -217,7 +218,9 @@ pub struct CheckpointHookContext {
     pub session_id: String,
     pub checkpoint: CheckpointKind,
     pub state: SessionReadView,
-    pub host: Arc<dyn RuntimeSessionHost>,
+    pub sessions: Arc<dyn SessionStateService>,
+    pub session_lifecycle: Arc<dyn SessionLifecycleService>,
+    pub session_graph: Arc<dyn SessionGraphService>,
 }
 
 #[derive(Clone)]

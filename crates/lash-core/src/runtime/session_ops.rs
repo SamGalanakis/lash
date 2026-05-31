@@ -158,7 +158,7 @@ impl LashRuntime {
 
     /// Promote a managed child session into the foreground runtime.
     ///
-    /// Child sessions created through `RuntimeSessionHost::create_session` are real
+    /// Child sessions created through `SessionLifecycleService::create_session` are real
     /// runtimes, not serialized placeholders. Foreground activation must therefore
     /// claim that runtime instead of reconstructing a new empty state in the UI.
     pub async fn activate_managed_session(&mut self, session_id: &str) -> Result<(), SessionError> {
@@ -318,12 +318,12 @@ impl LashRuntime {
             ));
         };
         let manager = self
-            .runtime_session_manager()
+            .runtime_session_services()
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
         crate::session::triggers::emit_host_event(
             &self.state.session_id,
             Arc::clone(session.plugins()),
-            manager as Arc<dyn crate::ProcessService>,
+            manager.process_service(),
             host_event_invocation,
             resource_type,
             alias,
@@ -340,7 +340,7 @@ impl LashRuntime {
         args: serde_json::Value,
         session_id: Option<String>,
     ) -> Result<crate::ToolResult, PluginActionInvokeError> {
-        let manager = self.runtime_session_manager()?;
+        let manager = self.runtime_session_services()?;
         let Some(session) = self.session.as_ref() else {
             return Err(PluginActionInvokeError::Unknown(name.to_string()));
         };
@@ -351,8 +351,10 @@ impl LashRuntime {
                 args,
                 session_id,
                 true,
-                manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
-                manager as Arc<dyn crate::ProcessService>,
+                manager.state_service(),
+                manager.lifecycle_service(),
+                manager.graph_service(),
+                manager.process_service(),
             )
             .await
     }

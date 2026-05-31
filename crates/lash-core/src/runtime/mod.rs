@@ -41,7 +41,6 @@ use crate::llm::types::{
     LlmOutputPart, LlmProviderTraceEvent, LlmProviderTraceSender, LlmRequest, LlmResponse,
     LlmStreamEvent, LlmUsage,
 };
-use crate::plugin::runtime_host::RuntimeSessionHost;
 use crate::plugin::{
     CheckpointHookContext, PrepareTurnRequest, SessionConfigChangedContext, SessionRelation,
 };
@@ -856,7 +855,7 @@ pub struct LashRuntime {
     /// Protocol-owned turn options for this session.
     pub(in crate::runtime) protocol_turn_options: crate::ProtocolTurnOptions,
     /// Session-scoped token cost ledger. Shared by ALL
-    /// `RuntimeSessionManager` instances created from this runtime
+    /// `RuntimeSessionServices` instances created from this runtime
     /// (both per-turn and async maintenance). Entries accumulate here
     /// and are drained into `state.token_ledger` at turn-commit time.
     pub(in crate::runtime) shared_token_ledger: Arc<std::sync::Mutex<Vec<TokenLedgerEntry>>>,

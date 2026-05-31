@@ -294,7 +294,7 @@ fn render_language_section(
             "- Independent operation fanout: call independent operations directly and store their values, e.g. `a = await web.search({{ query: \"one\" }})?` and `b = await files.read({{ path: \"notes/two.md\" }})?`.{tail}"
         ));
     }
-    bullets.push("- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. There is no `while` loop; use bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string());
+    bullets.push("- Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string());
     bullets.push("- Bare expressions are valid statements in normal blocks.".to_string());
     bullets.push("- When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.".to_string());
     format!("### Language\n\n{}", bullets.join("\n"))

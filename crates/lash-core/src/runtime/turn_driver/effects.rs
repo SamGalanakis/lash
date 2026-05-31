@@ -157,7 +157,9 @@ impl RuntimeTurnDriver<'_> {
                     machine.message_sequence(),
                     machine.protocol_iteration(),
                 ),
-                host: self.session_manager.clone(),
+                sessions: self.session_services.state_service(),
+                session_lifecycle: self.session_services.lifecycle_service(),
+                session_graph: self.session_services.graph_service(),
             })
             .await
             .map_err(|err| {

@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 
-impl RuntimeSessionManager {
+impl RuntimeSessionServices {
     pub(in crate::runtime::session_manager::process_runners) async fn run_process_tool_call(
         &self,
         registration: crate::ProcessRegistration,
@@ -44,9 +44,8 @@ impl RuntimeSessionManager {
     ) -> Result<crate::ToolCallOutput, crate::PluginError> {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionEvent>(64);
         let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-        let host = Arc::new(self.clone()) as Arc<dyn crate::plugin::RuntimeSessionHost>;
-        let direct_completions = crate::DirectCompletionClient::runtime(
-            Arc::new(self.clone()),
+        let services = Arc::new(self.clone());
+        let direct_completions = services.direct_completion_client(
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
                 &self.current.host.core.effect_controller,
             )),
@@ -62,8 +61,10 @@ impl RuntimeSessionManager {
                 .current
                 .plugins
                 .tool_surface(&self.current.session_id)?,
-            host: Arc::clone(&host),
-            processes: Arc::new(self.clone()),
+            sessions: services.state_service(),
+            session_lifecycle: services.lifecycle_service(),
+            session_graph: services.graph_service(),
+            processes: services.process_service(),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
                 &self.current.host.core.effect_controller,
             )),

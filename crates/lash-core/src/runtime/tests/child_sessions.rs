@@ -3,8 +3,11 @@ use super::*;
 #[tokio::test]
 async fn session_manager_create_session_accepts_custom_context_surface() {
     let runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
-    let manager = runtime.session_manager().expect("session manager");
-    let handle = manager
+    let manager = runtime.session_state_service().expect("session manager");
+    let lifecycle = runtime
+        .session_lifecycle_service()
+        .expect("session lifecycle");
+    let handle = lifecycle
         .create_session(
             crate::SessionCreateRequest::root(
                 crate::SessionStartPoint::Empty,
@@ -51,7 +54,10 @@ async fn inherited_child_session_carries_parent_tool_state() {
     .await
     .expect("runtime");
     set_runtime_provider(&mut runtime, mock_provider(Vec::new()).into_handle());
-    let manager = runtime.session_manager().expect("session manager");
+    let manager = runtime.session_state_service().expect("session manager");
+    let lifecycle = runtime
+        .session_lifecycle_service()
+        .expect("session lifecycle");
     let mut snapshot = manager.tool_state("root").await.expect("tool state");
     assert!(snapshot.remove("memory_probe").is_some());
     manager
@@ -59,7 +65,7 @@ async fn inherited_child_session_carries_parent_tool_state() {
         .await
         .expect("apply dynamic state");
 
-    let handle = manager
+    let handle = lifecycle
         .create_session(
             crate::SessionCreateRequest::child_session(
                 "root",
@@ -133,7 +139,10 @@ async fn forked_child_session_filters_hidden_tool_state_before_rebind() {
     .await
     .expect("runtime");
     set_runtime_provider(&mut runtime, mock_provider(Vec::new()).into_handle());
-    let manager = runtime.session_manager().expect("session manager");
+    let manager = runtime.session_state_service().expect("session manager");
+    let lifecycle = runtime
+        .session_lifecycle_service()
+        .expect("session lifecycle");
     assert!(
         manager
             .tool_state("root")
@@ -142,7 +151,7 @@ async fn forked_child_session_filters_hidden_tool_state_before_rebind() {
             .contains("memory_probe")
     );
 
-    let handle = manager
+    let handle = lifecycle
         .create_session(
             crate::SessionCreateRequest::child_session(
                 "root",

@@ -1034,6 +1034,8 @@ mod tests {
         crate::ToolContext::builder(
             "registry-test".to_string(),
             Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::testing::MockSessionManager::default()),
             Arc::new(crate::UnavailableProcessService),
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),

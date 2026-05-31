@@ -144,7 +144,6 @@ impl ProcessCapability {
         &self,
         current: &CurrentSessionCapability,
         managed: &ManagedSessionCapability,
-        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
         process_id: &str,
         scope: crate::ProcessOpScope<'_>,
@@ -159,7 +158,7 @@ impl ProcessCapability {
                 "unknown process `{process_id}`"
             )));
         }
-        let _ = (managed, host, session_id);
+        let _ = (managed, session_id);
         let outcome = self
             .execute_process_effect(
                 current,
@@ -234,7 +233,6 @@ impl ProcessCapability {
         &self,
         current: &CurrentSessionCapability,
         managed: &ManagedSessionCapability,
-        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
@@ -255,7 +253,6 @@ impl ProcessCapability {
                 self.cancel_process(
                     current,
                     managed,
-                    Arc::clone(&host),
                     session_id,
                     &grant.process_id,
                     scope.clone(),
@@ -340,7 +337,6 @@ impl ProcessCapability {
         &self,
         current: &CurrentSessionCapability,
         _managed: &ManagedSessionCapability,
-        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
         keep_process_ids: Vec<String>,
         scope: crate::ProcessOpScope<'_>,
@@ -375,7 +371,6 @@ impl ProcessCapability {
                 self.cancel_process(
                     current,
                     _managed,
-                    Arc::clone(&host),
                     session_id,
                     &grant.process_id,
                     scope.clone(),

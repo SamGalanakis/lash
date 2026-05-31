@@ -164,7 +164,7 @@ impl Store {
 
     pub fn put_blob(&self, content: &[u8]) -> BlobRef {
         let hash = format!("{:x}", Sha256::digest(content));
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         if let Err(err) = conn.execute(
             "INSERT OR IGNORE INTO blobs (hash, content) VALUES (?1, ?2)",
             params![hash, content],
@@ -177,7 +177,7 @@ impl Store {
     pub fn put_artifact_blob(&self, descriptor: BlobArtifactDescriptor, content: &[u8]) -> BlobRef {
         let hash = format!("{:x}", Sha256::digest(content));
         let stored = encode_artifact_blob(&descriptor, self.options.blob_profile, content);
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         if let Err(err) = conn.execute(
             "INSERT OR IGNORE INTO blobs (hash, content) VALUES (?1, ?2)",
             params![hash, stored],
@@ -188,7 +188,7 @@ impl Store {
     }
 
     pub fn get_blob(&self, blob_ref: &BlobRef) -> Option<Vec<u8>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         Self::get_blob_conn(&conn, blob_ref)
     }
 
@@ -207,7 +207,7 @@ impl Store {
     }
 
     pub fn get_typed_blob<T: serde::de::DeserializeOwned>(&self, blob_ref: &BlobRef) -> Option<T> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         Self::get_typed_blob_conn(&conn, blob_ref)
     }
 
@@ -261,7 +261,7 @@ impl Store {
     }
 
     pub fn get_checkpoint(&self, blob_ref: &BlobRef) -> Option<HydratedSessionCheckpoint> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         Self::get_checkpoint_conn(&conn, blob_ref)
     }
 
@@ -269,16 +269,14 @@ impl Store {
         if entries.is_empty() {
             return;
         }
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction().expect("usage delta transaction");
-        {
+        let result = self.with_write_tx(|tx| {
             let mut stmt = tx
                 .prepare(
                     "INSERT INTO usage_deltas (
                         source, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 )
-                .expect("usage delta statement");
+                .map_err(sqlite_error)?;
             for entry in entries {
                 stmt.execute(params![
                     entry.source,
@@ -288,14 +286,17 @@ impl Store {
                     entry.usage.cached_input_tokens,
                     entry.usage.reasoning_tokens,
                 ])
-                .expect("usage delta insert");
+                .map_err(sqlite_error)?;
             }
+            Ok(())
+        });
+        if let Err(err) = result {
+            tracing::warn!(error = %err, "failed to persist usage deltas");
         }
-        tx.commit().expect("usage delta commit");
     }
 
     pub fn load_usage_deltas(&self) -> Vec<lash_core::TokenLedgerEntry> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         Self::load_usage_deltas_conn(&conn)
     }
 }

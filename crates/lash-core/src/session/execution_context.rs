@@ -129,8 +129,8 @@ impl<'run> RuntimeExecutionContext<'run> {
         &self.turn_context
     }
 
-    pub(crate) fn runtime_host(&self) -> &dyn crate::plugin::RuntimeSessionHost {
-        self.dispatch.host.as_ref()
+    pub(crate) fn session_graph_service(&self) -> &dyn crate::plugin::SessionGraphService {
+        self.dispatch.session_graph.as_ref()
     }
 
     pub(super) async fn emit_turn_activity(
@@ -385,7 +385,9 @@ mod tests {
                 vec![tool.manifest()],
                 std::collections::BTreeMap::new(),
             )),
-            host: Arc::new(crate::testing::MockSessionManager::default()),
+            sessions: Arc::new(crate::testing::MockSessionManager::default()),
+            session_lifecycle: Arc::new(crate::testing::MockSessionManager::default()),
+            session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
@@ -442,7 +444,9 @@ mod tests {
                 vec![tool.manifest()],
                 std::collections::BTreeMap::new(),
             )),
-            host: Arc::new(crate::testing::MockSessionManager::default()),
+            sessions: Arc::new(crate::testing::MockSessionManager::default()),
+            session_lifecycle: Arc::new(crate::testing::MockSessionManager::default()),
+            session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
@@ -529,7 +533,9 @@ mod tests {
                 vec![tool.manifest()],
                 std::collections::BTreeMap::new(),
             )),
-            host: Arc::new(crate::testing::MockSessionManager::default()),
+            sessions: Arc::new(crate::testing::MockSessionManager::default()),
+            session_lifecycle: Arc::new(crate::testing::MockSessionManager::default()),
+            session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
@@ -591,7 +597,9 @@ mod tests {
                 Vec::new(),
                 std::collections::BTreeMap::new(),
             )),
-            host: Arc::new(crate::testing::MockSessionManager::default()),
+            sessions: Arc::new(crate::testing::MockSessionManager::default()),
+            session_lifecycle: Arc::new(crate::testing::MockSessionManager::default()),
+            session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),

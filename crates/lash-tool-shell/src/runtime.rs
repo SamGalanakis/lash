@@ -48,6 +48,7 @@ struct ShellProcess {
     output_notify: Arc<Notify>,
     spill: Arc<StdMutex<Option<ShellOutputSpill>>>,
     killer: Arc<StdMutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
+    pid: Option<u32>,
 }
 
 pub(crate) struct PipeExecProcessRequest<'a> {
@@ -210,6 +211,10 @@ impl ShellRuntime {
             )
         })?;
         let killer = child.clone_killer();
+        // Capture the child PID before the child is moved into the wait thread.
+        // The PTY child is a session/process-group leader, so we kill the whole
+        // group on cancel/timeout to reap backgrounded descendants.
+        let pid = child.process_id();
         let reader = pair
             .master
             .try_clone_reader()
@@ -258,6 +263,7 @@ impl ShellRuntime {
             output_notify,
             spill,
             killer,
+            pid,
         };
         self.processes.lock().unwrap().insert(id, process);
         Ok(())
@@ -281,6 +287,7 @@ impl ShellRuntime {
             exit_notify: Arc::clone(&proc.exit_notify),
             output_notify: Arc::clone(&proc.output_notify),
             killer: Arc::clone(&proc.killer),
+            pid: proc.pid,
         })
     }
 
@@ -452,6 +459,11 @@ impl ShellRuntime {
         if let Some(proc) = self.processes.lock().unwrap().remove(id)
             && let Some(mut spill) = proc.spill.lock().unwrap().take()
         {
+            // Flush but deliberately do NOT delete the spill here: this hook
+            // fires as the same tool call hands `full_output_path` back to the
+            // caller for later reading, so reaping now would destroy the
+            // artifact. The file is created 0600 (owner-only); see the reaping
+            // gap noted in `output::create_spill_file`.
             let _ = spill.file.flush();
         }
     }

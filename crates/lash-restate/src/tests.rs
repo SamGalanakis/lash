@@ -11,7 +11,7 @@ use std::sync::Mutex;
 #[test]
 fn restate_effect_name_uses_lash_replay_key() {
     let invocation = RuntimeInvocation::effect(
-        lash_core::RuntimeScope::for_turn("session", "turn", 1, 2),
+        lash_core::runtime::RuntimeScope::for_turn("session", "turn", 1, 2),
         "effect",
         RuntimeEffectKind::ToolCall,
         "session:turn:1:2:tool_call:effect",
@@ -339,7 +339,7 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
 
 fn runtime_invocation(kind: RuntimeEffectKind, effect_id: &str) -> RuntimeInvocation {
     RuntimeInvocation::effect(
-        lash_core::RuntimeScope::for_turn("session", "turn", 1, 0),
+        lash_core::runtime::RuntimeScope::for_turn("session", "turn", 1, 0),
         effect_id,
         kind,
         format!("session:turn:1:0:{}:{effect_id}", kind.as_str()),
@@ -1113,7 +1113,8 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
         .expect("list queued wakes");
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].items.len(), 1);
-    let lash_core::QueuedWorkPayload::ProcessWake { wake } = &queued[0].items[0].payload else {
+    let lash_core::runtime::QueuedWorkPayload::ProcessWake { wake } = &queued[0].items[0].payload
+    else {
         panic!("expected process wake queue payload");
     };
     assert_eq!(wake.input, "wake-after-rebuild");

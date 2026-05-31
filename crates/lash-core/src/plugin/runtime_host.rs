@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::*;
 
 #[async_trait::async_trait]
-pub trait RuntimeSessionHost: Send + Sync {
+pub trait SessionStateService: Send + Sync {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
         Err(PluginError::Session(
             "session snapshots are unavailable in this runtime".to_string(),
@@ -72,7 +72,10 @@ pub trait RuntimeSessionHost: Send + Sync {
             .map_err(|err| PluginError::Session(err.to_string()))?;
         self.apply_tool_state(session_id, snapshot).await
     }
+}
 
+#[async_trait::async_trait]
+pub trait SessionLifecycleService: Send + Sync {
     async fn create_session(
         &self,
         _request: SessionCreateRequest,
@@ -97,7 +100,10 @@ pub trait RuntimeSessionHost: Send + Sync {
             "session execution is unavailable in this runtime".to_string(),
         ))
     }
+}
 
+#[async_trait::async_trait]
+pub trait SessionGraphService: Send + Sync {
     async fn append_session_nodes(
         &self,
         _session_id: &str,

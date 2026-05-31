@@ -209,10 +209,7 @@ mod tests {
     use super::*;
     use lash_core::plugin::PromptHookContext;
     use lash_core::testing::{MockSessionManager, mock_assembled_turn};
-    use lash_core::{
-        PluginHost, PromptSlot, SessionPolicy, SessionReadView,
-        SessionSnapshot,
-    };
+    use lash_core::{PluginHost, PromptSlot, SessionPolicy, SessionReadView, SessionSnapshot};
 
     struct StaticInstructionSource {
         text: String,
@@ -262,7 +259,7 @@ mod tests {
         let contributions = session
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
-                host: Arc::new(mock_session_manager("run-session")),
+                sessions: Arc::new(mock_session_manager("run-session")),
                 state: SessionReadView::from_snapshot(&SessionSnapshot::default()),
                 protocol_turn_options: lash_core::ProtocolTurnOptions::default(),
                 turn_context: lash_core::TurnContext::default(),

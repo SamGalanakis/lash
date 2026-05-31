@@ -37,7 +37,9 @@ impl std::ops::Deref for PersistentRuntimeServices {
 
 pub(crate) struct NoopSessionManager;
 
-impl RuntimeSessionHost for NoopSessionManager {}
+impl SessionStateService for NoopSessionManager {}
+impl SessionLifecycleService for NoopSessionManager {}
+impl SessionGraphService for NoopSessionManager {}
 impl RuntimeServices {
     pub fn new(plugins: Arc<PluginSession>) -> Self {
         Self {

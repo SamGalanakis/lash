@@ -298,6 +298,25 @@ impl From<Vec<Message>> for MessageSequence {
     }
 }
 
+// A `MessageSequence` is a memoized base/delta rope with caches; its meaningful
+// value is the flat, materialized message list. Serialize as exactly that list
+// (and reconstruct an owned sequence on the way back) so that types embedding a
+// `MessageSequence` can derive serde with the same wire form as a plain
+// `Vec<Message>`. This is what lets `Effect` be serialized directly in a turn
+// checkpoint instead of round-tripping through a parallel `Vec<Message>` twin.
+impl serde::Serialize for MessageSequence {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_slice().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MessageSequence {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let messages = Vec::<Message>::deserialize(deserializer)?;
+        Ok(Self::from_owned(messages))
+    }
+}
+
 impl std::ops::Deref for MessageSequence {
     type Target = [Message];
 
@@ -1276,6 +1295,47 @@ mod tests {
         assert_eq!(meta.item_id.as_deref(), Some("rs_xyz"));
         assert_eq!(meta.summary, vec!["Thinking.".to_string()]);
         assert_eq!(meta.encrypted_content.as_deref(), Some("CIPHER=="));
+    }
+
+    #[test]
+    fn message_sequence_serializes_as_flat_message_array() {
+        // The custom `MessageSequence` serde must produce exactly the same wire
+        // form as a plain `Vec<Message>`. This is the invariant that lets
+        // `Effect` be serialized directly in a turn checkpoint instead of
+        // round-tripping through a parallel `Vec<Message>` twin — so existing
+        // persisted checkpoints stay byte-compatible.
+        let msgs = vec![
+            Message {
+                id: "m0".to_string(),
+                role: MessageRole::Assistant,
+                parts: vec![reasoning_part_fixture(None)].into(),
+                origin: None,
+            },
+            Message {
+                id: "m1".to_string(),
+                role: MessageRole::Assistant,
+                parts: vec![reasoning_part_fixture(Some("CIPHER=="))].into(),
+                origin: None,
+            },
+        ];
+        // Build via base+delta so the materialization path is exercised, not
+        // just the trivial owned case.
+        let sequence = MessageSequence::from_base_and_delta(
+            Arc::new(vec![msgs[0].clone()]),
+            vec![msgs[1].clone()],
+        );
+
+        assert_eq!(
+            serde_json::to_value(&sequence).expect("serialize sequence"),
+            serde_json::to_value(&msgs).expect("serialize vec"),
+            "MessageSequence must serialize identically to Vec<Message>"
+        );
+
+        let decoded: MessageSequence =
+            serde_json::from_value(serde_json::to_value(&sequence).unwrap())
+                .expect("deserialize sequence");
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded.as_slice()[1].id, "m1");
     }
 
     #[test]

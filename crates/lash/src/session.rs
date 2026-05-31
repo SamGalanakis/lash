@@ -1,4 +1,7 @@
 use crate::support::*;
+use lash_core::runtime::{
+    DeliveryPolicy, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkPayload, SlotPolicy,
+};
 
 pub struct SessionBuilder {
     pub(crate) core: LashCore,
@@ -31,43 +34,6 @@ impl SessionBuilder {
     pub fn provider(mut self, provider: ProviderHandle) -> Self {
         self.spec = self.spec.provider_id(provider.kind());
         self.provider = Some(provider);
-        self
-    }
-
-    pub fn prompt_template(mut self, template: PromptTemplate) -> Self {
-        let mut prompt = self.spec.prompt.take().unwrap_or_default();
-        prompt.template = Some(template);
-        self.spec = self.spec.prompt_layer(prompt);
-        self
-    }
-
-    pub fn prompt_contribution(mut self, contribution: PromptContribution) -> Self {
-        let mut prompt = self.spec.prompt.take().unwrap_or_default();
-        prompt.add_contribution(contribution);
-        self.spec = self.spec.prompt_layer(prompt);
-        self
-    }
-
-    pub fn replace_prompt_slot(
-        mut self,
-        slot: PromptSlot,
-        contributions: impl IntoIterator<Item = PromptContribution>,
-    ) -> Self {
-        let mut prompt = self.spec.prompt.take().unwrap_or_default();
-        prompt.replace_slot(slot, contributions);
-        self.spec = self.spec.prompt_layer(prompt);
-        self
-    }
-
-    pub fn clear_prompt_slot(mut self, slot: PromptSlot) -> Self {
-        let mut prompt = self.spec.prompt.take().unwrap_or_default();
-        prompt.clear_slot(slot);
-        self.spec = self.spec.prompt_layer(prompt);
-        self
-    }
-
-    pub fn prompt_layer(mut self, layer: PromptLayer) -> Self {
-        self.spec = self.spec.prompt_layer(layer);
         self
     }
 
@@ -179,7 +145,7 @@ impl SessionBuilder {
     ) -> Result<Option<RuntimeSessionState>> {
         match self.core.env.residency {
             Residency::KeepAll => {
-                let loaded = lash_core::load_persisted_session_state(store)
+                let loaded = lash_core::store::load_persisted_session_state(store)
                     .await
                     .map_err(|err| {
                         SessionError::Protocol(format!("failed to load store: {err}"))
@@ -187,16 +153,19 @@ impl SessionBuilder {
                 Ok(loaded)
             }
             Residency::ActivePathOnly => {
-                let active = lash_core::load_persisted_session_state_active_path(store, None)
-                    .await
-                    .map_err(|err| {
-                        SessionError::Protocol(format!("failed to load active-path store: {err}"))
-                    })?;
+                let active =
+                    lash_core::store::load_persisted_session_state_active_path(store, None)
+                        .await
+                        .map_err(|err| {
+                            SessionError::Protocol(format!(
+                                "failed to load active-path store: {err}"
+                            ))
+                        })?;
                 if active
                     .as_ref()
                     .is_some_and(|state| state.session_graph.nodes.is_empty())
                 {
-                    let mut full = lash_core::load_persisted_session_state(store)
+                    let mut full = lash_core::store::load_persisted_session_state(store)
                         .await
                         .map_err(|err| {
                             SessionError::Protocol(format!(
@@ -283,6 +252,12 @@ impl SessionBuilder {
                 session_id: self.session_id.clone(),
                 message,
             })
+    }
+}
+
+impl PromptLayerSink for SessionBuilder {
+    fn prompt_layer_mut(&mut self) -> &mut PromptLayer {
+        self.spec.prompt.get_or_insert_with(PromptLayer::new)
     }
 }
 
@@ -399,12 +374,12 @@ impl LashSession {
             session: self,
             input,
             id: None,
-            delivery_policy: lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-            slot_policy: lash_core::SlotPolicy::Exclusive,
+            delivery_policy: DeliveryPolicy::AfterCurrentTurnCommit,
+            slot_policy: SlotPolicy::Exclusive,
         }
     }
 
-    pub async fn queued_work(&self) -> Result<Vec<lash_core::QueuedWorkBatch>> {
+    pub async fn queued_work(&self) -> Result<Vec<QueuedWorkBatch>> {
         let observation = self.runtime.observe();
         let store = observation.queue_store.as_ref().ok_or_else(|| {
             EmbedError::Runtime(lash_core::RuntimeError::new(
@@ -496,8 +471,8 @@ pub struct QueueInputBuilder<'a> {
     session: &'a LashSession,
     input: TurnInput,
     id: Option<String>,
-    delivery_policy: lash_core::DeliveryPolicy,
-    slot_policy: lash_core::SlotPolicy,
+    delivery_policy: DeliveryPolicy,
+    slot_policy: SlotPolicy,
 }
 
 impl<'a> QueueInputBuilder<'a> {
@@ -506,12 +481,12 @@ impl<'a> QueueInputBuilder<'a> {
         self
     }
 
-    pub fn delivery_policy(mut self, policy: lash_core::DeliveryPolicy) -> Self {
+    pub fn delivery_policy(mut self, policy: DeliveryPolicy) -> Self {
         self.delivery_policy = policy;
         self
     }
 
-    pub fn slot_policy(mut self, policy: lash_core::SlotPolicy) -> Self {
+    pub fn slot_policy(mut self, policy: SlotPolicy) -> Self {
         self.slot_policy = policy;
         self
     }
@@ -526,11 +501,11 @@ impl<'a> QueueInputBuilder<'a> {
             ))
         })?;
         lash_core::ensure_durable_turn_input(&self.input).map_err(EmbedError::Runtime)?;
-        let mut draft = lash_core::QueuedWorkBatchDraft::new(
+        let mut draft = QueuedWorkBatchDraft::new(
             observation.session_id().to_string(),
             self.delivery_policy,
             self.slot_policy,
-            vec![lash_core::QueuedWorkPayload::turn_input(self.input)],
+            vec![QueuedWorkPayload::turn_input(self.input)],
         );
         draft.source_key = source_key;
         store

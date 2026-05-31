@@ -6,6 +6,7 @@
 mod control_tools;
 mod driver;
 mod executor;
+mod fence_scan;
 mod plugin;
 mod projection;
 mod protocol;

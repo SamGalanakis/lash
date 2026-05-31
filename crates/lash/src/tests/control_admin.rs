@@ -9,15 +9,8 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
     let usage = session.usage_report();
     assert_eq!(usage.usage.output_tokens, 2);
     session.control().tools().refresh_surface().await?;
-    session.control().state().await_background_work().await?;
-    assert!(
-        session
-            .control()
-            .state()
-            .list_process_handles()
-            .await?
-            .is_empty()
-    );
+    session.process_control().await_all().await?;
+    assert!(session.process_control().list().await?.is_empty());
     let err = session
         .control()
         .state()
@@ -66,7 +59,7 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         let _ = session.usage_report();
         let _ = session.control().tools().state().await?;
         let _ = session.control().tools().active_definitions().await?;
-        let _ = session.control().state().list_process_handles().await?;
+        let _ = session.process_control().list().await?;
         Result::<()>::Ok(())
     })
     .await
@@ -172,7 +165,7 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
     };
 
     entered_rx.await.expect("child provider entered");
-    let host = session.control().state().session_manager().await?;
+    let host = session.control().state().session_state_service().await?;
     let snapshot = tokio::time::timeout(std::time::Duration::from_millis(50), async {
         host.snapshot_session("child-observation").await
     })

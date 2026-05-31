@@ -242,7 +242,7 @@ mod tests {
         let contributions = session
             .collect_prompt_contributions(lash_core::PromptHookContext {
                 session_id: "root".to_string(),
-                host: Arc::new(lash_core::testing::MockSessionManager::default()),
+                sessions: Arc::new(lash_core::testing::MockSessionManager::default()),
                 state: lash_core::SessionReadView::from_snapshot(
                     &lash_core::SessionSnapshot::default(),
                 ),

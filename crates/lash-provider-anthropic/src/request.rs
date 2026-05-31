@@ -1,0 +1,420 @@
+//! Request-body construction: translating an [`LlmRequest`] into the Anthropic
+//! Messages wire shape (messages, tools, cache control, thinking config,
+//! structured output).
+
+use crate::policy::{AnthropicModelPolicy, AnthropicThinkingConfig, clamp_effort};
+use crate::support::*;
+
+impl AnthropicProvider {
+    fn role_name(role: &LlmRole) -> &'static str {
+        match role {
+            LlmRole::User => "user",
+            LlmRole::Assistant => "assistant",
+            LlmRole::System => "user",
+        }
+    }
+
+    fn image_block_value(req: &LlmRequest, attachment_idx: usize) -> Option<Value> {
+        let att = req.attachments.get(attachment_idx)?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
+        Some(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": att.mime,
+                "data": b64,
+            }
+        }))
+    }
+
+    fn text_block_value(text: &str, cache_breakpoint: bool) -> Value {
+        let mut block = json!({
+            "type": "text",
+            "text": text,
+        });
+        if cache_breakpoint {
+            block["__lash_cache_breakpoint"] = json!(true);
+        }
+        block
+    }
+
+    /// Translate one `LlmContentBlock` into the Anthropic wire shape.
+    /// Returns `None` for blocks that have no valid wire form (e.g. an
+    /// empty text block — Anthropic 400s on those).
+    fn content_block_value(req: &LlmRequest, block: &LlmContentBlock) -> Option<Value> {
+        match block {
+            LlmContentBlock::Text {
+                text,
+                cache_breakpoint,
+                ..
+            } => {
+                if text.trim().is_empty() {
+                    return None;
+                }
+                Some(Self::text_block_value(text, *cache_breakpoint))
+            }
+            LlmContentBlock::Image { attachment_idx } => Some(
+                Self::image_block_value(req, *attachment_idx)
+                    .unwrap_or_else(|| Self::text_block_value("[Image attached]", false)),
+            ),
+            LlmContentBlock::ToolCall {
+                call_id,
+                tool_name,
+                input_json,
+                ..
+            } => {
+                let input: Value = serde_json::from_str(input_json).unwrap_or_else(|_| json!({}));
+                Some(json!({
+                    "type": "tool_use",
+                    "id": normalize_tool_call_id(call_id),
+                    "name": tool_name,
+                    "input": input,
+                }))
+            }
+            LlmContentBlock::ToolResult {
+                call_id, content, ..
+            } => Some(json!({
+                "type": "tool_result",
+                "tool_use_id": normalize_tool_call_id(call_id),
+                "content": content.clone(),
+            })),
+            LlmContentBlock::Reasoning { text, replay, .. } => {
+                // Anthropic requires a signature to replay a thinking
+                // block. If we don't have one (e.g. aborted stream, or
+                // reasoning captured from a non-Anthropic provider that
+                // stored its payload in `encrypted_content` only), fall
+                // back to plain text so the turn still validates.
+                let Some(sig) = replay.as_ref().and_then(|meta| meta.signature.as_deref()) else {
+                    if text.trim().is_empty() {
+                        return None;
+                    }
+                    return Some(Self::text_block_value(text, false));
+                };
+                if replay.as_ref().is_some_and(|meta| meta.redacted) {
+                    return Some(json!({
+                        "type": "redacted_thinking",
+                        "data": sig,
+                    }));
+                }
+                if text.trim().is_empty() {
+                    return None;
+                }
+                Some(json!({
+                    "type": "thinking",
+                    "thinking": text,
+                    "signature": sig,
+                }))
+            }
+        }
+    }
+
+    /// Build the `messages` array for Anthropic Messages API. Each lash
+    /// `LlmMessage` becomes one wire message; adjacent same-role messages
+    /// get merged to match Anthropic's alternation rules.
+    fn build_messages(&self, req: &LlmRequest) -> (Option<String>, Vec<Value>) {
+        let mut system_prompt: Option<String> = None;
+        let mut out: Vec<Value> = Vec::new();
+        let mut first_system_seen = false;
+
+        for msg in &req.messages {
+            // First system message is the real system prompt; hoist it
+            // into the top-level `system` field. Subsequent system
+            // messages (runtime feedback) become user turns so the
+            // conversation ends on a user boundary.
+            if matches!(msg.role, LlmRole::System) && !first_system_seen {
+                first_system_seen = true;
+                let text = collect_text(&msg.blocks);
+                if !text.is_empty() {
+                    system_prompt = Some(text);
+                }
+                continue;
+            }
+
+            let wire_role = Self::role_name(&msg.role);
+            let mut blocks: Vec<Value> = Vec::new();
+            for block in msg.blocks.iter() {
+                if let Some(value) = Self::content_block_value(req, block) {
+                    blocks.push(value);
+                }
+            }
+            if blocks.is_empty() {
+                continue;
+            }
+
+            // Merge with previous turn if same role — keeps replay valid
+            // when a reasoning-only message immediately precedes a text
+            // message from the same role.
+            if let Some(prev) = out.last_mut()
+                && prev.get("role").and_then(|v| v.as_str()) == Some(wire_role)
+                && let Some(prev_content) = prev.get_mut("content").and_then(|c| c.as_array_mut())
+            {
+                prev_content.extend(blocks);
+                continue;
+            }
+
+            out.push(json!({
+                "role": wire_role,
+                "content": blocks,
+            }));
+        }
+
+        (system_prompt, out)
+    }
+
+    fn build_tools(&self, req: &LlmRequest) -> Vec<Value> {
+        req.tools
+            .iter()
+            .map(|tool| {
+                let schema = &tool.input_schema;
+                let properties = schema.get("properties").cloned().unwrap_or(json!({}));
+                let required = schema.get("required").cloned().unwrap_or(json!([]));
+                json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                    },
+                })
+            })
+            .collect()
+    }
+
+    fn cache_control_value(cache_retention: CacheRetention) -> Option<Value> {
+        match cache_retention {
+            CacheRetention::None => None,
+            CacheRetention::Short => Some(json!({ "type": "ephemeral" })),
+            CacheRetention::Long => Some(json!({ "type": "ephemeral", "ttl": "1h" })),
+        }
+    }
+
+    fn apply_cache_control(
+        &self,
+        cache_retention: CacheRetention,
+        system: &mut Option<Value>,
+        messages: &mut [Value],
+        tools: &mut [Value],
+    ) {
+        let Some(ctrl) = Self::cache_control_value(cache_retention) else {
+            for msg in messages {
+                if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                    for block in content {
+                        block
+                            .as_object_mut()
+                            .map(|obj| obj.remove("__lash_cache_breakpoint"));
+                    }
+                }
+            }
+            return;
+        };
+
+        if let Some(sys) = system
+            && let Some(arr) = sys.as_array_mut()
+            && let Some(last) = arr.last_mut()
+            && last.is_object()
+        {
+            last["cache_control"] = ctrl.clone();
+        }
+
+        let mut applied_explicit_breakpoint = false;
+        for msg in messages.iter_mut().rev() {
+            if !matches!(
+                msg.get("role").and_then(Value::as_str),
+                Some("user" | "assistant")
+            ) {
+                continue;
+            }
+            let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
+                continue;
+            };
+            for block in content.iter_mut().rev() {
+                let is_marked = block
+                    .get("__lash_cache_breakpoint")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if is_marked && block.is_object() {
+                    block["cache_control"] = ctrl.clone();
+                    block
+                        .as_object_mut()
+                        .map(|obj| obj.remove("__lash_cache_breakpoint"));
+                    applied_explicit_breakpoint = true;
+                    break;
+                }
+            }
+            if applied_explicit_breakpoint {
+                break;
+            }
+        }
+
+        if !applied_explicit_breakpoint
+            && let Some(last_msg) = messages.last_mut()
+            && last_msg.get("role").and_then(|v| v.as_str()) == Some("user")
+            && let Some(content) = last_msg.get_mut("content").and_then(|c| c.as_array_mut())
+            && let Some(last_block) = content.last_mut()
+            && last_block.is_object()
+        {
+            last_block["cache_control"] = ctrl.clone();
+        }
+
+        if let Some(last_tool) = tools.last_mut()
+            && last_tool.is_object()
+        {
+            last_tool["cache_control"] = ctrl;
+        }
+
+        for msg in messages {
+            if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                for block in content {
+                    block
+                        .as_object_mut()
+                        .map(|obj| obj.remove("__lash_cache_breakpoint"));
+                }
+            }
+        }
+    }
+
+    pub(crate) fn build_request_body(&self, req: &LlmRequest) -> Result<Value, LlmTransportError> {
+        validate_image_attachments(req, OPENAI_IMAGE_MIMES, "Anthropic")?;
+        let (system_text, mut messages) = self.build_messages(req);
+        let mut tools = self.build_tools(req);
+
+        let thinking_config = req
+            .model_variant
+            .as_deref()
+            .and_then(|variant| AnthropicModelPolicy.thinking_config(&req.model, variant));
+        let policy = resolve_generation_policy(
+            &req.generation,
+            &self.options,
+            DEFAULT_MAX_OUTPUT_TOKENS,
+            thinking_config,
+        );
+
+        let mut system_value: Option<Value> = system_text.map(|text| {
+            json!([{
+                "type": "text",
+                "text": text,
+            }])
+        });
+
+        // Cache control: mark system, last user message, and last tool as
+        // ephemeral to benefit from prompt caching. Applied before the body
+        // is assembled so we only serialize the final state once.
+        self.apply_cache_control(
+            policy.cache_retention,
+            &mut system_value,
+            &mut messages,
+            &mut tools,
+        );
+
+        let mut body = json!({
+            "model": req.model,
+            "max_tokens": policy.max_output_tokens,
+            "messages": messages,
+        });
+
+        if let Some(system_value) = system_value {
+            body["system"] = system_value;
+        }
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools);
+            body["tool_choice"] = match req.tool_choice {
+                LlmToolChoice::Auto => json!({ "type": "auto" }),
+                LlmToolChoice::None => json!({ "type": "none" }),
+                LlmToolChoice::Required => json!({ "type": "any" }),
+            };
+        }
+
+        // Extended thinking. Temperature is incompatible with thinking; omit
+        // it whenever thinking is enabled (matches Anthropic API rules).
+        let mut thinking_enabled = false;
+        if let Some(cfg) = policy.thinking {
+            let display = if policy.expose_thinking {
+                "summarized"
+            } else {
+                "omitted"
+            };
+            match cfg {
+                AnthropicThinkingConfig::Adaptive { effort } => {
+                    let clamped = clamp_effort(&req.model, &effort);
+                    body["thinking"] = json!({
+                        "type": "adaptive",
+                        "display": display,
+                    });
+                    body["output_config"] = json!({ "effort": clamped });
+                    thinking_enabled = true;
+                }
+                AnthropicThinkingConfig::Budget { budget_tokens } => {
+                    body["thinking"] = json!({
+                        "type": "enabled",
+                        "budget_tokens": budget_tokens,
+                        "display": display,
+                    });
+                    thinking_enabled = true;
+                }
+            }
+        }
+        if !thinking_enabled {
+            body["temperature"] = json!(0);
+        }
+
+        if let Some(output_spec) = &req.output_spec {
+            let format = match output_spec {
+                LlmOutputSpec::JsonObject => json!({
+                    "type": "json_schema",
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": true,
+                    },
+                }),
+                LlmOutputSpec::JsonSchema(schema) => json!({
+                    "type": "json_schema",
+                    "schema": schema.schema,
+                }),
+            };
+            if !body.get("output_config").is_some_and(Value::is_object) {
+                body["output_config"] = json!({});
+            }
+            body["output_config"]["format"] = format;
+        }
+
+        body["stream"] = json!(true);
+        Ok(body)
+    }
+}
+
+/// Join all `Text` blocks in a message into a single string, separated by
+/// blank lines. Non-text blocks are ignored. Used to collapse a multi-block
+/// system message into the top-level `system` field.
+fn collect_text(blocks: &[LlmContentBlock]) -> String {
+    let mut out = String::new();
+    for block in blocks {
+        if let LlmContentBlock::Text { text, .. } = block {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(text);
+        }
+    }
+    out
+}
+
+/// Normalize tool call IDs to the Anthropic-allowed character set and length.
+fn normalize_tool_call_id(id: &str) -> String {
+    let sanitized: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    if sanitized.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        sanitized
+    }
+}

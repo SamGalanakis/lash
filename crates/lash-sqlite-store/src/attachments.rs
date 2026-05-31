@@ -12,17 +12,16 @@ impl lashlang::LashlangArtifactStore for Store {
         let bytes = artifact
             .to_store_bytes()
             .map_err(|err| lashlang::ArtifactStoreError::Encode(err.to_string()))?;
-        let mut conn = self.conn.lock().map_err(|_| {
-            lashlang::ArtifactStoreError::Backend("sqlite store lock poisoned".to_string())
-        })?;
+        let blob_profile = self.options.blob_profile;
+        let mut conn = lock_conn(&self.conn);
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
         let blob_ref = Self::insert_artifact_blob_conn(
             &tx,
             BlobArtifactDescriptor::lashlang_module(),
             &bytes,
-            self.options.blob_profile,
+            blob_profile,
         )
         .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
         tx.execute(
@@ -39,9 +38,7 @@ impl lashlang::LashlangArtifactStore for Store {
         &self,
         module_ref: &lashlang::ModuleRef,
     ) -> Result<Option<lashlang::ModuleArtifact>, lashlang::ArtifactStoreError> {
-        let conn = self.conn.lock().map_err(|_| {
-            lashlang::ArtifactStoreError::Backend("sqlite store lock poisoned".to_string())
-        })?;
+        let conn = lock_conn(&self.conn);
         let blob_ref = conn
             .query_row(
                 "SELECT blob_ref FROM artifact_refs WHERE artifact_ref = ?1",
@@ -67,7 +64,7 @@ impl lashlang::LashlangArtifactStore for Store {
 
 impl AttachmentManifest for Store {
     fn record_intent(&self, intent: AttachmentIntent) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         conn.execute(
             "INSERT INTO attachment_manifest
                 (attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms)
@@ -92,10 +89,8 @@ impl AttachmentManifest for Store {
         if attachment_ids.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction().map_err(sqlite_error)?;
-        let now = current_epoch_ms() as i64;
-        {
+        self.with_write_tx(|tx| {
+            let now = current_epoch_ms() as i64;
             let mut stmt = tx
                 .prepare(
                     "UPDATE attachment_manifest
@@ -107,49 +102,49 @@ impl AttachmentManifest for Store {
                 stmt.execute(params![now, id.as_str(), session_id])
                     .map_err(sqlite_error)?;
             }
-        }
-        tx.commit().map_err(sqlite_error)?;
-        Ok(())
+            Ok(())
+        })
     }
 
     fn list_uncommitted(
         &self,
         older_than_epoch_ms: u64,
     ) -> Result<Vec<AttachmentManifestEntry>, StoreError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms
-                 FROM attachment_manifest
-                 WHERE committed_at_ms IS NULL AND intent_at_ms <= ?1
-                 ORDER BY intent_at_ms ASC",
-            )
-            .map_err(sqlite_error)?;
-        let rows = stmt
-            .query_map(params![older_than_epoch_ms as i64], |row| {
-                let id: String = row.get(0)?;
-                let session_id: String = row.get(1)?;
-                let canonical_uri: String = row.get(2)?;
-                let intent_at_ms: i64 = row.get(3)?;
-                let committed_at_ms: Option<i64> = row.get(4)?;
-                Ok(AttachmentManifestEntry {
-                    attachment_id: AttachmentId::new(id),
-                    session_id,
-                    canonical_uri,
-                    intent_at_epoch_ms: intent_at_ms as u64,
-                    committed_at_epoch_ms: committed_at_ms.map(|v| v as u64),
+        self.with_read(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms
+                     FROM attachment_manifest
+                     WHERE committed_at_ms IS NULL AND intent_at_ms <= ?1
+                     ORDER BY intent_at_ms ASC",
+                )
+                .map_err(sqlite_error)?;
+            let rows = stmt
+                .query_map(params![older_than_epoch_ms as i64], |row| {
+                    let id: String = row.get(0)?;
+                    let session_id: String = row.get(1)?;
+                    let canonical_uri: String = row.get(2)?;
+                    let intent_at_ms: i64 = row.get(3)?;
+                    let committed_at_ms: Option<i64> = row.get(4)?;
+                    Ok(AttachmentManifestEntry {
+                        attachment_id: AttachmentId::new(id),
+                        session_id,
+                        canonical_uri,
+                        intent_at_epoch_ms: intent_at_ms as u64,
+                        committed_at_epoch_ms: committed_at_ms.map(|v| v as u64),
+                    })
                 })
-            })
-            .map_err(sqlite_error)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(sqlite_error)?);
-        }
-        Ok(out)
+                .map_err(sqlite_error)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(sqlite_error)?);
+            }
+            Ok(out)
+        })
     }
 
     fn forget(&self, attachment_id: &AttachmentId) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_conn(&self.conn);
         conn.execute(
             "DELETE FROM attachment_manifest WHERE attachment_id = ?1",
             params![attachment_id.as_str()],

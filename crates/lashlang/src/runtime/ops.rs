@@ -287,18 +287,20 @@ pub(crate) async fn execute_intrinsic(
 }
 
 fn invalid_arity_message(name: &str, argc: usize) -> String {
-    let expected = match name {
-        "find" => return format!("`find` takes 2 or 3 arg(s), got {argc}"),
-        "range" => return format!("`range` takes 1, 2, or 3 arg(s), got {argc}"),
-        "format" => return "`format` requires at least a template string".to_string(),
-        "len" | "empty" | "keys" | "values" | "trim" | "to_string" | "to_int" | "to_float"
-        | "json_parse" => 1,
-        "contains" | "grep_text" | "starts_with" | "ends_with" | "split" | "join" | "validate"
-        | "ceil_div" | "floor_div" | "push" => 2,
-        "slice" => 3,
-        _ => return format!("`{name}` takes 0 arg(s), got {argc}"),
-    };
-    format!("`{name}` takes {expected} arg(s), got {argc}")
+    // A handful of variadic builtins have bespoke prose; the rest derive their
+    // message directly from the single arity registry.
+    match name {
+        "find" => format!("`find` takes 2 or 3 arg(s), got {argc}"),
+        "range" => format!("`range` takes 1, 2, or 3 arg(s), got {argc}"),
+        "format" => "`format` requires at least a template string".to_string(),
+        _ => {
+            let expected = match crate::builtins::lookup(name).map(|builtin| builtin.arity) {
+                Some(crate::builtins::Arity::Exact(n)) => n,
+                _ => 0,
+            };
+            format!("`{name}` takes {expected} arg(s), got {argc}")
+        }
+    }
 }
 
 pub(crate) async fn execute_len_builtin(value: &Value) -> Result<Value, RuntimeError> {

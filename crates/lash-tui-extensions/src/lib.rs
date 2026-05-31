@@ -636,10 +636,6 @@ fn command_matches(name: &str, spec: SlashCommandSpec) -> bool {
     name == spec.name || spec.aliases.contains(&name)
 }
 
-fn surface_key(plugin_id: &str, key: &str) -> String {
-    format!("{plugin_id}:{key}")
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PlanModeStatus {
     enabled: bool,
@@ -681,7 +677,7 @@ async fn invoke_plan_mode_action(
 }
 
 fn plan_mode_effects(status: &PlanModeStatus) -> Vec<TuiHostEffect> {
-    let key = surface_key("plan_mode", "mode");
+    let key = global_surface_id("plan_mode", "mode");
     let mut effects = if status.enabled {
         vec![TuiHostEffect::UpsertModeIndicator {
             key,
@@ -786,7 +782,7 @@ impl TuiExtension for PlanModeTuiExtension {
         if approved {
             let mut effects = vec![
                 TuiHostEffect::ClearModeIndicator {
-                    key: surface_key("plan_mode", "mode"),
+                    key: global_surface_id("plan_mode", "mode"),
                 },
                 TuiHostEffect::ClearPanel {
                     plugin_id: "plan_mode".to_string(),

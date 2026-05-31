@@ -319,7 +319,9 @@ pub struct TurnTransformContext {
     pub state: SessionReadView,
     pub prompt_usage: Option<crate::runtime::PromptUsage>,
     pub max_context_tokens: Option<usize>,
-    pub host: Arc<dyn super::RuntimeSessionHost>,
+    pub sessions: Arc<dyn super::SessionStateService>,
+    pub session_lifecycle: Arc<dyn super::SessionLifecycleService>,
+    pub session_graph: Arc<dyn super::SessionGraphService>,
     pub direct_completions: crate::DirectCompletionClient<'static>,
 }
 
@@ -329,7 +331,9 @@ pub struct RewriteContext {
     pub session_id: String,
     pub trigger: RewriteTrigger,
     pub state: SessionReadView,
-    pub host: Arc<dyn super::RuntimeSessionHost>,
+    pub sessions: Arc<dyn super::SessionStateService>,
+    pub session_lifecycle: Arc<dyn super::SessionLifecycleService>,
+    pub session_graph: Arc<dyn super::SessionGraphService>,
 }
 
 #[derive(Debug, thiserror::Error, Clone)]

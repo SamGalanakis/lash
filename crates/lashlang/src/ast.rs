@@ -182,6 +182,10 @@ pub enum Expr {
         iterable: Box<Expr>,
         body: Box<Expr>,
     },
+    While {
+        condition: Box<Expr>,
+        body: Box<Expr>,
+    },
     Break,
     Continue,
     StartProcess(ProcessStartExpr),
@@ -230,6 +234,130 @@ pub enum Expr {
     },
     TypeLiteral(Box<TypeExpr>),
 }
+
+impl Expr {
+    /// Yields every direct child expression of `self` in evaluation order.
+    ///
+    /// This is the single structural-traversal primitive: any pass that only
+    /// needs to recurse into the sub-expressions of a node (without caring
+    /// about the node's own kind) can fold over `children()` instead of
+    /// re-spelling the full `match`. Leaf nodes (`Null`, `Bool`, `Number`,
+    /// `String`, `Variable`, `Break`, `Continue`, `WaitSignal`,
+    /// `ResourceRef`, `TypeLiteral`) yield nothing.
+    ///
+    /// `Assign` includes any dynamic index expressions in its `target` path
+    /// (in path order) before the assigned value, matching the order in which
+    /// the compiler and linker visit them.
+    pub fn children(&self) -> ExprChildren<'_> {
+        let mut buffer = SmallExprVec::new();
+        match self {
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Number(_)
+            | Expr::String(_)
+            | Expr::Variable(_)
+            | Expr::Break
+            | Expr::Continue
+            | Expr::WaitSignal
+            | Expr::ResourceRef(_)
+            | Expr::TypeLiteral(_) => {}
+            Expr::Block(expressions) | Expr::List(expressions) => {
+                buffer.extend(expressions.iter());
+            }
+            Expr::Record(entries) => buffer.extend(entries.iter().map(|(_, value)| value)),
+            Expr::Assign { target, expr } => {
+                for step in &target.steps {
+                    if let AssignPathStep::Index(index) = step {
+                        buffer.push(index);
+                    }
+                }
+                buffer.push(expr);
+            }
+            Expr::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                buffer.push(condition);
+                buffer.push(then_block);
+                buffer.push(else_block);
+            }
+            Expr::For { iterable, body, .. } => {
+                buffer.push(iterable);
+                buffer.push(body);
+            }
+            Expr::While { condition, body } => {
+                buffer.push(condition);
+                buffer.push(body);
+            }
+            Expr::StartProcess(start) => buffer.extend(start.args.iter().map(|(_, value)| value)),
+            Expr::ReceiverCall { receiver, args, .. } => {
+                buffer.push(receiver);
+                buffer.extend(args.iter());
+            }
+            Expr::SignalRun { run, payload } => {
+                buffer.push(run);
+                buffer.push(payload);
+            }
+            Expr::Await(expr)
+            | Expr::SleepFor(expr)
+            | Expr::SleepUntil(expr)
+            | Expr::ResultUnwrap(expr)
+            | Expr::Cancel(expr)
+            | Expr::Print(expr)
+            | Expr::Yield(expr)
+            | Expr::Wake(expr)
+            | Expr::Fail(expr)
+            | Expr::Unary { expr, .. } => buffer.push(expr),
+            Expr::Submit(expr) | Expr::Finish(expr) => {
+                if let Some(expr) = expr {
+                    buffer.push(expr);
+                }
+            }
+            Expr::BuiltinCall { args, .. } => buffer.extend(args.iter()),
+            Expr::Field { target, .. } => buffer.push(target),
+            Expr::Index { target, index } => {
+                buffer.push(target);
+                buffer.push(index);
+            }
+            Expr::Binary { left, right, .. } => {
+                buffer.push(left);
+                buffer.push(right);
+            }
+        }
+        ExprChildren {
+            buffer,
+            position: 0,
+        }
+    }
+}
+
+type SmallExprVec<'expr> = smallvec::SmallVec<[&'expr Expr; 3]>;
+
+/// Iterator over the direct child expressions yielded by [`Expr::children`].
+pub struct ExprChildren<'expr> {
+    buffer: SmallExprVec<'expr>,
+    position: usize,
+}
+
+impl<'expr> Iterator for ExprChildren<'expr> {
+    type Item = &'expr Expr;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.buffer.get(self.position).copied();
+        if item.is_some() {
+            self.position += 1;
+        }
+        item
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.buffer.len() - self.position;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for ExprChildren<'_> {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypeExpr {
@@ -413,5 +541,107 @@ mod tests {
             r#"{ status: enum["ok", "err"], tags: list[str]?, owner: User, value: int | null }"#
         );
         assert_eq!(ty.to_string(), format_type_expr(&ty));
+    }
+
+    fn var(name: &str) -> Expr {
+        Expr::Variable(name.into())
+    }
+
+    fn child_vars(expr: &Expr) -> Vec<String> {
+        expr.children()
+            .map(|child| match child {
+                Expr::Variable(name) => name.to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn children_yields_leaves_as_empty() {
+        for leaf in [
+            Expr::Null,
+            Expr::Bool(true),
+            Expr::Number(1.0),
+            Expr::String("s".into()),
+            var("x"),
+            Expr::Break,
+            Expr::Continue,
+            Expr::WaitSignal,
+            Expr::TypeLiteral(Box::new(TypeExpr::Str)),
+        ] {
+            let children: Vec<_> = leaf.children().collect();
+            assert!(children.is_empty(), "{leaf:?} should have no children");
+        }
+    }
+
+    #[test]
+    fn children_yields_composite_subexpressions_in_order() {
+        let block = Expr::Block(vec![var("a"), var("b"), var("c")]);
+        assert_eq!(child_vars(&block), ["a", "b", "c"]);
+
+        let record = Expr::Record(vec![("k1".into(), var("v1")), ("k2".into(), var("v2"))]);
+        assert_eq!(child_vars(&record), ["v1", "v2"]);
+
+        let if_expr = Expr::If {
+            condition: Box::new(var("cond")),
+            then_block: Box::new(var("then")),
+            else_block: Box::new(var("else")),
+        };
+        assert_eq!(child_vars(&if_expr), ["cond", "then", "else"]);
+
+        let while_expr = Expr::While {
+            condition: Box::new(var("cond")),
+            body: Box::new(var("body")),
+        };
+        assert_eq!(child_vars(&while_expr), ["cond", "body"]);
+
+        let receiver = Expr::ReceiverCall {
+            receiver: Box::new(var("recv")),
+            operation: "op".into(),
+            args: vec![var("arg0"), var("arg1")],
+        };
+        assert_eq!(child_vars(&receiver), ["recv", "arg0", "arg1"]);
+
+        let binary = Expr::Binary {
+            left: Box::new(var("left")),
+            op: BinaryOp::Add,
+            right: Box::new(var("right")),
+        };
+        assert_eq!(child_vars(&binary), ["left", "right"]);
+    }
+
+    #[test]
+    fn children_yields_assign_index_steps_before_value() {
+        let assign = Expr::Assign {
+            target: AssignTarget {
+                root: "root".into(),
+                steps: vec![
+                    AssignPathStep::Field("field".into()),
+                    AssignPathStep::Index(var("idx")),
+                ],
+            },
+            expr: Box::new(var("value")),
+        };
+        // Field steps contribute no child expressions; the dynamic index is
+        // yielded before the assigned value.
+        assert_eq!(child_vars(&assign), ["idx", "value"]);
+    }
+
+    #[test]
+    fn children_handles_optional_finish_and_submit() {
+        assert!(Expr::Submit(None).children().next().is_none());
+        assert!(Expr::Finish(None).children().next().is_none());
+        assert_eq!(
+            child_vars(&Expr::Submit(Some(Box::new(var("done"))))),
+            ["done"]
+        );
+    }
+
+    #[test]
+    fn children_size_hint_is_exact() {
+        let block = Expr::Block(vec![var("a"), var("b"), var("c"), var("d")]);
+        let iter = block.children();
+        assert_eq!(iter.len(), 4);
+        assert_eq!(iter.size_hint(), (4, Some(4)));
     }
 }
