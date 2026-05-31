@@ -373,9 +373,12 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use lash_core::plugin::runtime_host::RuntimeSessionHost;
+    use lash_core::plugin::runtime_host::{
+        SessionGraphService, SessionLifecycleService, SessionStateService,
+    };
     use lash_core::plugin::{PluginError, SessionHandle};
-    use lash_core::{RuntimeSessionState, SessionCreateRequest, SessionSnapshot, ToolCall};
+    use lash_core::runtime::RuntimeSessionState;
+    use lash_core::{SessionCreateRequest, SessionSnapshot, ToolCall};
 
     fn model_spec(model: &str, variant: Option<&str>) -> lash_core::ModelSpec {
         lash_core::ModelSpec::from_token_limits(
@@ -396,7 +399,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl RuntimeSessionHost for DirectCompletionManager {
+    impl SessionStateService for DirectCompletionManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
             Ok(self.snapshot.to_snapshot())
         }
@@ -413,7 +416,10 @@ mod tests {
         ) -> Result<Vec<serde_json::Value>, PluginError> {
             Ok(Vec::new())
         }
+    }
 
+    #[async_trait]
+    impl SessionLifecycleService for DirectCompletionManager {
         async fn create_session(
             &self,
             _request: SessionCreateRequest,
@@ -425,6 +431,9 @@ mod tests {
             Ok(())
         }
     }
+
+    #[async_trait]
+    impl SessionGraphService for DirectCompletionManager {}
 
     fn direct_completion_context(
         manager: Arc<DirectCompletionManager>,

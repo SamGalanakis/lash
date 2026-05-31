@@ -58,10 +58,14 @@ impl TurnContextTransform for ObservationalMemoryTransform {
             >= self.config.observation_message_tokens
             || active_observation_tokens >= self.config.reflection_observation_tokens;
         let graph = if should_advance_memory {
-            let mut graph = ctx.host.snapshot_current().await?.session_graph;
+            let mut graph = ctx.sessions.snapshot_current().await?.session_graph;
             graph = maybe_advance_memory_state(
                 &self.config,
-                &OmRuntimeHost::new(&ctx.session_id, &ctx.host, ctx.direct_completions.clone()),
+                &OmRuntimeHost::new(
+                    &ctx.session_id,
+                    &ctx.session_graph,
+                    ctx.direct_completions.clone(),
+                ),
                 ctx.state.policy(),
                 graph,
             )

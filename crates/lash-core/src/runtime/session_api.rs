@@ -158,27 +158,27 @@ impl LashRuntime {
         Ok(())
     }
 
-    pub(super) fn runtime_session_manager(
+    pub(super) fn runtime_session_services(
         &self,
-    ) -> Result<Arc<RuntimeSessionManager>, PluginActionInvokeError> {
-        Ok(Arc::new(RuntimeSessionManager::new(
+    ) -> Result<Arc<RuntimeSessionServices>, PluginActionInvokeError> {
+        Ok(Arc::new(RuntimeSessionServices::new(
             self, true, None, None,
         )?))
     }
 
-    pub(super) fn runtime_session_manager_for_turn(
+    pub(super) fn runtime_session_services_for_turn(
         &self,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
-    ) -> Result<Arc<RuntimeSessionManager>, PluginActionInvokeError> {
-        self.runtime_session_manager_for_turn_with_lease(child_usage_event_relay, None)
+    ) -> Result<Arc<RuntimeSessionServices>, PluginActionInvokeError> {
+        self.runtime_session_services_for_turn_with_lease(child_usage_event_relay, None)
     }
 
-    pub(super) fn runtime_session_manager_for_turn_with_lease(
+    pub(super) fn runtime_session_services_for_turn_with_lease(
         &self,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
         turn_lease: Option<crate::RuntimeTurnLease>,
-    ) -> Result<Arc<RuntimeSessionManager>, PluginActionInvokeError> {
-        Ok(Arc::new(RuntimeSessionManager::new(
+    ) -> Result<Arc<RuntimeSessionServices>, PluginActionInvokeError> {
+        Ok(Arc::new(RuntimeSessionServices::new(
             self,
             false,
             child_usage_event_relay,
@@ -186,16 +186,32 @@ impl LashRuntime {
         )?))
     }
 
-    pub fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>, PluginActionInvokeError> {
-        self.runtime_session_manager()
-            .map(|manager| manager as Arc<dyn RuntimeSessionHost>)
+    pub fn session_state_service(
+        &self,
+    ) -> Result<Arc<dyn crate::plugin::SessionStateService>, PluginActionInvokeError> {
+        self.runtime_session_services()
+            .map(|services| services.state_service())
+    }
+
+    pub fn session_lifecycle_service(
+        &self,
+    ) -> Result<Arc<dyn crate::plugin::SessionLifecycleService>, PluginActionInvokeError> {
+        self.runtime_session_services()
+            .map(|services| services.lifecycle_service())
+    }
+
+    pub fn session_graph_service(
+        &self,
+    ) -> Result<Arc<dyn crate::plugin::SessionGraphService>, PluginActionInvokeError> {
+        self.runtime_session_services()
+            .map(|services| services.graph_service())
     }
 
     pub fn process_service(
         &self,
     ) -> Result<Arc<dyn crate::ProcessService>, PluginActionInvokeError> {
-        self.runtime_session_manager()
-            .map(|manager| manager as Arc<dyn crate::ProcessService>)
+        self.runtime_session_services()
+            .map(|services| services.process_service())
     }
 
     pub async fn enqueue_turn_input(
@@ -242,7 +258,7 @@ impl LashRuntime {
         &mut self,
         trigger: crate::RewriteTrigger,
     ) -> Result<bool, PluginActionInvokeError> {
-        let manager = self.runtime_session_manager()?;
+        let services = self.runtime_session_services()?;
         let Some(plugin_session) = self.session.as_ref().map(|s| Arc::clone(s.plugins())) else {
             return Err(PluginActionInvokeError::Unknown(
                 "runtime session not available".to_string(),
@@ -252,7 +268,9 @@ impl LashRuntime {
             session_id: self.state.session_id.clone(),
             trigger,
             state: self.read_view(),
-            host: manager,
+            sessions: services.state_service(),
+            session_lifecycle: services.lifecycle_service(),
+            session_graph: services.graph_service(),
         };
         let input = crate::HistoryState::from_snapshot(&self.state.to_snapshot());
         let baseline_messages = input.messages.len();
@@ -293,7 +311,7 @@ impl LashRuntime {
         if current == previous {
             return;
         }
-        let Ok(host) = self.runtime_session_manager() else {
+        let Ok(services) = self.runtime_session_services() else {
             return;
         };
         session
@@ -303,7 +321,7 @@ impl LashRuntime {
                     session_id: self.state.session_id.clone(),
                     previous,
                     current,
-                    host,
+                    sessions: services.state_service(),
                 },
             )))
             .await;
@@ -317,7 +335,7 @@ impl LashRuntime {
         if current == previous {
             return;
         }
-        let Ok(host) = self.runtime_session_manager() else {
+        let Ok(services) = self.runtime_session_services() else {
             return;
         };
         self.policy = session
@@ -327,7 +345,7 @@ impl LashRuntime {
                     session_id: self.state.session_id.clone(),
                     previous,
                     current,
-                    host,
+                    sessions: services.state_service(),
                 },
                 self.policy.clone(),
             )

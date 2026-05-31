@@ -19,10 +19,11 @@ use tokio_util::sync::CancellationToken;
 use lash_core::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, PluginSpecFactory, SessionPlugin,
 };
+use lash_core::runtime::ProcessEventSemanticsSpec;
 use lash_core::{
-    PreparedToolCall, ProcessEventSemanticsSpec, ProcessEventType, ProcessHandleDescriptor,
-    ProcessInput, ProcessRegistration, ProgressSender, PromptContribution, SessionToolAccess,
-    ToolCall, ToolDefinition, ToolProvider, ToolResult, ToolScheduling,
+    PreparedToolCall, ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessRegistration,
+    ProgressSender, PromptContribution, SessionToolAccess, ToolCall, ToolDefinition, ToolProvider,
+    ToolResult, ToolScheduling,
 };
 
 use lash_tool_support::{
@@ -935,6 +936,8 @@ mod tests {
         let processes: Arc<dyn lash_core::ProcessService> = service;
         lash_core::ToolContext::__for_testing(
             "test-session".to_string(),
+            host.clone(),
+            host.clone(),
             host,
             processes,
             Arc::new(lash_core::InMemoryAttachmentStore::new()),

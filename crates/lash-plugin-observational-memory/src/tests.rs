@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash_core::plugin::{PluginError, PluginLifecycleEvent, RuntimeSessionHost};
+use lash_core::plugin::{
+    PluginError, PluginLifecycleEvent, SessionGraphService, SessionStateService,
+};
 use lash_core::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectCompletion, DirectCompletionClient,
     DirectRequest, Message, MessageRole, Part, PartKind, SessionAppendNode, SessionGraph,
@@ -46,7 +48,10 @@ struct RecordingHost {
 }
 
 #[async_trait]
-impl RuntimeSessionHost for RecordingHost {
+impl SessionStateService for RecordingHost {}
+
+#[async_trait]
+impl SessionGraphService for RecordingHost {
     async fn append_session_nodes(
         &self,
         session_id: &str,
@@ -77,9 +82,11 @@ impl RuntimeSessionHost for RecordingHost {
 fn post_persist_context_with_completion(
     session_id: &str,
     graph: SessionGraph,
-    host: Arc<dyn RuntimeSessionHost>,
+    host: Arc<RecordingHost>,
     completion_text: String,
 ) -> SessionStateChangedContext {
+    let sessions: Arc<dyn SessionStateService> = host.clone();
+    let session_graph: Arc<dyn SessionGraphService> = host;
     SessionStateChangedContext {
         session_id: session_id.to_string(),
         state: SessionReadView::from_snapshot(&SessionSnapshot {
@@ -88,7 +95,8 @@ fn post_persist_context_with_completion(
             policy: lash_core::testing::mock_session_policy(),
             ..Default::default()
         }),
-        host,
+        sessions,
+        session_graph,
         direct_completions: DirectCompletionClient::from_fn(
             move |_request: DirectRequest, _usage_source: String| {
                 let completion_text = completion_text.clone();

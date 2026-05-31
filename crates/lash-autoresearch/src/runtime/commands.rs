@@ -16,7 +16,7 @@ pub(crate) async fn set_autoresearch_tools_enabled(
     } else {
         Some(lash_core::ToolAvailability::Off)
     };
-    ctx.host
+    ctx.sessions
         .set_tools_availability(session_id, &autoresearch_tool_names(), availability)
         .await
         .map_err(|err| {

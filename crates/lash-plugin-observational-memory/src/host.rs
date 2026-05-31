@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use lash_core::plugin::PluginError;
-use lash_core::plugin::runtime_host::RuntimeSessionHost;
+use lash_core::plugin::runtime_host::SessionGraphService;
 use lash_core::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectCompletion, DirectRequest,
     SessionAppendNode, SessionGraph,
@@ -9,19 +9,19 @@ use lash_core::{
 
 pub(crate) struct OmRuntimeHost<'a> {
     session_id: &'a str,
-    host: &'a Arc<dyn RuntimeSessionHost>,
+    session_graph: &'a Arc<dyn SessionGraphService>,
     direct_completions: lash_core::DirectCompletionClient<'a>,
 }
 
 impl<'a> OmRuntimeHost<'a> {
     pub(crate) fn new(
         session_id: &'a str,
-        host: &'a Arc<dyn RuntimeSessionHost>,
+        session_graph: &'a Arc<dyn SessionGraphService>,
         direct_completions: lash_core::DirectCompletionClient<'a>,
     ) -> Self {
         Self {
             session_id,
-            host,
+            session_graph,
             direct_completions,
         }
     }
@@ -35,7 +35,7 @@ impl<'a> OmRuntimeHost<'a> {
         graph: &SessionGraph,
         nodes: Vec<(String, serde_json::Value)>,
     ) -> Result<Option<SessionGraph>, PluginError> {
-        append_plugin_nodes(self.session_id, self.host, graph, nodes).await
+        append_plugin_nodes(self.session_id, self.session_graph, graph, nodes).await
     }
 
     pub(crate) async fn direct_completion(
@@ -51,7 +51,7 @@ impl<'a> OmRuntimeHost<'a> {
 
 async fn append_plugin_nodes(
     session_id: &str,
-    host: &Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost>,
+    session_graph: &Arc<dyn SessionGraphService>,
     graph: &SessionGraph,
     nodes: Vec<(String, serde_json::Value)>,
 ) -> Result<Option<SessionGraph>, PluginError> {
@@ -63,7 +63,7 @@ async fn append_plugin_nodes(
         .cloned()
         .map(|(plugin_type, body)| SessionAppendNode::plugin(plugin_type, body))
         .collect::<Vec<_>>();
-    match host
+    match session_graph
         .append_session_nodes(
             session_id,
             AppendSessionNodesRequest {

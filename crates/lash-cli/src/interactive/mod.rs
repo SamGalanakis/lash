@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::Event as TermEvent;
 use lash::{LashSession, ModeId, TurnEvent, provider::ProviderHandle};
+use lash_core::runtime::RuntimeSessionState;
 use lash_core::session_model::Message;
 use lash_core::{TokenUsage, ToolState};
 use lash_sqlite_store::Store;
@@ -391,7 +392,7 @@ pub(crate) async fn run_app(
                             let preserved_policy = rt.policy_snapshot();
                             rt.control()
                                 .state()
-                                .set_persisted(lash_core::RuntimeSessionState::from_snapshot(
+                                .set_persisted(RuntimeSessionState::from_snapshot(
                                     cleared_session_state(preserved_policy),
                                 ))
                                 .await?;

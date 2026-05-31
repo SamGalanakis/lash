@@ -6,9 +6,10 @@ use crate::rlm_support::{
     SpawnCreateRequestInput, build_session_policy, build_spawn_create_request,
 };
 use lash_core::llm::types::{LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole};
+use lash_core::runtime::RuntimeSessionState;
 use lash_core::{
     LashRuntime, PluginFactory, PluginHost, ProcessRuntimeHost, RuntimeCoreConfig, RuntimeServices,
-    RuntimeSessionState, SessionPolicy, TestLocalProcessRegistry,
+    SessionPolicy, TestLocalProcessRegistry,
 };
 use lash_core::{ToolArgumentProjectionPolicy, ToolDefinition, ToolOutputContract, TurnInput};
 use lash_protocol_rlm::RlmTurnInputExt;

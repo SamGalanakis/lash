@@ -29,7 +29,7 @@ pub(super) struct RuntimeTurnDriver<'a> {
     pub(super) turn_pipeline: TurnCommitPipeline,
     pub(super) llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
     pub(super) next_llm_ordinal: usize,
-    pub(super) session_manager: Arc<RuntimeSessionManager>,
+    pub(super) session_services: Arc<RuntimeSessionServices>,
     pub(super) protocol_turn_options: crate::ProtocolTurnOptions,
     pub(super) protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
     pub(super) turn_context: crate::TurnContext,

@@ -762,7 +762,7 @@ mod tests {
             crate::RuntimeCoreConfig::in_memory(),
         );
         let poke = spawn_inline_process_runners(&worker, 1);
-        let manager = RuntimeSessionManager::new(&runtime, true, None, None)
+        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
             .expect("runtime session manager");
         let mut input = serde_json::Map::new();
         input.insert("root".to_string(), serde_json::json!("seed"));
@@ -894,7 +894,7 @@ mod tests {
             crate::RuntimeCoreConfig::in_memory(),
         );
         let pokes = spawn_inline_process_runners(&worker, 1);
-        let manager = RuntimeSessionManager::new(&runtime, true, None, None)
+        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
             .expect("runtime session manager");
         assert!(
             !manager.current.plugins.lashlang_abilities().processes,
@@ -977,7 +977,7 @@ mod tests {
         let mut runtime = runtime_with_processes(Vec::new()).await;
         let controller = RecordingProcessEffectController::default();
         runtime.host.core.effect_controller = Arc::new(controller.clone());
-        let manager = RuntimeSessionManager::new(&runtime, true, None, None)
+        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
             .expect("runtime session manager");
         let registry = runtime
             .host
@@ -1127,7 +1127,7 @@ mod tests {
             crate::RuntimeCoreConfig::in_memory(),
         );
         let pokes = spawn_inline_process_runners(&worker, 1);
-        let manager = RuntimeSessionManager::new(&runtime, true, None, None)
+        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
             .expect("runtime session manager");
         let program = ::lashlang::Program::block(vec![::lashlang::Expr::Fail(Box::new(
             ::lashlang::Expr::Record(vec![(
@@ -1225,7 +1225,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_unreferenced_process_handles_revokes_current_grants_and_cancels_only_unowned() {
         let runtime = runtime_with_processes(Vec::new()).await;
-        let manager = RuntimeSessionManager::new(&runtime, true, None, None)
+        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
             .expect("runtime session manager");
         let registry = runtime
             .host
@@ -1249,7 +1249,6 @@ mod tests {
             .cancel_unreferenced_process_handles(
                 &manager.current,
                 &manager.managed,
-                Arc::new(manager.clone()),
                 "root",
                 vec!["keep".to_string()],
                 crate::ProcessOpScope::new(),
@@ -1303,7 +1302,7 @@ mod tests {
     #[tokio::test]
     async fn scoped_transfer_and_cleanup_use_process_effect_controller_metadata() {
         let runtime = runtime_with_processes(Vec::new()).await;
-        let manager = RuntimeSessionManager::new(&runtime, true, None, None)
+        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
             .expect("runtime session manager");
         let registry = runtime
             .host
@@ -1357,7 +1356,6 @@ mod tests {
             .cancel_unreferenced_process_handles(
                 &manager.current,
                 &manager.managed,
-                Arc::new(manager.clone()),
                 "root",
                 Vec::<String>::new(),
                 scoped_request(),
@@ -1381,7 +1379,7 @@ mod tests {
     async fn process_control_fails_loudly_when_process_registry_is_unavailable() {
         let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
         runtime.host.process_registry = None;
-        let manager = RuntimeSessionManager::new(&runtime, true, None, None)
+        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
             .expect("runtime session manager");
 
         manager
@@ -1437,7 +1435,6 @@ mod tests {
             .cancel_unreferenced_process_handles(
                 &manager.current,
                 &manager.managed,
-                Arc::new(manager.clone()),
                 "root",
                 Vec::<String>::new(),
                 crate::ProcessOpScope::new(),

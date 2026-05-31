@@ -212,8 +212,8 @@ pub fn mock_session_policy() -> SessionPolicy {
 
 /// A `ToolContext` backed by a default [`MockSessionManager`], suitable for
 /// unit-testing a `ToolProvider` in isolation. Use [`mock_tool_context_with_host`]
-/// when the tool under test interacts with host state and needs a configured
-/// `MockSessionManager` (or another `RuntimeSessionHost` implementation).
+/// when the tool under test interacts with session services and needs a
+/// configured `MockSessionManager`.
 pub fn mock_tool_context() -> crate::ToolContext<'static> {
     mock_tool_context_with_host(Arc::new(MockSessionManager::default()))
 }
@@ -221,9 +221,13 @@ pub fn mock_tool_context() -> crate::ToolContext<'static> {
 /// Like [`mock_tool_context`], but lets the caller supply the host. Useful
 /// when a tool reads from the host (snapshots, tool state, lifecycle hooks)
 /// and the test wants to assert against captured interactions.
-pub fn mock_tool_context_with_host(
-    host: Arc<dyn crate::plugin::RuntimeSessionHost>,
-) -> crate::ToolContext<'static> {
+pub fn mock_tool_context_with_host<T>(host: Arc<T>) -> crate::ToolContext<'static>
+where
+    T: crate::plugin::SessionStateService
+        + crate::plugin::SessionLifecycleService
+        + crate::plugin::SessionGraphService
+        + 'static,
+{
     mock_tool_context_with_host_and_direct_completions(
         host,
         crate::DirectCompletionClient::unavailable(
@@ -232,13 +236,24 @@ pub fn mock_tool_context_with_host(
     )
 }
 
-pub fn mock_tool_context_with_host_and_direct_completions(
-    host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+pub fn mock_tool_context_with_host_and_direct_completions<T>(
+    host: Arc<T>,
     direct_completions: crate::DirectCompletionClient<'static>,
-) -> crate::ToolContext<'static> {
+) -> crate::ToolContext<'static>
+where
+    T: crate::plugin::SessionStateService
+        + crate::plugin::SessionLifecycleService
+        + crate::plugin::SessionGraphService
+        + 'static,
+{
+    let sessions: Arc<dyn crate::plugin::SessionStateService> = host.clone();
+    let session_lifecycle: Arc<dyn crate::plugin::SessionLifecycleService> = host.clone();
+    let session_graph: Arc<dyn crate::plugin::SessionGraphService> = host;
     crate::tool_provider::ToolContext::__for_testing(
         "test-session".to_string(),
-        host,
+        sessions,
+        session_lifecycle,
+        session_graph,
         Arc::new(crate::UnavailableProcessService),
         Arc::new(crate::InMemoryAttachmentStore::new()),
         direct_completions,
@@ -310,7 +325,9 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
             Vec::new(),
             std::collections::BTreeMap::new(),
         )),
-        host: Arc::new(MockSessionManager::default()),
+        sessions: Arc::new(MockSessionManager::default()),
+        session_lifecycle: Arc::new(MockSessionManager::default()),
+        session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(UnavailableProcessService),
         effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController::default(),
@@ -425,7 +442,7 @@ impl MockSessionManager {
 }
 
 #[async_trait::async_trait]
-impl crate::plugin::RuntimeSessionHost for MockSessionManager {
+impl crate::plugin::SessionStateService for MockSessionManager {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
         Ok(self.snapshot.clone())
     }
@@ -459,6 +476,10 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
             .apply_state(snapshot)
             .map_err(|err| PluginError::Session(err.to_string()))
     }
+}
+
+#[async_trait::async_trait]
+impl crate::plugin::SessionLifecycleService for MockSessionManager {
     async fn create_session(
         &self,
         request: SessionCreateRequest,
@@ -492,6 +513,9 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
         Ok(self.turn.clone())
     }
 }
+
+#[async_trait::async_trait]
+impl crate::plugin::SessionGraphService for MockSessionManager {}
 
 #[async_trait::async_trait]
 impl crate::ProcessService for MockSessionManager {

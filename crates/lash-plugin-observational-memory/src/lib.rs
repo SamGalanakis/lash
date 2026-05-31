@@ -165,7 +165,11 @@ async fn run_async_maintenance(
     graph: &lash_core::SessionGraph,
     ctx: &SessionStateChangedContext,
 ) -> Result<(), PluginError> {
-    let om_host = OmRuntimeHost::new(&ctx.session_id, &ctx.host, ctx.direct_completions.clone());
+    let om_host = OmRuntimeHost::new(
+        &ctx.session_id,
+        &ctx.session_graph,
+        ctx.direct_completions.clone(),
+    );
     maybe_buffer_observations(&config, &om_host, ctx.state.policy(), graph).await?;
     maybe_buffer_reflection(&config, &om_host, ctx.state.policy(), graph).await?;
     Ok(())

@@ -52,7 +52,9 @@ pub struct PrepareTurnRequest {
     pub session_id: String,
     pub state: SessionReadView,
     pub messages: crate::MessageSequence,
-    pub host: Arc<dyn RuntimeSessionHost>,
+    pub sessions: Arc<dyn SessionStateService>,
+    pub session_lifecycle: Arc<dyn SessionLifecycleService>,
+    pub session_graph: Arc<dyn SessionGraphService>,
     pub turn_context: crate::TurnContext,
 }
 

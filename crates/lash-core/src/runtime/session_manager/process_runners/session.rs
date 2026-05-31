@@ -1,6 +1,6 @@
 use super::*;
 
-impl RuntimeSessionManager {
+impl RuntimeSessionServices {
     pub(in crate::runtime::session_manager::process_runners) async fn run_process_session_turn(
         &self,
         registration: crate::ProcessRegistration,

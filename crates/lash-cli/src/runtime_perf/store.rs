@@ -463,7 +463,7 @@ impl RuntimePersistence for RuntimePerfStore {
     ) -> Result<RuntimeTurnLease, StoreError> {
         let token = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
         let lease = RuntimeTurnLease {
-            schema_version: lash_core::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
+            schema_version: lash_core::store::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
             owner_id: owner_id.to_string(),

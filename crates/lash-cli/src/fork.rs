@@ -3,6 +3,7 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow};
 use lash_core::provider::ProviderHandle;
+use lash_core::store::SessionHead;
 use lash_sqlite_store::Store;
 
 use crate::persistence::persist_committed_runtime_state;
@@ -561,7 +562,7 @@ fn materialize_child_from_graph(
             .get_checkpoint(blob_ref)
             .map(|checkpoint| child_store.put_checkpoint(&checkpoint).checkpoint_ref)
     });
-    child_store.save_session_head(lash_core::SessionHead {
+    child_store.save_session_head(SessionHead {
         session_id: child_session_id.to_string(),
         head_revision: 0,
         agent_frames: Vec::new(),
@@ -608,7 +609,7 @@ pub async fn fork_current_session(
             None,
         )
         .map_err(anyhow::Error::msg)?;
-        lash_core::SessionHead {
+        SessionHead {
             session_id: child_meta.session_id.clone(),
             head_revision: 0,
             agent_frames: Vec::new(),
@@ -667,8 +668,8 @@ mod fork_tests {
         lash_core::SessionGraph::from_active_read_state(&messages, &[])
     }
 
-    fn persisted_checkpoint(iteration: usize) -> lash_core::HydratedSessionCheckpoint {
-        lash_core::HydratedSessionCheckpoint {
+    fn persisted_checkpoint(iteration: usize) -> lash_core::store::HydratedSessionCheckpoint {
+        lash_core::store::HydratedSessionCheckpoint {
             turn_state: lash_core::PersistedTurnState {
                 turn_index: iteration,
                 token_usage: lash_core::TokenUsage {
@@ -694,7 +695,7 @@ mod fork_tests {
         let checkpoint_ref = store
             .put_checkpoint(&persisted_checkpoint(iteration))
             .checkpoint_ref;
-        store.save_session_head(lash_core::SessionHead {
+        store.save_session_head(lash_core::store::SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
             agent_frames: Vec::new(),

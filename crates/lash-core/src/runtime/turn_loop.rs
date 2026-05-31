@@ -250,7 +250,7 @@ impl LashRuntime {
         };
 
         let plugins = Arc::clone(session.plugins());
-        let manager = match self.runtime_session_manager_for_turn(None) {
+        let manager = match self.runtime_session_services_for_turn(None) {
             Ok(manager) => manager,
             Err(err) => {
                 let runtime_err =
@@ -268,7 +268,13 @@ impl LashRuntime {
 
         self.mark_phase_begin(RuntimeTurnPhase::FinalizeTurn);
         let finalized = match plugins
-            .finalize_turn_with_phase_probe(assembled, manager, self.turn_phase_probe.clone())
+            .finalize_turn_with_phase_probe(
+                assembled,
+                manager.state_service(),
+                manager.lifecycle_service(),
+                manager.graph_service(),
+                self.turn_phase_probe.clone(),
+            )
             .await
         {
             Ok(finalized) => finalized,
@@ -394,11 +400,9 @@ impl LashRuntime {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let Ok(manager) = self.runtime_session_manager() else {
+        let Ok(manager) = self.runtime_session_services() else {
             return;
         };
-        let host = manager.clone();
-
         let direct_completions = manager.direct_completion_client(
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
                 &self.host.core.effect_controller,
@@ -413,7 +417,8 @@ impl LashRuntime {
                 crate::PluginLifecycleEvent::TurnPersisted(crate::SessionStateChangedContext {
                     session_id: self.state.session_id.clone(),
                     state: crate::SessionReadView::from_snapshot(&returned_turn.state),
-                    host,
+                    sessions: manager.state_service(),
+                    session_graph: manager.graph_service(),
                     direct_completions,
                 }),
                 self.turn_phase_probe.clone(),
@@ -649,7 +654,7 @@ impl LashRuntime {
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
         let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
         let manager = self
-            .runtime_session_manager_for_turn_with_lease(
+            .runtime_session_services_for_turn_with_lease(
                 Some(child_usage_event_relay.clone()),
                 Some(turn_lease.clone()),
             )
@@ -683,7 +688,7 @@ impl LashRuntime {
             turn_pipeline: TurnCommitPipeline::from_state(self.state.clone()),
             llm_stream_summaries: HashMap::new(),
             next_llm_ordinal: 0,
-            session_manager: manager,
+            session_services: manager,
             protocol_turn_options: checkpoint_record.protocol_turn_options.clone(),
             protocol_extension: None,
             turn_context: {
@@ -1086,9 +1091,11 @@ impl LashRuntime {
             });
         }
 
-        let manager = self.runtime_session_manager_for_turn(None).map_err(|err| {
-            RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
-        })?;
+        let manager = self
+            .runtime_session_services_for_turn(None)
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
+            })?;
         let plugin_session = self
             .session
             .as_ref()
@@ -1104,7 +1111,9 @@ impl LashRuntime {
             state: self.read_view(),
             prompt_usage: previous_prompt_usage.clone(),
             max_context_tokens: Some(LashRuntime::max_context_tokens(self)),
-            host: manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
+            sessions: manager.state_service(),
+            session_lifecycle: manager.lifecycle_service(),
+            session_graph: manager.graph_service(),
             direct_completions: manager.direct_completion_client(
                 crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
                     &self.host.core.effect_controller,
@@ -1214,7 +1223,7 @@ impl LashRuntime {
             .clone()
             .unwrap_or_else(|| self.state.effective_protocol_turn_options().clone());
         let manager = self
-            .runtime_session_manager_for_turn(Some(child_usage_event_relay.clone()))
+            .runtime_session_services_for_turn(Some(child_usage_event_relay.clone()))
             .map_err(|err| {
                 RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
             })?;
@@ -1242,7 +1251,9 @@ impl LashRuntime {
                         effective_protocol_turn_options.clone(),
                     ),
                     messages,
-                    host: manager.clone(),
+                    sessions: manager.state_service(),
+                    session_lifecycle: manager.lifecycle_service(),
+                    session_graph: manager.graph_service(),
                     turn_context: turn_context.clone(),
                 },
                 self.turn_phase_probe.clone(),
@@ -1364,7 +1375,7 @@ impl LashRuntime {
                 .map_err(|err| RuntimeError::new("llm_provider", err.to_string()))?
         };
         let manager = self
-            .runtime_session_manager_for_turn_with_lease(
+            .runtime_session_services_for_turn_with_lease(
                 Some(child_usage_event_relay.clone()),
                 turn_lease.clone(),
             )
@@ -1387,7 +1398,7 @@ impl LashRuntime {
             turn_pipeline,
             llm_stream_summaries: HashMap::new(),
             next_llm_ordinal: 0,
-            session_manager: manager,
+            session_services: manager,
             protocol_turn_options: effective_protocol_turn_options,
             protocol_extension,
             turn_context,

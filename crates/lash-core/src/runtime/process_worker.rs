@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::effect::ProcessRunner;
-use super::session_manager::RuntimeSessionManager;
+use super::session_manager::RuntimeSessionServices;
 use super::{EmbeddedRuntimeBuilder, RUNTIME_TURN_LEASE_TTL_MS, RuntimeCoreConfig};
 use crate::{
     LashRuntime, PluginError, PluginFactory, PluginHost, PluginStack, ProcessAwaitOutput,
@@ -143,7 +143,7 @@ impl DurableProcessWorker {
             )));
         }
         let runtime = self.rebuild_runtime(session_id).await?;
-        let manager = RuntimeSessionManager::new(&runtime, true, None, None).map_err(|err| {
+        let manager = RuntimeSessionServices::new(&runtime, true, None, None).map_err(|err| {
             PluginError::Session(format!(
                 "failed to rebuild runtime session `{session_id}` for process `{}`: {err}",
                 registration.id

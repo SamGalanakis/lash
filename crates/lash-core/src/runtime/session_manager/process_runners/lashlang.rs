@@ -2,7 +2,7 @@ use super::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-impl RuntimeSessionManager {
+impl RuntimeSessionServices {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::runtime::session_manager::process_runners) async fn run_lashlang_process(
         &self,
@@ -113,9 +113,8 @@ impl RuntimeSessionManager {
 
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionEvent>(64);
         let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-        let runtime_host = Arc::new(self.clone()) as Arc<dyn crate::plugin::RuntimeSessionHost>;
-        let direct_completions = crate::DirectCompletionClient::runtime(
-            Arc::new(self.clone()),
+        let services = Arc::new(self.clone());
+        let direct_completions = services.direct_completion_client(
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
                 &self.current.host.core.effect_controller,
             )),
@@ -129,8 +128,10 @@ impl RuntimeSessionManager {
             plugins: Arc::clone(&self.current.plugins),
             tools: self.current.plugins.tools(),
             surface: tool_surface,
-            host: Arc::clone(&runtime_host),
-            processes: Arc::new(self.clone()),
+            sessions: services.state_service(),
+            session_lifecycle: services.lifecycle_service(),
+            session_graph: services.graph_service(),
+            processes: services.process_service(),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
                 &self.current.host.core.effect_controller,
             )),
@@ -325,7 +326,7 @@ impl LashlangProcessHost<'_> {
         crate::tool_provider::process_events::enqueue_wake_delivery(
             self.store.as_deref(),
             result.wake_delivery,
-            Some(self.ctx.runtime_host()),
+            Some(self.ctx.session_graph_service()),
         )
         .await
         .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;

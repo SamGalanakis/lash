@@ -732,9 +732,12 @@ mod tests {
         std::fs::write(&path, &data).unwrap();
 
         let store = Arc::new(lash_core::InMemoryAttachmentStore::new());
+        let host = Arc::new(lash_core::testing::MockSessionManager::default());
         let context = lash_core::ToolContext::__for_testing(
             "test-session".into(),
-            Arc::new(lash_core::testing::MockSessionManager::default()),
+            host.clone(),
+            host.clone(),
+            host,
             Arc::new(lash_core::UnavailableProcessService),
             store.clone(),
             lash_core::DirectCompletionClient::from_fn(|_, _| {

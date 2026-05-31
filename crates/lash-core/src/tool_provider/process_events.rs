@@ -5,7 +5,7 @@ use super::ToolProcessEventContext;
 pub(crate) async fn enqueue_wake_delivery(
     store: Option<&dyn crate::RuntimePersistence>,
     wake_delivery: Option<crate::ProcessWakeDelivery>,
-    trace_host: Option<&dyn crate::plugin::RuntimeSessionHost>,
+    trace_host: Option<&dyn crate::plugin::SessionGraphService>,
 ) -> Result<(), PluginError> {
     let Some(wake_delivery) = wake_delivery else {
         return Ok(());
@@ -92,7 +92,7 @@ impl ToolProcessEventControl {
         enqueue_wake_delivery(
             process.store.as_deref(),
             result.wake_delivery,
-            Some(process.host.as_ref()),
+            Some(process.session_graph.as_ref()),
         )
         .await?;
         Ok(result.event)

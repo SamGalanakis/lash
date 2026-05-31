@@ -423,11 +423,14 @@ macro_rules! impl_unsupported_queued_work_methods {
     () => {
         fn enqueue_queued_work<'life0, 'async_trait>(
             &'life0 self,
-            _batch: $crate::QueuedWorkBatchDraft,
+            _batch: $crate::runtime::QueuedWorkBatchDraft,
         ) -> ::core::pin::Pin<
             Box<
                 dyn ::core::future::Future<
-                        Output = ::std::result::Result<$crate::QueuedWorkBatch, $crate::StoreError>,
+                        Output = ::std::result::Result<
+                            $crate::runtime::QueuedWorkBatch,
+                            $crate::store::StoreError,
+                        >,
                     > + Send
                     + 'async_trait,
             >,
@@ -437,7 +440,7 @@ macro_rules! impl_unsupported_queued_work_methods {
             Self: 'async_trait,
         {
             Box::pin(async move {
-                Err($crate::StoreError::Backend(
+                Err($crate::store::StoreError::Backend(
                     "queued work is not supported by this test store".to_string(),
                 ))
             })
@@ -447,15 +450,15 @@ macro_rules! impl_unsupported_queued_work_methods {
             &'life0 self,
             session_id: &'life1 str,
             _owner_id: &'life2 str,
-            _boundary: $crate::QueuedWorkClaimBoundary,
+            _boundary: $crate::runtime::QueuedWorkClaimBoundary,
             _lease_ttl_ms: u64,
             _max_batches: usize,
         ) -> ::core::pin::Pin<
             Box<
                 dyn ::core::future::Future<
                         Output = ::std::result::Result<
-                            Option<$crate::QueuedWorkClaim>,
-                            $crate::StoreError,
+                            Option<$crate::runtime::QueuedWorkClaim>,
+                            $crate::store::StoreError,
                         >,
                     > + Send
                     + 'async_trait,
@@ -468,7 +471,7 @@ macro_rules! impl_unsupported_queued_work_methods {
             Self: 'async_trait,
         {
             Box::pin(async move {
-                Err($crate::StoreError::Backend(format!(
+                Err($crate::store::StoreError::Backend(format!(
                     "queued work is not supported for session `{session_id}` by this test store"
                 )))
             })
@@ -476,12 +479,15 @@ macro_rules! impl_unsupported_queued_work_methods {
 
         fn renew_queued_work_claim<'life0, 'life1, 'async_trait>(
             &'life0 self,
-            claim: &'life1 $crate::QueuedWorkClaim,
+            claim: &'life1 $crate::runtime::QueuedWorkClaim,
             _lease_ttl_ms: u64,
         ) -> ::core::pin::Pin<
             Box<
                 dyn ::core::future::Future<
-                        Output = ::std::result::Result<$crate::QueuedWorkClaim, $crate::StoreError>,
+                        Output = ::std::result::Result<
+                            $crate::runtime::QueuedWorkClaim,
+                            $crate::store::StoreError,
+                        >,
                     > + Send
                     + 'async_trait,
             >,
@@ -492,7 +498,7 @@ macro_rules! impl_unsupported_queued_work_methods {
             Self: 'async_trait,
         {
             Box::pin(async move {
-                Err($crate::StoreError::QueuedWorkClaimExpired {
+                Err($crate::store::StoreError::QueuedWorkClaimExpired {
                     session_id: claim.session_id.clone(),
                     claim_id: claim.claim_id.clone(),
                 })
@@ -501,11 +507,12 @@ macro_rules! impl_unsupported_queued_work_methods {
 
         fn abandon_queued_work_claim<'life0, 'life1, 'async_trait>(
             &'life0 self,
-            _claim: &'life1 $crate::QueuedWorkClaim,
+            _claim: &'life1 $crate::runtime::QueuedWorkClaim,
         ) -> ::core::pin::Pin<
             Box<
-                dyn ::core::future::Future<Output = ::std::result::Result<(), $crate::StoreError>>
-                    + Send
+                dyn ::core::future::Future<
+                        Output = ::std::result::Result<(), $crate::store::StoreError>,
+                    > + Send
                     + 'async_trait,
             >,
         >
@@ -524,8 +531,8 @@ macro_rules! impl_unsupported_queued_work_methods {
             Box<
                 dyn ::core::future::Future<
                         Output = ::std::result::Result<
-                            Vec<$crate::QueuedWorkBatch>,
-                            $crate::StoreError,
+                            Vec<$crate::runtime::QueuedWorkBatch>,
+                            $crate::store::StoreError,
                         >,
                     > + Send
                     + 'async_trait,

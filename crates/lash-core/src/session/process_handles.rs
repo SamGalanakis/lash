@@ -304,7 +304,9 @@ mod tests {
             plugins,
             tools,
             surface,
-            host: host.clone(),
+            sessions: host.clone(),
+            session_lifecycle: host.clone(),
+            session_graph: host.clone(),
             processes: host.clone(),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
@@ -401,8 +403,10 @@ mod tests {
             plugins,
             tools: provider,
             surface,
-            host: host.clone(),
-            processes: host,
+            sessions: host.clone(),
+            session_lifecycle: host.clone(),
+            session_graph: host.clone(),
+            processes: host.clone(),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),

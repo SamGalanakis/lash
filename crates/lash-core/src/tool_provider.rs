@@ -3,7 +3,9 @@ use std::sync::Arc;
 use lash_sansio::llm::types::ProviderReplayMeta;
 use serde::{Deserialize, Serialize};
 
-use crate::plugin::{PluginError, RuntimeSessionHost, SessionSnapshot};
+use crate::plugin::{
+    PluginError, SessionGraphService, SessionLifecycleService, SessionSnapshot, SessionStateService,
+};
 use crate::{AttachmentStore, ToolContract, ToolManifest, ToolResult};
 
 mod attachments;
@@ -37,7 +39,8 @@ pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 pub struct ToolContext<'run> {
     pub(crate) session_id: String,
     pub(crate) agent_frame_id: crate::AgentFrameId,
-    pub(crate) host: Arc<dyn RuntimeSessionHost>,
+    pub(crate) sessions: Arc<dyn SessionStateService>,
+    pub(crate) session_lifecycle: Arc<dyn SessionLifecycleService>,
     pub(crate) processes: Arc<dyn crate::ProcessService>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) runtime_dispatch: Option<Arc<crate::tool_dispatch::ToolDispatchContext<'run>>>,
@@ -61,13 +64,15 @@ pub(crate) struct ToolProcessEventContext {
     registry: Arc<dyn crate::ProcessRegistry>,
     wake_target_scope: Option<crate::ProcessScope>,
     store: Option<Arc<dyn crate::RuntimePersistence>>,
-    host: Arc<dyn RuntimeSessionHost>,
+    session_graph: Arc<dyn SessionGraphService>,
 }
 
 pub(crate) struct ToolContextBuilder<'run> {
     session_id: String,
     agent_frame_id: crate::AgentFrameId,
-    host: Arc<dyn RuntimeSessionHost>,
+    sessions: Arc<dyn SessionStateService>,
+    session_lifecycle: Arc<dyn SessionLifecycleService>,
+    session_graph: Arc<dyn SessionGraphService>,
     processes: Arc<dyn crate::ProcessService>,
     effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     runtime_dispatch: Option<Arc<crate::tool_dispatch::ToolDispatchContext<'run>>>,
@@ -88,7 +93,9 @@ impl<'run> ToolContextBuilder<'run> {
         Self {
             session_id: dispatch.session_id.clone(),
             agent_frame_id: dispatch.agent_frame_id.clone(),
-            host: Arc::clone(&dispatch.host),
+            sessions: Arc::clone(&dispatch.sessions),
+            session_lifecycle: Arc::clone(&dispatch.session_lifecycle),
+            session_graph: Arc::clone(&dispatch.session_graph),
             processes: Arc::clone(&dispatch.processes),
             effect_controller: dispatch.effect_controller.clone(),
             runtime_dispatch: Some(Arc::clone(&dispatch)),
@@ -145,7 +152,7 @@ impl<'run> ToolContextBuilder<'run> {
             registry,
             wake_target_scope,
             store,
-            host: Arc::clone(&self.host),
+            session_graph: Arc::clone(&self.session_graph),
         });
         self
     }
@@ -159,7 +166,8 @@ impl<'run> ToolContextBuilder<'run> {
         ToolContext {
             session_id: self.session_id,
             agent_frame_id: self.agent_frame_id,
-            host: self.host,
+            sessions: self.sessions,
+            session_lifecycle: self.session_lifecycle,
             processes: self.processes,
             effect_controller: self.effect_controller,
             runtime_dispatch: self.runtime_dispatch,
@@ -182,7 +190,9 @@ impl<'run> ToolContext<'run> {
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn builder(
         session_id: String,
-        host: Arc<dyn RuntimeSessionHost>,
+        sessions: Arc<dyn SessionStateService>,
+        session_lifecycle: Arc<dyn SessionLifecycleService>,
+        session_graph: Arc<dyn SessionGraphService>,
         processes: Arc<dyn crate::ProcessService>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         attachment_store: Arc<dyn AttachmentStore>,
@@ -191,7 +201,9 @@ impl<'run> ToolContext<'run> {
         ToolContextBuilder {
             session_id,
             agent_frame_id: String::new(),
-            host,
+            sessions,
+            session_lifecycle,
+            session_graph,
             processes,
             effect_controller,
             runtime_dispatch: None,
@@ -223,7 +235,8 @@ impl<'run> ToolContext<'run> {
     pub fn sessions(&self) -> ToolSessionControl {
         ToolSessionControl {
             session_id: self.session_id.clone(),
-            host: Arc::clone(&self.host),
+            sessions: Arc::clone(&self.sessions),
+            session_lifecycle: Arc::clone(&self.session_lifecycle),
         }
     }
 
@@ -321,7 +334,7 @@ impl<'run> ToolContext<'run> {
             registry,
             wake_target_scope: None,
             store: None,
-            host: Arc::clone(&self.host),
+            session_graph: Arc::new(crate::plugin::NoopSessionManager),
         });
         self
     }
@@ -352,7 +365,9 @@ impl<'run> ToolContext<'run> {
     #[doc(hidden)]
     pub fn __for_testing(
         session_id: String,
-        host: Arc<dyn RuntimeSessionHost>,
+        sessions: Arc<dyn SessionStateService>,
+        session_lifecycle: Arc<dyn SessionLifecycleService>,
+        session_graph: Arc<dyn SessionGraphService>,
         processes: Arc<dyn crate::ProcessService>,
         attachment_store: Arc<dyn AttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'static>,
@@ -360,7 +375,9 @@ impl<'run> ToolContext<'run> {
     ) -> ToolContext<'static> {
         ToolContext::builder(
             session_id,
-            host,
+            sessions,
+            session_lifecycle,
+            session_graph,
             processes,
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
@@ -420,7 +437,7 @@ impl PreparedToolCall {
 #[derive(Clone)]
 pub struct ToolPrepareContext {
     session_id: String,
-    host: Arc<dyn RuntimeSessionHost>,
+    sessions: Arc<dyn SessionStateService>,
     turn_context: crate::TurnContext,
     tool_call_id: Option<String>,
 }
@@ -428,13 +445,13 @@ pub struct ToolPrepareContext {
 impl ToolPrepareContext {
     pub(crate) fn new(
         session_id: String,
-        host: Arc<dyn RuntimeSessionHost>,
+        sessions: Arc<dyn SessionStateService>,
         turn_context: crate::TurnContext,
         tool_call_id: Option<String>,
     ) -> Self {
         Self {
             session_id,
-            host,
+            sessions,
             turn_context,
             tool_call_id,
         }
@@ -460,17 +477,17 @@ impl ToolPrepareContext {
     }
 
     pub async fn session_snapshot(&self) -> Result<SessionSnapshot, PluginError> {
-        self.host.snapshot_session(&self.session_id).await
+        self.sessions.snapshot_session(&self.session_id).await
     }
 
     pub async fn tool_catalog(&self) -> Result<Vec<serde_json::Value>, PluginError> {
-        self.host.tool_catalog(&self.session_id).await
+        self.sessions.tool_catalog(&self.session_id).await
     }
 
     pub async fn shared_tool_catalog(
         &self,
     ) -> Result<std::sync::Arc<Vec<serde_json::Value>>, PluginError> {
-        self.host.shared_tool_catalog(&self.session_id).await
+        self.sessions.shared_tool_catalog(&self.session_id).await
     }
 }
 
@@ -535,6 +552,8 @@ mod tests {
 
         let context = ToolContext::builder(
             "session-1".to_string(),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            Arc::new(crate::testing::MockSessionManager::default()),
             Arc::new(crate::testing::MockSessionManager::default()),
             Arc::new(crate::UnavailableProcessService),
             crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(

@@ -595,7 +595,9 @@ impl PluginSession {
         args: serde_json::Value,
         session_id: Option<String>,
         default_to_current_session: bool,
-        host: Arc<dyn RuntimeSessionHost>,
+        sessions: Arc<dyn SessionStateService>,
+        session_lifecycle: Arc<dyn SessionLifecycleService>,
+        session_graph: Arc<dyn SessionGraphService>,
         processes: Arc<dyn crate::ProcessService>,
     ) -> Result<ToolResult, PluginActionInvokeError> {
         let Some(op) = self.contributions.plugin_actions.get(name).cloned() else {
@@ -623,7 +625,9 @@ impl PluginSession {
         Ok((op.handler)(
             PluginActionContext {
                 session_id: effective_session,
-                host,
+                sessions,
+                session_lifecycle,
+                session_graph,
                 processes,
             },
             args,
@@ -636,7 +640,9 @@ impl PluginSession {
         args: Op::Args,
         session_id: Option<String>,
         default_to_current_session: bool,
-        host: Arc<dyn RuntimeSessionHost>,
+        sessions: Arc<dyn SessionStateService>,
+        session_lifecycle: Arc<dyn SessionLifecycleService>,
+        session_graph: Arc<dyn SessionGraphService>,
         processes: Arc<dyn crate::ProcessService>,
     ) -> Result<Op::Output, PluginError> {
         let args = serde_json::to_value(args)
@@ -647,7 +653,9 @@ impl PluginSession {
                 args,
                 session_id,
                 default_to_current_session,
-                host,
+                sessions,
+                session_lifecycle,
+                session_graph,
                 processes,
             )
             .await

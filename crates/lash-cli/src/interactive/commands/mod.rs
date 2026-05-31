@@ -10,6 +10,7 @@ use super::*;
 use crate::SkillCatalog;
 use crate::app::PendingImage;
 use crate::turn_runner::make_turn_input;
+use lash_core::runtime::{QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
 
 #[derive(Clone)]
 pub(super) enum ParsedSlashCommand {
@@ -119,9 +120,7 @@ fn current_epoch_ms() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-fn ready_batches_for_idle_dispatch(
-    batches: &[lash_core::QueuedWorkBatch],
-) -> Vec<lash_core::QueuedWorkBatch> {
+fn ready_batches_for_idle_dispatch(batches: &[QueuedWorkBatch]) -> Vec<QueuedWorkBatch> {
     let now = current_epoch_ms();
     let ready = batches
         .iter()
@@ -140,13 +139,13 @@ fn ready_batches_for_idle_dispatch(
         }
         if selected.is_empty() {
             selected.push((*batch).clone());
-            if first_slot_policy == lash_core::SlotPolicy::Exclusive {
+            if first_slot_policy == SlotPolicy::Exclusive {
                 break;
             }
             continue;
         }
-        if first_slot_policy != lash_core::SlotPolicy::Join
-            || batch.slot_policy != lash_core::SlotPolicy::Join
+        if first_slot_policy != SlotPolicy::Join
+            || batch.slot_policy != SlotPolicy::Join
             || batch.delivery_policy != first_delivery_policy
             || batch.merge_key != first_merge_key
         {
@@ -196,7 +195,7 @@ fn prepared_turn_from_queued_input(input: &lash_core::TurnInput) -> Option<Prepa
 
 fn display_turns_for_queued_batches(
     app: &mut App,
-    batches: &[lash_core::QueuedWorkBatch],
+    batches: &[QueuedWorkBatch],
 ) -> Vec<PreparedTurn> {
     let mut turns = Vec::new();
     for batch in batches {
@@ -206,7 +205,7 @@ fn display_turns_for_queued_batches(
                 .or_else(|| source.strip_prefix("injection:"))
         });
         for item in &batch.items {
-            let lash_core::QueuedWorkPayload::TurnInput { input } = &item.payload else {
+            let QueuedWorkPayload::TurnInput { input } = &item.payload else {
                 continue;
             };
             if let Some(draft_id) = queue_draft_id

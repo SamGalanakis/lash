@@ -287,6 +287,8 @@ impl PluginHost {
                 None,
                 false,
                 Arc::new(NoopSessionManager),
+                Arc::new(NoopSessionManager),
+                Arc::new(NoopSessionManager),
                 Arc::new(crate::UnavailableProcessService),
             )
             .await
@@ -347,7 +349,9 @@ impl PluginHost {
         session_id: &str,
         name: &str,
         args: serde_json::Value,
-        host: Arc<dyn RuntimeSessionHost>,
+        sessions: Arc<dyn SessionStateService>,
+        session_lifecycle: Arc<dyn SessionLifecycleService>,
+        session_graph: Arc<dyn SessionGraphService>,
         processes: Arc<dyn crate::ProcessService>,
     ) -> Result<ToolResult, PluginActionInvokeError> {
         let session = self.session(session_id)?;
@@ -357,7 +361,9 @@ impl PluginHost {
                 args,
                 Some(session_id.to_string()),
                 false,
-                host,
+                sessions,
+                session_lifecycle,
+                session_graph,
                 processes,
             )
             .await

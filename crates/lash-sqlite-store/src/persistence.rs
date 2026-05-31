@@ -674,7 +674,7 @@ impl RuntimePersistence for Store {
         }
         let conn = self.conn.lock().unwrap();
         ensure_runtime_turn_lease_conn(&conn, lease)?;
-        let actual_hash = lash_core::runtime_turn_checkpoint_hash(&checkpoint.checkpoint)?;
+        let actual_hash = lash_core::store::runtime_turn_checkpoint_hash(&checkpoint.checkpoint)?;
         if actual_hash != checkpoint.checkpoint_hash {
             return Err(StoreError::RuntimeTurnCheckpointHashMismatch {
                 session_id: checkpoint.session_id,
@@ -726,7 +726,7 @@ impl RuntimePersistence for Store {
             checkpoint.schema_version,
             RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
         )?;
-        let actual_hash = lash_core::runtime_turn_checkpoint_hash(&checkpoint.checkpoint)?;
+        let actual_hash = lash_core::store::runtime_turn_checkpoint_hash(&checkpoint.checkpoint)?;
         if checkpoint.checkpoint_hash != actual_hash {
             return Err(StoreError::RuntimeTurnCheckpointHashMismatch {
                 session_id: session_id.to_string(),

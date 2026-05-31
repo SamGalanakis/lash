@@ -50,7 +50,7 @@ pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
             result.clone(),
             duration_ms,
             context.turn_context.clone(),
-            Arc::clone(&context.host),
+            Arc::clone(&context.sessions),
         ))
         .await
     {

@@ -135,7 +135,9 @@ impl StaticToolExecute for ToolDiscoveryToolsProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::plugin::runtime_host::RuntimeSessionHost;
+    use lash_core::plugin::runtime_host::{
+        SessionGraphService, SessionLifecycleService, SessionStateService,
+    };
     use lash_core::plugin::{PluginError, SessionHandle, SessionSnapshot};
     use lash_core::{
         DirectCompletion, TokenUsage, ToolAgentSurface, ToolCall, ToolContract, ToolDefinition,
@@ -153,7 +155,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl RuntimeSessionHost for FakeSessionManager {
+    impl SessionStateService for FakeSessionManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
             Ok(self.snapshot.clone())
         }
@@ -177,7 +179,10 @@ mod tests {
         ) -> Result<u64, PluginError> {
             Ok(0)
         }
+    }
 
+    #[async_trait::async_trait]
+    impl SessionLifecycleService for FakeSessionManager {
         async fn create_session(
             &self,
             _request: lash_core::plugin::SessionCreateRequest,
@@ -189,6 +194,9 @@ mod tests {
             Ok(())
         }
     }
+
+    #[async_trait::async_trait]
+    impl SessionGraphService for FakeSessionManager {}
 
     fn snapshot_with_model(model: &str, variant: Option<&str>) -> SessionSnapshot {
         let mut snapshot = SessionSnapshot::default();

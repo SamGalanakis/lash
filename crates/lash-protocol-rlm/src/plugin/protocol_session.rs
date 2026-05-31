@@ -140,7 +140,7 @@ mod tests {
     struct NoopPromptManager;
 
     #[async_trait::async_trait]
-    impl lash_core::plugin::runtime_host::RuntimeSessionHost for NoopPromptManager {
+    impl lash_core::plugin::runtime_host::SessionStateService for NoopPromptManager {
         async fn snapshot_current(
             &self,
         ) -> Result<lash_core::SessionSnapshot, lash_core::plugin::PluginError> {
@@ -164,7 +164,10 @@ mod tests {
         ) -> Result<Vec<serde_json::Value>, lash_core::plugin::PluginError> {
             Ok(Vec::new())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl lash_core::plugin::runtime_host::SessionLifecycleService for NoopPromptManager {
         async fn create_session(
             &self,
             _request: lash_core::SessionCreateRequest,
@@ -181,6 +184,9 @@ mod tests {
             Ok(())
         }
     }
+
+    #[async_trait::async_trait]
+    impl lash_core::plugin::runtime_host::SessionGraphService for NoopPromptManager {}
 
     fn test_session(config: RlmProtocolPluginConfig) -> RlmProtocolSession {
         let runtime_state = Arc::new(
@@ -251,7 +257,9 @@ mod tests {
                 session_id: "root".to_string(),
                 checkpoint: lash_core::CheckpointKind::AfterWork,
                 state: lash_core::SessionReadView::from_snapshot(&state),
-                host: Arc::new(NoopPromptManager),
+                sessions: Arc::new(NoopPromptManager),
+                session_lifecycle: Arc::new(NoopPromptManager),
+                session_graph: Arc::new(NoopPromptManager),
             })
             .expect("warning directives");
 

@@ -6,14 +6,17 @@ use tokio::sync::Mutex;
 
 use lash_plugin_plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
 
-use lash_core::plugin::runtime_host::RuntimeSessionHost;
+use lash_core::plugin::runtime_host::{
+    SessionGraphService, SessionLifecycleService, SessionStateService,
+};
 use lash_core::plugin::{
     PluginDirective, PluginError, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContext,
 };
+use lash_core::runtime::RuntimeSessionState;
 use lash_core::{
-    AssembledTurn, MessageRole, PluginHost, RuntimeSessionState, SessionCreateRequest,
-    SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot, ToolDefinition, ToolRegistry,
-    ToolResult, TurnHookContext, TurnResultHookContext,
+    AssembledTurn, MessageRole, PluginHost, SessionCreateRequest, SessionHandle, SessionPolicy,
+    SessionReadView, SessionSnapshot, ToolDefinition, ToolRegistry, ToolResult, TurnHookContext,
+    TurnResultHookContext,
 };
 
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
@@ -21,6 +24,27 @@ use lash_tool_support::{StaticToolExecute, StaticToolProvider};
 
 fn unavailable_processes() -> Arc<dyn lash_core::ProcessService> {
     Arc::new(lash_core::UnavailableProcessService)
+}
+
+fn sessions<T>(manager: &Arc<T>) -> Arc<dyn SessionStateService>
+where
+    T: SessionStateService + 'static,
+{
+    manager.clone()
+}
+
+fn session_lifecycle<T>(manager: &Arc<T>) -> Arc<dyn SessionLifecycleService>
+where
+    T: SessionLifecycleService + 'static,
+{
+    manager.clone()
+}
+
+fn session_graph<T>(manager: &Arc<T>) -> Arc<dyn SessionGraphService>
+where
+    T: SessionGraphService + 'static,
+{
+    manager.clone()
 }
 
 #[async_trait::async_trait]
@@ -58,7 +82,7 @@ trait PlanTestHostCore: Send + Sync {
 macro_rules! impl_plan_test_host {
     ($ty:ty) => {
         #[async_trait::async_trait]
-        impl lash_core::plugin::runtime_host::RuntimeSessionHost for $ty {
+        impl SessionStateService for $ty {
             async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
                 PlanTestHostCore::snapshot_current(self).await
             }
@@ -87,16 +111,24 @@ macro_rules! impl_plan_test_host {
             ) -> Result<u64, PluginError> {
                 PlanTestHostCore::apply_tool_state(self, session_id, snapshot).await
             }
+        }
+
+        #[async_trait::async_trait]
+        impl SessionLifecycleService for $ty {
             async fn create_session(
                 &self,
                 request: SessionCreateRequest,
             ) -> Result<SessionHandle, PluginError> {
                 PlanTestHostCore::create_session(self, request).await
             }
+
             async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
                 PlanTestHostCore::close_session(self, session_id).await
             }
         }
+
+        #[async_trait::async_trait]
+        impl SessionGraphService for $ty {}
 
         #[async_trait::async_trait]
         impl lash_plugin_plan_mode::PlanModePrompt for $ty {
@@ -246,7 +278,7 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_session("root", None).expect("session");
-    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
+    let manager = Arc::new(mock_session_manager("run-session"));
 
     let enabled = session
         .invoke_plugin_action(
@@ -254,7 +286,9 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
             json!({}),
             None,
             true,
-            manager.clone(),
+            sessions(&manager),
+            session_lifecycle(&manager),
+            session_graph(&manager),
             unavailable_processes(),
         )
         .await
@@ -283,7 +317,9 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
             json!({}),
             None,
             true,
-            manager,
+            sessions(&manager),
+            session_lifecycle(&manager),
+            session_graph(&manager),
             unavailable_processes(),
         )
         .await
@@ -299,13 +335,16 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
     restored
         .restore(&lash_core::PluginSessionSnapshot::default())
         .expect("reset restore");
+    let reset_manager = Arc::new(mock_session_manager("run-session"));
     let reset_toggle = restored
         .invoke_plugin_action(
             "plan_mode.toggle",
             json!({}),
             None,
             true,
-            Arc::new(mock_session_manager("run-session")),
+            sessions(&reset_manager),
+            session_lifecycle(&reset_manager),
+            session_graph(&reset_manager),
             unavailable_processes(),
         )
         .await
@@ -325,7 +364,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_session("root", None).expect("session");
     let manager = Arc::new(mock_session_manager("run-session"));
-    let manager_host: Arc<dyn RuntimeSessionHost> = manager.clone();
+    let manager_host = manager.clone();
 
     let initial = manager
         .tool_state("root")
@@ -341,7 +380,9 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
             json!({}),
             None,
             true,
-            manager_host.clone(),
+            sessions(&manager_host),
+            session_lifecycle(&manager_host),
+            session_graph(&manager_host),
             unavailable_processes(),
         )
         .await
@@ -361,7 +402,9 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
             json!({}),
             None,
             true,
-            manager_host,
+            sessions(&manager_host),
+            session_lifecycle(&manager_host),
+            session_graph(&manager_host),
             unavailable_processes(),
         )
         .await
@@ -383,7 +426,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_session("root", None).expect("session");
-    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
+    let manager = Arc::new(mock_session_manager("run-session"));
 
     session
         .invoke_plugin_action(
@@ -391,7 +434,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             json!({}),
             None,
             true,
-            manager.clone(),
+            sessions(&manager),
+            session_lifecycle(&manager),
+            session_graph(&manager),
             unavailable_processes(),
         )
         .await
@@ -401,7 +446,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: manager.clone(),
+            sessions: sessions(&manager),
             turn_context: lash_core::TurnContext::default(),
         })
         .await
@@ -591,7 +636,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             json!({}),
             None,
             true,
-            manager.clone(),
+            sessions(&manager),
+            session_lifecycle(&manager),
+            session_graph(&manager),
             unavailable_processes(),
         )
         .await
@@ -602,7 +649,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             json!({}),
             None,
             true,
-            manager.clone(),
+            sessions(&manager),
+            session_lifecycle(&manager),
+            session_graph(&manager),
             unavailable_processes(),
         )
         .await
@@ -613,7 +662,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             session_id: "root".to_string(),
             checkpoint: lash_core::CheckpointKind::AfterWork,
             state: mock_read_view("run-session"),
-            host: manager.clone(),
+            sessions: sessions(&manager),
+            session_lifecycle: session_lifecycle(&manager),
+            session_graph: session_graph(&manager),
         })
         .await
         .expect("checkpoint");
@@ -633,7 +684,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             turn: Arc::new(lash_core::TurnResultSummary::from_assembled(&empty_turn(
                 "root",
             ))),
-            host: manager,
+            sessions: sessions(&manager),
         })
         .await
         .expect("after_turn");
@@ -646,7 +697,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_session("root", None).expect("session");
-    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
+    let manager = Arc::new(mock_session_manager("run-session"));
 
     session
         .invoke_plugin_action(
@@ -654,7 +705,9 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
             json!({}),
             None,
             true,
-            manager.clone(),
+            sessions(&manager),
+            session_lifecycle(&manager),
+            session_graph(&manager),
             unavailable_processes(),
         )
         .await
@@ -664,7 +717,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: manager.clone(),
+            sessions: sessions(&manager),
             turn_context: lash_core::TurnContext::default(),
         })
         .await
@@ -681,7 +734,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
             turn: Arc::new(lash_core::TurnResultSummary::from_assembled(&empty_turn(
                 "root",
             ))),
-            host: manager.clone(),
+            sessions: sessions(&manager),
         })
         .await
         .expect("after_turn");
@@ -690,7 +743,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: manager.clone(),
+            sessions: sessions(&manager),
             turn_context: lash_core::TurnContext::default(),
         })
         .await
@@ -707,7 +760,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
         PlanModePluginConfig::default().with_allowed_tools(["apply_patch", "read_file"]),
     ));
     let session = host.build_session("root", None).expect("session");
-    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
+    let manager = Arc::new(mock_session_manager("run-session"));
 
     session
         .invoke_plugin_action(
@@ -715,7 +768,9 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
             json!({}),
             None,
             true,
-            manager.clone(),
+            sessions(&manager),
+            session_lifecycle(&manager),
+            session_graph(&manager),
             unavailable_processes(),
         )
         .await
@@ -824,7 +879,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     let manager = Arc::new(PromptingSessionManager {
         base: mock_session_manager("run-session"),
     });
-    let manager_host: Arc<dyn RuntimeSessionHost> = manager.clone();
+    let manager_host = manager.clone();
     let host = plan_mode_host(
         PlanModePluginFactory::new(PlanModePluginConfig::default()).with_prompt(manager.clone()),
     );
@@ -836,7 +891,9 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             json!({}),
             None,
             true,
-            manager_host.clone(),
+            sessions(&manager_host),
+            session_lifecycle(&manager_host),
+            session_graph(&manager_host),
             unavailable_processes(),
         )
         .await
@@ -845,7 +902,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: manager_host.clone(),
+            sessions: sessions(&manager_host),
             turn_context: lash_core::TurnContext::default(),
         })
         .await
@@ -882,10 +939,9 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             })
     );
 
-    let dynamic =
-        lash_core::plugin::runtime_host::RuntimeSessionHost::tool_state(manager.as_ref(), "root")
-            .await
-            .expect("tool state");
+    let dynamic = SessionStateService::tool_state(manager.as_ref(), "root")
+        .await
+        .expect("tool state");
     assert!(dynamic.get("plan_exit").is_some_and(|tool| {
         tool.manifest().effective_availability() == lash_core::ToolAvailability::Off
     }));
@@ -953,7 +1009,6 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
     let manager = Arc::new(PromptingSessionManager);
     let host = plan_mode_host(PlanModePluginFactory::default().with_prompt(manager.clone()));
     let session = host.build_session("root", None).expect("session");
-    let manager: Arc<dyn RuntimeSessionHost> = manager;
 
     session
         .invoke_plugin_action(
@@ -961,7 +1016,9 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             json!({}),
             None,
             true,
-            manager.clone(),
+            sessions(&manager),
+            session_lifecycle(&manager),
+            session_graph(&manager),
             unavailable_processes(),
         )
         .await
@@ -971,7 +1028,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: manager.clone(),
+            sessions: sessions(&manager),
             turn_context: lash_core::TurnContext::default(),
         })
         .await
@@ -1059,7 +1116,6 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
     let manager = Arc::new(PromptingSessionManager);
     let host = plan_mode_host(PlanModePluginFactory::default().with_prompt(manager.clone()));
     let session = host.build_session("root", None).expect("session");
-    let manager: Arc<dyn RuntimeSessionHost> = manager;
 
     session
         .invoke_plugin_action(
@@ -1067,7 +1123,9 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             json!({}),
             None,
             true,
-            manager.clone(),
+            sessions(&manager),
+            session_lifecycle(&manager),
+            session_graph(&manager),
             unavailable_processes(),
         )
         .await
@@ -1077,7 +1135,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
         .before_turn(TurnHookContext {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
-            host: manager.clone(),
+            sessions: sessions(&manager),
             turn_context: lash_core::TurnContext::default(),
         })
         .await
@@ -1169,7 +1227,9 @@ async fn plan_mode_after_tool_call_switches_agent_frame_on_fresh_context_approva
             json!({}),
             None,
             true,
-            manager.clone(),
+            sessions(&manager),
+            session_lifecycle(&manager),
+            session_graph(&manager),
             unavailable_processes(),
         )
         .await
@@ -1226,7 +1286,7 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
     let _cwd = CurrentDirGuard::set(temp.path());
     let host = plan_mode_host(PlanModePluginFactory::default());
     let session = host.build_session("root", None).expect("session");
-    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
+    let manager = Arc::new(mock_session_manager("run-session"));
 
     session
         .invoke_plugin_action(
@@ -1234,7 +1294,9 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
             json!({}),
             None,
             true,
-            manager.clone(),
+            sessions(&manager),
+            session_lifecycle(&manager),
+            session_graph(&manager),
             unavailable_processes(),
         )
         .await

@@ -97,12 +97,32 @@ struct ProcessCapability {
 struct DirectCompletionCapability;
 
 #[derive(Clone)]
-pub(super) struct RuntimeSessionManager {
+pub(super) struct RuntimeSessionServices {
     current: CurrentSessionCapability,
     managed: ManagedSessionCapability,
     processes: ProcessCapability,
     usage: UsageCapability,
     direct: DirectCompletionCapability,
+}
+
+#[derive(Clone)]
+pub(in crate::runtime) struct RuntimeSessionStateService {
+    services: Arc<RuntimeSessionServices>,
+}
+
+#[derive(Clone)]
+pub(in crate::runtime) struct RuntimeSessionLifecycleService {
+    services: Arc<RuntimeSessionServices>,
+}
+
+#[derive(Clone)]
+pub(in crate::runtime) struct RuntimeSessionGraphService {
+    services: Arc<RuntimeSessionServices>,
+}
+
+#[derive(Clone)]
+pub(in crate::runtime) struct RuntimeSessionProcessService {
+    services: Arc<RuntimeSessionServices>,
 }
 
 impl CurrentSessionCapability {
@@ -198,7 +218,37 @@ impl UsageCapability {
     }
 }
 
-impl RuntimeSessionManager {
+impl RuntimeSessionServices {
+    pub(in crate::runtime) fn state_service(
+        self: &Arc<Self>,
+    ) -> Arc<dyn crate::plugin::SessionStateService> {
+        Arc::new(RuntimeSessionStateService {
+            services: Arc::clone(self),
+        })
+    }
+
+    pub(in crate::runtime) fn lifecycle_service(
+        self: &Arc<Self>,
+    ) -> Arc<dyn crate::plugin::SessionLifecycleService> {
+        Arc::new(RuntimeSessionLifecycleService {
+            services: Arc::clone(self),
+        })
+    }
+
+    pub(in crate::runtime) fn graph_service(
+        self: &Arc<Self>,
+    ) -> Arc<dyn crate::plugin::SessionGraphService> {
+        Arc::new(RuntimeSessionGraphService {
+            services: Arc::clone(self),
+        })
+    }
+
+    pub(in crate::runtime) fn process_service(self: &Arc<Self>) -> Arc<dyn crate::ProcessService> {
+        Arc::new(RuntimeSessionProcessService {
+            services: Arc::clone(self),
+        })
+    }
+
     pub(super) fn direct_completion_client<'run>(
         self: &Arc<Self>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,

@@ -2,7 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
-use crate::plugin::{PluginSession, RuntimeSessionHost};
+use crate::plugin::{
+    PluginSession, SessionGraphService, SessionLifecycleService, SessionStateService,
+};
 use crate::{
     PreparedToolCall, SessionEvent, ToolCallRecord, ToolFailure, ToolFailureClass, ToolProvider,
     ToolResult, ToolSurface,
@@ -37,7 +39,9 @@ pub struct ToolDispatchContext<'run> {
     pub plugins: Arc<PluginSession>,
     pub tools: Arc<dyn ToolProvider>,
     pub surface: Arc<ToolSurface>,
-    pub host: Arc<dyn RuntimeSessionHost>,
+    pub sessions: Arc<dyn SessionStateService>,
+    pub session_lifecycle: Arc<dyn SessionLifecycleService>,
+    pub session_graph: Arc<dyn SessionGraphService>,
     pub processes: Arc<dyn crate::ProcessService>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,

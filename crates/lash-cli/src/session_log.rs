@@ -390,7 +390,7 @@ mod tests {
     ) {
         let graph = lash_core::SessionGraph::from_active_read_state(&messages, &tool_calls);
         let checkpoint_ref = store
-            .put_checkpoint(&lash_core::HydratedSessionCheckpoint {
+            .put_checkpoint(&lash_core::store::HydratedSessionCheckpoint {
                 turn_state: lash_core::PersistedTurnState {
                     turn_index: 1,
                     token_usage,
@@ -406,7 +406,7 @@ mod tests {
                 execution_state: None,
             })
             .checkpoint_ref;
-        store.save_session_head(lash_core::SessionHead {
+        store.save_session_head(lash_core::store::SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
             agent_frames: Vec::new(),

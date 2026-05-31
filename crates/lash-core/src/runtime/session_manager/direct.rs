@@ -6,7 +6,7 @@ use super::*;
 /// the owning session manager.
 #[derive(Clone)]
 struct RuntimeDirectSource<'run> {
-    manager: Arc<RuntimeSessionManager>,
+    manager: Arc<RuntimeSessionServices>,
     effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     turn_id: Option<String>,
     turn_lease: Option<crate::RuntimeTurnLease>,
@@ -40,7 +40,7 @@ pub struct DirectCompletionClient<'run> {
 
 impl<'run> DirectCompletionClient<'run> {
     pub(super) fn runtime(
-        manager: Arc<RuntimeSessionManager>,
+        manager: Arc<RuntimeSessionServices>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         turn_id: Option<String>,
         turn_lease: Option<crate::RuntimeTurnLease>,

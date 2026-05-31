@@ -172,7 +172,7 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
     };
 
     entered_rx.await.expect("child provider entered");
-    let host = session.control().state().session_manager().await?;
+    let host = session.control().state().session_state_service().await?;
     let snapshot = tokio::time::timeout(std::time::Duration::from_millis(50), async {
         host.snapshot_session("child-observation").await
     })

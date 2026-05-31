@@ -985,7 +985,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                         Arc::new(|ctx, _args| {
                             Box::pin(async move {
                                 let handle = ctx
-                                    .host
+                                    .session_lifecycle
                                     .create_session(
                                         crate::SessionCreateRequest::root(
                                             crate::SessionStartPoint::CurrentSession,
@@ -1007,7 +1007,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                                 match handle {
                                     Ok(handle) => {
                                         let snapshot = ctx
-                                            .host
+                                            .sessions
                                             .snapshot_session(&handle.session_id)
                                             .await
                                             .map_err(|err| {
@@ -1102,8 +1102,10 @@ async fn session_manager_can_run_child_session_turn() {
         }),
     }]);
     let runtime = runtime_with_plugins(Vec::new(), transport).await;
-    let manager = runtime.session_manager().expect("session manager");
-    let handle = manager
+    let lifecycle = runtime
+        .session_lifecycle_service()
+        .expect("session lifecycle");
+    let handle = lifecycle
         .create_session(
             crate::SessionCreateRequest::root(
                 crate::SessionStartPoint::Empty,
@@ -1114,7 +1116,7 @@ async fn session_manager_can_run_child_session_turn() {
         )
         .await
         .expect("child session");
-    let assembled = manager
+    let assembled = lifecycle
         .start_turn(
             &handle.session_id,
             TurnInput {
@@ -1169,8 +1171,10 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
     );
     runtime.state.turn_index = 3;
 
-    let manager = runtime.session_manager().expect("session manager");
-    let handle = manager
+    let lifecycle = runtime
+        .session_lifecycle_service()
+        .expect("session lifecycle");
+    let handle = lifecycle
         .create_session(
             crate::SessionCreateRequest::child_session(
                 "root",
@@ -1212,8 +1216,10 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
 #[tokio::test]
 async fn child_relation_does_not_replace_active_session() {
     let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
-    let manager = runtime.session_manager().expect("session manager");
-    manager
+    let lifecycle = runtime
+        .session_lifecycle_service()
+        .expect("session lifecycle");
+    lifecycle
         .create_session(
             crate::SessionCreateRequest::child_session(
                 runtime.session_id(),
@@ -1251,8 +1257,10 @@ async fn child_relation_does_not_replace_active_session() {
 #[tokio::test]
 async fn session_manager_rejects_duplicate_child_session_ids() {
     let runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
-    let manager = runtime.session_manager().expect("session manager");
-    manager
+    let lifecycle = runtime
+        .session_lifecycle_service()
+        .expect("session lifecycle");
+    lifecycle
         .create_session(
             crate::SessionCreateRequest::root(
                 crate::SessionStartPoint::Empty,
@@ -1264,7 +1272,7 @@ async fn session_manager_rejects_duplicate_child_session_ids() {
         .await
         .expect("first child session");
 
-    let err = manager
+    let err = lifecycle
         .create_session(
             crate::SessionCreateRequest::root(
                 crate::SessionStartPoint::Empty,
@@ -1281,8 +1289,10 @@ async fn session_manager_rejects_duplicate_child_session_ids() {
 #[tokio::test]
 async fn runtime_can_activate_managed_child_session() {
     let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
-    let manager = runtime.session_manager().expect("session manager");
-    manager
+    let lifecycle = runtime
+        .session_lifecycle_service()
+        .expect("session lifecycle");
+    lifecycle
         .create_session(
             crate::SessionCreateRequest::child(
                 runtime.session_id(),
@@ -1304,7 +1314,7 @@ async fn runtime_can_activate_managed_child_session() {
 
     assert_eq!(runtime.session_id(), "child");
     assert!(
-        manager
+        lifecycle
             .start_turn(
                 "child",
                 TurnInput {

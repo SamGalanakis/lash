@@ -1751,7 +1751,7 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
         runtime_with_plugins_and_tools_and_host(Vec::new(), Arc::new(EmptyTools), transport, host)
             .await;
 
-    let manager = runtime.runtime_session_manager().expect("session manager");
+    let manager = runtime.runtime_session_services().expect("session manager");
     let direct = manager.direct_completion_client(
         RuntimeEffectControllerHandle::shared(Arc::new(recorder.clone())),
         None,
@@ -1820,7 +1820,7 @@ async fn in_turn_direct_completion_requires_lease_and_journals_under_it() {
         .await
         .expect("lease");
 
-    let manager = runtime.runtime_session_manager().expect("session manager");
+    let manager = runtime.runtime_session_services().expect("session manager");
     let direct = manager.direct_completion_client(
         RuntimeEffectControllerHandle::shared(Arc::new(recorder.clone())),
         Some("turn-direct".to_string()),
@@ -1872,7 +1872,7 @@ async fn direct_effect_restores_required_streaming_for_provider_execution() {
     )
     .await;
 
-    let manager = runtime.runtime_session_manager().expect("session manager");
+    let manager = runtime.runtime_session_services().expect("session manager");
     let direct = manager.direct_completion_client(
         RuntimeEffectControllerHandle::shared(Arc::new(InlineRuntimeEffectController::default())),
         None,
@@ -1922,7 +1922,7 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
         runtime_with_plugins_and_tools_and_host(Vec::new(), Arc::new(EmptyTools), transport, host)
             .await;
 
-    let manager = runtime.runtime_session_manager().expect("session manager");
+    let manager = runtime.runtime_session_services().expect("session manager");
     let direct = manager.direct_completion_client(
         RuntimeEffectControllerHandle::shared(Arc::new(recorder.clone())),
         None,
@@ -1993,7 +1993,7 @@ async fn direct_llm_completion_envelope_stores_attachment_refs_not_bytes() {
         provider_trace: None,
     };
 
-    let manager = runtime.runtime_session_manager().expect("session manager");
+    let manager = runtime.runtime_session_services().expect("session manager");
     let direct = manager.direct_completion_client(
         RuntimeEffectControllerHandle::shared(Arc::new(recorder.clone())),
         None,

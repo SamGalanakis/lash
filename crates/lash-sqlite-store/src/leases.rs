@@ -59,7 +59,7 @@ pub(crate) fn ensure_runtime_turn_lease_conn(
 
 pub(crate) fn ensure_runtime_turn_completion_conn(
     conn: &Connection,
-    completed: &lash_core::RuntimeTurnCompletion,
+    completed: &lash_core::store::RuntimeTurnCompletion,
 ) -> Result<(), StoreError> {
     let now = current_epoch_ms();
     let Some(current) =

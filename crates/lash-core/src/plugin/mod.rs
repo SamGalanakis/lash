@@ -68,7 +68,7 @@ pub use registry::{
 };
 pub use runtime_host::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectCompletion, DirectLlmCompletion,
-    RuntimeSessionHost,
+    SessionGraphService, SessionLifecycleService, SessionStateService,
 };
 pub use runtime_impl::{PluginHost, SessionAuthorityContext};
 pub(crate) use services::NoopSessionManager;
@@ -387,7 +387,7 @@ mod tests {
         let contributions = session
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
-                host: Arc::new(MockSessionManager::default()),
+                sessions: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::from_snapshot(&SessionSnapshot::default()),
                 protocol_turn_options: ProtocolTurnOptions::default(),
                 turn_context: crate::TurnContext::default(),
@@ -413,6 +413,8 @@ mod tests {
                 json!({"ok":true}),
                 None,
                 true,
+                Arc::new(MockSessionManager::default()),
+                Arc::new(MockSessionManager::default()),
                 Arc::new(MockSessionManager::default()),
                 Arc::new(crate::UnavailableProcessService),
             )
@@ -454,6 +456,8 @@ mod tests {
                 },
                 None,
                 true,
+                Arc::new(MockSessionManager::default()),
+                Arc::new(MockSessionManager::default()),
                 Arc::new(MockSessionManager::default()),
                 Arc::new(crate::UnavailableProcessService),
             )
@@ -534,6 +538,8 @@ mod tests {
                 None,
                 true,
                 Arc::new(MockSessionManager::default()),
+                Arc::new(MockSessionManager::default()),
+                Arc::new(MockSessionManager::default()),
                 Arc::new(crate::UnavailableProcessService),
             )
             .await
@@ -551,6 +557,8 @@ mod tests {
                 "root",
                 "mock.echo",
                 json!({"ok":true}),
+                Arc::new(MockSessionManager::default()),
+                Arc::new(MockSessionManager::default()),
                 Arc::new(MockSessionManager::default()),
                 Arc::new(crate::UnavailableProcessService),
             )
@@ -584,6 +592,8 @@ mod tests {
                 "child",
                 "mock.echo",
                 json!({"ok":true}),
+                Arc::new(MockSessionManager::default()),
+                Arc::new(MockSessionManager::default()),
                 Arc::new(MockSessionManager::default()),
                 Arc::new(crate::UnavailableProcessService),
             )

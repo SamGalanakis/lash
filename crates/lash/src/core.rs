@@ -1,4 +1,9 @@
 use crate::support::*;
+use lash_core::runtime::{
+    ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
+    RuntimeScope,
+};
 
 #[derive(Clone)]
 pub struct LashCore {
@@ -128,10 +133,10 @@ impl LashCore {
             return Err(EmbedError::MissingSessionStoreFactory);
         };
         let process = if let Some(process_registry) = self.env.process_registry.as_ref() {
-            let invocation = lash_core::RuntimeInvocation::effect(
-                lash_core::RuntimeScope::new(session_id.clone()),
+            let invocation = RuntimeInvocation::effect(
+                RuntimeScope::new(session_id.clone()),
                 format!("process:delete-session:{session_id}"),
-                lash_core::RuntimeEffectKind::Process,
+                RuntimeEffectKind::Process,
                 format!("{session_id}:delete-session"),
                 None,
             );
@@ -140,17 +145,15 @@ impl LashCore {
                 .core
                 .effect_controller
                 .execute_effect(
-                    lash_core::RuntimeEffectEnvelope::new(
+                    RuntimeEffectEnvelope::new(
                         invocation,
-                        lash_core::RuntimeEffectCommand::Process {
-                            command: lash_core::ProcessCommand::DeleteSession {
+                        RuntimeEffectCommand::Process {
+                            command: ProcessCommand::DeleteSession {
                                 session_id: session_id.clone(),
                             },
                         },
                     ),
-                    lash_core::RuntimeEffectLocalExecutor::process_control(Arc::clone(
-                        process_registry,
-                    )),
+                    RuntimeEffectLocalExecutor::process_control(Arc::clone(process_registry)),
                 )
                 .await
                 .map_err(|err| EmbedError::SessionDeleteProcess {
@@ -158,8 +161,8 @@ impl LashCore {
                     message: err.to_string(),
                 })?;
             match outcome {
-                lash_core::RuntimeEffectOutcome::Process {
-                    result: lash_core::ProcessEffectOutcome::DeleteSession { report },
+                RuntimeEffectOutcome::Process {
+                    result: ProcessEffectOutcome::DeleteSession { report },
                 } => Some(report),
                 other => {
                     return Err(EmbedError::SessionDeleteProcess {

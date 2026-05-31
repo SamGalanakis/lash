@@ -186,13 +186,14 @@ pub use plugin::{
     PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
     ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RewriteContext, RewriteTrigger,
     RuntimeServices, SessionAppendNode, SessionConfigChangedContext, SessionContextSurface,
-    SessionCreateRequest, SessionHandle, SessionParam, SessionPlugin, SessionPluginSource,
-    SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
-    SessionStateChangedContext, SessionToolAccess, SnapshotReader, SnapshotWriter,
-    SubagentSessionContext, ToolDiscoveryContext, ToolDiscoveryContribution,
-    ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolResultProjectionContext,
-    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
-    TurnResultHookContext, TurnResultSummary, TurnTransformContext, plugin_action_def,
+    SessionCreateRequest, SessionGraphService, SessionHandle, SessionLifecycleService,
+    SessionParam, SessionPlugin, SessionPluginSource, SessionReadView, SessionRelation,
+    SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionStateService,
+    SessionToolAccess, SnapshotReader, SnapshotWriter, SubagentSessionContext,
+    ToolDiscoveryContext, ToolDiscoveryContribution, ToolDiscoveryContributor,
+    ToolDiscoveryToolContribution, ToolResultProjectionContext, ToolResultProjector,
+    ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
+    TurnResultSummary, TurnTransformContext, plugin_action_def,
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{
@@ -208,37 +209,47 @@ pub use runtime::{
     DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig,
     DurableSubstrateFacet, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink,
     ExecutionSummary, InMemorySessionStore, InMemorySessionStoreFactory, InlineProcessRunHandle,
-    InlineRuntimeEffectController, InputItem, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
-    MergeKey, NoopEventSink, NoopTurnActivitySink, OutputState, PROCESS_LEASE_SCHEMA_VERSION,
-    ParkedSession, PreparedProcessEventAppend, ProcessAwaitOutput, ProcessCommand,
-    ProcessEffectOutcome, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessId, ProcessInput, ProcessLease, ProcessLeaseCompletion, ProcessListMode, ProcessOpScope,
-    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
-    ProcessRuntimeHost, ProcessScope, ProcessScopeId, ProcessService, ProcessSessionDeleteReport,
-    ProcessStartGrant, ProcessStartOptions, ProcessStatus, ProcessTerminalSemantics,
-    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
-    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkPoke, ProcessWorkRunner,
-    PromptUsage, ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
-    ProtocolTurnExtensionHandle, QUEUED_WORK_CLAIM_TTL_MS, QueuedCheckpointWork, QueuedTurnWork,
-    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
-    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, Residency, RuntimeCoreConfig,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
-    RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeInvocation,
-    RuntimeObservation, RuntimeReplay, RuntimeScope, RuntimeSessionState, RuntimeSubject,
+    InlineRuntimeEffectController, InputItem, LashRuntime, MergeKey, NoopEventSink,
+    NoopTurnActivitySink, OutputState, PROCESS_LEASE_SCHEMA_VERSION, ParkedSession,
+    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
+    ProcessEventType, ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor,
+    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessLease,
+    ProcessLeaseCompletion, ProcessListMode, ProcessOpScope, ProcessProvenance, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost, ProcessScope,
+    ProcessScopeId, ProcessService, ProcessSessionDeleteReport, ProcessStartGrant,
+    ProcessStartOptions, ProcessStatus, ProcessTerminalSemantics, ProcessTerminalSpec,
+    ProcessTerminalState, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
+    ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkPoke, ProcessWorkRunner, PromptUsage,
+    ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
+    ProtocolTurnExtensionHandle, Residency, RuntimeCoreConfig, RuntimeEnvironment,
+    RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeObservation,
     SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, SlotPolicy,
     TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink,
     TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions, UnavailableProcessService,
     UsageReportRow, UsageTotals, current_epoch_ms, diff_token_ledger, diff_usage_reports,
     ensure_durable_turn_input, epoch_ms_from_system_time, lashlang_process_event_types,
-    materialize_process_event_semantics, prepare_process_event_append,
-    prepare_process_registration, process_event_invocation, process_event_payload_hash,
-    process_wake_batch_draft, process_wake_delivery, process_wake_input_from_event_payload,
-    process_wake_turn_cause, process_wake_turn_text, require_event_replay,
     system_time_from_epoch_ms,
+};
+#[allow(unused_imports)]
+pub(crate) use runtime::{
+    LlmAttachmentSpec, PreparedProcessEventAppend, ProcessEventSemantics, QUEUED_WORK_CLAIM_TTL_MS,
+    QueuedCheckpointWork, QueuedTurnWork, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim,
+    QueuedWorkClaimBoundary, QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload,
+    RuntimeReplay, RuntimeScope, RuntimeSubject, materialize_process_event_semantics,
+    prepare_process_event_append, prepare_process_registration, process_event_invocation,
+    process_event_payload_hash, process_wake_batch_draft, process_wake_delivery,
+    process_wake_input_from_event_payload, process_wake_turn_cause, process_wake_turn_text,
+    require_event_replay,
+};
+// Effect / process-control / durable-state types consumed by external durable
+// backends (e.g. lash-restate's LashProcessWorkflow) and their integration
+// tests. Kept on the public surface; the rest of the runtime block above
+// stays crate-internal.
+pub use runtime::{
+    LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, ProcessEventSemanticsSpec,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimeSessionState,
 };
 pub use schemars::JsonSchema;
 pub use session::{
@@ -254,14 +265,21 @@ pub use session_model::{ConversationRecord, ProtocolEvent, SessionEventRecord, T
 pub use session_model::{ResolvedSessionPolicy, SessionPolicy, SessionSpec};
 pub use store::{
     AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
-    GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
-    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
-    RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
-    RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnCompletion,
-    RuntimeTurnLease, RuntimeTurnMachineConfigSnapshot, SessionCheckpoint, SessionHead,
-    SessionHeadMeta, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError, VacuumReport,
-    ensure_supported_schema_version, load_persisted_session_state,
-    load_persisted_session_state_active_path, refresh_persisted_session_state,
+    RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError, VacuumReport,
+};
+// Durable-state / checkpoint types consumed by external backends and their
+// conformance/integration tests (lash-sqlite-store, lash-restate, etc.).
+#[allow(unused_imports)]
+pub(crate) use store::{
+    GraphCommitDelta, PersistedSessionRead, RuntimeCommitResult, SessionCheckpoint,
+    SessionHeadMeta, ensure_supported_schema_version, load_persisted_session_state,
+    load_persisted_session_state_active_path,
+};
+pub use store::{
+    HydratedSessionCheckpoint, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+    RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
+    RuntimeEffectJournalRecord, RuntimeTurnCheckpoint, RuntimeTurnCompletion, RuntimeTurnLease,
+    RuntimeTurnMachineConfigSnapshot, SessionHead, refresh_persisted_session_state,
     runtime_turn_checkpoint_hash,
 };
 pub use tool_provider::{
@@ -300,5 +318,87 @@ mod tests {
 
         assert!(!source.contains(&removed_envelope));
         assert!(!source.contains(&removed_persisted));
+    }
+
+    fn public_reexport_block(source: &str, module: &str) -> String {
+        let start = format!("pub use {module}::{{");
+        let mut block = String::new();
+        let mut collecting = false;
+        for line in source.lines() {
+            if line.trim_start().starts_with(&start) {
+                collecting = true;
+            }
+            if collecting {
+                block.push_str(line);
+                block.push('\n');
+                if line.trim_end() == "};" {
+                    break;
+                }
+            }
+        }
+        assert!(!block.is_empty(), "missing public {module} re-export block");
+        block
+    }
+
+    #[test]
+    fn root_runtime_exports_exclude_internal_runtime_records() {
+        let runtime_exports = public_reexport_block(include_str!("lib.rs"), "runtime");
+        for removed in [
+            "RuntimeEffectCommand",
+            "RuntimeEffectEnvelope",
+            "RuntimeEffectKind",
+            "RuntimeEffectOutcome",
+            "RuntimeInvocation",
+            "RuntimeScope",
+            "RuntimeSessionState",
+            "QueuedWorkBatch",
+            "QueuedWorkBatchDraft",
+            "QueuedWorkPayload",
+            "prepare_process_registration",
+            "process_wake_batch_draft",
+            "require_event_replay",
+        ] {
+            assert!(
+                !runtime_exports.contains(removed),
+                "runtime root export leaked {removed}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_store_exports_exclude_wire_records() {
+        let store_exports = public_reexport_block(include_str!("lib.rs"), "store");
+        for removed in [
+            "SessionHead",
+            "SessionCheckpoint",
+            "RuntimeCommit",
+            "RuntimeTurnLease",
+            "RuntimeEffectJournalRecord",
+            "HydratedSessionCheckpoint",
+            "PersistedSessionRead",
+            "GraphCommitDelta",
+        ] {
+            assert!(
+                !store_exports.contains(removed),
+                "store root export leaked {removed}"
+            );
+        }
+    }
+
+    #[test]
+    fn removed_manager_and_host_trait_names_stay_removed() {
+        let removed_manager = ["Runtime", "Session", "Manager"].concat();
+        let removed_host = ["Runtime", "Session", "Host"].concat();
+        let sources = [
+            include_str!("runtime/session_manager/mod.rs"),
+            include_str!("plugin/runtime_host.rs"),
+            include_str!("tool_dispatch/context.rs"),
+            include_str!("tool_provider.rs"),
+        ];
+
+        for source in sources {
+            assert!(!source.contains(&removed_manager));
+            assert!(!source.contains(&removed_host));
+        }
     }
 }

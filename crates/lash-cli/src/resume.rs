@@ -6,6 +6,7 @@ use lash::control::SessionConfigPatch;
 use lash_core::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, fresh_message_id,
 };
+use lash_core::store::HydratedSessionCheckpoint;
 use lash_core::{
     PersistedSessionConfig, PersistedTurnState, PromptUsage, ProviderHandle, TokenUsage, ToolState,
 };
@@ -129,7 +130,7 @@ async fn apply_graph_resume_state(
     graph: lash_core::SessionGraph,
     config: Option<lash_core::PersistedSessionConfig>,
     _token_ledger: Vec<lash_core::TokenLedgerEntry>,
-    checkpoint: Option<lash_core::HydratedSessionCheckpoint>,
+    checkpoint: Option<HydratedSessionCheckpoint>,
     _checkpoint_ref: Option<lash_core::BlobRef>,
     history: &mut Vec<Message>,
     runtime: &mut Option<LashSession>,
@@ -356,10 +357,10 @@ mod tests {
     fn persist_session_head(
         store: &Store,
         graph: lash_core::SessionGraph,
-        checkpoint: lash_core::HydratedSessionCheckpoint,
+        checkpoint: lash_core::store::HydratedSessionCheckpoint,
     ) {
         let checkpoint_ref = store.put_checkpoint(&checkpoint).checkpoint_ref;
-        store.save_session_head(lash_core::SessionHead {
+        store.save_session_head(lash_core::store::SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
             agent_frames: Vec::new(),
@@ -382,11 +383,11 @@ mod tests {
         last_prompt_usage: Option<PromptUsage>,
     ) -> (
         lash_core::SessionGraph,
-        lash_core::HydratedSessionCheckpoint,
+        lash_core::store::HydratedSessionCheckpoint,
     ) {
         (
             lash_core::SessionGraph::from_active_read_state(&messages, &[]),
-            lash_core::HydratedSessionCheckpoint {
+            lash_core::store::HydratedSessionCheckpoint {
                 turn_state: lash_core::PersistedTurnState {
                     turn_index: iteration,
                     token_usage,
