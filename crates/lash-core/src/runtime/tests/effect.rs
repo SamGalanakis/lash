@@ -1840,6 +1840,26 @@ async fn in_turn_direct_completion_requires_lease_and_journals_under_it() {
     }));
     assert_eq!(store.runtime_effect_journal_save_count(), 1);
     assert!(store.runtime_turn_lease_renew_count() >= 1);
+
+    // A direct effect must record usage into the shared in-memory ledger only;
+    // that ledger is drained and persisted exactly once by the lease-fenced
+    // turn-commit pipeline. The direct path must NOT issue its own
+    // out-of-band `commit_runtime_state` mid-turn: doing so races the owning
+    // turn's head-revision CAS, and — because the effect's `apply` re-runs on
+    // journal replay — would double-merge the usage into the durable cost
+    // ledger on every crash/resume. Since the path performs zero durable
+    // commits, replay cannot double-count it.
+    assert_eq!(
+        *store
+            .runtime_commit_count
+            .lock()
+            .expect("runtime commit count"),
+        0,
+        "in-turn direct completion must not commit runtime state out-of-band"
+    );
+    let ledger = runtime.shared_token_ledger.lock().expect("token ledger");
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0].usage.input_tokens, 7);
 }
 
 #[tokio::test]
