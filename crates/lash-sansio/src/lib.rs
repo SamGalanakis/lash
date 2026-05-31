@@ -46,10 +46,10 @@ pub use session_model::{
     default_prompt_template, messages_are_prompt_resume_safe, resolve_prompt_layers, shared_parts,
 };
 pub use tool_contract::{
-    CompactToolContract, ModelTool, SchemaProjectionOverride, ToolActivation,
+    CompactToolContract, LashSchema, ModelTool, SchemaProjectionOverride, ToolActivation,
     ToolAgentExecutableSurface, ToolAgentSurface, ToolArgumentProjectionPolicy, ToolAvailability,
     ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolId, ToolManifest, ToolOutputContract,
-    ToolRetryPolicy, ToolScheduling, schema_for,
+    ToolRetryPolicy, ToolScheduling, schema_for, validate_tool_input,
 };
 pub use tool_output::{
     ModelToolReturn, ModelToolReturnPart, ToolCallOutcome, ToolCallOutput, ToolCallRecord,

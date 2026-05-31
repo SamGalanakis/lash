@@ -12,11 +12,11 @@ Most agent stacks treat the LLM as the runtime and stitch state around it — a 
 
 ### Durable per-turn commits
 
-Every completed turn lands as one lease-fenced `RuntimeCommit` against a `SessionGraph` — graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS. In-flight turns persist separately as a lease-guarded `RuntimeTurnCheckpoint` plus effect-journal records. Scoped durable turns renew the same `RuntimeTurnLease` before checkpoint and journal writes, abandon ownership on non-commit exits while preserving resumable state, and clear the turn's checkpoint and journal only through a final commit that still owns an active, unexpired lease.
+Every completed turn lands as one semantic `RuntimeCommit` against a `SessionGraph` — graph delta, checkpoint blobs, usage deltas, queued-work completions, attachment manifests, and head revision in one optimistic transaction. Lash owns stable `turn_id`s, replay keys, checkpoint hashes, causal metadata, and final commit idempotency. Durable turn providers own only in-flight effect replay: embedded SQLite uses lease-guarded turn checkpoints plus effect-journal rows, while substrate-native adapters use the provider's history and timers. Effects are the replay boundary; turns are the semantic commit boundary.
 
 ### Sans-IO state machine for workflow integration
 
-`lash-core::RuntimeEffectController` is the durable boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process control, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with a typed `RuntimeInvocation`: scoped session/turn coordinates, a subject, optional causal parent, `replay.key`, checkpoint digest, and ref-only attachment specs. The default inline controller runs in process; workflow adapters pass a scoped controller with a stable turn id, while `LashRuntime::resume_turn(...)` / `LashSession::resume_turn(...)` reload the saved turn checkpoint and replay completed effects from the runtime journal. Process handles are explicit runtime support: install a deployment-level `ProcessRegistry` such as `lash-sqlite-store::SqliteProcessRegistry` when the host wants background process control; otherwise process start/list/await/cancel/transfer/cleanup fail loudly.
+`lash-core::RuntimeEffectController` is the boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process control, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with a typed `RuntimeInvocation`: scoped session/turn coordinates, a subject, optional causal parent, `replay.key`, checkpoint digest, and ref-only attachment specs. The default inline controller runs in process; workflow adapters pass a `DurableTurnScope` with a stable turn id. Embedded recovery uses `LashRuntime::resume_turn(...)` / `LashSession::resume_turn(...)` to reload a saved Lash checkpoint and replay embedded effect-journal outcomes. Substrate-native recovery reruns the provider handler with the same turn id and lets provider history replay effects before Lash retries the final idempotent commit. Process handles are explicit runtime support: install a deployment-level `ProcessRegistry` such as `lash-sqlite-store::SqliteProcessRegistry` when the host wants background process control; otherwise process start/list/await/cancel/transfer/cleanup fail loudly.
 
 ### Two execution modes, one commit unit
 
@@ -106,7 +106,7 @@ See [`docs/quickstart.html`](https://lash.run/quickstart.html) for the full walk
 
 ## Run the example
 
-`examples/agent-service` is a localhost SQLite-backed chat app that exercises the `lash` facade end-to-end: RLM protocol, typed session plugin activation, app-owned board tools, semantic streaming, per-chat model selection, SQLite runtime persistence, and optional Restate turn durability.
+`examples/agent-service` is a localhost SQLite-backed chat app that exercises the `lash` facade end-to-end: RLM protocol, typed session plugin activation, app-owned board tools, semantic streaming, per-chat model selection, SQLite runtime persistence, and optional Restate durable turn.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... cargo run -p agent-service
@@ -116,7 +116,7 @@ Then open <http://127.0.0.1:3000>. See [`examples/agent-service/README.md`](exam
 
 ## The CLI
 
-`lash-cli` is a first-party terminal frontend on top of the library — coding-agent affordances (patch-based editing, shell execution, file search, web search, planning, skills, host-backed subagents, session resume / retry, provider-native variants, live token accounting). It's not the product, but it's a fully featured way to drive the runtime from a terminal and a useful reference for end-to-end integration.
+`lash-cli` is a first-party terminal frontend on top of the library — coding-agent affordances (patch-based editing, shell execution, file search, web search, planning, skills, host-backed subagents, session resume / retry, model-native variants, live token accounting). It's not the product, but it's a fully featured way to drive the runtime from a terminal and a useful reference for end-to-end integration.
 
 ![lash TUI](screenshot.png)
 
@@ -143,7 +143,7 @@ The CI runtime-performance gate uses the quick synthetic profile:
 python3 scripts/profile_runtime.py --profile quick --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/ci.json
 ```
 
-That default matrix covers standard mode, RLM, RLM tool batches, large tool surfaces, observational-memory prompt and maintenance paths, embed paths, streaming, scoped effect controllers, store reopen, and durable turn-checkpoint round trips. The nightly / manual `Performance` workflow runs the full runtime profile:
+That default matrix covers standard mode, RLM, RLM tool batches, large tool surfaces, observational-memory prompt and maintenance paths, embed paths, streaming, durable turn scopes, store reopen, and durable turn-checkpoint round trips. The nightly / manual `Performance` workflow runs the full runtime profile:
 
 ```bash
 python3 scripts/profile_runtime.py --profile full --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/full.json

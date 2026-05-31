@@ -5,7 +5,7 @@ pub(crate) use std::sync::{Arc, Mutex as StdMutex};
 pub(crate) use async_trait::async_trait;
 pub(crate) use lash_core::plugin::StaticPluginFactory;
 pub(crate) use lash_core::runtime::{
-    RuntimeEffectController, RuntimeEffectControllerScope, RuntimeSessionState,
+    DurableTurnScope, RuntimeEffectController, RuntimeSessionState,
 };
 pub(crate) use lash_core::{
     DurabilityTier, DurableProcessWorker, DurableProcessWorkerConfig, LashRuntime, MessageRole,

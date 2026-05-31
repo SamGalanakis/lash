@@ -8,15 +8,14 @@ pub use envelope::{
     RuntimeInvocation, RuntimeReplay, RuntimeScope, RuntimeSubject,
 };
 pub use executor::{
-    InlineRuntimeEffectController, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectControllerScope, RuntimeEffectLocalExecutor,
+    DurableTurnScope, InlineRuntimeEffectController, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectLocalExecutor,
 };
 
 pub(crate) use executor::{ProcessRunner, RuntimeEffectControllerHandle};
 pub(crate) use journal::{
-    JournaledEffectInvocation, LlmTraceFailure, apply_direct_outcome, emit_llm_trace_completed,
-    emit_llm_trace_failed, emit_llm_trace_started, execute_effect_with_journal,
-    invoke_journaled_effect, renew_runtime_turn_lease_for_effect, token_usage_from_llm,
+    LlmTraceFailure, apply_direct_outcome, emit_llm_trace_completed, emit_llm_trace_failed,
+    emit_llm_trace_started, token_usage_from_llm,
 };
 
 #[cfg(test)]

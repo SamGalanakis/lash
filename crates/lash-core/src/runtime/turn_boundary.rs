@@ -9,7 +9,8 @@ use crate::{
 };
 
 use super::{
-    RuntimeError, RuntimeErrorCode, RuntimeSessionState, TurnCommitDraft, merge_ledger_entry,
+    DurableTurnProvider, DurableTurnRun, RuntimeError, RuntimeErrorCode, RuntimeSessionState,
+    TurnCommitDraft, merge_ledger_entry,
 };
 
 pub(super) struct ProgressBoundaryCommit {
@@ -65,7 +66,7 @@ struct FinalCommitInput<'a> {
     store: Option<&'a (dyn RuntimePersistence + 'a)>,
     usage_deltas: &'a [crate::TokenLedgerEntry],
     outcome: &'a TurnOutcome,
-    completed_turn: Option<crate::RuntimeTurnCompletion>,
+    durable_turn: Option<(&'a dyn DurableTurnProvider, DurableTurnRun)>,
     completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
 }
 
@@ -296,7 +297,7 @@ impl TurnBoundary {
         returned_turn: &mut AssembledTurn,
         session: Option<&mut Session>,
         usage_deltas: &[crate::TokenLedgerEntry],
-        completed_turn: Option<crate::RuntimeTurnCompletion>,
+        durable_turn: Option<(&dyn DurableTurnProvider, DurableTurnRun)>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     ) -> Result<(), RuntimeError> {
         let (store, plugins, execution_state_snapshot) = match session {
@@ -316,7 +317,7 @@ impl TurnBoundary {
             store: store.as_ref().map(|store| store.as_ref()),
             usage_deltas,
             outcome: &returned_turn.outcome,
-            completed_turn,
+            durable_turn,
             completed_queue_claims,
         })
         .await
@@ -392,7 +393,7 @@ impl TurnBoundary {
             store,
             usage_deltas,
             outcome,
-            completed_turn,
+            durable_turn,
             completed_queue_claims,
         } = input;
         let state = self.final_state_mut();
@@ -449,7 +450,7 @@ impl TurnBoundary {
                 store,
                 graph,
                 usage_deltas,
-                completed_turn,
+                durable_turn,
                 completed_queue_claims,
             )
             .await
@@ -464,16 +465,19 @@ impl TurnBoundary {
         store: &(dyn RuntimePersistence + '_),
         graph: GraphCommitDelta,
         usage_deltas: &[crate::TokenLedgerEntry],
-        completed_turn: Option<crate::RuntimeTurnCompletion>,
+        durable_turn: Option<(&dyn DurableTurnProvider, DurableTurnRun)>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     ) -> Result<(), StoreError> {
         let state = self.state_mut();
         let mark = PersistedGraphMark::from_graph_commit(&graph);
         let mut commit =
             RuntimeCommit::persisted_state_with_graph_commit(state, graph, usage_deltas);
-        commit.completed_turn = completed_turn;
         commit.completed_queue_claims = completed_queue_claims;
-        let result = store.commit_runtime_state(commit).await?;
+        let result = if let Some((backend, run)) = durable_turn {
+            backend.finalize_turn(run, commit, store).await?
+        } else {
+            store.commit_runtime_state(commit).await?
+        };
         state.apply_persisted_commit_result(result);
         if let TurnCommitStage::Drafting(draft) = &mut self.stage {
             match mark {
@@ -946,7 +950,7 @@ mod tests {
                 usage_deltas: &usage,
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 tool_calls: &[],
-                completed_turn: None,
+                durable_turn: None,
                 completed_queue_claims: Vec::new(),
             })
             .await
@@ -985,7 +989,7 @@ mod tests {
                 usage_deltas: &[],
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 tool_calls: &[],
-                completed_turn: None,
+                durable_turn: None,
                 completed_queue_claims: Vec::new(),
             })
             .await

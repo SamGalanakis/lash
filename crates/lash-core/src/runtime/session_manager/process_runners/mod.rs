@@ -503,7 +503,7 @@ mod tests {
         // Process execution identity is the persisted process_id; a retry/
         // recovery that presents an empty (fresh, non-persisted) id has lost its
         // idempotency anchor and must fail loudly, mirroring the empty-turn-id
-        // rejection in `RuntimeEffectControllerScope::new`.
+        // rejection in `DurableTurnScope::new`.
         let registry = Arc::new(crate::TestLocalProcessRegistry::default());
         let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
         let factory =

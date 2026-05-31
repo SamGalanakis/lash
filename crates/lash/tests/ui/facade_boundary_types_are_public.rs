@@ -8,10 +8,10 @@ use lash::direct::{
 };
 use lash::messages::MessageRole;
 use lash::persistence::{
-    GcReport, GraphCommitDelta, PersistedSessionRead, RuntimeSessionState, RuntimeCommit,
-    RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
-    RuntimeTurnLease, SessionCheckpoint, SessionMeta, SessionNodeRecord, SessionReadScope,
-    StoreError, TokenLedgerEntry, VacuumReport,
+    EmbeddedDurableTurnStore, GcReport, GraphCommitDelta, PersistedSessionRead,
+    RuntimeCommit, RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence,
+    RuntimeSessionState, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionCheckpoint, SessionMeta,
+    SessionNodeRecord, SessionReadScope, StoreError, TokenLedgerEntry, VacuumReport,
     load_persisted_session_state, load_persisted_session_state_active_path,
 };
 use lash::plugins::{
@@ -67,6 +67,33 @@ impl RuntimePersistence for FacadeStore {
 
     lash::impl_unsupported_queued_work_methods!();
 
+    fn embedded_durable_turn_store(&self) -> Option<&dyn EmbeddedDurableTurnStore> {
+        Some(self)
+    }
+
+    async fn save_session_meta(&self, _meta: SessionMeta) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
+        Ok(None)
+    }
+
+    async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn vacuum(&self) -> Result<VacuumReport, StoreError> {
+        Ok(VacuumReport::default())
+    }
+
+    async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
+        Ok(GcReport::default())
+    }
+}
+
+#[async_trait]
+impl EmbeddedDurableTurnStore for FacadeStore {
     async fn claim_runtime_turn_lease(
         &self,
         session_id: &str,
@@ -135,26 +162,6 @@ impl RuntimePersistence for FacadeStore {
         _replay_key: &str,
     ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError> {
         Ok(None)
-    }
-
-    async fn save_session_meta(&self, _meta: SessionMeta) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
-        Ok(None)
-    }
-
-    async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    async fn vacuum(&self) -> Result<VacuumReport, StoreError> {
-        Ok(VacuumReport::default())
-    }
-
-    async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
-        Ok(GcReport::default())
     }
 }
 

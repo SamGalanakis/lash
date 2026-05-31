@@ -149,7 +149,7 @@ async fn main() -> anyhow_like::Result<()> {
             {
                 // Base controller for turns that run outside a Restate
                 // workflow scope; durable turns pass a scoped controller per
-                // turn via `stream_with_effect_scope`. The Restate ingress
+                // turn via `stream_with_durable_turn`. The Restate ingress
                 // runner is the sole executor of out-of-turn/background
                 // processes, so disable the default inline runner and hand the
                 // core its poke (fired after every successful process start).

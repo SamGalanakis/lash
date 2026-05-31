@@ -3,7 +3,7 @@ use crate::PluginError;
 
 impl<'run> RuntimeTurnDriver<'run> {
     pub(super) fn effect_controller_handle(&self) -> RuntimeEffectControllerHandle<'run> {
-        RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller())
+        RuntimeEffectControllerHandle::borrowed(self.durable_turn_scope.controller())
     }
 
     pub(super) fn execution_context(

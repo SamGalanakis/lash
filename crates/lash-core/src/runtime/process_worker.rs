@@ -491,7 +491,7 @@ impl DurableProcessWorker {
     /// `run` re-invocation (keyed `LashProcessWorkflow/{process_id}`) or a
     /// recovery sweep re-running a non-terminal row — must present that stable
     /// id. An empty/fresh id has lost its idempotency anchor and is rejected
-    /// loudly here, mirroring how `RuntimeEffectControllerScope::new` rejects an
+    /// loudly here, mirroring how `DurableTurnScope::new` rejects an
     /// empty turn id at the durable-effect boundary.
     fn ensure_stable_process_id(
         &self,

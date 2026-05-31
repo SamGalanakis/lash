@@ -139,13 +139,13 @@ impl TurnBuilder {
         })
     }
 
-    pub async fn run_with_effect_scope(
+    pub async fn run_with_durable_turn(
         self,
-        effect_scope: RuntimeEffectControllerScope<'_>,
+        durable_turn_scope: DurableTurnScope<'_>,
     ) -> Result<TurnOutput> {
         let collector = RunActivityCollector::default();
         let result = self
-            .stream_with_effect_scope(&collector, effect_scope)
+            .stream_with_durable_turn(&collector, durable_turn_scope)
             .await?;
         Ok(TurnOutput {
             result,
@@ -191,17 +191,17 @@ impl TurnBuilder {
         stream_prepared_turn(&runtime, input, TurnSinks::turn(events), None, cancel).await
     }
 
-    pub async fn stream_with_effect_scope(
+    pub async fn stream_with_durable_turn(
         self,
         events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectControllerScope<'_>,
+        durable_turn_scope: DurableTurnScope<'_>,
     ) -> Result<TurnResult> {
         let (runtime, input, cancel) = self.prepare()?;
         stream_prepared_turn(
             &runtime,
             input,
             TurnSinks::turn(events),
-            Some(effect_scope),
+            Some(durable_turn_scope),
             cancel,
         )
         .await
@@ -280,13 +280,13 @@ impl ResumeTurnBuilder {
         })
     }
 
-    pub async fn run_with_effect_scope(
+    pub async fn run_with_durable_turn(
         self,
-        effect_scope: RuntimeEffectControllerScope<'_>,
+        durable_turn_scope: DurableTurnScope<'_>,
     ) -> Result<TurnOutput> {
         let collector = RunActivityCollector::default();
         let result = self
-            .stream_with_effect_scope(&collector, effect_scope)
+            .stream_with_durable_turn(&collector, durable_turn_scope)
             .await?;
         Ok(TurnOutput {
             result,
@@ -307,17 +307,19 @@ impl ResumeTurnBuilder {
         })
     }
 
-    pub async fn collect_with_effect_scope(
+    pub async fn collect_with_durable_turn(
         self,
         events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectControllerScope<'_>,
+        durable_turn_scope: DurableTurnScope<'_>,
     ) -> Result<TurnOutput> {
         let collector = RunActivityCollector::default();
         let fanout = BorrowedTurnActivityFanout {
             live: events,
             collector: &collector,
         };
-        let result = self.stream_with_effect_scope(&fanout, effect_scope).await?;
+        let result = self
+            .stream_with_durable_turn(&fanout, durable_turn_scope)
+            .await?;
         Ok(TurnOutput {
             result,
             activities: collector.into_activities(),
@@ -336,16 +338,16 @@ impl ResumeTurnBuilder {
         Ok(TurnResult::from_assembled(assembled))
     }
 
-    pub async fn stream_with_effect_scope(
+    pub async fn stream_with_durable_turn(
         self,
         events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectControllerScope<'_>,
+        durable_turn_scope: DurableTurnScope<'_>,
     ) -> Result<TurnResult> {
         let assembled = resume_prepared_assembled(
             &self.runtime,
             &self.turn_id,
             TurnSinks::turn(events),
-            Some(effect_scope),
+            Some(durable_turn_scope),
             self.cancel,
         )
         .await?;
@@ -380,16 +382,16 @@ impl AdvancedResumeTurn {
         Ok(TurnResult::from_assembled(assembled))
     }
 
-    pub async fn collect_session_events_with_effect_scope(
+    pub async fn collect_session_events_with_durable_turn(
         self,
         events: &dyn EventSink,
-        effect_scope: RuntimeEffectControllerScope<'_>,
+        durable_turn_scope: DurableTurnScope<'_>,
     ) -> Result<TurnResult> {
         let assembled = resume_prepared_assembled(
             &self.builder.runtime,
             &self.builder.turn_id,
             TurnSinks::session(events),
-            Some(effect_scope),
+            Some(durable_turn_scope),
             self.builder.cancel,
         )
         .await?;
@@ -428,13 +430,13 @@ pub(crate) async fn resume_prepared_assembled(
     runtime: &RuntimeHandle,
     turn_id: &str,
     sinks: TurnSinks<'_>,
-    effect_scope: Option<RuntimeEffectControllerScope<'_>>,
+    durable_turn_scope: Option<DurableTurnScope<'_>>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
     let turn = writer
-        .resume_turn(turn_id, turn_options(sinks, effect_scope, cancel))
+        .resume_turn(turn_id, turn_options(sinks, durable_turn_scope, cancel))
         .await?;
     runtime.publish_from(&writer);
     Ok(turn)
@@ -468,7 +470,7 @@ pub(crate) async fn stream_next_queued_prepared_assembled(
 
 fn turn_options<'a>(
     sinks: TurnSinks<'a>,
-    effect_scope: Option<RuntimeEffectControllerScope<'a>>,
+    durable_turn_scope: Option<DurableTurnScope<'a>>,
     cancel: CancellationToken,
 ) -> lash_core::TurnOptions<'a> {
     let mut opts = lash_core::TurnOptions::new(cancel);
@@ -478,8 +480,8 @@ fn turn_options<'a>(
     if let Some(turn_events) = sinks.turn_events() {
         opts = opts.with_turn_events(turn_events);
     }
-    if let Some(effect_scope) = effect_scope {
-        opts = opts.with_effect_scope(effect_scope);
+    if let Some(durable_turn_scope) = durable_turn_scope {
+        opts = opts.with_durable_turn_scope(durable_turn_scope);
     }
     opts
 }
@@ -512,14 +514,14 @@ pub(crate) async fn stream_prepared_turn(
     runtime: &RuntimeHandle,
     input: TurnInput,
     sinks: TurnSinks<'_>,
-    effect_scope: Option<RuntimeEffectControllerScope<'_>>,
+    durable_turn_scope: Option<DurableTurnScope<'_>>,
     cancel: CancellationToken,
 ) -> Result<TurnResult> {
     let turn = Box::pin(stream_prepared_assembled(
         runtime,
         input,
         sinks,
-        effect_scope,
+        durable_turn_scope,
         cancel,
     ))
     .await?;
@@ -530,14 +532,14 @@ pub(crate) async fn stream_prepared_assembled(
     runtime: &RuntimeHandle,
     input: TurnInput,
     sinks: TurnSinks<'_>,
-    effect_scope: Option<RuntimeEffectControllerScope<'_>>,
+    durable_turn_scope: Option<DurableTurnScope<'_>>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
     let turn = Box::pin(stream_prepared_agent_frame_run(
         runtime,
         input,
         sinks,
-        effect_scope,
+        durable_turn_scope,
         cancel,
     ))
     .await?;
@@ -553,7 +555,7 @@ pub(crate) async fn stream_prepared_agent_frame_run(
     runtime: &RuntimeHandle,
     input: TurnInput,
     sinks: TurnSinks<'_>,
-    effect_scope: Option<RuntimeEffectControllerScope<'_>>,
+    durable_turn_scope: Option<DurableTurnScope<'_>>,
     cancel: CancellationToken,
 ) -> Result<lash_core::AgentFrameRun> {
     let writer_handle = runtime.writer();
@@ -565,7 +567,8 @@ pub(crate) async fn stream_prepared_agent_frame_run(
             .map_err(EmbedError::Session)?;
     }
     let turn = Box::pin(
-        writer.stream_turn_with_agent_frames(input, turn_options(sinks, effect_scope, cancel)),
+        writer
+            .stream_turn_with_agent_frames(input, turn_options(sinks, durable_turn_scope, cancel)),
     )
     .await?;
     runtime.publish_from(&writer);

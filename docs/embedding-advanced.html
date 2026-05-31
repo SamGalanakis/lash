@@ -66,7 +66,7 @@ let core = LashCore::rlm()
         <div class="section" id="durable-workflows">
           <div class="section-header">
             <h2>Durable Workflows</h2>
-            <p>Standard <code>LashCore</code> persists at the turn boundary. For sub-turn durability — expensive LLM calls, long tool calls, process control, mid-turn worker migration — run the turn with a scoped <code>RuntimeEffectController</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
+            <p>Standard <code>LashCore</code> persists at the turn boundary. For durable in-flight effects — expensive LLM calls, long tool calls, process control, mid-turn worker migration — run the turn with a scoped <code>RuntimeEffectController</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
           </div>
           <p>Shape: the runtime driver polls <code>TurnMachine</code> and claims a <code>RuntimeTurnLease</code>. For each reply-producing turn effect it saves a lease-guarded <code>RuntimeTurnCheckpoint</code>, builds a <code>RuntimeEffectEnvelope</code> with a typed <code>RuntimeInvocation</code>, invokes the active scoped controller, renews the same lease token before journaling the returned outcome by <code>replay.key</code>, and feeds it back as the matching response. <code>LashSession::resume_turn(turn_id)</code> claims ownership again, reloads the checkpoint, and replays any already-completed effect outcomes without rerunning input hooks or stream history. Controller/runtime errors abandon lease ownership while preserving resumable state; only the final commit clears the checkpoint and journal.</p>
           <p>Full contract: <a href="./architecture/durability.html">Architecture → Durability</a>. Embedders without workflow orchestration use the regular <a href="./persistence.html">session-store path</a>.</p>
@@ -168,7 +168,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
         <div class="section" id="complete-example">
           <div class="section-header">
             <h2>Complete Example</h2>
-            <p>The browser example: application chat database, RLM mode, typed session plugin activation, app-owned board tools, semantic stream events, terminal rendering from <code>TurnOutput</code>, and optional Restate turn durability.</p>
+            <p>The browser example: application chat database, RLM mode, typed session plugin activation, app-owned board tools, semantic stream events, terminal rendering from <code>TurnOutput</code>, and optional Restate durable turns.</p>
           </div>
           <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
 # then open http://127.0.0.1:3000</code></pre>

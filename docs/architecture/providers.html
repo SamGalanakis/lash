@@ -126,7 +126,7 @@
             <article class="panel"><h3>Auth</h3><p>Bearer header, OAuth refresh, device-code flow — whatever the vendor requires. Auth state is opaque to the runtime.</p></article>
             <article class="panel"><h3>Readiness</h3><p>Optional pre-flight check (token refresh, capability probe) that runs once per session.</p></article>
             <article class="panel"><h3>Transport</h3><p>The actual HTTP call. Translates <code>LlmRequest</code> to the wire format, streams the response, normalizes back to <code>LlmResponse</code> chunks.</p></article>
-            <article class="panel"><h3>Model policy</h3><p>Maps user-facing model + variant names to provider-native ids, declares structured-output / tool-call / thinking capabilities per model.</p></article>
+            <article class="panel"><h3>Model policy</h3><p>Maps user-facing model + variant names to model-native ids, declares structured-output / tool-call / thinking capabilities per model.</p></article>
             <article class="panel"><h3>Factory</h3><p>Materializes host config into provider components; <code>ProviderHandle::new(components)</code> assembles the five pieces into the live handle the runtime can use.</p></article>
           </div>
           <p>See <code>lash-provider-openai</code> as the most general template — it handles both the direct Responses path and the generic Chat Completions path in one crate.</p>

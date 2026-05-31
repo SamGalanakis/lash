@@ -213,16 +213,18 @@ impl DirectCompletionCapability {
             request,
             usage_source,
         } = plan;
-        crate::runtime::effect::invoke_journaled_effect(
-            crate::runtime::effect::JournaledEffectInvocation::new(
-                current.store.as_ref().map(|store| store.as_ref()),
-                context.turn_lease,
-                context.effect_controller,
-                envelope,
-                crate::RuntimeEffectLocalExecutor::direct(
-                    provider,
-                    Arc::clone(&current.host.core.durability.attachment_store),
-                ),
+        let journal_store = context
+            .turn_lease
+            .and_then(|_| current.store.as_ref())
+            .and_then(|store| store.embedded_durable_turn_store());
+        crate::runtime::invoke_embedded_journaled_effect(
+            journal_store,
+            context.turn_lease,
+            context.effect_controller,
+            envelope,
+            crate::RuntimeEffectLocalExecutor::direct(
+                provider,
+                Arc::clone(&current.host.core.durability.attachment_store),
             ),
             |outcome| async move {
                 crate::runtime::effect::apply_direct_outcome(

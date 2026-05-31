@@ -22,7 +22,6 @@ pub mod tool_dispatch;
 mod tool_provider;
 pub mod tool_registry;
 mod tool_result;
-mod tool_schema;
 mod trace;
 
 pub use lash_sansio::sansio;
@@ -55,24 +54,24 @@ pub use lash_sansio::llm::types::{
 pub use lash_sansio::{
     AcceptedInjectedTurnInput, AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef,
     BaseRenderCache, CheckpointDelivery, CheckpointKind, CompactToolContract, EffectId,
-    ErrorEnvelope, ExecImage, ExecResponse, ImageMediaType, LlmCallError, MediaType, Message,
-    MessageOrigin, MessageRole, MessageSequence, ModelToolReturn, ModelToolReturnPart, Part,
-    PartKind, PluginMessage, PluginRuntimeEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin,
-    PromptContext, PromptContribution, PromptContributionGate, PromptContributionSet,
-    PromptFingerprint, PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer,
-    Response, SchemaProjectionOverride, SessionEvent, TextProjectionMetadata, TokenUsage,
-    ToolActivation, ToolAgentExecutableSurface, ToolAgentSurface, ToolArgumentProjectionPolicy,
-    ToolAvailability, ToolAvailabilityConfig, ToolCallOutcome, ToolCallOutput, ToolCallRecord,
-    ToolCallStatus, ToolCancellation, ToolContract, ToolControl, ToolDefinition, ToolFailure,
-    ToolFailureClass, ToolFailureSource, ToolId, ToolManifest, ToolOutputContract,
-    ToolRetryDisposition, ToolRetryPolicy, ToolScheduling, ToolSurface, ToolSurfaceBuildInput,
-    ToolSurfaceEntry, ToolSurfaceOverride, ToolValue, TurnCause, TurnFinish, TurnLimitFinalMessage,
-    TurnOutcome, TurnStop, append_assistant_text_part, build_prompt, build_tool_surface,
-    build_turn, default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
-    normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
-    prompt_tool_names_fingerprint, reasoning_part, render_turn_causes_prompt,
-    resolve_prompt_layers, shared_parts,
+    ErrorEnvelope, ExecImage, ExecResponse, ImageMediaType, LashSchema, LlmCallError, MediaType,
+    Message, MessageOrigin, MessageRole, MessageSequence, ModelToolReturn, ModelToolReturnPart,
+    Part, PartKind, PluginMessage, PluginRuntimeEvent, PreparedPrompt, PromptBuildInput,
+    PromptBuiltin, PromptContext, PromptContribution, PromptContributionGate,
+    PromptContributionSet, PromptFingerprint, PromptLayer, PromptSlot, PromptSlotLayer,
+    PromptTemplate, PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt,
+    ResolvedPromptLayer, Response, SchemaProjectionOverride, SessionEvent, TextProjectionMetadata,
+    TokenUsage, ToolActivation, ToolAgentExecutableSurface, ToolAgentSurface,
+    ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolCallOutcome,
+    ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation, ToolContract, ToolControl,
+    ToolDefinition, ToolFailure, ToolFailureClass, ToolFailureSource, ToolId, ToolManifest,
+    ToolOutputContract, ToolRetryDisposition, ToolRetryPolicy, ToolScheduling, ToolSurface,
+    ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride, ToolValue, TurnCause, TurnFinish,
+    TurnLimitFinalMessage, TurnOutcome, TurnStop, append_assistant_text_part, build_prompt,
+    build_tool_surface, build_turn, default_prompt_template, head_tail_truncate,
+    messages_are_prompt_resume_safe, normalized_response_parts, prompt_template_fingerprint,
+    prompt_text_fingerprint, prompt_tool_names_fingerprint, reasoning_part,
+    render_turn_causes_prompt, resolve_prompt_layers, shared_parts, validate_tool_input,
 };
 pub use lashlang::{DurabilityTier, InMemoryLashlangArtifactStore, LashlangArtifactStore};
 pub use protocol_build::ProtocolBuildInput;
@@ -80,7 +79,6 @@ pub use tool_registry::{
     ReconfigureError, ToolRegistry, ToolSourceHandle, ToolState, ToolStateEntry,
 };
 pub use tool_result::ToolResult;
-pub use tool_schema::LashSchema;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProtocolTurnOptions {
     #[serde(default = "empty_protocol_turn_payload")]
@@ -246,10 +244,12 @@ pub(crate) use runtime::{
 // tests. Kept on the public surface; the rest of the runtime block above
 // stays crate-internal.
 pub use runtime::{
-    LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, ProcessEventSemanticsSpec,
+    BeginDurableTurnRequest, DurableTurnCheckpointSnapshot, DurableTurnProvider, DurableTurnRun,
+    DurableTurnScope, EmbeddedDurableTurnProvider, EmbeddedDurableTurnStore, LlmRequestSpec,
+    ProcessCommand, ProcessEffectOutcome, ProcessEventSemanticsSpec, ResumeDurableTurnRequest,
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimeSessionState,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeInvocation, RuntimeSessionState, SubstrateDurableTurnProvider,
 };
 pub use schemars::JsonSchema;
 pub use session::{

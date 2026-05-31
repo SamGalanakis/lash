@@ -160,15 +160,30 @@ impl<'scope> ProcessCommandRunner<'scope> {
             .or(self.current.turn_lease.as_ref());
         // Process registry/workflow idempotency is the replay boundary when a
         // process control call is issued outside an active turn lease.
-        let journal_store = turn_lease.and(self.current.store.as_ref().map(|store| store.as_ref()));
-        let outcome = crate::runtime::effect::execute_effect_with_journal(
-            journal_store,
-            turn_lease,
-            controller,
-            envelope,
-            crate::RuntimeEffectLocalExecutor::process_control(Arc::clone(&self.registry)),
-        )
-        .await?;
+        let journal_store = turn_lease
+            .and_then(|_| self.current.store.as_ref())
+            .and_then(|store| store.embedded_durable_turn_store());
+        let has_turn_id = envelope.invocation.scope.turn_id.is_some();
+        let outcome = if let (Some(store), Some(lease), true) =
+            (journal_store, turn_lease, has_turn_id)
+        {
+            let mut lease = lease.clone();
+            crate::runtime::execute_embedded_journaled_effect(
+                store,
+                &mut lease,
+                controller,
+                envelope,
+                crate::RuntimeEffectLocalExecutor::process_control(Arc::clone(&self.registry)),
+            )
+            .await?
+        } else {
+            controller
+                .execute_effect(
+                    envelope,
+                    crate::RuntimeEffectLocalExecutor::process_control(Arc::clone(&self.registry)),
+                )
+                .await?
+        };
         if is_start && let Some(poke) = self.current.host.process_work_poke.as_ref() {
             poke.poke();
         }

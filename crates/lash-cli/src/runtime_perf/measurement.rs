@@ -487,15 +487,15 @@ pub(crate) async fn run_once(
         let turn = if matches!(scenario, RuntimePerfScenario::ScopedEffectController) {
             let effect_controller = ScopedPerfEffectController;
             let turn_id = format!("runtime-perf-scoped-{}", turn_index + 1);
-            let effect_scope =
-                lash::advanced::RuntimeEffectControllerScope::new(&effect_controller, &turn_id)
+            let durable_turn_scope =
+                lash::advanced::DurableTurnScope::new(&effect_controller, &turn_id)
                     .map_err(anyhow::Error::from)?;
             runtime_perf_timed(
                 scenario,
                 turn_index,
                 "run_turn",
                 Some(cancel.clone()),
-                runtime.run_turn_with_effect_scope(turn_input, cancel, effect_scope),
+                runtime.run_turn_with_durable_turn_scope(turn_input, cancel, durable_turn_scope),
             )
             .await
         } else {
@@ -1749,6 +1749,7 @@ fn checkpoint_config(
         projector: Arc::new(ChatContextProjector),
         sync_execution_surface: false,
         model: "mock-model".to_string(),
+        max_context_tokens: None,
         max_turns: Some(8),
         model_variant: None,
         generation: lash_core::GenerationOptions::default(),

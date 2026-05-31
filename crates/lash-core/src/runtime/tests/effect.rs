@@ -1,7 +1,7 @@
 use super::*;
 use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
 use crate::plugin::{ProtocolDriverPlugin, ProtocolSessionPlugin};
-use crate::store::RuntimePersistence;
+use crate::runtime::EmbeddedDurableTurnStore;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -796,7 +796,7 @@ async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
 async fn effect_journal_replays_without_reinvoking_controller_and_rejects_hash_mismatch() {
     let recorder = RecordingEffectController::default();
     let store = RecordingStore::default();
-    let lease = store
+    let mut lease = store
         .claim_runtime_turn_lease("root", "turn-1", "test", 60_000)
         .await
         .expect("lease");
@@ -814,18 +814,18 @@ async fn effect_journal_replays_without_reinvoking_controller_and_rejects_hash_m
         RuntimeEffectCommand::Sleep { duration_ms: 1 },
     );
 
-    let first = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let first = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &recorder,
         envelope.clone(),
         crate::RuntimeEffectLocalExecutor::unavailable(),
     )
     .await
     .expect("first effect");
-    let second = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let second = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &recorder,
         envelope,
         crate::RuntimeEffectLocalExecutor::unavailable(),
@@ -837,9 +837,9 @@ async fn effect_journal_replays_without_reinvoking_controller_and_rejects_hash_m
     assert!(matches!(second, RuntimeEffectOutcome::Sleep));
     assert_eq!(recorder.count_kind(RuntimeEffectKind::Sleep), 1);
 
-    let mismatched = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let mismatched = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &recorder,
         RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::Sleep { duration_ms: 2 }),
         crate::RuntimeEffectLocalExecutor::unavailable(),
@@ -863,9 +863,13 @@ async fn journaled_turn_effect_requires_lease_before_controller_execution() {
         "root:turn-1:1:0:sleep:1",
     );
 
-    let err = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        None,
+    let mut wrong_lease = store
+        .claim_runtime_turn_lease("root", "other-turn", "test", 60_000)
+        .await
+        .expect("wrong lease");
+    let err = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut wrong_lease,
         &recorder,
         RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::Sleep { duration_ms: 1 }),
         crate::RuntimeEffectLocalExecutor::unavailable(),
@@ -881,7 +885,7 @@ async fn journaled_turn_effect_requires_lease_before_controller_execution() {
 async fn process_effect_journal_replays_without_reinvoking_controller_and_rejects_hash_mismatch() {
     let controller = ProcessJournalController::default();
     let store = RecordingStore::default();
-    let lease = store
+    let mut lease = store
         .claim_runtime_turn_lease("root", "turn-process", "test", 60_000)
         .await
         .expect("lease");
@@ -904,18 +908,18 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         },
     );
 
-    let first = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let first = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &controller,
         envelope.clone(),
         crate::RuntimeEffectLocalExecutor::unavailable(),
     )
     .await
     .expect("first process effect");
-    let second = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let second = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &controller,
         envelope,
         crate::RuntimeEffectLocalExecutor::unavailable(),
@@ -937,9 +941,9 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
     ));
     assert_eq!(controller.call_count(), 1);
 
-    let mismatched = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let mismatched = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &controller,
         RuntimeEffectEnvelope::new(
             invocation,
@@ -961,7 +965,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
 #[tokio::test]
 async fn journaled_effect_renews_lease_while_pending() {
     let store = RecordingStore::default();
-    let lease = store
+    let mut lease = store
         .claim_runtime_turn_lease("root", "turn-long-effect", "test", 60_000)
         .await
         .expect("lease");
@@ -974,9 +978,9 @@ async fn journaled_effect_renews_lease_while_pending() {
         RuntimeEffectKind::Sleep,
         "root:turn-long-effect:1:0:sleep:long",
     );
-    let outcome = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let outcome = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &DelayedSleepController {
             delay: Duration::from_millis(80),
         },
@@ -994,7 +998,7 @@ async fn journaled_effect_renews_lease_while_pending() {
 #[tokio::test]
 async fn journaled_effect_does_not_save_outcome_when_pending_lease_renewal_fails() {
     let store = RecordingStore::default();
-    let lease = store
+    let mut lease = store
         .claim_runtime_turn_lease("root", "turn-expiring-effect", "test", 1)
         .await
         .expect("lease");
@@ -1008,9 +1012,9 @@ async fn journaled_effect_does_not_save_outcome_when_pending_lease_renewal_fails
         "root:turn-expiring-effect:1:0:sleep:expiring",
     );
 
-    let err = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let err = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &DelayedSleepController {
             delay: Duration::from_millis(80),
         },
@@ -1145,7 +1149,7 @@ async fn wrong_controller_outcome_fails_turn_explicitly() {
 #[tokio::test]
 async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
     let recorder = RecordingEffectController::default();
-    assert!(RuntimeEffectControllerScope::new(&recorder, "").is_err());
+    assert!(DurableTurnScope::new(&recorder, "").is_err());
     let transport = mock_provider(vec![MockCall {
         stream_events: Vec::new(),
         response: Ok(LlmResponse {
@@ -1165,14 +1169,14 @@ async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
     )
     .await;
 
-    let effect_scope =
-        RuntimeEffectControllerScope::new(&recorder, "stable-scoped-turn").expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&recorder, "stable-scoped-turn").expect("durable turn scope");
     let turn = runtime
         .stream_turn(
             TurnInput::text("hello"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect("turn");
@@ -1207,15 +1211,15 @@ async fn durable_controller_rejects_ephemeral_attachment_store_before_turn_runs(
         EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
     )
     .await;
-    let effect_scope =
-        RuntimeEffectControllerScope::new(&controller, "durable-turn").expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&controller, "durable-turn").expect("durable turn scope");
 
     let err = runtime
         .stream_turn(
             TurnInput::text("hello"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect_err("ephemeral attachment store should be rejected");
@@ -1245,15 +1249,15 @@ async fn durable_controller_rejects_ephemeral_artifact_store_before_turn_runs() 
         }),
     )
     .await;
-    let effect_scope = RuntimeEffectControllerScope::new(&controller, "durable-artifact-turn")
-        .expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&controller, "durable-artifact-turn").expect("durable turn scope");
 
     let err = runtime
         .stream_turn(
             TurnInput::text("hello"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect_err("ephemeral artifact store should be rejected");
@@ -1284,15 +1288,15 @@ async fn durable_controller_rejects_ephemeral_session_store_before_turn_runs() {
         store,
     )
     .await;
-    let effect_scope = RuntimeEffectControllerScope::new(&controller, "durable-session-turn")
-        .expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&controller, "durable-session-turn").expect("durable turn scope");
 
     let err = runtime
         .stream_turn(
             TurnInput::text("hello"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect_err("ephemeral session store should be rejected");
@@ -1321,15 +1325,15 @@ async fn durable_controller_with_all_durable_stores_runs_turn() {
         )),
     )
     .await;
-    let effect_scope =
-        RuntimeEffectControllerScope::new(&controller, "durable-ok-turn").expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&controller, "durable-ok-turn").expect("durable turn scope");
 
     let turn = runtime
         .stream_turn(
             TurnInput::text("hello"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect("durable controller + all-durable stores should run");
@@ -1426,14 +1430,14 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
     )
     .await;
 
-    let effect_scope = RuntimeEffectControllerScope::new(&scoped_recorder, "scoped-tool-direct")
-        .expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&scoped_recorder, "scoped-tool-direct").expect("durable turn scope");
     let turn = runtime
         .stream_turn(
             TurnInput::text("use direct tool"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect("turn");
@@ -1530,14 +1534,14 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
     )
     .await;
 
-    let effect_scope =
-        RuntimeEffectControllerScope::new(&recorder, "scoped-retry-sleep").expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&recorder, "scoped-retry-sleep").expect("durable turn scope");
     let turn = runtime
         .stream_turn(
             TurnInput::text("use retry tool"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect("turn");

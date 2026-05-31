@@ -103,6 +103,12 @@ impl RuntimeTurnDriver<'_> {
             projector: turn_driver_preamble.config.projector.clone(),
             sync_execution_surface: checkpoint_record.machine_config.sync_execution_surface,
             model: checkpoint_record.machine_config.model.id.clone(),
+            max_context_tokens: Some(
+                checkpoint_record
+                    .machine_config
+                    .model
+                    .context_window_tokens(),
+            ),
             max_turns: checkpoint_record.machine_config.max_turns,
             model_variant: checkpoint_record.machine_config.model.variant.clone(),
             generation: checkpoint_record.machine_config.generation.clone(),
@@ -188,6 +194,7 @@ impl RuntimeTurnDriver<'_> {
             run_session_id: session_policy.session_id.clone(),
             autonomous: session_policy.autonomous,
             model,
+            max_context_tokens: Some(session_policy.context_window_tokens()),
             messages,
             events: self.turn_pipeline.active_events(),
             turn_causes: self.turn_causes.clone(),
@@ -301,8 +308,9 @@ impl RuntimeTurnDriver<'_> {
         request: &LlmRequest,
     ) -> Result<Option<crate::ProtocolLlmCallAction>, PluginError> {
         let latest_prompt_usage = self.turn_pipeline.state_mut().last_prompt_usage.clone();
-        let effect_controller =
-            crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
+        let effect_controller = crate::runtime::RuntimeEffectControllerHandle::borrowed(
+            self.durable_turn_scope.controller(),
+        );
         let direct_completions = self.session_services.direct_completion_client(
             effect_controller.clone_scoped(),
             Some(self.turn_id.clone()),

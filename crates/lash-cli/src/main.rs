@@ -160,7 +160,7 @@ struct Args {
     #[arg(long)]
     model: Option<String>,
 
-    /// Provider-native model variant (for example: high, max, xhigh)
+    /// Model-native variant (for example: high, max, xhigh)
     #[arg(long)]
     variant: Option<String>,
 

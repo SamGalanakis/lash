@@ -3,31 +3,28 @@
 //! The high-performance local **durable** persistence backend for the lash
 //! agent runtime. One SQLite database per session, opened with WAL journal
 //! mode and a 15-second busy timeout, satisfying the full
-//! [`RuntimePersistence`] + [`AttachmentManifest`] contract from `lash-core`.
+//! [`RuntimePersistence`] + embedded durable turn + [`AttachmentManifest`]
+//! contract from `lash-core`.
 //!
 //! ## Why this is "the durable backend" not just "an option"
 //!
 //! Lash's runtime layer treats persistence as a first-class boundary, not a
 //! debug-only convenience. Every primitive that lets the runtime survive a
-//! crash — head-revision CAS, runtime turn leases with fencing tokens,
-//! effect-journal idempotency, attachment write-ahead manifests, blob
-//! content-addressing with optional compression — is implemented in this
-//! crate against SQLite for one reason: SQLite is the simplest backend that
-//! gives us *atomic multi-statement transactions on a single file* with
-//! durability guarantees we can reason about. Everything else in the
-//! `RuntimePersistence` contract (lease/fencing, optimistic concurrency,
-//! per-record `schema_version` stamps, the attachment manifest) is shaped
-//! for distributed durable backends — Restate, Postgres, hosted KV — and
-//! the SQLite impl is the reference implementation that proves those
-//! shapes work.
+//! crash — head-revision CAS, final turn-commit idempotency, embedded runtime
+//! turn leases with fencing tokens, effect-journal idempotency, attachment
+//! write-ahead manifests, blob content-addressing with optional compression —
+//! is implemented in this crate against SQLite for one reason: SQLite is the
+//! simplest backend that gives us *atomic multi-statement transactions on a
+//! single file* with durability guarantees we can reason about. The settled
+//! `RuntimePersistence` contract stays separate from embedded in-flight turn
+//! durability so substrate-native backends can use their own history/timers for
+//! replay without double-journaling into Lash tables.
 //!
-//! In other words: SQLite is the local case. The lease/fencing machinery,
-//! the per-record version stamps, the `RuntimeCommit::committed_attachment_ids`
-//! plumbing — none of it is overkill for "single-process sqlite," it's the
-//! contract that *also* has to hold when a second runtime carries the same
-//! session over to Restate replay or to a different process. Treat any
-//! simplification as "would this still work over Restate?" before
-//! shipping.
+//! In other words: SQLite is the local embedded case. The lease/fencing
+//! machinery, the per-record version stamps, the
+//! `RuntimeCommit::committed_attachment_ids` plumbing, and turn-commit
+//! idempotency are the contract that lets final session state stay coherent
+//! even when a substrate-native backend owns in-flight replay.
 //!
 //! ## Schema cutover, not migrations
 //!

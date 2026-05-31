@@ -107,11 +107,14 @@ pub(crate) fn ensure_runtime_turn_completion_conn(
     conn: &Connection,
     completed: &lash_core::store::RuntimeTurnCompletion,
 ) -> Result<(), StoreError> {
+    let Some(lease_token) = completed.lease_token.as_deref() else {
+        return Ok(());
+    };
     let now = current_epoch_ms();
     let current =
         load_runtime_turn_lease_from_conn(conn, &completed.session_id, &completed.turn_id)
             .map_err(sqlite_error)?;
-    if !guard_lease(current.as_ref(), &completed.lease_token, now) {
+    if !guard_lease(current.as_ref(), lease_token, now) {
         return Err(StoreError::RuntimeTurnLeaseExpired {
             session_id: completed.session_id.clone(),
             turn_id: completed.turn_id.clone(),

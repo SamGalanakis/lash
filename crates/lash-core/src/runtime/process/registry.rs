@@ -136,7 +136,7 @@ pub trait ProcessRegistry: Send + Sync {
 
     /// Claim the durable single-owner lease over a non-terminal process.
     ///
-    /// Mirrors [`claim_runtime_turn_lease`](crate::RuntimePersistence::claim_runtime_turn_lease):
+    /// Mirrors [`claim_runtime_turn_lease`](crate::EmbeddedDurableTurnStore::claim_runtime_turn_lease):
     /// an unexpired lease held by a *different* owner fences the claim (returns
     /// an error); claiming a free, expired, or own lease succeeds and bumps the
     /// `fencing_token`. The returned [`ProcessLease`]'s

@@ -303,8 +303,8 @@ fn unsupported_schema_error_reports_real_versions() {
         "error must report the found version 99: {message}"
     );
     assert!(
-        message.contains("schema version 2") || message.contains("version 2"),
-        "error must report the real expected version 2: {message}"
+        message.contains("schema version 3") || message.contains("version 3"),
+        "error must report the real expected version 3: {message}"
     );
     assert!(
         !message.contains("version 1 only"),

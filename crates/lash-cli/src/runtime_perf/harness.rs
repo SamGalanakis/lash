@@ -133,18 +133,18 @@ impl BenchmarkRuntime {
             .map_err(anyhow::Error::from)
     }
 
-    pub(crate) async fn run_turn_with_effect_scope(
+    pub(crate) async fn run_turn_with_durable_turn_scope(
         &self,
         input: lash::TurnInput,
         cancel: tokio_util::sync::CancellationToken,
-        effect_scope: lash::advanced::RuntimeEffectControllerScope<'_>,
+        durable_turn_scope: lash::advanced::DurableTurnScope<'_>,
     ) -> anyhow::Result<lash::TurnResult> {
         self.session
             .as_ref()
             .expect("benchmark session")
             .turn(input)
             .cancel(cancel)
-            .run_with_effect_scope(effect_scope)
+            .run_with_durable_turn(durable_turn_scope)
             .await
             .map(|output| output.result)
             .map_err(anyhow::Error::from)
@@ -768,7 +768,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
             turn_index + 1
         ),
         RuntimePerfScenario::TurnCheckpoint => format!(
-            "Turn {} in turn durability checkpoint benchmark mode. Checkpoint and restore pending effects, then reply with exactly: runtime perf benchmark ok",
+            "Turn {} in durable turn checkpoint benchmark mode. Checkpoint and restore pending effects, then reply with exactly: runtime perf benchmark ok",
             turn_index + 1
         ),
         RuntimePerfScenario::ScopedEffectController => format!(

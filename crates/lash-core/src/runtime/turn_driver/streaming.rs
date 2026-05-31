@@ -25,33 +25,6 @@ async fn emit_plugin_runtime_events_runtime(
     }
 }
 
-fn refine_terminal_reason_for_context_window(
-    response: &mut LlmResponse,
-    max_context_tokens: Option<usize>,
-) {
-    if response.terminal_reason != crate::LlmTerminalReason::OutputLimit {
-        return;
-    }
-    if response.usage.output_tokens != 0 {
-        return;
-    }
-    let Some(max_context_tokens) = max_context_tokens.filter(|value| *value > 0) else {
-        return;
-    };
-    let prompt_tokens = response
-        .usage
-        .input_tokens
-        .saturating_add(response.usage.cached_input_tokens)
-        .max(0) as usize;
-    if prompt_tokens >= max_context_tokens.saturating_mul(95) / 100 {
-        response.terminal_reason = crate::LlmTerminalReason::ContextOverflow;
-        response.terminal_diagnostic = Some(
-            "Model produced no output because the prompt reached the configured context window."
-                .to_string(),
-        );
-    }
-}
-
 fn validate_generation_options(
     model: &crate::ModelSpec,
     generation: &crate::GenerationOptions,
@@ -380,14 +353,6 @@ impl RuntimeTurnDriver<'_> {
                 }
             }
         };
-
-        let result = result.map(|mut response| {
-            refine_terminal_reason_for_context_window(
-                &mut response,
-                Some(self.policy.context_window_tokens()),
-            );
-            response
-        });
 
         if let Err(err) = &result {
             tracing::error!(

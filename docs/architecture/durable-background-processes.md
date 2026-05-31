@@ -29,9 +29,9 @@ A background `process` can be started three ways:
 Before this work, only the first was durably re-executed in a Restate
 deployment, and the asymmetry was silent.
 
-Durability of execution used to be borrowed from the **turn's effect scope**. A
-turn run under `stream_with_effect_scope(restate)` threaded the Restate-backed
-controller into process control via a silent
+Durability of execution used to be borrowed from the **turn-local controller
+scope**. A turn run with `stream_with_durable_turn(scope)` threaded the
+Restate-backed controller into process control via a silent
 `effect_controller.unwrap_or(current.host.core.effect_controller)` fallback, so a
 turn's `start name(...)` scheduled a `LashProcessWorkflow` invocation that
 Restate re-invoked on crash — but a trigger or cron tick fires **outside** a
@@ -83,7 +83,7 @@ host *per background process*. Right answer for a thin stateless SDK; wrong
 answer for a durable runtime with first-class background processes, triggers,
 and cron.
 
-## Rejected: `emit_host_event_with_effect_scope`
+## Rejected: emitter-supplied durable turn scopes
 
 The tempting stopgap is to let the emitter carry a durable scope, mirroring the
 turn API. It is the wrong layer:
@@ -176,11 +176,11 @@ one owner. Process execution identity is the persisted `process_id` end-to-end
 retry — a Restate `run` re-invocation or a recovery sweep — must present that
 stable id, and an empty/fresh id is rejected loudly
 (`DurableProcessWorker::ensure_stable_process_id`), mirroring how
-`RuntimeEffectControllerScope::new` rejects an empty turn id.
+`DurableTurnScope::new` rejects an empty turn id.
 
 ## Non-goals
 
-- Not "make every emitter durable" (`emit_host_event_with_effect_scope`).
+- Not "make every emitter supply a durable turn scope".
 - Not "the host re-implements recovery" (the OpenAI `RunState` model).
 - Not exactly-once side effects inside a process beyond what the existing effect
   journal/replay provides for turns — the same at-least-once-with-idempotency
@@ -223,8 +223,8 @@ the `lash` facade lazily spawns a default inline runner on first
 no replacement; a Restate deployment registers the ingress-client runner at the
 serve path (`lash-restate/src/lib.rs`) and hands the core its poke.
 
-`emit_host_event_with_effect_scope` was **not** added — the worker owns
-execution durability, not the emitter.
+An emitter-supplied durability API was **not** added — the worker owns execution
+durability, not the emitter.
 
 ### Subagent collapse
 

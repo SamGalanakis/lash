@@ -154,7 +154,9 @@ impl lash_core::RuntimePersistence for SnapshotStore {
     ) -> std::result::Result<lash_core::store::RuntimeCommitResult, lash_core::store::StoreError>
     {
         let mut read = self.read.lock().expect("snapshot store lock");
-        if let Some(completed) = &commit.completed_turn {
+        if let Some(completed) = &commit.completed_turn
+            && let Some(lease_token) = completed.lease_token.as_deref()
+        {
             let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
             let lease_matches = self
                 .runtime_turn_leases
@@ -162,7 +164,7 @@ impl lash_core::RuntimePersistence for SnapshotStore {
                 .expect("runtime turn leases lock")
                 .get(&lease_key)
                 .is_some_and(|lease| {
-                    lease.lease_token == completed.lease_token
+                    lease.lease_token == lease_token
                         && lease.expires_at_epoch_ms > test_current_epoch_ms()
                 });
             if !lease_matches {
@@ -204,7 +206,9 @@ impl lash_core::RuntimePersistence for SnapshotStore {
             checkpoint: Some(commit.checkpoint),
             token_ledger: commit.usage_deltas,
         });
-        if let Some(completed) = &commit.completed_turn {
+        if let Some(completed) = &commit.completed_turn
+            && completed.lease_token.is_some()
+        {
             let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
             self.runtime_turn_checkpoints
                 .lock()
@@ -279,6 +283,45 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         Ok(Vec::new())
     }
 
+    fn embedded_durable_turn_store(&self) -> Option<&dyn lash_core::EmbeddedDurableTurnStore> {
+        Some(self)
+    }
+
+    async fn save_session_meta(
+        &self,
+        _meta: lash_core::SessionMeta,
+    ) -> std::result::Result<(), lash_core::store::StoreError> {
+        Ok(())
+    }
+
+    async fn load_session_meta(
+        &self,
+    ) -> std::result::Result<Option<lash_core::SessionMeta>, lash_core::store::StoreError> {
+        Ok(None)
+    }
+
+    async fn tombstone_nodes(
+        &self,
+        _ids: &[String],
+    ) -> std::result::Result<(), lash_core::store::StoreError> {
+        Ok(())
+    }
+
+    async fn vacuum(
+        &self,
+    ) -> std::result::Result<lash_core::VacuumReport, lash_core::store::StoreError> {
+        Ok(lash_core::VacuumReport::default())
+    }
+
+    async fn gc_unreachable(
+        &self,
+    ) -> std::result::Result<lash_core::GcReport, lash_core::store::StoreError> {
+        Ok(lash_core::GcReport::default())
+    }
+}
+
+#[async_trait]
+impl lash_core::EmbeddedDurableTurnStore for SnapshotStore {
     async fn claim_runtime_turn_lease(
         &self,
         session_id: &str,
@@ -405,38 +448,6 @@ impl lash_core::RuntimePersistence for SnapshotStore {
             ))
             .cloned())
     }
-
-    async fn save_session_meta(
-        &self,
-        _meta: lash_core::SessionMeta,
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        Ok(())
-    }
-
-    async fn load_session_meta(
-        &self,
-    ) -> std::result::Result<Option<lash_core::SessionMeta>, lash_core::store::StoreError> {
-        Ok(None)
-    }
-
-    async fn tombstone_nodes(
-        &self,
-        _ids: &[String],
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        Ok(())
-    }
-
-    async fn vacuum(
-        &self,
-    ) -> std::result::Result<lash_core::VacuumReport, lash_core::store::StoreError> {
-        Ok(lash_core::VacuumReport::default())
-    }
-
-    async fn gc_unreachable(
-        &self,
-    ) -> std::result::Result<lash_core::GcReport, lash_core::store::StoreError> {
-        Ok(lash_core::GcReport::default())
-    }
 }
 
 #[derive(Clone)]
@@ -493,6 +504,52 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
 
     lash_core::impl_unsupported_queued_work_methods!();
 
+    fn embedded_durable_turn_store(&self) -> Option<&dyn lash_core::EmbeddedDurableTurnStore> {
+        Some(self)
+    }
+
+    async fn save_session_meta(
+        &self,
+        _meta: lash_core::SessionMeta,
+    ) -> std::result::Result<(), lash_core::store::StoreError> {
+        Ok(())
+    }
+
+    async fn load_session_meta(
+        &self,
+    ) -> std::result::Result<Option<lash_core::SessionMeta>, lash_core::store::StoreError> {
+        Ok(Some(lash_core::SessionMeta {
+            session_id: self.session_id.clone(),
+            session_name: self.session_id.clone(),
+            created_at: "test".to_string(),
+            model: "mock-model".to_string(),
+            cwd: None,
+            relation: lash_core::SessionRelation::Root,
+        }))
+    }
+
+    async fn tombstone_nodes(
+        &self,
+        _ids: &[String],
+    ) -> std::result::Result<(), lash_core::store::StoreError> {
+        Ok(())
+    }
+
+    async fn vacuum(
+        &self,
+    ) -> std::result::Result<lash_core::VacuumReport, lash_core::store::StoreError> {
+        Ok(lash_core::VacuumReport::default())
+    }
+
+    async fn gc_unreachable(
+        &self,
+    ) -> std::result::Result<lash_core::GcReport, lash_core::store::StoreError> {
+        Ok(lash_core::GcReport::default())
+    }
+}
+
+#[async_trait]
+impl lash_core::EmbeddedDurableTurnStore for BoundSessionStore {
     async fn claim_runtime_turn_lease(
         &self,
         session_id: &str,
@@ -567,45 +624,6 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
         lash_core::store::StoreError,
     > {
         Ok(None)
-    }
-
-    async fn save_session_meta(
-        &self,
-        _meta: lash_core::SessionMeta,
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        Ok(())
-    }
-
-    async fn load_session_meta(
-        &self,
-    ) -> std::result::Result<Option<lash_core::SessionMeta>, lash_core::store::StoreError> {
-        Ok(Some(lash_core::SessionMeta {
-            session_id: self.session_id.clone(),
-            session_name: self.session_id.clone(),
-            created_at: "test".to_string(),
-            model: "mock-model".to_string(),
-            cwd: None,
-            relation: lash_core::SessionRelation::Root,
-        }))
-    }
-
-    async fn tombstone_nodes(
-        &self,
-        _ids: &[String],
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        Ok(())
-    }
-
-    async fn vacuum(
-        &self,
-    ) -> std::result::Result<lash_core::VacuumReport, lash_core::store::StoreError> {
-        Ok(lash_core::VacuumReport::default())
-    }
-
-    async fn gc_unreachable(
-        &self,
-    ) -> std::result::Result<lash_core::GcReport, lash_core::store::StoreError> {
-        Ok(lash_core::GcReport::default())
     }
 }
 

@@ -1,11 +1,11 @@
 use lash_core::{
-    HostTurnProtocol, HydratedSessionCheckpoint, ModelSpec, PersistedSessionConfig,
-    PersistedTurnState, PluginSessionSnapshot, PreparedPrompt, PromptContext, ProtocolTurnOptions,
-    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit, RuntimeEffectJournalRecord,
-    RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence, RuntimeSessionState,
-    RuntimeTurnCheckpoint, RuntimeTurnMachineConfigSnapshot, SessionGraph, SessionHead,
-    SessionPolicy, SessionStoreCreateRequest, SessionStoreFactory, StoreError, TokenUsage,
-    ToolState, TurnDriverConfig, TurnDriverPreamble,
+    EmbeddedDurableTurnStore, HostTurnProtocol, HydratedSessionCheckpoint, ModelSpec,
+    PersistedSessionConfig, PersistedTurnState, PluginSessionSnapshot, PreparedPrompt,
+    PromptContext, ProtocolTurnOptions, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit,
+    RuntimeEffectJournalRecord, RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence,
+    RuntimeSessionState, RuntimeTurnCheckpoint, RuntimeTurnMachineConfigSnapshot, SessionGraph,
+    SessionHead, SessionPolicy, SessionStoreCreateRequest, SessionStoreFactory, StoreError,
+    TokenUsage, ToolState, TurnDriverConfig, TurnDriverPreamble,
 };
 use lash_sqlite_store::{
     BlobArtifactDescriptor, BuiltinBlobProfile, SqliteSessionStoreFactory, Store, StoreGcPolicy,
@@ -361,6 +361,7 @@ fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckp
         run_session_id: None,
         autonomous: false,
         model: "mock-model".to_string(),
+        max_context_tokens: None,
         messages: lash_core::MessageSequence::default(),
         events: Arc::new(Vec::new()),
         turn_causes: Vec::new(),

@@ -80,6 +80,38 @@ impl RuntimePersistence for Store {
                     attempted_session_id: commit.session_id.clone(),
                 });
             }
+            if let Some(completed) = &commit.completed_turn {
+                if completed.session_id != commit.session_id {
+                    return Err(StoreError::RuntimeTurnLeaseExpired {
+                        session_id: completed.session_id.clone(),
+                        turn_id: completed.turn_id.clone(),
+                    });
+                }
+                let prior: Option<(String, String)> = tx
+                    .query_row(
+                        "SELECT turn_commit_hash, result_json FROM runtime_turn_commits
+                         WHERE session_id = ?1 AND turn_id = ?2",
+                        params![completed.session_id, completed.turn_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(sqlite_error)?;
+                if let Some((turn_commit_hash, result_json)) = prior {
+                    if turn_commit_hash == completed.turn_commit_hash {
+                        let result: RuntimeCommitResult =
+                            serde_json::from_str(&result_json).map_err(|err| {
+                                StoreError::Backend(format!(
+                                    "failed to decode runtime turn commit result: {err}"
+                                ))
+                            })?;
+                        return Ok(result);
+                    }
+                    return Err(StoreError::RuntimeTurnCommitConflict {
+                        session_id: completed.session_id.clone(),
+                        turn_id: completed.turn_id.clone(),
+                    });
+                }
+            }
             let actual_revision = existing.as_ref().map_or(0, |meta| meta.head_revision);
             if commit.expected_head_revision.is_some()
                 && commit.expected_head_revision != Some(actual_revision)
@@ -192,7 +224,9 @@ impl RuntimePersistence for Store {
                 ],
             )
             .map_err(sqlite_error)?;
-            if let Some(completed) = &commit.completed_turn {
+            if let Some(completed) = &commit.completed_turn
+                && let Some(lease_token) = completed.lease_token.as_deref()
+            {
                 tx.execute(
                     "DELETE FROM runtime_effect_journal
                      WHERE session_id = ?1 AND turn_id = ?2
@@ -200,21 +234,13 @@ impl RuntimePersistence for Store {
                          SELECT 1 FROM runtime_turn_checkpoints
                          WHERE session_id = ?1 AND turn_id = ?2 AND lease_token = ?3
                        )",
-                    params![
-                        completed.session_id,
-                        completed.turn_id,
-                        completed.lease_token
-                    ],
+                    params![completed.session_id, completed.turn_id, lease_token],
                 )
                 .map_err(sqlite_error)?;
                 tx.execute(
                     "DELETE FROM runtime_turn_checkpoints
                      WHERE session_id = ?1 AND turn_id = ?2 AND lease_token = ?3",
-                    params![
-                        completed.session_id,
-                        completed.turn_id,
-                        completed.lease_token
-                    ],
+                    params![completed.session_id, completed.turn_id, lease_token],
                 )
                 .map_err(sqlite_error)?;
             }
@@ -250,14 +276,35 @@ impl RuntimePersistence for Store {
                         .map_err(sqlite_error)?;
                 }
             }
-            Ok(RuntimeCommitResult {
+            let result = RuntimeCommitResult {
                 head_revision: next_revision,
                 checkpoint_ref: stored_checkpoint.checkpoint_ref,
                 manifest: stored_checkpoint.manifest,
-            })
+            };
+            if let Some(completed) = &commit.completed_turn {
+                tx.execute(
+                    "INSERT INTO runtime_turn_commits (
+                        session_id, turn_id, turn_commit_hash, result_json, committed_at_ms
+                     )
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        completed.session_id,
+                        completed.turn_id,
+                        completed.turn_commit_hash,
+                        encode_json(&result),
+                        current_epoch_ms() as i64
+                    ],
+                )
+                .map_err(sqlite_error)?;
+            }
+            Ok(result)
         })?;
         self.maybe_auto_gc();
         Ok(result)
+    }
+
+    fn embedded_durable_turn_store(&self) -> Option<&dyn lash_core::EmbeddedDurableTurnStore> {
+        Some(self)
     }
 
     async fn enqueue_queued_work(
@@ -536,6 +583,64 @@ impl RuntimePersistence for Store {
         })
     }
 
+    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
+        let conn = lock_conn(&self.conn);
+        let relation_json = serde_json::to_string(&meta.relation)
+            .map_err(|err| StoreError::Backend(err.to_string()))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO session_meta
+             (singleton, session_id, session_name, created_at, model, cwd, relation_json)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                meta.session_id,
+                meta.session_name,
+                meta.created_at,
+                meta.model,
+                meta.cwd,
+                relation_json
+            ],
+        )
+        .map_err(sqlite_error)?;
+        Ok(())
+    }
+
+    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
+        self.with_read(|conn| Ok(load_session_meta_from_conn(conn)))
+    }
+
+    async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), StoreError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.with_write_tx(|tx| {
+            for id in ids {
+                tx.execute(
+                    "UPDATE graph_nodes SET tombstoned = 1 WHERE node_id = ?1",
+                    params![id],
+                )
+                .map_err(sqlite_error)?;
+            }
+            Ok(())
+        })
+    }
+
+    async fn vacuum(&self) -> Result<VacuumReport, StoreError> {
+        let conn = lock_conn(&self.conn);
+        let removed = conn
+            .execute("DELETE FROM graph_nodes WHERE tombstoned = 1", [])
+            .map_err(sqlite_error)?;
+        Ok(VacuumReport {
+            removed_node_count: removed,
+        })
+    }
+
+    async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
+        Ok(Self::gc_unreachable(self))
+    }
+}
+
+#[async_trait::async_trait]
+impl lash_core::EmbeddedDurableTurnStore for Store {
     async fn claim_runtime_turn_lease(
         &self,
         session_id: &str,
@@ -812,60 +917,5 @@ impl RuntimePersistence for Store {
             RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
         )?;
         Ok(Some(record))
-    }
-
-    async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
-        let conn = lock_conn(&self.conn);
-        let relation_json = serde_json::to_string(&meta.relation)
-            .map_err(|err| StoreError::Backend(err.to_string()))?;
-        conn.execute(
-            "INSERT OR REPLACE INTO session_meta
-             (singleton, session_id, session_name, created_at, model, cwd, relation_json)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                meta.session_id,
-                meta.session_name,
-                meta.created_at,
-                meta.model,
-                meta.cwd,
-                relation_json
-            ],
-        )
-        .map_err(sqlite_error)?;
-        Ok(())
-    }
-
-    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
-        self.with_read(|conn| Ok(load_session_meta_from_conn(conn)))
-    }
-
-    async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), StoreError> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-        self.with_write_tx(|tx| {
-            for id in ids {
-                tx.execute(
-                    "UPDATE graph_nodes SET tombstoned = 1 WHERE node_id = ?1",
-                    params![id],
-                )
-                .map_err(sqlite_error)?;
-            }
-            Ok(())
-        })
-    }
-
-    async fn vacuum(&self) -> Result<VacuumReport, StoreError> {
-        let conn = lock_conn(&self.conn);
-        let removed = conn
-            .execute("DELETE FROM graph_nodes WHERE tombstoned = 1", [])
-            .map_err(sqlite_error)?;
-        Ok(VacuumReport {
-            removed_node_count: removed,
-        })
-    }
-
-    async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
-        Ok(Self::gc_unreachable(self))
     }
 }

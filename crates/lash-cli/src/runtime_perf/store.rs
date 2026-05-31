@@ -11,10 +11,10 @@ use lash_core::store::{
     GraphCommitDelta, PersistedSessionRead, RuntimeCommitResult, SessionCheckpoint, SessionHeadMeta,
 };
 use lash_core::{
-    BlobRef, DeliveryPolicy, GcReport, RuntimeCommit, RuntimeEffectJournalRecord,
-    RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionGraph, SessionNodeRecord,
-    SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError,
-    VacuumReport, current_epoch_ms,
+    BlobRef, DeliveryPolicy, EmbeddedDurableTurnStore, GcReport, RuntimeCommit,
+    RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnLease,
+    SessionGraph, SessionNodeRecord, SessionReadScope, SessionStoreCreateRequest,
+    SessionStoreFactory, SlotPolicy, StoreError, VacuumReport, current_epoch_ms,
 };
 
 #[derive(Clone)]
@@ -248,14 +248,16 @@ impl RuntimePersistence for RuntimePerfStore {
             graph_node_count,
             token_ledger: Vec::new(),
         });
-        if let Some(completed) = completed_turn {
+        if let Some(completed) = completed_turn
+            && let Some(lease_token) = completed.lease_token.as_deref()
+        {
             let key = (completed.session_id.clone(), completed.turn_id.clone());
             let lease_matches = self
                 .runtime_turn_leases
                 .lock()
                 .expect("lock perf runtime turn leases")
                 .get(&key)
-                .is_some_and(|lease| lease.lease_token == completed.lease_token);
+                .is_some_and(|lease| lease.lease_token == lease_token);
             if lease_matches {
                 self.runtime_turn_leases
                     .lock()
@@ -458,6 +460,38 @@ impl RuntimePersistence for RuntimePerfStore {
         Ok(batches)
     }
 
+    fn embedded_durable_turn_store(&self) -> Option<&dyn EmbeddedDurableTurnStore> {
+        Some(self)
+    }
+
+    async fn save_session_meta(&self, meta: store::SessionMeta) -> Result<(), store::StoreError> {
+        *self.session_meta.lock().expect("lock perf session meta") = Some(meta);
+        Ok(())
+    }
+
+    async fn load_session_meta(&self) -> Result<Option<store::SessionMeta>, store::StoreError> {
+        Ok(self
+            .session_meta
+            .lock()
+            .expect("lock perf session meta")
+            .clone())
+    }
+
+    async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), store::StoreError> {
+        Ok(())
+    }
+
+    async fn vacuum(&self) -> Result<VacuumReport, store::StoreError> {
+        Ok(VacuumReport::default())
+    }
+
+    async fn gc_unreachable(&self) -> Result<GcReport, store::StoreError> {
+        Ok(GcReport::default())
+    }
+}
+
+#[async_trait::async_trait]
+impl EmbeddedDurableTurnStore for RuntimePerfStore {
     async fn claim_runtime_turn_lease(
         &self,
         session_id: &str,
@@ -604,30 +638,5 @@ impl RuntimePersistence for RuntimePerfStore {
                 replay_key.to_string(),
             ))
             .cloned())
-    }
-
-    async fn save_session_meta(&self, meta: store::SessionMeta) -> Result<(), store::StoreError> {
-        *self.session_meta.lock().expect("lock perf session meta") = Some(meta);
-        Ok(())
-    }
-
-    async fn load_session_meta(&self) -> Result<Option<store::SessionMeta>, store::StoreError> {
-        Ok(self
-            .session_meta
-            .lock()
-            .expect("lock perf session meta")
-            .clone())
-    }
-
-    async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), store::StoreError> {
-        Ok(())
-    }
-
-    async fn vacuum(&self) -> Result<VacuumReport, store::StoreError> {
-        Ok(VacuumReport::default())
-    }
-
-    async fn gc_unreachable(&self) -> Result<GcReport, store::StoreError> {
-        Ok(GcReport::default())
     }
 }

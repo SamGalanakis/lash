@@ -29,8 +29,8 @@ impl DurableSubstrateFacet {
 /// errors, but callers should match this type instead of parsing display text.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RuntimeErrorCode {
-    MissingEffectScopeTurnId,
-    EffectScopeTurnIdMismatch,
+    MissingDurableTurnScopeTurnId,
+    DurableTurnScopeTurnIdMismatch,
     /// A process (re-)execution was handed an empty/non-persisted process id.
     /// Process execution identity is the persisted `process_id`; a retry that
     /// cannot present that stable id has lost its idempotency anchor.
@@ -66,8 +66,8 @@ pub enum RuntimeErrorCode {
 impl RuntimeErrorCode {
     pub fn as_str(&self) -> &str {
         match self {
-            Self::MissingEffectScopeTurnId => "missing_effect_scope_turn_id",
-            Self::EffectScopeTurnIdMismatch => "effect_scope_turn_id_mismatch",
+            Self::MissingDurableTurnScopeTurnId => "missing_durable_turn_scope_turn_id",
+            Self::DurableTurnScopeTurnIdMismatch => "durable_turn_scope_turn_id_mismatch",
             Self::MissingProcessExecutionId => "missing_process_execution_id",
             Self::DurableSubstrateRequired { facet } => facet.as_code(),
             Self::RuntimeTurnResumeStoreRequired => "runtime_turn_resume_store_required",
@@ -106,8 +106,8 @@ impl std::fmt::Display for RuntimeErrorCode {
 impl From<&str> for RuntimeErrorCode {
     fn from(code: &str) -> Self {
         match code {
-            "missing_effect_scope_turn_id" => Self::MissingEffectScopeTurnId,
-            "effect_scope_turn_id_mismatch" => Self::EffectScopeTurnIdMismatch,
+            "missing_durable_turn_scope_turn_id" => Self::MissingDurableTurnScopeTurnId,
+            "durable_turn_scope_turn_id_mismatch" => Self::DurableTurnScopeTurnIdMismatch,
             "missing_process_execution_id" => Self::MissingProcessExecutionId,
             "durable_substrate_required:attachment_store" => Self::DurableSubstrateRequired {
                 facet: DurableSubstrateFacet::AttachmentStore,
@@ -208,7 +208,7 @@ impl RuntimeError {
     ///
     /// Process execution identity is the persisted `process_id`, so a retry
     /// must present that stable id — mirroring how
-    /// [`RuntimeEffectControllerScope::new`](crate::RuntimeEffectControllerScope)
+    /// [`DurableTurnScope::new`](crate::DurableTurnScope)
     /// rejects an empty turn id.
     pub fn missing_process_execution_id() -> Self {
         Self::new(

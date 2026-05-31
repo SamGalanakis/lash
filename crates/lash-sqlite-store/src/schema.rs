@@ -90,6 +90,15 @@ CREATE TABLE IF NOT EXISTS runtime_effect_journal (
     PRIMARY KEY (session_id, turn_id, idempotency_key)
 );
 
+CREATE TABLE IF NOT EXISTS runtime_turn_commits (
+    session_id        TEXT NOT NULL,
+    turn_id           TEXT NOT NULL,
+    turn_commit_hash  TEXT NOT NULL,
+    result_json       TEXT NOT NULL,
+    committed_at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (session_id, turn_id)
+);
+
 CREATE TABLE IF NOT EXISTS queued_work_batches (
     enqueue_seq       INTEGER PRIMARY KEY AUTOINCREMENT,
     batch_id          TEXT NOT NULL UNIQUE,
@@ -148,7 +157,7 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// Canonical schema version. There is no migration chain — older databases
 /// must be deleted before opening. See the [`SCHEMA`] doc comment for the
 /// rationale.
-pub(crate) const SCHEMA_VERSION: i32 = 2;
+pub(crate) const SCHEMA_VERSION: i32 = 3;
 
 pub(crate) const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 1_000;

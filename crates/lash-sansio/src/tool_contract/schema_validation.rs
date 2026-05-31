@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::ToolContract;
+use crate::tool_contract::ToolContract;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LashSchema {
@@ -35,7 +35,7 @@ impl LashSchema {
     }
 }
 
-pub(crate) fn validate_tool_input(contract: &ToolContract, args: &Value) -> Result<(), String> {
+pub fn validate_tool_input(contract: &ToolContract, args: &Value) -> Result<(), String> {
     LashSchema::new(contract.input_schema.clone()).validate(args)
 }
 
