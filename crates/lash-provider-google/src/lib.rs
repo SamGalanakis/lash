@@ -437,6 +437,7 @@ impl GoogleOAuthProvider {
         text_deltas: &mut Vec<String>,
         usage: &mut LlmUsage,
         tool_call_parts: Option<&mut Vec<LlmOutputPart>>,
+        finish_event: &mut Option<Value>,
     ) -> Result<(), LlmTransportError> {
         if raw.trim().is_empty() || raw.trim() == "[DONE]" {
             return Ok(());
@@ -457,7 +458,34 @@ impl GoogleOAuthProvider {
         if let Some(parts) = tool_call_parts {
             parts.extend(Self::tool_call_parts_from_event(&event));
         }
+        // Capture the last event carrying a non-empty `finishReason` so the
+        // streaming finalizer can derive the terminal reason exactly like the
+        // non-streaming path instead of hardcoding Stop.
+        if Self::finish_reason_str(&event).is_some() {
+            *finish_event = Some(event);
+        }
         Ok(())
+    }
+
+    /// The non-empty `finishReason` carried by the first candidate of an event,
+    /// honouring the streaming `response.candidates` wrapper as well as the
+    /// unwrapped top-level shape.
+    fn finish_reason_str(value: &Value) -> Option<&str> {
+        value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("finishReason"))
+            .or_else(|| {
+                value
+                    .get("response")
+                    .and_then(|response| response.get("candidates"))
+                    .and_then(Value::as_array)
+                    .and_then(|candidates| candidates.first())
+                    .and_then(|candidate| candidate.get("finishReason"))
+            })
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty())
     }
 
     fn response_parts_from_value(value: &Value) -> Vec<LlmOutputPart> {
@@ -537,21 +565,7 @@ impl GoogleOAuthProvider {
     }
 
     fn terminal_reason_from_value(value: &Value, parts: &[LlmOutputPart]) -> LlmTerminalReason {
-        let finish = value
-            .get("candidates")
-            .and_then(Value::as_array)
-            .and_then(|candidates| candidates.first())
-            .and_then(|candidate| candidate.get("finishReason"))
-            .or_else(|| {
-                value
-                    .get("response")
-                    .and_then(|response| response.get("candidates"))
-                    .and_then(Value::as_array)
-                    .and_then(|candidates| candidates.first())
-                    .and_then(|candidate| candidate.get("finishReason"))
-            })
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let finish = Self::finish_reason_str(value).unwrap_or("");
         match finish {
             "STOP" => LlmTerminalReason::Stop,
             "MAX_TOKENS" => LlmTerminalReason::OutputLimit,
@@ -1022,6 +1036,7 @@ impl GoogleOAuthProvider {
         let mut full = String::new();
         let mut usage = LlmUsage::default();
         let mut tool_call_parts: Vec<LlmOutputPart> = Vec::new();
+        let mut finish_event: Option<Value> = None;
         drive_sse_response(
             resp,
             self.options.llm_timeouts().chunk_timeout,
@@ -1036,6 +1051,7 @@ impl GoogleOAuthProvider {
                     &mut text_deltas,
                     &mut usage,
                     Some(&mut tool_call_parts),
+                    &mut finish_event,
                 )?;
                 emit_stream_progress(stream_events.as_ref(), text_deltas, &usage, &prev_usage);
                 Ok(())
@@ -1052,11 +1068,18 @@ impl GoogleOAuthProvider {
         }
         parts.extend(tool_call_parts);
 
+        // Mirror the non-streaming path: derive the terminal reason from the
+        // last `finishReason` observed across the SSE events. When no event
+        // carried one, `terminal_reason_from_value` on a value without a
+        // finishReason falls back to ToolUse/Stop from the assembled parts.
+        let terminal_reason =
+            Self::terminal_reason_from_value(finish_event.as_ref().unwrap_or(&Value::Null), &parts);
+
         Ok(LlmResponse {
             full_text: full,
             parts,
             usage,
-            terminal_reason: LlmTerminalReason::Stop,
+            terminal_reason,
             terminal_diagnostic: None,
             provider_usage: None,
             request_body,

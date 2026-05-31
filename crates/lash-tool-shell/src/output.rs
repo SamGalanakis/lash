@@ -37,6 +37,11 @@ pub(crate) struct ProcessState {
     pub(crate) exit_notify: Arc<Notify>,
     pub(crate) output_notify: Arc<Notify>,
     pub(crate) killer: Arc<StdMutex<Option<Box<dyn portable_pty::ChildKiller + Send + Sync>>>>,
+    /// PID of the direct PTY child. Because the PTY child is a session leader
+    /// (portable-pty calls `setsid` in its `pre_exec`), this PID is also the
+    /// leader of its process group, so SIGKILLing `-pid` reaps backgrounded
+    /// descendants too.
+    pub(crate) pid: Option<u32>,
 }
 
 pub(crate) struct ShellOutputSpill {
@@ -60,13 +65,20 @@ pub(crate) enum PollOutcome {
 }
 
 pub(crate) fn kill_child(state: &ProcessState) {
+    // The PTY child is its own session/process-group leader (portable-pty runs
+    // `setsid` in `pre_exec`), so SIGKILL the whole group first to reap any
+    // backgrounded descendants, mirroring the pipe path's
+    // `terminate_pipe_process`. The portable-pty killer only signals the direct
+    // child, so we still invoke it as a fallback (and on non-unix where group
+    // kill is unavailable).
+    terminate_process_group(state.pid);
     if let Some(mut killer) = state.killer.lock().unwrap().take() {
         let _ = killer.kill();
     }
 }
 
 #[cfg(unix)]
-pub(crate) fn terminate_pipe_process(pid: Option<u32>) {
+fn terminate_process_group(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
@@ -76,6 +88,14 @@ pub(crate) fn terminate_pipe_process(pid: Option<u32>) {
             let _ = libc::kill(pid as i32, libc::SIGKILL);
         }
     }
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(_pid: Option<u32>) {}
+
+#[cfg(unix)]
+pub(crate) fn terminate_pipe_process(pid: Option<u32>) {
+    terminate_process_group(pid);
 }
 
 #[cfg(not(unix))]
@@ -310,6 +330,34 @@ fn shell_output_path(id: &str) -> std::io::Result<PathBuf> {
     Ok(dir.join(format!("exec_command-{id}-{nonce}.log")))
 }
 
+/// Create the spill file owner-readable/writable only (0600). The captured
+/// stream can contain command output the agent never meant to share with other
+/// users on the host, so we avoid the default world-readable 0644.
+///
+/// Reaping gap: the spill path is returned to the caller as `full_output_path`
+/// so the agent can read the full stream after the tool call finishes. There is
+/// therefore no in-process lifecycle point at which the file is both done-with
+/// and safe to delete (`ShellRuntime::remove_process` fires while the path is
+/// still being handed back). These temp files are left in
+/// `${TMPDIR}/lash-tool-output` for OS-level temp cleanup to reclaim; 0600
+/// keeps them from leaking to other local users in the meantime.
+fn create_spill_file(path: &Path) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        File::create(path)
+    }
+}
+
 pub(crate) fn activate_spill(
     id: &str,
     existing_output: &[u8],
@@ -320,7 +368,7 @@ pub(crate) fn activate_spill(
     }
 
     let path = shell_output_path(id).ok()?;
-    let mut file = File::create(&path).ok()?;
+    let mut file = create_spill_file(&path).ok()?;
     if file.write_all(existing_output).is_err() {
         let _ = fs::remove_file(&path);
         return None;

@@ -532,10 +532,24 @@ fn render_window(slice: &WindowSlice, kind: WindowKind) -> String {
 
 fn truncate_line(line: &str) -> String {
     if line.len() > MAX_LINE_LEN {
-        format!("{}...", &line[..MAX_LINE_LEN])
+        // Slice on a char boundary at or below MAX_LINE_LEN so a multi-byte
+        // char straddling the limit doesn't panic ("not a char boundary").
+        let end = floor_char_boundary(line, MAX_LINE_LEN);
+        format!("{}...", &line[..end])
     } else {
         line.to_string()
     }
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    let mut idx = index;
+    while idx > 0 && !text.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
 }
 
 #[cfg(test)]
@@ -765,5 +779,25 @@ mod tests {
         assert_eq!(reference.width, Some(1));
         assert_eq!(reference.height, Some(1));
         assert_eq!(store.get(&reference.id).unwrap().bytes, data);
+    }
+
+    #[test]
+    fn truncate_line_does_not_split_multibyte_char() {
+        // Pad with ASCII so a 3-byte char ('€') straddles the MAX_LINE_LEN
+        // byte boundary: bytes [MAX_LINE_LEN - 1 .. MAX_LINE_LEN + 2). A naive
+        // `&line[..MAX_LINE_LEN]` slice would panic on a non-char boundary.
+        let mut line = "a".repeat(MAX_LINE_LEN - 1);
+        line.push('€');
+        line.push_str(&"b".repeat(50));
+        assert!(line.len() > MAX_LINE_LEN);
+
+        let truncated = truncate_line(&line);
+
+        // Truncation succeeded (no panic) and kept the char-boundary prefix.
+        assert!(truncated.ends_with("..."));
+        let body = truncated.strip_suffix("...").unwrap();
+        // The straddling '€' is dropped entirely, leaving only the padding.
+        assert_eq!(body, "a".repeat(MAX_LINE_LEN - 1));
+        assert!(body.is_char_boundary(body.len()));
     }
 }
