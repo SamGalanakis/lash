@@ -37,43 +37,6 @@ impl SessionBuilder {
         self
     }
 
-    pub fn prompt_template(mut self, template: PromptTemplate) -> Self {
-        let mut prompt = self.spec.prompt.take().unwrap_or_default();
-        prompt.template = Some(template);
-        self.spec = self.spec.prompt_layer(prompt);
-        self
-    }
-
-    pub fn prompt_contribution(mut self, contribution: PromptContribution) -> Self {
-        let mut prompt = self.spec.prompt.take().unwrap_or_default();
-        prompt.add_contribution(contribution);
-        self.spec = self.spec.prompt_layer(prompt);
-        self
-    }
-
-    pub fn replace_prompt_slot(
-        mut self,
-        slot: PromptSlot,
-        contributions: impl IntoIterator<Item = PromptContribution>,
-    ) -> Self {
-        let mut prompt = self.spec.prompt.take().unwrap_or_default();
-        prompt.replace_slot(slot, contributions);
-        self.spec = self.spec.prompt_layer(prompt);
-        self
-    }
-
-    pub fn clear_prompt_slot(mut self, slot: PromptSlot) -> Self {
-        let mut prompt = self.spec.prompt.take().unwrap_or_default();
-        prompt.clear_slot(slot);
-        self.spec = self.spec.prompt_layer(prompt);
-        self
-    }
-
-    pub fn prompt_layer(mut self, layer: PromptLayer) -> Self {
-        self.spec = self.spec.prompt_layer(layer);
-        self
-    }
-
     pub fn session_spec(mut self, spec: SessionSpec) -> Self {
         self.spec = spec;
         self
@@ -289,6 +252,12 @@ impl SessionBuilder {
                 session_id: self.session_id.clone(),
                 message,
             })
+    }
+}
+
+impl PromptLayerSink for SessionBuilder {
+    fn prompt_layer_mut(&mut self) -> &mut PromptLayer {
+        self.spec.prompt.get_or_insert_with(PromptLayer::new)
     }
 }
 

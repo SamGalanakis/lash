@@ -10,6 +10,7 @@ mod core;
 mod error;
 mod mode;
 mod plugin_binding;
+mod prompt_layer;
 mod session;
 mod support;
 #[cfg(test)]
@@ -25,6 +26,7 @@ pub use crate::core::{AdvancedLashCoreBuilder, LashCore, LashCoreBuilder, Sessio
 pub use crate::error::{EmbedError, Result};
 pub use crate::mode::{ModeId, ModePreset};
 pub use crate::plugin_binding::PluginBinding;
+pub use crate::prompt_layer::PromptLayerSink;
 pub use crate::session::{
     LashSession, ObservableSession, QueueInputBuilder, SessionBuilder, SessionConfigPatch,
 };
@@ -43,7 +45,7 @@ pub mod prelude {
         AdvancedLashCoreBuilder, AdvancedToolsControl, EmbedError, HostEvent, HostEventEmitReport,
         HostEventsControl, InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset,
         ModelSpec, ObservableSession, PluginActions, PluginBinding, PluginStack, ProcessControl,
-        QueuedTurnBuilder, Result, ResumeTurnBuilder, SessionBuilder, SessionSpec,
+        PromptLayerSink, QueuedTurnBuilder, Result, ResumeTurnBuilder, SessionBuilder, SessionSpec,
         SessionTriggerInstallReport, ToolsControl, TriggersControl, TurnActivity, TurnBuilder,
         TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
     };

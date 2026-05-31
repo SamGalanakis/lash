@@ -827,32 +827,12 @@ impl StateControl {
         self.control.branch_to_node(target_leaf).await
     }
 
-    pub async fn await_background_work(&self) -> Result<()> {
-        self.control.await_background_work().await
-    }
-
     pub async fn persist_current(&self) -> Result<RuntimeSessionState> {
         self.control.persist_current_state().await
     }
 
-    pub async fn list_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
-        self.control.list_process_handles().await
-    }
-
-    pub async fn list_all_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
-        self.control.list_all_process_handles().await
-    }
-
     pub async fn session_state_service(&self) -> Result<Arc<dyn SessionStateService>> {
         self.control.session_state_service().await
-    }
-
-    pub async fn cancel_process(&self, process_id: &str) -> Result<ProcessRecord> {
-        self.control.cancel_process(process_id).await
-    }
-
-    pub async fn cancel_all_processes(&self) -> Result<Vec<ProcessRecord>> {
-        self.control.cancel_all_processes().await
     }
 
     pub async fn snapshot_execution(&self) -> Result<Option<Vec<u8>>> {

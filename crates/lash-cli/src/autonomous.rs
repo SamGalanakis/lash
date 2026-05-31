@@ -219,7 +219,7 @@ pub(crate) async fn run_autonomous(
     let outcome = run_autonomous_turn(session.clone(), turn_input, &mut renderer, 1).await?;
     let (mut done, cancel) = (outcome.done, outcome.cancel);
     if persistence.await_background_work {
-        session.control().state().await_background_work().await?;
+        session.process_control().await_all().await?;
         let state = session.control().state().persist_current().await?;
         done.result.state = state.to_snapshot();
     }

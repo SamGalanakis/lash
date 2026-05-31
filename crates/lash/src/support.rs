@@ -40,5 +40,6 @@ pub(crate) use crate::core::*;
 pub(crate) use crate::error::*;
 pub(crate) use crate::mode::*;
 pub(crate) use crate::plugin_binding::*;
+pub(crate) use crate::prompt_layer::PromptLayerSink;
 pub(crate) use crate::session::SessionBuilder;
 pub(crate) use crate::turn::*;

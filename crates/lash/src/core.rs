@@ -288,39 +288,6 @@ impl LashCoreBuilder {
         self
     }
 
-    pub fn prompt_template(mut self, template: PromptTemplate) -> Self {
-        self.prompt_mut().template = Some(template);
-        self
-    }
-
-    pub fn prompt_contribution(mut self, contribution: PromptContribution) -> Self {
-        self.prompt_mut().add_contribution(contribution);
-        self
-    }
-
-    pub fn replace_prompt_slot(
-        mut self,
-        slot: PromptSlot,
-        contributions: impl IntoIterator<Item = PromptContribution>,
-    ) -> Self {
-        self.prompt_mut().replace_slot(slot, contributions);
-        self
-    }
-
-    pub fn clear_prompt_slot(mut self, slot: PromptSlot) -> Self {
-        self.prompt_mut().clear_slot(slot);
-        self
-    }
-
-    pub fn prompt_layer(mut self, layer: PromptLayer) -> Self {
-        self.prompt = Some(layer);
-        self
-    }
-
-    fn prompt_mut(&mut self) -> &mut PromptLayer {
-        self.prompt.get_or_insert_with(PromptLayer::new)
-    }
-
     pub fn model(mut self, model: lash_core::ModelSpec) -> Self {
         self.session_spec = self.session_spec.model(model);
         self
@@ -783,6 +750,12 @@ pub(crate) fn build_plugin_host_for_mode(
         plugin_host = plugin_host.with_lashlang_abilities(abilities);
     }
     Ok(plugin_host)
+}
+
+impl PromptLayerSink for LashCoreBuilder {
+    fn prompt_layer_mut(&mut self) -> &mut PromptLayer {
+        self.prompt.get_or_insert_with(PromptLayer::new)
+    }
 }
 
 pub struct AdvancedLashCoreBuilder {
