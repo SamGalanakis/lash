@@ -175,7 +175,12 @@ pub enum LogEvent {
 }
 
 /// An effect the host must fulfil.
-#[derive(Debug)]
+//
+// `Clone` is implemented by hand below rather than derived: the derive would
+// demand `M: Clone`, but only `M::Event` is ever cloned (and `TurnProtocol`
+// already guarantees `Event: Clone`), so a manual impl keeps `Effect<M>`
+// cloneable for every protocol — which the turn checkpoint relies on.
+#[derive(Debug, Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum Effect<M: TurnProtocol = UnitTurnProtocol> {
     /// Sync the live execution surface before the turn proceeds.
@@ -230,6 +235,59 @@ pub enum Effect<M: TurnProtocol = UnitTurnProtocol> {
     },
 }
 
+impl<M: TurnProtocol> Clone for Effect<M> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::SyncExecutionSurface {
+                id,
+                update_machine_config,
+            } => Self::SyncExecutionSurface {
+                id: *id,
+                update_machine_config: *update_machine_config,
+            },
+            Self::LlmCall { id, request } => Self::LlmCall {
+                id: *id,
+                request: Arc::clone(request),
+            },
+            Self::CancelLlm { id } => Self::CancelLlm { id: *id },
+            Self::ToolCalls { id, calls } => Self::ToolCalls {
+                id: *id,
+                calls: calls.clone(),
+            },
+            Self::ExecCode { id, code } => Self::ExecCode {
+                id: *id,
+                code: code.clone(),
+            },
+            Self::Checkpoint { id, checkpoint } => Self::Checkpoint {
+                id: *id,
+                checkpoint: *checkpoint,
+            },
+            Self::Log { event } => Self::Log {
+                event: event.clone(),
+            },
+            Self::Emit(event) => Self::Emit(event.clone()),
+            Self::Progress {
+                messages,
+                event_delta,
+                protocol_iteration,
+            } => Self::Progress {
+                messages: messages.clone(),
+                event_delta: event_delta.clone(),
+                protocol_iteration: *protocol_iteration,
+            },
+            Self::Done {
+                messages,
+                event_delta,
+                protocol_iteration,
+            } => Self::Done {
+                messages: messages.clone(),
+                event_delta: event_delta.clone(),
+                protocol_iteration: *protocol_iteration,
+            },
+        }
+    }
+}
+
 impl<M: TurnProtocol> Effect<M> {
     fn id(&self) -> Option<EffectId> {
         match self {
@@ -245,48 +303,6 @@ impl<M: TurnProtocol> Effect<M> {
 }
 
 /// Error details from a failed LLM call.
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
-#[allow(clippy::large_enum_variant)]
-pub enum CheckpointEffect<M: TurnProtocol = UnitTurnProtocol> {
-    SyncExecutionSurface {
-        id: EffectId,
-        update_machine_config: bool,
-    },
-    LlmCall {
-        id: EffectId,
-        request: Arc<LlmRequest>,
-    },
-    CancelLlm {
-        id: EffectId,
-    },
-    ToolCalls {
-        id: EffectId,
-        calls: Vec<PendingToolCall>,
-    },
-    ExecCode {
-        id: EffectId,
-        code: String,
-    },
-    Checkpoint {
-        id: EffectId,
-        checkpoint: CheckpointKind,
-    },
-    Log {
-        event: LogEvent,
-    },
-    Emit(SessionEvent),
-    Progress {
-        messages: Vec<Message>,
-        event_delta: Vec<SessionEventRecord<M::Event>>,
-        protocol_iteration: usize,
-    },
-    Done {
-        messages: Vec<Message>,
-        event_delta: Vec<SessionEventRecord<M::Event>>,
-        protocol_iteration: usize,
-    },
-}
-
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct LlmCallError {
     pub message: String,
@@ -615,7 +631,7 @@ enum MachineState<M: TurnProtocol = UnitTurnProtocol> {
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct TurnCheckpoint<M: TurnProtocol = UnitTurnProtocol> {
     state: MachineState<M>,
-    pending_effects: Vec<CheckpointEffect<M>>,
+    pending_effects: Vec<Effect<M>>,
     next_effect_id: u64,
     #[serde(default)]
     next_synthetic_message_id: u64,
@@ -676,96 +692,6 @@ impl<M: TurnProtocol> Clone for MachineState<M> {
                 on_empty: on_empty.clone(),
             },
             Self::Finished => Self::Finished,
-        }
-    }
-}
-
-impl<M: TurnProtocol> CheckpointEffect<M> {
-    fn from_effect(effect: &Effect<M>) -> Self {
-        match effect {
-            Effect::SyncExecutionSurface {
-                id,
-                update_machine_config,
-            } => Self::SyncExecutionSurface {
-                id: *id,
-                update_machine_config: *update_machine_config,
-            },
-            Effect::LlmCall { id, request } => Self::LlmCall {
-                id: *id,
-                request: Arc::clone(request),
-            },
-            Effect::CancelLlm { id } => Self::CancelLlm { id: *id },
-            Effect::ToolCalls { id, calls } => Self::ToolCalls {
-                id: *id,
-                calls: calls.clone(),
-            },
-            Effect::ExecCode { id, code } => Self::ExecCode {
-                id: *id,
-                code: code.clone(),
-            },
-            Effect::Checkpoint { id, checkpoint } => Self::Checkpoint {
-                id: *id,
-                checkpoint: *checkpoint,
-            },
-            Effect::Log { event } => Self::Log {
-                event: event.clone(),
-            },
-            Effect::Emit(event) => Self::Emit(event.clone()),
-            Effect::Progress {
-                messages,
-                event_delta,
-                protocol_iteration,
-            } => Self::Progress {
-                messages: messages.iter().cloned().collect(),
-                event_delta: event_delta.clone(),
-                protocol_iteration: *protocol_iteration,
-            },
-            Effect::Done {
-                messages,
-                event_delta,
-                protocol_iteration,
-            } => Self::Done {
-                messages: messages.iter().cloned().collect(),
-                event_delta: event_delta.clone(),
-                protocol_iteration: *protocol_iteration,
-            },
-        }
-    }
-
-    fn into_effect(self) -> Effect<M> {
-        match self {
-            Self::SyncExecutionSurface {
-                id,
-                update_machine_config,
-            } => Effect::SyncExecutionSurface {
-                id,
-                update_machine_config,
-            },
-            Self::LlmCall { id, request } => Effect::LlmCall { id, request },
-            Self::CancelLlm { id } => Effect::CancelLlm { id },
-            Self::ToolCalls { id, calls } => Effect::ToolCalls { id, calls },
-            Self::ExecCode { id, code } => Effect::ExecCode { id, code },
-            Self::Checkpoint { id, checkpoint } => Effect::Checkpoint { id, checkpoint },
-            Self::Log { event } => Effect::Log { event },
-            Self::Emit(event) => Effect::Emit(event),
-            Self::Progress {
-                messages,
-                event_delta,
-                protocol_iteration,
-            } => Effect::Progress {
-                messages: MessageSequence::from_owned(messages),
-                event_delta,
-                protocol_iteration,
-            },
-            Self::Done {
-                messages,
-                event_delta,
-                protocol_iteration,
-            } => Effect::Done {
-                messages: MessageSequence::from_owned(messages),
-                event_delta,
-                protocol_iteration,
-            },
         }
     }
 }
@@ -918,7 +844,7 @@ impl<M: TurnProtocol> TurnMachine<M> {
             .pending_effects
             .iter()
             .filter(|effect| active_effect_id.is_none_or(|id| effect.id() != Some(id)))
-            .map(CheckpointEffect::from_effect)
+            .cloned()
             .collect::<Vec<_>>();
         TurnCheckpoint {
             state: self.state.clone(),
@@ -945,7 +871,6 @@ impl<M: TurnProtocol> TurnMachine<M> {
         let pending_effects = checkpoint
             .pending_effects
             .into_iter()
-            .map(CheckpointEffect::into_effect)
             .collect::<VecDeque<_>>();
         let active_effect_redelivery = active_effect_id.is_some()
             && !pending_effects
