@@ -343,6 +343,7 @@ impl Compiler {
                 iterable,
                 body,
             } => self.compile_for_expr(binding, iterable, body, false),
+            Expr::While { condition, body } => self.compile_while_expr(condition, body, false),
             Expr::Submit(_) | Expr::Finish(_) | Expr::Fail(_) | Expr::Break | Expr::Continue => {
                 self.compile_expr(expression);
             }
@@ -553,6 +554,30 @@ impl Compiler {
         self.clear_const_slots();
     }
 
+    fn compile_while_expr(&mut self, condition: &Expr, body: &Expr, leave_value: bool) {
+        self.clear_const_slots();
+        let loop_start = self.code.len();
+        let jump_to_end = self.compile_condition_jump_if_false(condition);
+        self.clear_const_slots();
+        self.loop_contexts.push(LoopContext {
+            continue_target: loop_start,
+            break_jumps: SmallVec::new(),
+        });
+        self.compile_block_discarding_values(body);
+        let loop_context = self
+            .loop_contexts
+            .pop()
+            .expect("loop context should exist while compiling `while`");
+        self.code.push(Instruction::Jump(loop_start));
+        let loop_end = self.code.len();
+        self.patch_jump(jump_to_end, loop_end);
+        for break_jump in loop_context.break_jumps {
+            self.patch_jump(break_jump, loop_end);
+        }
+        self.clear_const_slots();
+        self.push_null_if(leave_value);
+    }
+
     fn fold_compile_time_expr(&self, expr: &Expr) -> Option<Value> {
         match expr {
             Expr::Null => Some(Value::Null),
@@ -670,6 +695,7 @@ impl Compiler {
             Expr::Block(_)
             | Expr::Assign { .. }
             | Expr::For { .. }
+            | Expr::While { .. }
             | Expr::Break
             | Expr::Continue
             | Expr::ReceiverCall { .. }
@@ -796,6 +822,7 @@ impl Compiler {
                 iterable,
                 body,
             } => self.compile_for_expr(binding, iterable, body, true),
+            Expr::While { condition, body } => self.compile_while_expr(condition, body, true),
             Expr::Break => {
                 let jump = self.emit_jump();
                 self.loop_contexts
@@ -1360,6 +1387,7 @@ pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
         Expr::Block(_)
         | Expr::Assign { .. }
         | Expr::For { .. }
+        | Expr::While { .. }
         | Expr::Break
         | Expr::Continue
         | Expr::ReceiverCall { .. }

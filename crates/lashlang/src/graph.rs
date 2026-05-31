@@ -302,6 +302,10 @@ fn collect_expr_graph(
             collect_expr_graph(iterable, owner, span, process_refs, nodes, edges);
             collect_expr_graph(body, owner, span, process_refs, nodes, edges);
         }
+        Expr::While { condition, body } => {
+            collect_expr_graph(condition, owner, span, process_refs, nodes, edges);
+            collect_expr_graph(body, owner, span, process_refs, nodes, edges);
+        }
         Expr::Null
         | Expr::Bool(_)
         | Expr::Number(_)
@@ -568,6 +572,10 @@ impl ProcessMapBuilder<'_> {
             }
             Expr::For { iterable, body, .. } => {
                 self.visit_expr(iterable, owner);
+                self.visit_expr(body, owner);
+            }
+            Expr::While { condition, body } => {
+                self.visit_expr(condition, owner);
                 self.visit_expr(body, owner);
             }
             Expr::List(items) => {

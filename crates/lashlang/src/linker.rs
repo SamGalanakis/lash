@@ -1113,6 +1113,17 @@ impl<'module> Linker<'module> {
                     Some(Binding::Value),
                 )
             }
+            Expr::While { condition, body } => {
+                let condition = self.lower_expr(condition, scope)?.0;
+                let body = self.lower_expr(body, scope)?.0;
+                (
+                    Expr::While {
+                        condition: Box::new(condition),
+                        body: Box::new(body),
+                    },
+                    Some(Binding::Value),
+                )
+            }
             Expr::StartProcess(start) => {
                 self.ensure_feature(self.surface.abilities.processes, "processes", scope.span)?;
                 let Some(process) = self.program.process(start.process.as_str()) else {

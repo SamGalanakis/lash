@@ -99,9 +99,6 @@ fn parse_hint(error: &ParseError) -> Option<&'static str> {
         ParseError::Unexpected { found, .. } if found == "`for`" => Some(
             "`for` is a statement. Put it on its own line, not inside an expression or record literal.",
         ),
-        ParseError::UnsupportedLoop {
-            keyword: "while", ..
-        } => Some("use bounded `for` loops over ranges or lists"),
         ParseError::Expected { expected, .. } if expected.contains("type literals must start") => {
             Some("write nested object types as `Type { field: type }`")
         }

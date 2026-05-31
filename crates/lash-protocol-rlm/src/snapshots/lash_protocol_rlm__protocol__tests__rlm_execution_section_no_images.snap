@@ -1,6 +1,5 @@
 ---
 source: crates/lash-protocol-rlm/src/protocol/tests.rs
-assertion_line: 17
 expression: "rlm_execution_section_for_surface(RlmPromptFeatures\n{ images: false, ..RlmPromptFeatures::default() }, &full_prompt_surface())"
 ---
 **All actions go through `lashlang`.** Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a fenced `lashlang` block. Start from operations listed under **Showcased Tools**; if a discovery tool is available, use it to find additional module call forms before calling them. Emit a block whenever you need to call an available operation or compute a value. Plain prose is for direct conversational replies that need no action.
@@ -51,7 +50,7 @@ submit "The bound version is 0.2.61."
 - Triggers: module-event declarations that may appear alongside normal foreground code. Use `trigger clicked on ui.button.pressed as event -> handle_click(event: event, ui: ui.button)` or `trigger changed on each file.changed as file, event -> process_name(file: file, event: event)`. Bind every target process parameter explicitly. Trigger args may only be the whole event payload, a concrete module authority, or the authority handle from `on each`; trigger declarations cannot contain code, `await`, `print`, `submit`, loops, assignments, module operations, or computed records.
 - Schedules: declare cron activation with `schedule name every cron("0 * * * *") as tick { ... }`.
 - Independent operation fanout: call independent operations directly and store their values, e.g. `a = await web.search({ query: "one" })?` and `b = await files.read({ path: "notes/two.md" })?`. Use a named process for multi-step background work.
-- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. There is no `while` loop; use bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.
+- Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.
 - Bare expressions are valid statements in normal blocks.
 - When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.
 

@@ -18,10 +18,8 @@ pub enum ParseError {
     },
     #[error("unexpected {found}")]
     Unexpected { found: String, span: Span },
-    #[error("`{keyword}` can only be used inside a `for` loop")]
+    #[error("`{keyword}` can only be used inside a loop")]
     LoopControlOutsideLoop { keyword: &'static str, span: Span },
-    #[error("unsupported `{keyword}` loop; use bounded `for` loops over ranges or lists")]
-    UnsupportedLoop { keyword: &'static str, span: Span },
     #[error("`{keyword}` can only be used inside a `process` body")]
     ProcessControlOutsideBlock { keyword: &'static str, span: Span },
     #[error("`{keyword}` can't be used inside a `process` body")]
@@ -39,7 +37,6 @@ impl ParseError {
             Self::Expected { span, .. }
             | Self::Unexpected { span, .. }
             | Self::LoopControlOutsideLoop { span, .. }
-            | Self::UnsupportedLoop { span, .. }
             | Self::ProcessControlOutsideBlock { span, .. }
             | Self::ForegroundControlInsideProcess { span, .. }
             | Self::TriggerBodyNotAllowed { span }
@@ -71,7 +68,7 @@ pub fn parse(source: &str) -> Result<Program, ParseError> {
 /// dozen native frames carrying the large `Expr` enum. Empirically ~64 levels
 /// parse comfortably on a 2 MiB thread stack while ~128 overflow it, so the
 /// limit is kept well under that cliff. Block nesting (`parse_block` ->
-/// `parse_statement_expr` -> `parse_if`/`parse_for` -> `parse_block`) is a
+/// `parse_statement_expr` -> `parse_if`/`parse_for`/`parse_while` -> `parse_block`) is a
 /// shallower per-level chain and shares the same budget, so any mix of the two
 /// stays bounded. Real generated programs nest only a handful deep, so this is
 /// ample headroom; capping here also bounds every downstream AST walker
@@ -428,10 +425,7 @@ impl Parser {
                 self.parse_loop_control("continue")
             }
             TokenKind::Ident(name) if name == "while" && !self.peek_assignment_target() => {
-                Err(ParseError::UnsupportedLoop {
-                    keyword: "while",
-                    span: self.peek().span,
-                })
+                self.parse_while()
             }
             TokenKind::Ident(_) if self.peek_assignment_target() => self.parse_assign(),
             _ => self.parse_expr(),
@@ -506,6 +500,18 @@ impl Parser {
         Ok(Expr::For {
             binding,
             iterable: Box::new(iterable),
+            body: Box::new(body),
+        })
+    }
+
+    fn parse_while(&mut self) -> Result<Expr, ParseError> {
+        self.bump();
+        let condition = self.parse_expr()?;
+        self.loop_depth += 1;
+        let body = self.parse_block()?;
+        self.loop_depth -= 1;
+        Ok(Expr::While {
+            condition: Box::new(condition),
             body: Box::new(body),
         })
     }

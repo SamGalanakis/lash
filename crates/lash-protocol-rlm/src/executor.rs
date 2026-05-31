@@ -1103,33 +1103,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_error_for_unsupported_while_points_at_while() {
+    fn parser_accepts_bounded_while_with_nested_for() {
         let source = r#"pool_i = 0
-while len(final_ids) < 100 && pool_i < len(candidate_pools) {
+final_ids = []
+candidate_pools = [{ matches: ["a", "b"] }]
+while len(final_ids) < 2 && pool_i < len(candidate_pools) {
   for m in candidate_pools[pool_i].matches {
-    print m
+    final_ids = final_ids + [m]
   }
-}"#;
-        let err = match lashlang::compile(source) {
-            Ok(_) => panic!("while should not compile"),
-            Err(err) => err,
-        };
+  pool_i = pool_i + 1
+}
+submit final_ids"#;
 
-        let message = lashlang::format_parse_diagnostic(source, &err);
-        assert!(message.contains("unsupported `while` loop"), "{message}");
-        assert!(message.contains("--> line 2, column 1"), "{message}");
-        assert!(
-            message.contains("use bounded `for` loops over ranges or lists"),
-            "{message}"
-        );
-        assert!(
-            message.contains("hint: use bounded `for` loops over ranges or lists"),
-            "{message}"
-        );
-        assert!(message.contains("while len(final_ids) < 100"), "{message}");
-        assert!(
-            !message.contains("expected `:`, found identifier `m`"),
-            "{message}"
-        );
+        lashlang::compile(source).expect("while should compile");
     }
 }

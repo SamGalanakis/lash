@@ -182,6 +182,10 @@ pub enum Expr {
         iterable: Box<Expr>,
         body: Box<Expr>,
     },
+    While {
+        condition: Box<Expr>,
+        body: Box<Expr>,
+    },
     Break,
     Continue,
     StartProcess(ProcessStartExpr),
@@ -238,8 +242,8 @@ impl Expr {
     /// needs to recurse into the sub-expressions of a node (without caring
     /// about the node's own kind) can fold over `children()` instead of
     /// re-spelling the full `match`. Leaf nodes (`Null`, `Bool`, `Number`,
-    /// `String`, `Variable`, `Break`, `Continue`, `WaitSignal`, `ResourceRef`,
-    /// `TypeLiteral`) yield nothing.
+    /// `String`, `Variable`, `Break`, `Continue`, `WaitSignal`,
+    /// `ResourceRef`, `TypeLiteral`) yield nothing.
     ///
     /// `Assign` includes any dynamic index expressions in its `target` path
     /// (in path order) before the assigned value, matching the order in which
@@ -280,6 +284,10 @@ impl Expr {
             }
             Expr::For { iterable, body, .. } => {
                 buffer.push(iterable);
+                buffer.push(body);
+            }
+            Expr::While { condition, body } => {
+                buffer.push(condition);
                 buffer.push(body);
             }
             Expr::StartProcess(start) => buffer.extend(start.args.iter().map(|(_, value)| value)),
@@ -580,6 +588,12 @@ mod tests {
             else_block: Box::new(var("else")),
         };
         assert_eq!(child_vars(&if_expr), ["cond", "then", "else"]);
+
+        let while_expr = Expr::While {
+            condition: Box::new(var("cond")),
+            body: Box::new(var("body")),
+        };
+        assert_eq!(child_vars(&while_expr), ["cond", "body"]);
 
         let receiver = Expr::ReceiverCall {
             receiver: Box::new(var("recv")),

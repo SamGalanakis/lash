@@ -213,12 +213,12 @@ fn execution_section_can_disable_image_guidance() {
 }
 
 #[test]
-fn execution_section_states_no_while_loop() {
+fn execution_section_mentions_while_and_bounded_loop_guidance() {
     let section =
         rlm_execution_section_for_surface(RlmPromptFeatures::default(), &full_prompt_surface());
 
-    assert!(section.contains("There is no `while` loop"));
-    assert!(section.contains("use bounded `for` loops over ranges/lists"));
+    assert!(section.contains("statement `if`/`for`/`while`"));
+    assert!(section.contains("Prefer bounded `while` loops where possible"));
 }
 
 #[test]

@@ -664,6 +664,11 @@ fn write_expr(writer: &mut HashWriter, expr: &Expr, normalizer: &NameNormalizer)
             write_expr(writer, iterable, normalizer);
             write_expr(writer, body, normalizer);
         }
+        Expr::While { condition, body } => {
+            writer.atom("while");
+            write_expr(writer, condition, normalizer);
+            write_expr(writer, body, normalizer);
+        }
         Expr::Break => writer.atom("break"),
         Expr::Continue => writer.atom("continue"),
         Expr::StartProcess(start) => {
@@ -1172,6 +1177,11 @@ impl<'program> RequirementsCollector<'program> {
                 } else {
                     scope.remove(binding.as_str());
                 }
+                Some(RequirementBinding::Value)
+            }
+            Expr::While { condition, body } => {
+                self.collect_expr(condition, scope);
+                self.collect_expr(body, scope);
                 Some(RequirementBinding::Value)
             }
             Expr::StartProcess(start) => {

@@ -129,71 +129,8 @@ fn test_surface() -> lashlang::LashlangSurface {
 }
 
 fn program_contains_start_process(expr: &lashlang::Expr) -> bool {
-    match expr {
-        lashlang::Expr::StartProcess(_) => true,
-        lashlang::Expr::Block(expressions) | lashlang::Expr::List(expressions) => {
-            expressions.iter().any(program_contains_start_process)
-        }
-        lashlang::Expr::Record(entries) => entries
-            .iter()
-            .any(|(_, expr)| program_contains_start_process(expr)),
-        lashlang::Expr::Assign { target, expr } => {
-            target.steps.iter().any(|step| match step {
-                lashlang::AssignPathStep::Field(_) => false,
-                lashlang::AssignPathStep::Index(index) => program_contains_start_process(index),
-            }) || program_contains_start_process(expr)
-        }
-        lashlang::Expr::If {
-            condition,
-            then_block,
-            else_block,
-        } => {
-            program_contains_start_process(condition)
-                || program_contains_start_process(then_block)
-                || program_contains_start_process(else_block)
-        }
-        lashlang::Expr::For { iterable, body, .. } => {
-            program_contains_start_process(iterable) || program_contains_start_process(body)
-        }
-        lashlang::Expr::ReceiverCall { receiver, args, .. } => {
-            program_contains_start_process(receiver)
-                || args.iter().any(program_contains_start_process)
-        }
-        lashlang::Expr::Await(expr)
-        | lashlang::Expr::SleepFor(expr)
-        | lashlang::Expr::SleepUntil(expr)
-        | lashlang::Expr::ResultUnwrap(expr)
-        | lashlang::Expr::Cancel(expr)
-        | lashlang::Expr::Print(expr)
-        | lashlang::Expr::Yield(expr)
-        | lashlang::Expr::Wake(expr)
-        | lashlang::Expr::Fail(expr)
-        | lashlang::Expr::Unary { expr, .. } => program_contains_start_process(expr),
-        lashlang::Expr::Submit(expr) | lashlang::Expr::Finish(expr) => {
-            expr.as_deref().is_some_and(program_contains_start_process)
-        }
-        lashlang::Expr::SignalRun { run, payload } => {
-            program_contains_start_process(run) || program_contains_start_process(payload)
-        }
-        lashlang::Expr::BuiltinCall { args, .. } => args.iter().any(program_contains_start_process),
-        lashlang::Expr::Field { target, .. } => program_contains_start_process(target),
-        lashlang::Expr::Index { target, index } => {
-            program_contains_start_process(target) || program_contains_start_process(index)
-        }
-        lashlang::Expr::Binary { left, right, .. } => {
-            program_contains_start_process(left) || program_contains_start_process(right)
-        }
-        lashlang::Expr::Null
-        | lashlang::Expr::Bool(_)
-        | lashlang::Expr::Number(_)
-        | lashlang::Expr::String(_)
-        | lashlang::Expr::Variable(_)
-        | lashlang::Expr::Break
-        | lashlang::Expr::Continue
-        | lashlang::Expr::ResourceRef(_)
-        | lashlang::Expr::WaitSignal
-        | lashlang::Expr::TypeLiteral(_) => false,
-    }
+    matches!(expr, lashlang::Expr::StartProcess(_))
+        || expr.children().any(program_contains_start_process)
 }
 
 impl MockHost {
@@ -665,16 +602,17 @@ async fn prompt_claim_bare_submit_terminates_with_null() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Prompt claim: "Control flow: statement `if`/`for`; `break` exits the
-// nearest `for`; `continue` skips to the nearest `for`'s next iteration;
+// Prompt claim: "Control flow: statement `if`/`for`/`while`; `break` exits
+// the nearest loop; `continue` skips to the nearest loop's next iteration;
 // expression ternary `cond ? yes : no` (there is no expression-form `if`);
-// boolean negation via `!cond` or `not cond`. There is no `while` loop;
-// use bounded `for` loops over ranges/lists for fill or retry logic.
+// boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops
+// where possible and bounded `for` loops over ranges/lists for fill or retry
+// logic.
 // `submit` is different from `break`: it ends the whole program/turn."
 // ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_claim_if_for_and_ternary_work() {
+async fn prompt_claim_if_for_while_and_ternary_work() {
     let host = MockHost::default();
     assert_eq!(
         run(
@@ -694,6 +632,17 @@ submit total"#,
     assert_eq!(
         run(&host, "if 1 < 2 { submit 7 } else { submit 9 }"),
         Value::Number(7.0)
+    );
+    assert_eq!(
+        run(
+            &host,
+            r#"items = []
+while len(items) < 3 {
+  items = items + [len(items)]
+}
+submit items"#,
+        ),
+        Value::List(vec![Value::Number(0.0), Value::Number(1.0), Value::Number(2.0)].into())
     );
 }
 
@@ -754,19 +703,6 @@ async fn prompt_claim_loop_control_requires_loop() {
             } if actual == keyword
         ));
     }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn prompt_claim_while_loop_is_rejected() {
-    let err =
-        parse("while len(items) < 3 { print items }").expect_err("while loops are not supported");
-    assert!(matches!(
-        err,
-        ParseError::UnsupportedLoop {
-            keyword: "while",
-            ..
-        }
-    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
