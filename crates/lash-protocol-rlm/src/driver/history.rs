@@ -737,49 +737,24 @@ fn truncated_ref(raw_len: usize, max_output_chars: usize, reference: &str) -> St
     }
 }
 
+/// Strip the executed ` ```lashlang ` block out of the reasoning
+/// preview — the code already renders verbatim in the dedicated
+/// "Code:" section below, so leaving it in the reasoning duplicates it.
+///
+/// Routes through the canonical [`crate::fence_scan`] scanner so this
+/// strips *exactly* the fence the driver extracts and executes. The
+/// older bespoke copy here only inspected the first backtick run and
+/// recognized a divergent alias set (`rlm`/`lash`); a reasoning string
+/// that opened with some other fenced sample (e.g. a ` ```python `
+/// illustration) before the real ` ```lashlang ` block slipped past it
+/// entirely, leaking the executed code into the reasoning preview.
 fn reasoning_without_first_fence(text: &str) -> String {
-    let Some(open_rel) = text.find("```") else {
+    let Some(span) = crate::fence_scan::first_lashlang_fence_span(text) else {
         return text.to_string();
     };
-    // CommonMark variable-length fences: count opener backticks; the
-    // closer must be a run of ≥N backticks. Mirrors the runtime
-    // extractor in `protocol.rs::first_lashlang_fence_span`.
-    let opener_len = text.as_bytes()[open_rel..]
-        .iter()
-        .take_while(|&&b| b == b'`')
-        .count();
-    let after_open = open_rel + opener_len;
-    let rest = &text[after_open..];
-    let Some(lang_end_rel) = rest.find('\n') else {
-        return text[..open_rel].to_string();
-    };
-    let lang = rest[..lang_end_rel].trim();
-    if !matches!(lang, "lashlang" | "rlm" | "lash") {
-        return text.to_string();
-    }
-    let body_start = after_open + lang_end_rel + 1;
-    let body_bytes = &text.as_bytes()[body_start..];
-    let mut close = text.len();
-    let mut consumed = 0usize;
-    let mut i = 0;
-    while i < body_bytes.len() {
-        if body_bytes[i] == b'`' {
-            let start = i;
-            while i < body_bytes.len() && body_bytes[i] == b'`' {
-                i += 1;
-            }
-            if i - start >= opener_len {
-                close = body_start + start;
-                consumed = opener_len;
-                break;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    let after_close = (close + consumed).min(text.len());
+    let after_close = (span.body_end + span.close_len).min(text.len());
     let mut out = String::new();
-    out.push_str(text[..open_rel].trim_end());
+    out.push_str(text[..span.open_start].trim_end());
     let tail = text[after_close..].trim_start();
     if !tail.is_empty() {
         if !out.is_empty() {
@@ -788,4 +763,46 @@ fn reasoning_without_first_fence(text: &str) -> String {
         out.push_str(tail);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reasoning_without_first_fence;
+
+    #[test]
+    fn strips_the_canonical_lashlang_block() {
+        let reasoning = "I'll compute it.\n\n```lashlang\nsubmit 1\n```";
+        assert_eq!(
+            reasoning_without_first_fence(reasoning),
+            "I'll compute it.",
+            "the executed block is rendered separately and must not be duplicated"
+        );
+    }
+
+    #[test]
+    fn strips_lashlang_block_after_a_non_lashlang_sample() {
+        // Regression: the reasoning leads with an illustrative
+        // ```python sample, then the real ```lashlang block. The old
+        // stripper only inspected the first backtick run, saw a
+        // non-lashlang tag, and returned the text unchanged — leaking
+        // the executed code into the reasoning preview (where it then
+        // duplicated the dedicated "Code:" section). The unified
+        // scanner skips the sample and strips the real block.
+        let reasoning = "For example:\n\n```python\nx = 1\n```\n\nNow the real one:\n\n```lashlang\nsubmit x\n```";
+        let stripped = reasoning_without_first_fence(reasoning);
+        assert!(
+            !stripped.contains("submit x"),
+            "the executed lashlang block must be stripped, got: {stripped:?}"
+        );
+        assert!(
+            stripped.contains("```python"),
+            "the non-lashlang sample is prose and stays in the reasoning"
+        );
+    }
+
+    #[test]
+    fn leaves_reasoning_without_a_lashlang_fence_untouched() {
+        let reasoning = "Just thinking out loud, no code here.";
+        assert_eq!(reasoning_without_first_fence(reasoning), reasoning);
+    }
 }
