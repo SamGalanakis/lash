@@ -10,10 +10,10 @@ async-trait = { workspace = true }
 axum = "0.8"
 bytes = { workspace = true }
 chrono = { workspace = true }
-lash-restate = { path = "../../crates/lash-restate", version = "=0.1.0-alpha.16", optional = true }
-lash-sqlite-store = { path = "../../crates/lash-sqlite-store", version = "=0.1.0-alpha.16" }
-lash = { package = "lash-runtime", path = "../../crates/lash", version = "=0.1.0-alpha.16" }
-lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.16" }
+lash-restate = { path = "../../crates/lash-restate", version = "=0.1.0-alpha.17", optional = true }
+lash-sqlite-store = { path = "../../crates/lash-sqlite-store", version = "=0.1.0-alpha.17" }
+lash = { package = "lash-runtime", path = "../../crates/lash", version = "=0.1.0-alpha.17" }
+lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.17" }
 reqwest = { workspace = true, features = ["json", "rustls", "http2"], optional = true }
 restate-sdk = { workspace = true, optional = true }
 rusqlite = { version = "0.33", features = ["bundled"] }
@@ -24,7 +24,7 @@ tokio-stream = "0.1"
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-lash-core = { path = "../../crates/lash-core", version = "=0.1.0-alpha.16", features = ["testing"] }
+lash-core = { path = "../../crates/lash-core", version = "=0.1.0-alpha.17", features = ["testing"] }
 tempfile = { workspace = true }
 
 [features]

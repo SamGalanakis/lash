@@ -14,9 +14,9 @@ keywords = ["lash", "agent", "storage", "filesystem", "runtime"]
 categories = ["filesystem", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.16", default-features = false }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.17", default-features = false }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.16", features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.17", features = ["testing"] }
 tempfile = { workspace = true }
