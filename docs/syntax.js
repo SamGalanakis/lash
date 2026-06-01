@@ -51,14 +51,17 @@
   }
 
   // ── lashlang grammar — Prism doesn't ship with this one ──
-  // Mirrors the surface tokens used in our docs: control flow, the
-  // receiver operations / named process starts / await / submit verbs, raw triple-quoted
-  // strings, and ordinary Rust-style punctuation.
+  // Kept in sync with crates/lashlang: the lexer keywords plus the parser's
+  // contextual keywords (process / start / finish / yield / wake / signal /
+  // wait / run / with / trigger / schedule / while / break / continue / let /
+  // enum), the builtins.rs registry, and the primitive type names. Comments
+  // are `#` and `//`; strings are single- or triple-quoted ("""…""",
+  // r"""…""", r'''…'''). There are no /* */ block comments in lashlang.
   function defineLashlang(Prism) {
     if (!Prism || !Prism.languages || Prism.languages.lashlang) return;
     Prism.languages.lashlang = {
       "triple-string": {
-        pattern: /r"""[\s\S]*?"""/,
+        pattern: /r?"""[\s\S]*?"""|r'''[\s\S]*?'''/,
         alias: "string",
         greedy: true,
       },
@@ -67,14 +70,16 @@
         greedy: true,
       },
       "comment": {
-        pattern: /\/\/.*|\/\*[\s\S]*?\*\//,
+        pattern: /#.*|\/\/.*/,
         greedy: true,
       },
-      "keyword": /\b(?:and|as|await|break|cancel|continue|each|else|every|fail|false|finish|for|if|in|let|not|null|on|or|print|process|schedule|signal|sleep|start|submit|trigger|true|type|while)\b/,
-      "builtin": /\b(?:contains|len|push|glob|read_file|continue_as)\b/,
+      "keyword": /\b(?:and|as|await|break|call|cancel|continue|each|else|enum|every|fail|false|finish|for|if|in|let|not|null|on|or|print|process|run|schedule|signal|sleep|start|submit|trigger|true|type|wait|wake|while|with|yield)\b/,
+      "class-name": /\b[A-Z][A-Za-z0-9_]*\b/,
+      "type": /\b(?:str|string|int|integer|float|number|bool|boolean|any|list)\b/,
+      "builtin": /\b(?:ceil_div|contains|empty|ends_with|find|floor_div|format|grep_text|join|json_parse|keys|len|push|range|slice|split|starts_with|to_float|to_int|to_string|trim|validate|values)\b/,
       "function": /\b[a-z_][a-z0-9_]*(?=\s*\()/i,
       "number": /\b\d+(?:\.\d+)?\b/,
-      "operator": /=>|->|::|[+\-*/%=<>!?:]+/,
+      "operator": /=>|->|::|[+\-*/%=<>!?:&|]+/,
       "punctuation": /[{}[\];(),.]/,
     };
     // shorthand alias used in fenced blocks
