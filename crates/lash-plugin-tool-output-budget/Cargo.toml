@@ -14,7 +14,7 @@ keywords = ["lash", "agent", "tools", "plugin", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.17" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.18" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
