@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>lash api · advanced · lash docs</title>
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
@@ -59,14 +61,14 @@ let core = LashCore::rlm()
     .residency(Residency::ActivePathOnly)
     .build()?;</code></pre>
           <p>Plugin background work — tasks tracked via <code>ToolContext::processes()</code>, post-turn observation summaries, MCP warm-ups — continues past turn return. To drain it before returning (one-shot processes that need observations persisted before exit):</p>
-          <pre><code>session.control().state().await_background_work().await?;</code></pre>
+          <pre><code>session.process_control().await_all().await?;</code></pre>
           <p>Exposed by the CLI as <code>--await-background-work</code> on <code>lash --print</code>. Embedders rarely need it outside short-lived processes.</p>
         </div>
 
         <div class="section" id="durable-workflows">
           <div class="section-header">
             <h2>Durable Workflows</h2>
-            <p>Standard <code>LashCore</code> persists at the turn boundary. For sub-turn durability — expensive LLM calls, long tool calls, process control, mid-turn worker migration — run the turn with a scoped <code>RuntimeEffectController</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
+            <p>Standard <code>LashCore</code> persists at the turn boundary. For durable in-flight effects — expensive LLM calls, long tool calls, process control, mid-turn worker migration — run the turn with a scoped <code>RuntimeEffectController</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
           </div>
           <p>Shape: the runtime driver polls <code>TurnMachine</code> and claims a <code>RuntimeTurnLease</code>. For each reply-producing turn effect it saves a lease-guarded <code>RuntimeTurnCheckpoint</code>, builds a <code>RuntimeEffectEnvelope</code> with a typed <code>RuntimeInvocation</code>, invokes the active scoped controller, renews the same lease token before journaling the returned outcome by <code>replay.key</code>, and feeds it back as the matching response. <code>LashSession::resume_turn(turn_id)</code> claims ownership again, reloads the checkpoint, and replays any already-completed effect outcomes without rerunning input hooks or stream history. Controller/runtime errors abandon lease ownership while preserving resumable state; only the final commit clears the checkpoint and journal.</p>
           <p>Full contract: <a href="./architecture/durability.html">Architecture → Durability</a>. Embedders without workflow orchestration use the regular <a href="./persistence.html">session-store path</a>.</p>
@@ -105,7 +107,7 @@ let core = LashCore::rlm()
           </div>
           <p>Both tiers consult <code>tier_models</code> for an override, then fall back to the parent's model. Pass overrides through <code>default_registry(&amp;tier_models)</code>.</p>
           <h3>Capability resolution</h3>
-          <p><code>Capability::resolve(ctx)</code> sees the live parent <code>SessionPolicy</code> and returns a <code>SessionSpec</code>. The runtime composes spec against parent policy to produce effective child config. The spec is what's persisted, so a resumed subagent re-derives the same authority.</p>
+          <p><code>Capability::build_session_request(ctx)</code> sees the live parent <code>SessionPolicy</code> and returns a <code>SessionCreateRequest</code>. The runtime composes the capability's <code>SessionSpec</code> against parent policy to produce effective child config. The spec is what's persisted, so a resumed subagent re-derives the same authority.</p>
           <p>Three interactive-only tools are always stripped from subagents: <code>ask</code>, <code>showcase</code>, <code>plan_exit</code>. A subagent calling them would block indefinitely.</p>
           <h3>Usage attribution</h3>
           <p>Child sessions emit <code>TurnEvent::ChildUsage</code> on the parent's stream, tagged with <code>source</code> (<code>"subagent"</code>, <code>"compaction"</code>, <code>"observer"</code>) and child <code>session_id</code>. <code>TurnResult.children_usage</code> rolls up per <code>(source, model)</code>; <code>total_usage()</code> sums parent + children. Finer splits: fold <code>ChildUsage</code> from the stream directly.</p>
@@ -153,7 +155,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
         <div class="section" id="advanced-runtime">
           <div class="section-header">
             <h2>Advanced Runtime</h2>
-            <p><code>.advanced()</code> exposes runtime-host concerns: custom plugin hosts, shared process hosts, residency policy, and a replaceable <code>RuntimeCoreConfig</code>. Installing a <code>ProcessRegistry</code> derives the explicit Lashlang process/lifecycle abilities for sessions built from the environment; plugin hosts do not have a separate process-availability boolean. <code>RuntimeEnvironment</code> stores that config as <code>core</code>; the environment builder's attachment, prompt, trace, termination, and effect-controller methods are thin core mutators.</p>
+            <p><code>.advanced()</code> exposes runtime-host concerns: custom plugin hosts, shared process hosts, residency policy, and a replaceable <code>RuntimeHostConfig</code>. Installing a <code>ProcessRegistry</code> derives the explicit Lashlang process/lifecycle abilities for sessions built from the environment; plugin hosts do not have a separate process-availability boolean. <code>RuntimeEnvironment</code> stores that config as <code>core</code>; the environment builder's attachment, prompt, trace, termination, and effect-controller methods are thin core mutators.</p>
           </div>
           <pre><code>let core = LashCore::rlm()
     .provider(provider)
@@ -168,7 +170,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
         <div class="section" id="complete-example">
           <div class="section-header">
             <h2>Complete Example</h2>
-            <p>The browser example: application chat database, RLM mode, typed session plugin activation, app-owned board tools, semantic stream events, terminal rendering from <code>TurnOutput</code>, and optional Restate turn durability.</p>
+            <p>The browser example: application chat database, RLM mode, typed session plugin activation, app-owned board tools, semantic stream events, terminal rendering from <code>TurnOutput</code>, and optional Restate durable turns.</p>
           </div>
           <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
 # then open http://127.0.0.1:3000</code></pre>

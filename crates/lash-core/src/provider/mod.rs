@@ -32,8 +32,8 @@ pub use options::{
 };
 pub use rate_limit::{ProviderRateLimitPermit, ProviderRateLimiter};
 pub use resolver::{
-    EmptyProviderResolver, MapProviderResolver, ProviderResolutionError, RuntimeProviderResolver,
-    SingleProviderResolver,
+    EmptyProviderResolver, MapProviderResolver, ProviderBinding, ProviderResolutionError,
+    RuntimeProviderResolver, SingleProviderResolver,
 };
 pub use spec::ProviderSpec;
 pub use traits::{

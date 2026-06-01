@@ -1,7 +1,7 @@
 use super::*;
 use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
 use crate::plugin::{ProtocolDriverPlugin, ProtocolSessionPlugin};
-use crate::store::RuntimePersistence;
+use crate::runtime::EmbeddedDurableTurnStore;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -66,6 +66,30 @@ fn test_effect_invocation(
         replay_key,
         Some("0".repeat(64)),
     )
+}
+
+fn runtime_host_config_with_effect_controller(
+    effect_controller: Arc<dyn RuntimeEffectController>,
+) -> RuntimeHostConfig {
+    let mut config = RuntimeHostConfig::in_memory();
+    config.control.effect_controller = effect_controller;
+    config
+}
+
+fn runtime_host_config_with_provider(provider: crate::ProviderHandle) -> RuntimeHostConfig {
+    let mut config = RuntimeHostConfig::in_memory();
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(provider));
+    config
+}
+
+fn runtime_host_config_with_durability(
+    attachment_store: Arc<dyn crate::AttachmentStore>,
+    artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+) -> RuntimeHostConfig {
+    let mut config = RuntimeHostConfig::in_memory();
+    config.durability.attachment_store = attachment_store;
+    config.durability.lashlang_artifact_store = artifact_store;
+    config
 }
 
 #[async_trait::async_trait]
@@ -465,13 +489,11 @@ impl RuntimeEffectController for WrongOutcomeEffectController {
 }
 
 fn host_with_effect_recorder(recorder: RecordingEffectController) -> EmbeddedRuntimeHost {
-    EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory()
-            .with_effect_controller(Arc::new(recorder))
-            .with_provider_resolver(Arc::new(crate::SingleProviderResolver::new(
-                mock_provider(Vec::new()).into_handle(),
-            ))),
-    )
+    let mut config = runtime_host_config_with_effect_controller(Arc::new(recorder));
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+        mock_provider(Vec::new()).into_handle(),
+    ));
+    EmbeddedRuntimeHost::new(config)
 }
 
 #[tokio::test]
@@ -610,11 +632,11 @@ async fn durable_controller_error_abandons_lease_and_preserves_resume_state() {
     let recorder = RecordingEffectController::default();
     let store = Arc::new(RecordingStore::default());
     let transport = mock_provider(Vec::new());
-    let host = EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory().with_effect_controller(
-        Arc::new(FailToolCallController {
+    let host = EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(Arc::new(
+        FailToolCallController {
             inner: recorder.clone(),
-        }),
-    ));
+        },
+    )));
     let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
         Vec::new(),
         Arc::new(EchoTool),
@@ -719,11 +741,11 @@ async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
     let turn_id = "resume-shared-finisher-turn";
     let store = Arc::new(RecordingStore::default());
     let first_recorder = RecordingEffectController::default();
-    let failing_host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory().with_effect_controller(Arc::new(FailToolCallController {
+    let failing_host = EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(
+        Arc::new(FailToolCallController {
             inner: first_recorder,
-        })),
-    );
+        }),
+    ));
     let mut failing_runtime = runtime_with_plugins_and_tools_and_host_and_store(
         Vec::new(),
         Arc::new(EchoTool),
@@ -744,9 +766,9 @@ async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
     assert!(store.runtime_effect_journal_count() >= 1);
 
     let resume_recorder = RecordingEffectController::default();
-    let resume_host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory().with_effect_controller(Arc::new(resume_recorder.clone())),
-    );
+    let resume_host = EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(
+        Arc::new(resume_recorder.clone()),
+    ));
     let mut resume_runtime = runtime_with_plugins_and_tools_and_host_and_store(
         Vec::new(),
         Arc::new(EchoTool),
@@ -774,7 +796,7 @@ async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
 async fn effect_journal_replays_without_reinvoking_controller_and_rejects_hash_mismatch() {
     let recorder = RecordingEffectController::default();
     let store = RecordingStore::default();
-    let lease = store
+    let mut lease = store
         .claim_runtime_turn_lease("root", "turn-1", "test", 60_000)
         .await
         .expect("lease");
@@ -792,18 +814,18 @@ async fn effect_journal_replays_without_reinvoking_controller_and_rejects_hash_m
         RuntimeEffectCommand::Sleep { duration_ms: 1 },
     );
 
-    let first = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let first = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &recorder,
         envelope.clone(),
         crate::RuntimeEffectLocalExecutor::unavailable(),
     )
     .await
     .expect("first effect");
-    let second = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let second = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &recorder,
         envelope,
         crate::RuntimeEffectLocalExecutor::unavailable(),
@@ -815,9 +837,9 @@ async fn effect_journal_replays_without_reinvoking_controller_and_rejects_hash_m
     assert!(matches!(second, RuntimeEffectOutcome::Sleep));
     assert_eq!(recorder.count_kind(RuntimeEffectKind::Sleep), 1);
 
-    let mismatched = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let mismatched = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &recorder,
         RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::Sleep { duration_ms: 2 }),
         crate::RuntimeEffectLocalExecutor::unavailable(),
@@ -841,9 +863,13 @@ async fn journaled_turn_effect_requires_lease_before_controller_execution() {
         "root:turn-1:1:0:sleep:1",
     );
 
-    let err = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        None,
+    let mut wrong_lease = store
+        .claim_runtime_turn_lease("root", "other-turn", "test", 60_000)
+        .await
+        .expect("wrong lease");
+    let err = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut wrong_lease,
         &recorder,
         RuntimeEffectEnvelope::new(invocation, RuntimeEffectCommand::Sleep { duration_ms: 1 }),
         crate::RuntimeEffectLocalExecutor::unavailable(),
@@ -859,7 +885,7 @@ async fn journaled_turn_effect_requires_lease_before_controller_execution() {
 async fn process_effect_journal_replays_without_reinvoking_controller_and_rejects_hash_mismatch() {
     let controller = ProcessJournalController::default();
     let store = RecordingStore::default();
-    let lease = store
+    let mut lease = store
         .claim_runtime_turn_lease("root", "turn-process", "test", 60_000)
         .await
         .expect("lease");
@@ -882,18 +908,18 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
         },
     );
 
-    let first = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let first = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &controller,
         envelope.clone(),
         crate::RuntimeEffectLocalExecutor::unavailable(),
     )
     .await
     .expect("first process effect");
-    let second = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let second = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &controller,
         envelope,
         crate::RuntimeEffectLocalExecutor::unavailable(),
@@ -915,9 +941,9 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
     ));
     assert_eq!(controller.call_count(), 1);
 
-    let mismatched = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let mismatched = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &controller,
         RuntimeEffectEnvelope::new(
             invocation,
@@ -939,7 +965,7 @@ async fn process_effect_journal_replays_without_reinvoking_controller_and_reject
 #[tokio::test]
 async fn journaled_effect_renews_lease_while_pending() {
     let store = RecordingStore::default();
-    let lease = store
+    let mut lease = store
         .claim_runtime_turn_lease("root", "turn-long-effect", "test", 60_000)
         .await
         .expect("lease");
@@ -952,9 +978,9 @@ async fn journaled_effect_renews_lease_while_pending() {
         RuntimeEffectKind::Sleep,
         "root:turn-long-effect:1:0:sleep:long",
     );
-    let outcome = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let outcome = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &DelayedSleepController {
             delay: Duration::from_millis(80),
         },
@@ -972,7 +998,7 @@ async fn journaled_effect_renews_lease_while_pending() {
 #[tokio::test]
 async fn journaled_effect_does_not_save_outcome_when_pending_lease_renewal_fails() {
     let store = RecordingStore::default();
-    let lease = store
+    let mut lease = store
         .claim_runtime_turn_lease("root", "turn-expiring-effect", "test", 1)
         .await
         .expect("lease");
@@ -986,9 +1012,9 @@ async fn journaled_effect_does_not_save_outcome_when_pending_lease_renewal_fails
         "root:turn-expiring-effect:1:0:sleep:expiring",
     );
 
-    let err = crate::runtime::effect::execute_effect_with_journal(
-        Some(&store),
-        Some(&lease),
+    let err = crate::runtime::execute_embedded_journaled_effect(
+        &store,
+        &mut lease,
         &DelayedSleepController {
             delay: Duration::from_millis(80),
         },
@@ -1072,10 +1098,9 @@ async fn controller_rejection_fails_turn_explicitly() {
         Vec::new(),
         Arc::new(EmptyTools),
         mock_provider(Vec::new()),
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory()
-                .with_effect_controller(Arc::new(RejectingEffectController)),
-        ),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(Arc::new(
+            RejectingEffectController,
+        ))),
     )
     .await;
 
@@ -1100,10 +1125,9 @@ async fn wrong_controller_outcome_fails_turn_explicitly() {
         Vec::new(),
         Arc::new(EmptyTools),
         mock_provider(Vec::new()),
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory()
-                .with_effect_controller(Arc::new(WrongOutcomeEffectController)),
-        ),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(Arc::new(
+            WrongOutcomeEffectController,
+        ))),
     )
     .await;
 
@@ -1125,7 +1149,7 @@ async fn wrong_controller_outcome_fails_turn_explicitly() {
 #[tokio::test]
 async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
     let recorder = RecordingEffectController::default();
-    assert!(RuntimeEffectControllerScope::new(&recorder, "").is_err());
+    assert!(DurableTurnScope::new(&recorder, "").is_err());
     let transport = mock_provider(vec![MockCall {
         stream_events: Vec::new(),
         response: Ok(LlmResponse {
@@ -1141,18 +1165,18 @@ async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
         Vec::new(),
         Arc::new(EmptyTools),
         transport,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
     )
     .await;
 
-    let effect_scope =
-        RuntimeEffectControllerScope::new(&recorder, "stable-scoped-turn").expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&recorder, "stable-scoped-turn").expect("durable turn scope");
     let turn = runtime
         .stream_turn(
             TurnInput::text("hello"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect("turn");
@@ -1184,18 +1208,18 @@ async fn durable_controller_rejects_ephemeral_attachment_store_before_turn_runs(
         Vec::new(),
         Arc::new(EmptyTools),
         transport,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
     )
     .await;
-    let effect_scope =
-        RuntimeEffectControllerScope::new(&controller, "durable-turn").expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&controller, "durable-turn").expect("durable turn scope");
 
     let err = runtime
         .stream_turn(
             TurnInput::text("hello"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect_err("ephemeral attachment store should be rejected");
@@ -1217,21 +1241,23 @@ async fn durable_controller_rejects_ephemeral_artifact_store_before_turn_runs() 
         Vec::new(),
         Arc::new(EmptyTools),
         done_once_provider(),
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory()
-                .with_attachment_store(Arc::new(DurableInMemoryAttachmentStore::default())),
-        ),
+        EmbeddedRuntimeHost::new({
+            let mut config = RuntimeHostConfig::in_memory();
+            config.durability.attachment_store =
+                Arc::new(DurableInMemoryAttachmentStore::default());
+            config
+        }),
     )
     .await;
-    let effect_scope = RuntimeEffectControllerScope::new(&controller, "durable-artifact-turn")
-        .expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&controller, "durable-artifact-turn").expect("durable turn scope");
 
     let err = runtime
         .stream_turn(
             TurnInput::text("hello"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect_err("ephemeral artifact store should be rejected");
@@ -1255,23 +1281,22 @@ async fn durable_controller_rejects_ephemeral_session_store_before_turn_runs() {
         Vec::new(),
         Arc::new(EmptyTools),
         done_once_provider(),
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory()
-                .with_attachment_store(Arc::new(DurableInMemoryAttachmentStore::default()))
-                .with_lashlang_artifact_store(Arc::new(DurableInMemoryArtifactStore::default())),
-        ),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_durability(
+            Arc::new(DurableInMemoryAttachmentStore::default()),
+            Arc::new(DurableInMemoryArtifactStore::default()),
+        )),
         store,
     )
     .await;
-    let effect_scope = RuntimeEffectControllerScope::new(&controller, "durable-session-turn")
-        .expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&controller, "durable-session-turn").expect("durable turn scope");
 
     let err = runtime
         .stream_turn(
             TurnInput::text("hello"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect_err("ephemeral session store should be rejected");
@@ -1294,22 +1319,21 @@ async fn durable_controller_with_all_durable_stores_runs_turn() {
         Vec::new(),
         Arc::new(EmptyTools),
         done_once_provider(),
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory()
-                .with_attachment_store(Arc::new(DurableInMemoryAttachmentStore::default()))
-                .with_lashlang_artifact_store(Arc::new(DurableInMemoryArtifactStore::default())),
-        ),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_durability(
+            Arc::new(DurableInMemoryAttachmentStore::default()),
+            Arc::new(DurableInMemoryArtifactStore::default()),
+        )),
     )
     .await;
-    let effect_scope =
-        RuntimeEffectControllerScope::new(&controller, "durable-ok-turn").expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&controller, "durable-ok-turn").expect("durable turn scope");
 
     let turn = runtime
         .stream_turn(
             TurnInput::text("hello"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect("durable controller + all-durable stores should run");
@@ -1406,14 +1430,14 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
     )
     .await;
 
-    let effect_scope = RuntimeEffectControllerScope::new(&scoped_recorder, "scoped-tool-direct")
-        .expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&scoped_recorder, "scoped-tool-direct").expect("durable turn scope");
     let turn = runtime
         .stream_turn(
             TurnInput::text("use direct tool"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect("turn");
@@ -1506,18 +1530,18 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
             attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
         transport,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
     )
     .await;
 
-    let effect_scope =
-        RuntimeEffectControllerScope::new(&recorder, "scoped-retry-sleep").expect("effect scope");
+    let durable_turn_scope =
+        DurableTurnScope::new(&recorder, "scoped-retry-sleep").expect("durable turn scope");
     let turn = runtime
         .stream_turn(
             TurnInput::text("use retry tool"),
             TurnOptions::new(CancellationToken::new())
                 .with_events(&NoopEventSink)
-                .with_effect_scope(effect_scope),
+                .with_durable_turn_scope(durable_turn_scope),
         )
         .await
         .expect("turn");
@@ -1680,11 +1704,9 @@ async fn start_exec_without_code_executor_stops_as_runtime_error() {
         .expect("plugins");
     let mut runtime = LashRuntime::from_embedded_state(
         policy,
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::in_memory().with_provider_resolver(Arc::new(
-                crate::SingleProviderResolver::new(mock_provider(Vec::new()).into_handle()),
-            )),
-        ),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_provider(
+            mock_provider(Vec::new()).into_handle(),
+        )),
         RuntimeServices::new(plugin_session),
         RuntimeSessionState::default(),
     )
@@ -1740,13 +1762,13 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
             ..LlmResponse::default()
         }),
     }]);
-    let host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory()
-            .with_effect_controller(Arc::new(recorder.clone()))
-            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(
-                trace_path.clone(),
-            )))),
-    );
+    let host = EmbeddedRuntimeHost::new({
+        let mut config = runtime_host_config_with_effect_controller(Arc::new(recorder.clone()));
+        config.tracing.trace_sink = Some(Arc::new(lash_trace::JsonlTraceSink::new(
+            trace_path.clone(),
+        )));
+        config
+    });
     let runtime =
         runtime_with_plugins_and_tools_and_host(Vec::new(), Arc::new(EmptyTools), transport, host)
             .await;
@@ -1804,9 +1826,9 @@ async fn in_turn_direct_completion_requires_lease_and_journals_under_it() {
             ..LlmResponse::default()
         }),
     }]);
-    let host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory().with_effect_controller(Arc::new(recorder.clone())),
-    );
+    let host = EmbeddedRuntimeHost::new(runtime_host_config_with_effect_controller(Arc::new(
+        recorder.clone(),
+    )));
     let runtime = runtime_with_plugins_and_tools_and_host_and_store(
         Vec::new(),
         Arc::new(EmptyTools),
@@ -1888,7 +1910,7 @@ async fn direct_effect_restores_required_streaming_for_provider_execution() {
         Vec::new(),
         Arc::new(EmptyTools),
         transport,
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
     )
     .await;
 
@@ -1931,13 +1953,13 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
             ..LlmResponse::default()
         }),
     }]);
-    let host = EmbeddedRuntimeHost::new(
-        RuntimeCoreConfig::in_memory()
-            .with_effect_controller(Arc::new(recorder.clone()))
-            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(
-                trace_path.clone(),
-            )))),
-    );
+    let host = EmbeddedRuntimeHost::new({
+        let mut config = runtime_host_config_with_effect_controller(Arc::new(recorder.clone()));
+        config.tracing.trace_sink = Some(Arc::new(lash_trace::JsonlTraceSink::new(
+            trace_path.clone(),
+        )));
+        config
+    });
     let runtime =
         runtime_with_plugins_and_tools_and_host(Vec::new(), Arc::new(EmptyTools), transport, host)
             .await;
@@ -1990,7 +2012,7 @@ async fn direct_llm_completion_envelope_stores_attachment_refs_not_bytes() {
         Vec::new(),
         Arc::new(EmptyTools),
         mock_provider(Vec::new()),
-        EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory()),
+        EmbeddedRuntimeHost::new(RuntimeHostConfig::in_memory()),
     )
     .await;
 

@@ -795,6 +795,7 @@ where
     queued_work_claims_respect_boundaries_renewal_and_abandon(make()).await;
     queued_work_completion_is_lease_guarded(make()).await;
     journal_is_idempotent_and_cleared_on_final_commit(make()).await;
+    substrate_native_final_commit_is_idempotent_and_conflicts_on_changed_hash(make()).await;
     active_lease_fences_competing_claims(make()).await;
     superseded_lease_cannot_write_or_clear(make()).await;
     renewed_lease_survives_original_expiry(make()).await;
@@ -1253,23 +1254,26 @@ async fn queued_work_completion_is_lease_guarded(store: Arc<dyn RuntimePersisten
 }
 
 async fn journal_is_idempotent_and_cleared_on_final_commit(store: Arc<dyn RuntimePersistence>) {
-    let lease = store
+    let turns = store
+        .embedded_durable_turn_store()
+        .expect("embedded durable turn");
+    let lease = turns
         .claim_runtime_turn_lease("root", "turn-1", "test-owner", 60_000)
         .await
         .expect("lease");
     let record = effect_record("root", "turn-1", "sleep");
-    store
+    turns
         .save_runtime_effect_outcome(&lease, record.clone())
         .await
         .expect("save journal");
-    let loaded = store
+    let loaded = turns
         .load_runtime_effect_outcome("root", "turn-1", &record.replay_key)
         .await
         .expect("load journal")
         .expect("journal record");
     assert_eq!(loaded.envelope_hash, record.envelope_hash);
     // Replaying the same key is idempotent (overwrites, no duplicate row).
-    store
+    turns
         .save_runtime_effect_outcome(&lease, record.clone())
         .await
         .expect("replay save is idempotent");
@@ -1278,8 +1282,10 @@ async fn journal_is_idempotent_and_cleared_on_final_commit(store: Arc<dyn Runtim
         session_id: "root".to_string(),
         ..RuntimeSessionState::default()
     };
-    let commit = RuntimeCommit::persisted_state(&state, &[])
-        .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease));
+    let commit = RuntimeCommit::persisted_state(&state, &[]);
+    let commit_hash = commit.turn_commit_hash().expect("turn commit hash");
+    let commit =
+        commit.clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease, commit_hash));
     store
         .commit_runtime_state(commit)
         .await
@@ -1287,6 +1293,8 @@ async fn journal_is_idempotent_and_cleared_on_final_commit(store: Arc<dyn Runtim
 
     assert!(
         store
+            .embedded_durable_turn_store()
+            .expect("embedded durable turn")
             .load_runtime_effect_outcome("root", "turn-1", &record.replay_key)
             .await
             .expect("load after clear")
@@ -1295,6 +1303,8 @@ async fn journal_is_idempotent_and_cleared_on_final_commit(store: Arc<dyn Runtim
     );
     assert!(
         store
+            .embedded_durable_turn_store()
+            .expect("embedded durable turn")
             .load_runtime_turn_checkpoint("root", "turn-1")
             .await
             .expect("load checkpoint")
@@ -1302,12 +1312,67 @@ async fn journal_is_idempotent_and_cleared_on_final_commit(store: Arc<dyn Runtim
     );
 }
 
+async fn substrate_native_final_commit_is_idempotent_and_conflicts_on_changed_hash(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        ..RuntimeSessionState::default()
+    };
+    let commit = RuntimeCommit::persisted_state(&state, &[]);
+    let turn_commit_hash = commit.turn_commit_hash().expect("turn commit hash");
+    let commit = commit.clearing_completed_turn(RuntimeTurnCompletion::substrate_native(
+        "root",
+        "provider-turn",
+        turn_commit_hash.clone(),
+    ));
+
+    let first = store
+        .commit_runtime_state(commit.clone())
+        .await
+        .expect("substrate-native final commit does not require a Lash lease");
+    let retry = store
+        .commit_runtime_state(commit)
+        .await
+        .expect("same substrate-native final commit retries idempotently");
+    assert_eq!(retry.head_revision, first.head_revision);
+    assert_eq!(retry.checkpoint_ref, first.checkpoint_ref);
+
+    let mut retry_from_new_head = RuntimeCommit::persisted_state(&state, &[]);
+    retry_from_new_head.expected_head_revision = Some(first.head_revision);
+    let retry_hash = retry_from_new_head
+        .turn_commit_hash()
+        .expect("retry commit hash");
+    assert_eq!(
+        retry_hash, turn_commit_hash,
+        "turn commit identity must not depend on the optimistic CAS revision"
+    );
+
+    let changed_state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        turn_index: 1,
+        ..RuntimeSessionState::default()
+    };
+    let changed = RuntimeCommit::persisted_state(&changed_state, &[]);
+    let changed_hash = changed.turn_commit_hash().expect("changed commit hash");
+    let err = store
+        .commit_runtime_state(changed.clearing_completed_turn(
+            RuntimeTurnCompletion::substrate_native("root", "provider-turn", changed_hash),
+        ))
+        .await
+        .expect_err("same provider turn id with a different commit hash must conflict");
+    assert!(matches!(err, StoreError::RuntimeTurnCommitConflict { .. }));
+}
+
 async fn active_lease_fences_competing_claims(store: Arc<dyn RuntimePersistence>) {
-    store
+    let turns = store
+        .embedded_durable_turn_store()
+        .expect("embedded durable turn");
+    turns
         .claim_runtime_turn_lease("root", "turn-active", "owner-a", 60_000)
         .await
         .expect("lease");
-    let conflict = store
+    let conflict = turns
         .claim_runtime_turn_lease("root", "turn-active", "owner-b", 60_000)
         .await;
     assert!(
@@ -1317,16 +1382,19 @@ async fn active_lease_fences_competing_claims(store: Arc<dyn RuntimePersistence>
 }
 
 async fn superseded_lease_cannot_write_or_clear(store: Arc<dyn RuntimePersistence>) {
-    let old = store
+    let turns = store
+        .embedded_durable_turn_store()
+        .expect("embedded durable turn");
+    let old = turns
         .claim_runtime_turn_lease("root", "turn-superseded", "owner-a", 0)
         .await
         .expect("old lease");
-    let current = store
+    let current = turns
         .claim_runtime_turn_lease("root", "turn-superseded", "owner-b", 60_000)
         .await
         .expect("new lease");
 
-    let stale_save = store
+    let stale_save = turns
         .save_runtime_effect_outcome(&old, effect_record("root", "turn-superseded", "stale"))
         .await;
     assert!(
@@ -1334,18 +1402,18 @@ async fn superseded_lease_cannot_write_or_clear(store: Arc<dyn RuntimePersistenc
         "a superseded lease must not write"
     );
 
-    store
+    turns
         .abandon_runtime_turn_lease(&old)
         .await
         .expect("a stale abandon is ignored");
-    let conflict = store
+    let conflict = turns
         .claim_runtime_turn_lease("root", "turn-superseded", "owner-c", 60_000)
         .await;
     assert!(
         matches!(conflict, Err(StoreError::RuntimeTurnLeaseConflict { .. })),
         "a stale abandon must not release the live lease"
     );
-    store
+    turns
         .save_runtime_effect_outcome(
             &current,
             effect_record("root", "turn-superseded", "current"),
@@ -1355,64 +1423,75 @@ async fn superseded_lease_cannot_write_or_clear(store: Arc<dyn RuntimePersistenc
 }
 
 async fn renewed_lease_survives_original_expiry(store: Arc<dyn RuntimePersistence>) {
-    let lease = store
+    let turns = store
+        .embedded_durable_turn_store()
+        .expect("embedded durable turn");
+    let lease = turns
         .claim_runtime_turn_lease("root", "turn-renew", "owner-a", 20)
         .await
         .expect("lease");
-    let renewed = store
+    let renewed = turns
         .renew_runtime_turn_lease(&lease, 60_000)
         .await
         .expect("renew lease");
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
-    store
+    turns
         .save_runtime_effect_outcome(&renewed, effect_record("root", "turn-renew", "renewed"))
         .await
         .expect("a renewed lease can write after the original TTL would have expired");
 }
 
 async fn abandon_releases_owner_and_preserves_journal(store: Arc<dyn RuntimePersistence>) {
-    let lease = store
+    let turns = store
+        .embedded_durable_turn_store()
+        .expect("embedded durable turn");
+    let lease = turns
         .claim_runtime_turn_lease("root", "turn-abandon", "owner-a", 60_000)
         .await
         .expect("lease");
     let record = effect_record("root", "turn-abandon", "effect-a");
-    store
+    turns
         .save_runtime_effect_outcome(&lease, record.clone())
         .await
         .expect("save journal");
 
-    store
+    turns
         .abandon_runtime_turn_lease(&lease)
         .await
         .expect("abandon lease");
 
     assert!(
         store
+            .embedded_durable_turn_store()
+            .expect("embedded durable turn")
             .load_runtime_effect_outcome("root", "turn-abandon", &record.replay_key)
             .await
             .expect("load journal")
             .is_some(),
         "abandon must preserve the journal for a resuming owner"
     );
-    store
+    turns
         .claim_runtime_turn_lease("root", "turn-abandon", "owner-b", 60_000)
         .await
         .expect("a new owner can claim an abandoned turn");
 }
 
 async fn stale_final_commit_rejects_and_preserves_resume(store: Arc<dyn RuntimePersistence>) {
-    let old = store
+    let turns = store
+        .embedded_durable_turn_store()
+        .expect("embedded durable turn");
+    let old = turns
         .claim_runtime_turn_lease("root", "turn-stale", "owner-a", 20)
         .await
         .expect("old lease");
     let record = effect_record("root", "turn-stale", "current");
-    store
+    turns
         .save_runtime_effect_outcome(&old, record.clone())
         .await
         .expect("save journal");
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-    let current = store
+    let current = turns
         .claim_runtime_turn_lease("root", "turn-stale", "owner-b", 60_000)
         .await
         .expect("new lease");
@@ -1421,16 +1500,19 @@ async fn stale_final_commit_rejects_and_preserves_resume(store: Arc<dyn RuntimeP
         session_id: "root".to_string(),
         ..RuntimeSessionState::default()
     };
+    let commit = RuntimeCommit::persisted_state(&state, &[]);
+    let commit_hash = commit.turn_commit_hash().expect("turn commit hash");
     let err = store
         .commit_runtime_state(
-            RuntimeCommit::persisted_state(&state, &[])
-                .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&old)),
+            commit.clearing_completed_turn(RuntimeTurnCompletion::from_lease(&old, commit_hash)),
         )
         .await
         .expect_err("a stale final commit must fail");
     assert!(matches!(err, StoreError::RuntimeTurnLeaseExpired { .. }));
     assert!(
         store
+            .embedded_durable_turn_store()
+            .expect("embedded durable turn")
             .load_runtime_effect_outcome("root", "turn-stale", &record.replay_key)
             .await
             .expect("load journal")
@@ -1445,19 +1527,22 @@ async fn stale_final_commit_rejects_and_preserves_resume(store: Arc<dyn RuntimeP
             .is_none(),
         "a rejected commit must not persist session state"
     );
-    store
+    turns
         .save_runtime_effect_outcome(&current, effect_record("root", "turn-stale", "after"))
         .await
         .expect("the current owner can still write");
 }
 
 async fn expired_final_commit_rejects_and_preserves_resume(store: Arc<dyn RuntimePersistence>) {
-    let lease = store
+    let turns = store
+        .embedded_durable_turn_store()
+        .expect("embedded durable turn");
+    let lease = turns
         .claim_runtime_turn_lease("root", "turn-expired", "owner-a", 20)
         .await
         .expect("lease");
     let record = effect_record("root", "turn-expired", "effect");
-    store
+    turns
         .save_runtime_effect_outcome(&lease, record.clone())
         .await
         .expect("save journal");
@@ -1467,16 +1552,19 @@ async fn expired_final_commit_rejects_and_preserves_resume(store: Arc<dyn Runtim
         session_id: "root".to_string(),
         ..RuntimeSessionState::default()
     };
+    let commit = RuntimeCommit::persisted_state(&state, &[]);
+    let commit_hash = commit.turn_commit_hash().expect("turn commit hash");
     let err = store
         .commit_runtime_state(
-            RuntimeCommit::persisted_state(&state, &[])
-                .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease)),
+            commit.clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease, commit_hash)),
         )
         .await
         .expect_err("an expired final commit must fail");
     assert!(matches!(err, StoreError::RuntimeTurnLeaseExpired { .. }));
     assert!(
         store
+            .embedded_durable_turn_store()
+            .expect("embedded durable turn")
             .load_runtime_effect_outcome("root", "turn-expired", &record.replay_key)
             .await
             .expect("load journal")

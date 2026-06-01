@@ -42,6 +42,7 @@ fn test_config_with_protocol_turn_options(
         projector: Arc::new(ChatContextProjector),
         sync_execution_surface: protocol == TestProtocol::Rlm,
         model: "test-model".to_string(),
+        max_context_tokens: None,
         max_turns: None,
         model_variant: None,
         generation: lash_core::GenerationOptions::default(),

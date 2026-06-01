@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>modules - lash architecture</title>
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link rel="icon" href="../favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="../apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
@@ -30,7 +32,7 @@
           </div>
           <div class="module-grid">
             <article class="panel"><small>Pure protocol</small><h3>lash-sansio</h3><p>Owns <code>TurnMachine</code>, <code>Effect</code>, <code>Response</code>, <code>TurnDriverPreamble</code>, prompt templates, messages, attachments, the <code>TurnOutcome::{Finished, AgentFrameSwitch, Stopped}</code> contract, canonical tool-call output, and tool definitions/output contracts. It does not depend on Lashlang; runtime-facing protocol build input and Lashlang surfaces live in <code>lash-core</code>. Top-level files cover turn, prompt, plugin, attachment, session, turn drivers, tool contracts, tool output, and tool surfaces; the <code>sansio/</code>, <code>session_model/</code>, and <code>llm/</code> subdirectories hold the state machine, durable model, and provider request types.</p><code class="path">lash-sansio</code></article>
-            <article class="panel"><small>Async runtime</small><h3>lash-core</h3><p>Owns <code>LashRuntime</code>, <code>Session</code>, <code>SessionGraph</code>, <code>RuntimeEffectController</code>, <code>ProcessRegistry</code>, <code>ProtocolBuildInput</code>, and the <code>RuntimePersistence</code> contract, plus tool dispatch, live provider handles, OAuth, attachments, tracing, runtime controls, the built-in tool-output budgeting plugin, and AgentFrame switch-following turn execution. Process support is explicit host configuration: a process registry derives the Lashlang process/lifecycle abilities used to build session surfaces. No knowledge of MCP, user config files, provider credential files, or any host concerns — those live in higher layers.</p><code class="path">lash-core</code></article>
+            <article class="panel"><small>Async runtime</small><h3>lash-core</h3><p>Owns <code>LashRuntime</code>, <code>Session</code>, <code>SessionGraph</code>, <code>RuntimeEffectController</code>, <code>ProcessRegistry</code>, <code>ProtocolBuildInput</code>, and the <code>RuntimePersistence</code> contract, plus tool dispatch, live provider handles, attachments, tracing, runtime controls, and AgentFrame switch-following turn execution. Process support is explicit host configuration: a process registry derives the Lashlang process/lifecycle abilities used to build session surfaces. No knowledge of MCP, user config files, provider credential files, or any host concerns — those live in higher layers.</p><code class="path">lash-core</code></article>
             <article class="panel"><small>Facade</small><h3>lash</h3><p>App-facing API on top of <code>lash-core</code>. Provides <code>LashCore</code>, <code>LashCoreBuilder</code>, <code>LashSession</code>, <code>SessionBuilder</code>, <code>TurnBuilder</code>, mode presets, and typed-plugin binding helpers. Host applications use this crate (not <code>lash-core</code> directly) for runtime construction, chat/task sessions, persistence wiring, and semantic turn streaming.</p><code class="path">lash, examples/*</code></article>
             <article class="panel"><small>CLI runtime + config</small><h3>lash-cli</h3><p>Hosts the <code>lash</code> binary plus a <code>[lib]</code> half that defines <code>LashConfig</code>, provider spec parsing, and credential bootstrap. The bin handles resume/fork, <code>--print</code>, interactive TUI flows, and assembles the plugin factory chain (providers, MCP, mode presets) before constructing <code>LashCore</code>.</p><code class="path">lash-cli</code></article>
             <article class="panel"><small>Protocol plugins</small><h3>standard + rlm</h3><p>Standard drives native provider tool calls. RLM extracts <code>lashlang</code> code fences, runs persistent REPL state with read-only host bindings projected into scope (<code>history</code> and <code>ProjectionRef</code>-backed app globals), renders execution instructions only from the effective <code>LashlangSurface</code>, masks fence streaming, provides the <code>continue_as</code> AgentFrame switch control tool, and records the RLM trajectory. Both protocols return terminal outcomes; shared runtime code writes final prose transcripts.</p><code class="path">lash-protocol-standard, lash-protocol-rlm, lashlang, lash-rlm-types</code></article>
@@ -63,11 +65,10 @@ flowchart TD
   Facade --> Core
   Core --> Sansio["lash-sansio"]
   Core --> Lang["lashlang"]
-  Core --> Store["lash-sqlite-store"]
-  Core --> RlmTypes["lash-rlm-types"]
+  Store["lash-sqlite-store"] --> Core
   Modes["lash-protocol-standard<br/>lash-protocol-rlm"] --> Core
   Modes --> Sansio
-  Modes --> RlmTypes
+  Modes --> RlmTypes["lash-rlm-types"]
   Plugins["lash-plugin-*<br/>lash-llm-tools<br/>lash-standard-plugins"] --> Core
   Mcp --> Core
   Subagents["lash-subagents"] --> Core
@@ -75,13 +76,12 @@ flowchart TD
   Autoresearch["lash-autoresearch"] --> Facade
   Autoresearch --> Core
   Providers["lash-provider-*"] --> Core
-  Builtins --> Providers
   Export["lash-export"] --> Core
   Export --> TraceCore
   Export --> RlmTypes
   TraceViewer["lash-trace-viewer"] --> TraceCore["lash-trace"]
   Core --> TraceCore
-  FileIndex["lash-file-index"] --> CLI
+  CLI --> FileIndex["lash-file-index"]
             </div>
           </div>
         </div>

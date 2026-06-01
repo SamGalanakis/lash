@@ -3,550 +3,426 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>lash — Whole-Workspace Code Review</title>
+<meta name="color-scheme" content="dark light">
+<title>lash — Thermo-Nuclear Review (post-refactor)</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  /* ============ BLUEPRINT THEME (dark-first) ============ */
+  /* ===== EDITORIAL — warm paper / amber+slate (distinct from the prior blueprint pass) ===== */
   :root {
-    --font-body: 'DM Sans', system-ui, sans-serif;
-    --font-mono: 'Fira Code', 'SF Mono', Consolas, monospace;
+    --font-body: 'IBM Plex Sans', system-ui, sans-serif;
+    --font-head: 'Fraunces', Georgia, serif;
+    --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
 
-    --bg: #0d141d;
-    --bg2: #0a1018;
-    --surface: #141d29;
-    --surface2: #1a2532;
-    --surface-elevated: #1d2937;
-    --border: rgba(120, 160, 210, 0.14);
-    --border-bright: rgba(120, 160, 210, 0.30);
-    --text: #d7e3f0;
-    --text-dim: #8197b0;
-    --grid: rgba(120, 160, 210, 0.045);
+    --bg: #f6f1e9; --bg2: #efe7da; --surface: #fffdf8; --surface2: #f3ece0;
+    --border: rgba(60,48,32,0.14); --border-bright: rgba(60,48,32,0.30);
+    --text: #2b2218; --text-dim: #6e6353; --grid: rgba(60,48,32,0.04);
 
-    --accent: #5fa8d8;          /* blueprint blue */
-    --accent-dim: rgba(95, 168, 216, 0.12);
+    --accent: #b3641a;            /* burnt amber */
+    --accent-dim: rgba(179,100,26,0.12);
+    --ink: #344a3f;              /* deep slate-green */
 
-    /* severity */
-    --red: #e8675c;
-    --red-dim: rgba(232, 103, 92, 0.13);
-    --red-line: rgba(232, 103, 92, 0.55);
-    --amber: #e0a83a;
-    --amber-dim: rgba(224, 168, 58, 0.13);
-    --amber-line: rgba(224, 168, 58, 0.5);
-    --green: #5cc98a;
-    --green-dim: rgba(92, 201, 138, 0.13);
-    --green-line: rgba(92, 201, 138, 0.5);
-
-    /* lens identity */
-    --lensA: #e0a83a;           /* structural = amber */
-    --lensA-dim: rgba(224, 168, 58, 0.10);
-    --lensB: #e8675c;           /* bugs = red */
-    --lensB-dim: rgba(232, 103, 92, 0.10);
+    --red: #b1442f; --red-dim: rgba(177,68,47,0.12); --red-line: rgba(177,68,47,0.5);
+    --amber: #a9781a; --amber-dim: rgba(169,120,26,0.13); --amber-line: rgba(169,120,26,0.5);
+    --green: #3f7d52; --green-dim: rgba(63,125,82,0.13); --green-line: rgba(63,125,82,0.5);
+    --blue: #2f6d86; --blue-dim: rgba(47,109,134,0.12);
   }
-  @media (prefers-color-scheme: light) {
+  @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #eef2f7; --bg2: #e5ebf2; --surface: #ffffff; --surface2: #f3f7fb;
-      --surface-elevated: #ffffff;
-      --border: rgba(30, 60, 100, 0.14); --border-bright: rgba(30, 60, 100, 0.28);
-      --text: #16222f; --text-dim: #51657c; --grid: rgba(30, 60, 100, 0.05);
-      --accent: #1d6fa5; --accent-dim: rgba(29, 111, 165, 0.10);
-      --red: #c43d30; --red-dim: rgba(196, 61, 48, 0.10); --red-line: rgba(196,61,48,0.5);
-      --amber: #b07d12; --amber-dim: rgba(176, 125, 18, 0.10); --amber-line: rgba(176,125,18,0.5);
-      --green: #1c9d5e; --green-dim: rgba(28, 157, 94, 0.10); --green-line: rgba(28,157,94,0.5);
-      --lensA: #b07d12; --lensA-dim: rgba(176,125,18,0.08);
-      --lensB: #c43d30; --lensB-dim: rgba(196,61,48,0.08);
+      --bg: #17140f; --bg2: #120f0b; --surface: #201b14; --surface2: #271f17;
+      --border: rgba(214,188,150,0.14); --border-bright: rgba(214,188,150,0.30);
+      --text: #ece2d2; --text-dim: #a99e8c; --grid: rgba(214,188,150,0.045);
+      --accent: #e0975a; --accent-dim: rgba(224,151,90,0.14); --ink: #8fbfa6;
+      --red: #e8786a; --red-dim: rgba(232,120,106,0.14); --red-line: rgba(232,120,106,0.5);
+      --amber: #e0b153; --amber-dim: rgba(224,177,83,0.14); --amber-line: rgba(224,177,83,0.5);
+      --green: #74c98f; --green-dim: rgba(116,201,143,0.14); --green-line: rgba(116,201,143,0.5);
+      --blue: #6fb6d0; --blue-dim: rgba(111,182,208,0.14);
     }
   }
-
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  .grid > *, [style*="display:grid"] > *, [style*="display: grid"] > * { min-width: 0; }
-
+  * { margin:0; padding:0; box-sizing:border-box; }
+  .grid>*,[style*="display:grid"]>*{min-width:0;}
   body {
     background-color: var(--bg);
-    background-image:
-      linear-gradient(var(--grid) 1px, transparent 1px),
-      linear-gradient(90deg, var(--grid) 1px, transparent 1px),
-      radial-gradient(ellipse at 50% -8%, var(--accent-dim) 0%, transparent 55%);
-    background-size: 30px 30px, 30px 30px, 100% 100%;
-    color: var(--text);
-    font-family: var(--font-body);
-    line-height: 1.6;
-    overflow-wrap: break-word;
-    padding: 0 28px 80px;
+    background-image: linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size: 32px 32px,32px 32px;
+    color: var(--text); font-family: var(--font-body); line-height:1.6; overflow-wrap:break-word; padding:0 28px 80px;
   }
+  @keyframes fadeUp{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
+  .an{animation:fadeUp .4s ease-out both;animation-delay:calc(var(--i,0)*.04s);}
+  @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-delay:0!important;}}
+  code,.mono{font-family:var(--font-mono);}
+  code{font-size:0.84em;background:var(--accent-dim);color:var(--text);padding:1px 5px;border-radius:4px;word-break:break-word;}
+  .ref{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);}
 
-  @keyframes fadeUp { from { opacity:0; transform: translateY(10px);} to {opacity:1; transform:none;} }
-  @keyframes fadeScale { from { opacity:0; transform: scale(.94);} to {opacity:1; transform:none;} }
-  .an { animation: fadeUp .4s ease-out both; animation-delay: calc(var(--i,0)*.04s); }
-  @media (prefers-reduced-motion: reduce){ *,*::before,*::after{animation-duration:.01ms!important;animation-delay:0!important;transition-duration:.01ms!important;} }
+  header.mast{max-width:1380px;margin:0 auto;padding:52px 0 24px;border-bottom:2px solid var(--border-bright);}
+  .eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:3px;text-transform:uppercase;color:var(--accent);margin-bottom:14px;}
+  h1{font-family:var(--font-head);font-size:clamp(32px,5vw,54px);font-weight:500;letter-spacing:-0.5px;line-height:1.02;margin-bottom:18px;}
+  h1 em{font-style:italic;color:var(--accent);}
+  .standfirst{font-size:17px;color:var(--text-dim);max-width:92ch;}
+  .standfirst strong{color:var(--text);font-weight:600;}
 
-  code, .mono { font-family: var(--font-mono); }
-  code {
-    font-size: 0.85em; background: var(--accent-dim); color: var(--text);
-    padding: 1px 5px; border-radius: 4px; word-break: break-word;
-  }
-  .ref { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
+  .kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:13px;margin:26px auto 8px;max-width:1380px;}
+  .kpi{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:17px;box-shadow:0 2px 12px rgba(60,48,32,.06);animation:fadeUp .4s ease-out both;animation-delay:calc(var(--i,0)*.05s);}
+  .kpi b{font-family:var(--font-head);font-size:31px;font-weight:600;line-height:1;letter-spacing:-.5px;display:block;font-variant-numeric:tabular-nums;}
+  .kpi.red b{color:var(--red);} .kpi.amber b{color:var(--amber);} .kpi.green b{color:var(--green);} .kpi.ink b{color:var(--ink);}
+  .kpi span{font-family:var(--font-mono);font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-top:8px;display:block;}
 
-  /* ============ MASTHEAD ============ */
-  header.mast {
-    max-width: 1400px; margin: 0 auto; padding: 54px 0 26px;
-    border-bottom: 1px solid var(--border);
-  }
-  .eyebrow { font-family: var(--font-mono); font-size: 11px; letter-spacing: 3px; text-transform: uppercase; color: var(--accent); margin-bottom: 14px; }
-  h1 { font-size: clamp(30px, 4.5vw, 50px); font-weight: 700; letter-spacing: -1px; line-height: 1.05; margin-bottom: 18px; }
-  .standfirst { font-size: 17px; color: var(--text-dim); max-width: 90ch; }
-  .standfirst strong { color: var(--text); font-weight: 600; }
-  .lens-key { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 22px; font-family: var(--font-mono); font-size: 12px; }
-  .lens-key .k { display: inline-flex; align-items: center; gap: 8px; }
-  .lens-key .sw { width: 13px; height: 13px; border-radius: 3px; }
+  .wrap{max-width:1380px;margin:34px auto 0;display:grid;grid-template-columns:200px 1fr;gap:0 46px;}
+  .main{min-width:0;}
+  nav.toc{position:sticky;top:18px;align-self:start;grid-row:1/-1;max-height:calc(100dvh - 36px);overflow-y:auto;padding:12px 0;}
+  .toc-title{font-family:var(--font-mono);font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:var(--text-dim);padding-bottom:10px;margin-bottom:8px;border-bottom:1px solid var(--border);}
+  .toc a{display:block;font-size:11.5px;color:var(--text-dim);text-decoration:none;padding:5px 9px;border-radius:5px;border-left:2px solid transparent;line-height:1.4;transition:all .15s;}
+  .toc a:hover{color:var(--text);background:var(--surface2);}
+  .toc a.active{color:var(--text);border-left-color:var(--accent);background:var(--surface);}
 
-  /* ============ KPI ROW ============ */
-  .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap: 14px; margin: 28px 0 8px; max-width: 1400px; margin-left:auto; margin-right:auto; }
-  .kpi { background: var(--surface-elevated); border: 1px solid var(--border); border-radius: 12px; padding: 18px; box-shadow: 0 2px 10px rgba(0,0,0,.18); animation: fadeScale .4s ease-out both; animation-delay: calc(var(--i,0)*.05s); }
-  .kpi b { font-size: 30px; font-weight: 700; line-height: 1; letter-spacing: -.5px; font-variant-numeric: tabular-nums; display: block; }
-  .kpi.red b { color: var(--red); } .kpi.amber b { color: var(--amber); } .kpi.blue b { color: var(--accent); }
-  .kpi span { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); margin-top: 8px; display:block; }
+  .verdict{background:linear-gradient(160deg,var(--surface),var(--surface2));border:1px solid var(--border-bright);border-left:4px solid var(--accent);border-radius:14px;padding:26px 30px;margin-bottom:34px;box-shadow:0 4px 22px rgba(60,48,32,.08);}
+  .verdict h2{font-family:var(--font-head);font-size:25px;font-weight:500;margin-bottom:13px;letter-spacing:-.3px;}
+  .verdict p{color:var(--text-dim);font-size:15.5px;margin-bottom:12px;max-width:90ch;}
+  .verdict p:last-child{margin-bottom:0;}
+  .verdict strong{color:var(--text);font-weight:600;}
+  .verdict .hot{color:var(--accent);font-weight:600;}
 
-  /* ============ LAYOUT (TOC + main) ============ */
-  .wrap { max-width: 1400px; margin: 36px auto 0; display: grid; grid-template-columns: 190px 1fr; gap: 0 44px; }
-  .main { min-width: 0; }
-  nav.toc { position: sticky; top: 18px; align-self: start; grid-row: 1/-1; max-height: calc(100dvh - 36px); overflow-y: auto; padding: 12px 0; }
-  .toc-title { font-family: var(--font-mono); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; color: var(--text-dim); padding-bottom: 10px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
-  .toc a { display: block; font-size: 11.5px; color: var(--text-dim); text-decoration: none; padding: 5px 9px; border-radius: 5px; border-left: 2px solid transparent; line-height: 1.4; transition: all .15s; }
-  .toc a:hover { color: var(--text); background: var(--surface2); }
-  .toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+  section{margin-bottom:44px;scroll-margin-top:18px;}
+  .sec-label{font-family:var(--font-mono);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:2px;display:flex;align-items:center;gap:11px;margin-bottom:8px;color:var(--accent);}
+  .sec-label .num{color:var(--bg);background:var(--accent);border-radius:5px;padding:1px 8px;font-size:11px;}
+  h2.sec{font-family:var(--font-head);font-size:27px;font-weight:500;letter-spacing:-.4px;margin-bottom:8px;line-height:1.12;}
+  .sec-intro{color:var(--text-dim);font-size:15px;max-width:88ch;margin-bottom:20px;}
+  .sec-intro strong{color:var(--text);}
 
-  /* ============ VERDICT ============ */
-  .verdict { background: linear-gradient(160deg, var(--surface-elevated), var(--surface)); border: 1px solid var(--border-bright); border-left: 4px solid var(--accent); border-radius: 14px; padding: 26px 30px; margin-bottom: 36px; box-shadow: 0 4px 24px rgba(0,0,0,.2); }
-  .verdict h2 { font-size: 22px; font-weight: 700; margin-bottom: 12px; letter-spacing:-.3px; }
-  .verdict p { color: var(--text-dim); font-size: 15.5px; margin-bottom: 12px; max-width: 86ch; }
-  .verdict p:last-child { margin-bottom: 0; }
-  .verdict strong { color: var(--text); font-weight: 600; }
-  .verdict .hot { color: var(--amber); font-weight: 600; }
-  .verdict .bug { color: var(--red); font-weight: 600; }
+  /* ranked code-judo list */
+  .ranked{counter-reset:rk;list-style:none;display:grid;gap:13px;}
+  .ranked li{counter-increment:rk;position:relative;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:12px;padding:17px 20px 17px 62px;}
+  .ranked li::before{content:counter(rk);position:absolute;left:16px;top:16px;width:32px;height:32px;border-radius:9px;background:var(--accent-dim);color:var(--accent);font-family:var(--font-mono);font-weight:600;font-size:15px;display:flex;align-items:center;justify-content:center;}
+  .ranked h3{font-size:15.5px;font-weight:600;margin-bottom:5px;}
+  .ranked .win{font-family:var(--font-mono);font-size:11px;color:var(--green);font-weight:600;float:right;margin-left:12px;}
+  .ranked p{font-size:13.5px;color:var(--text-dim);margin-bottom:7px;}
+  .ranked .fix{font-size:13.5px;color:var(--text);}
+  .ranked .fix b{color:var(--accent);font-weight:600;}
+  .ranked .files{margin-top:7px;}
 
-  /* ============ SECTION CHROME ============ */
-  section { margin-bottom: 46px; scroll-margin-top: 18px; }
-  .sec-label { font-family: var(--font-mono); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 2px; display: flex; align-items: center; gap: 11px; margin-bottom: 8px; }
-  .sec-label .num { color: var(--bg); border-radius: 5px; padding: 1px 8px; font-size: 11px; }
-  .lensA-tag .num { background: var(--lensA); } .lensA-tag { color: var(--lensA); }
-  .lensB-tag .num { background: var(--lensB); } .lensB-tag { color: var(--lensB); }
-  .neutral-tag .num { background: var(--accent); } .neutral-tag { color: var(--accent); }
-  h2.sec { font-size: 25px; font-weight: 700; letter-spacing: -.4px; margin-bottom: 8px; line-height:1.15; }
-  .sec-intro { color: var(--text-dim); font-size: 15px; max-width: 84ch; margin-bottom: 22px; }
-  .sec-intro strong { color: var(--text); }
+  .table-wrap{border:1px solid var(--border);border-radius:13px;overflow:hidden;background:var(--surface);}
+  .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;}
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  thead th{position:sticky;top:0;background:var(--surface2);text-align:left;font-family:var(--font-mono);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);padding:12px 15px;border-bottom:2px solid var(--border-bright);white-space:nowrap;}
+  td{padding:13px 15px;border-bottom:1px solid var(--border);vertical-align:top;line-height:1.5;}
+  tbody tr:last-child td{border-bottom:none;}
+  td.what{font-weight:600;color:var(--text);min-width:220px;max-width:380px;}
+  td small{display:block;color:var(--text-dim);font-size:11.5px;margin-top:4px;line-height:1.5;}
+  td .fixline{color:var(--green);font-size:12px;margin-top:5px;}
+  td .fixline::before{content:"→ ";color:var(--text-dim);}
+  td.num{font-variant-numeric:tabular-nums;text-align:right;font-family:var(--font-mono);font-size:12px;white-space:nowrap;}
 
-  .lens-banner { display:inline-flex; align-items:center; gap:8px; font-family: var(--font-mono); font-size: 10px; letter-spacing:1.5px; text-transform: uppercase; padding: 4px 11px; border-radius: 20px; margin-bottom: 14px; }
-  .lens-banner.A { background: var(--lensA-dim); color: var(--lensA); border: 1px solid var(--amber-line); }
-  .lens-banner.B { background: var(--lensB-dim); color: var(--lensB); border: 1px solid var(--red-line); }
+  .badge{display:inline-block;font-family:var(--font-mono);font-size:9.5px;font-weight:600;letter-spacing:.4px;padding:3px 7px;border-radius:5px;white-space:nowrap;}
+  .b-judo{background:var(--accent-dim);color:var(--accent);border:1px solid var(--accent);}
+  .b-dead{background:var(--red-dim);color:var(--red);border:1px solid var(--red-line);}
+  .b-spag{background:var(--amber-dim);color:var(--amber);border:1px solid var(--amber-line);}
+  .b-size{background:var(--blue-dim);color:var(--blue);border:1px solid var(--blue);}
+  .b-keep{background:var(--green-dim);color:var(--green);border:1px solid var(--green-line);}
+  .b-code{background:var(--red-dim);color:var(--red);}
+  .b-test{background:var(--green-dim);color:var(--green);}
 
-  /* ============ RANKED LIST (restructurings) ============ */
-  .ranked { counter-reset: rk; list-style: none; display: grid; gap: 14px; }
-  .ranked li { counter-increment: rk; position: relative; background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--amber-line); border-radius: 12px; padding: 18px 20px 18px 60px; }
-  .ranked li::before { content: counter(rk); position: absolute; left: 16px; top: 18px; width: 30px; height: 30px; border-radius: 8px; background: var(--amber-dim); color: var(--amber); font-family: var(--font-mono); font-weight: 700; font-size: 15px; display: flex; align-items: center; justify-content: center; }
-  .ranked h3 { font-size: 15.5px; font-weight: 600; margin-bottom: 5px; }
-  .ranked p { font-size: 13.5px; color: var(--text-dim); margin-bottom: 8px; }
-  .ranked .fix { font-size: 13.5px; color: var(--text); }
-  .ranked .fix b { color: var(--green); font-weight: 600; }
-  .ranked .files { margin-top: 8px; }
+  .pull{margin:6px 0 22px;padding:22px 28px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--accent-dim);border-radius:10px;}
+  .pull q{font-family:var(--font-head);font-size:22px;font-weight:500;font-style:italic;letter-spacing:-.3px;line-height:1.34;display:block;}
+  .pull q::before{content:"“";} .pull q::after{content:"”";}
 
-  /* ============ TABLE ============ */
-  .table-wrap { border: 1px solid var(--border); border-radius: 13px; overflow: hidden; background: var(--surface); }
-  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  thead th { position: sticky; top: 0; background: var(--surface2); text-align: left; font-family: var(--font-mono); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); padding: 13px 16px; border-bottom: 2px solid var(--border-bright); white-space: nowrap; }
-  td { padding: 14px 16px; border-bottom: 1px solid var(--border); vertical-align: top; line-height: 1.5; }
-  tbody tr:last-child td { border-bottom: none; }
-  tbody tr.bugrow:nth-child(even) { background: var(--red-dim); }
-  td.what { font-weight: 600; color: var(--text); min-width: 230px; max-width: 360px; }
-  td small { display: block; color: var(--text-dim); font-size: 11.5px; margin-top: 5px; line-height: 1.5; }
-  td .fixline { color: var(--green); font-size: 12px; margin-top: 6px; }
-  td .fixline::before { content: "→ fix: "; color: var(--text-dim); }
+  .theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:11px;margin-top:16px;}
+  .tc{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;font-size:13px;}
+  .tc b{color:var(--accent);font-weight:600;display:block;margin-bottom:3px;font-family:var(--font-mono);font-size:12.5px;}
+  .tc span{color:var(--text-dim);font-size:12.5px;}
+  .tc .twin{color:var(--text);font-weight:600;}
 
-  /* severity badges */
-  .badge { display: inline-block; font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: .5px; padding: 3px 8px; border-radius: 5px; white-space: nowrap; }
-  .b-p0 { background: var(--red); color: var(--bg); }
-  .b-p1 { background: var(--red-dim); color: var(--red); border: 1px solid var(--red-line); }
-  .b-req { background: var(--amber-dim); color: var(--amber); border: 1px solid var(--amber-line); }
-  .b-keep { background: var(--green-dim); color: var(--green); border: 1px solid var(--green-line); }
-  .b-na { background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); }
+  .health{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:13px;}
+  .hcard{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;border-top:3px solid var(--border-bright);}
+  .hcard.hot{border-top-color:var(--red-line);} .hcard.mixed{border-top-color:var(--amber-line);} .hcard.good{border-top-color:var(--green-line);}
+  .hcard .crate{font-family:var(--font-mono);font-size:12.5px;font-weight:600;color:var(--text);}
+  .hcard .note{font-size:12.5px;color:var(--text-dim);margin:7px 0 9px;}
+  .hcard ul{margin:0;padding-left:1.1em;}
+  .hcard li{font-size:12.5px;color:var(--text-dim);margin-bottom:5px;}
+  .hcard li b{color:var(--text);font-weight:600;}
 
-  /* ============ HEALTH GRID ============ */
-  .health { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px,1fr)); gap: 14px; }
-  .hcard { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 17px 19px; border-top: 3px solid var(--border-bright); }
-  .hcard.good { border-top-color: var(--green-line); }
-  .hcard.mixed { border-top-color: var(--amber-line); }
-  .hcard.hot { border-top-color: var(--red-line); }
-  .hcard .crate { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--text); }
-  .hcard .rating { float: right; }
-  .hcard .note { font-size: 13px; color: var(--text-dim); margin: 8px 0 10px; }
-  .hcard .standout { font-size: 12.5px; border-top: 1px dashed var(--border); padding-top: 9px; }
-  .hcard .standout b { color: var(--text); font-weight: 600; }
-  .hcard .sa { color: var(--amber); } .hcard .sb { color: var(--red); }
-  .pill { font-family: var(--font-mono); font-size: 9px; letter-spacing: 1px; text-transform: uppercase; padding: 2px 7px; border-radius: 12px; }
-  .pill.nb { background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); margin-left: 6px; }
+  .keep{display:grid;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));gap:10px;}
+  .keep .k{background:var(--green-dim);border:1px solid var(--green-line);border-radius:10px;padding:12px 15px;font-size:13px;}
+  .keep .k b{color:var(--green);font-weight:600;display:block;margin-bottom:3px;}
+  .keep .k span{color:var(--text-dim);font-size:12.5px;}
 
-  /* ============ PULLQUOTE ============ */
-  .pull { margin: 8px 0 22px; padding: 22px 28px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--accent-dim); border-radius: 10px; }
-  .pull q { font-size: 21px; font-weight: 600; letter-spacing: -.3px; line-height: 1.35; display:block; }
-  .pull q::before { content: "“"; } .pull q::after { content: "”"; }
-  .canon { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap: 10px; margin-top: 18px; }
-  .canon .c { background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; font-size: 13px; }
-  .canon .c code { display: inline-block; margin-bottom: 3px; }
-  .canon .c span { color: var(--text-dim); font-size: 12px; }
+  .callout{border:1px solid var(--border);border-left:4px solid var(--blue);background:var(--surface);border-radius:10px;padding:18px 22px;}
+  .callout .t{font-family:var(--font-mono);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--blue);margin-bottom:9px;}
+  .callout p{font-size:14px;color:var(--text-dim);margin-bottom:8px;} .callout p:last-child{margin-bottom:0;} .callout strong{color:var(--text);}
 
-  /* ============ KEEP LIST ============ */
-  .keep { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap: 11px; }
-  .keep .k { background: var(--green-dim); border: 1px solid var(--green-line); border-radius: 10px; padding: 13px 16px; font-size: 13.5px; }
-  .keep .k b { color: var(--green); font-weight: 600; display:block; margin-bottom: 3px; }
-  .keep .k span { color: var(--text-dim); font-size: 12.5px; }
+  footer{max-width:1380px;margin:40px auto 0;border-top:2px solid var(--border-bright);padding-top:20px;font-family:var(--font-mono);font-size:11px;color:var(--text-dim);line-height:1.7;}
 
-  /* ============ CALLOUT ============ */
-  .callout { border: 1px solid var(--border); border-left: 4px solid var(--accent); background: var(--surface); border-radius: 10px; padding: 18px 22px; }
-  .callout.warn { border-left-color: var(--amber); background: var(--amber-dim); }
-  .callout .t { font-family: var(--font-mono); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: var(--amber); margin-bottom: 9px; }
-  .callout p { font-size: 14px; color: var(--text-dim); margin-bottom: 8px; }
-  .callout p:last-child { margin-bottom: 0; }
-  .callout strong { color: var(--text); }
-  .callout ul { margin: 6px 0 0 0; padding-left: 1.4em; }
-  .callout li { font-size: 13.5px; color: var(--text-dim); margin-bottom: 5px; }
-  .callout li b { color: var(--text); font-weight: 600; }
-
-  footer { max-width: 1400px; margin: 40px auto 0; border-top: 1px solid var(--border); padding-top: 20px; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); line-height: 1.7; }
-
-  @media (max-width: 1000px) {
-    .wrap { grid-template-columns: 1fr; }
-    nav.toc { position: sticky; top: 0; z-index: 200; max-height: none; display: flex; gap: 4px; overflow-x: auto; background: var(--bg); border-bottom: 1px solid var(--border); padding: 9px 0; margin: 0 -28px 14px; padding-left: 28px; padding-right: 28px; grid-row: auto; }
-    nav.toc::-webkit-scrollbar { display: none; }
-    .toc-title { display: none; }
-    .toc a { white-space: nowrap; flex-shrink: 0; border-left: none; border-bottom: 2px solid transparent; border-radius: 4px 4px 0 0; }
-    .toc a.active { border-left: none; border-bottom-color: var(--accent); }
-    section { scroll-margin-top: 54px; }
+  @media (max-width:1000px){
+    .wrap{grid-template-columns:1fr;}
+    nav.toc{position:sticky;top:0;z-index:200;max-height:none;display:flex;gap:4px;overflow-x:auto;background:var(--bg);border-bottom:1px solid var(--border);padding:9px 0;margin:0 -28px 14px;padding-left:28px;padding-right:28px;grid-row:auto;}
+    nav.toc::-webkit-scrollbar{display:none;} .toc-title{display:none;}
+    .toc a{white-space:nowrap;flex-shrink:0;border-left:none;border-bottom:2px solid transparent;border-radius:4px 4px 0 0;}
+    .toc a.active{border-left:none;border-bottom-color:var(--accent);}
+    section{scroll-margin-top:54px;}
   }
 </style>
 </head>
 <body>
 
 <header class="mast">
-  <div class="eyebrow an" style="--i:0">Whole-workspace review · two lenses · read-only</div>
-  <h1 class="an" style="--i:1">lash — Code Review</h1>
+  <div class="eyebrow an" style="--i:0">Whole-workspace · thermo-nuclear · 6 parallel reviewers · post-refactor</div>
+  <h1 class="an" style="--i:1">The refactor closed the <em>visible</em> duplication.<br>It left the <em>twins</em> behind.</h1>
   <p class="standfirst an" style="--i:2">
-    Every workspace crate <strong>except <code>lash-cli</code></strong>, reviewed twice: a complete
-    <strong>structural / maintainability</strong> pass and a partial <strong>correctness bug-hunt</strong>.
-    Findings are read-only analysis — nothing was edited.
+    A second deep code-quality audit of every workspace crate <strong>except <code>lash-cli</code></strong>, run after the large
+    dedup/restructure pass landed. Six independent reviewers (core, lashlang, providers, tools+stores, plugins+protocols, facade+ui)
+    converged — without coordination — on <strong>one structural theme</strong>: the recent dedups introduced the canonical version of
+    each helper but <strong>did not finish the cutover</strong>, leaving old copies in place as silent-drift twins. Read-only analysis.
   </p>
-  <div class="lens-key an" style="--i:3">
-    <span class="k"><span class="sw" style="background:var(--lensA)"></span> Lens A — Structural / maintainability (complete)</span>
-    <span class="k"><span class="sw" style="background:var(--lensB)"></span> Lens B — Correctness bugs (partial)</span>
-    <span class="k"><span class="sw" style="background:var(--green)"></span> Keep — already excellent</span>
-  </div>
 </header>
 
 <div class="kpi-row">
-  <div class="kpi blue an" style="--i:0"><b>28</b><span>source files &gt; 1000 lines</span></div>
-  <div class="kpi red an" style="--i:1"><b>5</b><span>P1 correctness bugs</span></div>
-  <div class="kpi amber an" style="--i:2"><b>5</b><span>required restructurings</span></div>
-  <div class="kpi blue an" style="--i:3"><b>~10</b><span>crate-subsystems reviewed</span></div>
-  <div class="kpi amber an" style="--i:4"><b>600–900</b><span>lines deletable in providers</span></div>
-  <div class="kpi blue an" style="--i:5"><b>2</b><span>review lenses</span></div>
+  <div class="kpi amber an" style="--i:0"><b>6</b><span>incomplete cutovers</span></div>
+  <div class="kpi red an" style="--i:1"><b>~1,300</b><span>lines deletable (code-judo)</span></div>
+  <div class="kpi ink an" style="--i:2"><b>10</b><span>ranked code-judo moves</span></div>
+  <div class="kpi green an" style="--i:3"><b>~420</b><span>lines of dead code</span></div>
+  <div class="kpi ink an" style="--i:4"><b>7 / 14</b><span>&gt;1k files: real-code / test-inflated</span></div>
+  <div class="kpi amber an" style="--i:5"><b>16×</b><span>worst single-shape repeat</span></div>
 </div>
 
 <div class="wrap">
   <nav class="toc" id="toc">
     <div class="toc-title">Contents</div>
     <a href="#verdict">Verdict</a>
-    <a href="#restructure">A · Top 5 restructurings</a>
-    <a href="#bugs">B · P1 correctness bugs</a>
-    <a href="#grid">Per-subsystem health</a>
-    <a href="#theme">Cross-cutting theme</a>
-    <a href="#keep">Already excellent</a>
-    <a href="#coverage">Coverage caveat</a>
+    <a href="#cutover">The 6 incomplete cutovers</a>
+    <a href="#judo">Top 10 code-judo moves</a>
+    <a href="#subsystems">Per-subsystem findings</a>
+    <a href="#filesize">File size: code vs test</a>
+    <a href="#keep">Landed clean — keep</a>
+    <a href="#scope">Scope &amp; method</a>
   </nav>
 
   <main class="main">
 
-    <!-- VERDICT -->
     <section id="verdict">
       <div class="verdict an" style="--i:0">
         <h2>Top-line verdict</h2>
         <p>
-          <strong>Architecture is sound. There is no structural regression anywhere.</strong> The pervasive
-          structural debt is <span class="hot">horizontal duplication</span> — the same algorithm, scaffold,
-          CAS-invariant, builder-surface, or string-primitive written 2–4× by hand, with several copies
-          already drifting.
+          <strong>The architecture is healthy and the just-landed work was real.</strong> Storage's
+          <code>with_write_tx</code>/<code>guard_lease</code>, the anthropic/google provider decomposition, the unified RLM
+          <code>fence_scan</code>, the <code>truncate_windowed</code> core, the <code>CheckpointEffect</code> deletion, and the
+          facade's <code>PromptLayerSink</code> all landed cleanly. No structural regression was introduced.
         </p>
         <p>
-          The single recurring theme across every crate: <strong>a canonical helper exists or obviously
-          should — and copies proliferated instead.</strong>
+          But the dominant finding is a <span class="hot">consistent half-finished-cutover pattern</span>. Each dedup created the
+          canonical helper and pointed <em>some</em> callers at it — then stopped. The superseded copy survives next to the new one as
+          a <strong>second authority that can silently drift</strong>: byte-identical, hand-synced, and (in three cases) already
+          diverging. This is the highest-leverage cleanup available, and it is pure subtraction.
         </p>
         <p>
-          Separately, the bug-hunt found <span class="bug">real P1 correctness bugs</span> concentrated at two
-          seams: <strong>out-of-band token-usage accounting</strong> (counted twice on replay, and committed
-          outside the lease fence) and <strong>byte-level provider stream framing</strong> (UTF-8 corruption,
-          dropped terminal events). One storage finding rises to <strong>P0</strong>: the durability CAS/lease
-          guards are enforced in Rust around the SQL, not atomically by it.
+          Secondary: a cluster of <strong>parallel walkers / forwarder strata</strong> (four node-classifiers, two graph walkers, a
+          16× result-envelope, a 38-method pass-through layer, a 5-crate plugin shim) and a <strong>file-size signal that is
+          half-illusory</strong> — most “1000+ line” files are test-inflated; only seven are genuinely large code.
         </p>
       </div>
     </section>
 
-    <!-- LENS A: RESTRUCTURINGS -->
-    <section id="restructure">
-      <span class="lens-banner A">Lens A — Structural · complete coverage</span>
-      <div class="sec-label lensA-tag"><span class="num">A</span> Required restructurings</div>
-      <h2 class="sec">The top 5, ordered by leverage</h2>
-      <p class="sec-intro">
-        Each is a <strong>code-judo</strong> move — it deletes complexity rather than rearranging it. Ordered
-        by deletion-to-risk ratio. <span class="badge b-req">STRUCTURAL · REQUIRED</span>
-      </p>
+    <section id="cutover">
+      <div class="sec-label"><span class="num">A</span> The pattern</div>
+      <h2 class="sec">Six dedups, six surviving twins</h2>
+      <div class="pull an" style="--i:0"><q>The canonical helper now exists. So does the copy it was meant to replace.</q></div>
+      <p class="sec-intro">Each row is a dedup that landed this cycle, the twin it left behind, and whether the two have already drifted. Finishing these cutovers is behavior-preserving deletion.</p>
+      <div class="theme-grid">
+        <div class="tc an" style="--i:0"><b>transport::normalize</b><span>5 primitives lifted to <code>lash-llm-transport</code> — but <span class="twin">OpenAI &amp; Codex never import it</span>; they keep byte-identical local <code>merge_usage</code>/<code>terminal_reason_from_parts</code>/<code>serialize_options_tail</code>, and <code>frame_sse_payload</code> has <span class="twin">zero callers</span> (dead lift).</span></div>
+        <div class="tc an" style="--i:1"><b>lashlang builtins registry</b><span><code>builtins.rs</code> is the declared single source — but <code>compiler.rs::intrinsic_for_builtin</code> is <span class="twin">a parallel 23-entry name→op table</span> that must stay in lockstep.</span></div>
+        <div class="tc an" style="--i:2"><b>validate → lower fold</b><span>Validation now runs inline in the linker — but <code>artifact.rs::RequirementsCollector</code> is <span class="twin">a third full AST walker</span> recomputing the same scope/binding inference; can diverge from the linker's.</span></div>
+        <div class="tc an" style="--i:3"><b>truncate_windowed</b><span>The truncation core was unified — but the <span class="twin">disk-spill layer, the per-tool truncation-direction rule, and the token estimate stayed forked</span> between rolling-history and tool-output-budget (and already differ on the hash key).</span></div>
+        <div class="tc an" style="--i:4"><b>StaticPluginFactory</b><span>Exists in core and used by 2 plugins — but <span class="twin">5 plugin crates still hand-roll</span> the full <code>Plugin</code>+<code>register()</code>+<code>Factory</code> shim it was built to remove.</span></div>
+        <div class="tc an" style="--i:5"><b>facade control dedup</b><span><code>StateControl</code>/<code>ProcessControl</code> were deduped — but <span class="twin">the ~38-method <code>SessionControl</code> pass-through stratum</span> beneath the 11 namespacing structs is still a 1:1 forwarding layer.</span></div>
+      </div>
+    </section>
+
+    <section id="judo">
+      <div class="sec-label"><span class="num">B</span> Ranked</div>
+      <h2 class="sec">Top 10 code-judo moves</h2>
+      <p class="sec-intro">Ordered by deletion-to-risk: lines removed plus drift-risk eliminated, all behavior-preserving. <span class="badge b-judo">CODE-JUDO</span> <span class="badge b-dead">DEAD CODE</span></p>
       <ol class="ranked">
-        <li class="an" style="--i:0">
-          <h3>Delete the parallel enum <code>CheckpointEffect</code></h3>
-          <p>Two enums, the same 10 variants, ~150 lines of <code>from_effect</code>/<code>into_effect</code>
-          round-tripping — differing only in <code>MessageSequence</code> vs <code>Vec&lt;Message&gt;</code> for serde.</p>
-          <div class="fix"><b>Fix:</b> make <code>Effect</code> serde-capable, delete the twin + both converters. Highest deletion-to-risk ratio in the workspace.</div>
-          <div class="files ref">lash-sansio/src/sansio/mod.rs:180-288, 683-771</div>
-        </li>
-        <li class="an" style="--i:1">
-          <h3>Add an <code>Expr</code> traversal primitive in lashlang &amp; fold <code>validate</code> into <code>lower</code></h3>
-          <p>~12 hand-written full-AST walks. <code>validate_expr</code>/<code>lower_expr</code> are near-identical twins
-          (the tree is walked twice); <code>artifact.rs</code> re-implements the linker's scope/binding inference a
-          <em>third</em> time; the builtin table exists 3×; type→schema construction 3–4×.</p>
-          <div class="fix"><b>Fix:</b> <code>Expr::children()</code>; emit <code>SurfaceRequirements</code> as a lowering byproduct; one builtin registry; one <code>fold_type</code> authority.</div>
-          <div class="files ref">lashlang/src/{ast.rs, linker.rs, compiler.rs, artifact.rs}</div>
-        </li>
-        <li class="an" style="--i:2">
-          <h3><code>with_write_tx</code>/<code>with_read</code> helper + one guarded-fenced-lease predicate</h3>
-          <p>The lock+txn+commit+error ceremony is open-coded in ~16 methods. The lease-fencing CAS — the most
-          safety-critical SQL in the crate — is duplicated near-verbatim between turn-leases and process-leases on
-          two error channels (a code comment literally says <em>"mirrors <code>claim_runtime_turn_lease</code>"</em>).</p>
-          <div class="fix"><b>Fix:</b> two helpers collapse the ceremony and make the <code>_conn</code>-vs-<code>&amp;self</code> twins trivial wrappers; extract one <code>guard_lease</code> predicate shared by both lease types.</div>
-          <div class="files ref">lash-sqlite-store/src/{persistence.rs, process_registry.rs, graph.rs, blobs.rs}</div>
-        </li>
-        <li class="an" style="--i:3">
-          <h3>Decompose the two 1500-line provider monoliths + promote 5 helpers to transport</h3>
-          <p>OpenAI already demonstrates the split (config/request/stream/policy/factory); Anthropic (1535) and
-          Google (1595) are flat monoliths. <code>merge_usage</code>, <code>terminal_reason_from_parts</code>,
-          SSE-payload framing, the HTTP-error envelope, and the <code>serialize_config</code> options-tail each exist
-          2–4×, several stranded in the OpenAI crate where peers can't reach them.</p>
-          <div class="fix"><b>Fix:</b> split both files along OpenAI's seams; lift the 5 primitives into <code>lash-llm-transport</code>. A new normalizer trait is <em>not</em> warranted — the conformance suite already pins the output contract.</div>
-          <div class="files ref">lash-provider-anthropic/src/lib.rs (1535), lash-provider-google/src/lib.rs (1595)</div>
-        </li>
-        <li class="an" style="--i:4">
-          <h3>Unify the two tool-output truncation + disk-spill implementations</h3>
-          <p>The same head/tail-window + byte-cap + spill algorithm written line-for-line in two plugins.
-          Rolling-history imports the budget plugin's constants, then forks the logic — and the tables have
-          <strong>already diverged</strong> (rolling-history tails <code>"batch"</code>, the budget doesn't).</p>
-          <div class="fix"><b>Fix:</b> one canonical <code>truncate_windowed</code> + spill helper; rolling-history consumes the budget projector instead of re-formatting.</div>
-          <div class="files ref">lash-plugin-rolling-history/src/lib.rs:139-264 · lash-plugin-tool-output-budget/src/lib.rs:321-527</div>
-        </li>
+        <li class="an" style="--i:0"><span class="win">~250 lines</span><h3>Replace the 16× hand-spelled grep result envelope with one <code>GrepEnvelope</code> struct</h3>
+          <p>The 14–16-key result map is re-typed at 16 exit paths (10 are the empty/error shape), with a 17th hand-synced copy in the output schema. One branch already omits two fields. This is the first review's "GrepEnvelope ×11", undercounted and unaddressed.</p>
+          <div class="fix"><b>Fix:</b> <code>#[derive(Serialize)] struct GrepEnvelope</code> + <code>GrepError</code> + <code>Default</code>; builders become <code>..Default::default()</code>; schema derives.</div>
+          <div class="files ref">lash-tool-search/src/lib.rs (16 sites; 222–1523)</div></li>
+        <li class="an" style="--i:1"><span class="win">~250 lines</span><h3>Inline the <code>SessionControl</code> pass-through stratum into the namespacing structs</h3>
+          <p>~38 private <code>SessionControl</code> methods exist only to be re-forwarded 1:1 by the 11 <code>*Control</code> structs that already <em>are</em> the public surface — three stacked forwarding layers for one op.</p>
+          <div class="fix"><b>Fix:</b> move each body into its single caller; keep only <code>with_writer</code>/<code>tool_state</code> shared. Deletes one whole layer, zero API change.</div>
+          <div class="files ref">lash/src/control.rs:60–557</div></li>
+        <li class="an" style="--i:2"><span class="win">~250 lines</span><h3>Collapse the 5-crate Factory→Plugin shim onto <code>StaticPluginFactory</code> + a <code>configured_plugin_factory!</code> macro</h3>
+          <p>rolling-history, tool-output-budget, observational-memory, standard-protocol (and MCP) each hand-roll <code>Plugin</code>+<code>register()</code>+<code>Factory{id,build}</code> that <code>PluginSpec</code> already expresses; the newtype delegation is itself copy-pasted in the crates that "do it right".</p>
+          <div class="fix"><b>Fix:</b> build a <code>PluginSpec</code> in the ctor + store a <code>StaticPluginFactory</code>; a macro generates the newtype+delegation. (Stateful plan-mode/update_plan/rlm correctly excluded.)</div>
+          <div class="files ref">5 plugin crates + new macro in lash-core/plugin/registry.rs</div></li>
+        <li class="an" style="--i:3"><span class="win">~200 lines</span><h3>Delete the RLM history renderer's <code>#[cfg(test)]</code> shadow path</h3>
+          <p>~200 lines of <code>driver/history.rs</code> are a second, owned-data rendering implementation kept in parallel with the production borrowed path; tests validate the shadow, not production.</p>
+          <div class="fix"><b>Fix:</b> drive the production borrowed functions from real fixtures (or a ~5-line owned→borrowed adapter). Drops the file under 600.</div>
+          <div class="files ref">lash-protocol-rlm/src/driver/history.rs</div></li>
+        <li class="an" style="--i:4"><span class="win">~170 lines</span><h3>Emit <code>SurfaceRequirements</code> from lowering; delete <code>RequirementsCollector</code></h3>
+          <p>The linker's lowering walk already computes every input the surface-requirements walker re-derives (resource bindings, op host-names, ability flags). The second engine is a drift risk on the surface the linker just proved consistent.</p>
+          <div class="fix"><b>Fix:</b> make the lowering pass emit requirements as a byproduct; delete <code>collect_expr</code> + the duplicate <code>RequirementBinding</code> enum + scope logic.</div>
+          <div class="files ref">lashlang/src/artifact.rs:945–1283</div></li>
+        <li class="an" style="--i:5"><span class="win">~115 lines</span><h3>Wire OpenAI/Codex onto <code>transport::normalize</code>; delete the dead lift</h3>
+          <p><code>frame_sse_payload</code> has no callers while OpenAI keeps two byte-identical framers; <code>merge_usage</code>/<code>terminal_reason_from_parts</code>/<code>serialize_options_tail</code> are shadowed locally. The "single canonical impl" is false for the two highest-volume providers.</p>
+          <div class="fix"><b>Fix:</b> make the OpenAI framers two-line shims over <code>frame_sse_payload</code>; delete local <code>merge_usage</code>/<code>terminal_reason_from_parts</code> and call <code>serialize_options_tail</code>.</div>
+          <div class="files ref">lash-provider-openai/src/{responses_shared,chat,provider}.rs · lash-provider-codex/src/lib.rs</div></li>
+        <li class="an" style="--i:6"><span class="win">~110 lines</span><h3>Delete the dead transcript renderer</h3>
+          <p><code>render_transcript_prompt</code> + <code>render_message_for_transcript</code> + <code>TranscriptTurn</code> have zero non-test callers — kept alive only by their own tests (which is why <code>cargo</code>/spring-cleaning didn't flag them). Active path is <code>append_structured_prompt</code>.</p>
+          <div class="fix"><b>Fix:</b> delete the three items, both re-exports, and the tests that exercise only them. Pure subtraction.</div>
+          <div class="files ref">lash-sansio/src/session_model/message.rs:233–254, 519–522, 587–660</div></li>
+        <li class="an" style="--i:7"><span class="win">~100 lines</span><h3>Collapse the four session-graph node-classifier walkers into one classifier + sink</h3>
+          <p>The "push event; push message if non-transient&amp;unseen; else push tool_call" cascade is hand-inlined in four places (the first review's "3 parallel walkers" is four). Plus a <code>unique_*_node_id</code> vs <code>_for_replacement</code> quartet that differs only by a second dedup set.</p>
+          <div class="fix"><b>Fix:</b> one <code>classify_node(node, &amp;mut impl ReadModelSink)</code>; thread a single owned id set so the <code>_for_replacement</code> twins delete.</div>
+          <div class="files ref">lash-core/src/session_graph.rs:441–535, 1304–1449</div></li>
+        <li class="an" style="--i:8"><span class="win">drift fix</span><h3>Move the builtin name→op mapping onto the registry; unify the three <code>approx_token_count</code> copies</h3>
+          <p>Two "single sources" that are really two: <code>BUILTINS</code> + <code>intrinsic_for_builtin</code>. Separately, "≈ len ÷ 4" is copied across three plugins that share a context budget — and OM counts chars while the others count bytes.</p>
+          <div class="fix"><b>Fix:</b> add an <code>op</code> to each <code>Builtin</code>; one <code>approx_token_count</code> in lash-core consumed by all three plugins.</div>
+          <div class="files ref">lashlang/src/{builtins,runtime/compiler}.rs · 3 plugin crates</div></li>
+        <li class="an" style="--i:9"><span class="win">~80 lines</span><h3>Consolidate the rolling-history ↔ tool-output-budget spill fork; shrink the dead typestate</h3>
+          <p>The truncation core was unified but disk-spill, direction policy, and token estimate stayed forked (already differ on the hash key). Separately, <code>turn_commit_pipeline::final_commit</code> has an unreachable <code>Drafting</code> branch + dead <code>Option</code>/<code>None</code> arms (stage is always <code>Finalized</code> by then).</p>
+          <div class="fix"><b>Fix:</b> move spill/direction into tool-output-budget's public surface; replace the stage enum's panic-guarded accessors with a single <code>finalized_progress_graph()</code>.</div>
+          <div class="files ref">lash-plugin-rolling-history/src/lib.rs:129–236 · lash-core/src/runtime/turn_commit_pipeline.rs:411–447</div></li>
       </ol>
     </section>
 
-    <!-- LENS B: BUGS -->
-    <section id="bugs">
-      <span class="lens-banner B">Lens B — Correctness · partial coverage</span>
-      <div class="sec-label lensB-tag"><span class="num">B</span> P1 correctness bugs</div>
-      <h2 class="sec">Concentrated at two seams</h2>
-      <p class="sec-intro">
-        Out-of-band <strong>token-usage accounting</strong> and byte-level <strong>provider stream framing</strong>.
-        One storage finding is <strong>P0</strong>. These are behavioral defects, not maintainability.
-      </p>
-      <div class="table-wrap an" style="--i:0">
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr><th>Sev</th><th class="what">Bug</th><th>Detail &amp; fix</th><th>Location</th></tr>
-            </thead>
-            <tbody>
-              <tr class="bugrow">
-                <td><span class="badge b-p1">P1</span></td>
-                <td class="what">Direct-effect token usage double-counted on journal replay</td>
-                <td><small><code>apply_outcome</code> runs unconditionally on replay, re-recording &amp; persisting usage without re-hitting the provider; inflates the durable cost ledger on every crash/resume or subagent replay.</small><div class="fixline">signal replayed-vs-fresh and skip usage recording on replay.</div></td>
-                <td class="ref">session_manager/direct.rs:216-239<br>effect/journal.rs:280-356</td>
-              </tr>
-              <tr class="bugrow">
-                <td><span class="badge b-p1">P1</span></td>
-                <td class="what">Out-of-band usage commit races the turn with no lease</td>
-                <td><small><code>persist_current_usage_ledger</code> builds its own <code>RuntimeCommit</code> and calls <code>commit_runtime_state</code> directly, outside the lease-fenced pipeline; can bump the head out from under the owning turn (CAS failure / clobbered graph refs).</small><div class="fixline">route through the lease-fenced pipeline, or fold into the turn's final commit.</div></td>
-                <td class="ref">session_manager/usage.rs:100-125</td>
-              </tr>
-              <tr class="bugrow">
-                <td><span class="badge b-p1">P1</span></td>
-                <td class="what">Google streaming hardcodes terminal reason to <code>Stop</code></td>
-                <td><small>The <code>alt=sse</code> branch returns <code>LlmTerminalReason::Stop</code> unconditionally, ignoring <code>finishReason</code> and tool calls — a streamed Gemini tool-call turn reports <code>Stop</code> instead of <code>ToolUse</code> (breaks the tool loop); <code>MAX_TOKENS</code>/<code>SAFETY</code> also mislabeled. The non-streaming path is correct.</small><div class="fixline">capture <code>finishReason</code> in <code>process_sse_event</code> + call <code>terminal_reason_from_value</code>.</div></td>
-                <td class="ref">lash-provider-google/src/lib.rs:1059</td>
-              </tr>
-              <tr class="bugrow">
-                <td><span class="badge b-p1">P1</span></td>
-                <td class="what">Shared SSE reader corrupts multi-byte UTF-8 split across network chunks</td>
-                <td><small><code>push_chunk</code> does <code>from_utf8_lossy</code> per raw network chunk; a codepoint straddling two TCP chunks becomes U+FFFD on each half. Affects <strong>all four providers</strong>. The conformance suite feeds whole events, so it can't catch this.</small><div class="fixline">accumulate raw bytes, decode complete lines only.</div></td>
-                <td class="ref">lash-llm-transport/src/streaming.rs:25</td>
-              </tr>
-              <tr class="bugrow">
-                <td><span class="badge b-p0">P0</span></td>
-                <td class="what"><code>BEGIN DEFERRED</code> on every read-then-write SQL transaction</td>
-                <td><small>rusqlite's <code>transaction()</code> opens DEFERRED, so the head-revision CAS and lease-fence read phases run under a shared snapshot — two connections/processes can both read, then serialize writes. The SQL-level CAS/lease guard is <strong>not atomic across processes</strong>; the in-process <code>Mutex</code> masks it only for one <code>Store</code> object, yet the crate's own docs promise correctness "across two processes."</small><div class="fixline"><code>transaction_with_behavior(Immediate)</code> for all read-then-write paths + check rows-affected on the queued-work claim UPDATE.</div></td>
-                <td class="ref">lash-sqlite-store/src/* (persistence, leases, process_registry, graph, blobs, attachments)</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <!-- HEALTH GRID -->
-    <section id="grid">
-      <div class="sec-label neutral-tag"><span class="num">▦</span> Per-subsystem health</div>
-      <h2 class="sec">Both lenses, by subsystem</h2>
-      <p class="sec-intro">Rating reflects structure + known bugs. <span class="pill nb">not bug-reviewed</span> marks areas Lens B has not yet covered.</p>
+    <section id="subsystems">
+      <div class="sec-label"><span class="num">C</span> By subsystem</div>
+      <h2 class="sec">Per-subsystem findings</h2>
+      <p class="sec-intro">Each reviewer's highest-conviction items beyond the ranked moves above.</p>
       <div class="health">
-
-        <div class="hcard good an" style="--i:0">
-          <span class="crate">lash-core runtime/durability</span><span class="rating badge b-keep">GOOD struct</span>
-          <p class="note">Macro-structure is good — <code>turn_driver</code>/<code>session_manager</code> are well-decomposed into small single-purpose submodules.</p>
-          <div class="standout"><b>Structural:</b> <span class="sa"><code>turn_commit_pipeline</code> hand-rolled typestate guarded by panics; <code>session_graph.rs</code> (1581) has 3 parallel projection walkers.</span><br><b>Bug:</b> <span class="sb">the two usage P1s.</span></div>
+        <div class="hcard hot an" style="--i:0">
+          <span class="crate">lash-core + lash-sansio</span>
+          <p class="note">Refactor landed clean; debt is parallel walkers + over-built typestate.</p>
+          <ul>
+            <li><b>TurnGraphEditor</b> re-implements <code>SessionGraph</code>'s append/dedup/active-path walk — two impls must stay in lockstep.</li>
+            <li><b>turn_loop.rs</b> three <code>pub fn</code>/<code>_inner</code> pairs repeat the effect-scope preamble + duplicate the turn-id-mismatch guard verbatim.</li>
+            <li><b>message.rs</b> mixes the message model with a ~400-line prompt-render engine → split <code>render.rs</code>.</li>
+            <li><b>Effect/TurnCheckpoint</b> ~70 lines of hand-written <code>Clone</code> to dodge the derive's phantom <code>M: Clone</code> → <code>derivative</code>/<code>educe</code>.</li>
+          </ul>
         </div>
-
-        <div class="hcard mixed an" style="--i:1">
-          <span class="crate">lashlang</span><span class="rating badge b-req">MIXED</span><span class="pill nb">not bug-reviewed</span>
-          <p class="note">Layering clean, traversal/derivation badly tangled (the <code>Expr</code>-walk ×12). The front of the pipeline (lex→parse→link→compile→artifact) is the debt.</p>
-          <div class="standout"><b>Keep:</b> <span style="color:var(--green)">the VM executor is excellent — fast/slow dual-dispatch is the template to copy, not a smell.</span></div>
+        <div class="hcard hot an" style="--i:1">
+          <span class="crate">lashlang</span>
+          <p class="note">Front-of-pipeline traversal still tangled despite the children() primitive.</p>
+          <ul>
+            <li><b>graph.rs</b> two near-identical full-<code>Expr</code>-match graph walkers → one <code>GraphSink</code> trait (~130 lines).</li>
+            <li><b>ops.rs</b> the projected-fast-path idiom (try host read, else materialize) copy-pasted 11× → one <code>projected_or</code> helper.</li>
+            <li><b>linker.rs</b> <code>lower_expr</code> is a 425-line god-method → split <code>linker/{scope,types,triggers,error,lower}.rs</code>.</li>
+            <li><b>vm/mod.rs</b> doc comment describes a "Stage 6" migration that already happened — delete the stale narrative.</li>
+          </ul>
         </div>
-
         <div class="hcard mixed an" style="--i:2">
-          <span class="crate">lash-sansio + protocols</span><span class="rating badge b-req">MIXED</span><span class="pill nb">not bug-reviewed</span>
-          <p class="note">Layering excellent (sansio knows nothing of protocols/lashlang).</p>
-          <div class="standout"><b>Structural:</b> <span class="sa"><code>CheckpointEffect</code> twin + fence grammar scanned twice (self-admitted "stay in lockstep") + standard/rlm drivers under-share 3 protocol-neutral edges.</span></div>
+          <span class="crate">providers + transport</span>
+          <p class="note">anthropic/google decomposition is the reference pattern; OpenAI/Codex lag.</p>
+          <ul>
+            <li><b>responses_shared.rs</b> (1501, the surviving monolith) → <code>responses/{request,parse,state,sse}.rs</code> along the proven seams.</li>
+            <li><b>Codex <code>complete()</code></b> duplicates OpenAI's buffered-Responses assembly + stream-event emission (~80 lines) → lift to <code>responses_shared</code>.</li>
+            <li><b>OpenAI driver</b> inlines <code>response_from_stream_state</code> twice; <code>terminal_reason_from_responses_value</code> is a pure rename alias.</li>
+            <li><b>Codex</b> three ad-hoc model-string classifiers (<code>has_xhigh_suffix</code> etc.) → one capability table.</li>
+          </ul>
         </div>
-
-        <div class="hcard mixed an" style="--i:3">
-          <span class="crate">providers + transport</span><span class="rating badge b-req">MIXED</span>
-          <p class="note">Well-tended, not a swamp — shared layer already exists (SSE driver, conformance suite, failure classifier). Debt = 2 monoliths + 5 stranded helpers.</p>
-          <div class="standout"><b>Bugs:</b> <span class="sb">Google streaming <code>Stop</code>; UTF-8 SSE corruption; <code>incomplete_details</code> over-broad → <code>OutputLimit</code>; mid-stream disconnect drops the final buffered event.</span><br><b>Weakest:</b> <span class="sa">Google.</span></div>
+        <div class="hcard hot an" style="--i:3">
+          <span class="crate">tools + storage</span>
+          <p class="note">Storage decomposition clean; debt concentrated in lash-tool-search.</p>
+          <ul>
+            <li><b>tool-search/lib.rs</b> (1950, 1534 code — the real offender) → <code>envelope/direct/backend/path_scope.rs</code>.</li>
+            <li><b>shell output/runtime</b> reader-spawn core, buffer renderers (×3), and the <code>select!</code> exited-branch body are duplicated.</li>
+            <li><b>floor_char_boundary</b> copied across read_file + search → move to <code>lash-tool-support</code> (the canonical home).</li>
+            <li><b>process_registry</b> <code>list_handle_grants</code>/<code>_live</code> identical but one SQL clause.</li>
+          </ul>
         </div>
-
-        <div class="hcard hot an" style="--i:4">
-          <span class="crate">storage backends</span><span class="rating badge b-p0">P0</span>
-          <p class="note">Invariants are <em>expressed</em> and pass conformance, but enforced in Rust <strong>around</strong> the SQL, not <strong>by</strong> it.</p>
-          <div class="standout"><b>Bugs:</b> <span class="sb">DEFERRED-txn concurrency gap (P0); claim returns claims it didn't win (rows-affected unchecked); <code>FileAttachmentStore</code> not crash-atomic (no temp+rename); <code>gc_unreachable</code> can delete live checkpoint blobs &amp; <code>.expect()</code>-panics inside a commit; lock-poisoning kills the session.</span><br><b>Schema:</b> <span class="sa">hard-fail-on-old-DB, no migration path; error says "version 1 only" while <code>SCHEMA_VERSION=2</code>.</span></div>
+        <div class="hcard mixed an" style="--i:4">
+          <span class="crate">plugins + protocols + subagents</span>
+          <p class="note">Landed dedups verified; the half-done ones cluster here.</p>
+          <ul>
+            <li><b>plan-mode</b> dual host-generic vs ToolContext helper sets (~70 lines) — root cause is a boundary leak: <code>ToolSessionControl</code> holds the <code>SessionStateService</code> but doesn't expose it.</li>
+            <li><b>RollingHistoryConfig</b> is a fieldless unit struct plumbed through 3 structs, 2 of which discard it.</li>
+            <li><b>MCP pool</b> <code>advertised_tools</code> (async, no await) is a byte-identical copy of <code>_blocking</code>.</li>
+          </ul>
         </div>
-
         <div class="hcard mixed an" style="--i:5">
-          <span class="crate">tools</span><span class="rating badge b-req">POSTURE</span>
-          <p class="note">Input-contract handling solid, <strong>no SSRF</strong> (web tools delegate to Tavily). Dominant risk is a <em>design posture</em>, not a bug: deliberately un-sandboxed — arbitrary host file read/write/delete + shell with full host env incl. API secrets — but <strong>undocumented</strong>, and the one in-tree confinement (plan-mode) uses lexical-only path resolution that symlinks defeat.</p>
-          <div class="standout"><b>Defects:</b> <span class="sb"><code>truncate_line</code> panics→errors on long multibyte lines (read_file.rs:533); PTY <code>start_command</code> leaks grandchildren (no process-group kill); <code>web_search</code> no timeout; exec output spilled world-readable &amp; never reaped.</span> <b>Structural:</b> <span class="sa"><code>GrepEnvelope</code> hand-written ~11×.</span></div>
+          <span class="crate">facade + tui + trace + misc</span>
+          <p class="note">Beyond the pass-through stratum (ranked #2).</p>
+          <ul>
+            <li><b>lash-tui/core.rs</b> (1072) is four files in one → <code>style/geom/buffer/terminal.rs</code>; diff-scan counter duplicated.</li>
+            <li><b>autoresearch</b> reinvents <code>lash-tui</code>'s <code>ScrollState</code>/<code>SelectionState</code> paging; <code>row_style</code> is a dead no-op <code>match</code>.</li>
+            <li><b>lash-export</b> <code>escape_attr</code>/<code>escape_breaks</code> are identity aliases of <code>escape</code> → delete.</li>
+            <li><b>PlanModeTuiExtension</b> (concrete) lives in the framework <code>lib.rs</code> → own module/crate.</li>
+            <li><b>LashCoreBuilder</b> threads "effective store factory" 3× held together by prose comments → one accessor.</li>
+          </ul>
         </div>
-
-        <div class="hcard mixed an" style="--i:6">
-          <span class="crate">plugins / subagents / trace / tui</span><span class="rating badge b-req">MIXED</span><span class="pill nb">not bug-reviewed</span>
-          <p class="note"><strong>subagents = cleanest crate</strong> (pushes usage-rollup to the shared process layer).</p>
-          <div class="standout"><b>Structural:</b> <span class="sa">truncation dup (#5); <code>Factory→Plugin</code> shim copy-pasted ×4; plan-mode dual host/ToolContext helper set; two latent injection/coupling gaps — tui-extensions <code>surface_key</code> duplicates <code>global_surface_id</code>; trace-viewer <code>escape_html</code> omits the single-quote that lash-export escapes.</span></div>
-        </div>
-
-        <div class="hcard mixed an" style="--i:7">
-          <span class="crate">lash facade (crates/lash)</span><span class="rating badge b-req">MIXED</span>
-          <p class="note">Thin where it should be, not a pointless pass-through, doesn't re-implement core.</p>
-          <div class="standout"><b>Structural:</b> <span class="sa"><code>StateControl</code> duplicates the entire <code>ProcessControl</code> process surface; 4 parallel prompt-mutation builder surfaces; <code>lash::advanced</code> is a ~99-symbol grab-bag with types reachable 2–3 ways; <code>AdvancedLashCoreBuilder</code> re-declares 4 base methods.</span></div>
-        </div>
-
       </div>
     </section>
 
-    <!-- THEME -->
-    <section id="theme">
-      <div class="sec-label neutral-tag"><span class="num">✦</span> Cross-cutting theme</div>
-      <h2 class="sec">The one pattern behind nearly every finding</h2>
-      <div class="pull an" style="--i:0">
-        <q>A canonical helper exists or obviously should — and copies proliferated instead.</q>
-      </div>
-      <p class="sec-intro">The helpers that should exist exactly once:</p>
-      <div class="canon">
-        <div class="c an" style="--i:0"><code>with_write_tx</code><span>storage — collapses the lock/txn/commit/error ceremony in ~16 methods</span></div>
-        <div class="c an" style="--i:1"><code>Expr::children()</code><span>lashlang — replaces ~12 hand-written full-AST walks</span></div>
-        <div class="c an" style="--i:2"><code>5 provider-neutral primitives</code><span>→ lash-llm-transport (merge_usage, terminal_reason_from_parts, SSE framing, HTTP-error envelope, serialize_config tail)</span></div>
-        <div class="c an" style="--i:3"><code>truncate_windowed</code><span>one truncation+spill helper for history &amp; budget plugins</span></div>
-        <div class="c an" style="--i:4"><code>PromptLayerSink</code><span>facade — one prompt-mutation surface instead of 4 builders</span></div>
-        <div class="c an" style="--i:5"><code>fence scanner</code><span>rlm — one grammar instead of two "stay in lockstep" copies</span></div>
-        <div class="c an" style="--i:6"><code>guard_lease</code><span>storage — one fencing predicate for turn- &amp; process-leases</span></div>
-        <div class="c an" style="--i:7"><code>ConfiguredPluginFactory</code><span>a macro to delete the Factory→Plugin shim copied ×4</span></div>
-      </div>
+    <section id="filesize">
+      <div class="sec-label"><span class="num">D</span> Decomposition</div>
+      <h2 class="sec">File size: real code vs test-inflated</h2>
+      <p class="sec-intro">The raw &gt;1000-line count overstates the problem. Most large files are dominated by an inline <code>#[cfg(test)]</code> module — the cheap fix is a <code>tests.rs</code> sibling (the pattern commit <code>6992625d</code> already established). Only the <span class="badge b-code">CODE</span> rows need real decomposition.</p>
+      <div class="table-wrap an" style="--i:0"><div class="table-scroll"><table>
+        <thead><tr><th>File</th><th>Total</th><th>Code</th><th>Test</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td class="what">lash-core/runtime/turn_loop.rs</td><td class="num">1596</td><td class="num">1596</td><td class="num">0</td><td><span class="badge b-code">CODE</span> <small>split queued-work + agent-frame loop out</small></td></tr>
+          <tr><td class="what">lashlang/linker.rs</td><td class="num">2181</td><td class="num">1571</td><td class="num">610</td><td><span class="badge b-code">CODE</span> <small>split scope/types/triggers/error/lower</small></td></tr>
+          <tr><td class="what">lash-tool-search/lib.rs</td><td class="num">1950</td><td class="num">1534</td><td class="num">416</td><td><span class="badge b-code">CODE</span> <small>envelope/direct/backend/path_scope</small></td></tr>
+          <tr><td class="what">lash-core/session_graph.rs</td><td class="num">1581</td><td class="num">~1450</td><td class="num">~130</td><td><span class="badge b-code">CODE</span> <small>extract projection free-fns after dedup</small></td></tr>
+          <tr><td class="what">lashlang/runtime/compiler.rs</td><td class="num">1548</td><td class="num">1548</td><td class="num">0</td><td><span class="badge b-code">CODE</span> <small>peel the const-folder into compiler/fold.rs</small></td></tr>
+          <tr><td class="what">lash-provider-openai/responses_shared.rs</td><td class="num">1501</td><td class="num">1501</td><td class="num">0</td><td><span class="badge b-code">CODE</span> <small>responses/{request,parse,state,sse}</small></td></tr>
+          <tr><td class="what">lash-core/testing/mod.rs</td><td class="num">1385</td><td class="num">1385</td><td class="num">0</td><td><span class="badge b-code">CODE</span> <small>harness — split by fixture type</small></td></tr>
+          <tr><td class="what">lash-sansio/tool_contract.rs</td><td class="num">1975</td><td class="num">~1010</td><td class="num">~964</td><td><span class="badge b-test">TEST</span> <small>tests.rs + peel ToolDefinition projection</small></td></tr>
+          <tr><td class="what">lash-core/tool_registry.rs</td><td class="num">1671</td><td class="num">985</td><td class="num">686</td><td><span class="badge b-test">TEST</span> <small>tests.rs sibling</small></td></tr>
+          <tr><td class="what">lash-tool-shell/lib.rs</td><td class="num">1725</td><td class="num">706</td><td class="num">1019</td><td><span class="badge b-test">TEST</span> <small>already split into runtime/output</small></td></tr>
+          <tr><td class="what">lash-tool-apply-patch/lib.rs</td><td class="num">1536</td><td class="num">968</td><td class="num">568</td><td><span class="badge b-test">TEST</span> <small>tests.rs; optional parser/applier split</small></td></tr>
+          <tr><td class="what">lash-protocol-rlm/executor.rs</td><td class="num">1120</td><td class="num">~307</td><td class="num">~810</td><td><span class="badge b-test">TEST</span> <small>executor/tests.rs — code is small</small></td></tr>
+          <tr><td class="what">lash-core/…/process_runners/mod.rs</td><td class="num">1450</td><td class="num">~10</td><td class="num">~1440</td><td><span class="badge b-test">TEST</span> <small>99% test — tests.rs, entry → ~10 lines</small></td></tr>
+          <tr><td class="what">lash-core/runtime/turn_commit_pipeline.rs</td><td class="num">1001</td><td class="num">373</td><td class="num">628</td><td><span class="badge b-test">TEST</span> <small>tests.rs; then apply #9/#10</small></td></tr>
+        </tbody>
+      </table></div></div>
     </section>
 
-    <!-- KEEP -->
     <section id="keep">
-      <div class="sec-label" style="color:var(--green)"><span class="num" style="background:var(--green)">✓</span> Already excellent</div>
-      <h2 class="sec">Don't touch these</h2>
-      <p class="sec-intro">Where the codebase is genuinely well-built. <span class="badge b-keep">KEEP</span></p>
+      <div class="sec-label" style="color:var(--green)"><span class="num" style="background:var(--green)">✓</span> Verified clean</div>
+      <h2 class="sec">This cycle's work landed well — keep</h2>
+      <p class="sec-intro">All six reviewers independently confirmed the recent refactor introduced no regressions. <span class="badge b-keep">KEEP</span></p>
       <div class="keep">
-        <div class="k an" style="--i:0"><b>lashlang VM fast/slow dual dispatch</b><span>The slow path materializes + re-dispatches through the fast path — no eval duplication. The template the rest should copy.</span></div>
-        <div class="k an" style="--i:1"><b>lash-subagents</b><span>Cleanest crate. Pushes durability/usage-rollup to the shared process layer instead of reinventing it.</span></div>
-        <div class="k an" style="--i:2"><b>lash-core turn_driver / session_manager</b><span>Well-decomposed into small, single-purpose submodules.</span></div>
-        <div class="k an" style="--i:3"><b>Codex reusing <code>responses_shared</code> verbatim</b><span>Exemplary code-judo — no fork, just reuse.</span></div>
-        <div class="k an" style="--i:4"><b><code>impl_restate_controller_context!</code> macro</b><span>The right way to avoid 5× context duplication.</span></div>
-        <div class="k an" style="--i:5"><b>lash-tool-support</b><span>The correct code-judo home for shared tool helpers; already widely used.</span></div>
-        <div class="k an" style="--i:6"><b>cross-provider conformance suite</b><span>Pins the normalized output contract across all four providers — why no normalizer trait is needed.</span></div>
+        <div class="k an" style="--i:0"><b>storage with_write_tx / guard_lease</b><span>Closure threading reads naturally; <code>TxOutcome</code> rollback path genuinely needed; <code>BEGIN IMMEDIATE</code> documented. No awkwardness.</span></div>
+        <div class="k an" style="--i:1"><b>anthropic / google decomposition</b><span>Clean submodule seams; they <em>do</em> consume <code>transport::normalize</code> — the reference pattern OpenAI/Codex should match.</span></div>
+        <div class="k an" style="--i:2"><b>RLM fence_scan unify</b><span>Single grammar; both streaming + finalize paths agree. The three-copy "stay in lockstep" problem is gone.</span></div>
+        <div class="k an" style="--i:3"><b>truncate_windowed core</b><span>Single windowing implementation, consumed cross-crate. (Only the spill/direction layer around it stayed forked.)</span></div>
+        <div class="k an" style="--i:4"><b>MCP transport fixes</b><span>Peer cloned under guard then released before the await; header builder; per-call timeout. Correct.</span></div>
+        <div class="k an" style="--i:5"><b>CheckpointEffect deletion</b><span><code>Effect</code> serializes directly via a custom <code>MessageSequence</code> serde; byte-identical wire form, test-pinned. No out-of-band commit remains.</span></div>
+        <div class="k an" style="--i:6"><b>VM fast/slow dual-dispatch</b><span>Slow path re-enters the fast path, no eval duplication; the exhaustiveness <code>unreachable!</code>s keep the split safe. Untouched.</span></div>
+        <div class="k an" style="--i:7"><b>lash-restate macro + PromptLayerSink</b><span><code>impl_restate_controller_context!</code> and the new prompt-sink trait are the right shared abstractions.</span></div>
       </div>
     </section>
 
-    <!-- COVERAGE -->
-    <section id="coverage">
-      <div class="sec-label neutral-tag"><span class="num">!</span> Coverage caveat</div>
-      <h2 class="sec">What this review does and doesn't cover</h2>
-      <div class="callout warn an" style="--i:0">
-        <div class="t">Honest scope</div>
-        <p><strong>Lens A (structural) is complete</strong> across all reviewed crates. <strong>Lens B (bug-hunt) is partial</strong> — it ran for:</p>
-        <ul>
-          <li><b>Bug-reviewed:</b> lash-core runtime · providers + transport · storage · tools</li>
-          <li><b>Not yet bug-reviewed:</b> lash-sansio / lashlang · protocol drivers · plugins / subagents</li>
-        </ul>
-        <p>All findings are <strong>read-only analysis; nothing was edited</strong>. Some findings — especially the
-        cross-process concurrency P0 — are reasoned from source, <strong>not reproduced under a live race</strong>.
-        Treat them as high-confidence hypotheses to verify, not confirmed failures.</p>
+    <section id="scope">
+      <div class="sec-label" style="color:var(--blue)"><span class="num" style="background:var(--blue)">!</span> Method</div>
+      <h2 class="sec">Scope &amp; method</h2>
+      <div class="callout an" style="--i:0">
+        <div class="t">How this was run</div>
+        <p>Six independent read-only reviewers, one per subsystem (<strong>core+sansio · lashlang · providers+transport · tools+stores · plugins+protocols+subagents · facade+ui+trace</strong>), each applying the thermo-nuclear lens (code-judo simplification, &gt;1k-line decomposition, spaghetti/branching, duplication, abstraction/boundary quality) to <strong>whole crates, not a diff</strong>. Every crate <strong>except <code>lash-cli</code></strong> was covered. Nothing was edited.</p>
+        <p>Findings are structural-quality analysis. Line-deletion estimates are reviewer approximations. The <strong>code vs test</strong> split in §D was measured per file (<code>#[cfg(test)]</code> boundary), correcting the raw line-count signal.</p>
       </div>
     </section>
-
-    <footer>
-      lash whole-workspace review · scope: all crates except <code>lash-cli</code> · two lenses (structural
-      complete, bug-hunt partial) · read-only.<br>
-      Severity: <span class="badge b-p0">P0</span> data-loss/durability-invariant ·
-      <span class="badge b-p1">P1</span> real correctness bug ·
-      <span class="badge b-req">REQUIRED</span> structural ·
-      <span class="badge b-keep">KEEP</span> already good.
-    </footer>
 
   </main>
 </div>
 
+<footer>
+  lash whole-workspace thermo-nuclear review · post-refactor · scope: all crates except <code>lash-cli</code> · 6 parallel read-only reviewers · structural-quality only.<br>
+  <span class="badge b-judo">CODE-JUDO</span> behavior-preserving simplification ·
+  <span class="badge b-dead">DEAD CODE</span> pure deletion ·
+  <span class="badge b-code">CODE</span> genuinely large ·
+  <span class="badge b-test">TEST</span> test-inflated ·
+  <span class="badge b-keep">KEEP</span> landed clean.
+</footer>
+
 <script>
-(function() {
-  const toc = document.getElementById('toc');
-  if (!toc) return;
-  const links = toc.querySelectorAll('a');
-  const sections = [];
-  links.forEach(link => {
-    const id = link.getAttribute('href').slice(1);
-    const el = document.getElementById(id);
-    if (el) sections.push({ id, el, link });
-  });
-  const observer = new IntersectionObserver(entries => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        links.forEach(l => l.classList.remove('active'));
-        const match = sections.find(s => s.el === entry.target);
-        if (match) {
-          match.link.classList.add('active');
-          if (window.innerWidth <= 1000) match.link.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
-        }
-      }
-    });
-  }, { rootMargin: '-8% 0px -82% 0px' });
-  sections.forEach(s => observer.observe(s.el));
-  links.forEach(link => link.addEventListener('click', e => {
-    e.preventDefault();
-    const el = document.getElementById(link.getAttribute('href').slice(1));
-    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); history.replaceState(null, '', '#' + link.getAttribute('href').slice(1)); }
-  }));
+(function(){
+  const toc=document.getElementById('toc'); if(!toc) return;
+  const links=toc.querySelectorAll('a'); const sections=[];
+  links.forEach(l=>{const id=l.getAttribute('href').slice(1);const el=document.getElementById(id);if(el)sections.push({el,link:l});});
+  const obs=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){links.forEach(l=>l.classList.remove('active'));const m=sections.find(s=>s.el===e.target);if(m){m.link.classList.add('active');if(window.innerWidth<=1000)m.link.scrollIntoView({behavior:'smooth',block:'nearest',inline:'center'});}}});},{rootMargin:'-8% 0px -82% 0px'});
+  sections.forEach(s=>obs.observe(s.el));
+  links.forEach(l=>l.addEventListener('click',e=>{e.preventDefault();const el=document.getElementById(l.getAttribute('href').slice(1));if(el){el.scrollIntoView({behavior:'smooth',block:'start'});history.replaceState(null,'','#'+l.getAttribute('href').slice(1));}}));
 })();
 </script>
 </body>

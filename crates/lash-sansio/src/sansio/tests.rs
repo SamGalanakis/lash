@@ -26,6 +26,7 @@ fn test_config(protocol_driver: Arc<dyn ProtocolDriverHandle>) -> TurnMachineCon
         projector: Arc::new(ChatContextProjector),
         sync_execution_surface: false,
         model: "test-model".to_string(),
+        max_context_tokens: None,
         max_turns: None,
         model_variant: None,
         generation: crate::llm::types::GenerationOptions::default(),

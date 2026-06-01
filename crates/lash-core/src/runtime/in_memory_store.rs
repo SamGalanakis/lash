@@ -41,6 +41,9 @@ pub struct InMemorySessionStore {
     runtime_effect_journal: Mutex<
         std::collections::HashMap<(String, String, String), crate::RuntimeEffectJournalRecord>,
     >,
+    runtime_turn_commits: Mutex<
+        std::collections::HashMap<(String, String), (String, crate::store::RuntimeCommitResult)>,
+    >,
     // Save/renew/abandon counters are observed only by lash-core tests; they
     // exist (and are incremented) solely under `cfg(test)` so the shipped store
     // carries no dead test-only state.
@@ -115,6 +118,30 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 attempted_session_id: commit.session_id,
             });
         }
+        if let Some(completed) = &commit.completed_turn {
+            if completed.session_id != commit.session_id {
+                return Err(crate::store::StoreError::RuntimeTurnLeaseExpired {
+                    session_id: completed.session_id.clone(),
+                    turn_id: completed.turn_id.clone(),
+                });
+            }
+            let key = (completed.session_id.clone(), completed.turn_id.clone());
+            if let Some((stored_hash, result)) = self
+                .runtime_turn_commits
+                .lock()
+                .expect("lock runtime turn commits")
+                .get(&key)
+                .cloned()
+            {
+                if stored_hash == completed.turn_commit_hash {
+                    return Ok(result);
+                }
+                return Err(crate::store::StoreError::RuntimeTurnCommitConflict {
+                    session_id: completed.session_id.clone(),
+                    turn_id: completed.turn_id.clone(),
+                });
+            }
+        }
         if commit.expected_head_revision.is_some() && commit.expected_head_revision != Some(actual)
         {
             return Err(crate::store::StoreError::HeadRevisionConflict {
@@ -123,21 +150,23 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             });
         }
         if let Some(completed) = &commit.completed_turn {
-            let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
-            let lease_matches = self
-                .runtime_turn_leases
-                .lock()
-                .expect("lock runtime turn leases")
-                .get(&lease_key)
-                .is_some_and(|lease| {
-                    lease.lease_token == completed.lease_token
-                        && lease.expires_at_epoch_ms > current_epoch_ms()
-                });
-            if !lease_matches {
-                return Err(crate::store::StoreError::RuntimeTurnLeaseExpired {
-                    session_id: completed.session_id.clone(),
-                    turn_id: completed.turn_id.clone(),
-                });
+            if let Some(lease_token) = completed.lease_token.as_deref() {
+                let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
+                let lease_matches = self
+                    .runtime_turn_leases
+                    .lock()
+                    .expect("lock runtime turn leases")
+                    .get(&lease_key)
+                    .is_some_and(|lease| {
+                        lease.lease_token == lease_token
+                            && lease.expires_at_epoch_ms > current_epoch_ms()
+                    });
+                if !lease_matches {
+                    return Err(crate::store::StoreError::RuntimeTurnLeaseExpired {
+                        session_id: completed.session_id.clone(),
+                        turn_id: completed.turn_id.clone(),
+                    });
+                }
             }
         }
         for completed in &commit.completed_queue_claims {
@@ -192,14 +221,16 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             execution_state_ref: commit.checkpoint.execution_state_ref.clone(),
         };
         *self.checkpoint.lock().expect("lock checkpoint") = Some(commit.checkpoint);
-        if let Some(completed) = &commit.completed_turn {
+        if let Some(completed) = &commit.completed_turn
+            && let Some(lease_token) = completed.lease_token.as_deref()
+        {
             let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
             let lease_matches = self
                 .runtime_turn_leases
                 .lock()
                 .expect("lock runtime turn leases")
                 .get(&lease_key)
-                .is_some_and(|lease| lease.lease_token == completed.lease_token);
+                .is_some_and(|lease| lease.lease_token == lease_token);
             if lease_matches {
                 self.runtime_turn_checkpoints
                     .lock()
@@ -233,11 +264,25 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             .runtime_commit_count
             .lock()
             .expect("lock runtime commit count") += 1;
-        Ok(crate::store::RuntimeCommitResult {
+        let result = crate::store::RuntimeCommitResult {
             head_revision,
             checkpoint_ref,
             manifest,
-        })
+        };
+        if let Some(completed) = &commit.completed_turn {
+            self.runtime_turn_commits
+                .lock()
+                .expect("lock runtime turn commits")
+                .insert(
+                    (completed.session_id.clone(), completed.turn_id.clone()),
+                    (completed.turn_commit_hash.clone(), result.clone()),
+                );
+        }
+        Ok(result)
+    }
+
+    fn embedded_durable_turn_store(&self) -> Option<&dyn crate::runtime::EmbeddedDurableTurnStore> {
+        Some(self)
     }
 
     async fn enqueue_queued_work(
@@ -428,6 +473,35 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         Ok(batches)
     }
 
+    async fn save_session_meta(
+        &self,
+        meta: crate::store::SessionMeta,
+    ) -> Result<(), crate::store::StoreError> {
+        *self.session_meta.lock().expect("lock session meta") = Some(meta);
+        Ok(())
+    }
+
+    async fn load_session_meta(
+        &self,
+    ) -> Result<Option<crate::store::SessionMeta>, crate::store::StoreError> {
+        Ok(self.session_meta.lock().expect("lock session meta").clone())
+    }
+
+    async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), crate::store::StoreError> {
+        Ok(())
+    }
+
+    async fn vacuum(&self) -> Result<crate::store::VacuumReport, crate::store::StoreError> {
+        Ok(crate::store::VacuumReport::default())
+    }
+
+    async fn gc_unreachable(&self) -> Result<crate::store::GcReport, crate::store::StoreError> {
+        Ok(crate::store::GcReport::default())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::EmbeddedDurableTurnStore for InMemorySessionStore {
     async fn claim_runtime_turn_lease(
         &self,
         session_id: &str,
@@ -634,32 +708,6 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 replay_key.to_string(),
             ))
             .cloned())
-    }
-
-    async fn save_session_meta(
-        &self,
-        meta: crate::store::SessionMeta,
-    ) -> Result<(), crate::store::StoreError> {
-        *self.session_meta.lock().expect("lock session meta") = Some(meta);
-        Ok(())
-    }
-
-    async fn load_session_meta(
-        &self,
-    ) -> Result<Option<crate::store::SessionMeta>, crate::store::StoreError> {
-        Ok(self.session_meta.lock().expect("lock session meta").clone())
-    }
-
-    async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), crate::store::StoreError> {
-        Ok(())
-    }
-
-    async fn vacuum(&self) -> Result<crate::store::VacuumReport, crate::store::StoreError> {
-        Ok(crate::store::VacuumReport::default())
-    }
-
-    async fn gc_unreachable(&self) -> Result<crate::store::GcReport, crate::store::StoreError> {
-        Ok(crate::store::GcReport::default())
     }
 }
 

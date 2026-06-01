@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lash::advanced::{AdvancedLashCoreBuilder, RuntimeCoreConfig};
+use lash::advanced::{AdvancedLashCoreBuilder, RuntimeHostConfig};
 use lash::direct::{
     DirectLlmClient, DirectLlmError, DirectRequest, LlmAttachment, LlmEventSender, LlmOutputPart,
     LlmResponse, LlmUsage, TokenUsage,
 };
 use lash::messages::MessageRole;
 use lash::persistence::{
-    GcReport, GraphCommitDelta, PersistedSessionRead, RuntimeSessionState, RuntimeCommit,
-    RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
-    RuntimeTurnLease, SessionCheckpoint, SessionMeta, SessionNodeRecord, SessionReadScope,
-    StoreError, TokenLedgerEntry, VacuumReport,
+    EmbeddedDurableTurnStore, GcReport, GraphCommitDelta, PersistedSessionRead,
+    RuntimeCommit, RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence,
+    RuntimeSessionState, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionCheckpoint, SessionMeta,
+    SessionNodeRecord, SessionReadScope, StoreError, TokenLedgerEntry, VacuumReport,
     load_persisted_session_state, load_persisted_session_state_active_path,
 };
 use lash::plugins::{
@@ -67,6 +67,33 @@ impl RuntimePersistence for FacadeStore {
 
     lash::impl_unsupported_queued_work_methods!();
 
+    fn embedded_durable_turn_store(&self) -> Option<&dyn EmbeddedDurableTurnStore> {
+        Some(self)
+    }
+
+    async fn save_session_meta(&self, _meta: SessionMeta) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
+        Ok(None)
+    }
+
+    async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn vacuum(&self) -> Result<VacuumReport, StoreError> {
+        Ok(VacuumReport::default())
+    }
+
+    async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
+        Ok(GcReport::default())
+    }
+}
+
+#[async_trait]
+impl EmbeddedDurableTurnStore for FacadeStore {
     async fn claim_runtime_turn_lease(
         &self,
         session_id: &str,
@@ -136,26 +163,6 @@ impl RuntimePersistence for FacadeStore {
     ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError> {
         Ok(None)
     }
-
-    async fn save_session_meta(&self, _meta: SessionMeta) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
-        Ok(None)
-    }
-
-    async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    async fn vacuum(&self) -> Result<VacuumReport, StoreError> {
-        Ok(VacuumReport::default())
-    }
-
-    async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
-        Ok(GcReport::default())
-    }
 }
 
 fn persistence_types_are_nameable(
@@ -215,11 +222,11 @@ fn direct_payload_types_are_nameable(
     let _ = (attachment, event_sender, output, usage, token_usage);
 }
 
-fn advanced_builder_accepts_runtime_core_config(
+fn advanced_builder_accepts_runtime_host_config(
     builder: AdvancedLashCoreBuilder,
-    config: RuntimeCoreConfig,
+    config: RuntimeHostConfig,
 ) -> AdvancedLashCoreBuilder {
-    builder.runtime_core_config(config)
+    builder.runtime_host_config(config)
 }
 
 fn tool_contract_types_are_nameable(
@@ -286,7 +293,7 @@ fn main() {
     let _ = plugin_types_are_nameable();
     let _ = direct_response_type_is_nameable;
     let _ = direct_payload_types_are_nameable;
-    let _ = advanced_builder_accepts_runtime_core_config;
+    let _ = advanced_builder_accepts_runtime_host_config;
     let _ = tool_contract_types_are_nameable;
     let _ = tool_surface_types_are_nameable;
     let _ = message_role_type_is_nameable;

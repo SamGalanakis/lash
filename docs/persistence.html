@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>persistence · lash docs</title>
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
@@ -25,16 +27,19 @@
 <div class="section" id="contract">
           <div class="section-header">
             <h2>The Contract</h2>
-            <p>Runtime-facing trait. Most hosts use <code>lash-sqlite-store</code> rather than implementing it. The contract covers session graph/head commits, queued work, durable turn leases, effect journals, metadata, garbage collection, and the attachment write-ahead manifest inherited through <code>AttachmentManifest</code>.</p>
+            <p>Runtime-facing trait. Most hosts use <code>lash-sqlite-store</code> rather than implementing it. The base contract covers session graph/head commits, queued work, metadata, garbage collection, and the attachment write-ahead manifest inherited through <code>AttachmentManifest</code>. Embedded durable-turn storage is exposed separately through <code>EmbeddedDurableTurnStore</code> so substrate-native providers can own replay without writing Lash effect-journal rows.</p>
           </div>
           <pre><code>#[async_trait]
 pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
+    fn durability_tier(&amp;self) -&gt; DurabilityTier { DurabilityTier::Inline }
     async fn load_session(&amp;self, scope: SessionReadScope)
         -&gt; Result&lt;Option&lt;PersistedSessionRead&gt;, StoreError&gt;;
     async fn load_node(&amp;self, node_id: &amp;str)
         -&gt; Result&lt;Option&lt;SessionNodeRecord&gt;, StoreError&gt;;
     async fn commit_runtime_state(&amp;self, commit: RuntimeCommit)
         -&gt; Result&lt;RuntimeCommitResult, StoreError&gt;;
+    fn embedded_durable_turn_store(&amp;self)
+        -&gt; Option&lt;&amp;dyn EmbeddedDurableTurnStore&gt; { None }
     async fn enqueue_queued_work(&amp;self, batch: QueuedWorkBatchDraft)
         -&gt; Result&lt;QueuedWorkBatch, StoreError&gt;;
     async fn claim_ready_queued_work(
@@ -54,6 +59,15 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         -&gt; Result&lt;(), StoreError&gt;;
     async fn list_queued_work(&amp;self, session_id: &amp;str)
         -&gt; Result&lt;Vec&lt;QueuedWorkBatch&gt;, StoreError&gt;;
+    async fn save_session_meta(&amp;self, meta: SessionMeta) -&gt; Result&lt;(), StoreError&gt;;
+    async fn load_session_meta(&amp;self) -&gt; Result&lt;Option&lt;SessionMeta&gt;, StoreError&gt;;
+    async fn tombstone_nodes(&amp;self, ids: &amp;[String]) -&gt; Result&lt;(), StoreError&gt;;
+    async fn vacuum(&amp;self) -&gt; Result&lt;VacuumReport, StoreError&gt;;
+    async fn gc_unreachable(&amp;self) -&gt; Result&lt;GcReport, StoreError&gt;;
+}
+
+#[async_trait]
+pub trait EmbeddedDurableTurnStore: Send + Sync {
     async fn claim_runtime_turn_lease(
         &amp;self,
         session_id: &amp;str,
@@ -89,11 +103,6 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         turn_id: &amp;str,
         replay_key: &amp;str,
     ) -&gt; Result&lt;Option&lt;RuntimeEffectJournalRecord&gt;, StoreError&gt;;
-    async fn save_session_meta(&amp;self, meta: SessionMeta) -&gt; Result&lt;(), StoreError&gt;;
-    async fn load_session_meta(&amp;self) -&gt; Result&lt;Option&lt;SessionMeta&gt;, StoreError&gt;;
-    async fn tombstone_nodes(&amp;self, ids: &amp;[String]) -&gt; Result&lt;(), StoreError&gt;;
-    async fn vacuum(&amp;self) -&gt; Result&lt;VacuumReport, StoreError&gt;;
-    async fn gc_unreachable(&amp;self) -&gt; Result&lt;GcReport, StoreError&gt;;
 }</code></pre>
           <p><code>SessionStoreFactory</code> produces one store per session, keyed by session id, relation, and policy:</p>
           <pre><code>pub trait SessionStoreFactory: Send + Sync {
@@ -124,7 +133,7 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
 }</code></pre>
           <p>Conflicts surface as a turn-level <code>Err</code> with <code>RuntimeError { code: "store_commit_failed", .. }</code> — not a <code>TurnStop</code> variant. The next read is identical to the read before the failed call. Hosts expecting concurrent access (multi-tab UIs, agent fleets) should serialize at their own layer or re-open against the refreshed head.</p>
           <p>In-memory sessions (no <code>store_factory</code>) enforce the same CAS against an in-process counter.</p>
-          <p>For per-effect durability under an external workflow runtime, install a custom <code>RuntimeEffectController</code>; the same store owns the runtime turn lease, checkpoint, and effect journal rows used during resume. See <a href="./architecture/durability.html">Architecture → Durability</a>.</p>
+          <p>For per-effect durability under an external workflow runtime, install a custom <code>RuntimeEffectController</code>. Embedded providers use the store's <code>embedded_durable_turn_store()</code> for runtime turn leases, checkpoints, and effect journal rows; substrate-native providers use their own workflow history/timers and let Lash handle only final commit idempotency. See <a href="./architecture/durability.html">Architecture → Durability</a>.</p>
         </div>
 
         <div class="section" id="wiring">

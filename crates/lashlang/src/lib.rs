@@ -15,9 +15,10 @@ pub use artifact::{
     global_in_memory_lashlang_artifact_store, surface_requirements_for_program,
 };
 pub use ast::{
-    AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ProcessDecl, ProcessParam,
-    ProcessStartExpr, Program, ResourceRefExpr, ScheduleCadence, ScheduleDecl, TriggerArg,
-    TriggerDecl, TriggerSource, TypeDecl, TypeExpr, TypeField, UnaryOp, format_type_expr,
+    AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ExprFolder, ExprVisitor,
+    ProcessDecl, ProcessParam, ProcessStartExpr, Program, ResourceRefExpr, ScheduleCadence,
+    ScheduleDecl, TriggerArg, TriggerDecl, TriggerSource, TypeDecl, TypeExpr, TypeField, UnaryOp,
+    fold_expr_children, format_type_expr, walk_expr,
 };
 pub use graph::{
     ProcessMap, ProcessMapEdge, ProcessMapNode, ProcessMapOptions, linked_static_graph_json,

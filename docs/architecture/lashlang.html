@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>lashlang · language - lash architecture</title>
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link rel="icon" href="../favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="../apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
@@ -49,7 +51,7 @@
             <dt>REPL state</dt>
             <dd>Variables persist across fenced blocks in the active RLM execution state. Read-only host bindings projected through RLM's projection API are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose. Lazy app projections are ref-backed and resolved before each block runs.</dd>
             <dt>Completion</dt>
-            <dd><code>submit</code> ends the program and turn. When the host exposes a continuation operation, <code>await TOOL.default.continue_as({ task: ..., seed: { ... } })?</code> is a receiver operation (not a keyword) that ends the current trajectory and activates a fresh-window AgentFrame in the same session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</dd>
+            <dd><code>submit</code> ends the program and turn. When the host exposes a continuation operation, <code>await control.continue_as({ task: ..., seed: { ... } })?</code> is a receiver operation (not a keyword) that ends the current trajectory and activates a fresh-window AgentFrame in the same session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</dd>
           </dl>
           <p>The examples below assume the host has linked a <code>TOOL.default</code> resource with the shown operations enabled.</p>
           <pre><code>```lashlang
@@ -65,7 +67,7 @@ for path in await TOOL.default.glob({ pattern: "src/**/*.rs" })? {
     findings = push(findings, { path: path, chars: len(text) })
   }
 }
-await TOOL.default.continue_as({
+await control.continue_as({
   task: "summarize the TODO audit and propose a follow-up plan",
   seed: { problem: input.prompt, findings: findings }
 })?

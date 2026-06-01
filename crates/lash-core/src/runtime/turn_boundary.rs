@@ -9,7 +9,8 @@ use crate::{
 };
 
 use super::{
-    RuntimeError, RuntimeErrorCode, RuntimeSessionState, TurnCommitDraft, merge_ledger_entry,
+    DurableTurnProvider, DurableTurnRun, RuntimeError, RuntimeErrorCode, RuntimeSessionState,
+    TurnCommitDraft, merge_ledger_entry,
 };
 
 pub(super) struct ProgressBoundaryCommit {
@@ -27,7 +28,7 @@ struct ProgressBoundarySnapshot<'a> {
     store: Option<&'a (dyn RuntimePersistence + 'a)>,
 }
 
-pub(super) struct TurnCommitPipeline {
+pub(super) struct TurnBoundary {
     stage: TurnCommitStage,
 }
 
@@ -65,7 +66,7 @@ struct FinalCommitInput<'a> {
     store: Option<&'a (dyn RuntimePersistence + 'a)>,
     usage_deltas: &'a [crate::TokenLedgerEntry],
     outcome: &'a TurnOutcome,
-    completed_turn: Option<crate::RuntimeTurnCompletion>,
+    durable_turn: Option<(&'a dyn DurableTurnProvider, DurableTurnRun)>,
     completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
 }
 
@@ -93,7 +94,7 @@ impl PersistedGraphMark {
     }
 }
 
-impl TurnCommitPipeline {
+impl TurnBoundary {
     pub(super) fn from_state(state: RuntimeSessionState) -> Self {
         Self {
             stage: TurnCommitStage::Drafting(TurnCommitDraft::from_state(state)),
@@ -296,7 +297,7 @@ impl TurnCommitPipeline {
         returned_turn: &mut AssembledTurn,
         session: Option<&mut Session>,
         usage_deltas: &[crate::TokenLedgerEntry],
-        completed_turn: Option<crate::RuntimeTurnCompletion>,
+        durable_turn: Option<(&dyn DurableTurnProvider, DurableTurnRun)>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     ) -> Result<(), RuntimeError> {
         let (store, plugins, execution_state_snapshot) = match session {
@@ -316,7 +317,7 @@ impl TurnCommitPipeline {
             store: store.as_ref().map(|store| store.as_ref()),
             usage_deltas,
             outcome: &returned_turn.outcome,
-            completed_turn,
+            durable_turn,
             completed_queue_claims,
         })
         .await
@@ -392,7 +393,7 @@ impl TurnCommitPipeline {
             store,
             usage_deltas,
             outcome,
-            completed_turn,
+            durable_turn,
             completed_queue_claims,
         } = input;
         let state = self.final_state_mut();
@@ -449,7 +450,7 @@ impl TurnCommitPipeline {
                 store,
                 graph,
                 usage_deltas,
-                completed_turn,
+                durable_turn,
                 completed_queue_claims,
             )
             .await
@@ -464,16 +465,19 @@ impl TurnCommitPipeline {
         store: &(dyn RuntimePersistence + '_),
         graph: GraphCommitDelta,
         usage_deltas: &[crate::TokenLedgerEntry],
-        completed_turn: Option<crate::RuntimeTurnCompletion>,
+        durable_turn: Option<(&dyn DurableTurnProvider, DurableTurnRun)>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     ) -> Result<(), StoreError> {
         let state = self.state_mut();
         let mark = PersistedGraphMark::from_graph_commit(&graph);
         let mut commit =
             RuntimeCommit::persisted_state_with_graph_commit(state, graph, usage_deltas);
-        commit.completed_turn = completed_turn;
         commit.completed_queue_claims = completed_queue_claims;
-        let result = store.commit_runtime_state(commit).await?;
+        let result = if let Some((backend, run)) = durable_turn {
+            backend.finalize_turn(run, commit, store).await?
+        } else {
+            store.commit_runtime_state(commit).await?
+        };
         state.apply_persisted_commit_result(result);
         if let TurnCommitStage::Drafting(draft) = &mut self.stage {
             match mark {
@@ -747,7 +751,7 @@ mod tests {
             .lock()
             .expect("lock graph")
             .extend_node_records(base_graph.nodes.iter().cloned());
-        let mut pipeline = TurnCommitPipeline::from_state(state);
+        let mut pipeline = TurnBoundary::from_state(state);
 
         pipeline
             .prepared_checkpoint(
@@ -794,7 +798,7 @@ mod tests {
                 ..crate::SessionHeadMeta::default()
             })
             .await;
-        let mut pipeline = TurnCommitPipeline::from_state(state);
+        let mut pipeline = TurnBoundary::from_state(state);
 
         let err = pipeline
             .prepared_checkpoint(
@@ -824,7 +828,7 @@ mod tests {
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user), &[]);
         let base_graph = graph.clone();
-        let mut pipeline = TurnCommitPipeline::from_state(state_with_graph(graph));
+        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph));
         let event_delta = vec![
             crate::SessionEventRecord::Conversation(ConversationRecord::from_message(user.clone())),
             crate::SessionEventRecord::Conversation(ConversationRecord::from_message(
@@ -887,7 +891,7 @@ mod tests {
         let user = text_message("u0", MessageRole::User, "hello");
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user), &[]);
-        let mut pipeline = TurnCommitPipeline::from_state(state_with_graph(graph));
+        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph));
         let protocol_event =
             crate::ProtocolEvent::typed("test_protocol", serde_json::json!({"step": "started"}))
                 .expect("protocol event serializes");
@@ -934,7 +938,7 @@ mod tests {
             usage_entry("turn", "gpt", 17),
         ];
         let store = RecordingStore::default();
-        let mut pipeline = TurnCommitPipeline::from_state(state_with_graph(graph.clone()));
+        let mut pipeline = TurnBoundary::from_state(state_with_graph(graph.clone()));
         let returned_state = pipeline.export_state_for_assembly();
 
         pipeline
@@ -946,7 +950,7 @@ mod tests {
                 usage_deltas: &usage,
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 tool_calls: &[],
-                completed_turn: None,
+                durable_turn: None,
                 completed_queue_claims: Vec::new(),
             })
             .await
@@ -973,7 +977,7 @@ mod tests {
         state.tool_state_snapshot = Some(crate::ToolState::default());
         state.plugin_snapshot = Some(crate::PluginSessionSnapshot::default());
         state.execution_state_snapshot = Some(b"runtime".to_vec());
-        let mut pipeline = TurnCommitPipeline::from_state(state);
+        let mut pipeline = TurnBoundary::from_state(state);
         let returned_state = pipeline.export_state_for_assembly();
 
         pipeline
@@ -985,7 +989,7 @@ mod tests {
                 usage_deltas: &[],
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 tool_calls: &[],
-                completed_turn: None,
+                durable_turn: None,
                 completed_queue_claims: Vec::new(),
             })
             .await

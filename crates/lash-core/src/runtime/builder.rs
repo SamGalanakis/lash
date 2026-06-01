@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
-    EmbeddedRuntimeHost, LashRuntime, PluginStack, ProcessRegistry, Residency, RuntimeCoreConfig,
-    RuntimeEffectController, RuntimePersistence, RuntimeSessionState, SessionError, SessionPolicy,
-    SessionStoreFactory, TerminationPolicy,
+    EmbeddedRuntimeHost, LashRuntime, PluginStack, ProcessRegistry, Residency,
+    RuntimeEffectController, RuntimeHostConfig, RuntimePersistence, RuntimeSessionState,
+    SessionError, SessionPolicy, SessionStoreFactory, TerminationPolicy,
 };
 
 enum PluginSource {
@@ -31,7 +31,7 @@ pub struct EmbeddedRuntimeBuilder {
     policy: Option<SessionPolicy>,
     initial_state: Option<RuntimeSessionState>,
     plugin_source: PluginSource,
-    core: RuntimeCoreConfig,
+    core: RuntimeHostConfig,
     session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     store: Option<Arc<dyn RuntimePersistence>>,
     process_registry: Option<Arc<dyn ProcessRegistry>>,
@@ -45,10 +45,10 @@ impl Default for EmbeddedRuntimeBuilder {
             policy: None,
             initial_state: None,
             plugin_source: PluginSource::Host(PluginHost::empty()),
-            // `RuntimeCoreConfig` has no `Default`; start from an explicitly
+            // `RuntimeHostConfig` has no `Default`; start from an explicitly
             // named in-memory core. Callers that need durable stores override
-            // it with `with_runtime_core`.
-            core: RuntimeCoreConfig::in_memory(),
+            // it with `with_runtime_host`.
+            core: RuntimeHostConfig::in_memory(),
             session_store_factory: None,
             store: None,
             process_registry: None,
@@ -105,7 +105,7 @@ impl EmbeddedRuntimeBuilder {
         self.with_plugin_factories(stack.into_factories())
     }
 
-    pub fn with_runtime_core(mut self, core: RuntimeCoreConfig) -> Self {
+    pub fn with_runtime_host(mut self, core: RuntimeHostConfig) -> Self {
         self.core = core;
         self
     }
@@ -114,17 +114,17 @@ impl EmbeddedRuntimeBuilder {
         mut self,
         attachment_store: Arc<dyn crate::AttachmentStore>,
     ) -> Self {
-        self.core = self.core.with_attachment_store(attachment_store);
+        self.core.durability.attachment_store = attachment_store;
         self
     }
 
     pub fn with_prompt_template(mut self, prompt_template: crate::PromptTemplate) -> Self {
-        self.core = self.core.with_prompt_template(prompt_template);
+        self.core.prompt.prompt.template = Some(prompt_template);
         self
     }
 
     pub fn with_prompt_contribution(mut self, contribution: crate::PromptContribution) -> Self {
-        self.core = self.core.with_prompt_contribution(contribution);
+        self.core.prompt.prompt.add_contribution(contribution);
         self
     }
 
@@ -133,37 +133,37 @@ impl EmbeddedRuntimeBuilder {
         slot: crate::PromptSlot,
         contributions: impl IntoIterator<Item = crate::PromptContribution>,
     ) -> Self {
-        self.core = self.core.with_replaced_prompt_slot(slot, contributions);
+        self.core.prompt.prompt.replace_slot(slot, contributions);
         self
     }
 
     pub fn with_cleared_prompt_slot(mut self, slot: crate::PromptSlot) -> Self {
-        self.core = self.core.with_cleared_prompt_slot(slot);
+        self.core.prompt.prompt.clear_slot(slot);
         self
     }
 
     pub fn with_prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
-        self.core = self.core.with_prompt_layer(prompt);
+        self.core.prompt.prompt = prompt;
         self
     }
 
     pub fn with_trace_sink(mut self, sink: Option<Arc<dyn lash_trace::TraceSink>>) -> Self {
-        self.core = self.core.with_trace_sink(sink);
+        self.core.tracing.trace_sink = sink;
         self
     }
 
     pub fn with_trace_level(mut self, level: lash_trace::TraceLevel) -> Self {
-        self.core = self.core.with_trace_level(level);
+        self.core.tracing.trace_level = level;
         self
     }
 
     pub fn with_trace_context(mut self, context: lash_trace::TraceContext) -> Self {
-        self.core = self.core.with_trace_context(context);
+        self.core.tracing.trace_context = context;
         self
     }
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
-        self.core = self.core.with_termination(termination);
+        self.core.control.termination = termination;
         self
     }
 
@@ -171,7 +171,7 @@ impl EmbeddedRuntimeBuilder {
         mut self,
         effect_controller: Arc<dyn RuntimeEffectController>,
     ) -> Self {
-        self.core = self.core.with_effect_controller(effect_controller);
+        self.core.control.effect_controller = effect_controller;
         self
     }
 
@@ -179,7 +179,7 @@ impl EmbeddedRuntimeBuilder {
         mut self,
         provider_resolver: Arc<dyn crate::RuntimeProviderResolver>,
     ) -> Self {
-        self.core = self.core.with_provider_resolver(provider_resolver);
+        self.core.providers.provider_resolver = provider_resolver;
         self
     }
 

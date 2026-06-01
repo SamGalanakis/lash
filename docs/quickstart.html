@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>quickstart · lash docs</title>
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
@@ -37,8 +39,8 @@
       <p class="stanza__lede">The <code>lash-runtime</code> crate is the user-facing facade (published on crates.io as <code>lash-runtime</code> because <code>lash</code> is owned by another project; the library is still imported as <code>use lash::...</code>). Pull in whatever provider crate you actually use and pass a configured <code>ProviderHandle</code> when opening sessions.</p>
       <p>During the alpha series, versions carry an <code>-alpha.N</code> suffix, so the dep needs the explicit pre-release tag.</p>
 <pre data-lang="cargo.toml"><code>[dependencies]
-lash-runtime         = "=0.1.0-alpha.13"
-lash-provider-openai = "=0.1.0-alpha.13"
+lash-runtime         = "=0.1.0-alpha.16"
+lash-provider-openai = "=0.1.0-alpha.16"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }</code></pre>
       <p>For ordinary projects the bundled facade and provider crates cover the common ground. Drop down to <code>lash-core</code> only when you need runtime-host plumbing — custom <code>PluginHost</code> instances or an explicitly installed deployment-level <code>ProcessRegistry</code> such as <code>lash-sqlite-store::SqliteProcessRegistry</code> for background process handles.</p>

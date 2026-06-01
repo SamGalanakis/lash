@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::ast::{
-    AssignPathStep, Declaration, Expr, Program, ResourceRefExpr, ScheduleCadence, TriggerArg,
-    TriggerSource,
+    Declaration, Expr, Program, ResourceRefExpr, ScheduleCadence, TriggerArg, TriggerSource,
 };
 use crate::lexer::Span;
 use crate::{LinkedModule, ModuleArtifact, ModuleRef, ProcessRef};
@@ -180,53 +179,51 @@ fn collect_expr_graph(
     edges: &mut Vec<Value>,
 ) {
     match expr {
-        Expr::Block(expressions) => {
-            for expression in expressions {
-                collect_expr_graph(expression, owner, span, process_refs, nodes, edges);
-            }
-        }
         Expr::StartProcess(start) => {
             let target = process_refs
                 .get(start.process.as_str())
                 .map(process_node_id)
                 .unwrap_or_else(|| format!("process:{}", start.process));
             edges.push(edge(owner, &target, "starts", span));
+            for child in expr.children() {
+                collect_expr_graph(child, owner, span, process_refs, nodes, edges);
+            }
         }
-        Expr::SleepFor(duration) => {
+        Expr::SleepFor(_) => {
             let sleep_id = format!("{owner}:sleep:{}", nodes.len());
             nodes.push(node(&sleep_id, "sleep", "sleep for", span));
             edges.push(edge(owner, &sleep_id, "sleeps", span));
-            collect_expr_graph(duration, &sleep_id, span, process_refs, nodes, edges);
+            for child in expr.children() {
+                collect_expr_graph(child, &sleep_id, span, process_refs, nodes, edges);
+            }
         }
-        Expr::SleepUntil(deadline) => {
+        Expr::SleepUntil(_) => {
             let sleep_id = format!("{owner}:sleep:{}", nodes.len());
             nodes.push(node(&sleep_id, "sleep", "sleep until", span));
             edges.push(edge(owner, &sleep_id, "sleeps", span));
-            collect_expr_graph(deadline, &sleep_id, span, process_refs, nodes, edges);
+            for child in expr.children() {
+                collect_expr_graph(child, &sleep_id, span, process_refs, nodes, edges);
+            }
         }
         Expr::WaitSignal => {
             let wait_id = format!("{owner}:wait:{}", nodes.len());
             nodes.push(node(&wait_id, "wait", "wait signal", span));
             edges.push(edge(owner, &wait_id, "waits", span));
         }
-        Expr::SignalRun { run, payload } => {
+        Expr::SignalRun { .. } => {
             let signal_id = format!("{owner}:signal:{}", nodes.len());
             nodes.push(node(&signal_id, "signal", "signal run", span));
             edges.push(edge(owner, &signal_id, "signals", span));
-            collect_expr_graph(run, &signal_id, span, process_refs, nodes, edges);
-            collect_expr_graph(payload, &signal_id, span, process_refs, nodes, edges);
+            for child in expr.children() {
+                collect_expr_graph(child, &signal_id, span, process_refs, nodes, edges);
+            }
         }
-        Expr::ReceiverCall {
-            receiver,
-            operation,
-            args,
-        } => {
+        Expr::ReceiverCall { operation, .. } => {
             let op_id = format!("{owner}:op:{operation}:{}", nodes.len());
             nodes.push(node(&op_id, "resource_operation", operation.as_str(), span));
             edges.push(edge(owner, &op_id, "calls", span));
-            collect_expr_graph(receiver, owner, span, process_refs, nodes, edges);
-            for arg in args {
-                collect_expr_graph(arg, owner, span, process_refs, nodes, edges);
+            for child in expr.children() {
+                collect_expr_graph(child, owner, span, process_refs, nodes, edges);
             }
         }
         Expr::ResourceRef(resource) => {
@@ -246,16 +243,6 @@ fn collect_expr_graph(
             collect_expr_graph(then_block, &branch_id, span, process_refs, nodes, edges);
             collect_expr_graph(else_block, &branch_id, span, process_refs, nodes, edges);
         }
-        Expr::Await(expr)
-        | Expr::ResultUnwrap(expr)
-        | Expr::Cancel(expr)
-        | Expr::Print(expr)
-        | Expr::Yield(expr)
-        | Expr::Wake(expr)
-        | Expr::Fail(expr)
-        | Expr::Unary { expr, .. } => {
-            collect_expr_graph(expr, owner, span, process_refs, nodes, edges)
-        }
         Expr::Finish(expr) | Expr::Submit(expr) => {
             let terminal_id = format!("{owner}:terminal:{}", nodes.len());
             nodes.push(node(&terminal_id, "terminal", "result", span));
@@ -264,56 +251,11 @@ fn collect_expr_graph(
                 collect_expr_graph(expr, owner, span, process_refs, nodes, edges);
             }
         }
-        Expr::Assign { expr, target } => {
-            for step in &target.steps {
-                if let crate::ast::AssignPathStep::Index(index) = step {
-                    collect_expr_graph(index, owner, span, process_refs, nodes, edges);
-                }
-            }
-            collect_expr_graph(expr, owner, span, process_refs, nodes, edges);
-        }
-        Expr::List(items) => {
-            for item in items {
-                collect_expr_graph(item, owner, span, process_refs, nodes, edges);
+        _ => {
+            for child in expr.children() {
+                collect_expr_graph(child, owner, span, process_refs, nodes, edges);
             }
         }
-        Expr::Record(entries) => {
-            for (_, value) in entries {
-                collect_expr_graph(value, owner, span, process_refs, nodes, edges);
-            }
-        }
-        Expr::BuiltinCall { args, .. } => {
-            for arg in args {
-                collect_expr_graph(arg, owner, span, process_refs, nodes, edges);
-            }
-        }
-        Expr::Field { target, .. } => {
-            collect_expr_graph(target, owner, span, process_refs, nodes, edges)
-        }
-        Expr::Index { target, index } => {
-            collect_expr_graph(target, owner, span, process_refs, nodes, edges);
-            collect_expr_graph(index, owner, span, process_refs, nodes, edges);
-        }
-        Expr::Binary { left, right, .. } => {
-            collect_expr_graph(left, owner, span, process_refs, nodes, edges);
-            collect_expr_graph(right, owner, span, process_refs, nodes, edges);
-        }
-        Expr::For { iterable, body, .. } => {
-            collect_expr_graph(iterable, owner, span, process_refs, nodes, edges);
-            collect_expr_graph(body, owner, span, process_refs, nodes, edges);
-        }
-        Expr::While { condition, body } => {
-            collect_expr_graph(condition, owner, span, process_refs, nodes, edges);
-            collect_expr_graph(body, owner, span, process_refs, nodes, edges);
-        }
-        Expr::Null
-        | Expr::Bool(_)
-        | Expr::Number(_)
-        | Expr::String(_)
-        | Expr::Variable(_)
-        | Expr::Break
-        | Expr::Continue
-        | Expr::TypeLiteral(_) => {}
     }
 }
 
@@ -496,40 +438,38 @@ impl ProcessMapBuilder<'_> {
                 if self.options.include_reachable_processes {
                     self.visit_process(start.process.as_str());
                 }
-                for (_, value) in &start.args {
-                    self.visit_expr(value, owner);
+                for child in expr.children() {
+                    self.visit_expr(child, owner);
                 }
             }
-            Expr::ReceiverCall {
-                receiver,
-                operation,
-                args,
-            } => {
+            Expr::ReceiverCall { operation, .. } => {
                 let op_id = format!("{owner}:resource:{operation}:{}", self.nodes.len());
                 self.node(&op_id, "resource_operation", operation.as_str());
                 self.edge(owner, &op_id, "calls");
-                self.visit_expr(receiver, &op_id);
-                for arg in args {
-                    self.visit_expr(arg, &op_id);
+                for child in expr.children() {
+                    self.visit_expr(child, &op_id);
                 }
             }
-            Expr::SleepFor(value) | Expr::SleepUntil(value) => {
+            Expr::SleepFor(_) | Expr::SleepUntil(_) => {
                 let sleep_id = format!("{owner}:sleep:{}", self.nodes.len());
                 self.node(&sleep_id, "sleep", "sleep");
                 self.edge(owner, &sleep_id, "sleeps");
-                self.visit_expr(value, &sleep_id);
+                for child in expr.children() {
+                    self.visit_expr(child, &sleep_id);
+                }
             }
             Expr::WaitSignal => {
                 let wait_id = format!("{owner}:wait:{}", self.nodes.len());
                 self.node(&wait_id, "wait", "wait signal");
                 self.edge(owner, &wait_id, "waits");
             }
-            Expr::SignalRun { run, payload } => {
+            Expr::SignalRun { .. } => {
                 let signal_id = format!("{owner}:signal:{}", self.nodes.len());
                 self.node(&signal_id, "signal", "signal run");
                 self.edge(owner, &signal_id, "signals");
-                self.visit_expr(run, &signal_id);
-                self.visit_expr(payload, &signal_id);
+                for child in expr.children() {
+                    self.visit_expr(child, &signal_id);
+                }
             }
             Expr::Finish(value) | Expr::Submit(value) => {
                 let terminal_id = format!("{owner}:terminal:{}", self.nodes.len());
@@ -562,61 +502,11 @@ impl ProcessMapBuilder<'_> {
                 self.visit_expr(then_block, &branch_id);
                 self.visit_expr(else_block, &branch_id);
             }
-            Expr::Assign { target, expr } => {
-                for step in &target.steps {
-                    if let AssignPathStep::Index(index) = step {
-                        self.visit_expr(index, owner);
-                    }
-                }
-                self.visit_expr(expr, owner);
-            }
-            Expr::For { iterable, body, .. } => {
-                self.visit_expr(iterable, owner);
-                self.visit_expr(body, owner);
-            }
-            Expr::While { condition, body } => {
-                self.visit_expr(condition, owner);
-                self.visit_expr(body, owner);
-            }
-            Expr::List(items) => {
-                for item in items {
-                    self.visit_expr(item, owner);
+            _ => {
+                for child in expr.children() {
+                    self.visit_expr(child, owner);
                 }
             }
-            Expr::Record(entries) => {
-                for (_, value) in entries {
-                    self.visit_expr(value, owner);
-                }
-            }
-            Expr::Await(expr)
-            | Expr::ResultUnwrap(expr)
-            | Expr::Cancel(expr)
-            | Expr::Print(expr)
-            | Expr::Yield(expr)
-            | Expr::Wake(expr)
-            | Expr::Unary { expr, .. } => self.visit_expr(expr, owner),
-            Expr::BuiltinCall { args, .. } => {
-                for arg in args {
-                    self.visit_expr(arg, owner);
-                }
-            }
-            Expr::Field { target, .. } => self.visit_expr(target, owner),
-            Expr::Index { target, index } => {
-                self.visit_expr(target, owner);
-                self.visit_expr(index, owner);
-            }
-            Expr::Binary { left, right, .. } => {
-                self.visit_expr(left, owner);
-                self.visit_expr(right, owner);
-            }
-            Expr::Null
-            | Expr::Bool(_)
-            | Expr::Number(_)
-            | Expr::String(_)
-            | Expr::Variable(_)
-            | Expr::Break
-            | Expr::Continue
-            | Expr::TypeLiteral(_) => {}
         }
     }
 

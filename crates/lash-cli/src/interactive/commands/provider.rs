@@ -127,7 +127,7 @@ pub(super) async fn handle_model(
     let mut msg = format!("Model set to `{}`", app.model);
     if let Some(variant) = current_model_variant.as_deref() {
         msg.push_str(&format!("\nVariant reset to `{}`", variant));
-        msg.push_str("\nUse `/variant` to pick a different provider-native preset.");
+        msg.push_str("\nUse `/variant` to pick a different model-native preset.");
     } else {
         msg.push_str("\nThis model does not expose configurable variants.");
     }

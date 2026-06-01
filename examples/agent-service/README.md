@@ -2,7 +2,7 @@
 
 SQLite-backed localhost chat example for `lash`, RLM mode, typed session
 plugin activation, app-owned board tools, semantic streaming, and optional
-Restate turn durability.
+Restate durable turns.
 
 Run it:
 
@@ -13,8 +13,8 @@ OPENROUTER_API_KEY=... cargo run -p agent-service
 Optional environment:
 
 ```bash
-OPENROUTER_MODEL=openai/gpt-5.5
-OPENROUTER_MODEL_VARIANT=medium
+OPENROUTER_MODEL=anthropic/claude-sonnet-4.6
+OPENROUTER_MODEL_VARIANT=high
 AGENT_SERVICE_ADDR=127.0.0.1:3000
 AGENT_SERVICE_DATA_DIR=.agent-service
 AGENT_SERVICE_TRACE=.agent-service/trace.jsonl
@@ -70,8 +70,8 @@ reconstructed from SQLite session stores instead of running in the route
 process. `AgentServiceTurnWorkflowRequest` carries only stable turn, chat, text,
 model, and model-variant data; board state stays in the app database. The
 workflow creates a `RestateRuntimeEffectController`, first attempts
-`session.resume_turn(turn_id).stream_with_effect_scope(...)`, and falls back to
-a fresh `session.turn(...).stream_with_effect_scope(...)` only when Lash has no
+`session.resume_turn(turn_id).stream_with_durable_turn(...)`, and falls back to
+a fresh `session.turn(...).stream_with_durable_turn(...)` only when Lash has no
 checkpoint for that turn id yet. Turn progress is written to an app-owned
 SQLite outbox keyed by `turn_id`, so the NDJSON route can stream progress after
 route restart or while the workflow is running in the Restate handler.

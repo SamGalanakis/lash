@@ -17,8 +17,9 @@ Configuration is read from `.env` or the process environment:
 - `AGENT_WORKBENCH_ADDR`: bind address, default `127.0.0.1:3030`.
 - `AGENT_WORKBENCH_DATA_DIR`: persistence directory, default
   `.agent-workbench`.
-- `OPENROUTER_MODEL`: default `openai/gpt-5.5`.
-- `OPENROUTER_MODEL_VARIANT`: default `medium`.
+- `OPENROUTER_MODEL`: default `anthropic/claude-sonnet-4.6`.
+- `OPENROUTER_MODEL_VARIANT`: default `high`; choose `provider default` in
+  the UI to send no variant for models without configurable thinking.
 
 The browser UI has three work areas: the left rail contains red and blue host
 event buttons plus per-turn model controls, the center pane is a chat/event

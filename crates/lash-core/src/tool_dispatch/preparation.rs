@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::plugin::ToolCallHookContext;
-use crate::tool_schema::validate_tool_input;
+use crate::validate_tool_input;
 use crate::{
     ProgressSender, ToolContext, ToolFailureClass, ToolManifest, ToolPrepareCall,
     ToolPrepareContext,

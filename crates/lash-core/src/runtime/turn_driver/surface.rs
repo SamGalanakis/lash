@@ -103,6 +103,12 @@ impl RuntimeTurnDriver<'_> {
             projector: turn_driver_preamble.config.projector.clone(),
             sync_execution_surface: checkpoint_record.machine_config.sync_execution_surface,
             model: checkpoint_record.machine_config.model.id.clone(),
+            max_context_tokens: Some(
+                checkpoint_record
+                    .machine_config
+                    .model
+                    .context_window_tokens(),
+            ),
             max_turns: checkpoint_record.machine_config.max_turns,
             model_variant: checkpoint_record.machine_config.model.variant.clone(),
             generation: checkpoint_record.machine_config.generation.clone(),
@@ -163,7 +169,7 @@ impl RuntimeTurnDriver<'_> {
         };
         self.mark_phase_begin(RuntimeTurnPhase::PromptBuild);
         let prepared_prompt = execution_surface.build_prompt(
-            &self.host.core.prompt,
+            &self.host.core.prompt.prompt,
             &session_policy.prompt,
             self.turn_context.prompt_layer(),
             Some(self.session.prompt_cache()),
@@ -173,7 +179,7 @@ impl RuntimeTurnDriver<'_> {
             run_session_id: session_policy.session_id.clone(),
             autonomous: session_policy.autonomous,
             model: session_policy.model.clone(),
-            generation: generation_options_from_provider(&session_policy.provider),
+            generation: generation_options_from_provider(session_policy.provider()),
             max_turns: session_policy.max_turns,
             sync_execution_surface: execution_surface
                 .turn_driver_preamble
@@ -188,6 +194,7 @@ impl RuntimeTurnDriver<'_> {
             run_session_id: session_policy.session_id.clone(),
             autonomous: session_policy.autonomous,
             model,
+            max_context_tokens: Some(session_policy.context_window_tokens()),
             messages,
             events: self.turn_pipeline.active_events(),
             turn_causes: self.turn_causes.clone(),
@@ -196,17 +203,17 @@ impl RuntimeTurnDriver<'_> {
             prepared_prompt,
             max_turns: session_policy.max_turns,
             model_variant: session_policy.model.variant.clone(),
-            generation: generation_options_from_provider(&session_policy.provider),
+            generation: generation_options_from_provider(session_policy.provider()),
             emit_llm_trace: false,
             termination: self.protocol_turn_options.clone(),
         });
-        if self.host.core.trace_sink.is_some() {
+        if self.host.core.tracing.trace_sink.is_some() {
             let prompt_hash =
                 lash_trace::sha256_hex(prepared.prepared_prompt.system_prompt.as_bytes());
             let prompt_chars = prepared.prepared_prompt.system_prompt.chars().count();
             crate::trace::emit_trace(
-                &self.host.core.trace_sink,
-                &self.host.core.trace_context,
+                &self.host.core.tracing.trace_sink,
+                &self.host.core.tracing.trace_context,
                 self.trace_context(run_offset),
                 lash_trace::TraceEvent::PromptBuilt {
                     prompt_hash: prompt_hash.clone(),
@@ -240,7 +247,7 @@ impl RuntimeTurnDriver<'_> {
             .await
             .map_err(|err| crate::SessionError::Protocol(err.to_string()))?;
         let prepared_prompt = execution_surface.build_prompt(
-            &self.host.core.prompt,
+            &self.host.core.prompt.prompt,
             &policy.prompt,
             self.turn_context.prompt_layer(),
             Some(self.session.prompt_cache()),
@@ -301,8 +308,9 @@ impl RuntimeTurnDriver<'_> {
         request: &LlmRequest,
     ) -> Result<Option<crate::ProtocolLlmCallAction>, PluginError> {
         let latest_prompt_usage = self.turn_pipeline.state_mut().last_prompt_usage.clone();
-        let effect_controller =
-            crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
+        let effect_controller = crate::runtime::RuntimeEffectControllerHandle::borrowed(
+            self.durable_turn_scope.controller(),
+        );
         let direct_completions = self.session_services.direct_completion_client(
             effect_controller.clone_scoped(),
             Some(self.turn_id.clone()),
@@ -351,11 +359,11 @@ impl RuntimeTurnDriver<'_> {
 
     pub(super) async fn prepare_provider(
         &mut self,
-        policy: &mut ResolvedSessionPolicy,
+        policy: &mut RuntimeSessionPolicy,
     ) -> Result<String, SessionEvent> {
         let model = policy.model.id.clone();
         if let Some(variant) = policy.model.variant.as_deref()
-            && let Err(message) = policy.provider.validate_variant(&model, variant)
+            && let Err(message) = policy.provider().validate_variant(&model, variant)
         {
             return Err(make_error_event(
                 "llm_provider",

@@ -1,6 +1,4 @@
-use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::LlmResponse;
 use crate::llm::transport::LlmTransportError;
@@ -8,10 +6,7 @@ use crate::runtime::session_manager::{CurrentSessionCapability, UsageCapability}
 use crate::sansio::LlmCallError;
 use crate::{LlmRequest as CoreLlmRequest, PluginError, session_model::TokenUsage};
 
-use super::envelope::{CausalRef, RuntimeEffectEnvelope, RuntimeEffectOutcome, RuntimeInvocation};
-use super::executor::{
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectLocalExecutor,
-};
+use super::envelope::{CausalRef, RuntimeEffectOutcome};
 
 // =============================================================================
 // LLM trace helpers
@@ -206,11 +201,11 @@ fn emit_direct_llm_trace_started(
     request: &CoreLlmRequest,
     caused_by: Option<&CausalRef>,
 ) -> Option<String> {
-    current.host.core.trace_sink.as_ref()?;
+    current.host.core.tracing.trace_sink.as_ref()?;
     let llm_call_id = uuid::Uuid::new_v4().to_string();
     emit_llm_trace_started(
-        &current.host.core.trace_sink,
-        &current.host.core.trace_context,
+        &current.host.core.tracing.trace_sink,
+        &current.host.core.tracing.trace_context,
         direct_trace_context(&current.session_id, Some(&llm_call_id), caused_by),
         request,
     );
@@ -227,8 +222,8 @@ fn emit_direct_llm_trace_completed(
         return;
     };
     emit_llm_trace_completed(
-        &current.host.core.trace_sink,
-        &current.host.core.trace_context,
+        &current.host.core.tracing.trace_sink,
+        &current.host.core.tracing.trace_context,
         direct_trace_context(&current.session_id, Some(llm_call_id), caused_by),
         response,
         0,
@@ -246,8 +241,8 @@ fn emit_direct_llm_trace_failed(
         return;
     };
     emit_llm_trace_failed(
-        &current.host.core.trace_sink,
-        &current.host.core.trace_context,
+        &current.host.core.tracing.trace_sink,
+        &current.host.core.tracing.trace_context,
         direct_trace_context(&current.session_id, Some(llm_call_id), caused_by),
         LlmTraceFailure::from(err),
         None,
@@ -267,224 +262,6 @@ fn direct_trace_context(
         context = crate::trace::trace_context_with_causal_ref(context, caused_by);
     }
     context
-}
-
-// =============================================================================
-// Per-turn effect journaling (durable replay)
-// =============================================================================
-
-pub(crate) async fn renew_runtime_turn_lease_for_effect(
-    store: &(dyn crate::RuntimePersistence + '_),
-    lease: &crate::RuntimeTurnLease,
-    invocation: &RuntimeInvocation,
-) -> Result<crate::RuntimeTurnLease, RuntimeEffectControllerError> {
-    require_matching_turn_lease(Some(lease), invocation)?;
-    store
-        .renew_runtime_turn_lease(lease, crate::runtime::RUNTIME_TURN_LEASE_TTL_MS)
-        .await
-        .map_err(RuntimeEffectControllerError::from)
-}
-
-pub(crate) async fn execute_effect_with_journal(
-    store: Option<&(dyn crate::RuntimePersistence + '_)>,
-    lease: Option<&crate::RuntimeTurnLease>,
-    controller: &dyn RuntimeEffectController,
-    envelope: RuntimeEffectEnvelope,
-    local_executor: RuntimeEffectLocalExecutor<'_>,
-) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-    let Some(turn_id) = envelope.invocation.scope.turn_id.clone() else {
-        return controller.execute_effect(envelope, local_executor).await;
-    };
-    let Some(store) = store else {
-        return controller.execute_effect(envelope, local_executor).await;
-    };
-    let mut active_lease = require_matching_turn_lease(lease, &envelope.invocation)?;
-    let envelope_hash = envelope.stable_hash()?;
-    let replay_key = envelope
-        .invocation
-        .replay_key()
-        .ok_or_else(|| {
-            RuntimeEffectControllerError::new(
-                "runtime_effect_replay_required",
-                "runtime effect envelope requires replay.key",
-            )
-        })?
-        .to_string();
-    if let Some(record) = store
-        .load_runtime_effect_outcome(&envelope.invocation.scope.session_id, &turn_id, &replay_key)
-        .await
-        .map_err(RuntimeEffectControllerError::from)?
-    {
-        if record.envelope_hash != envelope_hash {
-            return Err(RuntimeEffectControllerError::new(
-                "runtime_effect_journal_hash_mismatch",
-                format!(
-                    "recorded runtime effect `{}` has envelope hash `{}` but replay requested `{}`",
-                    replay_key, record.envelope_hash, envelope_hash
-                ),
-            ));
-        }
-        return Ok(record.outcome);
-    }
-
-    let invocation = envelope.invocation.clone();
-    let effect_kind = invocation.effect_kind().ok_or_else(|| {
-        RuntimeEffectControllerError::new(
-            "runtime_effect_invocation_subject",
-            "runtime effect envelope subject must be an effect",
-        )
-    })?;
-    let outcome = execute_pending_effect_with_lease_renewal(
-        store,
-        &mut active_lease,
-        &invocation,
-        controller,
-        envelope,
-        local_executor,
-    )
-    .await?;
-    active_lease = renew_runtime_turn_lease_for_effect(store, &active_lease, &invocation).await?;
-    store
-        .save_runtime_effect_outcome(
-            &active_lease,
-            crate::RuntimeEffectJournalRecord {
-                schema_version: crate::RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
-                session_id: invocation.scope.session_id,
-                turn_id,
-                replay_key,
-                envelope_hash,
-                effect_kind,
-                outcome: outcome.clone(),
-                created_at_epoch_ms: current_epoch_ms(),
-            },
-        )
-        .await
-        .map_err(RuntimeEffectControllerError::from)?;
-    Ok(outcome)
-}
-
-pub(crate) struct JournaledEffectInvocation<'a> {
-    store: Option<&'a (dyn crate::RuntimePersistence + 'a)>,
-    lease: Option<&'a crate::RuntimeTurnLease>,
-    controller: &'a dyn RuntimeEffectController,
-    envelope: RuntimeEffectEnvelope,
-    local_executor: RuntimeEffectLocalExecutor<'a>,
-}
-
-impl<'a> JournaledEffectInvocation<'a> {
-    pub(crate) fn new(
-        store: Option<&'a (dyn crate::RuntimePersistence + 'a)>,
-        lease: Option<&'a crate::RuntimeTurnLease>,
-        controller: &'a dyn RuntimeEffectController,
-        envelope: RuntimeEffectEnvelope,
-        local_executor: RuntimeEffectLocalExecutor<'a>,
-    ) -> Self {
-        Self {
-            store,
-            lease,
-            controller,
-            envelope,
-            local_executor,
-        }
-    }
-}
-
-pub(crate) async fn invoke_journaled_effect<T, E, F, Fut>(
-    invocation: JournaledEffectInvocation<'_>,
-    apply_outcome: F,
-) -> Result<T, E>
-where
-    E: From<RuntimeEffectControllerError>,
-    F: FnOnce(RuntimeEffectOutcome) -> Fut,
-    Fut: Future<Output = Result<T, E>>,
-{
-    let outcome = execute_effect_with_journal(
-        invocation.store,
-        invocation.lease,
-        invocation.controller,
-        invocation.envelope,
-        invocation.local_executor,
-    )
-    .await
-    .map_err(E::from)?;
-    apply_outcome(outcome).await
-}
-
-async fn execute_pending_effect_with_lease_renewal(
-    store: &(dyn crate::RuntimePersistence + '_),
-    active_lease: &mut crate::RuntimeTurnLease,
-    invocation: &RuntimeInvocation,
-    controller: &dyn RuntimeEffectController,
-    envelope: RuntimeEffectEnvelope,
-    local_executor: RuntimeEffectLocalExecutor<'_>,
-) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-    let pending = controller.execute_effect(envelope, local_executor);
-    tokio::pin!(pending);
-    loop {
-        tokio::select! {
-            outcome = &mut pending => return outcome,
-            _ = tokio::time::sleep(pending_effect_lease_renew_interval()) => {
-                *active_lease =
-                    renew_runtime_turn_lease_for_effect(store, active_lease, invocation).await?;
-            }
-        }
-    }
-}
-
-fn pending_effect_lease_renew_interval() -> Duration {
-    Duration::from_millis(pending_effect_lease_renew_interval_ms())
-}
-
-#[cfg(test)]
-fn pending_effect_lease_renew_interval_ms() -> u64 {
-    25
-}
-
-#[cfg(not(test))]
-fn pending_effect_lease_renew_interval_ms() -> u64 {
-    30_000
-}
-
-fn require_matching_turn_lease(
-    lease: Option<&crate::RuntimeTurnLease>,
-    invocation: &RuntimeInvocation,
-) -> Result<crate::RuntimeTurnLease, RuntimeEffectControllerError> {
-    let replay_key = invocation.replay_key().unwrap_or("<missing replay>");
-    let Some(turn_id) = invocation.scope.turn_id.as_deref() else {
-        return Err(RuntimeEffectControllerError::new(
-            "runtime_turn_lease_required",
-            format!(
-                "runtime effect `{}` does not carry a turn id for lease validation",
-                replay_key
-            ),
-        ));
-    };
-    let Some(lease) = lease else {
-        return Err(RuntimeEffectControllerError::new(
-            "runtime_turn_lease_required",
-            format!(
-                "runtime effect `{}` for turn `{}` requires a runtime turn lease",
-                replay_key, turn_id
-            ),
-        ));
-    };
-    if lease.session_id != invocation.scope.session_id || lease.turn_id != turn_id {
-        return Err(RuntimeEffectControllerError::new(
-            "runtime_turn_lease_required",
-            format!(
-                "runtime effect `{}` lease targets `{}`/`{}` but metadata targets `{}`/`{}`",
-                replay_key, lease.session_id, lease.turn_id, invocation.scope.session_id, turn_id
-            ),
-        ));
-    }
-    Ok(lease.clone())
-}
-
-fn current_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[cfg(test)]

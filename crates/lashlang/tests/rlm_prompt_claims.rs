@@ -129,8 +129,21 @@ fn test_surface() -> lashlang::LashlangSurface {
 }
 
 fn program_contains_start_process(expr: &lashlang::Expr) -> bool {
-    matches!(expr, lashlang::Expr::StartProcess(_))
-        || expr.children().any(program_contains_start_process)
+    struct Finder(bool);
+
+    impl lashlang::ExprVisitor for Finder {
+        fn visit_expr(&mut self, expr: &lashlang::Expr) {
+            if matches!(expr, lashlang::Expr::StartProcess(_)) {
+                self.0 = true;
+                return;
+            }
+            lashlang::walk_expr(self, expr);
+        }
+    }
+
+    let mut finder = Finder(false);
+    lashlang::ExprVisitor::visit_expr(&mut finder, expr);
+    finder.0
 }
 
 impl MockHost {

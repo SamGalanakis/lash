@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>providers - lash architecture</title>
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link rel="icon" href="../favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="../apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
@@ -41,7 +43,7 @@
         <div class="section">
           <div class="section-header">
             <h2>First-Party Providers</h2>
-            <p>Four provider crates ship with the workspace, registering five provider kinds — <code>lash-provider-openai</code> contributes both the direct Responses path and the generic Chat Completions path. The CLI registers all of them at boot via <code>lash-providers-builtin</code>; app hosts pick the ones they need.</p>
+            <p>Four provider crates ship with the workspace, contributing five provider kinds — <code>lash-provider-openai</code> supplies both the direct Responses path and the generic Chat Completions path. The CLI compiles in all five and materializes each from its provider factory keyed on the spec kind; <code>lash-providers-builtin</code> only enumerates the kind names as static metadata. App hosts pick the ones they need.</p>
           </div>
           <div class="table">
             <table>
@@ -108,10 +110,10 @@
             <p>Every provider returns a normalized <code>LlmUsage</code> to the runtime usage ledger after each completion. Chat-parsing handles both streaming and non-streaming usage chunks, including OpenRouter cache fields. Cache-write tokens are <strong>not</strong> counted as cached reads, so downstream cost/export code doesn't overstate cache hits.</p>
           </div>
           <pre><code>pub struct LlmUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cached_input_tokens: u64,  // Reads from cache
-    pub reasoning_tokens: u64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_input_tokens: i64,  // Reads from cache
+    pub reasoning_tokens: i64,
     // …provider-specific extras flow through the extended trace
 }</code></pre>
         </div>
@@ -126,7 +128,7 @@
             <article class="panel"><h3>Auth</h3><p>Bearer header, OAuth refresh, device-code flow — whatever the vendor requires. Auth state is opaque to the runtime.</p></article>
             <article class="panel"><h3>Readiness</h3><p>Optional pre-flight check (token refresh, capability probe) that runs once per session.</p></article>
             <article class="panel"><h3>Transport</h3><p>The actual HTTP call. Translates <code>LlmRequest</code> to the wire format, streams the response, normalizes back to <code>LlmResponse</code> chunks.</p></article>
-            <article class="panel"><h3>Model policy</h3><p>Maps user-facing model + variant names to provider-native ids, declares structured-output / tool-call / thinking capabilities per model.</p></article>
+            <article class="panel"><h3>Model policy</h3><p>Maps user-facing model + variant names to model-native ids, declares structured-output / tool-call / thinking capabilities per model.</p></article>
             <article class="panel"><h3>Factory</h3><p>Materializes host config into provider components; <code>ProviderHandle::new(components)</code> assembles the five pieces into the live handle the runtime can use.</p></article>
           </div>
           <p>See <code>lash-provider-openai</code> as the most general template — it handles both the direct Responses path and the generic Chat Completions path in one crate.</p>

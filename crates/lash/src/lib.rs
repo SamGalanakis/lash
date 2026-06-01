@@ -96,10 +96,10 @@ pub mod persistence {
         runtime_turn_checkpoint_hash,
     };
     pub use lash_core::{
-        AttachmentStore, BlobRef, GcReport, PersistedSessionConfig, PersistedTurnState,
-        ProtocolEvent, RuntimePersistence, SessionEventRecord, SessionGraph, SessionMeta,
-        SessionNodeRecord, SessionReadScope, SessionReadView, SessionSnapshot, StoreError,
-        TokenLedgerEntry, VacuumReport,
+        AttachmentStore, BlobRef, EmbeddedDurableTurnStore, GcReport, PersistedSessionConfig,
+        PersistedTurnState, ProtocolEvent, RuntimePersistence, SessionEventRecord, SessionGraph,
+        SessionMeta, SessionNodeRecord, SessionReadScope, SessionReadView, SessionSnapshot,
+        StoreError, TokenLedgerEntry, VacuumReport,
     };
     pub use lash_local_store::FileAttachmentStore;
 }
@@ -143,17 +143,17 @@ pub mod advanced {
     pub use crate::AdvancedLashCoreBuilder;
     pub use lash_core::runtime::{
         AssembledTurn, DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig,
-        EmbeddedRuntimeHost, EventSink, InlineRuntimeEffectController, LashRuntime,
-        LlmAttachmentSpec, LlmRequestSpec, NoopEventSink, NoopTurnActivitySink, ProcessCommand,
-        ProcessEffectOutcome, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-        ProcessInput, ProcessListMode, ProcessOpScope, ProcessRecord, ProcessRegistration,
-        ProcessRegistry, ProcessRunHandle, ProcessScope, ProcessScopeId, ProcessService,
-        ProcessSessionDeleteReport, ProcessStartOptions, ProcessStatus, ProcessWakeDelivery,
-        ProcessWorkPoke, ProcessWorkRunner, Residency, RuntimeCoreConfig, RuntimeEffectCommand,
-        RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
-        RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-        RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode,
-        RuntimeHandle, RuntimeInvocation, RuntimeObservation, RuntimeScope, RuntimeTurnPhase,
+        DurableTurnScope, EmbeddedRuntimeHost, EventSink, InlineRuntimeEffectController,
+        LashRuntime, LlmAttachmentSpec, LlmRequestSpec, NoopEventSink, NoopTurnActivitySink,
+        ProcessCommand, ProcessEffectOutcome, ProcessHandleDescriptor, ProcessHandleGrant,
+        ProcessHandleGrantEntry, ProcessInput, ProcessListMode, ProcessOpScope, ProcessRecord,
+        ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessScope, ProcessScopeId,
+        ProcessService, ProcessSessionDeleteReport, ProcessStartOptions, ProcessStatus,
+        ProcessWakeDelivery, ProcessWorkPoke, ProcessWorkRunner, Residency, RuntimeEffectCommand,
+        RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+        RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
+        RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
+        RuntimeHostConfig, RuntimeInvocation, RuntimeObservation, RuntimeScope, RuntimeTurnPhase,
         RuntimeTurnPhaseProbe, TerminationPolicy, TurnContext, lashlang_process_event_types,
         process_wake_input_from_event_payload, process_wake_turn_cause, process_wake_turn_text,
     };

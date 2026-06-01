@@ -50,7 +50,7 @@ impl RuntimeTurnDriver<'_> {
         if let Ok(response) = &result {
             let usage = crate::runtime::effect::token_usage_from_llm(&response.usage);
             self.turn_pipeline.state_mut().last_prompt_usage =
-                normalize_prompt_usage(&self.policy.provider, &usage);
+                normalize_prompt_usage(self.policy.provider(), &usage);
             if !text_streamed {
                 let prose_projector = self.session.plugins().assistant_prose_projector();
                 emit_semantic_response_parts(event_tx, response, prose_projector.as_deref()).await;
@@ -122,7 +122,7 @@ impl RuntimeTurnDriver<'_> {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<(), RuntimeError> {
-        if self.host.core.trace_sink.is_some() {
+        if self.host.core.tracing.trace_sink.is_some() {
             for pending in &calls {
                 self.emit_tool_call_started_trace(
                     machine.protocol_iteration(),
@@ -142,7 +142,7 @@ impl RuntimeTurnDriver<'_> {
                 return Ok(());
             }
         };
-        if self.host.core.trace_sink.is_some() {
+        if self.host.core.tracing.trace_sink.is_some() {
             for outcome in &results {
                 let record = ToolCallRecord {
                     call_id: Some(outcome.call_id.clone()),
@@ -176,7 +176,7 @@ impl RuntimeTurnDriver<'_> {
     ) -> Result<(), RuntimeError> {
         let code_correlation_id = TurnActivityId::new(format!("code:{id:?}"));
         let iteration = machine.protocol_iteration();
-        if self.host.core.trace_sink.is_some() {
+        if self.host.core.tracing.trace_sink.is_some() {
             self.emit_protocol_diagnostic_trace(
                 iteration,
                 "exec_code_started",
@@ -257,7 +257,7 @@ impl RuntimeTurnDriver<'_> {
             }
         }
         if let Ok(output) = &result {
-            if self.host.core.trace_sink.is_some() {
+            if self.host.core.tracing.trace_sink.is_some() {
                 let observations_text = output.observations.join("\n");
                 self.emit_protocol_diagnostic_trace(
                     iteration,
@@ -287,7 +287,7 @@ impl RuntimeTurnDriver<'_> {
             self.turn_pipeline
                 .record_tool_calls(output.tool_calls.iter().cloned());
         } else if let Err(error) = &result
-            && self.host.core.trace_sink.is_some()
+            && self.host.core.tracing.trace_sink.is_some()
         {
             self.emit_protocol_diagnostic_trace(
                 iteration,

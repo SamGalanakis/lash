@@ -143,6 +143,7 @@ impl LashCore {
             let outcome = self
                 .env
                 .core
+                .control
                 .effect_controller
                 .execute_effect(
                     RuntimeEffectEnvelope::new(
@@ -232,7 +233,7 @@ pub struct LashCoreBuilder {
     provider: Option<ProviderHandle>,
     pub(crate) store_factory: Option<Arc<dyn SessionStoreFactory>>,
     child_store_factory: Option<Arc<dyn SessionStoreFactory>>,
-    // `RuntimeCoreConfig` has no `Default`: the three host-owned durability
+    // `RuntimeHostConfig` has no `Default`: the three host-owned durability
     // dependencies must be named. They are collected here and resolved in
     // `build()`, which errors if any is unset — unless `in_memory_stores()`
     // opted into the named in-memory versions.
@@ -247,7 +248,7 @@ pub struct LashCoreBuilder {
     trace_context: Option<lash_trace::TraceContext>,
     termination: Option<TerminationPolicy>,
     // Advanced full-config override; used as the base core when present.
-    runtime_core_config: Option<RuntimeCoreConfig>,
+    runtime_host_config: Option<RuntimeHostConfig>,
     tool_providers: Vec<Arc<dyn ToolProvider>>,
     plugin_stack: PluginStack,
     plugin_host: Option<PluginHost>,
@@ -412,15 +413,15 @@ impl LashCoreBuilder {
         self
     }
 
-    /// Resolve the runtime core config, requiring the three host-owned
+    /// Resolve the runtime host config, requiring the three host-owned
     /// durability dependencies to have been named (or `in_memory_stores()` to
     /// have opted into the in-memory versions).
-    fn resolve_runtime_core_config(&mut self) -> Result<RuntimeCoreConfig> {
-        if let Some(base) = self.runtime_core_config.take() {
+    fn resolve_runtime_host_config(&mut self) -> Result<RuntimeHostConfig> {
+        if let Some(base) = self.runtime_host_config.take() {
             return Ok(self.apply_core_overrides(base));
         }
         if self.in_memory_stores {
-            return Ok(self.apply_core_overrides(RuntimeCoreConfig::in_memory()));
+            return Ok(self.apply_core_overrides(RuntimeHostConfig::in_memory()));
         }
         let effect_controller = self
             .effect_controller
@@ -435,35 +436,35 @@ impl LashCoreBuilder {
             .take()
             .ok_or(EmbedError::MissingAttachmentStore)?;
         let core =
-            RuntimeCoreConfig::new(effect_controller, lashlang_artifact_store, attachment_store);
+            RuntimeHostConfig::new(effect_controller, lashlang_artifact_store, attachment_store);
         Ok(self.apply_core_overrides(core))
     }
 
     /// Apply benign + still-set dependency overrides on top of a base core.
-    fn apply_core_overrides(&mut self, mut core: RuntimeCoreConfig) -> RuntimeCoreConfig {
+    fn apply_core_overrides(&mut self, mut core: RuntimeHostConfig) -> RuntimeHostConfig {
         if let Some(effect_controller) = self.effect_controller.take() {
-            core = core.with_effect_controller(effect_controller);
+            core.control.effect_controller = effect_controller;
         }
         if let Some(attachment_store) = self.attachment_store.take() {
-            core = core.with_attachment_store(attachment_store);
+            core.durability.attachment_store = attachment_store;
         }
         if let Some(artifact_store) = self.lashlang_artifact_store.take() {
-            core = core.with_lashlang_artifact_store(artifact_store);
+            core.durability.lashlang_artifact_store = artifact_store;
         }
         if let Some(prompt) = self.prompt.take() {
-            core = core.with_prompt_layer(prompt);
+            core.prompt.prompt = prompt;
         }
         if let Some(trace_sink) = self.trace_sink.take() {
-            core = core.with_trace_sink(Some(trace_sink));
+            core.tracing.trace_sink = Some(trace_sink);
         }
         if let Some(trace_level) = self.trace_level.take() {
-            core = core.with_trace_level(trace_level);
+            core.tracing.trace_level = trace_level;
         }
         if let Some(trace_context) = self.trace_context.take() {
-            core = core.with_trace_context(trace_context);
+            core.tracing.trace_context = trace_context;
         }
         if let Some(termination) = self.termination.take() {
-            core = core.with_termination(termination);
+            core.control.termination = termination;
         }
         core
     }
@@ -560,10 +561,10 @@ impl LashCoreBuilder {
         };
         let policy = self.session_spec.resolve_against(&base_policy);
 
-        let mut core = self.resolve_runtime_core_config()?;
+        let mut core = self.resolve_runtime_host_config()?;
         if let Some(provider) = self.provider.clone() {
-            core = core
-                .with_provider_resolver(Arc::new(lash_core::SingleProviderResolver::new(provider)));
+            core.providers.provider_resolver =
+                Arc::new(lash_core::SingleProviderResolver::new(provider));
         }
 
         let plugin_factories = if let Some(plugin_host) = self.plugin_host {
@@ -612,7 +613,7 @@ impl LashCoreBuilder {
 
         let mut env_builder = RuntimeEnvironment::builder()
             .with_plugin_host(Arc::new(default_plugin_host))
-            .with_runtime_core_config(core);
+            .with_runtime_host_config(core);
         if let Some(process_registry) = self.process_registry {
             env_builder = env_builder.with_process_registry(process_registry);
         }
@@ -653,7 +654,7 @@ impl LashCoreBuilder {
     fn resolve_process_work_runner(
         process_registry: Option<&Arc<dyn ProcessRegistry>>,
         worker_plugin_host: &PluginHost,
-        core: &RuntimeCoreConfig,
+        core: &RuntimeHostConfig,
         store_factory: Option<&Arc<dyn SessionStoreFactory>>,
         policy: &SessionPolicy,
         explicit_poke: Option<ProcessWorkPoke>,
@@ -763,8 +764,8 @@ pub struct AdvancedLashCoreBuilder {
 }
 
 impl AdvancedLashCoreBuilder {
-    pub fn runtime_core_config(mut self, core: lash_core::RuntimeCoreConfig) -> Self {
-        self.builder.runtime_core_config = Some(core);
+    pub fn runtime_host_config(mut self, core: lash_core::RuntimeHostConfig) -> Self {
+        self.builder.runtime_host_config = Some(core);
         self
     }
 

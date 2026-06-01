@@ -93,9 +93,9 @@ important.
 
 | Family | Use |
 |---|---|
-| `--font-display` (Big Shoulders Display) | h1, h2, h3, brand mark, stat values, table headers |
+| `--font-display` (Big Shoulders Display) | h1, h2, h3, brand mark, stat values |
 | `--font-body` (Spectral) | paragraphs, descriptions, body copy |
-| `--font-ui` (Chivo Mono) | labels, eyebrows, code, mock chrome, terminal specimens |
+| `--font-mono` (Chivo Mono) | labels, eyebrows, code, mock chrome, terminal specimens, table headers |
 
 **Rules**:
 
@@ -264,7 +264,7 @@ Wrap in `.table` for horizontal-scroll on narrow viewports.
 </div>
 ```
 
-`<th>` renders in Big Shoulders Display, sodium, uppercase.
+`<th>` renders in Chivo Mono (`--font-mono`), sodium, uppercase.
 
 ### Pager (prev/next)
 

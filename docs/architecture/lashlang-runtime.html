@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>lashlang · runtime - lash architecture</title>
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link rel="icon" href="../favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="../apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
@@ -129,7 +131,7 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
             <li>
               <div>
                 <h3>Compiler</h3>
-                <p>The compiler lowers linked canonical IR into a <code>Chunk</code> of <code>Instruction</code>s, folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and explicit resource/process effects that the linked <code>LashlangSurface</code> allowed. Chunks no longer carry the full AST or <code>LinkedModule</code>; process-start effects carry <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, display name, and args. The process runner loads the <code>ModuleArtifact</code> from the artifact store and uses a compiled-process cache keyed by <code>(process_ref, required_surface_ref, compiler_version, vm_abi_version)</code>; live resource operation dispatch still uses the current callable tool surface.</p>
+                <p>The compiler lowers linked canonical IR into a <code>Chunk</code> of <code>Instruction</code>s, folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Intrinsic</code> ops like <code>IntrinsicOp::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and explicit resource/process effects that the linked <code>LashlangSurface</code> allowed. Chunks no longer carry the full AST or <code>LinkedModule</code>; process-start effects carry <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, display name, and args. The process runner loads the <code>ModuleArtifact</code> from the artifact store and uses a compiled-process cache keyed by <code>(process_ref, required_surface_ref, compiler_version, vm_abi_version)</code>; live resource operation dispatch still uses the current callable tool surface.</p>
               </div>
             </li>
             <li>

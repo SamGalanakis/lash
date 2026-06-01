@@ -696,25 +696,31 @@ fn render_agent_frame_divider(
         );
     }
 
-    if let Some(seed_value) = record.args.get("seed")
-        && let Some(seed_obj) = seed_value.as_object()
-        && !seed_obj.is_empty()
+    if let Ok(seed) = lash_protocol_rlm::RlmSeed::from_tool_args(&record.args)
+        && !seed.is_empty()
     {
+        let seed_len = seed.globals.len() + seed.projected.entries.len();
         let _ = writeln!(
             out,
             "        <div><span class=\"agent-frame-seed-label\">seed · {} entries</span><div class=\"seed-list\">",
-            seed_obj.len()
+            seed_len
         );
-        for (name, value) in seed_obj {
-            let projected = lash_rlm_types::projection_inner(value).is_some();
-            let kind_label = if projected { "projected" } else { "global" };
-            let kind_attr = if projected { "projected" } else { "global" };
+        for name in seed.globals.keys() {
             let _ = writeln!(
                 out,
                 "          <span class=\"seed-pill\" data-kind=\"{kind}\"><span class=\"seed-name\">{name}</span><span class=\"seed-kind\">{label}</span></span>",
-                kind = kind_attr,
+                kind = "global",
                 name = escape(name),
-                label = kind_label
+                label = "global"
+            );
+        }
+        for (name, _) in &seed.projected.entries {
+            let _ = writeln!(
+                out,
+                "          <span class=\"seed-pill\" data-kind=\"{kind}\"><span class=\"seed-name\">{name}</span><span class=\"seed-kind\">{label}</span></span>",
+                kind = "projected",
+                name = escape(name),
+                label = "projected"
             );
         }
         out.push_str("        </div></div>\n");

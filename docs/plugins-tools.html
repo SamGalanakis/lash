@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>plugins · tools · lash docs</title>
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
@@ -46,21 +48,21 @@
             <table>
               <thead><tr><th>Method</th><th>Use it for</th></tr></thead>
               <tbody>
-                <tr><td><code>context.session_model().await?</code></td><td>Read the active session's concrete <code>model</code> and optional <code>model_variant</code>. Use this before building a <code>DirectRequest</code> that should match the current session.</td></tr>
-                <tr><td><code>context.session_snapshot().await?</code> / <code>context.snapshot_current_session().await?</code></td><td>Read the current session snapshot when a tool truly needs more than model selection.</td></tr>
-                <tr><td><code>context.snapshot_session(session_id).await?</code></td><td>Read another session snapshot through the tool context when the host grants that runtime capability.</td></tr>
-                <tr><td><code>context.tool_catalog().await?</code></td><td>Read the current session's projected tool catalog for discovery/ranking tools.</td></tr>
-                <tr><td><code>context.set_tools_availability(...).await?</code></td><td>Promote, hide, or reset dynamic tool availability for the current session.</td></tr>
+                <tr><td><code>context.sessions().model().await?</code></td><td>Read the active session's concrete <code>model</code> and optional <code>model_variant</code>. Use this before building a <code>DirectRequest</code> that should match the current session.</td></tr>
+                <tr><td><code>context.sessions().snapshot_current().await?</code></td><td>Read the current session snapshot when a tool truly needs more than model selection.</td></tr>
+                <tr><td><code>context.sessions().snapshot(session_id).await?</code></td><td>Read another session snapshot through the tool context when the host grants that runtime capability.</td></tr>
+                <tr><td><code>context.sessions().tool_catalog().await?</code></td><td>Read the current session's projected tool catalog for discovery/ranking tools.</td></tr>
+                <tr><td><code>context.sessions().set_tools_availability(...).await?</code></td><td>Promote, hide, or reset dynamic tool availability for the current session.</td></tr>
                 <tr><td><code>context.sessions()</code></td><td>Cloneable child-session control: <code>create_session</code>, <code>close_session</code>, and one-shot <code>start_turn</code>. Durable background work uses process handles granted to sessions, not child-turn handles.</td></tr>
-                <tr><td><code>context.emit_process_event(...)</code></td><td>Append typed process events from a tool that is already executing inside a durable process.</td></tr>
-                <tr><td><code>context.direct_completion(request, source).await?</code></td><td>Run a one-shot LLM request. Missing <code>session_id</code> and <code>caused_by</code> are filled from the current tool call for tracing, usage attribution, and stable direct-effect replay keys; set <code>DirectRequest::replay</code> when one tool call issues multiple otherwise-identical direct requests.</td></tr>
+                <tr><td><code>context.process_events().emit(...).await?</code></td><td>Append typed process events from a tool that is already executing inside a durable process.</td></tr>
+                <tr><td><code>context.direct_completions().complete(request, source).await?</code></td><td>Run a one-shot LLM request. Missing <code>session_id</code> and <code>caused_by</code> are filled from the current tool call for tracing, usage attribution, and stable direct-effect replay keys; set <code>DirectRequest::replay</code> when one tool call issues multiple otherwise-identical direct requests.</td></tr>
               </tbody>
             </table>
           </div>
           <pre><code>use lash::direct::{DirectOutputSpec, DirectRequest};
 
 async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
-    let model = match call.context.session_model().await {
+    let model = match call.context.sessions().model().await {
         Ok(model) =&gt; model,
         Err(err) =&gt; return ToolResult::err_fmt(format_args!("{err}")),
     };
@@ -71,13 +73,14 @@ async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
         messages: vec![/* ... */],
         attachments: Vec::new(),
         output: DirectOutputSpec::Text,
+        generation: Default::default(),
         stream_events: None,
         session_id: None,                 // filled by ToolContext
         caused_by: None,                  // filled by ToolContext
         replay: None,
     };
 
-    match call.context.direct_completion(request, "my_tool").await {
+    match call.context.direct_completions().complete(request, "my_tool").await {
         Ok(completion) =&gt; ToolResult::ok(serde_json::json!({ "text": completion.text })),
         Err(err) =&gt; ToolResult::err_fmt(format_args!("{err}")),
     }
@@ -88,44 +91,44 @@ async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
         <div class="section" id="tool-execution-modes">
           <div class="section-header">
             <h2>Tool Execution Modes</h2>
-            <p>When the model emits multiple tool calls in one assistant turn, the runtime can dispatch them concurrently or one-at-a-time. The choice is declared per tool via <code>ToolDefinition::execution_mode</code>; the runtime groups the batch and runs each group accordingly.</p>
+            <p>When the model emits multiple tool calls in one assistant turn, the runtime can dispatch them concurrently or one-at-a-time. The choice is declared per tool via <code>ToolDefinition::with_scheduling</code>; the runtime groups the batch and runs each group accordingly.</p>
           </div>
           <div class="two-col">
             <article class="panel">
-              <h3><code>ToolExecutionMode::Parallel</code> (default)</h3>
+              <h3><code>ToolScheduling::Parallel</code> (default)</h3>
               <p>The tool's <code>execute()</code> may run concurrently with other parallel tools from the same batch. The dispatcher schedules them through <code>FuturesUnordered</code> and collects results as each completes. Right for pure reads, network fetches, file scans — anything safe to interleave.</p>
             </article>
             <article class="panel">
-              <h3><code>ToolExecutionMode::Serial</code></h3>
+              <h3><code>ToolScheduling::Serial</code></h3>
               <p>The tool blocks the batch: the runtime runs serial tools one at a time in the order the model emitted them, and only after all parallel tools in the batch have finished. Right for tools that mutate shared state (write to a file, update a database, advance a state machine) where overlapping calls would corrupt outcomes.</p>
             </article>
           </div>
-          <pre><code>use lash::tools::{ToolDefinition, ToolExecutionMode};
+          <pre><code>use lash::tools::{ToolDefinition, ToolScheduling};
 
-ToolDefinition::raw("write_file", "Replace a file's contents.", schema, examples)
-    .execution_mode(ToolExecutionMode::Serial)</code></pre>
+ToolDefinition::raw_named("write_file", "Replace a file's contents.", input_schema, output_schema)
+    .with_scheduling(ToolScheduling::Serial)</code></pre>
           <p>Mixing parallel and serial tools in one batch is supported and common: a read-heavy plan emitting five <code>read_file</code> calls plus one <code>write_file</code> gets the reads concurrently and the write afterward. There is no model-visible distinction — the model sees the same JSON tool list regardless of dispatch mode.</p>
         </div>
 
         <div class="section" id="tool-output-budget">
           <div class="section-header">
             <h2>Tool-Output Budgeting</h2>
-            <p>Large tool outputs blow up provider context, model context windows, and persistent history all at once. <code>ToolOutputBudgetPluginFactory</code> sits in <code>PluginStack::runtime()</code> by default and projects oversized outputs into shorter forms at three different sites — so the dispatch result, the model's next request, and the session graph each see an appropriately budgeted view.</p>
+            <p>Large tool outputs blow up provider context, model context windows, and persistent history all at once. <code>ToolOutputBudgetPluginFactory</code> sits in the <code>runtime_plugin_stack()</code> by default and projects oversized outputs into shorter forms at three different sites — so the dispatch result, the model's next request, and the session graph each see an appropriately budgeted view.</p>
           </div>
           <pre><code>use lash::plugins::{
-    ToolOutputBudgetConfig, ToolOutputBudgetPluginFactory,
+    runtime_plugin_stack, ToolOutputBudgetConfig, ToolOutputBudgetPluginFactory,
 };
 
 let config = ToolOutputBudgetConfig {
-    max_bytes: 32 * 1024, // default: 16 * 1024
-    max_lines: 800,        // default: 400
+    limit: 32 * 1024,  // default: 16 * 1024 bytes
+    max_lines: 800,     // default: 400
     ..ToolOutputBudgetConfig::default()
 };
 
-let plugins = PluginStack::runtime().configure(|plugins| {
+let plugins = runtime_plugin_stack().configure(|plugins| {
     plugins.replace(Arc::new(ToolOutputBudgetPluginFactory::new(config)));
 });</code></pre>
-          <p>Defaults are <strong>16 KiB and 400 lines per tool output</strong>. Outputs under both caps pass through untouched; outputs over either cap are truncated with a "<code>… N more bytes / lines elided …</code>" trailer.</p>
+          <p>Defaults are <strong>16 KiB and 400 lines per tool output</strong>. Outputs under both caps pass through untouched; outputs over either cap are truncated with a "<code>...N bytes truncated...</code>" marker.</p>
           <p>The plugin registers a tool-result projector that applies at three points:</p>
           <ul class="bullets">
             <li><strong>Dispatch projection</strong> — what the runtime returns to the calling code as the tool's immediate result.</li>

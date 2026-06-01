@@ -1008,6 +1008,9 @@ use schema_docs::{
     schema_parameter_docs,
 };
 
+mod schema_validation;
+pub use schema_validation::{LashSchema, validate_tool_input};
+
 #[cfg(test)]
 mod tests {
     use super::*;

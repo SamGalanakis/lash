@@ -199,9 +199,8 @@ impl SessionBuilder {
     ) -> Result<LashSession> {
         let mut env = self.core.env.clone();
         if let Some(provider) = self.provider.clone().or_else(|| self.core.provider.clone()) {
-            env.core = env
-                .core
-                .with_provider_resolver(Arc::new(lash_core::SingleProviderResolver::new(provider)));
+            env.core.providers.provider_resolver =
+                Arc::new(lash_core::SingleProviderResolver::new(provider));
         }
         let plugin_host = build_plugin_host_for_mode(
             &self.core.modes,

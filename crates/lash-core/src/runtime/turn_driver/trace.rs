@@ -20,8 +20,8 @@ impl RuntimeTurnDriver<'_> {
 
     pub(super) fn emit_trace(&self, protocol_iteration: usize, event: lash_trace::TraceEvent) {
         crate::trace::emit_trace(
-            &self.host.core.trace_sink,
-            &self.host.core.trace_context,
+            &self.host.core.tracing.trace_sink,
+            &self.host.core.tracing.trace_context,
             self.trace_context(protocol_iteration),
             event,
         );

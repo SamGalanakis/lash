@@ -178,8 +178,8 @@ impl CurrentSessionCapability {
         event: lash_trace::TraceEvent,
     ) -> Result<(), crate::PluginError> {
         crate::trace::emit_trace(
-            &self.host.core.trace_sink,
-            &self.host.core.trace_context,
+            &self.host.core.tracing.trace_sink,
+            &self.host.core.tracing.trace_context,
             context.for_session(self.session_id.clone()),
             event,
         );

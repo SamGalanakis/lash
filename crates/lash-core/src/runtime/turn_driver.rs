@@ -20,13 +20,15 @@ pub(super) use trace::protocol_step_trace_event;
 
 pub(super) struct RuntimeTurnDriver<'a> {
     pub(super) session: Session,
-    pub(super) policy: ResolvedSessionPolicy,
+    pub(super) policy: RuntimeSessionPolicy,
     pub(super) host: RuntimeHost,
-    pub(super) effect_scope: RuntimeEffectControllerScope<'a>,
+    pub(super) durable_turn_scope: DurableTurnScope<'a>,
+    pub(super) durable_turn: &'a dyn DurableTurnProvider,
+    pub(super) durable_turn_run: DurableTurnRun,
     pub(super) session_id: String,
     pub(super) turn_id: String,
     pub(super) turn_index: usize,
-    pub(super) turn_pipeline: TurnCommitPipeline,
+    pub(super) turn_pipeline: TurnBoundary,
     pub(super) llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
     pub(super) next_llm_ordinal: usize,
     pub(super) session_services: Arc<RuntimeSessionServices>,

@@ -8,7 +8,7 @@ use crate::rlm_support::{
 use lash_core::llm::types::{LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole};
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::{
-    LashRuntime, PluginFactory, PluginHost, ProcessRuntimeHost, RuntimeCoreConfig, RuntimeServices,
+    LashRuntime, PluginFactory, PluginHost, ProcessRuntimeHost, RuntimeHostConfig, RuntimeServices,
     SessionPolicy, TestLocalProcessRegistry,
 };
 use lash_core::{ToolArgumentProjectionPolicy, ToolDefinition, ToolOutputContract, TurnInput};
@@ -558,9 +558,12 @@ async fn run_seed_probe(
         .build_session("root", None)
         .expect("plugin session");
     let host = ProcessRuntimeHost::new(
-        lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::in_memory().with_provider_resolver(
-            Arc::new(lash_core::SingleProviderResolver::new(provider.clone())),
-        )),
+        lash_core::EmbeddedRuntimeHost::new({
+            let mut config = RuntimeHostConfig::in_memory();
+            config.providers.provider_resolver =
+                Arc::new(lash_core::SingleProviderResolver::new(provider.clone()));
+            config
+        }),
         Arc::clone(&registry) as Arc<dyn lash_core::ProcessRegistry>,
     );
     let policy = SessionPolicy {
@@ -579,9 +582,12 @@ async fn run_seed_probe(
     let worker = lash_core::DurableProcessWorker::new(
         lash_core::DurableProcessWorkerConfig::from_plugin_factories(
             factories,
-            RuntimeCoreConfig::in_memory().with_provider_resolver(Arc::new(
-                lash_core::SingleProviderResolver::new(provider.clone()),
-            )),
+            {
+                let mut config = RuntimeHostConfig::in_memory();
+                config.providers.provider_resolver =
+                    Arc::new(lash_core::SingleProviderResolver::new(provider.clone()));
+                config
+            },
             Arc::new(lash_core::InMemorySessionStoreFactory::new()),
             Arc::clone(&registry) as Arc<dyn lash_core::ProcessRegistry>,
         )

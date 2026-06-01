@@ -11,28 +11,58 @@ use super::{
 
 /// Required host configuration for all runtimes.
 #[derive(Clone)]
-pub struct RuntimeCoreConfig {
+pub struct RuntimeHostConfig {
+    pub profile: RuntimeHostProfileConfig,
+    pub durability: RuntimeDurabilityConfig,
+    pub providers: RuntimeProviderConfig,
+    pub prompt: RuntimePromptConfig,
+    pub control: RuntimeControlConfig,
+    pub tracing: RuntimeTracingConfig,
+}
+
+#[derive(Clone)]
+pub struct RuntimeHostProfileConfig {
     pub host_profile_id: String,
+}
+
+#[derive(Clone)]
+pub struct RuntimeDurabilityConfig {
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     pub lashlang_process_cache: Arc<Mutex<lashlang::CompiledProcessCache>>,
+}
+
+#[derive(Clone)]
+pub struct RuntimeProviderConfig {
     pub provider_resolver: Arc<dyn crate::RuntimeProviderResolver>,
+}
+
+#[derive(Clone)]
+pub struct RuntimePromptConfig {
     pub prompt: crate::PromptLayer,
+}
+
+#[derive(Clone)]
+pub struct RuntimeControlConfig {
+    pub effect_controller: Arc<dyn RuntimeEffectController>,
+    pub termination: TerminationPolicy,
+}
+
+#[derive(Clone)]
+pub struct RuntimeTracingConfig {
     pub trace_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
-    pub termination: TerminationPolicy,
-    pub effect_controller: Arc<dyn RuntimeEffectController>,
 }
 
-impl RuntimeCoreConfig {
+impl RuntimeHostConfig {
     /// Construct a config with the three host-owned dependencies named
     /// explicitly.
     ///
     /// There is intentionally no `Default`. The effect controller, Lashlang
     /// artifact store, and attachment store decide a runtime's durability, so
     /// hosts must choose them rather than silently inheriting in-memory
-    /// implementations. Use [`RuntimeCoreConfig::in_memory`] to opt into the
+    /// implementations. Use [`RuntimeHostConfig::in_memory`] to opt into the
     /// in-process / in-memory versions by name.
     pub fn new(
         effect_controller: Arc<dyn RuntimeEffectController>,
@@ -40,17 +70,29 @@ impl RuntimeCoreConfig {
         attachment_store: Arc<dyn crate::AttachmentStore>,
     ) -> Self {
         Self {
-            host_profile_id: "default".to_string(),
-            attachment_store,
-            lashlang_artifact_store,
-            lashlang_process_cache: Arc::new(Mutex::new(lashlang::CompiledProcessCache::new())),
-            provider_resolver: Arc::new(crate::EmptyProviderResolver),
-            prompt: crate::PromptLayer::new(),
-            trace_sink: None,
-            trace_level: TraceLevel::Standard,
-            trace_context: TraceContext::default(),
-            termination: TerminationPolicy::default(),
-            effect_controller,
+            profile: RuntimeHostProfileConfig {
+                host_profile_id: "default".to_string(),
+            },
+            durability: RuntimeDurabilityConfig {
+                attachment_store,
+                lashlang_artifact_store,
+                lashlang_process_cache: Arc::new(Mutex::new(lashlang::CompiledProcessCache::new())),
+            },
+            providers: RuntimeProviderConfig {
+                provider_resolver: Arc::new(crate::EmptyProviderResolver),
+            },
+            prompt: RuntimePromptConfig {
+                prompt: crate::PromptLayer::new(),
+            },
+            control: RuntimeControlConfig {
+                termination: TerminationPolicy::default(),
+                effect_controller,
+            },
+            tracing: RuntimeTracingConfig {
+                trace_sink: None,
+                trace_level: TraceLevel::Standard,
+                trace_context: TraceContext::default(),
+            },
         }
     }
 
@@ -67,111 +109,17 @@ impl RuntimeCoreConfig {
             Arc::new(crate::InMemoryAttachmentStore::new()),
         )
     }
-
-    pub fn with_attachment_store(
-        mut self,
-        attachment_store: Arc<dyn crate::AttachmentStore>,
-    ) -> Self {
-        self.attachment_store = attachment_store;
-        self
-    }
-
-    pub fn with_lashlang_artifact_store(
-        mut self,
-        artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
-    ) -> Self {
-        self.lashlang_artifact_store = artifact_store;
-        self
-    }
-
-    pub fn with_lashlang_process_cache(
-        mut self,
-        process_cache: Arc<Mutex<lashlang::CompiledProcessCache>>,
-    ) -> Self {
-        self.lashlang_process_cache = process_cache;
-        self
-    }
-
-    pub fn with_provider_resolver(
-        mut self,
-        provider_resolver: Arc<dyn crate::RuntimeProviderResolver>,
-    ) -> Self {
-        self.provider_resolver = provider_resolver;
-        self
-    }
-
-    pub fn with_host_profile_id(mut self, host_profile_id: impl Into<String>) -> Self {
-        self.host_profile_id = host_profile_id.into();
-        self
-    }
-
-    pub fn with_prompt_template(mut self, prompt_template: crate::PromptTemplate) -> Self {
-        self.prompt.template = Some(prompt_template);
-        self
-    }
-
-    pub fn with_prompt_contribution(mut self, contribution: crate::PromptContribution) -> Self {
-        self.prompt.add_contribution(contribution);
-        self
-    }
-
-    pub fn with_replaced_prompt_slot(
-        mut self,
-        slot: crate::PromptSlot,
-        contributions: impl IntoIterator<Item = crate::PromptContribution>,
-    ) -> Self {
-        self.prompt.replace_slot(slot, contributions);
-        self
-    }
-
-    pub fn with_cleared_prompt_slot(mut self, slot: crate::PromptSlot) -> Self {
-        self.prompt.clear_slot(slot);
-        self
-    }
-
-    pub fn with_prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
-        self.prompt = prompt;
-        self
-    }
-
-    pub fn with_trace_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
-        self.trace_sink = sink;
-        self
-    }
-
-    pub fn with_trace_level(mut self, level: TraceLevel) -> Self {
-        self.trace_level = level;
-        self
-    }
-
-    pub fn with_trace_context(mut self, context: TraceContext) -> Self {
-        self.trace_context = context;
-        self
-    }
-
-    pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
-        self.termination = termination;
-        self
-    }
-
-    pub fn with_effect_controller(
-        mut self,
-        effect_controller: Arc<dyn RuntimeEffectController>,
-    ) -> Self {
-        self.effect_controller = effect_controller;
-        self
-    }
 }
 
 /// Base host shape for embedded runtimes.
 #[derive(Clone)]
 pub struct EmbeddedRuntimeHost {
-    pub core: RuntimeCoreConfig,
+    pub core: RuntimeHostConfig,
     pub session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
 }
 
 impl EmbeddedRuntimeHost {
-    pub fn new(core: RuntimeCoreConfig) -> Self {
+    pub fn new(core: RuntimeHostConfig) -> Self {
         Self {
             core,
             session_store_factory: None,
@@ -205,7 +153,7 @@ impl ProcessRuntimeHost {
 
 #[derive(Clone)]
 pub(crate) struct RuntimeHost {
-    pub core: RuntimeCoreConfig,
+    pub core: RuntimeHostConfig,
     pub session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
     /// Wakes the host's [`ProcessWorkRunner`](super::ProcessWorkRunner) so a
@@ -219,12 +167,13 @@ impl RuntimeHost {
         &self,
         session_id: &str,
         policy: crate::SessionPolicy,
-    ) -> Result<crate::ResolvedSessionPolicy, crate::SessionError> {
+    ) -> Result<crate::RuntimeSessionPolicy, crate::SessionError> {
         let provider_id = policy.recorded_provider_id();
-        let provider = self
+        let binding = self
             .core
+            .providers
             .provider_resolver
-            .resolve_provider(provider_id)
+            .resolve_provider_binding(provider_id)
             .map_err(|err| match err {
                 crate::ProviderResolutionError::MissingProviderId => {
                     crate::SessionError::ProviderUnconfigured {
@@ -245,7 +194,7 @@ impl RuntimeHost {
                     }
                 }
             })?;
-        Ok(crate::ResolvedSessionPolicy::new(policy, provider))
+        Ok(crate::RuntimeSessionPolicy::new(policy, binding))
     }
 }
 

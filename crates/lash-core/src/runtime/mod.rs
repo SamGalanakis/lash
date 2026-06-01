@@ -2,6 +2,7 @@ mod assembly;
 mod builder;
 pub(crate) mod causal;
 mod config_ops;
+mod durable_turn;
 mod effect;
 mod environment;
 mod error;
@@ -19,8 +20,8 @@ mod session_ops;
 mod state;
 #[cfg(test)]
 pub(crate) mod tests;
+mod turn_boundary;
 mod turn_commit_draft;
-mod turn_commit_pipeline;
 mod turn_driver;
 mod turn_graph_editor;
 mod turn_loop;
@@ -46,7 +47,7 @@ use crate::plugin::{
 };
 use crate::sansio::{LlmCallError, Response};
 use crate::session_model::{
-    Message, MessageRole, Part, PartKind, PruneState, ResolvedSessionPolicy, SessionEvent,
+    Message, MessageRole, Part, PartKind, PruneState, RuntimeSessionPolicy, SessionEvent,
     SessionPolicy, TokenUsage, fresh_message_id, make_error_event, reassign_part_ids, shared_parts,
     transport_stream_events,
 };
@@ -59,8 +60,8 @@ use crate::{Effect, TurnMachine};
 
 use host::*;
 use session_manager::*;
+use turn_boundary::*;
 use turn_commit_draft::*;
-use turn_commit_pipeline::*;
 use turn_driver::*;
 
 pub(crate) const RUNTIME_TURN_LEASE_TTL_MS: u64 = 15 * 60 * 1000;
@@ -78,17 +79,25 @@ use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
 pub use causal::process_event_invocation;
 pub(crate) use causal::tool_retry_sleep_invocation;
+pub use durable_turn::{
+    BeginDurableTurnRequest, DurableTurnCheckpointSnapshot, DurableTurnProvider, DurableTurnRun,
+    EmbeddedDurableTurnProvider, EmbeddedDurableTurnStore, ResumeDurableTurnRequest,
+    SubstrateDurableTurnProvider,
+};
+pub(crate) use durable_turn::{
+    execute_embedded_journaled_effect, invoke_embedded_journaled_effect,
+};
 pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
-    CausalRef, InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec, ProcessCommand,
-    ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
-    RuntimeReplay, RuntimeScope, RuntimeSubject,
+    CausalRef, DurableTurnScope, InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec,
+    ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimeReplay,
+    RuntimeScope, RuntimeSubject,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{DurableSubstrateFacet, RuntimeError, RuntimeErrorCode};
-pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeCoreConfig};
+pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeHostConfig};
 pub use in_memory_store::{InMemorySessionStore, InMemorySessionStoreFactory};
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};
@@ -748,17 +757,17 @@ impl TurnActivitySink for NoopTurnActivitySink {
     async fn emit(&self, _activity: TurnActivity) {}
 }
 
-/// Optional sinks and durable-effect scope passed to one of [`LashRuntime`]'s
+/// Optional sinks and durable turn scope passed to one of [`LashRuntime`]'s
 /// turn-driving entry points (`stream_turn`, `resume_turn`,
 /// `stream_turn_with_agent_frames`).
 ///
 /// Construct via [`TurnOptions::new`] and chain `with_*` builders; defaults to
-/// no-op sinks and an inline effect scope derived from the runtime's own
+/// no-op sinks and an inline durable turn scope derived from the runtime's own
 /// effect controller.
 pub struct TurnOptions<'a> {
     events: Option<&'a dyn EventSink>,
     turn_events: Option<&'a dyn TurnActivitySink>,
-    effect_scope: Option<RuntimeEffectControllerScope<'a>>,
+    durable_turn_scope: Option<DurableTurnScope<'a>>,
     cancel: CancellationToken,
 }
 
@@ -767,7 +776,7 @@ impl<'a> TurnOptions<'a> {
         Self {
             events: None,
             turn_events: None,
-            effect_scope: None,
+            durable_turn_scope: None,
             cancel,
         }
     }
@@ -782,8 +791,8 @@ impl<'a> TurnOptions<'a> {
         self
     }
 
-    pub fn with_effect_scope(mut self, effect_scope: RuntimeEffectControllerScope<'a>) -> Self {
-        self.effect_scope = Some(effect_scope);
+    pub fn with_durable_turn_scope(mut self, durable_turn_scope: DurableTurnScope<'a>) -> Self {
+        self.durable_turn_scope = Some(durable_turn_scope);
         self
     }
 
@@ -795,17 +804,17 @@ impl<'a> TurnOptions<'a> {
         self.turn_events.unwrap_or(&NOOP_TURN_ACTIVITY_SINK)
     }
 
-    /// Return the caller-supplied effect scope, or build a fresh inline scope
+    /// Return the caller-supplied durable turn scope, or build a fresh inline scope
     /// from `fallback_controller` targeting `turn_id`.
-    pub(crate) fn resolve_effect_scope(
+    pub(crate) fn resolve_durable_turn_scope(
         &self,
         fallback_controller: &'a dyn RuntimeEffectController,
         turn_id: &'a str,
-    ) -> Result<RuntimeEffectControllerScope<'a>, RuntimeError> {
-        if let Some(scope) = self.effect_scope {
+    ) -> Result<DurableTurnScope<'a>, RuntimeError> {
+        if let Some(scope) = self.durable_turn_scope {
             return Ok(scope);
         }
-        RuntimeEffectControllerScope::new(fallback_controller, turn_id)
+        DurableTurnScope::new(fallback_controller, turn_id)
     }
 }
 

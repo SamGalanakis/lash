@@ -47,9 +47,10 @@ async fn main() -> anyhow_like::Result<()> {
     let durability = AgentServiceDurability::configured()?;
     let api_key = std::env::var("OPENROUTER_API_KEY")
         .map_err(|_| "OPENROUTER_API_KEY is required".to_string())?;
-    let model = std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-5.5".to_string());
+    let model = std::env::var("OPENROUTER_MODEL")
+        .unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string());
     let model_variant =
-        std::env::var("OPENROUTER_MODEL_VARIANT").unwrap_or_else(|_| "medium".to_string());
+        std::env::var("OPENROUTER_MODEL_VARIANT").unwrap_or_else(|_| "high".to_string());
     let addr: SocketAddr = std::env::var("AGENT_SERVICE_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
         .parse()
@@ -149,7 +150,7 @@ async fn main() -> anyhow_like::Result<()> {
             {
                 // Base controller for turns that run outside a Restate
                 // workflow scope; durable turns pass a scoped controller per
-                // turn via `stream_with_effect_scope`. The Restate ingress
+                // turn via `stream_with_durable_turn`. The Restate ingress
                 // runner is the sole executor of out-of-turn/background
                 // processes, so disable the default inline runner and hand the
                 // core its poke (fired after every successful process start).

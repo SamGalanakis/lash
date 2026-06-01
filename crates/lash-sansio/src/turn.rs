@@ -10,6 +10,9 @@ pub struct SansIoTurnInput<M: TurnProtocol = UnitTurnProtocol> {
     pub run_session_id: Option<String>,
     pub autonomous: bool,
     pub model: String,
+    /// Model context-window size in tokens, if known. Threaded into the kernel
+    /// so it can reclassify a zero-output `OutputLimit` as `ContextOverflow`.
+    pub max_context_tokens: Option<usize>,
     pub messages: MessageSequence,
     pub events: Arc<Vec<crate::SessionEventRecord<M::Event>>>,
     pub turn_causes: Vec<crate::TurnCause>,
@@ -36,6 +39,7 @@ pub fn build_turn<M: TurnProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMac
             projector: input.turn_driver_preamble.config.projector.clone(),
             sync_execution_surface: input.turn_driver_preamble.config.sync_execution_surface,
             model: input.model,
+            max_context_tokens: input.max_context_tokens,
             max_turns: input.max_turns,
             model_variant: input.model_variant,
             generation: input.generation,
@@ -173,6 +177,7 @@ mod tests {
             run_session_id: Some("run".to_string()),
             autonomous: false,
             model: "gpt-5".to_string(),
+            max_context_tokens: None,
             messages: crate::MessageSequence::default(),
             events: Arc::new(Vec::new()),
             turn_causes: Vec::new(),

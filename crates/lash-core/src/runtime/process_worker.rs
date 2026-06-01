@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::effect::ProcessRunner;
 use super::session_manager::RuntimeSessionServices;
-use super::{EmbeddedRuntimeBuilder, RUNTIME_TURN_LEASE_TTL_MS, RuntimeCoreConfig};
+use super::{EmbeddedRuntimeBuilder, RUNTIME_TURN_LEASE_TTL_MS, RuntimeHostConfig};
 use crate::{
     LashRuntime, PluginError, PluginFactory, PluginHost, PluginStack, ProcessAwaitOutput,
     ProcessExecutionContext, ProcessInput, ProcessLease, ProcessLeaseCompletion, ProcessRecord,
@@ -20,7 +20,7 @@ use crate::{
 #[derive(Clone)]
 pub struct DurableProcessWorkerConfig {
     pub plugin_host: Arc<PluginHost>,
-    pub runtime_core: RuntimeCoreConfig,
+    pub runtime_host: RuntimeHostConfig,
     pub session_policy: crate::SessionPolicy,
     pub session_store_factory: Arc<dyn SessionStoreFactory>,
     pub process_registry: Arc<dyn ProcessRegistry>,
@@ -35,13 +35,13 @@ pub struct DurableProcessWorkerConfig {
 impl DurableProcessWorkerConfig {
     pub fn new(
         plugin_host: Arc<PluginHost>,
-        runtime_core: RuntimeCoreConfig,
+        runtime_host: RuntimeHostConfig,
         session_store_factory: Arc<dyn SessionStoreFactory>,
         process_registry: Arc<dyn ProcessRegistry>,
     ) -> Self {
         Self {
             plugin_host,
-            runtime_core,
+            runtime_host,
             session_policy: crate::SessionPolicy::default(),
             session_store_factory,
             process_registry,
@@ -61,13 +61,13 @@ impl DurableProcessWorkerConfig {
 
     pub fn from_plugin_factories(
         plugin_factories: impl IntoIterator<Item = Arc<dyn PluginFactory>>,
-        runtime_core: RuntimeCoreConfig,
+        runtime_host: RuntimeHostConfig,
         session_store_factory: Arc<dyn SessionStoreFactory>,
         process_registry: Arc<dyn ProcessRegistry>,
     ) -> Self {
         Self::new(
             Arc::new(PluginHost::new(plugin_factories.into_iter().collect())),
-            runtime_core,
+            runtime_host,
             session_store_factory,
             process_registry,
         )
@@ -75,13 +75,13 @@ impl DurableProcessWorkerConfig {
 
     pub fn from_plugin_stack(
         plugin_stack: PluginStack,
-        runtime_core: RuntimeCoreConfig,
+        runtime_host: RuntimeHostConfig,
         session_store_factory: Arc<dyn SessionStoreFactory>,
         process_registry: Arc<dyn ProcessRegistry>,
     ) -> Self {
         Self::from_plugin_factories(
             plugin_stack.into_factories(),
-            runtime_core,
+            runtime_host,
             session_store_factory,
             process_registry,
         )
@@ -422,7 +422,7 @@ impl DurableProcessWorker {
         EmbeddedRuntimeBuilder::new()
             .with_session_id(session_id.to_string())
             .with_plugin_host(self.config.plugin_host.as_ref().clone())
-            .with_runtime_core(self.config.runtime_core.clone())
+            .with_runtime_host(self.config.runtime_host.clone())
             .with_policy(self.config.session_policy.clone())
             .with_session_store_factory(Arc::clone(&self.config.session_store_factory))
             .with_process_registry(Arc::clone(&self.config.process_registry))
@@ -446,7 +446,12 @@ impl DurableProcessWorker {
     /// Inline controllers (the default tier) impose no requirement, so
     /// inline/in-memory workers pass unchanged.
     fn ensure_durable_substrate(&self) -> Result<(), PluginError> {
-        if self.config.runtime_core.effect_controller.durability_tier()
+        if self
+            .config
+            .runtime_host
+            .control
+            .effect_controller
+            .durability_tier()
             != crate::DurabilityTier::Durable
         {
             return Ok(());
@@ -456,7 +461,8 @@ impl DurableProcessWorker {
         };
         if self
             .config
-            .runtime_core
+            .runtime_host
+            .durability
             .attachment_store
             .persistence()
             .durability_tier()
@@ -466,7 +472,8 @@ impl DurableProcessWorker {
         }
         if self
             .config
-            .runtime_core
+            .runtime_host
+            .durability
             .lashlang_artifact_store
             .durability_tier()
             != crate::DurabilityTier::Durable
@@ -484,7 +491,7 @@ impl DurableProcessWorker {
     /// `run` re-invocation (keyed `LashProcessWorkflow/{process_id}`) or a
     /// recovery sweep re-running a non-terminal row — must present that stable
     /// id. An empty/fresh id has lost its idempotency anchor and is rejected
-    /// loudly here, mirroring how `RuntimeEffectControllerScope::new` rejects an
+    /// loudly here, mirroring how `DurableTurnScope::new` rejects an
     /// empty turn id at the durable-effect boundary.
     fn ensure_stable_process_id(
         &self,
@@ -503,7 +510,7 @@ impl DurableProcessWorker {
         registration: &ProcessRegistration,
     ) -> Result<(), PluginError> {
         let actual = registration.provenance.host_profile_id.as_str();
-        let expected = self.config.runtime_core.host_profile_id.as_str();
+        let expected = self.config.runtime_host.profile.host_profile_id.as_str();
         if actual.is_empty() || actual == expected {
             return Ok(());
         }
@@ -639,10 +646,10 @@ mod boundary_tests {
         artifact: Arc<dyn LashlangArtifactStore>,
         session_store_tier: DurabilityTier,
     ) -> DurableProcessWorker {
-        let runtime_core = RuntimeCoreConfig::in_memory()
-            .with_effect_controller(Arc::new(DurableController))
-            .with_attachment_store(attachment)
-            .with_lashlang_artifact_store(artifact);
+        let mut runtime_host = RuntimeHostConfig::in_memory();
+        runtime_host.control.effect_controller = Arc::new(DurableController);
+        runtime_host.durability.attachment_store = attachment;
+        runtime_host.durability.lashlang_artifact_store = artifact;
         let plugin_host = Arc::new(crate::PluginHost::new(Vec::new()));
         let factory: Arc<dyn SessionStoreFactory> = Arc::new(TierSessionStoreFactory {
             tier: session_store_tier,
@@ -651,7 +658,7 @@ mod boundary_tests {
             Arc::new(crate::TestLocalProcessRegistry::default());
         DurableProcessWorker::new(DurableProcessWorkerConfig::new(
             plugin_host,
-            runtime_core,
+            runtime_host,
             factory,
             registry,
         ))
@@ -742,7 +749,7 @@ mod boundary_tests {
     async fn inline_worker_passes_substrate_check_with_ephemeral_stores() {
         // Inline controllers impose no requirement, so an in-memory worker runs
         // unchanged — the durable-first guard must not regress inline hosts.
-        let runtime_core = RuntimeCoreConfig::in_memory();
+        let runtime_host = RuntimeHostConfig::in_memory();
         let plugin_host = Arc::new(crate::PluginHost::new(Vec::new()));
         let factory: Arc<dyn SessionStoreFactory> = Arc::new(TierSessionStoreFactory {
             tier: DurabilityTier::Inline,
@@ -751,7 +758,7 @@ mod boundary_tests {
             Arc::new(crate::TestLocalProcessRegistry::default());
         let worker = DurableProcessWorker::new(DurableProcessWorkerConfig::new(
             plugin_host,
-            runtime_core,
+            runtime_host,
             factory,
             registry,
         ));

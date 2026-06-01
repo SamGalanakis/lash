@@ -44,27 +44,27 @@ pub trait RuntimeEffectController: Send + Sync {
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError>;
 }
 
-/// Borrowed durable effect controller for one runtime execution.
+/// Borrowed durable turn scope for one runtime execution.
 ///
 /// Durable integrations create one scope per externally
-/// identified run and pass it to the scoped runtime entrypoints, making the
+/// identified turn and pass it to the scoped runtime entrypoints, making the
 /// turn identity part of the idempotency contract rather than a tracing-only
 /// hint.
 #[derive(Clone, Copy)]
-pub struct RuntimeEffectControllerScope<'run> {
+pub struct DurableTurnScope<'run> {
     controller: &'run dyn RuntimeEffectController,
     turn_id: &'run str,
 }
 
-impl<'run> RuntimeEffectControllerScope<'run> {
+impl<'run> DurableTurnScope<'run> {
     pub fn new(
         controller: &'run dyn RuntimeEffectController,
         turn_id: &'run str,
     ) -> Result<Self, RuntimeError> {
         if turn_id.is_empty() {
             return Err(RuntimeError::new(
-                RuntimeErrorCode::MissingEffectScopeTurnId,
-                "scoped durable runs require a non-empty stable turn_id",
+                RuntimeErrorCode::MissingDurableTurnScopeTurnId,
+                "durable turn scopes require a non-empty stable turn_id",
             ));
         }
         Ok(Self {

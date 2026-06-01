@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>lash api · basics · lash docs</title>
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
@@ -33,11 +35,11 @@
             <dt>Per-turn atomic commit</dt>
             <dd><code>RuntimeCommit</code> writes graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS on <code>expected_head_revision</code>. Partial turn = no commit.</dd>
             <dt>Typed plugin capabilities</dt>
-            <dd>Tools see a named <code>ToolContext</code> surface — <code>processes()</code>, <code>sessions()</code>, <code>direct_completion</code>, <code>tool_catalog</code>, snapshot reads — not a general host handle. The surface exposes no <code>ToolContext::host()</code> escape hatch.</dd>
+            <dd>Tools see a named <code>ToolContext</code> surface — <code>processes()</code>, <code>sessions()</code>, <code>direct_completions()</code>, <code>tool_catalog()</code>, snapshot reads — not a general host handle. The surface exposes no <code>ToolContext::host()</code> escape hatch.</dd>
             <dt>Sandboxed code load, ready</dt>
             <dd>RLM mode runs model-emitted Lashlang programs in a VM with no direct filesystem, OS-process, or network surface. Every effect crosses Lashlang's <code>ExecutionHost</code>, and the linked host surface decides which resource and background-process abilities exist. Use it when the model should compose multiple tool calls per turn instead of one.</dd>
             <dt>Subagent capability boundaries</dt>
-            <dd><code>Capability::resolve(parent_policy)</code> returns a constrained <code>SessionSpec</code> for the child. Interactive-only tools are stripped from every subagent surface regardless of capability.</dd>
+            <dd><code>Capability::build_session_request(ctx)</code> resolves a constrained <code>SessionCreateRequest</code> for the child against the parent policy. Interactive-only tools are stripped from every subagent surface regardless of capability.</dd>
             <dt>Semantic event stream</dt>
             <dd>Identity-bearing <code>TurnActivity</code> items: assistant prose deltas, reasoning deltas, tool start/complete pairs with correlation ids, code-block start/complete, terminal <code>SubmittedValue</code>/<code>ToolValue</code>, per-call and rolling usage. Assistant prose deltas are live previews; the settled transcript comes from <code>TurnResult</code> / <code>SessionReadView</code> after the runtime commit.</dd>
             <dt>Tracing as a first-class sink</dt>
@@ -116,7 +118,7 @@
             <div class="diagram-title">lash vs lash-core boundary</div>
             <pre><code>use std::sync::Arc;
 
-use lash::{tools::*, LashCore, ModeId, ModePreset, PluginStack, TurnEvent, TurnInput};
+use lash::{plugins::runtime_plugin_stack, tools::*, LashCore, ModeId, ModePreset, TurnEvent, TurnInput};
 
 let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new("lash-sessions"));
 
@@ -126,7 +128,7 @@ let core = LashCore::builder()
     .default_mode(ModeId::rlm())
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
-    .plugins(PluginStack::runtime())
+    .plugins(runtime_plugin_stack())
     .tools(Arc::new(AppTools) as Arc&lt;dyn ToolProvider&gt;)
     .store_factory(store_factory)
     .build()?;
@@ -147,7 +149,7 @@ println!("{assistant_text}");</code></pre>
             <dt><code>SessionSpec</code></dt>
             <dd>Provider, model/variant, mode, max context tokens, max turns, prompt layer. Root cores: <code>SessionSpec::new()</code>. Children and subagents: <code>SessionSpec::inherit()</code>.</dd>
             <dt><code>PluginStack</code></dt>
-            <dd>Ordered plugin factory list. <code>LashCore::standard()</code> / <code>::rlm()</code> ship with <code>PluginStack::runtime()</code>; raw <code>::builder()</code> starts empty.</dd>
+            <dd>Ordered plugin factory list. <code>LashCore::standard()</code> / <code>::rlm()</code> ship with <code>plugins::runtime_plugin_stack()</code>; raw <code>::builder()</code> starts empty.</dd>
             <dt><code>LashSession</code></dt>
             <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>run(...)</code>, <code>read_view()</code>, and <code>control()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
@@ -163,10 +165,10 @@ println!("{assistant_text}");</code></pre>
           <div class="two-col">
             <article class="panel">
               <h3>Root defaults</h3>
-              <pre><code>use lash::{plugins::PluginFactory, LashCore, PluginStack, SessionSpec};
+              <pre><code>use lash::{plugins::{runtime_plugin_stack, PluginFactory}, LashCore, ModeId, ModePreset, SessionSpec};
 
 let root_spec = SessionSpec::new()
-    .provider(provider)
+    .provider_id(provider.kind())
     .model(lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None, None).expect("valid model metadata"));
 
 let core = LashCore::rlm()
@@ -178,7 +180,7 @@ let core = LashCore::rlm()
             </article>
             <article class="panel">
               <h3>Explicit stacks</h3>
-              <pre><code>let plugins = PluginStack::runtime().configure(|plugins| {
+              <pre><code>let plugins = runtime_plugin_stack().configure(|plugins| {
     plugins.replace(Arc::new(CustomBudgetPlugin) as Arc&lt;dyn PluginFactory&gt;);
     plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
 });

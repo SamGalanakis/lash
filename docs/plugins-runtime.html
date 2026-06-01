@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="dark light">
 <style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>plugins · runtime · lash docs</title>
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
@@ -42,8 +44,8 @@
             <h2>Snapshots And Durability</h2>
             <p>A session that uses a <code>SessionStoreFactory</code> (see <a href="./persistence.html">Persistence</a>) survives process restarts: the runtime parks its in-memory state into the store on shutdown and rehydrates it on the next open. Plugins participate by implementing two optional <code>SessionPlugin</code> methods:</p>
           </div>
-          <pre><code>fn snapshot(&amp;self) -&gt; Result&lt;Option&lt;Vec&lt;u8&gt;&gt;, PluginError&gt; { Ok(None) }
-fn restore(&amp;self, _bytes: &amp;[u8]) -&gt; Result&lt;(), PluginError&gt; { Ok(()) }</code></pre>
+          <pre><code>fn snapshot(&amp;self, _writer: &amp;mut dyn SnapshotWriter) -&gt; Result&lt;PluginSnapshotMeta, PluginError&gt; { /* default: empty meta */ }
+fn restore(&amp;self, _meta: &amp;PluginSnapshotMeta, _reader: &amp;dyn SnapshotReader) -&gt; Result&lt;(), PluginError&gt; { Ok(()) }</code></pre>
           <p><code>snapshot()</code> serialises whatever session-local state the plugin holds — counters, accumulated context, pending state machines — and the bytes go into the same SQLite checkpoint blob the runtime uses for its own state. <code>restore()</code> is called on a fresh session plugin after <code>register()</code> when the runtime opens an existing session id. Treat the byte format as private to your plugin; version it inline if you anticipate schema drift.</p>
           <p>Plugins that hold no per-session state at all (most prompt contributors, observers, pure tool providers) can skip both methods — the defaults are correct. Plugins that hold mutable per-session state (counters, plan documents, ongoing observations) <strong>must</strong> implement snapshot/restore to remain consistent across restart; without them, the session resumes with the runtime graph intact but the plugin's view reset to factory defaults.</p>
           <p>Snapshot bytes live in the session store, so they share its durability story: every commit is one SQLite transaction with optimistic CAS. There is no separate flush of plugin state — your snapshot lands in the same atomic write as the turn that produced it.</p>
@@ -69,7 +71,7 @@ fn restore(&amp;self, _bytes: &amp;[u8]) -&gt; Result&lt;(), PluginError&gt; { O
           </div>
           <div class="def-list-grid">
             <article class="panel"><h3>Tool + state + runtime event</h3><p><code>lash-plugin-plan-mode</code> — single tool with session-local state, semantic runtime-event emission on tool success, root-session-only gating. Good template for "I want to expose one stateful tool and let hosts choose the presentation."</p></article>
-            <article class="panel"><h3>Prompt contribution + factory state</h3><p><code>lash-plugin-prompt-context</code> — captures an instruction source on the factory, projects it into prompts via <code>reg.prompt().contribute(...)</code>. Good template for "I want to inject something into the system prompt."</p></article>
+            <article class="panel"><h3>Prompt contribution + factory state</h3><p><code>lash-cli</code>'s <code>PromptContextPluginFactory</code> — captures an instruction source on the factory, projects it into prompts via <code>reg.prompt().contribute(...)</code>. Good template for "I want to inject something into the system prompt."</p></article>
             <article class="panel"><h3>Per-core connection pool</h3><p><code>lash-plugin-mcp</code> — factory keeps an <code>Arc&lt;McpConnectionPool&gt;</code> shared across every session, plus runtime <code>attach_server</code> / <code>detach_server</code> methods. Good template for "I'm wrapping an external service with one persistent connection."</p></article>
           </div>
         </div>

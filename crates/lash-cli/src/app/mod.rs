@@ -514,7 +514,7 @@ pub struct App {
     pub focused: bool,
     /// Token/usage accounting for the current session.
     pub usage: UsageState,
-    /// Active provider-native variant for the current model, if any.
+    /// Active model-native variant for the current model, if any.
     pub model_variant: Option<String>,
     /// Unique session name (e.g. "alpine-canyon").
     pub session_name: String,

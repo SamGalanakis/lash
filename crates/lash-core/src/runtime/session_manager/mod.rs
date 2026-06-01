@@ -178,7 +178,7 @@ impl CurrentSessionCapability {
         }
     }
 
-    fn resolve_policy(&self) -> Result<ResolvedSessionPolicy, crate::PluginError> {
+    fn resolve_policy(&self) -> Result<RuntimeSessionPolicy, crate::PluginError> {
         self.host
             .resolve_session_policy(&self.session_id, self.policy.clone())
             .map_err(|err| crate::PluginError::Session(err.to_string()))

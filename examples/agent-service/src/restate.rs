@@ -211,15 +211,15 @@ async fn run_restate_chat_turn_and_persist(
     );
 
     let resume_scope = controller
-        .effect_scope(&request.turn_id)
+        .durable_turn_scope(&request.turn_id)
         .map_err(|err| AppError::internal(err.to_string()))?;
     let resume = session
         .resume_turn(request.turn_id.clone())
-        .stream_with_effect_scope(&ui_events, resume_scope)
+        .stream_with_durable_turn(&ui_events, resume_scope)
         .await;
     let output = route_restate_resume_or_start_fresh(resume, || async {
         let fresh_scope = controller
-            .effect_scope(&request.turn_id)
+            .durable_turn_scope(&request.turn_id)
             .map_err(|err| AppError::internal(err.to_string()))?;
         let mut input = TurnInput::text(request.text.clone());
         input.trace_turn_id = Some(request.turn_id.clone());
@@ -229,7 +229,7 @@ async fn run_restate_chat_turn_and_persist(
         })?;
         let turn = session.turn(input).model(turn_model).require_submit();
         Ok(turn?
-            .stream_with_effect_scope(&ui_events, fresh_scope)
+            .stream_with_durable_turn(&ui_events, fresh_scope)
             .await?)
     })
     .await;

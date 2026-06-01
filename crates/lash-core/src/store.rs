@@ -64,6 +64,10 @@ pub enum StoreError {
     RuntimeEffectJournalHashMismatch { replay_key: String },
     #[error("runtime turn checkpoint hash mismatch for `{session_id}`/`{turn_id}`")]
     RuntimeTurnCheckpointHashMismatch { session_id: String, turn_id: String },
+    #[error(
+        "runtime turn `{turn_id}` for session `{session_id}` was already committed with a different commit hash"
+    )]
+    RuntimeTurnCommitConflict { session_id: String, turn_id: String },
     #[error("queued work claim `{claim_id}` for session `{session_id}` is missing or expired")]
     QueuedWorkClaimExpired {
         session_id: String,
@@ -166,7 +170,7 @@ pub struct SessionCheckpoint {
     pub execution_state_ref: Option<BlobRef>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct HydratedSessionCheckpoint {
     pub turn_state: crate::PersistedTurnState,
     pub tool_state_ref: Option<BlobRef>,
@@ -245,7 +249,7 @@ pub struct PersistedSessionRead {
     pub token_ledger: Vec<crate::TokenLedgerEntry>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum GraphCommitDelta {
     Unchanged {
         leaf_node_id: Option<String>,
@@ -268,7 +272,7 @@ impl GraphCommitDelta {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeCommit {
     pub session_id: String,
     pub expected_head_revision: Option<u64>,
@@ -290,7 +294,7 @@ pub struct RuntimeCommit {
     pub committed_attachment_ids: Vec<crate::AttachmentId>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeCommitResult {
     pub head_revision: u64,
     pub checkpoint_ref: BlobRef,
@@ -647,15 +651,31 @@ pub struct RuntimeTurnLease {
 pub struct RuntimeTurnCompletion {
     pub session_id: String,
     pub turn_id: String,
-    pub lease_token: String,
+    pub turn_commit_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_token: Option<String>,
 }
 
 impl RuntimeTurnCompletion {
-    pub fn from_lease(lease: &RuntimeTurnLease) -> Self {
+    pub fn from_lease(lease: &RuntimeTurnLease, turn_commit_hash: impl Into<String>) -> Self {
         Self {
             session_id: lease.session_id.clone(),
             turn_id: lease.turn_id.clone(),
-            lease_token: lease.lease_token.clone(),
+            turn_commit_hash: turn_commit_hash.into(),
+            lease_token: Some(lease.lease_token.clone()),
+        }
+    }
+
+    pub fn substrate_native(
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+        turn_commit_hash: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            turn_commit_hash: turn_commit_hash.into(),
+            lease_token: None,
         }
     }
 }
@@ -704,6 +724,15 @@ fn build_checkpoint_from_persisted_state(
 }
 
 impl RuntimeCommit {
+    pub fn turn_commit_hash(&self) -> Result<String, StoreError> {
+        let mut semantic_commit = self.clone();
+        semantic_commit.expected_head_revision = None;
+        semantic_commit.completed_turn = None;
+        crate::stable_hash::stable_json_sha256_hex(&semantic_commit).map_err(|err| {
+            StoreError::Backend(format!("failed to serialize runtime turn commit: {err}"))
+        })
+    }
+
     pub fn persisted_state(
         state: &crate::RuntimeSessionState,
         usage_deltas: &[crate::TokenLedgerEntry],
@@ -860,13 +889,15 @@ impl Default for SessionHeadMeta {
     }
 }
 
-/// Exact persistence protocol required by the runtime.
+/// Exact settled-session persistence protocol required by the runtime.
 ///
-/// This is intentionally the runtime's atomic transaction facade: one backend
-/// owns session graph/head commits, durable turn leases, turn checkpoints,
-/// effect-journal rows, and the attachment write-ahead manifest together.
-/// Keep this monolithic until a second real backend proves that splitting
-/// store facets removes more complexity than it adds.
+/// This is the runtime's atomic transaction facade for visible session state:
+/// session graph/head commits, queued-work ingress and completion, final
+/// turn-commit idempotency, metadata, usage, and the attachment write-ahead
+/// manifest. In-flight turn leases, checkpoints, and effect-journal rows are
+/// backend-specific embedded durability concerns exposed through
+/// [`EmbeddedDurableTurnStore`](crate::EmbeddedDurableTurnStore), not the
+/// generic session persistence contract.
 ///
 /// The [`AttachmentManifest`] supertrait is required so the runtime can wrap
 /// any persistence backend with a
@@ -897,6 +928,10 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError>;
 
+    fn embedded_durable_turn_store(&self) -> Option<&dyn crate::runtime::EmbeddedDurableTurnStore> {
+        None
+    }
+
     async fn enqueue_queued_work(
         &self,
         batch: crate::QueuedWorkBatchDraft,
@@ -926,47 +961,6 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::QueuedWorkBatch>, StoreError>;
-
-    async fn claim_runtime_turn_lease(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        owner_id: &str,
-        lease_ttl_ms: u64,
-    ) -> Result<RuntimeTurnLease, StoreError>;
-
-    async fn renew_runtime_turn_lease(
-        &self,
-        lease: &RuntimeTurnLease,
-        lease_ttl_ms: u64,
-    ) -> Result<RuntimeTurnLease, StoreError>;
-
-    async fn abandon_runtime_turn_lease(&self, lease: &RuntimeTurnLease) -> Result<(), StoreError>;
-
-    async fn save_runtime_turn_checkpoint(
-        &self,
-        lease: &RuntimeTurnLease,
-        checkpoint: RuntimeTurnCheckpoint,
-    ) -> Result<(), StoreError>;
-
-    async fn load_runtime_turn_checkpoint(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-    ) -> Result<Option<RuntimeTurnCheckpoint>, StoreError>;
-
-    async fn save_runtime_effect_outcome(
-        &self,
-        lease: &RuntimeTurnLease,
-        record: RuntimeEffectJournalRecord,
-    ) -> Result<(), StoreError>;
-
-    async fn load_runtime_effect_outcome(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        replay_key: &str,
-    ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError>;
 
     async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError>;
     async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError>;

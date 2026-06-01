@@ -2,11 +2,10 @@
 //!
 //! The primary entrypoint is [`RestateRuntimeEffectController`]. Construct it inside
 //! a Restate service, object, or workflow handler, derive a stable
-//! [`RuntimeEffectControllerScope`](lash_core::RuntimeEffectControllerScope), and run or resume
-//! the Lash turn through the scoped API. Fresh durable turns should use a stable
-//! `TurnInput::with_trace_turn_id(turn_id)`; resumed turns should use the
-//! facade `session.resume_turn(turn_id).run_with_effect_scope(scope)` handle so
-//! Lash reloads its `RuntimeTurnCheckpoint` and runtime effect journal.
+//! [`DurableTurnScope`](lash_core::DurableTurnScope), and run the Lash
+//! turn through the scoped API with a stable
+//! `TurnInput::with_trace_turn_id(turn_id)`. Restate recovery is handler replay
+//! with the same turn id and request data, not Lash checkpoint reload.
 //!
 //! ```rust,ignore
 //! use lash_restate::RestateRuntimeEffectController;
@@ -16,8 +15,8 @@
 //! # struct TurnRequest { turn_id: String }
 //! # #[derive(serde::Serialize, serde::Deserialize)]
 //! # struct TurnResponse;
-//! # async fn run_or_resume_lash_turn(
-//! #     _scope: lash_core::RuntimeEffectControllerScope<'_>,
+//! # async fn run_lash_turn(
+//! #     _scope: lash_core::DurableTurnScope<'_>,
 //! #     _req: TurnRequest,
 //! # ) -> Result<TurnResponse, std::io::Error> {
 //! #     Ok(TurnResponse)
@@ -37,10 +36,10 @@
 //!     ) -> HandlerResult<Json<TurnResponse>> {
 //!         let effect_controller = RestateRuntimeEffectController::new(ctx);
 //!         let turn_id = req.turn_id.clone();
-//!         let effect_scope = effect_controller
-//!             .effect_scope(&turn_id)
+//!         let durable_turn_scope = effect_controller
+//!             .durable_turn_scope(&turn_id)
 //!             .map_err(TerminalError::from_error)?;
-//!         let response = run_or_resume_lash_turn(effect_scope, req)
+//!         let response = run_lash_turn(durable_turn_scope, req)
 //!             .await
 //!             .map_err(TerminalError::from_error)?;
 //!         Ok(Json(response))
@@ -51,11 +50,12 @@
 //! Restate's Rust SDK requires journaled closures to be awaited immediately and
 //! not to call the Restate context from inside the closure. This adapter follows
 //! that rule: every Lash effect is wrapped as one immediately awaited
-//! `ctx.run(...).name(envelope.invocation.replay.key)` call, sleep commands
+//! `ctx.run(...).name(lash:<replay_key>)` call, sleep commands
 //! map to Restate's durable timer, and process commands call Restate workflow
-//! scheduling directly through idempotent registry/workflow operations. Lash's
-//! own runtime journal stores the same completed effect outcome by replay key
-//! and envelope hash before the restored `TurnMachine` consumes it.
+//! scheduling directly through idempotent registry/workflow operations.
+//! Substrate-native Restate turns do not claim Lash turn leases and do not write
+//! Lash runtime effect-journal rows; Lash only commits final session state
+//! through turn-commit idempotency.
 
 use std::fmt;
 use std::future::Future;
@@ -65,12 +65,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lash_core::{
-    DurabilityTier, DurableProcessWorker, PluginError, ProcessAwaitOutput, ProcessCommand,
-    ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef, ProcessLease,
-    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimeInvocation,
+    DurabilityTier, DurableProcessWorker, DurableTurnScope, PluginError, ProcessAwaitOutput,
+    ProcessCommand, ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef,
+    ProcessLease, ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
+    ProcessRunHandle, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeError, RuntimeInvocation,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
@@ -607,7 +607,7 @@ impl_restate_controller_context!(
 /// Lash [`RuntimeEffectController`] backed by a Restate handler context.
 ///
 /// This type is intentionally handler-scoped. Create one inside the Restate
-/// handler that owns the Lash turn, then pass [`RestateRuntimeEffectController::effect_scope`]
+/// handler that owns the Lash turn, then pass [`RestateRuntimeEffectController::durable_turn_scope`]
 /// to Lash's scoped turn API with a stable turn ID.
 pub struct RestateRuntimeEffectController<'ctx, C> {
     context: C,
@@ -641,11 +641,11 @@ impl<'ctx, C> RestateRuntimeEffectController<'ctx, C>
 where
     C: RestateControllerContext<'ctx>,
 {
-    pub fn effect_scope<'run>(
+    pub fn durable_turn_scope<'run>(
         &'run self,
         turn_id: &'run str,
-    ) -> Result<RuntimeEffectControllerScope<'run>, RuntimeError> {
-        RuntimeEffectControllerScope::new(self, turn_id)
+    ) -> Result<DurableTurnScope<'run>, RuntimeError> {
+        DurableTurnScope::new(self, turn_id)
     }
 
     async fn journal_effect<'run, T, Fut>(
