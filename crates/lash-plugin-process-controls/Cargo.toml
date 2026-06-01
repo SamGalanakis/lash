@@ -14,10 +14,10 @@ keywords = ["lash", "agent", "plugin", "process", "runtime"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.17", default-features = false }
-lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.17" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.18", default-features = false }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.18" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.17", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.18", default-features = false, features = ["testing"] }
