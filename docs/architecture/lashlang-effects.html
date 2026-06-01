@@ -40,7 +40,7 @@
             <dt><code>ProjectedValue</code></dt>
             <dd>Either a scalar <code>FlowValue</code> or a custom <code>Arc&lt;dyn ProjectedHostValue&gt;</code> for non-trivial shapes (lazy field access, length, indexing). Custom values may carry opaque projection-ref metadata so snapshots and seeds can rehydrate them without materializing the content.</dd>
             <dt><code>ProjectedHostValue</code></dt>
-            <dd>Trait that lets the host serve <code>get_field</code>, <code>get_index</code>, <code>len</code>, <code>render</code>, and <code>materialize</code> queries on demand (returning a <code>ProjectedRead</code> for field/index reads) so large host-side structures need not be cloned into Lashlang values.</dd>
+            <dd>Trait that lets the host serve <code>read_one</code>/<code>read_many</code> queries on demand: each is a <code>ProjectedReadRequest</code> (such as <code>Field</code>, <code>Index</code>, <code>Len</code>, <code>Render</code>, or <code>Materialize</code>) answered with a <code>ProjectedReadResponse</code>, so large host-side structures need not be cloned into Lashlang values.</dd>
             <dt>Snapshots</dt>
             <dd>Lashlang snapshot JSON records projected globals as markers, optionally including <code>projection_ref</code>. Restore creates unresolved projected placeholders; RLM resolves ref-backed placeholders through its resolver before the next fenced block runs.</dd>
             <dt>Reserved names</dt>
@@ -228,7 +228,7 @@ submit { a: results.one?, b: results.two? }</code></pre>
   note: str?
 }
 validated = validate(candidate, Payload)</code></pre>
-          <p>Type literals can be passed directly to tools that accept output schemas, and they double as runtime guards on JSON parsed from untrusted text. Validation errors carry a JSON-pointer-style path to the bad field.</p>
+          <p>Type literals can be passed directly to tools that accept output schemas, and they double as runtime guards on JSON parsed from untrusted text. Validation errors carry a JSONPath-style path (rooted at <code>$</code>, with <code>.field</code> and <code>[index]</code> segments) to the bad field.</p>
           <pre><code>Package = Type {
   name: str,
   version: str,

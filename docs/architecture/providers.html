@@ -43,7 +43,7 @@
         <div class="section">
           <div class="section-header">
             <h2>First-Party Providers</h2>
-            <p>Four provider crates ship with the workspace, registering five provider kinds — <code>lash-provider-openai</code> contributes both the direct Responses path and the generic Chat Completions path. The CLI registers all of them at boot via <code>lash-providers-builtin</code>; app hosts pick the ones they need.</p>
+            <p>Four provider crates ship with the workspace, contributing five provider kinds — <code>lash-provider-openai</code> supplies both the direct Responses path and the generic Chat Completions path. The CLI compiles in all five and materializes each from its provider factory keyed on the spec kind; <code>lash-providers-builtin</code> only enumerates the kind names as static metadata. App hosts pick the ones they need.</p>
           </div>
           <div class="table">
             <table>
@@ -110,10 +110,10 @@
             <p>Every provider returns a normalized <code>LlmUsage</code> to the runtime usage ledger after each completion. Chat-parsing handles both streaming and non-streaming usage chunks, including OpenRouter cache fields. Cache-write tokens are <strong>not</strong> counted as cached reads, so downstream cost/export code doesn't overstate cache hits.</p>
           </div>
           <pre><code>pub struct LlmUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cached_input_tokens: u64,  // Reads from cache
-    pub reasoning_tokens: u64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_input_tokens: i64,  // Reads from cache
+    pub reasoning_tokens: i64,
     // …provider-specific extras flow through the extended trace
 }</code></pre>
         </div>

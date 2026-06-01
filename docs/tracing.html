@@ -92,7 +92,7 @@ impl TraceSink for FanoutTraceSink {
             </article>
             <article class="panel">
               <h3>Tool calls</h3>
-              <p><code>ToolCallStarted</code>, <code>ToolCallCompleted</code>. Args, success flag, duration.</p>
+              <p><code>ToolCallStarted</code>, <code>ToolCallCompleted</code>. Args, <code>output</code> outcome (success / failure / cancelled), duration.</p>
             </article>
             <article class="panel">
               <h3>Usage</h3>
@@ -116,25 +116,18 @@ impl TraceSink for FanoutTraceSink {
           </div>
           <pre><code>{
   "schema_version": 2,
-  "id": "01HGQX...",
-  "timestamp": "2026-05-11T11:42:01.234Z",
+  "id": "6621dfa7-2cd0-4296-ac20-15c0f2d3cec1",
+  "timestamp": "2026-05-11T11:42:01.234+00:00",
   "context": {
     "session_id": "chat-123",
-    "turn_id": "turn-7",
-    "llm_call_id": null,
-    "tool_call_id": null,
-    "graph_node_id": null,
-    "run_id": null,
-    "experiment_id": null,
-    "metadata": {}
+    "turn_id": "turn-7"
   },
-  "event": {
-    "kind": "tool_call_completed",
-    "tool_name": "read_file",
-    "duration_ms": 8,
-    "success": true,
-    "...": "..."
-  }
+  "type": "tool_call_completed",
+  "call_id": "call-9",
+  "name": "read_file",
+  "args": { "...": "..." },
+  "output": { "outcome": { "status": "success", "payload": { "...": "..." } } },
+  "duration_ms": 8
 }</code></pre>
           <p>Record type: <code>lash_trace::TraceRecord</code>. Event variants: <code>lash_trace::TraceEvent</code>. Both <code>Deserialize</code>; parse directly with <code>serde_json::from_str::&lt;TraceRecord&gt;()</code>.</p>
         </div>
@@ -142,7 +135,7 @@ impl TraceSink for FanoutTraceSink {
         <div class="section" id="viewing">
           <div class="section-header">
             <h2>Viewing A Trace</h2>
-            <p>Renders JSONL to a self-contained HTML timeline with nested LLM calls, tool calls, and streaming chunks inline. Unparseable lines are preserved as raw text.</p>
+            <p>Renders JSONL to a self-contained HTML timeline with nested LLM calls, tool calls, and streaming chunks inline. Valid-JSON records of an unrecognized schema are preserved as raw text; a line that is not valid JSON aborts the load.</p>
           </div>
           <pre><code>$ cargo run -p lash-trace-viewer -- ./.lash-data/trace.jsonl
 # Writes ./.lash-data/trace.html next to the input
@@ -161,8 +154,8 @@ $ cargo run -p lash-trace-viewer -- trace.jsonl \
           </div>
           <pre><code># In your downstream Cargo.toml — pull in lash-core with the otel-trace
 # feature alongside the lash-runtime facade.
-lash-runtime = "=0.1.0-alpha.13"
-lash-core    = { version = "=0.1.0-alpha.13", features = ["otel-trace"] }</code></pre>
+lash-runtime = "=0.1.0-alpha.16"
+lash-core    = { version = "=0.1.0-alpha.16", features = ["otel-trace"] }</code></pre>
           <p><code>lash_core::OtelTraceSink</code> wraps an <code>opentelemetry</code> tracer and converts every event to a span with payload attributes. Use in place of (or alongside) <code>JsonlTraceSink</code>:</p>
           <pre><code>use lash::{LashCore, tracing::{TraceLevel, TraceSink}};
 use lash_core::OtelTraceSink;

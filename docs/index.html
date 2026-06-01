@@ -248,31 +248,8 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     println!("{}", result.assistant_message().unwrap_or_default());
     Ok(())
 }</code></pre>
+        <p>From there the runtime hands a backend more: <code>session.resume_turn(id)</code> finishes an interrupted turn from its checkpoint, <code>session.next_queued_turn()</code> drives turns from an app-owned queue, and <code>turn.provider(…)</code> / <code>turn.model(…)</code> override the model per turn.</p>
         <a class="stanza__link" href="./quickstart.html">read the quickstart <span class="arrow" aria-hidden="true">→</span></a>
-      </div>
-    </section>
-
-    <section class="stanza" id="running">
-      <div class="stanza__rail">
-        <div class="knot">
-          <span class="knot__bead" aria-hidden="true"></span>
-          <p class="knot__id">§ 06</p>
-          <p class="knot__name">operations</p>
-        </div>
-      </div>
-      <div class="stanza__body">
-        <h2 class="stanza__title">running it</h2>
-        <p class="stanza__lede">Embedded in a backend, the runtime gives you the operational surface a real service needs.</p>
-        <dl class="defs">
-          <dt>streaming</dt>
-          <dd><code>.run()</code> collects a whole turn; <code>.stream(&amp;sink)</code> and <code>.into_stream()</code> hand you activity events as they happen, so a UI can follow tokens, tool calls, and steps live.</dd>
-          <dt>resume</dt>
-          <dd><code>session.resume_turn(id)</code> reloads an interrupted turn from its last checkpoint and finishes it: the durability layer, on the embedding side.</dd>
-          <dt>queued work</dt>
-          <dd><code>session.next_queued_turn()</code> pulls the next turn from an app-owned queue with at-least-once or at-most-once delivery, so webhooks and task queues can drive turns asynchronously.</dd>
-          <dt>per-turn model</dt>
-          <dd><code>turn.provider(…)</code> and <code>turn.model(…)</code> override the provider and model for a single turn, for fallbacks, cost routing, or multi-model dispatch.</dd>
-        </dl>
       </div>
     </section>
 
@@ -280,7 +257,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
       <div class="stanza__rail">
         <div class="knot">
           <span class="knot__bead" aria-hidden="true"></span>
-          <p class="knot__id">§ 07</p>
+          <p class="knot__id">§ 06</p>
           <p class="knot__name">read on</p>
         </div>
       </div>

@@ -41,7 +41,7 @@ flowchart TD
   Bootstrap --> SessionBootstrap["SessionBootstrap<br/>new/resume/fork"]
   Bootstrap --> Providers["CLI provider spec materialization"]
   Bootstrap --> Plugins["PluginHost + plugin factories"]
-  Bootstrap --> Dynamic["DynamicToolProvider + MCP"]
+  Bootstrap --> Dynamic["McpPluginFactory + MCP servers"]
   Bootstrap --> Runtime["CliSessionOpener -> LashSession"]
   Runtime --> Mode{"Host mode"}
   Mode -->|--print| Auto["run_autonomous"]
@@ -124,7 +124,7 @@ let result = session
 flowchart LR
   Rlm["RLM lashlang<br/>await TOOL.default.spawn_agent / process ops"] --> Provider["spawn_agent_tool_definition<br/>+ lash_core process controls"]
   Provider --> Host["ToolContext sessions/processes<br/>+ process events"]
-  Host --> Manager["RuntimeSessionManager"]
+  Host --> Manager["runtime session manager"]
   Manager --> Child["start_turn -> stream_turn"]
   Manager --> Registry["process registry"]
   Registry --> Handles["list_process_handles<br/>tool.*"]

@@ -45,7 +45,7 @@ sequenceDiagram
   participant Store as RuntimePersistence
 
   Host->>Runtime: session.turn(TurnInput).stream(&sink)
-  Runtime->>Runtime: normalize InputItem text/file/dir/image refs
+  Runtime->>Runtime: normalize InputItem text/image refs
   Runtime->>Plugins: prepare_turn + context transforms
   Runtime->>Plugins: build TurnDriverPreamble from ProtocolBuildInput(ToolSurface + LashlangSurface)
   Runtime->>Machine: build_turn(TurnDriverPreamble, ToolSurface, PromptTemplate)
@@ -129,7 +129,7 @@ flowchart LR
             <div class="diagram-title">Read projection path</div>
             <div class="mermaid">
 flowchart LR
-  Store["Store<br/>SQLite + blobs + session_head"] --> State["PersistedSessionState"]
+  Store["Store<br/>SQLite + blobs + session_head"] --> State["PersistedSessionRead"]
   State --> Graph["SessionGraph<br/>nodes + leaf_node_id"]
   Graph --> ReadModel["internal SessionReadModel cache<br/>active_events, messages, tool_calls"]
   ReadModel --> View["SessionReadView"]
@@ -173,7 +173,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Normalize host input before prompt work.</h3>
-                <p><code>Text</code>, file refs, dir refs, and image refs become typed message parts and attachment references.</p>
+                <p><code>InputItem::Text</code> and <code>InputItem::ImageRef</code> become typed message parts and attachment references; host file and dir mentions are resolved into text markers before they reach the runtime.</p>
               </div>
             </li>
             <li>
@@ -185,7 +185,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Commit policy stays turn-scoped.</h3>
-                <p><code>TurnCommitPipeline</code> applies graph deltas, checkpoint boundaries, and usage reconciliation.</p>
+                <p><code>TurnBoundary</code> applies graph deltas, checkpoint boundaries, and usage reconciliation.</p>
               </div>
             </li>
             <li>

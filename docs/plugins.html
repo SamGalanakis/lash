@@ -88,10 +88,10 @@ let core = LashCore::rlm()
               <h3>Replace Or Remove</h3>
               <pre><code>use std::sync::Arc;
 use lash::{
-    plugins::ToolOutputBudgetPluginFactory, LashCore, ModeId, ModePreset, PluginStack,
+    plugins::{runtime_plugin_stack, ToolOutputBudgetPluginFactory}, LashCore, ModeId, ModePreset,
 };
 
-let plugins = PluginStack::runtime().configure(|plugins| {
+let plugins = runtime_plugin_stack().configure(|plugins| {
     plugins.replace(Arc::new(ToolOutputBudgetPluginFactory::new(config)));
     plugins.remove("some_optional_plugin");
 });
@@ -105,7 +105,7 @@ let core = LashCore::builder()
     .build()?;</code></pre>
             </article>
           </div>
-          <p>Use <code>.plugin(...)</code> to append one factory, <code>.plugins(...)</code> to replace the full stack, and <code>.configure_plugins(...)</code> to mutate the current stack. <code>PluginStack::runtime()</code> currently installs the built-in <code>ToolOutputBudgetPluginFactory</code>, which budgets oversized tool outputs for state, model context, and history projection.</p>
+          <p>Use <code>.plugin(...)</code> to append one factory, <code>.plugins(...)</code> to replace the full stack, and <code>.configure_plugins(...)</code> to mutate the current stack. <code>runtime_plugin_stack()</code> currently installs the built-in <code>ToolOutputBudgetPluginFactory</code>, which budgets oversized tool outputs for state, model context, and history projection.</p>
         </div>
 
         <div class="section" id="worked-example">
@@ -180,6 +180,7 @@ impl ToolProvider for UpdatePlanTool {
 
 fn update_plan_definition() -&gt; ToolDefinition {
     ToolDefinition::raw(
+            "tool:update_plan",
             "update_plan",
             "Publish or replace the current plan.",
             serde_json::json!({ "type": "object", "properties": { /* … */ } }),
@@ -209,7 +210,7 @@ fn update_plan_definition() -&gt; ToolDefinition {
                 <tr><td><code>reg.session()</code></td><td>Runtime-event observers and config mutators.</td></tr>
                 <tr><td><code>reg.actions()</code></td><td>Typed or raw RPC-shaped entry points the host can invoke directly, without going through tool calls.</td></tr>
                 <tr><td><code>reg.history()</code></td><td>History transforms and rewrites that run as part of compaction / rolling history.</td></tr>
-                <tr><td><code>reg.protocol()</code> / <code>reg.execution()</code> / <code>reg.tools().native(...)</code></td><td>Protocol driver/session, optional code execution, and native runtime tools. Most users install the built-in <code>lash-protocol-standard</code> or <code>lash-protocol-rlm</code> presets.</td></tr>
+                <tr><td><code>reg.protocol()</code> / <code>reg.execution()</code></td><td>Protocol driver/session and optional code execution. Most users install the built-in <code>lash-protocol-standard</code> or <code>lash-protocol-rlm</code> presets.</td></tr>
               </tbody>
             </table>
           </div>

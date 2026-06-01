@@ -268,11 +268,11 @@ terminal are carried as request config / tool-access, not lost.
   check.
 - `crates/lash/src/core.rs` — `ensure_store_peer_coherence` (facade build).
 - `crates/lash-core/src/runtime/error.rs` — `DurableSubstrateRequired { facet }`.
-- `crates/lash-core/src/runtime/turn_driver/lease.rs` — `RuntimeTurnLease`
+- `crates/lash-core/src/store.rs` — `RuntimeTurnLease`
   (the model the process lease mirrors).
 - `crates/lash-subagents/src/rlm.rs` — `agents.spawn` emitting
   `ProcessInput::SessionTurn`.
-- `crates/lash-restate/src/lib.rs` —
+- `crates/lash-restate/src/tests.rs` —
   `sqlite_trigger_started_process_recovered_after_worker_registry_reopen` and
   `sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`.
 - `crates/lash-core/src/testing/conformance.rs` — process-lease single-owner /

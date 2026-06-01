@@ -262,7 +262,7 @@ $ lash --print "Investigate the latest test failure." \
             <h2>Resume &amp; Fork</h2>
             <p>Every session has a UUID and a generated human-readable name. <code>--resume &lt;id_or_name&gt;</code> accepts either, plus the legacy <code>.db</code> filename for old sessions. Without an argument, <code>/resume</code> opens an interactive picker showing the 50 most recent sessions sorted by recency.</p>
           </div>
-          <p><code>/fork</code> branches the current session at the current message and opens the fork in a new terminal window. Lash resolves the launcher using the running binary's <code>$PATH</code> entry and falls back to the executable directory if needed. The launched fork runs <code>lash --resume &lt;new-session-id&gt;</code> in the new terminal.</p>
+          <p><code>/fork</code> branches the current session at the current message and opens the fork in a new terminal window. Lash resolves the launcher from the running executable and falls back to finding <code>lash</code> on <code>$PATH</code> if that binary isn't launchable. The launched fork runs <code>lash --resume &lt;new-session-id&gt;</code> in the new terminal.</p>
         </div>
   </main>
 

@@ -55,8 +55,8 @@
         <p>The workspace ships ~40 crates. Most are integrations the facade composes for you (providers, plugins, tools, transports, stores) and you don't import them directly — your <code>LashCore</code> wiring picks them up.</p>
       </div>
       <ul class="bullets">
-        <li>Provider crates: <code>lash-provider-anthropic</code>, <code>lash-provider-openai</code>, <code>lash-provider-google</code>, <code>lash-provider-codex</code>, plus the <code>lash-providers-builtin</code> aggregator that registers all of them with one call.</li>
-        <li>Plugin crates: <code>lash-plugin-mcp</code>, <code>lash-plugin-prompt-context</code>, <code>lash-plugin-rolling-history</code>, <code>lash-plugin-tool-discovery</code>, <code>lash-plugin-observational-memory</code>, <code>lash-plugin-plan-mode</code>, and the <code>lash-standard-plugins</code> aggregator.</li>
+        <li>Provider crates: <code>lash-provider-anthropic</code>, <code>lash-provider-openai</code>, <code>lash-provider-google</code>, <code>lash-provider-codex</code>, plus the <code>lash-providers-builtin</code> crate that lists the provider kinds compiled into the standard CLI host.</li>
+        <li>Plugin crates: <code>lash-plugin-mcp</code>, <code>lash-plugin-process-controls</code>, <code>lash-plugin-rolling-history</code>, <code>lash-plugin-tool-discovery</code>, <code>lash-plugin-observational-memory</code>, <code>lash-plugin-plan-mode</code>, and the <code>lash-standard-plugins</code> aggregator.</li>
         <li>Tool crates: <code>lash-tool-shell</code>, <code>lash-tool-files</code>, <code>lash-tool-search</code>, <code>lash-tool-web</code>, <code>lash-tool-apply-patch</code>, shared scaffolding in <code>lash-tool-support</code> and <code>lash-llm-tools</code>.</li>
         <li>Mode crates: <code>lash-protocol-standard</code>, <code>lash-protocol-rlm</code>.</li>
         <li>Persistence and tracing: <code>lash-sqlite-store</code>, <code>lash-restate</code>, <code>lash-trace</code>, <code>lash-trace-viewer</code>, <code>lash-export</code>.</li>
