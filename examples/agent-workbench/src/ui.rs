@@ -59,10 +59,10 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       margin: 0;
       color: var(--chalk-mid);
       font-family: var(--font-body);
-      font-size: clamp(0.95rem, 0.85rem + 0.4vw, 1.2rem);
+      font-size: 16px;
       line-height: 1.55;
       background:
-        repeating-linear-gradient(135deg, oklch(0.94 0.018 90 / 0.012) 0 1px, transparent 1px 8px),
+        linear-gradient(180deg, oklch(0.20 0.005 75 / 0.36), transparent 38vh),
         var(--form-deep);
     }
 
@@ -75,22 +75,30 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     .slash { color: var(--sodium); }
 
     .shell {
-      min-height: 100vh;
+      height: 100dvh;
+      min-height: 0;
+      overflow: hidden;
       display: grid;
-      grid-template-columns: 288px minmax(380px, 1fr) 360px;
+      grid-template-areas: "left main right";
+      grid-template-columns: minmax(280px, 320px) minmax(360px, 1fr) minmax(280px, 360px);
     }
 
     /* ─── left rail ─── */
 
     .left {
+      grid-area: left;
       min-width: 0;
+      min-height: 0;
       border-right: 1px solid var(--line);
       background: var(--form);
       display: grid;
       grid-template-rows: auto auto auto 1fr auto;
       gap: var(--space-xl);
       padding: var(--space-lg);
+      overflow: auto;
     }
+
+    .left > * { min-width: 0; }
 
     .brand {
       font-family: var(--font-display);
@@ -131,8 +139,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       --trigger-color: var(--error);
       --trigger-line: var(--line-danger);
       position: relative;
-      width: 100%;
-      max-width: 132px;
+      width: min(100%, 7rem);
       aspect-ratio: 1;
       border: 0;
       padding: 0;
@@ -140,6 +147,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       cursor: pointer;
       display: grid;
       place-items: center;
+      justify-self: center;
       touch-action: manipulation;
       -webkit-user-select: none;
       user-select: none;
@@ -152,7 +160,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
     .trigger-face {
       position: absolute;
-      inset: 13px;
+      inset: 0.625rem;
       border-radius: 50%;
       background: var(--form-raised);
       border: 1px solid var(--trigger-line);
@@ -164,7 +172,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     }
 
     .trigger-face strong {
-      font-size: 1.05rem;
+      font-size: 0.98rem;
       font-weight: 500;
       letter-spacing: 0.16em;
       color: var(--trigger-color);
@@ -241,24 +249,38 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     .status-row {
       display: flex;
       justify-content: space-between;
+      align-items: baseline;
       gap: var(--space-xs);
       padding-top: var(--space-xs);
       border-top: 1px solid var(--line);
     }
 
-    .status-row span:first-child { color: var(--ash-text); letter-spacing: 0.1em; text-transform: uppercase; }
-    .status-row span:last-child { color: var(--chalk-dim); }
+    .status-row span:first-child {
+      color: var(--ash-text);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      flex: none;
+    }
+    .status-row span:last-child {
+      min-width: 0;
+      color: var(--chalk-dim);
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
 
     /* ─── center ─── */
 
     .main {
+      grid-area: main;
       min-width: 0;
+      min-height: 0;
       display: grid;
       grid-template-rows: auto 1fr auto;
       background: var(--form-deep);
     }
 
     .topbar {
+      min-width: 0;
       min-height: 64px;
       display: flex;
       align-items: center;
@@ -288,7 +310,14 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       text-overflow: ellipsis;
     }
 
-    .topbar-right { display: flex; align-items: center; gap: var(--space-sm); }
+    .topbar-right {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: var(--space-sm);
+      flex-wrap: wrap;
+    }
 
     .pill {
       display: inline-flex;
@@ -334,7 +363,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       border: 1px solid var(--line-strong);
       border-radius: 6px;
       background: var(--form-raised);
-      box-shadow: 0 12px 30px oklch(0.06 0.002 75 / 0.55);
+      box-shadow: 0 6px 8px oklch(0.06 0.002 75 / 0.45);
     }
     .help-panel[hidden] { display: none; }
 
@@ -577,6 +606,11 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       line-height: 1.45;
     }
 
+    .composer textarea::placeholder {
+      color: var(--ash-text);
+      opacity: 1;
+    }
+
     .composer textarea:focus-visible { box-shadow: var(--focus-ring); border-color: var(--line-strong); }
 
     .send {
@@ -598,6 +632,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     /* ─── right rail · work ledger ─── */
 
     .right {
+      grid-area: right;
       min-width: 0;
       border-left: 1px solid var(--line);
       background: var(--form);
@@ -606,21 +641,30 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       min-height: 0;
     }
 
+    .right > * { min-width: 0; }
+
     .rail-head {
+      min-width: 0;
       min-height: 64px;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: var(--space-sm);
+      flex-wrap: wrap;
       padding: var(--space-md) var(--space-lg);
       border-bottom: 1px solid var(--line);
     }
 
     .rail-title { font-family: var(--font-display); font-weight: 700; font-size: 1.25rem; }
-    .rail-count { font-family: var(--font-ui); font-size: 0.75rem; color: var(--ash-text); }
+    .rail-count { font-family: var(--font-ui); font-size: 0.75rem; color: var(--ash-text); white-space: nowrap; }
     .rail-count.stale { color: var(--error); cursor: pointer; }
 
-    .work-list { min-height: 0; overflow: auto; padding: 0 var(--space-lg); }
+    .work-list {
+      min-width: 0;
+      min-height: 0;
+      overflow: auto;
+      padding: 0 var(--space-lg);
+    }
 
     .work-card {
       display: grid;
@@ -668,6 +712,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     }
 
     .empty {
+      min-width: 0;
       margin: var(--space-md) 0;
       border: 1px dashed var(--line);
       border-radius: 4px;
@@ -677,23 +722,74 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       font-family: var(--font-ui);
       font-size: 0.78rem;
       line-height: 1.6;
+      overflow-wrap: anywhere;
     }
 
-    @media (max-width: 1060px) {
-      .shell { grid-template-columns: 248px minmax(320px, 1fr); }
+    @media (max-width: 1180px) {
+      .shell {
+        min-height: 100dvh;
+        height: auto;
+        overflow: visible;
+        grid-template-areas:
+          "left main"
+          "right right";
+        grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
+        grid-template-rows: auto auto;
+      }
       .brand { font-size: 1.2rem; }
+      .left {
+        overflow: visible;
+      }
+      .main {
+        min-height: 78dvh;
+      }
       .right {
-        grid-column: 1 / -1;
-        min-height: 320px;
+        min-height: 360px;
         border-left: 0;
         border-top: 1px solid var(--line);
+      }
+      .work-list {
+        overflow: visible;
       }
     }
 
     @media (max-width: 720px) {
-      .shell { display: flex; flex-direction: column; }
-      .left { grid-template-rows: auto auto auto auto auto; }
+      .shell {
+        grid-template-areas:
+          "left"
+          "main"
+          "right";
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .left {
+        grid-template-rows: auto auto auto;
+        gap: var(--space-lg);
+        overflow: visible;
+      }
+      .trigger-bay {
+        justify-items: stretch;
+      }
+      .trigger-caption { justify-self: center; }
+      .status-stack { align-self: stretch; }
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      .topbar-right {
+        width: 100%;
+        flex-wrap: wrap;
+        justify-content: flex-start;
+      }
+      .main { min-height: 70dvh; }
+      .message {
+        grid-template-columns: 1fr;
+        gap: var(--space-xs);
+      }
       .composer { grid-template-columns: 1fr; }
+      .send {
+        width: 100%;
+        min-height: 48px;
+      }
     }
   </style>
 </head>
@@ -731,20 +827,19 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         <label class="field">
           <span>model</span>
           <input id="modelInput" list="modelList" autocomplete="off" spellcheck="false"
-                 title="Provider model slug, e.g. openai/gpt-5.5. Applies to the next turn." />
+                 title="Provider model slug, e.g. anthropic/claude-sonnet-4.6. Applies to chat sends and button events." />
           <datalist id="modelList"></datalist>
           <small id="modelHint" class="field-hint" hidden></small>
         </label>
         <label class="field">
           <span>thinking</span>
-          <select id="variantSelect" title="Reasoning effort for the next turn."></select>
+          <select id="variantSelect" title="Optional reasoning effort. Use provider default for models without configurable thinking."></select>
         </label>
       </form>
 
       <div></div>
 
       <div class="status-stack">
-        <div class="status-row"><span>model</span><span id="modelName">loading</span></div>
         <div class="status-row"><span>web</span><span id="webState">loading</span></div>
         <div class="status-row"><span>session</span><span id="sessionId">—</span></div>
       </div>
@@ -817,7 +912,6 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     const streamState = document.getElementById("streamState");
     const busyPill = document.getElementById("busyPill");
     const busyText = document.getElementById("busyText");
-    const modelName = document.getElementById("modelName");
     const webState = document.getElementById("webState");
     const sessionId = document.getElementById("sessionId");
 
@@ -842,9 +936,8 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
     function setBusy(next, label) {
       busy = next;
-      sendButton.disabled = next || modelEmpty();
+      syncCommandAvailability();
       stopButton.hidden = true;
-      for (const button of triggerButtons) button.setAttribute("aria-disabled", String(next));
       busyPill.classList.toggle("run", next);
       busyText.textContent = next ? "running" : "idle";
       timeline.setAttribute("aria-busy", String(next));
@@ -954,6 +1047,14 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         model: modelInput.value.trim(),
         model_variant: variantSelect.value
       };
+    }
+
+    function syncCommandAvailability() {
+      const unavailable = busy || modelEmpty();
+      sendButton.disabled = unavailable;
+      for (const button of triggerButtons) {
+        button.setAttribute("aria-disabled", String(unavailable));
+      }
     }
 
     const STATUS_LABELS = {
@@ -1375,7 +1476,8 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     function fireTrigger(event) {
       const button = event.currentTarget;
       if (busy || button.getAttribute("aria-disabled") === "true") return;
-      postCommand("/api/button-trigger", { button: button.dataset.button });
+      if (modelEmpty()) { validateModel(); modelInput.focus(); return; }
+      postCommand("/api/button-trigger", { button: button.dataset.button, ...selectedModelPayload() });
     }
 
     for (const button of triggerButtons) {
@@ -1388,13 +1490,10 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     function validateModel() {
       const value = modelInput.value.trim();
       const empty = !value;
-      const unknown = value && knownModels.size && !knownModels.has(value);
-      modelInput.classList.toggle("unknown", empty || unknown);
-      modelHint.hidden = !(empty || unknown);
+      modelInput.classList.toggle("unknown", empty);
+      modelHint.hidden = !empty;
       if (empty) modelHint.textContent = "a model is required before sending a turn";
-      else if (unknown) modelHint.textContent = "unrecognized model — it will still be sent as typed";
-      sendButton.disabled = busy || empty;
-      modelName.textContent = [value, variantSelect.value].filter(Boolean).join(" / ") || "—";
+      syncCommandAvailability();
     }
 
     async function loadState() {
@@ -1404,7 +1503,6 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         if (!response.ok) throw new Error("state request failed (" + response.status + ")");
         state = await response.json();
       } catch (error) {
-        modelName.textContent = "unavailable";
         webState.textContent = "unavailable";
         sessionId.textContent = "—";
         streamState.textContent = "could not load session";
@@ -1412,11 +1510,11 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
           ". check the server is running, then reload.");
         throw error;
       }
-      modelInput.value = state.settings.default_model || "";
+      modelInput.value = state.settings.model || "";
       const modelList = document.getElementById("modelList");
       modelList.innerHTML = "";
       knownModels.clear();
-      const known = state.settings.models || (state.settings.default_model ? [state.settings.default_model] : []);
+      const known = state.settings.models || (state.settings.model ? [state.settings.model] : []);
       for (const slug of known) {
         knownModels.add(slug);
         const option = document.createElement("option");
@@ -1424,11 +1522,12 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         modelList.appendChild(option);
       }
       variantSelect.innerHTML = "";
-      for (const variant of state.settings.model_variants || ["low", "medium", "high"]) {
+      const selectedVariant = state.settings.model_variant || "";
+      for (const variant of state.settings.model_variants || ["", "low", "medium", "high"]) {
         const option = document.createElement("option");
         option.value = variant;
-        option.textContent = variant;
-        if (variant === state.settings.default_model_variant) option.selected = true;
+        option.textContent = variant || "provider default";
+        if (variant === selectedVariant) option.selected = true;
         variantSelect.appendChild(option);
       }
       validateModel();

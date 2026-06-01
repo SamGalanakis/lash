@@ -13,8 +13,8 @@ OPENROUTER_API_KEY=... cargo run -p agent-service
 Optional environment:
 
 ```bash
-OPENROUTER_MODEL=openai/gpt-5.5
-OPENROUTER_MODEL_VARIANT=medium
+OPENROUTER_MODEL=anthropic/claude-sonnet-4.6
+OPENROUTER_MODEL_VARIANT=high
 AGENT_SERVICE_ADDR=127.0.0.1:3000
 AGENT_SERVICE_DATA_DIR=.agent-service
 AGENT_SERVICE_TRACE=.agent-service/trace.jsonl

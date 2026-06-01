@@ -73,9 +73,10 @@ async fn main() -> AnyhowResult<()> {
     if tavily_api_key.trim().is_empty() {
         eprintln!("warning: TAVILY_API_KEY is empty; web tools will return configuration errors");
     }
-    let model = std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-5.5".to_string());
+    let model = std::env::var("OPENROUTER_MODEL")
+        .unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string());
     let model_variant =
-        std::env::var("OPENROUTER_MODEL_VARIANT").unwrap_or_else(|_| "medium".to_string());
+        std::env::var("OPENROUTER_MODEL_VARIANT").unwrap_or_else(|_| "high".to_string());
 
     let provider = ProviderHandle::new(
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
@@ -154,8 +155,10 @@ async fn main() -> AnyhowResult<()> {
         process_registry,
         session_ids,
         messages: Arc::new(Mutex::new(Vec::new())),
-        default_model: model,
-        default_model_variant: Some(model_variant),
+        selected_model: Arc::new(Mutex::new(ModelSelection {
+            model,
+            model_variant: Some(model_variant),
+        })),
         web_configured: !tavily_api_key.trim().is_empty(),
         trace_sink: Some(Arc::clone(&trace_sink)),
         event_tx,
@@ -170,8 +173,7 @@ async fn main() -> AnyhowResult<()> {
             "addr": addr.to_string(),
             "data_dir": data_dir.display().to_string(),
             "trace_path": trace_path_display,
-            "model": state.default_model.clone(),
-            "model_variant": state.default_model_variant.clone(),
+            "model": serde_json::to_value(state.selected_model()).unwrap_or(Value::Null),
             "web_configured": state.web_configured,
         }),
     );
@@ -200,8 +202,7 @@ struct AppState {
     process_registry: Arc<dyn lash::advanced::ProcessRegistry>,
     session_ids: WorkbenchSessionIds,
     messages: Arc<Mutex<Vec<ChatMessage>>>,
-    default_model: String,
-    default_model_variant: Option<String>,
+    selected_model: Arc<Mutex<ModelSelection>>,
     web_configured: bool,
     trace_sink: Option<Arc<dyn TraceSink>>,
     event_tx: broadcast::Sender<StreamItem>,
@@ -210,11 +211,26 @@ struct AppState {
 
 #[derive(Clone, Debug, Serialize)]
 struct Settings {
-    default_model: String,
-    default_model_variant: Option<String>,
+    model: String,
+    model_variant: Option<String>,
     web_configured: bool,
     model_variants: Vec<&'static str>,
     session_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ModelSelection {
+    model: String,
+    model_variant: Option<String>,
+}
+
+impl ModelSelection {
+    fn from_spec(model: &lash::ModelSpec) -> Self {
+        Self {
+            model: model.id.clone(),
+            model_variant: model.variant.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -263,6 +279,8 @@ impl ButtonChoice {
 #[derive(Debug, Deserialize)]
 struct ButtonEventRequest {
     button: ButtonChoice,
+    model: Option<String>,
+    model_variant: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -386,6 +404,14 @@ async fn send_turn(
         request.model.as_deref(),
         request.model_variant.as_deref(),
     )?;
+    let session = state
+        .core
+        .session(state.current_session_id())
+        .rlm()
+        .open()
+        .await
+        .map_err(AppError::internal)?;
+    apply_model_selection_to_session(&state, &session, turn_model.clone(), "user_turn").await?;
     state.trace(
         "api.turn.request",
         json!({
@@ -394,7 +420,7 @@ async fn send_turn(
         }),
     );
     state.push_message("user", text.clone());
-    queue_user_turn(&state, text, turn_model).await?;
+    queue_user_turn(&state, &session, text, turn_model).await?;
     state.queue_runner.poke("user_turn");
     Ok(Json(CommandAccepted { accepted: true }))
 }
@@ -403,15 +429,30 @@ async fn button_trigger(
     State(state): State<AppState>,
     Json(request): Json<ButtonEventRequest>,
 ) -> Result<Json<CommandAccepted>, AppError> {
+    let turn_model = model_spec_for_request(
+        &state,
+        request.model.as_deref(),
+        request.model_variant.as_deref(),
+    )?;
+    let session = state
+        .core
+        .session(state.current_session_id())
+        .rlm()
+        .open()
+        .await
+        .map_err(AppError::internal)?;
+    apply_model_selection_to_session(&state, &session, turn_model.clone(), "button_trigger")
+        .await?;
     state.trace(
         "api.button_trigger.request",
         json!({
             "button": request.button,
+            "model": serde_json::to_value(&turn_model).unwrap_or(Value::Null),
         }),
     );
     let pressed_at = Utc::now().to_rfc3339();
     state.push_message("event", format!("{} button event", request.button.lower()));
-    match emit_button_host_event(&state, request.button, &pressed_at).await {
+    match emit_button_host_event(&state, &session, request.button, &pressed_at).await {
         Ok(report) => {
             state.trace(
                 "button_trigger.host_event_report",
@@ -461,11 +502,19 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
             "new_session_id": new_session_id.clone(),
         }),
     );
-    state
+    let session = state
         .core
         .session(new_session_id)
         .rlm()
         .open()
+        .await
+        .map_err(AppError::internal)?;
+    let selected_model = model_spec_from_selection(state.selected_model());
+    session
+        .configure(lash::SessionConfigPatch {
+            model: Some(selected_model),
+            ..lash::SessionConfigPatch::default()
+        })
         .await
         .map_err(AppError::internal)?;
     state.messages.lock().expect("messages lock").clear();
@@ -549,16 +598,10 @@ async fn list_work(State(state): State<AppState>) -> Result<Json<Vec<WorkItem>>,
 
 async fn queue_user_turn(
     state: &AppState,
+    session: &lash::LashSession,
     turn_text: String,
     turn_model: lash::ModelSpec,
 ) -> Result<(), AppError> {
-    let session = state
-        .core
-        .session(state.current_session_id())
-        .rlm()
-        .open()
-        .await
-        .map_err(AppError::internal)?;
     let mut input = TurnInput::text(turn_text.clone());
     input.turn_context.set_model(turn_model.clone());
     input.protocol_turn_options = Some(lash::advanced::ProtocolTurnOptions {
@@ -650,6 +693,13 @@ async fn run_next_queued_turn(state: &AppState, reason: &str) -> Result<bool, la
         .rlm()
         .open()
         .await?;
+    let selected_model = model_spec_from_selection(state.selected_model());
+    session
+        .configure(lash::SessionConfigPatch {
+            model: Some(selected_model.clone()),
+            ..lash::SessionConfigPatch::default()
+        })
+        .await?;
     let turn_state = Arc::new(Mutex::new(TurnStreamState::default()));
     let ui_events = ChannelTurnEvents {
         state: state.clone(),
@@ -663,6 +713,7 @@ async fn run_next_queued_turn(state: &AppState, reason: &str) -> Result<bool, la
         json!({
             "reason": reason,
             "session_id": state.current_session_id(),
+            "model": serde_json::to_value(&selected_model).unwrap_or(Value::Null),
         }),
     );
     let Some(output) = session.next_queued_turn().stream(&ui_events).await? else {
@@ -747,6 +798,7 @@ impl TurnActivitySink for ChannelTurnEvents {
 
 async fn emit_button_host_event(
     state: &AppState,
+    session: &lash::LashSession,
     button: ButtonChoice,
     pressed_at: &str,
 ) -> AnyhowResult<lash::HostEventEmitReport> {
@@ -764,13 +816,6 @@ async fn emit_button_host_event(
             "payload": payload.clone(),
         }),
     );
-    let session = state
-        .core
-        .session(state.current_session_id())
-        .rlm()
-        .open()
-        .await
-        .context("open workbench session")?;
     session
         .host_events()
         .emit(
@@ -816,12 +861,24 @@ impl AppState {
         self.session_ids.current()
     }
 
+    fn selected_model(&self) -> ModelSelection {
+        self.selected_model
+            .lock()
+            .expect("selected model lock")
+            .clone()
+    }
+
+    fn set_selected_model(&self, model: ModelSelection) {
+        *self.selected_model.lock().expect("selected model lock") = model;
+    }
+
     fn settings(&self) -> Settings {
+        let selected_model = self.selected_model();
         Settings {
-            default_model: self.default_model.clone(),
-            default_model_variant: self.default_model_variant.clone(),
+            model: selected_model.model,
+            model_variant: selected_model.model_variant,
             web_configured: self.web_configured,
-            model_variants: vec!["low", "medium", "high"],
+            model_variants: vec!["", "low", "medium", "high"],
             session_id: self.current_session_id(),
         }
     }
@@ -939,16 +996,13 @@ fn model_spec_for_request(
     model: Option<&str>,
     model_variant: Option<&str>,
 ) -> Result<lash::ModelSpec, AppError> {
+    let selected_model = state.selected_model();
     let model = model
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(&state.default_model)
+        .unwrap_or(selected_model.model.as_str())
         .to_string();
-    let model_variant = model_variant
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| state.default_model_variant.clone());
+    let model_variant = model_variant_for_request(&selected_model, model_variant);
     lash::ModelSpec::from_token_limits(
         model,
         model_variant,
@@ -957,6 +1011,58 @@ fn model_spec_for_request(
         None,
     )
     .map_err(AppError::bad_request)
+}
+
+fn model_variant_for_request(
+    selected_model: &ModelSelection,
+    model_variant: Option<&str>,
+) -> Option<String> {
+    match model_variant {
+        Some(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        None => selected_model.model_variant.clone(),
+    }
+}
+
+fn model_spec_from_selection(selection: ModelSelection) -> lash::ModelSpec {
+    lash::ModelSpec::from_token_limits(
+        selection.model,
+        selection.model_variant,
+        DEFAULT_CONTEXT_WINDOW_TOKENS,
+        None,
+        None,
+    )
+    .expect("workbench model selection should use a valid token limit")
+}
+
+async fn apply_model_selection_to_session(
+    state: &AppState,
+    session: &lash::LashSession,
+    model: lash::ModelSpec,
+    reason: &str,
+) -> Result<(), AppError> {
+    state.set_selected_model(ModelSelection::from_spec(&model));
+    session
+        .configure(lash::SessionConfigPatch {
+            model: Some(model.clone()),
+            ..lash::SessionConfigPatch::default()
+        })
+        .await
+        .map_err(AppError::internal)?;
+    state.trace(
+        "model_selection.applied",
+        json!({
+            "reason": reason,
+            "model": serde_json::to_value(&model).unwrap_or(Value::Null),
+        }),
+    );
+    Ok(())
 }
 
 fn assistant_text_for_display(output: &TurnResult, streamed_prose: &str) -> String {
@@ -1205,6 +1311,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn empty_model_variant_request_clears_selected_variant() {
+        let selected_model = ModelSelection {
+            model: "x-ai/grok-build-0.1".to_string(),
+            model_variant: Some("medium".to_string()),
+        };
+
+        assert_eq!(
+            model_variant_for_request(&selected_model, None),
+            Some("medium".to_string())
+        );
+        assert_eq!(
+            model_variant_for_request(&selected_model, Some(" high ")),
+            Some("high".to_string())
+        );
+        assert_eq!(model_variant_for_request(&selected_model, Some("")), None);
+        assert_eq!(
+            model_variant_for_request(&selected_model, Some("   ")),
+            None
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn button_host_event_starts_visible_lashlang_process() {
         let data_dir = std::env::temp_dir().join(format!(
@@ -1319,8 +1447,10 @@ mod tests {
             process_registry: Arc::clone(&process_registry),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
-            default_model: "test-model".to_string(),
-            default_model_variant: None,
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: None,
+            })),
             web_configured: false,
             trace_sink: None,
             event_tx: broadcast::channel(1024).0,
@@ -1383,12 +1513,22 @@ mod tests {
         );
         let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
             artifact_store.clone();
+        let seen_models = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let seen_models_for_provider = Arc::clone(&seen_models);
         let provider = lash::testing::TestProvider::builder()
             .kind("workbench-test")
-            .complete(|_| async {
-                Ok(text_response(
-                    "```lashlang\nsubmit \"blue button joke delivered\"\n```",
-                ))
+            .supported_variants(|_| &["low", "medium", "high"])
+            .complete(move |request| {
+                let seen_models = Arc::clone(&seen_models_for_provider);
+                async move {
+                    seen_models
+                        .lock()
+                        .expect("seen models lock")
+                        .push((request.model, request.model_variant));
+                    Ok(text_response(
+                        "```lashlang\nsubmit \"blue button joke delivered\"\n```",
+                    ))
+                }
             })
             .build()
             .into_handle();
@@ -1421,8 +1561,10 @@ mod tests {
             process_registry,
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
-            default_model: "test-model".to_string(),
-            default_model_variant: None,
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: None,
+            })),
             web_configured: false,
             trace_sink: None,
             event_tx,
@@ -1449,10 +1591,15 @@ mod tests {
             State(state.clone()),
             Json(ButtonEventRequest {
                 button: ButtonChoice::Blue,
+                model: Some("button-model".to_string()),
+                model_variant: Some("high".to_string()),
             }),
         )
         .await
         .expect("button command");
+        let selected_model = state.selected_model();
+        assert_eq!(selected_model.model, "button-model");
+        assert_eq!(selected_model.model_variant.as_deref(), Some("high"));
 
         let mut saw_wake = false;
         let mut seen_events = Vec::new();
@@ -1497,6 +1644,14 @@ mod tests {
         assert!(
             saw_wake,
             "runner should publish the queued wake start event; saw {seen_events:?}"
+        );
+        let seen_models = seen_models.lock().expect("seen models lock").clone();
+        assert!(
+            seen_models
+                .iter()
+                .any(|(model, variant)| model == "button-model"
+                    && variant.as_deref() == Some("high")),
+            "queued button turn should use the selected model; saw {seen_models:?}"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -1548,8 +1703,10 @@ mod tests {
                 text: "before reset".to_string(),
                 at: "2026-05-27T00:00:00Z".to_string(),
             }])),
-            default_model: "test-model".to_string(),
-            default_model_variant: None,
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: None,
+            })),
             web_configured: false,
             trace_sink: None,
             event_tx: broadcast::channel(1024).0,
