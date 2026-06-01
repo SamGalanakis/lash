@@ -692,7 +692,15 @@
   const regen = document.getElementById("regen");
   if (regen) regen.addEventListener("click", generate);
   let resizeTimer = null;
+  let lastWidth = window.innerWidth;
   window.addEventListener("resize", () => {
+    // Scrolling changes the viewport HEIGHT on most browsers (the chrome /
+    // URL bar showing and hiding, svh shifts), which fires `resize`. Only a
+    // WIDTH change alters the scene's layout — the text-column clearance and
+    // the horizon span. Ignore height-only resizes; otherwise the scene
+    // regenerates and re-runs its entrance animation mid-scroll.
+    if (window.innerWidth === lastWidth) return;
+    lastWidth = window.innerWidth;
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(generate, 180);
   });
