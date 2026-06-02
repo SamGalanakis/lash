@@ -103,6 +103,26 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
 ```</code></pre>
         </div>
 
+        <div class="section" id="surface-build-and-dispatch">
+          <div class="section-header">
+            <h2>Surface Build And Dispatch</h2>
+            <p>The runtime owns the concrete bridge between authored Lashlang and host capabilities. A turn builds a <code>RuntimeExecutionContext</code> from the active session, tool dispatch context, plugin session, process services, artifact store, attachment store, and turn metadata. That context produces the <code>LashlangSurface</code>, links the module, stores the content-addressed artifact, and gives <code>HostBridge</code> the dispatch primitives it needs during VM execution.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Lashlang operation</th><th>Runtime path</th></tr></thead>
+              <tbody>
+                <tr><td><code>await board.play({ ... })?</code></td><td><code>ToolAgentSurface</code> maps <code>board.play</code> to a host tool name such as <code>play_move</code>; <code>HostBridge</code> calls <code>RuntimeExecutionContext::call_tool</code> through the active <code>ToolDispatchContext</code>.</td></tr>
+                <tr><td><code>cron.Schedule({ ... })</code></td><td>A plugin-provided <code>ResourceCatalog</code> entry lowers this to a host value with type metadata. It is pure VM data until code passes it to <code>triggers.register</code>.</td></tr>
+                <tr><td><code>await triggers.register({ source, target })?</code></td><td>The trigger host operation is routed to <code>PluginSession</code>'s session trigger registry. The registry validates the source event type against the target process input and stores a route containing module/process refs, not source code text.</td></tr>
+                <tr><td><code>start name(...)</code></td><td>The compiled effect carries <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, process name, and args. Runtime process start writes a <code>ProcessInput::LashlangProcess</code> row and returns a process handle.</td></tr>
+                <tr><td><code>sleep for "5s"</code></td><td><code>HostBridge</code> converts the duration and runs a typed sleep effect through the runtime effect controller, so durable controllers can replay or schedule it.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>The linked artifact is the durable identity boundary. The process worker reloads <code>ModuleArtifact</code> by <code>module_ref</code>, verifies the recorded <code>required_surface_ref</code>, then compiles the selected <code>process_ref</code> through the process cache. Live callable tool dispatch still uses the current tool surface, so the artifact captures the language contract while the host remains responsible for active tools and resources.</p>
+        </div>
+
         <div class="section" id="images-and-attachments">
           <div class="section-header">
             <h2>Images And Attachments</h2>

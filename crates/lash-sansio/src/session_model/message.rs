@@ -54,6 +54,8 @@ pub enum MessageOrigin {
         sequence: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wake_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<crate::CausalRef>,
     },
 }
 

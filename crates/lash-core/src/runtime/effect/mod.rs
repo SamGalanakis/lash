@@ -3,14 +3,15 @@ mod executor;
 mod journal;
 
 pub use envelope::{
-    CausalRef, LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome,
-    RuntimeEffectCommand, RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome,
-    RuntimeInvocation, RuntimeReplay, RuntimeScope, RuntimeSubject,
+    LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome, RuntimeInvocation,
+    RuntimeReplay, RuntimeScope, RuntimeSubject,
 };
 pub use executor::{
     DurableTurnScope, InlineRuntimeEffectController, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectLocalExecutor,
 };
+pub use lash_sansio::CausalRef;
 
 pub(crate) use executor::{ProcessRunner, RuntimeEffectControllerHandle};
 pub(crate) use journal::{

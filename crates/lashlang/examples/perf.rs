@@ -5,9 +5,9 @@ use bench_support::{
     seeded_state_for,
 };
 use lashlang::{
-    CompiledProcessCache, ExecutionEnvironment, ExecutionOutcome, ExecutionScratch,
-    InMemoryLashlangArtifactStore, LashlangArtifactStore, ProjectedBindings, State, compile_linked,
-    execute, prewarm,
+    CompiledProcessCache, CompiledProgramCache, ExecutionEnvironment, ExecutionOutcome,
+    ExecutionScratch, InMemoryLashlangArtifactStore, LashlangArtifactStore, ProjectedBindings,
+    State, compile_linked, execute, prewarm,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
@@ -89,6 +89,7 @@ enum Mode {
     Snapshot,
     ArtifactRoundtrip,
     CompiledProcessCache,
+    CompiledProgramCache,
 }
 
 fn main() {
@@ -114,6 +115,7 @@ fn main() {
             Mode::CompiledExecute | Mode::Snapshot | Mode::CompiledProcessCache => 100_000,
             Mode::LinkArtifact => 25_000,
             Mode::ArtifactRoundtrip => 10_000,
+            Mode::CompiledProgramCache => 25_000,
         });
 
     let scenarios = parse_scenarios(scenario_arg.as_deref());
@@ -135,6 +137,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
     let host = BenchHost;
     let mut scratch = ExecutionScratch::new();
     let mut process_cache_stats = None;
+    let mut program_cache_stats = None;
     let mut artifact_bytes = None;
 
     reset_alloc_counters();
@@ -232,6 +235,16 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             }
             process_cache_stats = Some(cache.stats());
         }
+        Mode::CompiledProgramCache => {
+            let mut cache = CompiledProgramCache::new();
+            for _ in 0..iterations {
+                let compiled = cache
+                    .get_or_compile(std::hint::black_box(source.as_str()))
+                    .expect("program cache compile should succeed");
+                std::hint::black_box(compiled.compile_stats());
+            }
+            program_cache_stats = Some(cache.stats());
+        }
     }
     let elapsed = started.elapsed();
     let allocs = alloc_snapshot();
@@ -266,6 +279,12 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
         println!("process_cache_misses: {}", stats.misses);
         println!("process_cache_evictions: {}", stats.evictions);
         println!("process_cache_entries: {}", stats.entries);
+    }
+    if let Some(stats) = program_cache_stats {
+        println!("program_cache_hits: {}", stats.hits);
+        println!("program_cache_misses: {}", stats.misses);
+        println!("program_cache_evictions: {}", stats.evictions);
+        println!("program_cache_entries: {}", stats.entries);
     }
 }
 
@@ -309,8 +328,9 @@ fn parse_mode(value: &str) -> Mode {
         "snapshot" => Mode::Snapshot,
         "artifact_roundtrip" => Mode::ArtifactRoundtrip,
         "compiled_process_cache" => Mode::CompiledProcessCache,
+        "compiled_program_cache" => Mode::CompiledProgramCache,
         other => panic!(
-            "unknown mode `{other}`; expected one_shot, prewarmed_one_shot, link_artifact, compiled_execute, snapshot, artifact_roundtrip, or compiled_process_cache"
+            "unknown mode `{other}`; expected one_shot, prewarmed_one_shot, link_artifact, compiled_execute, snapshot, artifact_roundtrip, compiled_process_cache, or compiled_program_cache"
         ),
     }
 }

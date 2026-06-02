@@ -343,6 +343,14 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
     "second": "done:inspect api",
     "tools": 2
   },
+  "trigger_registry_surface": {
+    "button_handle": "trigger:ui.button.pressed:on_button",
+    "cancelled": true,
+    "daily_handle": "trigger:cron.Schedule:daily_digest",
+    "listed_source": "cron.Schedule",
+    "listed_target": "daily_digest",
+    "registration_count": 1
+  },
   "type_system_stress": {
     "count": 64,
     "first": "item-0",

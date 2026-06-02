@@ -28,6 +28,9 @@ visible background work. The buttons emit `ui.button.pressed`. The cron card is
 instructional: ask the agent to schedule something and it can construct a typed
 `cron.Schedule` source for a host-owned timer. Started Lashlang background
 processes appear in the right rail.
+The process graph panel is backed by `TraceProcessGraphStore`, a public
+trace-derived observation store; command operations still go through the
+session's `ProcessControl` facade.
 
 The button source config is `{}`. Red/blue selection arrives in the event
 payload:
@@ -69,4 +72,29 @@ handle = await triggers.register({
   name: "daily_digest"
 })?
 submit handle
+```
+
+The host side declares those source constructors through the plugin's
+`lashlang_resources()` hook. The button is a zero-config source whose event
+payload is validated separately through the host-event registration:
+
+```rust
+fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
+    let mut resources = lashlang::ResourceCatalog::new();
+    resources.add_trigger_source_constructor(
+        ["cron", "Schedule"],
+        schedule_config_type(),
+        lashlang::TypeExpr::Ref("cron.Tick".into()),
+    );
+    resources.add_trigger_source_constructor(
+        ["ui", "button", "pressed"],
+        lashlang::TypeExpr::Object(vec![]),
+        button_trigger_event_type(),
+    );
+    resources
+}
+
+reg.host_events().declare(
+    HostEvent::new("Button", "ui.button", "pressed").payload(button_trigger_event_type()),
+)?;
 ```

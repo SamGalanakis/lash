@@ -309,8 +309,8 @@ mod tests {
     mod conformance {
         use super::*;
         use lash_llm_transport::conformance::{
-            CanonicalUsage as U, ProviderNormalizer, ProviderWire, Scenario, StreamAssembly,
-            provider_conformance,
+            CanonicalUsage as U, ProviderConformanceSpec, ProviderNormalizer, ProviderWire,
+            Scenario, StreamAssembly, provider_conformance,
         };
         use serde_json::Value;
 
@@ -343,9 +343,28 @@ mod tests {
             ])
         }
 
+        fn tool_use_message() -> Value {
+            json!([
+                json!({ "type": "message_start", "message": { "usage": { "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT } } }).to_string(),
+                json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "call_1", "name": "lookup", "input": {} } }).to_string(),
+                // arguments deliberately split across two delta events
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{\"q\":" } }).to_string(),
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "\"x\"}" } }).to_string(),
+                json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+                json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } }).to_string(),
+            ])
+        }
+
         impl ProviderNormalizer for AnthropicNormalizer {
             fn name(&self) -> &str {
                 "anthropic"
+            }
+
+            fn conformance_spec(&self) -> ProviderConformanceSpec {
+                ProviderConformanceSpec::with_unsupported(&[(
+                    Scenario::UsageReasoning,
+                    "Anthropic usage does not expose separate reasoning-token counts",
+                )])
             }
 
             fn wire_for(&self, scenario: Scenario) -> Option<ProviderWire> {
@@ -365,16 +384,9 @@ mod tests {
                         "",
                         json!({ "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT }),
                     )),
-                    Scenario::ToolUse => {
-                        let events = json!([
-                            json!({ "type": "message_start", "message": { "usage": { "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT } } }).to_string(),
-                            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "call_1", "name": "lookup", "input": {} } }).to_string(),
-                            // arguments deliberately split across two delta events
-                            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{\"q\":" } }).to_string(),
-                            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "\"x\"}" } }).to_string(),
-                            json!({ "type": "content_block_stop", "index": 0 }).to_string(),
-                            json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } }).to_string(),
-                        ]);
+                    Scenario::NonStreamingToolUse => ProviderWire::body(tool_use_message()),
+                    Scenario::StreamingToolArgumentMerge => {
+                        let events = tool_use_message();
                         ProviderWire::body(events.clone()).with_tool_call_stream(
                             events
                                 .as_array()

@@ -56,43 +56,29 @@ fn process_wake_input_from_event_payload_renders_plain_scalar_payload_as_json() 
 
 #[test]
 fn process_wake_turn_text_frames_process_id_sequence_and_input() {
-    let wake = ProcessWakeDelivery {
-        wake_id: "wake:abc".to_string(),
-        target_session_id: "target".to_string(),
-        target_scope_id: ProcessScope::new("target").id(),
-        process_id: "process-1".to_string(),
-        sequence: 7,
-        dedupe_key: "process-1:7".to_string(),
-        input: "line one\nline two".to_string(),
-        created_at_ms: 123,
-    };
+    let wake = wake_delivery("process.ready", None);
 
     assert_eq!(
         process_wake_turn_text(&wake),
-        "Background process wake\nProcess: process-1\nEvent: process.wake #7\nWake input:\nline one\nline two"
+        "Background process wake\nProcess: process-1\nEvent: process.ready #7\nWake input:\nline one\nline two"
     );
 }
 
 #[test]
 fn process_wake_turn_cause_preserves_process_origin() {
-    let wake = ProcessWakeDelivery {
-        wake_id: "wake:abc".to_string(),
-        target_session_id: "target".to_string(),
-        target_scope_id: ProcessScope::new("target").id(),
-        process_id: "process-1".to_string(),
-        sequence: 7,
-        dedupe_key: "process-1:7".to_string(),
-        input: "line one\nline two".to_string(),
-        created_at_ms: 123,
+    let process_caused_by = crate::CausalRef::SessionNode {
+        session_id: "target".to_string(),
+        node_id: "host-event:button".to_string(),
     };
+    let wake = wake_delivery("process.ready", Some(process_caused_by.clone()));
 
     let cause = process_wake_turn_cause(&wake);
 
     assert_eq!(cause.id, "wake:abc");
-    assert_eq!(cause.event_type, "process.wake");
+    assert_eq!(cause.event_type, "process.ready");
     assert_eq!(
         cause.text,
-        "Background process wake\nProcess: process-1\nEvent: process.wake #7\nWake input:\nline one\nline two"
+        "Background process wake\nProcess: process-1\nEvent: process.ready #7\nWake input:\nline one\nline two"
     );
     assert!(matches!(
         cause.origin,
@@ -101,11 +87,65 @@ fn process_wake_turn_cause_preserves_process_origin() {
             event_type,
             sequence,
             wake_id,
+            caused_by,
         } if process_id == "process-1"
-            && event_type == "process.wake"
+            && event_type == "process.ready"
             && sequence == 7
             && wake_id.as_deref() == Some("wake:abc")
+            && caused_by == Some(process_caused_by)
     ));
+}
+
+#[test]
+fn process_wake_delivery_carries_event_invocation_and_process_cause() {
+    let process_caused_by = crate::CausalRef::SessionNode {
+        session_id: "target".to_string(),
+        node_id: "host-event:button".to_string(),
+    };
+    let wake = wake_delivery("process.ready", Some(process_caused_by.clone()));
+
+    assert_eq!(wake.event_type, "process.ready");
+    assert_eq!(wake.process_caused_by, Some(process_caused_by));
+    assert!(matches!(
+        wake.event_invocation.subject,
+        crate::RuntimeSubject::ProcessEvent {
+            process_id,
+            sequence: 7,
+            event_type,
+        } if process_id == "process-1" && event_type == "process.ready"
+    ));
+}
+
+fn wake_delivery(
+    event_type: impl Into<String>,
+    process_caused_by: Option<crate::CausalRef>,
+) -> ProcessWakeDelivery {
+    let event_type = event_type.into();
+    ProcessWakeDelivery {
+        wake_id: "wake:abc".to_string(),
+        target_session_id: "target".to_string(),
+        target_scope_id: ProcessScope::new("target").id(),
+        process_id: "process-1".to_string(),
+        sequence: 7,
+        event_type: event_type.clone(),
+        event_invocation: crate::RuntimeInvocation {
+            scope: crate::RuntimeScope::new("target"),
+            subject: crate::RuntimeSubject::ProcessEvent {
+                process_id: "process-1".to_string(),
+                sequence: 7,
+                event_type,
+            },
+            caused_by: Some(crate::CausalRef::Process {
+                process_id: "process-1".to_string(),
+            }),
+            replay: None,
+            checkpoint_hash: None,
+        },
+        process_caused_by,
+        dedupe_key: "process-1:7".to_string(),
+        input: "line one\nline two".to_string(),
+        created_at_ms: 123,
+    }
 }
 
 #[test]

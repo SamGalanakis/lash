@@ -218,15 +218,14 @@ mod tests {
 
     /// Cross-provider response-normalization conformance. Wraps this crate's
     /// (private) Gemini parsers in a `ProviderNormalizer`. Gemini materializes
-    /// tool-call arguments whole rather than streaming them across chunks, so
-    /// it opts out of the `ToolUse` chunk-assembly scenario (the suite logs the
-    /// skip) — that's a real provider difference, not a gap.
+    /// non-streaming function calls, but it does not expose the streaming
+    /// chunk-merge scenarios in the same shape as SSE-first providers.
     #[cfg(feature = "testing")]
     mod conformance {
         use super::*;
         use lash_llm_transport::conformance::{
-            CanonicalUsage as U, ProviderNormalizer, ProviderWire, Scenario, StreamAssembly,
-            provider_conformance,
+            CanonicalUsage as U, ProviderConformanceSpec, ProviderNormalizer, ProviderWire,
+            Scenario, StreamAssembly, provider_conformance,
         };
 
         struct GoogleNormalizer;
@@ -234,6 +233,19 @@ mod tests {
         impl ProviderNormalizer for GoogleNormalizer {
             fn name(&self) -> &str {
                 "google-gemini"
+            }
+
+            fn conformance_spec(&self) -> ProviderConformanceSpec {
+                ProviderConformanceSpec::with_unsupported(&[
+                    (
+                        Scenario::StreamingToolArgumentMerge,
+                        "Gemini streams complete functionCall objects, not argument deltas",
+                    ),
+                    (
+                        Scenario::StreamingUsageMerge,
+                        "Gemini usage events replace aggregate usage instead of incremental SSE deltas",
+                    ),
+                ])
             }
 
             fn wire_for(&self, scenario: Scenario) -> Option<ProviderWire> {
@@ -257,11 +269,18 @@ mod tests {
                     Scenario::ContentFilter => ProviderWire::body(json!({
                         "candidates": [{ "content": { "parts": [] }, "finishReason": "SAFETY" }]
                     })),
-                    // Gemini returns a complete `functionCall` (args as a whole
-                    // JSON object) rather than streaming arguments across
-                    // events, so the cross-chunk assembly scenario does not
-                    // apply. Opt out explicitly.
-                    Scenario::ToolUse => return None,
+                    Scenario::NonStreamingToolUse => ProviderWire::body(json!({
+                        "candidates": [{
+                            "content": { "parts": [{
+                                "functionCall": {
+                                    "id": "call_1",
+                                    "name": "lookup",
+                                    "args": { "q": "x" }
+                                }
+                            }] }
+                        }]
+                    })),
+                    Scenario::StreamingToolArgumentMerge => return None,
                     Scenario::UsageCacheHit => ProviderWire::body(json!({
                         "candidates": [{
                             "content": { "parts": [{ "text": "ok" }] },
@@ -294,9 +313,6 @@ mod tests {
                         }]
                     }))
                     .with_reasoning_text("thinking about it"),
-                    // Gemini replaces the usage block on each streaming event
-                    // rather than merging incrementally, so the merge scenario
-                    // does not apply. Opt out explicitly.
                     Scenario::StreamingUsageMerge => return None,
                 };
                 Some(wire)

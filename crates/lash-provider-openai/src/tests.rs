@@ -967,7 +967,7 @@ mod conformance {
                         "finish_reason": "content_filter"
                     }]
                 })),
-                Scenario::ToolUse => ProviderWire::body(json!({
+                Scenario::NonStreamingToolUse => ProviderWire::body(json!({
                     "choices": [{
                         "message": {
                             "role": "assistant",
@@ -979,18 +979,20 @@ mod conformance {
                         },
                         "finish_reason": "tool_calls"
                     }]
-                }))
-                .with_tool_call_stream(
-                    vec![
-                        // arguments deliberately split across two SSE events
-                        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}"#.to_string(),
-                        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]}}]}"#.to_string(),
-                        r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#.to_string(),
-                        "[DONE]".to_string(),
-                    ],
-                    "lookup",
-                    json!({ "q": "x" }),
-                ),
+                })),
+                Scenario::StreamingToolArgumentMerge => {
+                    ProviderWire::body(json!({})).with_tool_call_stream(
+                        vec![
+                            // arguments deliberately split across two SSE events
+                            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}"#.to_string(),
+                            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]}}]}"#.to_string(),
+                            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#.to_string(),
+                            "[DONE]".to_string(),
+                        ],
+                        "lookup",
+                        json!({ "q": "x" }),
+                    )
+                }
                 Scenario::UsageCacheHit => ProviderWire::body(json!({
                     "choices": [{
                         "message": { "role": "assistant", "content": "ok" },

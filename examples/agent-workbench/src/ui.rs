@@ -1804,7 +1804,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
     function renderGraphEdge(edge) {
       const el = document.createElement("div");
-      const selectedClass = edge.selected === true ? " selected" : edge.selected === false ? " dimmed" : "";
+      const selectedClass = edge.selection === "selected" ? " selected" : edge.selection === "rejected" ? " dimmed" : "";
       el.className = "graph-edge" + selectedClass;
       el.innerHTML = `<div class="graph-primary">${escapeHtml(edge.label || "edge")}</div>
         <div class="graph-secondary">${escapeHtml(edge.from)} → ${escapeHtml(edge.to)}</div>`;

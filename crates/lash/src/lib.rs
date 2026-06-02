@@ -184,8 +184,10 @@ pub mod prompt {
 pub mod tracing {
     pub use lash_core::{
         JsonlTraceSink, TraceAttachment, TraceBranchSelection, TraceContentBlock, TraceError,
-        TraceEvent, TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TraceProcessMap,
-        TraceProcessMapEdge, TraceProcessMapNode, TraceProcessStatus, TraceProcessTrackingEvent,
+        TraceEvent, TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TraceProcessEdgeSelection,
+        TraceProcessGraph, TraceProcessGraphChildLink, TraceProcessGraphEdge,
+        TraceProcessGraphNode, TraceProcessGraphStore, TraceProcessMap, TraceProcessMapEdge,
+        TraceProcessMapNode, TraceProcessNodeStatus, TraceProcessStatus, TraceProcessTrackingEvent,
         TracePromptComponent, TraceProviderStreamEvent, TraceRecord, TraceRuntimeStreamEvent,
         TraceSinkError, TraceTokenUsage, TraceToolSpec,
     };

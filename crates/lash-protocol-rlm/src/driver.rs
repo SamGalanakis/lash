@@ -552,6 +552,7 @@ mod tests {
                 event_type: "process.wake".to_string(),
                 sequence: 7,
                 wake_id: Some("wake:abc".to_string()),
+                caused_by: None,
             }),
         });
         let projection = projection_from_events(&[event]);
@@ -585,6 +586,7 @@ mod tests {
                 event_type: "process.wake".to_string(),
                 sequence: 7,
                 wake_id: Some("wake:abc".to_string()),
+                caused_by: None,
             },
             text: "Background process wake\nProcess: process-1\nEvent: process.wake #7\nWake input:\nblue button pressed".to_string(),
         };

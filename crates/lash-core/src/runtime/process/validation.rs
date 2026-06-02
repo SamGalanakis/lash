@@ -44,6 +44,9 @@ pub fn prepare_process_event_append(
                         target_scope,
                         process_id.to_string(),
                         existing.sequence,
+                        existing.event_type.clone(),
+                        existing.invocation.clone(),
+                        record.provenance.caused_by.clone(),
                         wake,
                         existing.occurred_at,
                     )
@@ -91,20 +94,7 @@ pub fn prepare_process_event_append(
         )));
     }
     let occurred_at = system_time_from_epoch_ms(occurred_at_ms);
-    let wake_delivery = semantics
-        .wake
-        .clone()
-        .zip(request.wake_target_scope.clone())
-        .map(|(wake, target_scope)| {
-            process_wake_delivery(
-                target_scope,
-                process_id.to_string(),
-                sequence,
-                wake,
-                occurred_at,
-            )
-        })
-        .transpose()?;
+    let wake_target_scope = request.wake_target_scope.clone();
     let event = ProcessEvent {
         process_id: process_id.to_string(),
         sequence,
@@ -120,6 +110,23 @@ pub fn prepare_process_event_append(
         semantics: semantics.clone(),
         occurred_at,
     };
+    let wake_delivery = semantics
+        .wake
+        .clone()
+        .zip(wake_target_scope)
+        .map(|(wake, target_scope)| {
+            process_wake_delivery(
+                target_scope,
+                process_id.to_string(),
+                event.sequence,
+                event.event_type.clone(),
+                event.invocation.clone(),
+                record.provenance.caused_by.clone(),
+                wake,
+                event.occurred_at,
+            )
+        })
+        .transpose()?;
     Ok(PreparedProcessEventAppend {
         event,
         payload_hash,

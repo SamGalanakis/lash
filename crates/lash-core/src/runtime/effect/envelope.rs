@@ -10,8 +10,8 @@ use crate::llm::types::{
 use crate::runtime::ProcessHandleGrantEntry;
 use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
 use crate::{
-    AttachmentCreateMeta, AttachmentRef, AttachmentStore, CheckpointDelivery, ExecResponse,
-    LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
+    AttachmentCreateMeta, AttachmentRef, AttachmentStore, CausalRef, CheckpointDelivery,
+    ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
     ProcessExecutionContext, ProcessListMode, ProcessRecord, ProcessRegistration, ProcessScope,
     ProcessStartGrant,
 };
@@ -188,36 +188,6 @@ pub enum RuntimeSubject {
         event_type: String,
     },
     SessionNode {
-        node_id: String,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CausalRef {
-    Turn {
-        session_id: String,
-        turn_id: String,
-    },
-    Effect {
-        session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<String>,
-        effect_id: String,
-    },
-    ToolCall {
-        session_id: String,
-        call_id: String,
-    },
-    Process {
-        process_id: String,
-    },
-    ProcessEvent {
-        process_id: String,
-        sequence: u64,
-    },
-    SessionNode {
-        session_id: String,
         node_id: String,
     },
 }

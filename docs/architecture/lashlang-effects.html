@@ -50,10 +50,41 @@
           </dl>
         </div>
 
+        <div class="section" id="host-provided-modules">
+          <div class="section-header">
+            <h2>Host-Provided Modules</h2>
+            <p>Lashlang does not ship a global tool namespace. The current turn's <code>RuntimeExecutionContext::lashlang_surface()</code> builds the effective language surface by translating callable <code>ToolSurface</code> entries into module operations and then extending that catalog with plugin-provided Lashlang resources. Linking and prompt rendering both use this surface, so examples in the prompt are executable against the same host contract.</p>
+          </div>
+          <dl class="def-list">
+            <dt><code>ToolAgentSurface</code></dt>
+            <dd>Tool manifests choose the authored call path. <code>ToolAgentSurface::new(["board"], "play")</code> maps the tool to <code>board.play</code>; leaving it empty falls back to <code>tools.&lt;tool_name&gt;</code>. Module path segments must be lowercase ASCII identifiers, and duplicate callable paths are rejected when the tool surface is built.</dd>
+            <dt><code>ResourceCatalog</code></dt>
+            <dd>The catalog records module instances, resource authority types, receiver operations, pure constructors, and trigger-source event metadata. A receiver operation carries the host operation name used for dispatch, plus input/output type text for prompt rendering and linker diagnostics.</dd>
+            <dt><code>PluginFactory::lashlang_resources</code></dt>
+            <dd>Plugins use this hook for language resources that are not ordinary tools: trigger registry operations, <code>cron.Schedule(...)</code>, <code>ui.button.pressed(...)</code>, or any other typed host value constructor. Session plugins can still register normal tools through <code>reg.tools()</code>; those tools become module operations through their manifest metadata.</dd>
+            <dt><code>LashlangAbilities</code></dt>
+            <dd>The host enables process starts, sleep, process signals, and trigger registry operations explicitly. A configured process registry derives process/lifecycle availability for sessions; plugins such as the built-in session-trigger plugin contribute trigger operations and resources.</dd>
+          </dl>
+          <pre><code>fn read_board_tool() -&gt; ToolDefinition {
+  ToolDefinition::raw("tool:read_board", "read_board", "...", input, output)
+    .with_agent_surface(ToolAgentSurface::new(["board"], "read"))
+}
+
+fn lashlang_resources(&self) -&gt; lashlang::ResourceCatalog {
+  let mut resources = lashlang::ResourceCatalog::new();
+  resources.add_trigger_source_constructor(
+    ["cron", "Schedule"],
+    schedule_config_type(),
+    lashlang::TypeExpr::Ref("cron.Tick".into()),
+  );
+  resources
+}</code></pre>
+        </div>
+
         <div class="section" id="tool-calls-and-async-handles">
           <div class="section-header">
             <h2>Resource Operations And Process Handles</h2>
-            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, and trigger registry operations are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. Runtime trigger routes are registered by calling <code>triggers.register</code> with a host-provided source value and a single-input process value; source owners later activate exact handles. Timers and recurring jobs are host-owned source policies, not Lashlang syntax.</p>
+            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, and trigger registry operations are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. In RLM, <code>HostBridge</code> dispatches ordinary module operations to the callable tool surface, trigger operations to the session trigger registry, process starts to the process service, and sleep through the runtime effect controller. Timers and recurring jobs are host-owned source policies, not Lashlang syntax.</p>
           </div>
           <dl class="def-list">
             <dt><code>await RESOURCE.alias.operation({ ... })</code></dt>
@@ -113,14 +144,14 @@ submit {
         <div class="section" id="triggers">
           <div class="section-header">
             <h2>Triggers</h2>
-          <p>Lashlang owns the canonical trigger registry contract. A host exposes pure value constructors such as <code>timer.Schedule(...)</code> and declares protocol metadata saying the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Code then passes that source value and a single-input process value to awaited registry operations such as <code>triggers.register</code>, process-scoped <code>triggers.list</code>, and <code>triggers.cancel</code>. The linker and runtime use the same operation names, field shapes, source decoding, target identity, alias resolution, and event-to-input assignability rules. Core owns durable route storage and exact-handle activation; concrete sources belong to plugins or host applications.</p>
+          <p>Lashlang owns the canonical trigger registry contract. A host exposes pure source constructors such as <code>cron.Schedule(...)</code> or <code>ui.button.pressed(...)</code> and declares protocol metadata saying the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Code then passes that source value and a single-input process value to awaited registry operations such as <code>triggers.register</code>, process-scoped <code>triggers.list</code>, and <code>triggers.cancel</code>. The linker and runtime use the same operation names, field shapes, source decoding, target identity, alias resolution, and event-to-input assignability rules. Core owns durable route storage and exact-handle/source-type activation; concrete sources belong to plugins or host applications.</p>
           </div>
-          <pre><code>process daily_digest(tick: timer.Tick) {
+          <pre><code>process daily_digest(tick: cron.Tick) {
   wake { kind: "daily_digest_due", tick: tick }
   finish true
 }
 
-source = timer.Schedule({
+source = cron.Schedule({
   expr: "0 8 * * *",
   tz: "UTC"
 })
@@ -133,20 +164,34 @@ handle = await triggers.register({
 registrations = await triggers.list({ target: daily_digest })?
 
 submit handle</code></pre>
-          <p>The matching host contract exposes the constructor and trigger-source relation. The source owner can query registrations for that source type and activate exact trigger handles through the session trigger control:</p>
-          <pre><code>resources.add_value_constructor(
-    ["timer", "Schedule"],
-    TypeExpr::Object(vec![expr_field, tz_field]),
-    TypeExpr::Ref("timer.Schedule".into()),
-);
-resources.add_trigger_source_type(
-    "timer.Schedule",
-    TypeExpr::Ref("timer.Tick".into()),
+          <p>A host event source uses the same registry. The workbench registers a typed UI button event whose source config is empty; the selected button arrives in the activation payload:</p>
+          <pre><code>type ButtonPressed = { button: "Red" | "Blue", message: str, pressed_at: str }
+
+process on_button(event: ButtonPressed) {
+  wake { kind: "button_pressed", button: event.button, message: event.message }
+  finish true
+}
+
+handle = await triggers.register({
+  source: ui.button.pressed({}),
+  target: on_button,
+  name: "button watcher"
+})?
+submit handle</code></pre>
+          <p>The matching host contract exposes constructors, trigger-source relations, and optionally typed host events. Source owners can list source registrations, activate exact handles, activate every enabled route for a source type, or emit a declared host event that validates the payload and fans out to matching routes:</p>
+          <pre><code>resources.add_trigger_source_constructor(
+    ["cron", "Schedule"],
+    schedule_config_type(),
+    TypeExpr::Ref("cron.Tick".into()),
 );
 
-for route in session.triggers().by_source_type("timer.Schedule").await? {
-    session.triggers().activate(route.handle, payload.clone()).await?;
-}</code></pre>
+reg.host_events().declare(
+    HostEvent::new("Button", "ui.button", "pressed").payload(button_event_type()),
+)?;
+
+session.activate_lashlang_trigger(handle, tick_payload).await?;
+session.activate_lashlang_trigger_source_type("cron.Schedule", tick_payload).await?;
+session.host_events().emit("Button", "ui.button", "pressed", button_payload).await?;</code></pre>
         </div>
 
         <div class="section" id="terminator-effects">
