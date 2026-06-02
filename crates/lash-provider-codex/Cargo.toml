@@ -21,11 +21,11 @@ default = ["testing"]
 testing = ["lash-llm-transport/testing"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.18" }
-lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.18" }
-lash-provider-auth = { path = "../lash-provider-auth", version = "=0.1.0-alpha.18" }
-lash-provider-openai = { path = "../lash-provider-openai", version = "=0.1.0-alpha.18" }
-lash-openai-schema = { path = "../lash-openai-schema", version = "=0.1.0-alpha.18" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.19" }
+lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.19" }
+lash-provider-auth = { path = "../lash-provider-auth", version = "=0.1.0-alpha.19" }
+lash-provider-openai = { path = "../lash-provider-openai", version = "=0.1.0-alpha.19" }
+lash-openai-schema = { path = "../lash-openai-schema", version = "=0.1.0-alpha.19" }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream", "rustls"] }

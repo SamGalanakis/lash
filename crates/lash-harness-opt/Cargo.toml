@@ -14,12 +14,12 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 dirs = "6"
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.18", default-features = false }
-lash-cli = { path = "../lash-cli", version = "=0.1.0-alpha.18" }
-lash = { package = "lash-runtime", path = "../lash", version = "=0.1.0-alpha.18" }
-lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.18" }
-lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.18" }
-lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.18" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.19", default-features = false }
+lash-cli = { path = "../lash-cli", version = "=0.1.0-alpha.19" }
+lash = { package = "lash-runtime", path = "../lash", version = "=0.1.0-alpha.19" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.19" }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.19" }
+lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.19" }
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
