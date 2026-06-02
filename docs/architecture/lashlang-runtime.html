@@ -12,10 +12,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../styles.css?v=2">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js" defer></script>
+<script src="../docs.js?v=2" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -51,10 +51,10 @@ sequenceDiagram
   Runtime-->>Driver: Response::ExecResult or TurnOutcome::AgentFrameSwitch (continue_as)
             </div>
           </div>
-          <p>An end-to-end fanout-and-merge program for a host surface that enables <code>TOOL.default</code> operations and background processes. It enumerates candidate files, starts per-file analyses as handles, awaits them as a record, builds a histogram with nested path assignment, and either finishes the trajectory or hands the partial work to a new AgentFrame when the budget would be exceeded.</p>
+          <p>An end-to-end fanout-and-merge program for a host surface that enables lowercase resource operations and background processes. It enumerates candidate files, starts per-file analyses as handles, awaits them as a record, builds a histogram with nested path assignment, and either finishes the trajectory or hands the partial work to a new AgentFrame when the budget would be exceeded.</p>
           <pre><code>```lashlang
-process review_file(tool: TOOL, path: str) {
-  report = await tool.spawn_agent({
+process review_file(agent: Agents, path: str) {
+  report = await agent.spawn({
     task: format("review {} for TODOs and panics", path),
     capability: "explore",
     output: Type { owner: str, todos: int, panics: int }
@@ -62,7 +62,7 @@ process review_file(tool: TOOL, path: str) {
   finish report
 }
 
-paths = await TOOL.default.glob({ pattern: "crates/lash/src/**/*.rs" })?
+paths = await workspace.default.glob({ pattern: "crates/lash/src/**/*.rs" })?
 if empty(paths) {
   submit { reviewed: 0, by_owner: {} }
 }
@@ -71,7 +71,7 @@ if empty(paths) {
 batch = slice(paths, null, 8)
 handles = {}
 for path in batch {
-  handles[path] = start review_file(tool: TOOL.default, path: path)
+  handles[path] = start review_file(agent: agents.default, path: path)
 }
 
 // Resolve the whole record concurrently, then collapse into a histogram.
@@ -94,7 +94,7 @@ for path in keys(resolved) {
 
 // Hand off the rest if we only got through a slice; otherwise submit.
 if len(paths) > len(batch) {
-  await TOOL.default.continue_as({
+  await control.continue_as({
     task: "continue the review over the remaining files",
     seed: { remaining: slice(paths, 8, null), by_owner: by_owner, errors: errors }
   })?

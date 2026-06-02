@@ -199,7 +199,7 @@ async fn delete_session_process_command_requests_cancel_only_for_unshared_active
         )
         .await
         .expect("grant remaining");
-    let controller = crate::InlineRuntimeEffectController::default();
+    let controller = crate::InlineRuntimeEffectController;
     let invocation = crate::RuntimeInvocation::effect(
         crate::RuntimeScope::new("deleted"),
         "process:delete-session:deleted",

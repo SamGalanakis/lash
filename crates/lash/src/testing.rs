@@ -18,7 +18,7 @@ pub mod conformance {
 
     use crate::core::LashCoreBuilder;
     use crate::plugins::{
-        HostEvent, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+        PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
     };
     use crate::testing::TestProvider;
     use crate::{LashCore, ModeId, ModePreset};
@@ -42,40 +42,36 @@ pub mod conformance {
     /// the backend produced by `make`. `make` must return a fresh backend on
     /// each call.
     ///
-    /// Each scenario mutates a session's tool surface (installs a lashlang
-    /// trigger → generation ≥ 2), drops and reopens it (a restart from cold
+    /// Each scenario registers a Lashlang trigger route through the runtime
+    /// `triggers` module, drops and reopens the session (a restart from cold
     /// durable storage), then drives an out-of-turn process through the
     /// lease-protected worker. The worker reconstructs the session purely from
-    /// persisted state; the suite asserts that reconstruction matches a live
-    /// `session().open()` — the surface is restored (not reset to the base
-    /// generation) and the process reaches terminal success — across the
+    /// persisted state; the suite asserts that trigger registry state and the
+    /// process runtime surface survive rebuild across the
     /// [`ProcessInput`](lash_core::ProcessInput) variants the worker runs.
     pub async fn runtime_rebuild_and_worker_recovery<F>(make: F)
     where
         F: Fn() -> RuntimeRebuildBackend,
     {
-        reopen_restores_mutated_tool_surface(make()).await;
+        reopen_restores_trigger_registry_state(make()).await;
         worker_runs_trigger_started_lashlang_process_after_restart(make()).await;
         worker_recovers_tool_call_process_in_restarted_session(make()).await;
         worker_recovers_session_turn_process_in_restarted_session(make()).await;
     }
 
     const TRIGGER_SOURCE: &str = r#"
-type ButtonChoice = enum["Red", "Blue"]
-type ButtonPressed = { button: ButtonChoice, message: str, pressed_at: str }
-
-process remember(event: ButtonPressed) {
-  checked = validate(event, Type {
-    button: enum["Red", "Blue"],
-    message: str,
-    pressed_at: str
-  })
-  wake { button: checked.button, message: checked.message }
-  finish { button: checked.button, ok: true }
+process remember(tick: clock.Tick) {
+  wake { id: tick.id, scheduled_at: tick.scheduled_at }
+  finish { id: tick.id, ok: true }
 }
 
-trigger remembered on ui.button.pressed as event
-  -> remember(event: event)
+source = clock.Alarm({ at: "08:00" })
+handle = await triggers.register({
+  source: source,
+  target: remember,
+  name: "remembered"
+})?
+submit "registered"
 "#;
 
     const SESSION_ID: &str = "rebuild-conformance";
@@ -88,28 +84,7 @@ trigger remembered on ui.button.pressed as event
             .with_triggers()
     }
 
-    fn trigger_payload_type() -> crate::modes::TypeExpr {
-        crate::modes::TypeExpr::Object(vec![
-            crate::modes::TypeField {
-                name: "button".into(),
-                ty: crate::modes::TypeExpr::Enum(vec!["Red".into(), "Blue".into()]),
-                optional: false,
-            },
-            crate::modes::TypeField {
-                name: "message".into(),
-                ty: crate::modes::TypeExpr::Str,
-                optional: false,
-            },
-            crate::modes::TypeField {
-                name: "pressed_at".into(),
-                ty: crate::modes::TypeExpr::Str,
-                optional: false,
-            },
-        ])
-    }
-
-    /// Makes `ui.button.pressed` a linkable trigger event source so the trigger
-    /// source installs and mutates the tool surface.
+    /// Installs the trigger abilities used by the rebuild conformance program.
     struct TriggerResourcePluginFactory;
 
     impl PluginFactory for TriggerResourcePluginFactory {
@@ -123,8 +98,15 @@ trigger remembered on ui.button.pressed as event
 
         fn lashlang_resources(&self) -> crate::modes::ResourceCatalog {
             let mut resources = crate::modes::ResourceCatalog::new();
-            resources.add_module_instance(["ui", "button"], "Button");
-            resources.add_trigger_event("Button", "pressed", trigger_payload_type());
+            resources.add_trigger_source_constructor(
+                ["clock", "Alarm"],
+                crate::modes::TypeExpr::Object(vec![crate::modes::TypeField {
+                    name: "at".into(),
+                    ty: crate::modes::TypeExpr::Str,
+                    optional: false,
+                }]),
+                crate::modes::TypeExpr::Ref("clock.Tick".into()),
+            );
             resources
         }
 
@@ -143,10 +125,8 @@ trigger remembered on ui.button.pressed as event
             "rebuild-conformance-trigger"
         }
 
-        fn register(&self, reg: &mut PluginRegistrar) -> std::result::Result<(), PluginError> {
-            reg.host_events().declare(
-                HostEvent::new("Button", "ui.button", "pressed").payload(trigger_payload_type()),
-            )
+        fn register(&self, _reg: &mut PluginRegistrar) -> std::result::Result<(), PluginError> {
+            Ok(())
         }
     }
 
@@ -188,17 +168,23 @@ trigger remembered on ui.button.pressed as event
             .expect("model spec")
     }
 
-    /// Provider that finishes an RLM child turn with a lashlang submit. Used only
-    /// by the SessionTurn child (the lashlang/tool processes never call the LLM);
-    /// the recovered child inherits this provider, exercising provider re-supply.
+    /// Provider used both to register the trigger route through a normal RLM
+    /// turn and to finish the SessionTurn child. The child inherits this
+    /// provider, exercising provider re-supply after rebuild.
     fn rebuild_provider() -> crate::provider::ProviderHandle {
         TestProvider::builder()
             .kind("rebuild-conformance")
-            .complete(|_| async {
+            .complete(|req| async move {
+                let rendered_messages = format!("{:?}", req.messages);
+                let text = if rendered_messages.contains("run child") {
+                    "```lashlang\nsubmit \"child done\"\n```".to_string()
+                } else {
+                    format!("```lashlang\n{}\n```", TRIGGER_SOURCE.trim())
+                };
                 Ok(crate::direct::LlmResponse {
-                    full_text: "```lashlang\nsubmit \"child done\"\n```".to_string(),
+                    full_text: text.clone(),
                     parts: vec![crate::direct::LlmOutputPart::Text {
-                        text: "```lashlang\nsubmit \"child done\"\n```".to_string(),
+                        text,
                         response_meta: None,
                     }],
                     ..crate::direct::LlmResponse::default()
@@ -231,9 +217,9 @@ trigger remembered on ui.button.pressed as event
         )
     }
 
-    /// Open the session, install the trigger (mutating the tool surface to
-    /// generation ≥ 2), optionally register an out-of-turn process, then drop and
-    /// reopen from cold durable storage. Returns the reopened core.
+    /// Open the session, register the trigger route through Lashlang, optionally
+    /// register an out-of-turn process, then drop and reopen from cold durable
+    /// storage.
     async fn open_mutate_and_restart(
         core: &LashCore,
         register: Option<lash_core::ProcessRegistration>,
@@ -245,12 +231,15 @@ trigger remembered on ui.button.pressed as event
             .open()
             .await
             .expect("open session");
-        let install = session
-            .triggers()
-            .install_lashlang_source(TRIGGER_SOURCE)
+        let output = session
+            .turn(lash_core::TurnInput::text("register rebuild trigger"))
+            .run()
             .await
-            .expect("install trigger source");
-        assert_eq!(install.installed, vec!["remembered"]);
+            .expect("register trigger route");
+        assert_eq!(
+            output.submitted_value(),
+            Some(&serde_json::json!("registered"))
+        );
         if let Some(registration) = register {
             registry
                 .register_process(registration)
@@ -280,10 +269,32 @@ trigger remembered on ui.button.pressed as event
         );
     }
 
-    /// Differential baseline: a live reopen restores the mutated tool surface
-    /// (the trigger removed the `attach_button_trigger` tool), not the base
-    /// surface — the same reconstruction the worker must produce.
-    async fn reopen_restores_mutated_tool_surface(backend: RuntimeRebuildBackend) {
+    async fn activate_first_clock_trigger(
+        session: &crate::LashSession,
+        payload: serde_json::Value,
+    ) -> lash_core::HostEventEmitReport {
+        let registrations = session
+            .triggers()
+            .by_source_type("clock.Alarm")
+            .await
+            .expect("list clock trigger registrations");
+        let handle = registrations
+            .iter()
+            .find(|registration| registration.enabled)
+            .map(|registration| registration.handle.as_str())
+            .expect("registered clock trigger handle")
+            .to_string();
+        session
+            .triggers()
+            .activate(handle, payload)
+            .await
+            .expect("activate trigger")
+    }
+
+    /// Differential baseline: a live reopen restores the trigger registry route
+    /// installed through a normal turn — the same reconstruction the worker
+    /// must use for out-of-turn process starts.
+    async fn reopen_restores_trigger_registry_state(backend: RuntimeRebuildBackend) {
         let registry = Arc::clone(&backend.process_registry);
         let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
         open_mutate_and_restart(&core, None, &registry).await;
@@ -294,22 +305,15 @@ trigger remembered on ui.button.pressed as event
             .open()
             .await
             .expect("reopen session");
-        let tool_names = reopened
-            .tools()
-            .active_definitions()
-            .await
-            .expect("active tools")
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<Vec<_>>();
-        // The installed trigger removes the surface-mutating installer tool; a
-        // base-generation surface (rebuild failure) would still advertise it.
-        assert!(
-            !tool_names
-                .iter()
-                .any(|name| name == "attach_button_trigger"),
-            "reopened surface should reflect the installed trigger, got tools: {tool_names:?}"
-        );
+        let report = activate_first_clock_trigger(
+            &reopened,
+            serde_json::json!({
+                "id": "daily-2026-06-01",
+                "scheduled_at": "2026-06-01T08:00:00Z"
+            }),
+        )
+        .await;
+        assert_eq!(report.started_process_ids.len(), 1);
     }
 
     async fn worker_runs_trigger_started_lashlang_process_after_restart(
@@ -325,20 +329,14 @@ trigger remembered on ui.button.pressed as event
             .open()
             .await
             .expect("reopen session");
-        let report = session
-            .host_events()
-            .emit(
-                "Button",
-                "ui.button",
-                "pressed",
-                serde_json::json!({
-                    "button": "Blue",
-                    "message": "user pressed the blue button",
-                    "pressed_at": "2026-05-29T00:00:00Z"
-                }),
-            )
-            .await
-            .expect("emit host event");
+        let report = activate_first_clock_trigger(
+            &session,
+            serde_json::json!({
+                "id": "daily-2026-06-01",
+                "scheduled_at": "2026-06-01T08:00:00Z"
+            }),
+        )
+        .await;
         assert_eq!(report.started_process_ids.len(), 1);
         await_success(&registry, &report.started_process_ids[0]).await;
     }

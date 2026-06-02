@@ -3,7 +3,7 @@ use lashlang::{
     AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ImageValue, LashlangAbilities,
     LashlangSurface, LinkedModule, ListValue, ProjectedBindings, ProjectedFuture,
     ProjectedHostValue, ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record,
-    ResourceCatalog, State, Value, from_json,
+    ResourceCatalog, State, TypeExpr, Value, from_json,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -643,8 +643,7 @@ submit {
   task: frame.task,
   seed_keys: frame.seed_keys,
   projected_count: frame.projected_count,
-  global_count: frame.global_count,
-  handle_count: frame.handle_count
+  global_count: frame.global_count
 }
 "#
         }
@@ -766,15 +765,39 @@ submit {
 pub fn benchmark_surface() -> LashlangSurface {
     let mut resources = ResourceCatalog::tool_default(["echo", "boom", "missing_tool"]);
     resources.add_module_instance(["shell"], "Shell");
-    resources.add_operation("Shell", "exec", "exec_command");
+    resources.add_operation(
+        "Shell",
+        "exec",
+        "exec_command",
+        TypeExpr::Any,
+        TypeExpr::Any,
+    );
     resources.add_module_instance(["llm"], "Llm");
-    resources.add_operation("Llm", "query", "llm_query");
+    resources.add_operation("Llm", "query", "llm_query", TypeExpr::Any, TypeExpr::Any);
     resources.add_module_instance(["agents"], "Agents");
-    resources.add_operation("Agents", "spawn", "spawn_agent");
+    resources.add_operation(
+        "Agents",
+        "spawn",
+        "spawn_agent",
+        TypeExpr::Any,
+        TypeExpr::Any,
+    );
     resources.add_module_instance(["processes"], "Processes");
-    resources.add_operation("Processes", "list", "list_process_handles");
+    resources.add_operation(
+        "Processes",
+        "list",
+        "list_process_handles",
+        TypeExpr::Any,
+        TypeExpr::Any,
+    );
     resources.add_module_instance(["control"], "Control");
-    resources.add_operation("Control", "continue_as", "continue_as");
+    resources.add_operation(
+        "Control",
+        "continue_as",
+        "continue_as",
+        TypeExpr::Any,
+        TypeExpr::Any,
+    );
     LashlangSurface::new(resources, LashlangAbilities::all())
 }
 
@@ -1348,7 +1371,6 @@ fn continue_as_record(args: &Record) -> Value {
     let mut seed_keys = Vec::new();
     let mut projected_count = 0usize;
     let mut global_count = 0usize;
-    let mut handle_count = 0usize;
     if let Some(seed) = seed {
         for (key, value) in seed.iter() {
             seed_keys.push(Value::String(key.into()));
@@ -1357,7 +1379,6 @@ fn continue_as_record(args: &Record) -> Value {
             } else {
                 global_count += 1;
             }
-            handle_count += count_handles(value);
         }
     }
 
@@ -1379,28 +1400,7 @@ fn continue_as_record(args: &Record) -> Value {
         "global_count".to_string(),
         Value::Number(global_count as f64),
     );
-    record.insert(
-        "handle_count".to_string(),
-        Value::Number(handle_count as f64),
-    );
     Value::Record(Arc::new(record))
-}
-
-fn count_handles(value: &Value) -> usize {
-    match value {
-        Value::Record(record) => {
-            let current = matches!(
-                (
-                    record.get("__handle__"),
-                    record.get("id").or_else(|| record.get("tool"))
-                ),
-                (Some(Value::String(kind)), Some(_)) if kind.as_str() == "process"
-            ) as usize;
-            current + record.values().map(count_handles).sum::<usize>()
-        }
-        Value::List(items) => items.iter().map(count_handles).sum(),
-        _ => 0,
-    }
 }
 
 fn process_handles_record() -> Value {

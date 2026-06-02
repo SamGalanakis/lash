@@ -1,6 +1,7 @@
 //! Public compile/execute entry points for lashlang programs.
 
 use crate::ast::Program;
+use crate::tracking::ProcessTrackingContext;
 use crate::{LinkedModule, ModuleArtifact, ProcessRef};
 
 use super::record::intern_symbol;
@@ -81,8 +82,22 @@ pub fn compile_linked_process(
         declaration_spans: linked_program.declaration_spans.clone(),
         expression_spans: Vec::new(),
     };
-    let (chunk, compile_stats) =
-        Compiler::compile_linked_program(&process_program, (&linked.artifact).into());
+    let process_ref = linked
+        .artifact
+        .process_ref(process_name)
+        .cloned()
+        .ok_or_else(|| RuntimeError::ValueError {
+            message: format!("linked module does not export process `{process_name}`"),
+        })?;
+    let (chunk, compile_stats) = Compiler::compile_linked_process_program(
+        &process_program,
+        (&linked.artifact).into(),
+        ProcessTrackingContext::new(
+            linked.artifact.module_ref.clone(),
+            process_ref,
+            process_name,
+        ),
+    );
     Ok(CompiledProgram {
         chunk,
         compile_stats,
@@ -118,8 +133,15 @@ pub fn compile_module_artifact_process(
         declaration_spans: artifact.canonical_ir.declaration_spans.clone(),
         expression_spans: Vec::new(),
     };
-    let (chunk, compile_stats) =
-        Compiler::compile_linked_program(&process_program, artifact.into());
+    let (chunk, compile_stats) = Compiler::compile_linked_process_program(
+        &process_program,
+        artifact.into(),
+        ProcessTrackingContext::new(
+            artifact.module_ref.clone(),
+            process_ref.clone(),
+            process_name,
+        ),
+    );
     Ok(CompiledProgram {
         chunk,
         compile_stats,

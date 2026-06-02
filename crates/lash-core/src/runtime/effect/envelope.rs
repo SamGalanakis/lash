@@ -7,12 +7,13 @@ use crate::llm::types::{
     LlmAttachment, LlmEventSender, LlmMessage, LlmOutputSpec, LlmProviderTraceSender,
     LlmToolChoice, LlmToolSpec,
 };
+use crate::runtime::ProcessHandleGrantEntry;
 use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
 use crate::{
     AttachmentCreateMeta, AttachmentRef, AttachmentStore, CheckpointDelivery, ExecResponse,
     LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
-    ProcessExecutionContext, ProcessHandleGrantEntry, ProcessListMode, ProcessRecord,
-    ProcessRegistration, ProcessScope, ProcessStartGrant,
+    ProcessExecutionContext, ProcessListMode, ProcessRecord, ProcessRegistration, ProcessScope,
+    ProcessStartGrant,
 };
 
 use super::executor::RuntimeEffectControllerError;

@@ -71,7 +71,7 @@ impl<'scope> ProcessCommandRunner<'scope> {
         &self,
         owner_scope: crate::ProcessScope,
         mode: crate::ProcessListMode,
-    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
+    ) -> Result<Vec<crate::runtime::ProcessHandleGrantEntry>, crate::PluginError> {
         match self
             .run(crate::ProcessCommand::List { owner_scope, mode })
             .await?
@@ -161,7 +161,7 @@ impl<'scope> ProcessCommandRunner<'scope> {
         // Process registry/workflow idempotency is the replay boundary when a
         // process control call is issued outside an active turn lease.
         let journal_store = turn_lease
-            .and_then(|_| self.current.store.as_ref())
+            .and(self.current.store.as_ref())
             .and_then(|store| store.embedded_durable_turn_store());
         let has_turn_id = envelope.invocation.scope.turn_id.is_some();
         let outcome = if let (Some(store), Some(lease), true) =
@@ -283,7 +283,7 @@ impl ProcessCapability {
         session_id: &str,
         mode: crate::ProcessListMode,
         scope: crate::ProcessOpScope<'_>,
-    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
+    ) -> Result<Vec<crate::runtime::ProcessHandleGrantEntry>, crate::PluginError> {
         self.command_runner(current, &scope)?
             .list(
                 self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref()),
@@ -335,40 +335,6 @@ impl ProcessCapability {
         let request = crate::ProcessEventAppendRequest::new("process.signal", payload)
             .with_replay_key(format!("process:{process_id}:signal:{signal_id}"));
         runner.signal(process_id, signal_id, request).await
-    }
-
-    pub(in crate::runtime::session_manager) async fn cancel_all_processes(
-        &self,
-        current: &CurrentSessionCapability,
-        managed: &ManagedSessionCapability,
-        session_id: &str,
-        scope: crate::ProcessOpScope<'_>,
-    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
-        let tasks = self
-            .list_process_handles(
-                current,
-                session_id,
-                crate::ProcessListMode::Live,
-                scope.clone(),
-            )
-            .await?;
-        let mut cancelled = Vec::new();
-        for (grant, record) in tasks {
-            if record.is_terminal() {
-                continue;
-            }
-            cancelled.push(
-                self.cancel_process(
-                    current,
-                    managed,
-                    session_id,
-                    &grant.process_id,
-                    scope.clone(),
-                )
-                .await?,
-            );
-        }
-        Ok(cancelled)
     }
 
     pub(in crate::runtime::session_manager) async fn validate_process_handles_visible(

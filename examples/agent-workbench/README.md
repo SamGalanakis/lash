@@ -22,8 +22,51 @@ Configuration is read from `.env` or the process environment:
   the UI to send no variant for models without configurable thinking.
 
 The browser UI has three work areas: the left rail contains red and blue host
-event buttons plus per-turn model controls, the center pane is a chat/event
-stream, and the right rail polls the process registry for visible background
-work. The two buttons emit the declared host event `ui.button.pressed`.
-The agent installs behavior by declaring a Lashlang `trigger` on that event;
-started Lashlang background processes appear in the right rail.
+event buttons, a cron schedule card, and per-turn model controls; the center
+pane is a chat/event stream; and the right rail polls the process registry for
+visible background work. The buttons emit `ui.button.pressed`. The cron card is
+instructional: ask the agent to schedule something and it can construct a typed
+`cron.Schedule` source for a host-owned timer. Started Lashlang background
+processes appear in the right rail.
+
+The button source config is `{}`. Red/blue selection arrives in the event
+payload:
+
+```lash
+type ButtonPressed = { button: "Red" | "Blue", message: str, pressed_at: str }
+
+process on_button(event: ButtonPressed) {
+  wake { kind: "button_pressed", button: event.button, message: event.message }
+  finish true
+}
+
+handle = await triggers.register({
+  source: ui.button.pressed({}),
+  target: on_button,
+  name: "button watcher"
+})?
+submit handle
+```
+
+The cron card is the schedule demo: there is no Lashlang `schedule` syntax and
+no UI tick button. The host owns any cron/timer policy. The workbench plugin
+declares the `cron.Schedule` source; core provides the generic trigger registry
+plus source-type activation for host-owned schedulers. Exact-handle activation
+remains available for schedulers that select specific due routes. Lashlang
+builds a `cron.Schedule` value and registers it with the runtime trigger
+registry:
+
+```lash
+process daily_digest(tick: cron.Tick) {
+  wake { kind: "daily_digest_due", tick: tick }
+  finish true
+}
+
+source = cron.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+handle = await triggers.register({
+  source: source,
+  target: daily_digest,
+  name: "daily_digest"
+})?
+submit handle
+```

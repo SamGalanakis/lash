@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use lash_core::{
-    Message, MessageRole, PartKind, PluginMessage, ProcessHandleGrantEntry, ProcessRecord,
-    ProcessStatus, PromptUsage, TokenUsage, ToolCallRecord,
+    Message, MessageRole, PartKind, PluginMessage, ProcessHandleSummary, ProcessLifecycleStatus,
+    PromptUsage, TokenUsage, ToolCallRecord,
 };
 use lash_tui::{Line, Rect};
 use lash_tui_extensions::TuiExtensions;
@@ -99,30 +99,32 @@ pub struct ProcessView {
     pub process_id: String,
     pub kind: String,
     pub label: String,
-    pub status: ProcessStatus,
+    pub status: ProcessLifecycleStatus,
     pub first_seen: std::time::Instant,
     pub status_duration: Option<std::time::Duration>,
     pub transient_until: Option<std::time::Instant>,
 }
 
 impl ProcessView {
-    fn from_record(
-        grant: lash_core::ProcessHandleGrant,
-        record: ProcessRecord,
+    fn from_summary(
+        summary: ProcessHandleSummary,
         first_seen: std::time::Instant,
         status_duration: Option<std::time::Duration>,
         transient_until: Option<std::time::Instant>,
     ) -> Self {
-        let kind = grant
+        let kind = summary
             .descriptor
             .kind
             .unwrap_or_else(|| "process".to_string());
-        let label = grant.descriptor.label.unwrap_or_else(|| record.id.clone());
+        let label = summary
+            .descriptor
+            .label
+            .unwrap_or_else(|| summary.process_id.clone());
         Self {
-            process_id: record.id.clone(),
+            process_id: summary.process_id,
             kind,
             label,
-            status: record.status,
+            status: summary.status,
             first_seen,
             status_duration,
             transient_until,
@@ -779,7 +781,7 @@ impl App {
         self.dirty = true;
     }
 
-    pub fn update_processes(&mut self, tasks: Vec<ProcessHandleGrantEntry>) {
+    pub fn update_processes(&mut self, tasks: Vec<ProcessHandleSummary>) {
         let now = std::time::Instant::now();
         let previous: HashMap<String, ProcessView> = self
             .processes
@@ -788,18 +790,18 @@ impl App {
             .map(|task| (task.process_id.clone(), task))
             .collect();
         let mut next = Vec::new();
-        for (grant, task) in tasks {
+        for task in tasks {
             let old_status = previous
-                .get(&task.id)
+                .get(&task.process_id)
                 .and_then(|item| item.status.terminal_state());
             let status = task.status.terminal_state();
             let first_seen = previous
-                .get(&task.id)
+                .get(&task.process_id)
                 .map(|item| item.first_seen)
                 .unwrap_or(now);
             let status_duration = if status.is_some() {
                 previous
-                    .get(&task.id)
+                    .get(&task.process_id)
                     .and_then(|item| item.status_duration)
                     .or_else(|| Some(first_seen.elapsed()))
             } else {
@@ -808,10 +810,11 @@ impl App {
             let transient_until = if status.is_some() && old_status != status {
                 Some(now + std::time::Duration::from_secs(10))
             } else {
-                previous.get(&task.id).and_then(|item| item.transient_until)
+                previous
+                    .get(&task.process_id)
+                    .and_then(|item| item.transient_until)
             };
-            next.push(ProcessView::from_record(
-                grant,
+            next.push(ProcessView::from_summary(
                 task,
                 first_seen,
                 status_duration,

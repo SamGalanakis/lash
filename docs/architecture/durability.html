@@ -12,10 +12,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../styles.css?v=2">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js" defer></script>
+<script src="../docs.js?v=2" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -204,10 +204,11 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Turn / Process Symmetry</h2>
-            <p>A background process can be started by a turn, by a trigger, or by cron, and however it starts it is <strong>identically durable</strong>. Start writes durable intent; a lash-owned <code>DurableProcessWorker</code> owns execution and recovery for every non-terminal process. Cron <em>activation</em> — a scheduler driving the tick — is the one remaining host-side gap; the execution half already covers any process a tick fires.</p>
+            <p>A background process can be started by a turn or by exact trigger-handle activation, and however it starts it is <strong>identically durable</strong>. Start writes durable intent; a lash-owned <code>DurableProcessWorker</code> owns execution and recovery for every non-terminal process. Timers and recurring jobs live on the host side as source owners; once they activate a trigger handle, Lash starts the target process through the same durable worker path.</p>
           </div>
           <p>Execution mirrors the turn machinery. A turn is fenced by a <code>RuntimeTurnLease</code>, resumes from its checkpoint + effect journal, and recovers via <code>resume_turn</code>; a process is fenced by a <code>ProcessLease</code>, resumes from registry events, and recovers through <code>DurableProcessWorker::drive_pending_processes</code>. Both leases carry owner id, lease token, fencing token, claim time, and expiry; stale writers fail before committing durable state.</p>
-          <p>A turn supplies its per-invocation durable controller through <code>DurableTurnScope</code>. Out-of-turn starts — trigger host events, facade <code>start</code>/<code>cancel</code>, and recovery sweeps — write durable registry intent and execute through the worker's wired controller. A durable host never silently re-runs a process on an inline controller.</p>
+          <p>A turn supplies its per-invocation durable controller through <code>DurableTurnScope</code>. Out-of-turn starts — trigger activations, facade <code>start</code>, and recovery sweeps — write durable registry intent and execute through the worker's wired controller. A durable host never silently re-runs a process on an inline controller.</p>
+          <p>User-facing cancellation is intentionally separate from execution recovery. Host API, tool, and Lashlang cancel requests route through <code>ProcessCancelAbility</code> with an explicit <code>ProcessCancelSource</code> and reason; cancel-all lists live visible handles and cancels each through that same ability path. Internal cleanup such as <code>cancel_unreferenced</code> remains a registry operation because it is not a public cancel request.</p>
           <p>The recovery sweep lists non-terminal processes, claims each available lease, skips work held by another live owner, runs the claimed process from host-owned worker config, writes the terminal outcome, and releases the lease. The sweep is idempotent by persisted <code>process_id</code>; the Restate invocation is keyed as <code>LashProcessWorkflow/{process_id}</code>.</p>
           <p>A subagent spawn is itself such a process. <code>agents.spawn</code> builds a <code>SessionCreateRequest</code> plus a <code>TurnInput</code> and emits one <code>ProcessInput::SessionTurn</code>, so a spawned child runs through the same generic process path — and therefore inherits provider re-supply, durability, and recovery — rather than a bespoke child-creation route. Recursion safety (the subagent depth ceiling and tool-hiding at that ceiling) and the <code>submit_error</code> terminal are carried as request config, not lost.</p>
         </div>
@@ -269,7 +270,7 @@ flowchart LR
                 <tr><td><code>scoped_transfer_and_cleanup_use_process_effect_controller_metadata</code></td><td>Process handle transfer and unreferenced-handle cleanup route through <code>ProcessOpScope</code>, carrying the active process effect metadata and controller.</td></tr>
                 <tr><td><code>process_control_fails_loudly_when_process_registry_is_unavailable</code></td><td>Process validation, non-empty transfer, and cleanup fail clearly without an installed <code>ProcessRegistry</code>, while empty transfer remains an explicit no-op.</td></tr>
                 <tr><td><code>lashlang_process_uses_artifact_refs_for_nested_starts</code></td><td>A durable Lashlang process with ref-only input can reload its <code>ModuleArtifact</code>, compile the selected <code>process_ref</code>, and run nested <code>start</code>/<code>await</code> without storing a full module snapshot on the process row.</td></tr>
-                <tr><td><code>executor_reports_disabled_lashlang_abilities_at_link_time</code></td><td>Disabled process declarations, starts, process sleep/signals, triggers, and cron schedules parse but fail during link with <code>lashlang feature `...` is disabled by this host</code>, producing no runtime tool calls or observations.</td></tr>
+                <tr><td><code>executor_reports_disabled_lashlang_abilities_at_link_time</code></td><td>Disabled process declarations, starts, process sleep/signals, and triggers parse but fail during link with <code>lashlang feature `...` is disabled by this host</code>, producing no runtime tool calls or observations.</td></tr>
                 <tr><td><code>durable_controller_error_abandons_lease_and_preserves_resume_state</code></td><td>Controller/runtime errors abandon the lease best-effort while preserving the checkpoint and completed journal rows for a future resume.</td></tr>
                 <tr><td><code>durable_finalize_error_abandons_lease_and_preserves_resume_state</code></td><td>Plugin finalization failures use the shared leased finisher's non-commit cleanup path: the lease is abandoned and resumable checkpoint/journal data is preserved.</td></tr>
                 <tr><td><code>durable_turn_resume_uses_leased_finisher_and_clears_resume_state</code></td><td>Fresh and resumed durable turns converge through the same lease-fenced final commit path, and a successful resumed finish clears checkpoint and journal rows only at commit.</td></tr>

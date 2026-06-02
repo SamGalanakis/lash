@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crate::ProcessTrackingChild;
+
 use super::super::host::{
     AbilityOp, AbilityResult, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessStart,
     ResourceOperation, Sleep, SleepKind,
@@ -8,8 +10,8 @@ use super::super::{
     ExecutionHost, RuntimeError, Value, error_value, is_process_handle_record,
     record_with_capacity, success, unwrap_tool_result,
 };
-use super::Vm;
 use super::control::VmOutcome;
+use super::{ActiveProcessTrackingNode, Vm};
 
 #[derive(Clone, Copy)]
 pub(super) enum VmEffect {
@@ -33,6 +35,29 @@ impl<H: ExecutionHost> Vm<'_, H> {
     pub(super) async fn resolve_effect(
         &mut self,
         effect: VmEffect,
+        instruction_ip: usize,
+    ) -> Result<Option<VmOutcome>, RuntimeError> {
+        let active = self.begin_process_tracking(instruction_ip);
+        let result = self.resolve_effect_inner(effect, active.as_ref()).await;
+        match (&result, active.as_ref()) {
+            (Ok(Some(VmOutcome::ProcessFailed(value))), Some(active)) => {
+                self.fail_process_tracking(active, value.to_string());
+            }
+            (Ok(_), Some(active)) => {
+                self.complete_process_tracking(active);
+            }
+            (Err(error), Some(active)) => {
+                self.fail_process_tracking(active, error.to_string());
+            }
+            _ => {}
+        }
+        result
+    }
+
+    async fn resolve_effect_inner(
+        &mut self,
+        effect: VmEffect,
+        active: Option<&ActiveProcessTrackingNode>,
     ) -> Result<Option<VmOutcome>, RuntimeError> {
         match effect {
             VmEffect::ResourceCall { operation, argc } => {
@@ -91,13 +116,15 @@ impl<H: ExecutionHost> Vm<'_, H> {
                             module_context.module_ref
                         ),
                     })?;
+                let child_module_ref = module_context.module_ref.clone();
+                let child_required_surface_ref = module_context.required_surface_ref.clone();
                 let value = self
                     .host
                     .perform(AbilityOp::StartProcess(Box::new(ProcessStart {
-                        module_ref: module_context.module_ref.clone(),
-                        process_ref,
-                        required_surface_ref: module_context.required_surface_ref.clone(),
-                        process_name,
+                        module_ref: child_module_ref.clone(),
+                        process_ref: process_ref.clone(),
+                        required_surface_ref: child_required_surface_ref,
+                        process_name: process_name.clone(),
                         args,
                     })))
                     .await
@@ -105,6 +132,19 @@ impl<H: ExecutionHost> Vm<'_, H> {
                     .map_err(|err| RuntimeError::ValueError {
                         message: format!("process start failed: {err}"),
                     })?;
+                if let (Some(active), Some(process_id)) =
+                    (active, process_handle_id_from_value(&value))
+                {
+                    self.observe_child_started(
+                        active,
+                        ProcessTrackingChild {
+                            process_id,
+                            module_ref: child_module_ref,
+                            process_ref,
+                            process_name,
+                        },
+                    );
+                }
                 self.stack.push(value);
             }
             VmEffect::AwaitHandle => {
@@ -302,4 +342,18 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 }),
         }
     }
+}
+
+fn process_handle_id_from_value(value: &Value) -> Option<String> {
+    let record = value.as_record()?;
+    let Value::String(kind) = record.get("__handle__")? else {
+        return None;
+    };
+    if kind.as_str() != "process" {
+        return None;
+    }
+    let Value::String(id) = record.get("id")? else {
+        return None;
+    };
+    Some(id.to_string())
 }

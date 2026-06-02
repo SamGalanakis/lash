@@ -9,7 +9,6 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
   "continue_as_seed_surface": {
     "frame_id": "frame:bench",
     "global_count": 4,
-    "handle_count": 2,
     "projected_count": 1,
     "seed_keys": [
       "projected_problem",

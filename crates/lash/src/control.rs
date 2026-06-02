@@ -21,14 +21,14 @@ impl SessionControl {
         }
     }
 
-    pub fn triggers(&self) -> TriggersControl {
-        TriggersControl {
+    pub fn host_events(&self) -> HostEventsControl {
+        HostEventsControl {
             control: self.clone(),
         }
     }
 
-    pub fn host_events(&self) -> HostEventsControl {
-        HostEventsControl {
+    pub fn triggers(&self) -> TriggersControl {
+        TriggersControl {
             control: self.clone(),
         }
     }
@@ -223,19 +223,6 @@ impl SessionControl {
         .await
     }
 
-    async fn install_lashlang_trigger_source(
-        &self,
-        source: &str,
-    ) -> Result<lash_core::SessionTriggerInstallReport> {
-        self.with_writer(async |runtime: &mut LashRuntime| {
-            runtime
-                .install_lashlang_trigger_source(source)
-                .await
-                .map_err(Into::into)
-        })
-        .await
-    }
-
     async fn emit_host_event(
         &self,
         resource_type: &str,
@@ -247,6 +234,58 @@ impl SessionControl {
             runtime
                 .emit_host_event(resource_type, alias, event, payload)
                 .await
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn activate_lashlang_trigger(
+        &self,
+        handle: &str,
+        payload: serde_json::Value,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .activate_lashlang_trigger(handle, payload)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn activate_lashlang_trigger_source_type(
+        &self,
+        source_type: impl AsRef<str>,
+        payload: serde_json::Value,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        let source_type = source_type.as_ref().to_string();
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .activate_lashlang_trigger_source_type(&source_type, payload)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn list_lashlang_trigger_registrations(
+        &self,
+    ) -> Result<Vec<lash_core::TriggerRegistration>> {
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .list_lashlang_trigger_registrations()
+                .map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn lashlang_trigger_registrations_by_source_type(
+        &self,
+        source_type: impl Into<lash_core::TriggerSourceType>,
+    ) -> Result<Vec<lash_core::TriggerRegistration>> {
+        self.with_writer(async |runtime: &mut LashRuntime| {
+            runtime
+                .lashlang_trigger_registrations_by_source_type(source_type)
                 .map_err(Into::into)
         })
         .await
@@ -312,30 +351,24 @@ impl SessionControl {
         .await
     }
 
-    async fn list_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+    async fn list_process_handles(&self) -> Result<Vec<lash_core::ProcessHandleSummary>> {
         Ok(self.runtime.observe().list_process_handles().await)
     }
 
-    async fn list_all_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+    async fn list_all_process_handles(&self) -> Result<Vec<lash_core::ProcessHandleSummary>> {
         Ok(self.runtime.observe().list_all_process_handles().await)
     }
 
     async fn start_process(
         &self,
-        registration: lash_core::ProcessRegistration,
-        options: lash_core::ProcessStartOptions,
-    ) -> Result<ProcessRecord> {
+        request: lash_core::ProcessStartRequest,
+    ) -> Result<lash_core::ProcessHandleSummary> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
         let processes = runtime.process_service()?;
         processes
-            .start(
-                &session_id,
-                registration,
-                options,
-                lash_core::ProcessOpScope::new(),
-            )
+            .start_from_request(&session_id, request, lash_core::ProcessOpScope::new())
             .await
             .map_err(Into::into)
     }
@@ -349,24 +382,43 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    async fn cancel_process(&self, process_id: &str) -> Result<ProcessRecord> {
+    async fn cancel_process(&self, process_id: &str) -> Result<lash_core::ProcessCancelSummary> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
         let processes = runtime.process_service()?;
-        processes
-            .cancel(&session_id, process_id, lash_core::ProcessOpScope::new())
+        let cancel_ability = runtime.process_cancel_ability();
+        cancel_ability
+            .cancel_summary(
+                processes.as_ref(),
+                lash_core::ProcessCancelRequest::new(
+                    &session_id,
+                    process_id,
+                    lash_core::ProcessOpScope::new(),
+                    lash_core::ProcessCancelSource::HostApi,
+                )
+                .with_reason("requested by host API"),
+            )
             .await
             .map_err(Into::into)
     }
 
-    async fn cancel_all_processes(&self) -> Result<Vec<ProcessRecord>> {
+    async fn cancel_visible_processes(&self) -> Result<Vec<lash_core::ProcessCancelSummary>> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
         let processes = runtime.process_service()?;
-        processes
-            .cancel_all(&session_id, lash_core::ProcessOpScope::new())
+        let cancel_ability = runtime.process_cancel_ability();
+        cancel_ability
+            .cancel_all_visible(
+                processes.as_ref(),
+                lash_core::ProcessCancelAllRequest::new(
+                    &session_id,
+                    lash_core::ProcessOpScope::new(),
+                    lash_core::ProcessCancelSource::HostApi,
+                )
+                .with_reason("requested by host API"),
+            )
             .await
             .map_err(Into::into)
     }
@@ -712,26 +764,6 @@ impl AdvancedToolsControl {
 }
 
 #[derive(Clone)]
-pub struct TriggersControl {
-    control: SessionControl,
-}
-
-impl TriggersControl {
-    /// Register trigger declarations from a Lashlang module.
-    ///
-    /// Foreground expressions in the module are ignored by this installer; they
-    /// are only executed when the same Lashlang source is run through a turn.
-    pub async fn install_lashlang_source(
-        &self,
-        source: impl AsRef<str>,
-    ) -> Result<lash_core::SessionTriggerInstallReport> {
-        self.control
-            .install_lashlang_trigger_source(source.as_ref())
-            .await
-    }
-}
-
-#[derive(Clone)]
 pub struct HostEventsControl {
     control: SessionControl,
 }
@@ -755,6 +787,66 @@ impl HostEventsControl {
     }
 }
 
+/// Host controls for Lashlang trigger registrations.
+///
+/// Lash does not own trigger source schedulers. Hosts or plugins that own a
+/// concrete source type can activate every enabled route for that source type,
+/// while scheduler-like sources may still activate an exact selected handle.
+#[derive(Clone)]
+pub struct TriggersControl {
+    control: SessionControl,
+}
+
+impl TriggersControl {
+    /// Return every trigger registration in the session.
+    ///
+    /// This is an admin/introspection view. Source owners should prefer
+    /// [`Self::by_source_type`] so they only inspect registrations for the
+    /// concrete source type they own.
+    pub async fn list_all(&self) -> Result<Vec<lash_core::TriggerRegistration>> {
+        self.control.list_lashlang_trigger_registrations().await
+    }
+
+    /// Return registrations whose source value has the given host value type.
+    ///
+    /// This is the source-owner API: a timer, UI, webhook, or other host-owned
+    /// source uses it to find the exact handles it may activate.
+    pub async fn by_source_type(
+        &self,
+        source_type: impl Into<lash_core::TriggerSourceType>,
+    ) -> Result<Vec<lash_core::TriggerRegistration>> {
+        self.control
+            .lashlang_trigger_registrations_by_source_type(source_type)
+            .await
+    }
+
+    /// Activate one exact trigger handle with an event payload.
+    ///
+    /// The payload must match the event type declared for the registered source.
+    /// Disabled or unknown handles do not start a process.
+    pub async fn activate(
+        &self,
+        handle: impl AsRef<str>,
+        payload: serde_json::Value,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        self.control
+            .activate_lashlang_trigger(handle.as_ref(), payload)
+            .await
+    }
+
+    /// Activate every enabled trigger route whose source value has this host
+    /// value type.
+    pub async fn activate_source_type(
+        &self,
+        source_type: impl AsRef<str>,
+        payload: serde_json::Value,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        self.control
+            .activate_lashlang_trigger_source_type(source_type.as_ref(), payload)
+            .await
+    }
+}
+
 #[derive(Clone)]
 pub struct ProcessControl {
     control: SessionControl,
@@ -767,17 +859,16 @@ impl ProcessControl {
 
     pub async fn start(
         &self,
-        registration: lash_core::ProcessRegistration,
-        options: lash_core::ProcessStartOptions,
-    ) -> Result<ProcessRecord> {
-        self.control.start_process(registration, options).await
+        request: lash_core::ProcessStartRequest,
+    ) -> Result<lash_core::ProcessHandleSummary> {
+        self.control.start_process(request).await
     }
 
-    pub async fn list(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+    pub async fn list(&self) -> Result<Vec<lash_core::ProcessHandleSummary>> {
         self.control.list_process_handles().await
     }
 
-    pub async fn list_all(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+    pub async fn list_all(&self) -> Result<Vec<lash_core::ProcessHandleSummary>> {
         self.control.list_all_process_handles().await
     }
 
@@ -785,12 +876,12 @@ impl ProcessControl {
         self.control.await_background_work().await
     }
 
-    pub async fn cancel(&self, process_id: &str) -> Result<ProcessRecord> {
+    pub async fn cancel(&self, process_id: &str) -> Result<lash_core::ProcessCancelSummary> {
         self.control.cancel_process(process_id).await
     }
 
-    pub async fn cancel_all(&self) -> Result<Vec<ProcessRecord>> {
-        self.control.cancel_all_processes().await
+    pub async fn cancel_all(&self) -> Result<Vec<lash_core::ProcessCancelSummary>> {
+        self.control.cancel_visible_processes().await
     }
 }
 

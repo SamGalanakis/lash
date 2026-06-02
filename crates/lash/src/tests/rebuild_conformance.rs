@@ -78,9 +78,7 @@ async fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
                     .attachment_store(Arc::clone(&attachment))
                     .lashlang_artifact_store(Arc::clone(&artifact))
                     .advanced()
-                    .effect_controller(Arc::new(
-                        crate::advanced::InlineRuntimeEffectController::default(),
-                    ))
+                    .effect_controller(Arc::new(crate::advanced::InlineRuntimeEffectController))
                     .build()
                     .expect("build core")
             }),

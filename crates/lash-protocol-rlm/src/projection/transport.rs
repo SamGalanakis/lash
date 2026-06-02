@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lash_core::{SessionAppendNode, ToolArgumentProjectionPolicy};
@@ -46,49 +45,11 @@ impl RlmSeed {
         self.globals.is_empty() && self.projected.is_empty()
     }
 
-    pub fn referenced_process_handle_ids(&self) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        for value in self.globals.values() {
-            collect_process_handle_ids(value, &mut out);
-        }
-        for (_, value) in &self.projected.entries {
-            collect_process_handle_ids(value, &mut out);
-        }
-        out
-    }
-
     pub fn into_event_body(self) -> lash_rlm_types::RlmSeedPluginBody {
         lash_rlm_types::RlmSeedPluginBody {
             globals: self.globals,
             projected: self.projected,
         }
-    }
-}
-
-fn collect_process_handle_ids(value: &Value, out: &mut BTreeSet<String>) {
-    if let Some(id) = value
-        .get("__handle__")
-        .and_then(Value::as_str)
-        .filter(|kind| *kind == "process")
-        .and_then(|_| value.get("id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
-    {
-        out.insert(id);
-    }
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                collect_process_handle_ids(item, out);
-            }
-        }
-        Value::Object(map) => {
-            for value in map.values() {
-                collect_process_handle_ids(value, out);
-            }
-        }
-        _ => {}
     }
 }
 

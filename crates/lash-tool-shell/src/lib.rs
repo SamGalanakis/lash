@@ -21,7 +21,7 @@ use lash_core::plugin::{
 };
 use lash_core::runtime::ProcessEventSemanticsSpec;
 use lash_core::{
-    PreparedToolCall, ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessRegistration,
+    PreparedToolCall, ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessStartRequest,
     ProgressSender, PromptContribution, SessionToolAccess, ToolCall, ToolDefinition, ToolProvider,
     ToolResult, ToolScheduling,
 };
@@ -244,15 +244,19 @@ impl StandardShell {
             None,
             serde_json::Value::Null,
         );
-        let registration =
-            ProcessRegistration::new(process_id.clone(), ProcessInput::ToolCall { call })
-                .with_extra_event_types([shell_signal_event_type()]);
         let descriptor = ProcessHandleDescriptor::new(Some("shell"), Some(params.cmd.clone()));
-        match context.processes().start(registration, descriptor).await {
-            Ok(_) => {
-                let mut handle = lash_core::lashlang_bridge::process_handle_json(&process_id);
+        let request = ProcessStartRequest::new(
+            process_id.clone(),
+            ProcessInput::ToolCall { call },
+            descriptor,
+        )
+        .with_extra_event_types([shell_signal_event_type()]);
+        match context.processes().start(request).await {
+            Ok(summary) => {
+                let mut handle = serde_json::to_value(summary).unwrap_or_else(|_| {
+                    lash_core::lashlang_bridge::process_handle_json(&process_id)
+                });
                 if let Some(object) = handle.as_object_mut() {
-                    object.insert("process_id".to_string(), json!(process_id));
                     object.insert("status".to_string(), json!("running"));
                     object.insert("done".to_string(), json!(false));
                     object.insert("running".to_string(), json!(true));
@@ -818,7 +822,7 @@ mod tests {
             session_id: &str,
             mode: lash_core::ProcessListMode,
             scope: lash_core::ProcessOpScope<'_>,
-        ) -> Result<Vec<lash_core::ProcessHandleGrantEntry>, PluginError> {
+        ) -> Result<Vec<lash_core::runtime::ProcessHandleGrantEntry>, PluginError> {
             let owner_scope = Self::owner_scope(session_id, &scope);
             match mode {
                 lash_core::ProcessListMode::Live => {
@@ -888,24 +892,6 @@ mod tests {
                 )
                 .await
                 .map(|result| result.event)
-        }
-
-        async fn cancel_all(
-            &self,
-            session_id: &str,
-            scope: lash_core::ProcessOpScope<'_>,
-        ) -> Result<Vec<lash_core::ProcessRecord>, PluginError> {
-            let entries = self
-                .list_visible(session_id, lash_core::ProcessListMode::Live, scope.clone())
-                .await?;
-            let mut cancelled = Vec::new();
-            for (grant, _record) in entries {
-                cancelled.push(
-                    self.cancel(session_id, &grant.process_id, scope.clone())
-                        .await?,
-                );
-            }
-            Ok(cancelled)
         }
 
         async fn transfer(

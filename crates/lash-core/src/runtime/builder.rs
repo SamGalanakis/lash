@@ -152,6 +152,21 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    pub fn with_process_tracking_sink(
+        mut self,
+        sink: Option<Arc<dyn lash_trace::TraceSink>>,
+    ) -> Self {
+        self.core.tracing.process_tracking_sink = sink;
+        self
+    }
+
+    pub fn with_process_tracking_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.core.tracing.process_tracking_sink = path.map(|path| {
+            Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
+        });
+        self
+    }
+
     pub fn with_trace_level(mut self, level: lash_trace::TraceLevel) -> Self {
         self.core.tracing.trace_level = level;
         self

@@ -21,19 +21,22 @@ use crate::ast::{
     AssignPathStep, AssignTarget, BinaryOp, Expr, ProcessStartExpr, Program, TypeExpr, UnaryOp,
 };
 use crate::lexer::Span;
+use crate::tracking::{ProcessAstPath, ProcessTrackingContext, ProcessTrackingSite};
 
 use super::record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, symbol_name};
 use super::schema::{ValidationPlan, compile_schema_value};
 use super::{
     Chunk, CompileStats, CompiledAssignPath, CompiledAssignPathStep, CompiledFormatTemplate,
-    Instruction, IntrinsicOp, LASH_TYPE_KEY, Name, Value, as_number, compile_format_template,
-    eval_binary_values, execute_integer_div_builtin, execute_len_direct, execute_range_builtin,
-    is_comparison_binary_op, is_numeric_binary_op, is_truthy, read_field_direct, read_index_direct,
-    transient_name, unwrap_type_value,
+    Instruction, IntrinsicOp, LASH_MODULE_REF_KEY, LASH_PROCESS_NAME_KEY, LASH_PROCESS_REF_KEY,
+    LASH_PROCESS_VALUE_KEY, LASH_REQUIRED_SURFACE_REF_KEY, LASH_TYPE_KEY, Name, Value, as_number,
+    compile_format_template, eval_binary_values, execute_integer_div_builtin, execute_len_direct,
+    execute_range_builtin, is_comparison_binary_op, is_numeric_binary_op, is_truthy,
+    read_field_direct, read_index_direct, transient_name, unwrap_type_value,
 };
 
 pub(crate) struct Compiler {
     module_context: Option<CompiledModuleContext>,
+    process_tracking: Option<ProcessTrackingCompileContext>,
     code: Vec<Instruction>,
     spans: Vec<Option<Span>>,
     constants: Vec<Value>,
@@ -47,6 +50,12 @@ pub(crate) struct Compiler {
     compile_stats: Rc<RefCell<CompileStats>>,
     const_slots: Vec<Option<Value>>,
     loop_contexts: Vec<LoopContext>,
+}
+
+struct ProcessTrackingCompileContext {
+    context: ProcessTrackingContext,
+    paths: FxHashMap<usize, ProcessAstPath>,
+    sites: Vec<Option<ProcessTrackingSite>>,
 }
 
 struct LoopContext {
@@ -90,6 +99,28 @@ impl Compiler {
         (chunk, compile_stats)
     }
 
+    pub(crate) fn compile_linked_process_program(
+        program: &Program,
+        module_context: CompiledModuleContext,
+        process_tracking_context: ProcessTrackingContext,
+    ) -> (Chunk, CompileStats) {
+        let stats = Rc::new(RefCell::new(CompileStats::default()));
+        let mut compiler = Self::with_slots_and_stats(
+            Some(module_context),
+            Rc::new(RefCell::new(SlotTable::default())),
+            stats.clone(),
+        );
+        compiler.process_tracking = Some(ProcessTrackingCompileContext {
+            context: process_tracking_context,
+            paths: process_tracking_paths(program),
+            sites: Vec::new(),
+        });
+        compiler.compile_program_block(program);
+        let chunk = compiler.finish();
+        let compile_stats = *stats.borrow();
+        (chunk, compile_stats)
+    }
+
     fn with_slots_and_stats(
         module_context: Option<CompiledModuleContext>,
         slots: Rc<RefCell<SlotTable>>,
@@ -97,6 +128,7 @@ impl Compiler {
     ) -> Self {
         Self {
             module_context,
+            process_tracking: None,
             code: Vec::new(),
             spans: Vec::new(),
             constants: Vec::new(),
@@ -117,10 +149,16 @@ impl Compiler {
         let slot_names = self.slots.borrow().names.clone();
         let mut spans = self.spans;
         spans.resize(self.code.len(), None);
+        let mut process_tracking_sites = self
+            .process_tracking
+            .map(|tracking| tracking.sites)
+            .unwrap_or_default();
+        process_tracking_sites.resize(self.code.len(), None);
         Chunk {
             module_context: self.module_context,
             code: self.code,
             spans,
+            process_tracking_sites,
             constants: self.constants,
             names: self.names,
             slot_names,
@@ -363,6 +401,33 @@ impl Compiler {
         }
     }
 
+    fn mark_process_tracking_site(&mut self, instruction: usize, site: ProcessTrackingSite) {
+        let Some(tracking) = self.process_tracking.as_mut() else {
+            return;
+        };
+        if tracking.sites.len() <= instruction {
+            tracking.sites.resize(instruction + 1, None);
+        }
+        tracking.sites[instruction] = Some(site);
+    }
+
+    fn process_tracking_site(
+        &self,
+        expression: &Expr,
+        kind: &str,
+        label: impl Into<String>,
+    ) -> Option<ProcessTrackingSite> {
+        let tracking = self.process_tracking.as_ref()?;
+        let path = tracking.paths.get(&expr_key(expression))?;
+        Some(tracking.context.builder().node_site(path, kind, label))
+    }
+
+    fn branch_tracking_site(&self, expression: &Expr) -> Option<ProcessTrackingSite> {
+        let tracking = self.process_tracking.as_ref()?;
+        let path = tracking.paths.get(&expr_key(expression))?;
+        Some(tracking.context.builder().branch_site(path))
+    }
+
     fn compile_block_discarding_values(&mut self, block: &Expr) {
         match block {
             Expr::Block(expressions) => {
@@ -588,6 +653,7 @@ impl Compiler {
                 resource.resource_type.to_string(),
                 resource.alias.to_string(),
             ))),
+            Expr::ProcessRef { .. } | Expr::HostValueConstructor { .. } => None,
             Expr::Variable(name) => self.const_for_name(name),
             Expr::List(items) => Some(Value::List(
                 items
@@ -875,7 +941,22 @@ impl Compiler {
                 let keys = self.push_key_list(entries.iter().map(|(key, _)| key.as_str()));
                 self.code.push(Instruction::BuildRecord(keys));
             }
-            Expr::StartProcess(process) => self.compile_start_process_expr(process),
+            Expr::StartProcess(process) => {
+                let instruction = self.compile_start_process_expr(process);
+                if let Some(site) = self.process_tracking_site(
+                    expr,
+                    "child_process",
+                    format!("start {}", process.process),
+                ) {
+                    self.mark_process_tracking_site(instruction, site);
+                }
+            }
+            Expr::ProcessRef { process } => self.compile_process_ref_expr(process),
+            Expr::HostValueConstructor { type_name, input } => {
+                self.compile_expr(input);
+                let type_name = self.push_name(type_name);
+                self.code.push(Instruction::WrapHostValue(type_name));
+            }
             Expr::ResourceRef(resource) => {
                 self.emit_push_value(Value::Resource(super::ResourceHandle::new(
                     resource.resource_type.to_string(),
@@ -886,13 +967,28 @@ impl Compiler {
                 receiver,
                 operation,
                 args,
-            } => self.compile_receiver_call_expr(receiver, operation, args, false),
+            } => {
+                let instruction = self.compile_receiver_call_expr(receiver, operation, args, false);
+                if let Some(site) =
+                    self.process_tracking_site(expr, "resource_operation", operation.as_str())
+                {
+                    self.mark_process_tracking_site(instruction, site);
+                }
+            }
             Expr::Await(handle) => match handle.as_ref() {
                 Expr::ReceiverCall {
                     receiver,
                     operation,
                     args,
-                } => self.compile_receiver_call_expr(receiver, operation, args, false),
+                } => {
+                    let instruction =
+                        self.compile_receiver_call_expr(receiver, operation, args, false);
+                    if let Some(site) =
+                        self.process_tracking_site(handle, "resource_operation", operation.as_str())
+                    {
+                        self.mark_process_tracking_site(instruction, site);
+                    }
+                }
                 Expr::ResultUnwrap(inner) => {
                     if let Expr::ReceiverCall {
                         receiver,
@@ -900,7 +996,15 @@ impl Compiler {
                         args,
                     } = inner.as_ref()
                     {
-                        self.compile_receiver_call_expr(receiver, operation, args, true);
+                        let instruction =
+                            self.compile_receiver_call_expr(receiver, operation, args, true);
+                        if let Some(site) = self.process_tracking_site(
+                            inner,
+                            "resource_operation",
+                            operation.as_str(),
+                        ) {
+                            self.mark_process_tracking_site(instruction, site);
+                        }
                     } else {
                         self.compile_expr(inner);
                         self.code.push(Instruction::AwaitHandleUnwrap);
@@ -913,19 +1017,35 @@ impl Compiler {
             },
             Expr::SleepFor(duration) => {
                 self.compile_expr(duration);
+                let instruction = self.code.len();
                 self.code.push(Instruction::SleepFor);
+                if let Some(site) = self.process_tracking_site(expr, "sleep", "sleep for") {
+                    self.mark_process_tracking_site(instruction, site);
+                }
             }
             Expr::SleepUntil(deadline) => {
                 self.compile_expr(deadline);
+                let instruction = self.code.len();
                 self.code.push(Instruction::SleepUntil);
+                if let Some(site) = self.process_tracking_site(expr, "sleep", "sleep until") {
+                    self.mark_process_tracking_site(instruction, site);
+                }
             }
             Expr::WaitSignal => {
+                let instruction = self.code.len();
                 self.code.push(Instruction::ProcessWaitSignal);
+                if let Some(site) = self.process_tracking_site(expr, "wait", "wait signal") {
+                    self.mark_process_tracking_site(instruction, site);
+                }
             }
             Expr::SignalRun { run, payload } => {
                 self.compile_expr(run);
                 self.compile_expr(payload);
+                let instruction = self.code.len();
                 self.code.push(Instruction::ProcessSignalRun);
+                if let Some(site) = self.process_tracking_site(expr, "signal", "signal run") {
+                    self.mark_process_tracking_site(instruction, site);
+                }
             }
             Expr::ResultUnwrap(expr) => {
                 if let Expr::ReceiverCall {
@@ -934,7 +1054,13 @@ impl Compiler {
                     args,
                 } = expr.as_ref()
                 {
-                    self.compile_receiver_call_expr(receiver, operation, args, true);
+                    let instruction =
+                        self.compile_receiver_call_expr(receiver, operation, args, true);
+                    if let Some(site) =
+                        self.process_tracking_site(expr, "resource_operation", operation.as_str())
+                    {
+                        self.mark_process_tracking_site(instruction, site);
+                    }
                 } else if let Expr::Await(handle) = expr.as_ref() {
                     self.compile_expr(handle);
                     self.code.push(Instruction::AwaitHandleUnwrap);
@@ -978,6 +1104,9 @@ impl Compiler {
                 else_block,
             } => {
                 let jump_to_else = self.compile_condition_jump_if_false(condition);
+                if let Some(site) = self.branch_tracking_site(expr) {
+                    self.mark_process_tracking_site(jump_to_else, site);
+                }
                 let const_slots_before_branches = self.const_slots.clone();
                 self.compile_expr(then_block);
                 let jump_to_end = self.emit_jump();
@@ -1003,25 +1132,41 @@ impl Compiler {
                 }
                 self.code.push(Instruction::Submit);
             }
-            Expr::Yield(expr) => {
-                self.compile_expr(expr);
+            Expr::Yield(value) => {
+                self.compile_expr(value);
+                let instruction = self.code.len();
                 self.code.push(Instruction::ProcessYield);
+                if let Some(site) = self.process_tracking_site(expr, "process_event", "yield") {
+                    self.mark_process_tracking_site(instruction, site);
+                }
             }
-            Expr::Wake(expr) => {
-                self.compile_expr(expr);
+            Expr::Wake(value) => {
+                self.compile_expr(value);
+                let instruction = self.code.len();
                 self.code.push(Instruction::ProcessWake);
+                if let Some(site) = self.process_tracking_site(expr, "process_event", "wake") {
+                    self.mark_process_tracking_site(instruction, site);
+                }
             }
-            Expr::Finish(expr) => {
-                if let Some(expr) = expr {
-                    self.compile_expr(expr);
+            Expr::Finish(value) => {
+                if let Some(value) = value {
+                    self.compile_expr(value);
                 } else {
                     self.compile_expr(&Expr::Null);
                 }
+                let instruction = self.code.len();
                 self.code.push(Instruction::ProcessFinish);
+                if let Some(site) = self.process_tracking_site(expr, "terminal", "result") {
+                    self.mark_process_tracking_site(instruction, site);
+                }
             }
-            Expr::Fail(expr) => {
-                self.compile_expr(expr);
+            Expr::Fail(value) => {
+                self.compile_expr(value);
+                let instruction = self.code.len();
                 self.code.push(Instruction::ProcessFail);
+                if let Some(site) = self.process_tracking_site(expr, "terminal", "failure") {
+                    self.mark_process_tracking_site(instruction, site);
+                }
             }
             Expr::TypeLiteral(ty) => self.compile_type_literal(ty),
             Expr::Binary { left, op, right } => match op {
@@ -1103,13 +1248,51 @@ impl Compiler {
         }
     }
 
-    fn compile_start_process_expr(&mut self, process: &ProcessStartExpr) {
+    fn compile_start_process_expr(&mut self, process: &ProcessStartExpr) -> usize {
         for (_, expr) in &process.args {
             self.compile_expr(expr);
         }
         let keys = self.push_key_list(process.args.iter().map(|(name, _)| name.as_str()));
         let process = self.push_name(&process.process);
+        let instruction = self.code.len();
         self.code.push(Instruction::StartProcess { process, keys });
+        instruction
+    }
+
+    fn compile_process_ref_expr(&mut self, process: &str) {
+        let Some(module_context) = self.module_context.as_ref() else {
+            self.emit_push_value(Value::Null);
+            return;
+        };
+        let Some(process_ref) = module_context.process_refs.get(process) else {
+            self.emit_push_value(Value::Null);
+            return;
+        };
+        let mut record = record_with_capacity(5);
+        record.insert(LASH_PROCESS_VALUE_KEY.to_string(), Value::Bool(true));
+        record.insert(
+            LASH_PROCESS_NAME_KEY.to_string(),
+            Value::String(process.into()),
+        );
+        record.insert(
+            LASH_MODULE_REF_KEY.to_string(),
+            Value::String(module_context.module_ref.to_string().into()),
+        );
+        let mut process_ref_record = record_with_capacity(2);
+        process_ref_record.insert(
+            "component".to_string(),
+            Value::String(process_ref.component.to_string().into()),
+        );
+        process_ref_record.insert("pos".to_string(), Value::Number(process_ref.pos as f64));
+        record.insert(
+            LASH_PROCESS_REF_KEY.to_string(),
+            Value::Record(Arc::new(process_ref_record)),
+        );
+        record.insert(
+            LASH_REQUIRED_SURFACE_REF_KEY.to_string(),
+            Value::String(module_context.required_surface_ref.to_string().into()),
+        );
+        self.emit_push_value(Value::Record(Arc::new(record)));
     }
 
     fn compile_receiver_call_expr(
@@ -1118,12 +1301,13 @@ impl Compiler {
         operation: &str,
         args: &[Expr],
         unwrap: bool,
-    ) {
+    ) -> usize {
         self.compile_expr(receiver);
         for arg in args {
             self.compile_expr(arg);
         }
         let operation = self.push_name(operation);
+        let instruction = self.code.len();
         if unwrap {
             self.code.push(Instruction::ResourceCallUnwrap {
                 operation,
@@ -1135,6 +1319,7 @@ impl Compiler {
                 argc: args.len(),
             });
         }
+        instruction
     }
 
     fn emit_jump_if_false(&mut self) -> usize {
@@ -1301,6 +1486,10 @@ impl Compiler {
                 let keys = self.push_key_list([schema_keys::ANY_OF].into_iter());
                 self.code.push(Instruction::BuildRecord(keys));
             }
+            TypeExpr::Process { .. } | TypeExpr::TriggerHandle(_) => {
+                let idx = self.push_const(interned_scalar_schema(ScalarSchemaKind::Any));
+                self.code.push(Instruction::PushConst(idx));
+            }
             TypeExpr::Any
             | TypeExpr::Str
             | TypeExpr::Int
@@ -1362,6 +1551,27 @@ fn intrinsic_for_builtin(name: &str, argc: usize) -> Option<IntrinsicOp> {
     })
 }
 
+fn expr_key(expr: &Expr) -> usize {
+    expr as *const Expr as usize
+}
+
+fn process_tracking_paths(program: &Program) -> FxHashMap<usize, ProcessAstPath> {
+    let mut paths = FxHashMap::default();
+    collect_process_tracking_paths(&program.main, ProcessAstPath::root(), &mut paths);
+    paths
+}
+
+fn collect_process_tracking_paths(
+    expr: &Expr,
+    path: ProcessAstPath,
+    paths: &mut FxHashMap<usize, ProcessAstPath>,
+) {
+    paths.insert(expr_key(expr), path.clone());
+    for (index, child) in expr.children().enumerate() {
+        collect_process_tracking_paths(child, path.child(index), paths);
+    }
+}
+
 pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Null
@@ -1369,10 +1579,12 @@ pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
         | Expr::Number(_)
         | Expr::String(_)
         | Expr::Variable(_)
+        | Expr::ProcessRef { .. }
         | Expr::ResourceRef(_) => true,
         Expr::List(items) => items.iter().all(is_pure_expr),
         Expr::Record(entries) => entries.iter().all(|(_, value)| is_pure_expr(value)),
         Expr::ResultUnwrap(expr) => is_pure_expr(expr),
+        Expr::HostValueConstructor { input, .. } => is_pure_expr(input),
         Expr::BuiltinCall { args, .. } => args.iter().all(is_pure_expr),
         Expr::Field { target, .. } => is_pure_expr(target),
         Expr::Index { target, index } => is_pure_expr(target) && is_pure_expr(index),
@@ -1488,6 +1700,9 @@ fn fold_type(ty: &TypeExpr) -> Option<Value> {
             let mut rec = record_with_capacity(1);
             rec.insert(ANY_OF.into(), Value::List(folded.into()));
             Some(Value::Record(Arc::new(rec)))
+        }
+        TypeExpr::Process { .. } | TypeExpr::TriggerHandle(_) => {
+            Some(interned_scalar_schema(ScalarSchemaKind::Any))
         }
         TypeExpr::Ref(_) => None,
     }

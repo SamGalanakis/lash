@@ -53,7 +53,7 @@
   // ── lashlang grammar — Prism doesn't ship with this one ──
   // Kept in sync with crates/lashlang: the lexer keywords plus the parser's
   // contextual keywords (process / start / finish / yield / wake / signal /
-  // wait / run / with / trigger / schedule / while / break / continue / let /
+  // wait / run / with / trigger / while / break / continue / let /
   // enum), the builtins.rs registry, and the primitive type names. Comments
   // are `#` and `//`; strings are single- or triple-quoted ("""…""",
   // r"""…""", r'''…'''). There are no /* */ block comments in lashlang.
@@ -73,7 +73,7 @@
         pattern: /#.*|\/\/.*/,
         greedy: true,
       },
-      "keyword": /\b(?:and|as|await|break|call|cancel|continue|each|else|enum|every|fail|false|finish|for|if|in|let|not|null|on|or|print|process|run|schedule|signal|sleep|start|submit|trigger|true|type|wait|wake|while|with|yield)\b/,
+      "keyword": /\b(?:and|as|await|break|call|cancel|continue|each|else|enum|every|fail|false|finish|for|if|in|let|not|null|on|or|print|process|run|signal|sleep|start|submit|trigger|true|type|wait|wake|while|with|yield)\b/,
       "class-name": /\b[A-Z][A-Za-z0-9_]*\b/,
       "type": /\b(?:str|string|int|integer|float|number|bool|boolean|any|list)\b/,
       "builtin": /\b(?:ceil_div|contains|empty|ends_with|find|floor_div|format|grep_text|join|json_parse|keys|len|push|range|slice|split|starts_with|to_float|to_int|to_string|trim|validate|values)\b/,
@@ -105,7 +105,7 @@
     const t = text || "";
     // Most-distinctive cues first.
     if (/^\s*\$\s/m.test(t) || /^\s*#\s*!.+/.test(t)) return "bash";
-    if (/\bprocess\s+\w|\btrigger\s+\w|\bschedule\s+\w|\bawait\s+[A-Z][A-Z0-9_]*\.\w+\.|\bstart\s+\w+\s*\(|```lashlang/.test(t)) return "lashlang";
+    if (/\bprocess\s+\w|\btrigger\s+\w|\bawait\s+[A-Z][A-Z0-9_]*\.\w+\.|\bstart\s+\w+\s*\(|```lashlang/.test(t)) return "lashlang";
     if (/^\s*[#/]{0,2}\[(?:dev-)?dependencies\]/m.test(t)) return "toml";
     if (/(?:^|\n)\s*\[[\w.\-]+\]\s*(?:\n|$)/.test(t) && /=\s*["'\d{[]/.test(t)) return "toml";
     if (/\bfn\s+\w|\bpub\s+(?:fn|struct|enum|use|mod|trait|type|const|static)\b|\buse\s+[a-z_][\w:]*::|#\[\w|\bimpl\s+\w/.test(t)) return "rust";

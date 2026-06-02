@@ -276,8 +276,8 @@ async fn rlm_mode_config_lashlang_abilities_drive_prompt_surface() -> Result<()>
         .await?;
 
     let prompts = seen.lock().expect("seen prompts");
-    assert!(prompts[0].contains("Triggers: module-event declarations"));
-    assert!(prompts[0].contains("ui.button.pressed"));
+    assert!(prompts[0].contains("Trigger registry"));
+    assert!(prompts[0].contains("constructor from the Host Surface"));
     assert!(!prompts[0].contains("TRIGGER."));
     Ok(())
 }
@@ -1203,7 +1203,7 @@ async fn all_durable_stores_build_successfully() -> Result<()> {
             .expect("open durable registry"),
     );
     peer_coherence_builder()
-        .effect_controller(Arc::new(lash_core::InlineRuntimeEffectController::default()))
+        .effect_controller(Arc::new(lash_core::InlineRuntimeEffectController))
         .store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
         .lashlang_artifact_store(durable_artifact_store(dir.path()))
@@ -1228,7 +1228,7 @@ async fn durable_registry_with_only_child_store_factory_builds() -> Result<()> {
             .expect("open durable registry"),
     );
     peer_coherence_builder()
-        .effect_controller(Arc::new(lash_core::InlineRuntimeEffectController::default()))
+        .effect_controller(Arc::new(lash_core::InlineRuntimeEffectController))
         .child_store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
         .lashlang_artifact_store(durable_artifact_store(dir.path()))

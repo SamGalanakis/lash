@@ -77,7 +77,7 @@ pub enum PluginLifecycleEvent {
     ///
     /// Hook failures are isolated from the foreground turn: the turn has already
     /// committed, and observers must not affect that commit.
-    TurnPersisted(SessionStateChangedContext),
+    TurnPersisted(Box<SessionStateChangedContext>),
     SessionRestored(SessionReadView),
     SessionConfigChanged(Box<SessionConfigChangedContext>),
 }

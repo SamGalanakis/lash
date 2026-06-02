@@ -93,6 +93,7 @@ impl<'a> ProcessRunContextBuilder<'a> {
             session_lifecycle: services.lifecycle_service(),
             session_graph: services.graph_service(),
             processes: services.process_service(),
+            process_cancel_ability: services.process_cancel_ability(),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
                 &self.services.current.host.core.control.effect_controller,
             )),
@@ -210,7 +211,13 @@ mod tests {
         };
         let mut resources = ::lashlang::ResourceCatalog::new();
         resources.add_module_instance(["tools"], "Tools");
-        resources.add_operation("Tools", "process_echo", "process_echo");
+        resources.add_operation(
+            "Tools",
+            "process_echo",
+            "process_echo",
+            ::lashlang::TypeExpr::Any,
+            ::lashlang::TypeExpr::Any,
+        );
         let linked_module = ::lashlang::LinkedModule::link(
             module,
             ::lashlang::LashlangSurface::new(
@@ -361,6 +368,30 @@ mod tests {
                 response_meta: None,
             }],
             ..crate::LlmResponse::default()
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingTraceSink {
+        records: std::sync::Mutex<Vec<lash_trace::TraceRecord>>,
+    }
+
+    impl RecordingTraceSink {
+        fn records(&self) -> Vec<lash_trace::TraceRecord> {
+            self.records.lock().expect("trace records").clone()
+        }
+    }
+
+    impl lash_trace::TraceSink for RecordingTraceSink {
+        fn append(
+            &self,
+            record: &lash_trace::TraceRecord,
+        ) -> Result<(), lash_trace::TraceSinkError> {
+            self.records
+                .lock()
+                .map_err(|_| lash_trace::TraceSinkError::LockPoisoned)?
+                .push(record.clone());
+            Ok(())
         }
     }
 
@@ -599,7 +630,7 @@ mod tests {
         )
     }
 
-    /// A trigger/cron-shaped registry row: a tool process written straight to
+    /// A trigger/host-event-shaped registry row: a tool process written straight to
     /// the registry with no turn lease and no manager-driven start.
     fn counting_registration(process_id: &str) -> crate::ProcessRegistration {
         worker_registration(crate::ProcessRegistration::new(
@@ -619,7 +650,7 @@ mod tests {
     #[tokio::test]
     async fn process_work_runner_drives_directly_registered_process_to_terminal_on_poke() {
         // Out-of-turn execution: a process is registered straight into the
-        // registry (the trigger/cron shape — no turn, no manager) and reaches
+        // registry (the trigger/host-event shape — no turn, no manager) and reaches
         // terminal promptly because the control seam's poke wakes the runner,
         // not because a separate boot-time recovery sweep eventually finds it.
         let registry: Arc<dyn crate::ProcessRegistry> =
@@ -722,7 +753,7 @@ mod tests {
                 .lock()
                 .expect("process effect records")
                 .push(envelope.invocation.clone());
-            crate::InlineRuntimeEffectController::default()
+            crate::InlineRuntimeEffectController
                 .execute_effect(envelope, local_executor)
                 .await
         }
@@ -1087,6 +1118,129 @@ mod tests {
             crate::ProcessAwaitOutput::Success { value, .. }
                 if value == serde_json::json!({ "nested": "stored" })
         ));
+    }
+
+    #[tokio::test]
+    async fn lashlang_process_tracking_uses_dedicated_sink_only() {
+        let registry = Arc::new(crate::TestLocalProcessRegistry::default());
+        let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
+        let normal_trace = Arc::new(RecordingTraceSink::default());
+        let process_trace = Arc::new(RecordingTraceSink::default());
+        let worker = process_worker_with_core(
+            Arc::clone(&registry_dyn),
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
+            {
+                let mut config = crate::RuntimeHostConfig::in_memory();
+                config.profile.host_profile_id = "worker-profile".to_string();
+                config.tracing.trace_sink =
+                    Some(Arc::clone(&normal_trace) as Arc<dyn lash_trace::TraceSink>);
+                config.tracing.process_tracking_sink =
+                    Some(Arc::clone(&process_trace) as Arc<dyn lash_trace::TraceSink>);
+                config
+            },
+        );
+
+        let mut args = serde_json::Map::new();
+        args.insert("flag".to_string(), serde_json::json!(true));
+        let registration = worker_registration(lashlang_process_registration(
+            "tracking-parent",
+            ::lashlang::parse(
+                r#"
+                process child() {
+                  finish "child"
+                }
+                process main(flag: bool) {
+                  if flag {
+                    handle = start child()
+                    yield "started"
+                    finish "parent"
+                  } else {
+                    fail "else"
+                  }
+                }
+                "#,
+            )
+            .expect("tracking process"),
+            args,
+        ));
+        registry_dyn
+            .register_process(registration.clone())
+            .await
+            .expect("register tracking parent");
+
+        let output = worker
+            .run_process(
+                registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("run tracking parent");
+
+        assert!(matches!(
+            output,
+            crate::ProcessAwaitOutput::Success { value, .. }
+                if value == serde_json::json!("parent")
+        ));
+        assert!(
+            normal_trace.records().iter().all(|record| {
+                !matches!(record.event, lash_trace::TraceEvent::ProcessTracking { .. })
+            }),
+            "normal trace sink must not receive process tracking"
+        );
+
+        let records = process_trace.records();
+        let events = records
+            .iter()
+            .filter_map(|record| match &record.event {
+                lash_trace::TraceEvent::ProcessTracking { event } => Some(event),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                lash_trace::TraceProcessTrackingEvent::ProcessStarted { process_map, .. }
+                    if process_map.nodes.iter().any(|node| node.kind == "branch")
+                        && process_map.edges.iter().any(|edge| edge.label == "then")
+            )),
+            "started event should carry the static process map: {events:?}"
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                lash_trace::TraceProcessTrackingEvent::BranchSelected {
+                    selected: lash_trace::TraceBranchSelection::Then,
+                    ..
+                }
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                lash_trace::TraceProcessTrackingEvent::ChildStarted {
+                    parent_process_id,
+                    child_process_name,
+                    ..
+                } if parent_process_id == "tracking-parent" && child_process_name == "child"
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                lash_trace::TraceProcessTrackingEvent::NodeCompleted { label, .. }
+                    if label == "result"
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                lash_trace::TraceProcessTrackingEvent::ProcessFinished {
+                    status: lash_trace::TraceProcessStatus::Completed,
+                    ..
+                }
+            )
+        }));
     }
 
     #[tokio::test]

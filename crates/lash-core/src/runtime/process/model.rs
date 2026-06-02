@@ -208,6 +208,69 @@ impl ProcessStartOptions {
     }
 }
 
+/// Public host-facing request for starting a visible process handle.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcessStartRequest {
+    pub id: ProcessId,
+    pub input: ProcessInput,
+    pub descriptor: ProcessHandleDescriptor,
+    #[serde(default)]
+    pub event_types: Vec<ProcessEventType>,
+}
+
+impl ProcessStartRequest {
+    pub fn new(
+        id: impl Into<ProcessId>,
+        input: ProcessInput,
+        descriptor: ProcessHandleDescriptor,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            input,
+            descriptor,
+            event_types: default_process_event_types(),
+        }
+    }
+
+    pub fn external(
+        id: impl Into<ProcessId>,
+        descriptor: ProcessHandleDescriptor,
+        metadata: serde_json::Value,
+    ) -> Self {
+        Self::new(id, ProcessInput::External { metadata }, descriptor)
+    }
+
+    pub fn with_event_types(
+        mut self,
+        event_types: impl IntoIterator<Item = ProcessEventType>,
+    ) -> Self {
+        self.event_types = event_types.into_iter().collect();
+        self
+    }
+
+    pub fn with_extra_event_types(
+        mut self,
+        event_types: impl IntoIterator<Item = ProcessEventType>,
+    ) -> Self {
+        self.event_types.extend(event_types);
+        self
+    }
+
+    pub(crate) fn into_registration_and_options(
+        self,
+    ) -> (
+        ProcessRegistration,
+        ProcessStartOptions,
+        ProcessHandleDescriptor,
+    ) {
+        let descriptor = self.descriptor;
+        let registration =
+            ProcessRegistration::new(self.id, self.input).with_event_types(self.event_types);
+        let options = ProcessStartOptions::new().with_descriptor(descriptor.clone());
+        (registration, options, descriptor)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessScope {
     pub session_id: String,
@@ -537,6 +600,113 @@ pub struct ProcessHandleGrant {
 }
 
 pub type ProcessHandleGrantEntry = (ProcessHandleGrant, ProcessRecord);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessLifecycleStatus {
+    #[default]
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl ProcessLifecycleStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+
+    pub fn terminal_state(self) -> Option<ProcessTerminalState> {
+        match self {
+            Self::Running => None,
+            Self::Completed => Some(ProcessTerminalState::Completed),
+            Self::Failed => Some(ProcessTerminalState::Failed),
+            Self::Cancelled => Some(ProcessTerminalState::Cancelled),
+        }
+    }
+}
+
+impl From<&ProcessStatus> for ProcessLifecycleStatus {
+    fn from(status: &ProcessStatus) -> Self {
+        match status {
+            ProcessStatus::Running => Self::Running,
+            ProcessStatus::Completed { .. } => Self::Completed,
+            ProcessStatus::Failed { .. } => Self::Failed,
+            ProcessStatus::Cancelled { .. } => Self::Cancelled,
+        }
+    }
+}
+
+impl From<ProcessStatus> for ProcessLifecycleStatus {
+    fn from(status: ProcessStatus) -> Self {
+        Self::from(&status)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessHandleSummary {
+    #[serde(rename = "__handle__")]
+    pub handle_type: String,
+    pub id: ProcessId,
+    pub process_id: ProcessId,
+    pub descriptor: ProcessHandleDescriptor,
+    pub status: ProcessLifecycleStatus,
+}
+
+impl ProcessHandleSummary {
+    pub fn new(
+        process_id: impl Into<ProcessId>,
+        descriptor: ProcessHandleDescriptor,
+        status: ProcessLifecycleStatus,
+    ) -> Self {
+        let process_id = process_id.into();
+        Self {
+            handle_type: "process".to_string(),
+            id: process_id.clone(),
+            process_id,
+            descriptor,
+            status,
+        }
+    }
+
+    pub fn from_grant_record(grant: ProcessHandleGrant, record: ProcessRecord) -> Self {
+        Self::new(
+            record.id,
+            grant.descriptor,
+            ProcessLifecycleStatus::from(record.status),
+        )
+    }
+}
+
+impl From<ProcessHandleGrantEntry> for ProcessHandleSummary {
+    fn from((grant, record): ProcessHandleGrantEntry) -> Self {
+        Self::from_grant_record(grant, record)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessCancelSummary {
+    pub process_id: ProcessId,
+    pub status: ProcessLifecycleStatus,
+}
+
+impl ProcessCancelSummary {
+    pub fn from_record(record: ProcessRecord) -> Self {
+        Self {
+            process_id: record.id,
+            status: ProcessLifecycleStatus::from(record.status),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

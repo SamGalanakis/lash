@@ -12,15 +12,15 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../styles.css?v=2">
 <script src="../theme.js"></script>
-<script src="../docs.js" defer></script>
+<script src="../docs.js?v=2" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">lash<span class="slash">/</span>system</h1>
-    <p class="opener__lede"><strong>lash</strong> is a Rust workspace for coding agents. The core is a layered agent runtime — a sans-IO turn machine wrapped by <code>lash-core</code>'s <code>RuntimeEffectController</code>, with protocol plugins, provider adapters, dynamic tools, durable session graph storage, a CLI/TUI host, and an app-facing <code>lash</code> facade on top.</p>
+    <p class="opener__lede"><strong>lash</strong> is a Rust workspace for durable LLM agents. The core is one runtime boundary around a sans-IO turn machine: <code>lash-core</code> owns session records, effect control, process execution, plugin hooks, and durable commits, while host applications own providers, resources, storage, workflow substrate, auth, transport, and UI.</p>
   </section>
 
   <main class="body" id="content">

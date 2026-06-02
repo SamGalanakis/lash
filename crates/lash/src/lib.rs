@@ -35,19 +35,23 @@ pub use crate::turn::{
     TurnBuilder, TurnOutput, TurnResult, TurnStream, message_role, message_text,
 };
 pub use lash_core::{
-    HostEvent, HostEventEmitReport, InputItem, ModelLimits, ModelSpec, PluginStack, SessionSpec,
-    SessionTriggerInstallReport, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent,
-    TurnInput, impl_unsupported_queued_work_methods,
+    HostEvent, HostEventEmitReport, InputItem, ModelLimits, ModelSpec, PluginStack,
+    ProcessCancelSummary, ProcessHandleDescriptor, ProcessHandleSummary, ProcessInput,
+    ProcessLifecycleStatus, ProcessStartRequest, SessionSpec, TriggerRegistration,
+    TriggerSourceType, TriggerTargetSummary, TurnActivity, TurnActivityId, TurnActivitySink,
+    TurnEvent, TurnInput, impl_unsupported_queued_work_methods,
 };
 
 pub mod prelude {
     pub use crate::{
         AdvancedLashCoreBuilder, AdvancedToolsControl, EmbedError, HostEvent, HostEventEmitReport,
         HostEventsControl, InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset,
-        ModelSpec, ObservableSession, PluginActions, PluginBinding, PluginStack, ProcessControl,
-        PromptLayerSink, QueuedTurnBuilder, Result, ResumeTurnBuilder, SessionBuilder, SessionSpec,
-        SessionTriggerInstallReport, ToolsControl, TriggersControl, TurnActivity, TurnBuilder,
-        TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
+        ModelSpec, ObservableSession, PluginActions, PluginBinding, PluginStack,
+        ProcessCancelSummary, ProcessControl, ProcessHandleDescriptor, ProcessHandleSummary,
+        ProcessInput, ProcessLifecycleStatus, ProcessStartRequest, PromptLayerSink,
+        QueuedTurnBuilder, Result, ResumeTurnBuilder, SessionBuilder, SessionSpec, ToolsControl,
+        TriggerRegistration, TriggerSourceType, TriggerTargetSummary, TriggersControl,
+        TurnActivity, TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
     };
     pub use lash_core::TurnActivitySink;
 }
@@ -145,11 +149,13 @@ pub mod advanced {
         AssembledTurn, DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig,
         DurableTurnScope, EmbeddedRuntimeHost, EventSink, InlineRuntimeEffectController,
         LashRuntime, LlmAttachmentSpec, LlmRequestSpec, NoopEventSink, NoopTurnActivitySink,
-        ProcessCommand, ProcessEffectOutcome, ProcessHandleDescriptor, ProcessHandleGrant,
-        ProcessHandleGrantEntry, ProcessInput, ProcessListMode, ProcessOpScope, ProcessRecord,
-        ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessScope, ProcessScopeId,
-        ProcessService, ProcessSessionDeleteReport, ProcessStartOptions, ProcessStatus,
-        ProcessWakeDelivery, ProcessWorkPoke, ProcessWorkRunner, Residency, RuntimeEffectCommand,
+        ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
+        ProcessCancelSummary, ProcessCommand, ProcessEffectOutcome, ProcessHandleDescriptor,
+        ProcessHandleGrant, ProcessHandleSummary, ProcessInput, ProcessLifecycleStatus,
+        ProcessListMode, ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry,
+        ProcessRunHandle, ProcessScope, ProcessScopeId, ProcessService, ProcessSessionDeleteReport,
+        ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessWakeDelivery,
+        ProcessWorkPoke, ProcessWorkRunner, Residency, RuntimeEffectCommand,
         RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
         RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
         RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
@@ -177,10 +183,11 @@ pub mod prompt {
 
 pub mod tracing {
     pub use lash_core::{
-        JsonlTraceSink, TraceAttachment, TraceContentBlock, TraceError, TraceEvent,
-        TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TracePromptComponent,
-        TraceProviderStreamEvent, TraceRecord, TraceRuntimeStreamEvent, TraceSinkError,
-        TraceTokenUsage, TraceToolSpec,
+        JsonlTraceSink, TraceAttachment, TraceBranchSelection, TraceContentBlock, TraceError,
+        TraceEvent, TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TraceProcessMap,
+        TraceProcessMapEdge, TraceProcessMapNode, TraceProcessStatus, TraceProcessTrackingEvent,
+        TracePromptComponent, TraceProviderStreamEvent, TraceRecord, TraceRuntimeStreamEvent,
+        TraceSinkError, TraceTokenUsage, TraceToolSpec,
     };
     pub use lash_trace::{StderrTraceSink, TeeTraceSink, TraceContext, TraceLevel, TraceSink};
 }

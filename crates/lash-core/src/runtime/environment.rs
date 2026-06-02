@@ -224,6 +224,17 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
+    pub fn with_process_tracking_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
+        self.env.core.tracing.process_tracking_sink = sink;
+        self
+    }
+
+    pub fn with_process_tracking_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.env.core.tracing.process_tracking_sink =
+            path.map(|path| Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn TraceSink>);
+        self
+    }
+
     pub fn with_trace_level(mut self, level: TraceLevel) -> Self {
         self.env.core.tracing.trace_level = level;
         self
@@ -269,7 +280,7 @@ mod tests {
         let attachment_store: Arc<dyn crate::AttachmentStore> =
             Arc::new(crate::InMemoryAttachmentStore::new());
         let effect_controller: Arc<dyn RuntimeEffectController> =
-            Arc::new(crate::runtime::InlineRuntimeEffectController::default());
+            Arc::new(crate::runtime::InlineRuntimeEffectController);
         let trace_context = TraceContext::default().for_session("session-1");
         let termination = TerminationPolicy {
             treat_missing_done_as_failure: false,

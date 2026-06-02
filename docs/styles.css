@@ -2245,16 +2245,6 @@ body.landing .cover__svg {
   transition: color 160ms ease, border-color 160ms ease;
 }
 .hero__ghlink:hover { color: var(--sodium); border-bottom-color: var(--sodium); }
-.hero__alpha {
-  margin: var(--space-sm) 0 0;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.04em;
-  line-height: 1.5;
-  color: var(--ink-dim);
-}
-.hero__alpha b { color: var(--sodium); font-weight: 500; text-transform: uppercase; letter-spacing: 0.12em; }
-
 .hero__scrollcue {
   position: absolute;
   left: 50%;
@@ -2291,7 +2281,7 @@ body.landing .cover__svg {
 /* ── narrow screens: stack the hero (text, then a scene band) ──
    Below 1000px there isn't room to seat the scene's figures beside
    the headline, so the scene drops to a band under the text instead
-   of sitting behind it. scene-landing.js drops its clearX reserve at
+     of sitting behind it. scene.js drops its clearX reserve at
    the same width, so the landscape uses the full band. */
 @media (max-width: 999px) {
   .hero { min-height: 0; justify-content: flex-start; }
@@ -2382,43 +2372,192 @@ body.landing .body::after {
 
 /* ── architecture stack (§01) ───────────────────────── */
 .stack {
+  /* No panel of its own — the SVG's host-application frame is the only
+     box, so the diagram sits directly on the page instead of nesting a
+     bordered card inside a bordered frame. */
   margin: var(--space-lg) 0 var(--space-md);
-  border: 1px solid var(--code-rule);
-  border-radius: 3px;
-  background: var(--code-bg);
-  overflow: hidden;
+  position: relative;
 }
-.stack__layer {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-md);
-  padding: 0.9rem 1.15rem;
-  border-top: 1px solid var(--code-rule);
-  transition: background 160ms ease;
+.stack__svg {
+  display: block;
+  width: 100%;
+  height: auto;
 }
-.stack__layer:first-child { border-top: 0; }
-.stack__layer:hover { background: color-mix(in oklch, var(--sodium-soft) 28%, transparent); }
-.stack__name {
+.stack__host {
+  fill: color-mix(in oklch, var(--bg) 80%, transparent);
+  stroke: var(--rule);
+  stroke-width: 1.4;
+}
+.stack__title {
   font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 1.3rem;
-  line-height: 1;
-  letter-spacing: -0.01em;
-  color: var(--ink);
-  transition: color 160ms ease;
+  font-weight: 700;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+  fill: var(--ink);
 }
-.stack__layer:hover .stack__name { color: var(--sodium); }
-.stack__caps {
+.stack__title--host {
+  font-size: 28px;
+  fill: var(--ink);
+}
+.stack__title--core {
+  font-size: 26px;
+  fill: var(--ink);
+}
+.stack__copy,
+.stack__eyebrow,
+.stack__port text,
+.stack__hook text,
+.stack__flow text,
+.stack__commit-title {
   font-family: var(--font-mono);
-  font-size: 0.76rem;
-  letter-spacing: 0.02em;
-  color: var(--ink-dim);
-  text-align: right;
+  font-size: 16px;
+  letter-spacing: 0.01em;
+  fill: var(--ink-dim);
+}
+.stack__copy--host {
+  font-size: 17px;
+  fill: var(--ink-mid);
+}
+.stack__copy--core-row {
+  font-size: 16px;
+  fill: var(--ink-mid);
+}
+.stack__eyebrow {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  fill: var(--ink-dim);
+}
+.stack__core-shell {
+  fill: color-mix(in oklch, var(--code-bg) 86%, transparent);
+  stroke: color-mix(in oklch, var(--sodium) 16%, var(--ink-dim));
+  stroke-width: 2;
+}
+
+/* plugin hooks compose the core's left edge — structure, not flow */
+.stack__hook path {
+  fill: none;
+  stroke: var(--ink-dim);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+.stack__hook circle {
+  fill: var(--ink-dim);
+  stroke: none;
+}
+.stack__hook text {
+  font-size: 15px;
+  font-weight: 700;
+  fill: var(--ink-mid);
+}
+
+/* host-owned resources across the boundary */
+.stack__port rect {
+  fill: color-mix(in oklch, var(--code-bg) 80%, transparent);
+  stroke: var(--rule);
+  stroke-width: 2;
+}
+.stack__port text {
+  font-size: 16px;
+  fill: var(--ink);
+}
+
+/* the typed boundary: the runtime's right edge — the active edge */
+.stack__membrane {
+  fill: none;
+  stroke: var(--sodium);
+  stroke-width: 2.4;
+  stroke-dasharray: 2 5;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 4px color-mix(in oklch, var(--sodium) 45%, transparent));
+}
+.stack__boundary-label {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  fill: color-mix(in oklch, var(--sodium) 82%, var(--ink));
+}
+
+/* effect / outcome crossings + the per-turn atomic commit */
+.stack__flow-line,
+.stack__return-line,
+.stack__commit-line {
+  fill: none;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.stack__flow-line {
+  stroke: var(--sodium);
+  marker-end: url("#stack-arrow-sodium");
+}
+.stack__return-line {
+  stroke: var(--sodium-deep);
+  marker-end: url("#stack-arrow-return");
+}
+.stack__flow text {
+  font-size: 15px;
+  fill: var(--sodium);
+}
+.stack__flow .stack__flow-label--back { fill: var(--sodium-deep); }
+.stack__commit-line {
+  stroke: var(--sodium);
+  stroke-dasharray: 7 5;
+  marker-end: url("#stack-arrow-sodium");
+}
+.stack__commit-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  fill: var(--sodium);
+}
+
+/* animated overlay — one turn traced through the runtime.
+   Hidden by default; the turn-trace driver fades each pulse in as it
+   sweeps, so the static diagram stands alone without JS or motion. */
+.stack__signals path,
+.stack__glows rect,
+.stack__glows circle,
+.stack__glows path { opacity: 0; }
+.stack__sig {
+  fill: none;
+  stroke: var(--sodium-deep);
+  stroke-width: 3.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 9 220;
+  filter: drop-shadow(0 0 3px color-mix(in oklch, var(--sodium) 72%, transparent));
+}
+.stack__sig--commit { stroke: var(--sodium); }
+.stack__glow {
+  fill: none;
+  stroke: var(--sodium);
+  stroke-width: 2.6;
+  filter: drop-shadow(0 0 6px color-mix(in oklch, var(--sodium) 58%, transparent));
+}
+.stack__glow--line { stroke-width: 2.6; }
+.stack__glow--hook {
+  fill: var(--sodium);
+  stroke: none;
+  filter: drop-shadow(0 0 4px color-mix(in oklch, var(--sodium) 70%, transparent));
+}
+@media (prefers-reduced-motion: reduce) {
+  .stack__signals path,
+  .stack__glows rect,
+  .stack__glows circle,
+  .stack__glows path { opacity: 0 !important; }
 }
 @media (max-width: 560px) {
-  .stack__layer { flex-direction: column; align-items: flex-start; gap: 0.35rem; padding: 0.8rem 1rem; }
-  .stack__caps { text-align: left; }
+  .stack {
+    overflow-x: auto;
+    scrollbar-color: var(--sodium) transparent;
+  }
+  .stack__svg {
+    min-width: 760px;
+  }
 }
 
 /* ── listing rows as links (read-on track) ──────────── */

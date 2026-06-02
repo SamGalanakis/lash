@@ -1,7 +1,6 @@
 use crate::ast::{
     AssignPathStep, AssignTarget, AstString, BinaryOp, Declaration, Expr, ProcessDecl,
-    ProcessParam, ProcessStartExpr, Program, ResourceRefExpr, ScheduleCadence, ScheduleDecl,
-    TriggerArg, TriggerDecl, TriggerSource, TypeDecl, TypeExpr, TypeField, UnaryOp,
+    ProcessParam, ProcessStartExpr, Program, TypeDecl, TypeExpr, TypeField, UnaryOp,
 };
 use crate::lexer::{LexError, Span, Token, TokenKind, lex};
 use thiserror::Error;
@@ -24,8 +23,10 @@ pub enum ParseError {
     ProcessControlOutsideBlock { keyword: &'static str, span: Span },
     #[error("`{keyword}` can't be used inside a `process` body")]
     ForegroundControlInsideProcess { keyword: &'static str, span: Span },
-    #[error("trigger declarations cannot contain code; use `-> process(arg: binding, ...)`")]
-    TriggerBodyNotAllowed { span: Span },
+    #[error(
+        "declarative trigger syntax has been removed; construct a source value and call the trigger registry register operation"
+    )]
+    DeclarativeTriggerRemoved { span: Span },
     #[error("expression nesting too deep (limit {limit}); flatten the program")]
     NestingTooDeep { limit: usize, span: Span },
 }
@@ -39,7 +40,7 @@ impl ParseError {
             | Self::LoopControlOutsideLoop { span, .. }
             | Self::ProcessControlOutsideBlock { span, .. }
             | Self::ForegroundControlInsideProcess { span, .. }
-            | Self::TriggerBodyNotAllowed { span }
+            | Self::DeclarativeTriggerRemoved { span }
             | Self::NestingTooDeep { span, .. } => span.start,
         }
     }
@@ -105,16 +106,9 @@ impl Parser {
                 continue;
             }
             if self.peek_contextual("trigger") && !self.peek_assignment_target() {
-                let start = self.peek().span.start;
-                declarations.push(Declaration::Trigger(self.parse_trigger_decl()?));
-                declaration_spans.push(self.span_from(start));
-                continue;
-            }
-            if self.peek_contextual("schedule") && !self.peek_assignment_target() {
-                let start = self.peek().span.start;
-                declarations.push(Declaration::Schedule(self.parse_schedule_decl()?));
-                declaration_spans.push(self.span_from(start));
-                continue;
+                return Err(ParseError::DeclarativeTriggerRemoved {
+                    span: self.peek().span,
+                });
             }
             let start = self.peek().span.start;
             expressions.push(self.parse_statement_expr()?);
@@ -194,207 +188,6 @@ impl Parser {
             params,
             return_ty,
             body,
-        })
-    }
-
-    fn parse_trigger_decl(&mut self) -> Result<TriggerDecl, ParseError> {
-        self.expect_contextual("trigger")?;
-        let name = self.expect_ident()?;
-        self.expect_contextual("on")?;
-        if self.peek_contextual("each") {
-            self.bump();
-            let resource_type = self.expect_ident()?;
-            self.expect_exact(TokenKind::Dot, "`.`")?;
-            let event = self.expect_ident()?;
-            self.expect_contextual("as")?;
-            let resource_binding = self.expect_ident()?;
-            self.expect_exact(TokenKind::Comma, "`,`")?;
-            let event_binding = self.expect_ident()?;
-            let source = TriggerSource::Each {
-                resource_type,
-                event,
-                resource_binding: resource_binding.clone(),
-            };
-            self.expect_trigger_arrow()?;
-            let process_name = self.expect_ident()?;
-            self.expect_exact(TokenKind::LParen, "`(`")?;
-            let args = self.parse_trigger_named_arguments(
-                event_binding.as_str(),
-                Some(resource_binding.as_str()),
-            )?;
-            self.expect_exact(TokenKind::RParen, "`)`")?;
-            return Ok(TriggerDecl {
-                name,
-                source,
-                event_binding,
-                process_name,
-                args,
-            });
-        }
-        let (resource, event) = self.parse_module_event_path()?;
-        self.expect_contextual("as")?;
-        let source = TriggerSource::Binding { resource, event };
-        let event_binding = self.expect_ident()?;
-        self.expect_trigger_arrow()?;
-        let process_name = self.expect_ident()?;
-        self.expect_exact(TokenKind::LParen, "`(`")?;
-        let args = self.parse_trigger_named_arguments(event_binding.as_str(), None)?;
-        self.expect_exact(TokenKind::RParen, "`)`")?;
-        Ok(TriggerDecl {
-            name,
-            source,
-            event_binding,
-            process_name,
-            args,
-        })
-    }
-
-    fn expect_trigger_arrow(&mut self) -> Result<(), ParseError> {
-        if matches!(self.peek_kind(), TokenKind::LBrace) {
-            return Err(ParseError::TriggerBodyNotAllowed {
-                span: self.peek().span,
-            });
-        }
-        let minus = self.bump();
-        if !matches!(minus.kind, TokenKind::Minus) {
-            return Err(ParseError::Expected {
-                expected: "`-> process(...)` trigger target",
-                found: render_kind(&minus.kind),
-                span: minus.span,
-            });
-        }
-        let greater = self.bump();
-        if !matches!(greater.kind, TokenKind::Greater) {
-            return Err(ParseError::Expected {
-                expected: "`-> process(...)` trigger target",
-                found: render_kind(&greater.kind),
-                span: greater.span,
-            });
-        }
-        Ok(())
-    }
-
-    fn parse_trigger_named_arguments(
-        &mut self,
-        event_binding: &str,
-        resource_binding: Option<&str>,
-    ) -> Result<Vec<(AstString, TriggerArg)>, ParseError> {
-        let mut entries = Vec::new();
-        while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
-            let key = self.expect_key_name()?;
-            self.expect_exact(TokenKind::Colon, "`:`")?;
-            let value = self.parse_trigger_arg(event_binding, resource_binding)?;
-            entries.push((key, value));
-            match self.peek_kind() {
-                TokenKind::Comma => {
-                    self.bump();
-                    continue;
-                }
-                TokenKind::RParen | TokenKind::Eof => break,
-                other => {
-                    return Err(ParseError::Expected {
-                        expected: "`,` or `)` after trigger argument binding",
-                        found: render_kind(other),
-                        span: self.peek().span,
-                    });
-                }
-            }
-        }
-        Ok(entries)
-    }
-
-    fn parse_trigger_arg(
-        &mut self,
-        event_binding: &str,
-        resource_binding: Option<&str>,
-    ) -> Result<TriggerArg, ParseError> {
-        let token = self.peek().clone();
-        match &token.kind {
-            TokenKind::Ident(_)
-                if self
-                    .tokens
-                    .get(self.index + 1)
-                    .is_some_and(|next| matches!(next.kind, TokenKind::Dot)) =>
-            {
-                let path = self.parse_module_path()?;
-                if path
-                    .first()
-                    .is_some_and(|root| root.as_str() == event_binding)
-                    || resource_binding.is_some_and(|binding| {
-                        path.first().is_some_and(|root| root.as_str() == binding)
-                    })
-                {
-                    return Err(ParseError::Expected {
-                        expected: "event binding, on-each resource binding, or module path",
-                        found: "computed trigger argument".to_string(),
-                        span: token.span,
-                    });
-                }
-                Ok(TriggerArg::ResourceRef(ResourceRefExpr::unresolved(path)))
-            }
-            TokenKind::Ident(name) => {
-                let name = name.clone();
-                self.bump();
-                if name.as_str() == event_binding {
-                    return Ok(TriggerArg::EventBinding(name));
-                }
-                if resource_binding.is_some_and(|binding| binding == name.as_str()) {
-                    return Ok(TriggerArg::ResourceBinding(name));
-                }
-                Ok(TriggerArg::ResourceRef(ResourceRefExpr::unresolved(vec![
-                    name,
-                ])))
-            }
-            other => Err(ParseError::Expected {
-                expected: "event binding, on-each resource binding, or module path",
-                found: render_kind(other),
-                span: token.span,
-            }),
-        }
-    }
-
-    fn parse_schedule_decl(&mut self) -> Result<ScheduleDecl, ParseError> {
-        self.expect_contextual("schedule")?;
-        let name = self.expect_ident()?;
-        self.expect_contextual("every")?;
-        let cadence = self.parse_schedule_cadence()?;
-        self.expect_contextual("as")?;
-        let tick_binding = self.expect_ident()?;
-        let body = self.parse_block()?;
-        Ok(ScheduleDecl {
-            name,
-            cadence,
-            tick_binding,
-            body,
-        })
-    }
-
-    fn parse_schedule_cadence(&mut self) -> Result<ScheduleCadence, ParseError> {
-        let function = self.expect_ident()?;
-        if function.as_str() != "cron" {
-            return Err(ParseError::Expected {
-                expected: "`cron(...)` schedule cadence",
-                found: format!("identifier `{function}`"),
-                span: self.tokens[self.index.saturating_sub(1)].span,
-            });
-        }
-        self.expect_exact(TokenKind::LParen, "`(`")?;
-        let expression = self.parse_expr()?;
-        let mut options = Vec::new();
-        while matches!(self.peek_kind(), TokenKind::Comma) {
-            self.bump();
-            if matches!(self.peek_kind(), TokenKind::RParen) {
-                break;
-            }
-            let key = self.expect_ident()?;
-            self.expect_exact(TokenKind::Colon, "`:`")?;
-            let value = self.parse_expr()?;
-            options.push((key, value));
-        }
-        self.expect_exact(TokenKind::RParen, "`)`")?;
-        Ok(ScheduleCadence::Cron {
-            expression,
-            options,
         })
     }
 
@@ -1092,8 +885,8 @@ impl Parser {
             // `foo: Type { ok: bool }`). Surface a targeted diagnostic
             // rather than the generic "expected type expression" shrug.
             TokenKind::LBrace => self.parse_type_object_body(),
-            TokenKind::Ident(name) => {
-                self.bump();
+            TokenKind::Ident(_name) => {
+                let name = self.parse_type_name()?;
                 match name.as_str() {
                     "str" | "string" => Ok(TypeExpr::Str),
                     "int" | "integer" => Ok(TypeExpr::Int),
@@ -1131,6 +924,24 @@ impl Parser {
                         self.expect_exact(TokenKind::RBracket, "`]`")?;
                         Ok(TypeExpr::List(Box::new(inner)))
                     }
+                    "Process" => {
+                        self.expect_exact(TokenKind::Less, "`<`")?;
+                        let input = self.parse_type_expr()?;
+                        self.expect_exact(TokenKind::Comma, "`,`")?;
+                        let output = self.parse_type_expr()?;
+                        self.expect_exact(TokenKind::Greater, "`>`")?;
+                        Ok(TypeExpr::Process {
+                            input: Box::new(input),
+                            output: Box::new(output),
+                            input_count: 1,
+                        })
+                    }
+                    "TriggerHandle" => {
+                        self.expect_exact(TokenKind::Less, "`<`")?;
+                        let event = self.parse_type_expr()?;
+                        self.expect_exact(TokenKind::Greater, "`>`")?;
+                        Ok(TypeExpr::TriggerHandle(Box::new(event)))
+                    }
                     "Type" => self.parse_type_object(),
                     _ => Ok(TypeExpr::Ref(name)),
                 }
@@ -1165,6 +976,20 @@ impl Parser {
                 span: token.span,
             }),
         }
+    }
+
+    fn parse_type_name(&mut self) -> Result<AstString, ParseError> {
+        let mut path = vec![self.expect_ident()?];
+        while matches!(self.peek_kind(), TokenKind::Dot) {
+            self.bump();
+            path.push(self.expect_ident()?);
+        }
+        Ok(path
+            .iter()
+            .map(AstString::as_str)
+            .collect::<Vec<_>>()
+            .join(".")
+            .into())
     }
 
     fn expect_key_name(&mut self) -> Result<AstString, ParseError> {
@@ -1337,31 +1162,6 @@ impl Parser {
         false
     }
 
-    fn parse_module_event_path(&mut self) -> Result<(ResourceRefExpr, AstString), ParseError> {
-        let mut path = self.parse_module_path()?;
-        if path.len() < 2 {
-            return Err(ParseError::Expected {
-                expected: "module event path like `ui.button.pressed`",
-                found: path
-                    .first()
-                    .map(|value| format!("identifier `{value}`"))
-                    .unwrap_or_else(|| "empty path".to_string()),
-                span: self.tokens[self.index.saturating_sub(1)].span,
-            });
-        }
-        let event = path.pop().expect("checked path length");
-        Ok((ResourceRefExpr::unresolved(path), event))
-    }
-
-    fn parse_module_path(&mut self) -> Result<Vec<AstString>, ParseError> {
-        let mut path = vec![self.expect_ident()?];
-        while matches!(self.peek_kind(), TokenKind::Dot) {
-            self.bump();
-            path.push(self.expect_ident()?);
-        }
-        Ok(path)
-    }
-
     fn peek_contextual(&self, keyword: &str) -> bool {
         matches!(self.peek_kind(), TokenKind::Ident(name) if name.as_str() == keyword)
     }
@@ -1503,7 +1303,7 @@ fn render_kind(kind: &TokenKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Declaration, Expr, TriggerArg, TriggerSource};
+    use crate::ast::{Declaration, Expr};
 
     fn block(program: &Program) -> &[Expr] {
         let Expr::Block(expressions) = &program.main else {
@@ -1612,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn module_declarations_parse_process_triggers_schedules_and_receiver_calls() {
+    fn module_declarations_parse_process_values_constructors_and_receiver_calls() {
         let program = parse(
             r#"
             type EmailInput = { source: "gmail" | "manual", message_id: string? }
@@ -1620,90 +1420,41 @@ mod tests {
               msg = await gmail.get_message(input.message_id)?
               finish msg
             }
-            trigger personal_mail on GMAIL.personal.new_message as event
-              -> triage(gmail: GMAIL.personal, input: event)
-            schedule daily every cron("0 8 * * *", tz: "UTC") as tick {
-              start triage(gmail: GMAIL.personal, input: { source: "manual", message_id: tick.id })
+            process digest(tick: timer.Tick) -> bool {
+              finish true
             }
+            source = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+            handle = await triggers.register({
+              source: source,
+              target: digest,
+              name: "daily_digest"
+            })?
+            submit handle
             "#,
         )
         .expect("module should parse");
-        assert_eq!(program.declarations.len(), 4);
+        assert_eq!(program.declarations.len(), 3);
         assert!(matches!(program.declarations[0], Declaration::Type(_)));
         assert!(matches!(program.declarations[1], Declaration::Process(_)));
-        let Declaration::Trigger(trigger) = &program.declarations[2] else {
-            panic!("expected trigger");
-        };
-        assert!(matches!(trigger.source, TriggerSource::Binding { .. }));
-        assert_eq!(trigger.process_name, "triage");
-        assert!(matches!(
-            trigger.args[1].1,
-            TriggerArg::EventBinding(ref name) if name == "event"
-        ));
-        assert!(matches!(program.declarations[3], Declaration::Schedule(_)));
+        assert!(matches!(program.declarations[2], Declaration::Process(_)));
+        let expressions = block(&program);
+        assert_eq!(expressions.len(), 3);
+        assert!(matches!(expressions[0], Expr::Assign { .. }));
+        assert!(matches!(expressions[1], Expr::Assign { .. }));
+        assert!(matches!(expressions[2], Expr::Submit(Some(_))));
     }
 
     #[test]
-    fn trigger_on_each_parses_declarative_resource_binding() {
-        let program = parse(
+    fn declarative_trigger_syntax_is_rejected() {
+        let err = parse(
             r#"
-            process triage(mailbox: GMAIL, event: any) { finish event }
-            trigger any_mail on each GMAIL.new_message as mailbox, event
-              -> triage(mailbox: mailbox, event: event)
+            process triage(event: any) { finish event }
+            trigger personal_mail on GMAIL.personal.new_message as event
+              -> triage(event: event)
             "#,
         )
-        .expect("trigger should parse");
-        let Declaration::Trigger(trigger) = &program.declarations[1] else {
-            panic!("expected trigger");
-        };
-        assert!(matches!(trigger.source, TriggerSource::Each { .. }));
-        assert!(matches!(
-            trigger.args[0].1,
-            TriggerArg::ResourceBinding(ref name) if name == "mailbox"
-        ));
-        assert!(matches!(
-            trigger.args[1].1,
-            TriggerArg::EventBinding(ref name) if name == "event"
-        ));
-    }
-
-    #[test]
-    fn trigger_bodies_and_computed_args_are_rejected() {
-        let old_body = parse(
-            r#"
-            process triage(event: any) { finish event }
-            trigger personal_mail on GMAIL.personal.new_message as event {
-              start triage(event: event)
-            }
-            "#,
-        )
-        .expect_err("old trigger body should be rejected");
-        assert!(matches!(old_body, ParseError::TriggerBodyNotAllowed { .. }));
-
-        for source in [
-            r#"
-            process triage(event: any) { finish event }
-            trigger personal_mail on GMAIL.personal.new_message as event
-              -> triage(event: event.message_id)
-            "#,
-            r#"
-            process triage(event: any) { finish event }
-            trigger personal_mail on GMAIL.personal.new_message as event
-              -> triage(event: { id: event.id })
-            "#,
-            r#"
-            process triage(event: any) { finish event }
-            trigger personal_mail on GMAIL.personal.new_message as event
-              -> triage(event: "id")
-            "#,
-            r#"
-            process triage(event: any) { finish event }
-            trigger personal_mail on GMAIL.personal.new_message as event
-              -> triage(event: await event)
-            "#,
-        ] {
-            parse(source).expect_err("computed trigger arg should be rejected");
-        }
+        .expect_err("declarative trigger syntax should be rejected");
+        assert!(matches!(err, ParseError::DeclarativeTriggerRemoved { .. }));
     }
 
     #[test]
@@ -1719,11 +1470,13 @@ mod tests {
               }
               finish msg
             }
-            trigger personal_mail on gmail.personal.new_message as event
-              -> triage(gmail: gmail.personal, input: event)
-            schedule daily every cron("0 8 * * *", tz: "UTC") as tick {
-              start triage(gmail: gmail.personal, input: { source: "manual", message_id: tick.id })
-            }
+            source = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+            handle = await triggers.register({
+              source: source,
+              target: triage,
+              name: "daily_digest"
+            })?
+            submit handle
             "#,
         )
         .expect("module should parse");
@@ -1732,9 +1485,6 @@ mod tests {
         let nodes = graph["nodes"].as_array().expect("graph nodes");
         let edges = graph["edges"].as_array().expect("graph edges");
         assert!(nodes.iter().any(|node| node["kind"] == "process"));
-        assert!(nodes.iter().any(|node| node["kind"] == "trigger"));
-        assert!(nodes.iter().any(|node| node["kind"] == "schedule"));
-        assert!(nodes.iter().any(|node| node["kind"] == "resource"));
         assert!(
             nodes
                 .iter()
@@ -1742,7 +1492,6 @@ mod tests {
         );
         assert!(nodes.iter().any(|node| node["kind"] == "branch"));
         assert!(nodes.iter().any(|node| node["kind"] == "terminal"));
-        assert!(edges.iter().any(|edge| edge["label"] == "starts"));
         assert!(edges.iter().any(|edge| edge["label"] == "calls"));
         assert!(
             nodes

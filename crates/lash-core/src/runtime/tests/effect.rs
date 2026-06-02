@@ -1916,7 +1916,7 @@ async fn direct_effect_restores_required_streaming_for_provider_execution() {
 
     let manager = runtime.runtime_session_services().expect("session manager");
     let direct = manager.direct_completion_client(
-        RuntimeEffectControllerHandle::shared(Arc::new(InlineRuntimeEffectController::default())),
+        RuntimeEffectControllerHandle::shared(Arc::new(InlineRuntimeEffectController)),
         None,
         None,
     );

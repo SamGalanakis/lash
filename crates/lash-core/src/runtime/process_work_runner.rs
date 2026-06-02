@@ -96,7 +96,7 @@ impl ProcessWorkRunner {
 ///
 /// Poking is idempotent — the runner skips leased and terminal rows — so the
 /// control seam can poke after any successful process start (in-turn-inline,
-/// trigger, host-event, or cron) without coordinating with the runner.
+/// trigger or host event) without coordinating with the runner.
 #[derive(Clone)]
 pub struct ProcessWorkPoke {
     notify: Arc<Notify>,

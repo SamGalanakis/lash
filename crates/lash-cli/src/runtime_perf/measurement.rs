@@ -1170,29 +1170,15 @@ fn process_list_stress_registration(
     ))
 }
 
-fn process_list_tool_payload(entries: &[lash_core::ProcessHandleGrantEntry]) -> serde_json::Value {
-    serde_json::Value::Array(
+fn process_list_tool_payload(
+    entries: &[lash_core::runtime::ProcessHandleGrantEntry],
+) -> serde_json::Value {
+    serde_json::json!(
         entries
             .iter()
-            .map(|(grant, process)| {
-                let mut handle = lash_core::lashlang_bridge::process_handle_json(&process.id);
-                if let Some(object) = handle.as_object_mut() {
-                    object.insert(
-                        "process_id".to_string(),
-                        serde_json::json!(process.id.as_str()),
-                    );
-                    object.insert(
-                        "descriptor".to_string(),
-                        serde_json::json!(&grant.descriptor),
-                    );
-                    object.insert(
-                        "status".to_string(),
-                        serde_json::json!(process.status.label()),
-                    );
-                }
-                handle
-            })
-            .collect(),
+            .cloned()
+            .map(lash_core::ProcessHandleSummary::from)
+            .collect::<Vec<_>>()
     )
 }
 

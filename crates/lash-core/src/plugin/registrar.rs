@@ -121,7 +121,7 @@ impl HostEventRegistrations<'_> {
     }
 }
 
-pub struct TriggerRegistrations<'a> {
+pub(crate) struct TriggerRegistrations<'a> {
     reg: &'a mut PluginRegistrar,
 }
 

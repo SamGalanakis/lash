@@ -163,7 +163,7 @@ impl DurableProcessWorker {
     /// this worker can claim, driving each to a terminal state.
     ///
     /// This is the crash-recovery counterpart to a worker that ran a process
-    /// from a live turn: a trigger/host-event/cron-started process whose worker
+    /// from a live turn: a trigger/host-event-started process whose worker
     /// died mid-flight is left non-terminal in the registry, and a subsequent
     /// worker reopening that registry must finish it. The sweep:
     ///

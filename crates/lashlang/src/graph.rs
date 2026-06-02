@@ -3,10 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::ast::{
-    Declaration, Expr, Program, ResourceRefExpr, ScheduleCadence, TriggerArg, TriggerSource,
-};
+use crate::ast::{Declaration, Expr, Program, ResourceRefExpr};
 use crate::lexer::Span;
+use crate::tracking::{ProcessAstPath, ProcessBranchSelection, ProcessTrackingContext};
 use crate::{LinkedModule, ModuleArtifact, ModuleRef, ProcessRef};
 
 pub fn static_graph_json(program: &Program, module_ref: impl Into<String>) -> Value {
@@ -61,77 +60,6 @@ fn static_graph_for_program(
                 collect_expr_graph(
                     &process.body,
                     &process_id,
-                    span,
-                    process_refs,
-                    &mut nodes,
-                    &mut edges,
-                );
-            }
-            Declaration::Trigger(trigger) => {
-                let trigger_id = format!("trigger:{}", trigger.name);
-                nodes.push(node(&trigger_id, "trigger", trigger.name.as_str(), span));
-                match &trigger.source {
-                    TriggerSource::Binding { resource, event } => {
-                        let resource_id = resource_node_id(resource);
-                        nodes.push(node(&resource_id, "resource", resource.path_string(), span));
-                        edges.push(edge(&resource_id, &trigger_id, event.as_str(), span));
-                    }
-                    TriggerSource::Each {
-                        resource_type,
-                        event,
-                        ..
-                    } => {
-                        let resource_id = format!("resource_type:{resource_type}");
-                        nodes.push(node(
-                            &resource_id,
-                            "resource_type",
-                            resource_type.as_str(),
-                            span,
-                        ));
-                        edges.push(edge(&resource_id, &trigger_id, event.as_str(), span));
-                    }
-                }
-                for (_, arg) in &trigger.args {
-                    if let TriggerArg::ResourceRef(resource) = arg {
-                        let resource_id = resource_node_id(resource);
-                        nodes.push(node(&resource_id, "resource", resource.path_string(), span));
-                        edges.push(edge(&trigger_id, resource_id, "binds", span));
-                    }
-                }
-                let target = process_refs
-                    .get(trigger.process_name.as_str())
-                    .map(process_node_id)
-                    .unwrap_or_else(|| format!("process:{}", trigger.process_name));
-                edges.push(trigger_edge(
-                    &trigger_id,
-                    &target,
-                    "starts",
-                    span,
-                    &trigger.args,
-                ));
-            }
-            Declaration::Schedule(schedule) => {
-                let schedule_id = format!("schedule:{}", schedule.name);
-                nodes.push(node(&schedule_id, "schedule", schedule.name.as_str(), span));
-                match &schedule.cadence {
-                    ScheduleCadence::Cron { .. } => {
-                        nodes.push(node(
-                            format!("{schedule_id}:cron"),
-                            "schedule_cadence",
-                            "cron",
-                            span,
-                        ));
-                        edges.push(edge(
-                            format!("{schedule_id}:cron"),
-                            &schedule_id,
-                            "activates",
-                            span,
-                        ));
-                    }
-                }
-                collect_expr_graph(
-                    &schedule.body,
-                    &schedule_id,
                     span,
                     process_refs,
                     &mut nodes,
@@ -287,46 +215,6 @@ fn edge(
     })
 }
 
-fn trigger_edge(
-    from: impl Into<String>,
-    to: impl Into<String>,
-    label: impl Into<String>,
-    span: Option<Span>,
-    args: &[(crate::ast::AstString, TriggerArg)],
-) -> Value {
-    let mut value = edge(from, to, label, span);
-    if let Some(object) = value.as_object_mut() {
-        object.insert("bindings".to_string(), trigger_bindings_value(args));
-    }
-    value
-}
-
-fn trigger_bindings_value(args: &[(crate::ast::AstString, TriggerArg)]) -> Value {
-    Value::Array(
-        args.iter()
-            .map(|(param, arg)| match arg {
-                TriggerArg::EventBinding(name) => json!({
-                    "param": param.as_str(),
-                    "kind": "event",
-                    "name": name.as_str(),
-                }),
-                TriggerArg::ResourceBinding(name) => json!({
-                    "param": param.as_str(),
-                    "kind": "resource_binding",
-                    "name": name.as_str(),
-                }),
-                TriggerArg::ResourceRef(resource) => json!({
-                    "param": param.as_str(),
-                    "kind": "resource_ref",
-                    "resource_type": resource.resource_type.as_str(),
-                    "alias": resource.alias.as_str(),
-                    "path": resource.path_string(),
-                }),
-            })
-            .collect(),
-    )
-}
-
 fn span_value(span: Option<Span>) -> Value {
     let span = span.unwrap_or(Span { start: 0, end: 1 });
     let end = if span.end > span.start {
@@ -370,6 +258,7 @@ pub struct ProcessMapNode {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessMapEdge {
+    pub id: String,
     pub from: String,
     pub to: String,
     pub label: String,
@@ -388,7 +277,7 @@ pub fn map_process(
         edges: Vec::new(),
         visited_processes: BTreeSet::new(),
     };
-    builder.visit_process(process_name);
+    builder.visit_process(process_name, ProcessAstPath::root());
     Some(ProcessMap {
         module_ref: artifact.module_ref.clone(),
         process_ref: process_ref.clone(),
@@ -406,105 +295,229 @@ struct ProcessMapBuilder<'artifact> {
 }
 
 impl ProcessMapBuilder<'_> {
-    fn visit_process(&mut self, process_name: &str) {
+    fn tracking_context(&self, process_name: &str) -> Option<ProcessTrackingContext> {
+        let process_ref = self.artifact.process_ref(process_name)?.clone();
+        Some(ProcessTrackingContext::new(
+            self.artifact.module_ref.clone(),
+            process_ref,
+            process_name,
+        ))
+    }
+
+    fn visit_process(&mut self, process_name: &str, path: ProcessAstPath) {
         if !self.visited_processes.insert(process_name.to_string()) {
             return;
         }
-        let Some(process_ref) = self.artifact.process_ref(process_name) else {
+        let Some(context) = self.tracking_context(process_name) else {
             return;
         };
         let Some(process) = self.artifact.canonical_ir.process(process_name) else {
             return;
         };
-        let process_id = process_node_id(process_ref);
+        let site_builder = context.builder();
+        let process_id = site_builder.process_node_id();
         self.node(&process_id, "process", process_name);
-        self.visit_expr(&process.body, &process_id);
+        self.visit_expr(&process.body, &context, &process_id, path);
     }
 
-    fn visit_expr(&mut self, expr: &Expr, owner: &str) {
+    fn visit_expr(
+        &mut self,
+        expr: &Expr,
+        context: &ProcessTrackingContext,
+        owner: &str,
+        path: ProcessAstPath,
+    ) {
+        let site_builder = context.builder();
         match expr {
             Expr::Block(expressions) => {
-                for expression in expressions {
-                    self.visit_expr(expression, owner);
+                for (index, expression) in expressions.iter().enumerate() {
+                    self.visit_expr(expression, context, owner, path.child(index));
                 }
             }
             Expr::StartProcess(start) => {
+                let site = site_builder.node_site(
+                    &path,
+                    "child_process",
+                    format!("start {}", start.process),
+                );
+                self.node(&site.node_id, &site.node_kind, &site.label);
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &site.node_id, "starts"),
+                    owner,
+                    &site.node_id,
+                    "starts",
+                );
                 let target = self
-                    .artifact
-                    .process_ref(start.process.as_str())
-                    .map(process_node_id)
+                    .tracking_context(start.process.as_str())
+                    .map(|context| context.builder().process_node_id())
                     .unwrap_or_else(|| format!("process:{}", start.process));
-                self.edge(owner, &target, "starts");
+                self.edge_with_id(
+                    site_builder.edge_id(&path, &site.node_id, &target, "child"),
+                    &site.node_id,
+                    &target,
+                    "child",
+                );
                 if self.options.include_reachable_processes {
-                    self.visit_process(start.process.as_str());
+                    self.visit_process(start.process.as_str(), ProcessAstPath::root());
                 }
-                for child in expr.children() {
-                    self.visit_expr(child, owner);
+                for (index, child) in expr.children().enumerate() {
+                    self.visit_expr(child, context, &site.node_id, path.child(index));
                 }
             }
             Expr::ReceiverCall { operation, .. } => {
-                let op_id = format!("{owner}:resource:{operation}:{}", self.nodes.len());
-                self.node(&op_id, "resource_operation", operation.as_str());
-                self.edge(owner, &op_id, "calls");
-                for child in expr.children() {
-                    self.visit_expr(child, &op_id);
+                let site = site_builder.node_site(&path, "resource_operation", operation.as_str());
+                self.node(&site.node_id, &site.node_kind, &site.label);
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &site.node_id, "calls"),
+                    owner,
+                    &site.node_id,
+                    "calls",
+                );
+                for (index, child) in expr.children().enumerate() {
+                    self.visit_expr(child, context, &site.node_id, path.child(index));
                 }
             }
-            Expr::SleepFor(_) | Expr::SleepUntil(_) => {
-                let sleep_id = format!("{owner}:sleep:{}", self.nodes.len());
-                self.node(&sleep_id, "sleep", "sleep");
-                self.edge(owner, &sleep_id, "sleeps");
-                for child in expr.children() {
-                    self.visit_expr(child, &sleep_id);
+            Expr::SleepFor(_) => {
+                let site = site_builder.node_site(&path, "sleep", "sleep for");
+                self.node(&site.node_id, &site.node_kind, &site.label);
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &site.node_id, "sleeps"),
+                    owner,
+                    &site.node_id,
+                    "sleeps",
+                );
+                for (index, child) in expr.children().enumerate() {
+                    self.visit_expr(child, context, &site.node_id, path.child(index));
+                }
+            }
+            Expr::SleepUntil(_) => {
+                let site = site_builder.node_site(&path, "sleep", "sleep until");
+                self.node(&site.node_id, &site.node_kind, &site.label);
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &site.node_id, "sleeps"),
+                    owner,
+                    &site.node_id,
+                    "sleeps",
+                );
+                for (index, child) in expr.children().enumerate() {
+                    self.visit_expr(child, context, &site.node_id, path.child(index));
                 }
             }
             Expr::WaitSignal => {
-                let wait_id = format!("{owner}:wait:{}", self.nodes.len());
-                self.node(&wait_id, "wait", "wait signal");
-                self.edge(owner, &wait_id, "waits");
+                let site = site_builder.node_site(&path, "wait", "wait signal");
+                self.node(&site.node_id, &site.node_kind, &site.label);
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &site.node_id, "waits"),
+                    owner,
+                    &site.node_id,
+                    "waits",
+                );
             }
             Expr::SignalRun { .. } => {
-                let signal_id = format!("{owner}:signal:{}", self.nodes.len());
-                self.node(&signal_id, "signal", "signal run");
-                self.edge(owner, &signal_id, "signals");
-                for child in expr.children() {
-                    self.visit_expr(child, &signal_id);
+                let site = site_builder.node_site(&path, "signal", "signal run");
+                self.node(&site.node_id, &site.node_kind, &site.label);
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &site.node_id, "signals"),
+                    owner,
+                    &site.node_id,
+                    "signals",
+                );
+                for (index, child) in expr.children().enumerate() {
+                    self.visit_expr(child, context, &site.node_id, path.child(index));
                 }
             }
             Expr::Finish(value) | Expr::Submit(value) => {
-                let terminal_id = format!("{owner}:terminal:{}", self.nodes.len());
-                self.node(&terminal_id, "terminal", "result");
-                self.edge(owner, &terminal_id, "terminates");
+                let site = site_builder.node_site(&path, "terminal", "result");
+                self.node(&site.node_id, &site.node_kind, &site.label);
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &site.node_id, "terminates"),
+                    owner,
+                    &site.node_id,
+                    "terminates",
+                );
                 if let Some(value) = value {
-                    self.visit_expr(value, &terminal_id);
+                    self.visit_expr(value, context, &site.node_id, path.child(0));
                 }
             }
             Expr::Fail(value) => {
-                let terminal_id = format!("{owner}:terminal:{}", self.nodes.len());
-                self.node(&terminal_id, "terminal", "failure");
-                self.edge(owner, &terminal_id, "terminates");
-                self.visit_expr(value, &terminal_id);
+                let site = site_builder.node_site(&path, "terminal", "failure");
+                self.node(&site.node_id, &site.node_kind, &site.label);
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &site.node_id, "terminates"),
+                    owner,
+                    &site.node_id,
+                    "terminates",
+                );
+                self.visit_expr(value, context, &site.node_id, path.child(0));
             }
             Expr::ResourceRef(resource) => {
                 let resource_id = resource_node_id(resource);
                 self.node(&resource_id, "resource", &resource.path_string());
-                self.edge(owner, &resource_id, "uses");
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &resource_id, "uses"),
+                    owner,
+                    &resource_id,
+                    "uses",
+                );
             }
             Expr::If {
                 condition,
                 then_block,
                 else_block,
             } => {
-                let branch_id = format!("{owner}:branch:{}", self.nodes.len());
-                self.node(&branch_id, "branch", "if");
-                self.edge(owner, &branch_id, "branches");
-                self.visit_expr(condition, &branch_id);
-                self.visit_expr(then_block, &branch_id);
-                self.visit_expr(else_block, &branch_id);
+                let site = site_builder.branch_site(&path);
+                self.node(&site.node_id, &site.node_kind, &site.label);
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &site.node_id, "branches"),
+                    owner,
+                    &site.node_id,
+                    "branches",
+                );
+                self.visit_expr(condition, context, &site.node_id, path.child(0));
+                let then_path = path.child(1);
+                let else_path = path.child(2);
+                let then_id =
+                    site_builder.branch_arm_node_id(&then_path, ProcessBranchSelection::Then);
+                let else_id =
+                    site_builder.branch_arm_node_id(&else_path, ProcessBranchSelection::Else);
+                self.node(&then_id, "branch_arm", "then");
+                self.node(&else_id, "branch_arm", "else");
+                if let Some(branch) = &site.branch {
+                    self.edge_with_id(branch.then_edge_id.clone(), &site.node_id, &then_id, "then");
+                    self.edge_with_id(branch.else_edge_id.clone(), &site.node_id, &else_id, "else");
+                }
+                self.visit_expr(then_block, context, &then_id, then_path);
+                self.visit_expr(else_block, context, &else_id, else_path);
+            }
+            Expr::Yield(_) => {
+                let site = site_builder.node_site(&path, "process_event", "yield");
+                self.node(&site.node_id, &site.node_kind, &site.label);
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &site.node_id, "emits"),
+                    owner,
+                    &site.node_id,
+                    "emits",
+                );
+                for (index, child) in expr.children().enumerate() {
+                    self.visit_expr(child, context, &site.node_id, path.child(index));
+                }
+            }
+            Expr::Wake(_) => {
+                let site = site_builder.node_site(&path, "process_event", "wake");
+                self.node(&site.node_id, &site.node_kind, &site.label);
+                self.edge_with_id(
+                    site_builder.edge_id(&path, owner, &site.node_id, "emits"),
+                    owner,
+                    &site.node_id,
+                    "emits",
+                );
+                for (index, child) in expr.children().enumerate() {
+                    self.visit_expr(child, context, &site.node_id, path.child(index));
+                }
             }
             _ => {
-                for child in expr.children() {
-                    self.visit_expr(child, owner);
+                for (index, child) in expr.children().enumerate() {
+                    self.visit_expr(child, context, owner, path.child(index));
                 }
             }
         }
@@ -521,8 +534,9 @@ impl ProcessMapBuilder<'_> {
         });
     }
 
-    fn edge(&mut self, from: &str, to: &str, label: &str) {
+    fn edge_with_id(&mut self, id: String, from: &str, to: &str, label: &str) {
         self.edges.push(ProcessMapEdge {
+            id,
             from: from.to_string(),
             to: to.to_string(),
             label: label.to_string(),
@@ -537,7 +551,13 @@ mod tests {
     fn linked(source: &str) -> crate::LinkedModule {
         let mut resources = crate::ResourceCatalog::new();
         resources.add_module_instance(["tools"], "Tools");
-        resources.add_operation("Tools", "read_file", "read_file");
+        resources.add_operation(
+            "Tools",
+            "read_file",
+            "read_file",
+            crate::TypeExpr::Any,
+            crate::TypeExpr::Any,
+        );
         crate::LinkedModule::link(
             crate::parse(source).expect("parse module"),
             crate::LashlangSurface::new(resources, crate::LashlangAbilities::all()),
@@ -580,5 +600,84 @@ mod tests {
                 .any(|node| node.kind == "resource_operation")
         );
         assert!(map.edges.iter().any(|edge| edge.label == "starts"));
+        assert!(map.edges.iter().all(|edge| !edge.id.is_empty()));
+
+        let remapped = map_process(
+            &linked.artifact,
+            &process_ref,
+            ProcessMapOptions {
+                include_reachable_processes: true,
+            },
+        )
+        .expect("remap process");
+        assert_eq!(map, remapped);
+        assert!(
+            map.nodes
+                .iter()
+                .any(|node| node.id.starts_with("resource_operation:")),
+            "resource operation node should use stable hashed identity: {map:?}"
+        );
+    }
+
+    #[test]
+    fn process_map_has_stable_branch_edges() {
+        let linked_module = linked(
+            r#"
+            process choose(tool: Tools, flag: bool) {
+              if flag {
+                value = await tool.read_file({ path: "a" })?
+                finish value
+              } else {
+                finish "none"
+              }
+            }
+            "#,
+        );
+        let process_ref = linked_module
+            .artifact
+            .process_ref("choose")
+            .expect("choose process ref")
+            .clone();
+
+        let map = map_process(
+            &linked_module.artifact,
+            &process_ref,
+            ProcessMapOptions::default(),
+        )
+        .expect("map process");
+
+        let branch_edges = map
+            .edges
+            .iter()
+            .filter(|edge| matches!(edge.label.as_str(), "then" | "else"))
+            .collect::<Vec<_>>();
+        assert_eq!(branch_edges.len(), 2);
+        assert!(branch_edges.iter().all(|edge| !edge.id.is_empty()));
+
+        let reparsed = linked(
+            r#"
+            process choose(tool: Tools, flag: bool) {
+              if flag {
+                value = await tool.read_file({ path: "a" })?
+                finish value
+              } else {
+                finish "none"
+              }
+            }
+            "#,
+        );
+        let reparsed_ref = reparsed
+            .artifact
+            .process_ref("choose")
+            .expect("choose process ref")
+            .clone();
+        let reparsed_map = map_process(
+            &reparsed.artifact,
+            &reparsed_ref,
+            ProcessMapOptions::default(),
+        )
+        .expect("reparsed map");
+        assert_eq!(map.nodes, reparsed_map.nodes);
+        assert_eq!(map.edges, reparsed_map.edges);
     }
 }

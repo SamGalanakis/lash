@@ -344,6 +344,10 @@ impl PluginHost {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "host action invocation wires the runtime service bundle at the plugin boundary"
+    )]
     pub async fn invoke_plugin_action_for_session(
         &self,
         session_id: &str,

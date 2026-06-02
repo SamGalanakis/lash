@@ -156,7 +156,7 @@ impl crate::ProcessService for RuntimeSessionProcessService {
         session_id: &str,
         mode: crate::ProcessListMode,
         scope: crate::ProcessOpScope<'_>,
-    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
+    ) -> Result<Vec<crate::runtime::ProcessHandleGrantEntry>, crate::PluginError> {
         self.services
             .processes
             .list_process_handles(&self.services.current, session_id, mode, scope)
@@ -215,22 +215,6 @@ impl crate::ProcessService for RuntimeSessionProcessService {
                 process_id,
                 signal_id,
                 payload,
-                scope,
-            )
-            .await
-    }
-
-    async fn cancel_all(
-        &self,
-        session_id: &str,
-        scope: crate::ProcessOpScope<'_>,
-    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
-        self.services
-            .processes
-            .cancel_all_processes(
-                &self.services.current,
-                &self.services.managed,
-                session_id,
                 scope,
             )
             .await

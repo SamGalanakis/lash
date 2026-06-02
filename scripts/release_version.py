@@ -10,6 +10,12 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
+DOC_VERSION_FILES = [
+    ROOT / "README.md",
+    ROOT / "docs" / "index.html",
+    ROOT / "docs" / "quickstart.html",
+    ROOT / "docs" / "tracing.html",
+]
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 # Pre-release versions (e.g. "0.1.0-alpha.1") are honoured but never
 # promoted to a stable release by CI. Numeric pre-release series do
@@ -149,6 +155,7 @@ def apply_version(version: tuple[int, int, int]) -> None:
 def apply_version_text(version_text: str) -> None:
     update_workspace_version(version_text)
     update_workspace_dependency_versions(version_text)
+    update_doc_example_versions(version_text)
     update_lockfile_versions(version_text)
 
 
@@ -198,6 +205,42 @@ def update_workspace_dependency_versions(version: str) -> None:
         updated = "\n".join(updated_lines) + "\n"
         if updated != text:
             manifest.write_text(updated)
+
+
+def update_doc_example_versions(version: str) -> None:
+    """Keep checked-in docs snippets in sync with the workspace version.
+
+    The docs are static HTML/Markdown rather than a templated site build, so the
+    release bump is the substitution point. Only lines that mention Lash crates
+    are rewritten; unrelated dependency versions in examples stay untouched.
+    """
+    simple_dep_re = re.compile(
+        r'(?P<prefix>\b(?:lash-[A-Za-z0-9_-]+|lashlang)\s*=\s*")'
+        r'=[^"]+'
+        r'(?P<suffix>")'
+    )
+    inline_table_dep_re = re.compile(
+        r'(?P<prefix>\b(?:lash-[A-Za-z0-9_-]+|lashlang)\s*=\s*\{[^}\n]*\bversion\s*=\s*")'
+        r'=[^"]+'
+        r'(?P<suffix>"[^}\n]*\})'
+    )
+
+    for path in DOC_VERSION_FILES:
+        text = path.read_text()
+        updated_lines = []
+        for line in text.splitlines():
+            updated = simple_dep_re.sub(
+                rf'\g<prefix>={version}\g<suffix>',
+                line,
+            )
+            updated = inline_table_dep_re.sub(
+                rf'\g<prefix>={version}\g<suffix>',
+                updated,
+            )
+            updated_lines.append(updated)
+        updated_text = "\n".join(updated_lines) + "\n"
+        if updated_text != text:
+            path.write_text(updated_text)
 
 
 def update_lockfile_versions(version: str) -> None:

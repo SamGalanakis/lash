@@ -12,15 +12,15 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css">
+<link rel="stylesheet" href="./styles.css?v=2">
 <script src="./theme.js"></script>
-<script src="./docs.js" defer></script>
+<script src="./docs.js?v=2" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash-trace</code>, <code>crates/lash</code>, <code>crates/lash-trace-viewer</code>, <code>examples/agent-service</code>.">
 <section class="opener">
     <h1 class="opener__title">tracing<span class="slash">/</span>observability</h1>
-    <p class="opener__lede">Structured trace records emit through <code>TraceSink</code>. The bundled <code>JsonlTraceSink</code> writes one record per line; fan-out, OTel, and custom sinks are wrappers. <code>lash-trace-viewer</code> renders JSONL to a self-contained HTML page.</p>
+    <p class="opener__lede">Structured runtime records emit through <code>TraceSink</code>. The bundled <code>JsonlTraceSink</code> writes one record per line; fan-out, OTel, and custom sinks are wrappers. Lashlang process tracking is a separate opt-in sink for process maps. <code>lash-trace-viewer</code> renders JSONL to a self-contained HTML page.</p>
   </section>
 
   <main class="body" id="content">
@@ -44,6 +44,19 @@ let core = LashCore::builder()
     .trace_level(TraceLevel::Extended)
     .build()?;</code></pre>
           <p><code>TraceLevel::Standard</code> (default): turns, tool calls, LLM start/complete, token usage. <code>TraceLevel::Extended</code> adds provider stream chunks, prompt-component hashes, and runtime stream deltas. Extended is verbose; use for provider debugging.</p>
+        </div>
+
+        <div class="section" id="process-tracking">
+          <div class="section-header">
+            <h2>Process Tracking</h2>
+            <p>Host-level Lashlang process tracking is a separate opt-in sink. It is observability only: it is not written to <code>process_events</code>, does not create process-registry storage, and the normal <code>trace_sink</code> does not receive it unless the host explicitly tees the sink itself.</p>
+          </div>
+          <pre><code>let core = LashCore::builder()
+    .provider(provider)
+    .model(model)
+    .process_tracking_jsonl_path(Some("./.lash-data/process-tracking.jsonl".into()))
+    .build()?;</code></pre>
+          <p>Tracking records use <code>TraceEvent::ProcessTracking</code> with typed payloads for process start/finish, node start/complete/fail, branch selection, and child process links. Every payload includes a deterministic <code>event_key</code> so reducers can dedupe replayed JSONL records.</p>
         </div>
 
         <div class="section" id="sink-trait">
@@ -154,8 +167,8 @@ $ cargo run -p lash-trace-viewer -- trace.jsonl \
           </div>
           <pre><code># In your downstream Cargo.toml — pull in lash-core with the otel-trace
 # feature alongside the lash-runtime facade.
-lash-runtime = "=0.1.0-alpha.16"
-lash-core    = { version = "=0.1.0-alpha.16", features = ["otel-trace"] }</code></pre>
+lash-runtime = "=0.1.0-alpha.17"
+lash-core    = { version = "=0.1.0-alpha.17", features = ["otel-trace"] }</code></pre>
           <p><code>lash_core::OtelTraceSink</code> wraps an <code>opentelemetry</code> tracer and converts every event to a span with payload attributes. Use in place of (or alongside) <code>JsonlTraceSink</code>:</p>
           <pre><code>use lash::{LashCore, tracing::{TraceLevel, TraceSink}};
 use lash_core::OtelTraceSink;

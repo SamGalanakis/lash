@@ -67,9 +67,11 @@ pub(crate) use json::*;
 pub(crate) use ops::*;
 pub use state::{Snapshot, State};
 pub use value::{
-    ImageValue, LASH_TYPE_KEY, ListValue, ProjectedBindingError, ProjectedBindings,
-    ProjectedFuture, ProjectedHostValue, ProjectedReadRequest, ProjectedReadResponse,
-    ProjectedValue, ResourceHandle, Value,
+    ImageValue, LASH_HOST_VALUE_KEY, LASH_HOST_VALUE_TYPE_KEY, LASH_MODULE_REF_KEY,
+    LASH_PROCESS_NAME_KEY, LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY,
+    LASH_REQUIRED_SURFACE_REF_KEY, LASH_TYPE_KEY, ListValue, ProjectedBindingError,
+    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
+    ProjectedReadResponse, ProjectedValue, ResourceHandle, Value,
 };
 use vm::IterState;
 

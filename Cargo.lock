@@ -2521,6 +2521,7 @@ dependencies = [
  "lash-core",
  "lash-tool-support",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

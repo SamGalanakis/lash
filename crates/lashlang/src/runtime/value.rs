@@ -30,6 +30,13 @@ use super::{
 /// consumer can tell a Type value apart from a plain record. The inner value
 /// is the JSON-Schema representation of the type.
 pub const LASH_TYPE_KEY: &str = "$lash_type";
+pub const LASH_HOST_VALUE_TYPE_KEY: &str = "$lash_host_value_type";
+pub const LASH_HOST_VALUE_KEY: &str = "value";
+pub const LASH_PROCESS_VALUE_KEY: &str = "$lash_process";
+pub const LASH_PROCESS_NAME_KEY: &str = "process_name";
+pub const LASH_MODULE_REF_KEY: &str = "module_ref";
+pub const LASH_PROCESS_REF_KEY: &str = "process_ref";
+pub const LASH_REQUIRED_SURFACE_REF_KEY: &str = "required_surface_ref";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListValue {

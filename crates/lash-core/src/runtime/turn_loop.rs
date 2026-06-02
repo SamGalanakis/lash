@@ -383,13 +383,15 @@ impl LashRuntime {
         session
             .plugins()
             .emit_runtime_event_with_phase_probe(
-                crate::PluginLifecycleEvent::TurnPersisted(crate::SessionStateChangedContext {
-                    session_id: self.state.session_id.clone(),
-                    state: crate::SessionReadView::from_snapshot(&returned_turn.state),
-                    sessions: manager.state_service(),
-                    session_graph: manager.graph_service(),
-                    direct_completions,
-                }),
+                crate::PluginLifecycleEvent::TurnPersisted(Box::new(
+                    crate::SessionStateChangedContext {
+                        session_id: self.state.session_id.clone(),
+                        state: crate::SessionReadView::from_snapshot(&returned_turn.state),
+                        sessions: manager.state_service(),
+                        session_graph: manager.graph_service(),
+                        direct_completions,
+                    },
+                )),
                 self.turn_phase_probe.clone(),
             )
             .await;

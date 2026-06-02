@@ -179,6 +179,9 @@ pub enum TraceEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cumulative: Option<TraceTokenUsage>,
     },
+    ProcessTracking {
+        event: TraceProcessTrackingEvent,
+    },
     TurnCompleted {
         status: String,
         done_reason: String,
@@ -385,6 +388,137 @@ pub struct TraceAgentFrameSwitch {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TraceProcessTrackingEvent {
+    ProcessStarted {
+        event_key: String,
+        process_id: String,
+        session_id: String,
+        module_ref: String,
+        process_ref: String,
+        process_name: String,
+        process_map: TraceProcessMap,
+    },
+    ProcessFinished {
+        event_key: String,
+        process_id: String,
+        session_id: String,
+        module_ref: String,
+        process_ref: String,
+        process_name: String,
+        status: TraceProcessStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    NodeStarted {
+        event_key: String,
+        process_id: String,
+        session_id: String,
+        module_ref: String,
+        process_ref: String,
+        process_name: String,
+        node_id: String,
+        node_kind: String,
+        label: String,
+        occurrence: u64,
+    },
+    NodeCompleted {
+        event_key: String,
+        process_id: String,
+        session_id: String,
+        module_ref: String,
+        process_ref: String,
+        process_name: String,
+        node_id: String,
+        node_kind: String,
+        label: String,
+        occurrence: u64,
+    },
+    NodeFailed {
+        event_key: String,
+        process_id: String,
+        session_id: String,
+        module_ref: String,
+        process_ref: String,
+        process_name: String,
+        node_id: String,
+        node_kind: String,
+        label: String,
+        occurrence: u64,
+        error: String,
+    },
+    BranchSelected {
+        event_key: String,
+        process_id: String,
+        session_id: String,
+        module_ref: String,
+        process_ref: String,
+        process_name: String,
+        node_id: String,
+        occurrence: u64,
+        edge_id: String,
+        selected: TraceBranchSelection,
+    },
+    ChildStarted {
+        event_key: String,
+        process_id: String,
+        session_id: String,
+        module_ref: String,
+        process_ref: String,
+        process_name: String,
+        parent_process_id: String,
+        parent_node_id: String,
+        occurrence: u64,
+        child_process_id: String,
+        child_module_ref: String,
+        child_process_ref: String,
+        child_process_name: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceProcessStatus {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceBranchSelection {
+    Then,
+    Else,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceProcessMap {
+    pub module_ref: String,
+    pub process_ref: String,
+    pub process_name: String,
+    #[serde(default)]
+    pub nodes: Vec<TraceProcessMapNode>,
+    #[serde(default)]
+    pub edges: Vec<TraceProcessMapEdge>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceProcessMapNode {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceProcessMapEdge {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceError {
     pub message: String,
     pub retryable: bool,
@@ -559,6 +693,40 @@ mod tests {
         let completed_json = serde_json::to_value(completed).unwrap();
         assert_eq!(completed_json["type"], "turn_completed");
         assert_eq!(completed_json["agent_frame_switch"]["frame_id"], "frame-1");
+    }
+
+    #[test]
+    fn process_tracking_records_are_jsonl_shaped() {
+        let event = TraceProcessTrackingEvent::NodeStarted {
+            event_key: "process:p1:node:n1:1:started".to_string(),
+            process_id: "p1".to_string(),
+            session_id: "s1".to_string(),
+            module_ref: "module".to_string(),
+            process_ref: "component:0".to_string(),
+            process_name: "main".to_string(),
+            node_id: "n1".to_string(),
+            node_kind: "resource_operation".to_string(),
+            label: "read_file".to_string(),
+            occurrence: 1,
+        };
+        let record = TraceRecord::new(
+            TraceContext::default().for_session("s1"),
+            TraceEvent::ProcessTracking { event },
+        );
+
+        let json = serde_json::to_value(&record).expect("serialize process tracking");
+        assert_eq!(json["type"], "process_tracking");
+        assert_eq!(json["event"]["kind"], "node_started");
+        assert_eq!(json["event"]["event_key"], "process:p1:node:n1:1:started");
+
+        let round_trip =
+            serde_json::from_value::<TraceRecord>(json).expect("deserialize process tracking");
+        assert!(matches!(
+            round_trip.event,
+            TraceEvent::ProcessTracking {
+                event: TraceProcessTrackingEvent::NodeStarted { .. }
+            }
+        ));
     }
 
     #[test]

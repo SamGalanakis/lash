@@ -1,6 +1,7 @@
 use crate::{ModuleRef, ProcessRef, RequiredSurfaceRef};
 
 use super::{ExecutionScratch, ProfileReport, ProjectedBindings, Record, RuntimeFailure, Value};
+use crate::ProcessTrackingObservation;
 use std::future::Future;
 use std::sync::Mutex;
 use thiserror::Error;
@@ -124,6 +125,8 @@ pub trait ExecutionHost: Sync {
     fn observe_runtime_failure(&self, _failure: RuntimeFailure) {}
 
     fn observe_profile(&self, _profile: ProfileReport) {}
+
+    fn observe_process_tracking(&self, _observation: ProcessTrackingObservation) {}
 }
 
 pub struct ExecutionEnvironment<'host, H: ExecutionHost> {
@@ -244,6 +247,10 @@ impl<H: ExecutionHost> ExecutionHost for ExecutionEnvironment<'_, H> {
         if let Ok(mut guard) = self.profile.lock() {
             *guard = Some(profile);
         }
+    }
+
+    fn observe_process_tracking(&self, observation: ProcessTrackingObservation) {
+        self.host.observe_process_tracking(observation);
     }
 }
 

@@ -184,36 +184,24 @@ impl RuntimeExecutionContext<'_> {
                 return Self::recorded_process_error(call_id, "cancel_process", args, err, started);
             }
         };
-        if let Err(err) = self
-            .dispatch
-            .processes
-            .validate_visible(
-                &self.session_id,
-                std::slice::from_ref(&handle_id),
-                self.process_scope(self.parent_invocation.clone()),
-            )
-            .await
-        {
-            return Self::recorded_process_error(
-                call_id,
-                "cancel_process",
-                args,
-                err.to_string(),
-                started,
-            );
-        }
         let output = match self
             .dispatch
-            .processes
+            .process_cancel_ability
             .cancel(
-                &self.session_id,
-                &handle_id,
-                self.process_scope(self.parent_invocation.clone()),
+                self.dispatch.processes.as_ref(),
+                crate::ProcessCancelRequest::new(
+                    &self.session_id,
+                    &handle_id,
+                    self.process_scope(self.parent_invocation.clone()),
+                    crate::ProcessCancelSource::Lashlang,
+                )
+                .with_handle(handle)
+                .with_reason("requested by lashlang"),
             )
             .await
         {
             Ok(status) => ToolCallOutput::success(Self::process_status_value(&status)),
-            Err(err) => ToolInvocationReply::error(json!(err.to_string())).output,
+            Err(err) => ToolInvocationReply::error(json!(format!("cancel failed: {err}"))).output,
         };
         Self::recorded_process_reply(call_id, "cancel_process", args, output, started)
     }
@@ -231,10 +219,37 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct PrepareRecordingTool {
         prepares: Arc<AtomicUsize>,
+    }
+
+    #[derive(Default)]
+    struct DenyCancelAbility {
+        calls: Mutex<Vec<(crate::ProcessCancelSource, String)>>,
+    }
+
+    impl DenyCancelAbility {
+        fn calls(&self) -> Vec<(crate::ProcessCancelSource, String)> {
+            self.calls.lock().expect("cancel calls").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ProcessCancelAbility for DenyCancelAbility {
+        async fn cancel(
+            &self,
+            _processes: &dyn crate::ProcessService,
+            request: crate::ProcessCancelRequest<'_>,
+        ) -> Result<crate::ProcessRecord, crate::PluginError> {
+            self.calls
+                .lock()
+                .expect("cancel calls")
+                .push((request.source, request.process_id.to_string()));
+            Err(crate::PluginError::Session("denied by host".to_string()))
+        }
     }
 
     fn process_tool_definition() -> ToolDefinition {
@@ -308,8 +323,9 @@ mod tests {
             session_lifecycle: host.clone(),
             session_graph: host.clone(),
             processes: host.clone(),
+            process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController::default(),
+                crate::InlineRuntimeEffectController,
             )),
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
@@ -407,8 +423,9 @@ mod tests {
             session_lifecycle: host.clone(),
             session_graph: host.clone(),
             processes: host.clone(),
+            process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController::default(),
+                crate::InlineRuntimeEffectController,
             )),
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
@@ -458,6 +475,79 @@ mod tests {
                 .as_ref()
                 .and_then(|record| record.call_id.as_deref()),
             Some("cancel-hidden-process")
+        );
+    }
+
+    #[tokio::test]
+    async fn process_handle_cancel_uses_host_cancel_ability() {
+        let provider: Arc<dyn ToolProvider> = Arc::new(PrepareRecordingTool {
+            prepares: Arc::new(AtomicUsize::new(0)),
+        });
+        let plugins = PluginHost::empty()
+            .build_session("root", None)
+            .expect("plugin session");
+        let surface = Arc::new(crate::ToolSurface::from_tools(
+            provider.tool_manifests(),
+            BTreeMap::new(),
+        ));
+        let host = Arc::new(crate::testing::MockSessionManager::default());
+        let ability = Arc::new(DenyCancelAbility::default());
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        let dispatch = Arc::new(ToolDispatchContext {
+            plugins,
+            tools: provider,
+            surface,
+            sessions: host.clone(),
+            session_lifecycle: host.clone(),
+            session_graph: host,
+            processes: Arc::new(crate::UnavailableProcessService),
+            process_cancel_ability: ability.clone(),
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController,
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
+            parent_invocation: None,
+            session_id: "session".to_string(),
+            agent_frame_id: String::new(),
+            event_tx,
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
+        });
+        let context = RuntimeExecutionContext::new(
+            "session".to_string(),
+            dispatch,
+            Default::default(),
+            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
+            Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(crate::ChronologicalProjection::default()),
+            None,
+            crate::TurnContext::default(),
+        );
+
+        let cancelled = context
+            .cancel_process_handle(
+                "cancel-process-1".to_string(),
+                json!({
+                    "__handle__": "process",
+                    "id": "process-1"
+                }),
+            )
+            .await;
+
+        assert!(!cancelled.output.is_success());
+        assert_eq!(
+            cancelled.output.value_for_projection()["message"],
+            json!("cancel failed: plugin session error: denied by host")
+        );
+        assert_eq!(
+            ability.calls(),
+            vec![(
+                crate::ProcessCancelSource::Lashlang,
+                "process-1".to_string()
+            )]
         );
     }
 }

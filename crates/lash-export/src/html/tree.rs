@@ -708,19 +708,15 @@ fn render_agent_frame_divider(
         for name in seed.globals.keys() {
             let _ = writeln!(
                 out,
-                "          <span class=\"seed-pill\" data-kind=\"{kind}\"><span class=\"seed-name\">{name}</span><span class=\"seed-kind\">{label}</span></span>",
-                kind = "global",
-                name = escape(name),
-                label = "global"
+                "          <span class=\"seed-pill\" data-kind=\"global\"><span class=\"seed-name\">{name}</span><span class=\"seed-kind\">global</span></span>",
+                name = escape(name)
             );
         }
         for (name, _) in &seed.projected.entries {
             let _ = writeln!(
                 out,
-                "          <span class=\"seed-pill\" data-kind=\"{kind}\"><span class=\"seed-name\">{name}</span><span class=\"seed-kind\">{label}</span></span>",
-                kind = "projected",
-                name = escape(name),
-                label = "projected"
+                "          <span class=\"seed-pill\" data-kind=\"projected\"><span class=\"seed-name\">{name}</span><span class=\"seed-kind\">projected</span></span>",
+                name = escape(name)
             );
         }
         out.push_str("        </div></div>\n");

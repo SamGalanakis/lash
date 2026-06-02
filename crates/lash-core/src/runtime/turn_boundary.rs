@@ -40,21 +40,23 @@ pub(super) struct TurnBoundary {
 /// [`TurnCommitStage::Finalized`], snapshotting the progress graph commit so
 /// later final commits can reconcile it against the materialized graph.
 enum TurnCommitStage {
-    Drafting(TurnCommitDraft),
-    Finalized {
-        state: RuntimeSessionState,
-        progress_graph_commit: GraphCommitDelta,
-    },
+    Drafting(Box<TurnCommitDraft>),
+    Finalized(Box<FinalizedTurnCommitStage>),
+}
+
+struct FinalizedTurnCommitStage {
+    state: RuntimeSessionState,
+    progress_graph_commit: GraphCommitDelta,
 }
 
 impl TurnCommitStage {
     /// Cheap throwaway value used only to move out of `&mut self` during the
     /// `Drafting` → `Finalized` transition.
     fn placeholder() -> Self {
-        Self::Finalized {
+        Self::Finalized(Box::new(FinalizedTurnCommitStage {
             state: RuntimeSessionState::default(),
             progress_graph_commit: GraphCommitDelta::Unchanged { leaf_node_id: None },
-        }
+        }))
     }
 }
 
@@ -97,21 +99,21 @@ impl PersistedGraphMark {
 impl TurnBoundary {
     pub(super) fn from_state(state: RuntimeSessionState) -> Self {
         Self {
-            stage: TurnCommitStage::Drafting(TurnCommitDraft::from_state(state)),
+            stage: TurnCommitStage::Drafting(Box::new(TurnCommitDraft::from_state(state))),
         }
     }
 
     pub(super) fn state_mut(&mut self) -> &mut RuntimeSessionState {
         match &mut self.stage {
             TurnCommitStage::Drafting(draft) => draft.state_mut(),
-            TurnCommitStage::Finalized { state, .. } => state,
+            TurnCommitStage::Finalized(finalized) => &mut finalized.state,
         }
     }
 
     pub(super) fn state(&self) -> &RuntimeSessionState {
         match &self.stage {
             TurnCommitStage::Drafting(draft) => draft.state(),
-            TurnCommitStage::Finalized { state, .. } => state,
+            TurnCommitStage::Finalized(finalized) => &finalized.state,
         }
     }
 
@@ -328,15 +330,15 @@ impl TurnBoundary {
 
     pub(super) fn into_final_state(self) -> RuntimeSessionState {
         match self.stage {
-            TurnCommitStage::Drafting(draft) => draft.into_final_state(),
-            TurnCommitStage::Finalized { state, .. } => state,
+            TurnCommitStage::Drafting(draft) => (*draft).into_final_state(),
+            TurnCommitStage::Finalized(finalized) => finalized.state,
         }
     }
 
     fn draft_ref(&self) -> &TurnCommitDraft {
         match &self.stage {
-            TurnCommitStage::Drafting(draft) => draft,
-            TurnCommitStage::Finalized { .. } => {
+            TurnCommitStage::Drafting(draft) => draft.as_ref(),
+            TurnCommitStage::Finalized(_) => {
                 panic!("turn commit draft is unavailable after final state materialization")
             }
         }
@@ -344,8 +346,8 @@ impl TurnBoundary {
 
     fn draft_mut(&mut self) -> &mut TurnCommitDraft {
         match &mut self.stage {
-            TurnCommitStage::Drafting(draft) => draft,
-            TurnCommitStage::Finalized { .. } => {
+            TurnCommitStage::Drafting(draft) => draft.as_mut(),
+            TurnCommitStage::Finalized(_) => {
                 panic!("turn commit draft is unavailable after final state materialization")
             }
         }
@@ -356,15 +358,15 @@ impl TurnBoundary {
             TurnCommitStage::Drafting(draft) => {
                 let progress_graph_commit =
                     draft.graph_commit(draft.state().graph_replace_required);
-                TurnCommitStage::Finalized {
-                    state: draft.into_final_state(),
+                TurnCommitStage::Finalized(Box::new(FinalizedTurnCommitStage {
+                    state: (*draft).into_final_state(),
                     progress_graph_commit,
-                }
+                }))
             }
             finalized => finalized,
         };
         match &mut self.stage {
-            TurnCommitStage::Finalized { state, .. } => state,
+            TurnCommitStage::Finalized(finalized) => &mut finalized.state,
             TurnCommitStage::Drafting(_) => unreachable!("stage was just finalized"),
         }
     }
@@ -413,10 +415,7 @@ impl TurnBoundary {
             TurnCommitStage::Drafting(draft) => {
                 Some(draft.graph_commit(draft.state().graph_replace_required))
             }
-            TurnCommitStage::Finalized {
-                progress_graph_commit,
-                ..
-            } => Some(progress_graph_commit.clone()),
+            TurnCommitStage::Finalized(finalized) => Some(finalized.progress_graph_commit.clone()),
         };
         let state = self.final_state_mut();
 

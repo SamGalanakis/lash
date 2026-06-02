@@ -223,9 +223,9 @@ impl<'run> EmbeddedDurableTurnProvider<'run> {
         Self { controller }
     }
 
-    fn embedded_store<'a>(
-        store: &'a dyn RuntimePersistence,
-    ) -> Result<&'a dyn EmbeddedDurableTurnStore, RuntimeEffectControllerError> {
+    fn embedded_store(
+        store: &dyn RuntimePersistence,
+    ) -> Result<&dyn EmbeddedDurableTurnStore, RuntimeEffectControllerError> {
         store.embedded_durable_turn_store().ok_or_else(|| {
             RuntimeEffectControllerError::new(
                 "embedded_durable_turn_store_unavailable",
@@ -234,9 +234,9 @@ impl<'run> EmbeddedDurableTurnProvider<'run> {
         })
     }
 
-    fn embedded_store_runtime<'a>(
-        store: &'a dyn RuntimePersistence,
-    ) -> Result<&'a dyn EmbeddedDurableTurnStore, RuntimeError> {
+    fn embedded_store_runtime(
+        store: &dyn RuntimePersistence,
+    ) -> Result<&dyn EmbeddedDurableTurnStore, RuntimeError> {
         store.embedded_durable_turn_store().ok_or_else(|| {
             RuntimeError::new(
                 RuntimeErrorCode::RuntimeTurnLease,
