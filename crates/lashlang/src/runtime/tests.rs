@@ -840,6 +840,75 @@ async fn compiler_propagates_safe_straight_line_constants() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn compiler_keeps_assignment_hot_paths_specialized() {
+    let source = r#"
+        items = []
+        total = 0
+        step = await tools.echo({ value: 3 })?
+        items = push(items, 1)
+        total = total + 2
+        total = total + step
+        submit { items: items, total: total }
+        "#;
+    let compiled = compile_source(source).expect("program should compile");
+
+    assert!(
+        compiled.chunk.code.iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::Intrinsic(IntrinsicOp::PushAssign(_))
+            )
+        }),
+        "`x = push(x, item)` should compile to the in-place push-assign opcode"
+    );
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::AddAssignNumber { .. })),
+        "`x = x + constant_number` should compile to numeric add-assign"
+    );
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::AddAssignSlot { .. })),
+        "`x = x + y` should compile to slot add-assign"
+    );
+    assert!(
+        !compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::Intrinsic(IntrinsicOp::Push))),
+        "the assignment form should not route through generic push"
+    );
+    assert!(
+        !compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::AddAssign(_))),
+        "numeric assignment forms should not route through generic add-assign"
+    );
+
+    let mut state = State::new();
+    let outcome = execute_compiled(&compiled, &mut state, &Host)
+        .await
+        .expect("program should run");
+    let ExecutionOutcome::Finished(Value::Record(record)) = outcome else {
+        panic!("expected record result");
+    };
+    assert_eq!(record["total"], Value::Number(5.0));
+    assert_eq!(
+        record["items"],
+        Value::List(vec![Value::Number(1.0)].into())
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn generic_iterator_loops_cover_range_list_keys_nested_control_and_mutation() {
     let source = r#"
         counts = {}
@@ -1827,6 +1896,23 @@ async fn helper_functions_are_covered_directly() {
     assert_eq!(
         apply_format("a{}b", &[Value::Number(1.0)]).expect("format"),
         "a1b"
+    );
+    let compiled_one_arg = compile_format_template("a{}b", 1);
+    let one_arg = compiled_one_arg
+        .one_arg
+        .as_ref()
+        .expect("single placeholder template should keep its direct shape");
+    assert_eq!(one_arg.prefix.as_deref(), Some("a"));
+    assert_eq!(one_arg.suffix.as_deref(), Some("b"));
+    assert_eq!(
+        execute_compiled_format_one_number_compact_direct(&compiled_one_arg, 42.0)
+            .expect("compiled one-number format")
+            .as_str(),
+        "a42b"
+    );
+    assert!(
+        compile_format_template("{}:{}", 2).one_arg.is_none(),
+        "multi-arg templates should keep the generic compiled format path"
     );
     assert_eq!(
         apply_format(
@@ -4033,17 +4119,17 @@ async fn compile_stats_count_const_folded_and_dynamic_literals() {
     let stats = compiled.compile_stats();
     assert_eq!(stats.type_literals_total, 3);
     assert_eq!(
-        stats.type_literals_const_folded, 2,
-        "Inner and A are constant"
+        stats.type_literals_const_folded, 3,
+        "Inner, A, and B are constant"
     );
-    assert_eq!(stats.type_literals_dynamic, 1, "B references Inner");
-    assert_eq!(stats.type_ref_sites, 1);
+    assert_eq!(stats.type_literals_dynamic, 0);
+    assert_eq!(stats.type_ref_sites, 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn profile_report_surfaces_resolve_type_ref_counts() {
     let src = r#"
-        Inner = Type { n: int }
+        Inner = await tools.echo({ value: Type { n: int } })?
         Outer = Type { nested: Inner }
         limit = await tools.echo({ value: 1 })?
         numbers = push(range(limit), limit)

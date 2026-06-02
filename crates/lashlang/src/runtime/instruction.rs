@@ -45,12 +45,19 @@ pub(crate) struct CompiledFormatTemplate {
     pub(crate) argc: usize,
     pub(crate) min_capacity: usize,
     pub(crate) error: Option<String>,
+    pub(crate) one_arg: Option<CompiledFormatOneArg>,
 }
 
 #[derive(Clone)]
 pub(crate) enum CompiledFormatPart {
     Literal(Arc<str>),
     Arg(usize),
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledFormatOneArg {
+    pub(crate) prefix: Option<Arc<str>>,
+    pub(crate) suffix: Option<Arc<str>>,
 }
 
 #[derive(Clone)]

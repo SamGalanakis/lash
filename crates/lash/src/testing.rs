@@ -55,6 +55,7 @@ pub mod conformance {
     {
         reopen_restores_trigger_registry_state(make()).await;
         worker_runs_trigger_started_lashlang_process_after_restart(make()).await;
+        host_event_triggered_process_wake_provenance_survives_restart(make()).await;
         worker_recovers_tool_call_process_in_restarted_session(make()).await;
         worker_recovers_session_turn_process_in_restarted_session(make()).await;
     }
@@ -74,7 +75,44 @@ handle = await triggers.register({
 submit "registered"
 "#;
 
+    const HOST_EVENT_TRIGGER_SOURCE: &str = r#"
+type ButtonPressed = { button: str, message: str, pressed_at: str }
+
+process remember_button(event: ButtonPressed) {
+  wake { button: event.button, message: event.message }
+  finish { button: event.button, ok: true }
+}
+
+source = ui.button.pressed({})
+handle = await triggers.register({
+  source: source,
+  target: remember_button,
+  name: "button remembered"
+})?
+submit "registered"
+"#;
+
     const SESSION_ID: &str = "rebuild-conformance";
+
+    fn button_pressed_event_type() -> crate::modes::TypeExpr {
+        crate::modes::TypeExpr::Object(vec![
+            crate::modes::TypeField {
+                name: "button".into(),
+                ty: crate::modes::TypeExpr::Str,
+                optional: false,
+            },
+            crate::modes::TypeField {
+                name: "message".into(),
+                ty: crate::modes::TypeExpr::Str,
+                optional: false,
+            },
+            crate::modes::TypeField {
+                name: "pressed_at".into(),
+                ty: crate::modes::TypeExpr::Str,
+                optional: false,
+            },
+        ])
+    }
 
     fn rebuild_abilities() -> crate::modes::LashlangAbilities {
         crate::modes::LashlangAbilities::default()
@@ -107,6 +145,11 @@ submit "registered"
                 }]),
                 crate::modes::TypeExpr::Ref("clock.Tick".into()),
             );
+            resources.add_trigger_source_constructor(
+                ["ui", "button", "pressed"],
+                crate::modes::TypeExpr::Object(Vec::new()),
+                button_pressed_event_type(),
+            );
             resources
         }
 
@@ -125,7 +168,11 @@ submit "registered"
             "rebuild-conformance-trigger"
         }
 
-        fn register(&self, _reg: &mut PluginRegistrar) -> std::result::Result<(), PluginError> {
+        fn register(&self, reg: &mut PluginRegistrar) -> std::result::Result<(), PluginError> {
+            reg.host_events().declare(
+                crate::HostEvent::new("Button", "ui.button", "pressed")
+                    .payload(button_pressed_event_type()),
+            )?;
             Ok(())
         }
     }
@@ -178,6 +225,8 @@ submit "registered"
                 let rendered_messages = format!("{:?}", req.messages);
                 let text = if rendered_messages.contains("run child") {
                     "```lashlang\nsubmit \"child done\"\n```".to_string()
+                } else if rendered_messages.contains("register rebuild host event trigger") {
+                    format!("```lashlang\n{}\n```", HOST_EVENT_TRIGGER_SOURCE.trim())
                 } else {
                     format!("```lashlang\n{}\n```", TRIGGER_SOURCE.trim())
                 };
@@ -225,6 +274,16 @@ submit "registered"
         register: Option<lash_core::ProcessRegistration>,
         registry: &Arc<dyn lash_core::ProcessRegistry>,
     ) {
+        open_mutate_and_restart_with_prompt(core, "register rebuild trigger", register, registry)
+            .await;
+    }
+
+    async fn open_mutate_and_restart_with_prompt(
+        core: &LashCore,
+        prompt: &str,
+        register: Option<lash_core::ProcessRegistration>,
+        registry: &Arc<dyn lash_core::ProcessRegistry>,
+    ) {
         let session = core
             .session(SESSION_ID)
             .rlm()
@@ -232,7 +291,7 @@ submit "registered"
             .await
             .expect("open session");
         let output = session
-            .turn(lash_core::TurnInput::text("register rebuild trigger"))
+            .turn(lash_core::TurnInput::text(prompt))
             .run()
             .await
             .expect("register trigger route");
@@ -339,6 +398,80 @@ submit "registered"
         .await;
         assert_eq!(report.started_process_ids.len(), 1);
         await_success(&registry, &report.started_process_ids[0]).await;
+    }
+
+    async fn host_event_triggered_process_wake_provenance_survives_restart(
+        backend: RuntimeRebuildBackend,
+    ) {
+        let registry = Arc::clone(&backend.process_registry);
+        let core = (backend.build_core)(base_builder(Arc::clone(&registry)));
+        open_mutate_and_restart_with_prompt(
+            &core,
+            "register rebuild host event trigger",
+            None,
+            &registry,
+        )
+        .await;
+
+        let session = core
+            .session(SESSION_ID)
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session");
+        let report = session
+            .host_events()
+            .emit(
+                "Button",
+                "ui.button",
+                "pressed",
+                serde_json::json!({
+                    "button": "Red",
+                    "message": "user pressed the red button",
+                    "pressed_at": "2026-06-02T12:00:00Z"
+                }),
+            )
+            .await
+            .expect("emit host event");
+        assert_eq!(report.started_process_ids.len(), 1);
+        let process_id = &report.started_process_ids[0];
+        let record = registry
+            .get_process(process_id)
+            .await
+            .expect("host-event-triggered process record");
+        let process_caused_by = record
+            .provenance
+            .caused_by
+            .clone()
+            .expect("triggered process cause");
+        assert!(matches!(
+            &process_caused_by,
+            lash_core::CausalRef::SessionNode {
+                session_id,
+                node_id,
+            } if session_id == SESSION_ID && node_id.starts_with("plugin:")
+        ));
+
+        await_success(&registry, process_id).await;
+        let queued = session.queued_work().await.expect("queued wake");
+        let wake = queued
+            .iter()
+            .flat_map(|batch| &batch.items)
+            .find_map(|item| match &item.payload {
+                lash_core::runtime::QueuedWorkPayload::ProcessWake { wake } => Some(wake),
+                _ => None,
+            })
+            .expect("process wake queued for host-event-triggered process");
+        assert_eq!(wake.process_id, *process_id);
+        assert_eq!(wake.process_caused_by, Some(process_caused_by));
+        assert!(matches!(
+            &wake.event_invocation.subject,
+            lash_core::runtime::RuntimeSubject::ProcessEvent {
+                process_id: wake_process_id,
+                event_type,
+                ..
+            } if wake_process_id == process_id && event_type == "process.wake"
+        ));
     }
 
     async fn worker_recovers_tool_call_process_in_restarted_session(

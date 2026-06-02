@@ -6,7 +6,7 @@ use crate::runtime::session_manager::{CurrentSessionCapability, UsageCapability}
 use crate::sansio::LlmCallError;
 use crate::{LlmRequest as CoreLlmRequest, PluginError, session_model::TokenUsage};
 
-use super::envelope::{CausalRef, RuntimeEffectOutcome};
+use super::{CausalRef, RuntimeEffectOutcome};
 
 // =============================================================================
 // LLM trace helpers

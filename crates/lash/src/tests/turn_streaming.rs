@@ -623,6 +623,65 @@ submit value
 }
 
 #[tokio::test]
+async fn process_tracking_graph_store_observes_lashlang_process_from_facade() -> Result<()> {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let graph_store = Arc::new(crate::tracing::TraceProcessGraphStore::default());
+    let core = LashCore::rlm()
+        .provider(queued_text_provider(vec![
+            r#"```lashlang
+process lookup(tools: Tools) {
+  value = await tools.app_lookup({})?
+  finish value
+}
+h = start lookup(tools: tools)
+value = await h
+submit value
+```"#,
+        ]))
+        .model(mock_model_spec())
+        .tools(Arc::new(BlockingAppTools::new(entered_tx, release_rx)))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .process_tracking_sink(Some(
+            Arc::clone(&graph_store) as Arc<dyn crate::tracing::TraceSink>
+        ))
+        .build()?;
+    let session = core.session("rlm-process-graph-store").open().await?;
+    let turn_session = session.clone();
+    let turn =
+        tokio::spawn(async move { turn_session.turn(TurnInput::text("start tool")).run().await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+        .await
+        .expect("tool process should start")
+        .expect("tool provider entered");
+
+    let processes = session.process_control().list().await?;
+    let running = processes
+        .iter()
+        .find(|process| process.descriptor.label.as_deref() == Some("lookup"))
+        .expect("running lookup process");
+    let graph = graph_store
+        .graph(&running.process_id)
+        .expect("process graph snapshot");
+    assert_eq!(graph.process_id, running.process_id);
+    assert_eq!(graph.process_name, "lookup");
+    assert_eq!(graph.status, lash_core::TraceProcessStatus::Running);
+    assert!(!graph.nodes.is_empty());
+    assert!(
+        graph_store
+            .graphs()
+            .iter()
+            .any(|graph| graph.process_name == "lookup")
+    );
+
+    release_tx.send(()).expect("release tool provider");
+    let _ = turn.await.expect("turn task")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()> {
     let core = LashCore::rlm()
         .provider(queued_text_provider(vec!["done in prose"]))

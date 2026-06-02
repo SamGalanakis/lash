@@ -1,4 +1,5 @@
 pub mod attachment;
+pub mod causal;
 pub mod llm;
 pub mod plugin;
 pub mod prompt;
@@ -16,6 +17,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use attachment::{
     AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef, ImageMediaType, MediaType,
 };
+pub use causal::CausalRef;
 pub use llm::types::LlmTerminalReason;
 pub use plugin::{
     CheckpointKind, PluginMessage, PluginRuntimeEvent, PromptContribution, PromptContributionGate,

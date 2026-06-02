@@ -42,6 +42,7 @@
 //! [`RuntimeTurnLease`]: lash_core::store::RuntimeTurnLease
 //! [`RuntimeEffectJournalRecord`]: lash_core::store::RuntimeEffectJournalRecord
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
@@ -78,6 +79,7 @@ use sha2::{Digest, Sha256};
 /// SQLite-backed store for checkpoint blobs and the canonical session head.
 pub struct Store {
     conn: Mutex<Connection>,
+    artifact_cache: Mutex<BTreeMap<lashlang::ModuleRef, Arc<lashlang::ModuleArtifact>>>,
     options: StoreOptions,
     commit_count: AtomicU64,
 }

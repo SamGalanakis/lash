@@ -31,13 +31,31 @@ impl lashlang::LashlangArtifactStore for Store {
         .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
         tx.commit()
             .map_err(|err| lashlang::ArtifactStoreError::Backend(err.to_string()))?;
+        self.artifact_cache
+            .lock()
+            .map_err(|_| {
+                lashlang::ArtifactStoreError::Backend("artifact cache lock poisoned".to_string())
+            })?
+            .insert(artifact.module_ref.clone(), Arc::new(artifact.clone()));
         Ok(())
     }
 
     fn get_module_artifact(
         &self,
         module_ref: &lashlang::ModuleRef,
-    ) -> Result<Option<lashlang::ModuleArtifact>, lashlang::ArtifactStoreError> {
+    ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
+        if let Some(artifact) = self
+            .artifact_cache
+            .lock()
+            .map_err(|_| {
+                lashlang::ArtifactStoreError::Backend("artifact cache lock poisoned".to_string())
+            })?
+            .get(module_ref)
+            .cloned()
+        {
+            return Ok(Some(artifact));
+        }
+
         let conn = lock_conn(&self.conn);
         let blob_ref = conn
             .query_row(
@@ -56,9 +74,17 @@ impl lashlang::LashlangArtifactStore for Store {
                 module_ref
             ))
         })?;
-        lashlang::ModuleArtifact::from_store_bytes(&bytes)
-            .map(Some)
-            .map_err(lashlang::ArtifactStoreError::from)
+        let artifact = Arc::new(
+            lashlang::ModuleArtifact::from_store_bytes(&bytes)
+                .map_err(lashlang::ArtifactStoreError::from)?,
+        );
+        self.artifact_cache
+            .lock()
+            .map_err(|_| {
+                lashlang::ArtifactStoreError::Backend("artifact cache lock poisoned".to_string())
+            })?
+            .insert(module_ref.clone(), artifact.clone());
+        Ok(Some(artifact))
     }
 }
 

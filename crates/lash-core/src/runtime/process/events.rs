@@ -286,9 +286,33 @@ pub struct ProcessWakeDelivery {
     pub target_scope_id: ProcessScopeId,
     pub process_id: ProcessId,
     pub sequence: u64,
+    #[serde(default = "default_process_wake_event_type")]
+    pub event_type: String,
+    #[serde(default = "default_process_wake_event_invocation")]
+    pub event_invocation: crate::RuntimeInvocation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_caused_by: Option<crate::CausalRef>,
     pub dedupe_key: String,
     pub input: String,
     pub created_at_ms: u64,
+}
+
+fn default_process_wake_event_type() -> String {
+    "process.wake".to_string()
+}
+
+fn default_process_wake_event_invocation() -> crate::RuntimeInvocation {
+    crate::RuntimeInvocation {
+        scope: crate::RuntimeScope::new(""),
+        subject: crate::RuntimeSubject::ProcessEvent {
+            process_id: String::new(),
+            sequence: 0,
+            event_type: default_process_wake_event_type(),
+        },
+        caused_by: None,
+        replay: None,
+        checkpoint_hash: None,
+    }
 }
 
 pub(super) fn default_process_event_types() -> Vec<ProcessEventType> {

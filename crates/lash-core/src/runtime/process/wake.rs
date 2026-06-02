@@ -18,20 +18,21 @@ pub fn process_wake_input_from_event_payload(payload: &serde_json::Value) -> Str
 /// Renders a durable process wake as model-visible chronological context.
 pub fn process_wake_turn_text(wake: &ProcessWakeDelivery) -> String {
     format!(
-        "Background process wake\nProcess: {}\nEvent: process.wake #{}\nWake input:\n{}",
-        wake.process_id, wake.sequence, wake.input
+        "Background process wake\nProcess: {}\nEvent: {} #{}\nWake input:\n{}",
+        wake.process_id, wake.event_type, wake.sequence, wake.input
     )
 }
 
 pub fn process_wake_turn_cause(wake: &ProcessWakeDelivery) -> crate::TurnCause {
     crate::TurnCause {
         id: wake.wake_id.clone(),
-        event_type: "process.wake".to_string(),
+        event_type: wake.event_type.clone(),
         origin: crate::MessageOrigin::Process {
             process_id: wake.process_id.clone(),
-            event_type: "process.wake".to_string(),
+            event_type: wake.event_type.clone(),
             sequence: wake.sequence,
             wake_id: Some(wake.wake_id.clone()),
+            caused_by: wake.process_caused_by.clone(),
         },
         text: process_wake_turn_text(wake),
     }
@@ -41,6 +42,9 @@ pub fn process_wake_delivery(
     target_scope: ProcessScope,
     process_id: ProcessId,
     sequence: u64,
+    event_type: String,
+    event_invocation: crate::RuntimeInvocation,
+    process_caused_by: Option<crate::CausalRef>,
     wake: ProcessWake,
     occurred_at: SystemTime,
 ) -> Result<ProcessWakeDelivery, PluginError> {
@@ -60,6 +64,9 @@ pub fn process_wake_delivery(
         target_scope_id,
         process_id,
         sequence,
+        event_type,
+        event_invocation,
+        process_caused_by,
         dedupe_key: wake.dedupe_key,
         input: wake.input,
         created_at_ms: epoch_ms_from_system_time(occurred_at),

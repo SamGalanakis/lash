@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use compact_str::CompactString;
 
-use super::instruction::{CompiledFormatPart, CompiledFormatTemplate};
+use super::instruction::{CompiledFormatOneArg, CompiledFormatPart, CompiledFormatTemplate};
 use super::*;
 
 pub(crate) async fn stringify_value_async(value: &Value) -> Result<String, RuntimeError> {
@@ -90,14 +90,37 @@ pub(crate) fn write_number(output: &mut impl fmt::Write, value: f64) -> fmt::Res
     if value.is_finite() && value.fract() == 0.0 {
         let as_i64 = value as i64 as f64;
         if as_i64 == value {
-            return write!(output, "{}", value as i64);
+            return write_i64(output, value as i64);
         }
         let as_u64 = value as u64 as f64;
         if as_u64 == value {
-            return write!(output, "{}", value as u64);
+            return write_u64(output, value as u64);
         }
     }
     write!(output, "{value}")
+}
+
+fn write_i64(output: &mut impl fmt::Write, value: i64) -> fmt::Result {
+    if value < 0 {
+        output.write_char('-')?;
+        return write_u64(output, value.unsigned_abs());
+    }
+    write_u64(output, value as u64)
+}
+
+fn write_u64(output: &mut impl fmt::Write, mut value: u64) -> fmt::Result {
+    let mut buffer = [0u8; 20];
+    let mut index = buffer.len();
+    loop {
+        index -= 1;
+        buffer[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    let text = std::str::from_utf8(&buffer[index..]).expect("digits are valid utf-8");
+    output.write_str(text)
 }
 
 pub(crate) async fn apply_format_async(
@@ -228,18 +251,61 @@ pub(crate) fn apply_format(template: &str, args: &[Value]) -> Result<String, Run
 
 pub(crate) fn compile_format_template(template: &str, argc: usize) -> CompiledFormatTemplate {
     match parse_format_template(template, argc) {
-        Ok(parts) => CompiledFormatTemplate {
-            parts: parts.into_boxed_slice(),
-            argc,
-            min_capacity: template.len(),
-            error: None,
-        },
+        Ok(parts) => {
+            let one_arg = compiled_format_one_arg(&parts, argc);
+            CompiledFormatTemplate {
+                parts: parts.into_boxed_slice(),
+                argc,
+                min_capacity: template.len(),
+                error: None,
+                one_arg,
+            }
+        }
         Err(message) => CompiledFormatTemplate {
             parts: Box::new([]),
             argc,
             min_capacity: template.len(),
             error: Some(message),
+            one_arg: None,
         },
+    }
+}
+
+fn compiled_format_one_arg(
+    parts: &[CompiledFormatPart],
+    argc: usize,
+) -> Option<CompiledFormatOneArg> {
+    if argc != 1 {
+        return None;
+    }
+    match parts {
+        [CompiledFormatPart::Arg(0)] => Some(CompiledFormatOneArg {
+            prefix: None,
+            suffix: None,
+        }),
+        [
+            CompiledFormatPart::Literal(prefix),
+            CompiledFormatPart::Arg(0),
+        ] => Some(CompiledFormatOneArg {
+            prefix: Some(prefix.clone()),
+            suffix: None,
+        }),
+        [
+            CompiledFormatPart::Arg(0),
+            CompiledFormatPart::Literal(suffix),
+        ] => Some(CompiledFormatOneArg {
+            prefix: None,
+            suffix: Some(suffix.clone()),
+        }),
+        [
+            CompiledFormatPart::Literal(prefix),
+            CompiledFormatPart::Arg(0),
+            CompiledFormatPart::Literal(suffix),
+        ] => Some(CompiledFormatOneArg {
+            prefix: Some(prefix.clone()),
+            suffix: Some(suffix.clone()),
+        }),
+        _ => None,
     }
 }
 
@@ -367,6 +433,16 @@ pub(crate) async fn execute_compiled_format(
             message: message.clone(),
         });
     }
+    if let Some(shape) = &template.one_arg {
+        let value = args.first().ok_or_else(|| RuntimeError::ValueError {
+            message: "format slot `0` is out of range".to_string(),
+        })?;
+        let mut output = String::with_capacity(template.min_capacity);
+        push_compiled_one_arg_prefix(&mut output, shape);
+        append_stringified_value_async(&mut output, value).await?;
+        push_compiled_one_arg_suffix(&mut output, shape);
+        return Ok(output);
+    }
 
     let mut output = String::with_capacity(template.min_capacity);
     for part in template.parts.iter() {
@@ -391,6 +467,16 @@ pub(crate) fn execute_compiled_format_direct(
         return Err(RuntimeError::ValueError {
             message: message.clone(),
         });
+    }
+    if let Some(shape) = &template.one_arg {
+        let value = args.first().ok_or_else(|| RuntimeError::ValueError {
+            message: "format slot `0` is out of range".to_string(),
+        })?;
+        let mut output = String::with_capacity(template.min_capacity);
+        push_compiled_one_arg_prefix(&mut output, shape);
+        append_stringified_value_direct(&mut output, value)?;
+        push_compiled_one_arg_suffix(&mut output, shape);
+        return Ok(output);
     }
 
     let mut output = String::with_capacity(template.min_capacity);
@@ -417,6 +503,13 @@ pub(crate) fn execute_compiled_format_one_number_compact_direct(
             message: message.clone(),
         });
     }
+    if let Some(shape) = &template.one_arg {
+        let mut output = CompactString::with_capacity(template.min_capacity);
+        push_compiled_one_arg_prefix(&mut output, shape);
+        write_number(&mut output, value).expect("string writes should not fail");
+        push_compiled_one_arg_suffix(&mut output, shape);
+        return Ok(output);
+    }
 
     let mut output = CompactString::with_capacity(template.min_capacity);
     for part in template.parts.iter() {
@@ -433,6 +526,22 @@ pub(crate) fn execute_compiled_format_one_number_compact_direct(
         }
     }
     Ok(output)
+}
+
+fn push_compiled_one_arg_prefix(output: &mut impl fmt::Write, shape: &CompiledFormatOneArg) {
+    if let Some(prefix) = &shape.prefix {
+        output
+            .write_str(prefix)
+            .expect("string writes should not fail");
+    }
+}
+
+fn push_compiled_one_arg_suffix(output: &mut impl fmt::Write, shape: &CompiledFormatOneArg) {
+    if let Some(suffix) = &shape.suffix {
+        output
+            .write_str(suffix)
+            .expect("string writes should not fail");
+    }
 }
 
 pub(crate) fn clamp_slice_bounds(

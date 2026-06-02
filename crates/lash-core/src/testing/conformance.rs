@@ -13,19 +13,49 @@
 use std::sync::Arc;
 
 use crate::{
-    AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, DeliveryPolicy, MergeKey,
-    ModelSpec, PluginSessionSnapshot, ProtocolTurnOptions, QueuedWorkBatchDraft,
-    QueuedWorkClaimBoundary, QueuedWorkPayload, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
-    RuntimeCommit, RuntimeEffectJournalRecord, RuntimeEffectKind, RuntimeEffectOutcome,
-    RuntimePersistence, RuntimeSessionState, RuntimeTurnCompletion, SessionPolicy,
-    SessionReadScope, SlotPolicy, StoreError, TokenLedgerEntry, TokenUsage, ToolState, TurnInput,
+    AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, CausalRef, DeliveryPolicy,
+    MergeKey, ModelSpec, PluginSessionSnapshot, ProtocolEvent, ProtocolTurnOptions,
+    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkPayload,
+    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit, RuntimeEffectJournalRecord,
+    RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence, RuntimeScope, RuntimeSessionState,
+    RuntimeSubject, RuntimeTurnCompletion, SessionMeta, SessionNodePayload, SessionNodeRecord,
+    SessionPolicy, SessionReadScope, SessionRelation, SlotPolicy, StoreError, TokenLedgerEntry,
+    TokenUsage, ToolState, TurnInput,
 };
 use crate::{
     LashSchema, ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventSemanticsSpec,
     ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessLeaseCompletion,
-    ProcessRegistration, ProcessRegistry, ProcessScope, ProcessTerminalState, ProcessValueSelector,
-    ProcessWakeDedupeKey, ProcessWakeSpec,
+    ProcessProvenance, ProcessRegistration, ProcessRegistry, ProcessScope, ProcessTerminalState,
+    ProcessValueSelector, ProcessWakeDedupeKey, ProcessWakeSpec,
 };
+
+/// A pair of [`ProcessRegistry`] handles opened against the same durable
+/// backing store.
+pub struct ReopenableProcessRegistry {
+    pub open: Arc<dyn ProcessRegistry>,
+    pub reopen: Arc<dyn ProcessRegistry>,
+}
+
+/// A pair of [`RuntimePersistence`] handles opened against the same durable
+/// backing store.
+pub struct ReopenableRuntimePersistence {
+    pub open: Arc<dyn RuntimePersistence>,
+    pub reopen: Arc<dyn RuntimePersistence>,
+}
+
+/// A pair of [`AttachmentStore`](crate::AttachmentStore) handles opened against
+/// the same durable backing store.
+pub struct ReopenableAttachmentStore {
+    pub open: Arc<dyn crate::AttachmentStore>,
+    pub reopen: Arc<dyn crate::AttachmentStore>,
+}
+
+/// A pair of [`LashlangArtifactStore`] handles opened against the same durable
+/// backing store.
+pub struct ReopenableLashlangArtifactStore {
+    pub open: Arc<dyn crate::LashlangArtifactStore>,
+    pub reopen: Arc<dyn crate::LashlangArtifactStore>,
+}
 
 /// Run the full [`ProcessRegistry`] conformance suite against the backend
 /// produced by `make`. `make` must return a fresh, empty registry on each call.
@@ -35,6 +65,9 @@ where
 {
     registration_is_idempotent_and_hash_conflicts_fail(make()).await;
     validates_custom_events_and_materializes_wakes(make()).await;
+    custom_wake_events_preserve_typed_provenance_and_replay(make()).await;
+    event_streams_filter_order_and_wait_without_leaking_old_events(make()).await;
+    wake_semantics_matrix_materializes_declared_wakes(make()).await;
     keyed_events_materialize_idempotent_wakes(make()).await;
     terminal_and_cancel_events_require_keys(make()).await;
     await_reads_terminal_materialized_output(make()).await;
@@ -49,6 +82,15 @@ where
     renewed_process_lease_survives_original_expiry(make()).await;
     completed_lease_releases_and_reclaim_bumps_fencing(make()).await;
     stale_lease_completion_cannot_release_live_lease(make()).await;
+}
+
+/// Run the full [`ProcessRegistry`] suite plus durable reopen checks.
+pub async fn process_registry_reopenable<F>(make: F)
+where
+    F: Fn() -> ReopenableProcessRegistry,
+{
+    process_registry(|| make().open).await;
+    process_registry_survives_reopen(make()).await;
 }
 
 fn registration(id: &str) -> ProcessRegistration {
@@ -72,6 +114,25 @@ fn wake_event_type(name: &str) -> ProcessEventType {
             }),
             ..ProcessEventSemanticsSpec::default()
         },
+    }
+}
+
+fn wake_event_type_with(name: &str, wake: ProcessWakeSpec) -> ProcessEventType {
+    ProcessEventType {
+        name: name.to_string(),
+        payload_schema: LashSchema::any(),
+        semantics: ProcessEventSemanticsSpec {
+            wake: Some(wake),
+            ..ProcessEventSemanticsSpec::default()
+        },
+    }
+}
+
+fn plain_event_type(name: &str) -> ProcessEventType {
+    ProcessEventType {
+        name: name.to_string(),
+        payload_schema: LashSchema::any(),
+        semantics: ProcessEventSemanticsSpec::default(),
     }
 }
 
@@ -184,6 +245,492 @@ async fn validates_custom_events_and_materializes_wakes(registry: Arc<dyn Proces
             .is_err(),
         "payload missing a required field must be rejected"
     );
+}
+
+async fn custom_wake_events_preserve_typed_provenance_and_replay(
+    registry: Arc<dyn ProcessRegistry>,
+) {
+    let target_scope = ProcessScope::for_agent_frame("target-session", "target-frame");
+    let target_scope_id = target_scope.id();
+    let process_caused_by = CausalRef::SessionNode {
+        session_id: "target-session".to_string(),
+        node_id: "host-event:button".to_string(),
+    };
+    let event_type = wake_event_type_with(
+        "producer.custom_wake",
+        ProcessWakeSpec {
+            when: Some(ProcessValueSelector::Present("/wake_input".to_string())),
+            input: ProcessValueSelector::Pointer("/wake_input".to_string()),
+            dedupe_key: ProcessWakeDedupeKey::EventIdentity,
+        },
+    );
+    registry
+        .register_process(
+            registration("proc-provenance")
+                .with_extra_event_types([event_type])
+                .with_process_provenance(
+                    ProcessProvenance::new(ProcessScope::new("owner-session"), "host-profile")
+                        .with_caused_by(Some(process_caused_by.clone())),
+                ),
+        )
+        .await
+        .expect("register");
+
+    let request = ProcessEventAppendRequest::new(
+        "producer.custom_wake",
+        serde_json::json!({
+            "line": "build failed",
+            "wake_input": "custom wake: build failed",
+        }),
+    )
+    .with_replay_key("custom-wake:build-failed")
+    .with_wake_target_scope(target_scope);
+    let first = registry
+        .append_event("proc-provenance", request.clone())
+        .await
+        .expect("append");
+    let replay = registry
+        .append_event("proc-provenance", request)
+        .await
+        .expect("replay append");
+
+    assert_eq!(first.event.sequence, 1);
+    assert_eq!(replay.event.sequence, first.event.sequence);
+    assert_eq!(
+        registry
+            .events_after("proc-provenance", 0)
+            .await
+            .expect("events")
+            .len(),
+        1,
+        "a replayed custom wake event must not append a second event row"
+    );
+    assert_eq!(
+        first.event.invocation.scope,
+        RuntimeScope::new("owner-session")
+    );
+    assert!(matches!(
+        &first.event.invocation.subject,
+        RuntimeSubject::ProcessEvent {
+            process_id,
+            sequence: 1,
+            event_type,
+        } if process_id == "proc-provenance" && event_type == "producer.custom_wake"
+    ));
+    assert_eq!(
+        first.event.invocation.caused_by,
+        Some(CausalRef::Process {
+            process_id: "proc-provenance".to_string()
+        })
+    );
+    assert_eq!(
+        first
+            .event
+            .invocation
+            .replay
+            .as_ref()
+            .map(|replay| replay.key.as_str()),
+        Some("custom-wake:build-failed")
+    );
+
+    let wake = first.wake_delivery.expect("wake delivery");
+    assert_eq!(wake.event_type, "producer.custom_wake");
+    assert_eq!(wake.event_invocation, first.event.invocation);
+    assert_eq!(wake.process_caused_by, Some(process_caused_by));
+    assert_eq!(wake.target_session_id, "target-session");
+    assert_eq!(wake.target_scope_id, target_scope_id);
+    assert_eq!(wake.process_id, "proc-provenance");
+    assert_eq!(wake.sequence, first.event.sequence);
+    assert_eq!(wake.dedupe_key, "proc-provenance:1");
+    assert_eq!(wake.input, "custom wake: build failed");
+    assert_eq!(
+        replay
+            .wake_delivery
+            .expect("replayed wake delivery")
+            .wake_id,
+        wake.wake_id,
+        "replaying a wake event must re-materialize the same wake identity"
+    );
+}
+
+async fn event_streams_filter_order_and_wait_without_leaking_old_events(
+    registry: Arc<dyn ProcessRegistry>,
+) {
+    registry
+        .register_process(registration("proc-stream").with_extra_event_types([
+            plain_event_type("producer.line"),
+            wake_event_type("producer.wake"),
+            plain_event_type("producer.future"),
+        ]))
+        .await
+        .expect("register");
+    registry
+        .append_event(
+            "proc-stream",
+            ProcessEventAppendRequest::new("producer.line", serde_json::json!({"line": "one"})),
+        )
+        .await
+        .expect("append line one");
+    registry
+        .append_event(
+            "proc-stream",
+            ProcessEventAppendRequest::new(
+                "producer.wake",
+                serde_json::json!({"wake_input": "wake two"}),
+            )
+            .with_wake_target_scope(ProcessScope::new("root")),
+        )
+        .await
+        .expect("append wake");
+    registry
+        .append_event(
+            "proc-stream",
+            ProcessEventAppendRequest::new("producer.line", serde_json::json!({"line": "three"})),
+        )
+        .await
+        .expect("append line three");
+
+    let after_one = registry
+        .events_after("proc-stream", 1)
+        .await
+        .expect("events after one");
+    assert_eq!(
+        after_one
+            .iter()
+            .map(|event| (event.sequence, event.event_type.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(2, "producer.wake"), (3, "producer.line")],
+        "events_after must preserve sequence order and exclude older events"
+    );
+    assert!(
+        registry
+            .events_after("proc-stream", 3)
+            .await
+            .expect("events after three")
+            .is_empty(),
+        "events_after must not leak events at or before the cursor"
+    );
+    let wake_after_one = registry
+        .wake_events_after("proc-stream", 1)
+        .await
+        .expect("wake events after one");
+    assert_eq!(
+        wake_after_one
+            .iter()
+            .map(|event| (event.sequence, event.event_type.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(2, "producer.wake")],
+        "wake_events_after must filter to unacked wake events after the cursor"
+    );
+    assert!(
+        registry
+            .wake_events_after("proc-stream", 2)
+            .await
+            .expect("wake events after wake")
+            .is_empty(),
+        "wake_events_after must not return the cursor event itself"
+    );
+    let immediate = registry
+        .wait_event_after("proc-stream", "producer.line", 1)
+        .await
+        .expect("immediate wait");
+    assert_eq!(
+        immediate.sequence, 3,
+        "wait_event_after must return an existing matching event immediately"
+    );
+
+    let waiter_registry = Arc::clone(&registry);
+    let waiter = tokio::spawn(async move {
+        waiter_registry
+            .wait_event_after("proc-stream", "producer.future", 3)
+            .await
+            .expect("future wait")
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    registry
+        .append_event(
+            "proc-stream",
+            ProcessEventAppendRequest::new("producer.future", serde_json::json!({"line": "four"})),
+        )
+        .await
+        .expect("append future event");
+    let future = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+        .await
+        .expect("future wait timeout")
+        .expect("future waiter task");
+    assert_eq!(future.sequence, 4);
+}
+
+async fn wake_semantics_matrix_materializes_declared_wakes(registry: Arc<dyn ProcessRegistry>) {
+    registry
+        .register_process(
+            registration("proc-wake-matrix").with_extra_event_types([
+                wake_event_type_with(
+                    "matrix.when_false",
+                    ProcessWakeSpec {
+                        when: Some(ProcessValueSelector::Const(serde_json::json!(false))),
+                        input: ProcessValueSelector::Const(serde_json::json!("must not wake")),
+                        dedupe_key: ProcessWakeDedupeKey::EventIdentity,
+                    },
+                ),
+                wake_event_type_with(
+                    "matrix.payload",
+                    ProcessWakeSpec {
+                        when: None,
+                        input: ProcessValueSelector::Payload,
+                        dedupe_key: ProcessWakeDedupeKey::EventIdentity,
+                    },
+                ),
+                wake_event_type_with(
+                    "matrix.const_input",
+                    ProcessWakeSpec {
+                        when: None,
+                        input: ProcessValueSelector::Const(serde_json::json!(
+                            "constant wake input"
+                        )),
+                        dedupe_key: ProcessWakeDedupeKey::EventIdentity,
+                    },
+                ),
+                wake_event_type_with(
+                    "matrix.template",
+                    ProcessWakeSpec {
+                        when: None,
+                        input: ProcessValueSelector::Template {
+                            template: "line {line} #{n}".to_string(),
+                            fields: [
+                                (
+                                    "line".to_string(),
+                                    ProcessValueSelector::Pointer("/line".to_string()),
+                                ),
+                                (
+                                    "n".to_string(),
+                                    ProcessValueSelector::Pointer("/n".to_string()),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        },
+                        dedupe_key: ProcessWakeDedupeKey::EventIdentity,
+                    },
+                ),
+                wake_event_type_with(
+                    "matrix.selector_dedupe",
+                    ProcessWakeSpec {
+                        when: None,
+                        input: ProcessValueSelector::Pointer("/wake_input".to_string()),
+                        dedupe_key: ProcessWakeDedupeKey::Selector(ProcessValueSelector::Pointer(
+                            "/dedupe".to_string(),
+                        )),
+                    },
+                ),
+                wake_event_type_with(
+                    "matrix.const_dedupe",
+                    ProcessWakeSpec {
+                        when: None,
+                        input: ProcessValueSelector::Pointer("/wake_input".to_string()),
+                        dedupe_key: ProcessWakeDedupeKey::Const("constant-dedupe".to_string()),
+                    },
+                ),
+            ]),
+        )
+        .await
+        .expect("register");
+    let target = ProcessScope::new("root");
+
+    let no_wake = registry
+        .append_event(
+            "proc-wake-matrix",
+            ProcessEventAppendRequest::new("matrix.when_false", serde_json::json!({}))
+                .with_wake_target_scope(target.clone()),
+        )
+        .await
+        .expect("append when false");
+    assert!(
+        no_wake.wake_delivery.is_none(),
+        "a false wake.when selector must suppress wake materialization"
+    );
+    let payload = registry
+        .append_event(
+            "proc-wake-matrix",
+            ProcessEventAppendRequest::new("matrix.payload", serde_json::json!("payload wake"))
+                .with_wake_target_scope(target.clone()),
+        )
+        .await
+        .expect("append payload wake")
+        .wake_delivery
+        .expect("payload wake");
+    assert_eq!(payload.input, "payload wake");
+    assert_eq!(payload.dedupe_key, "proc-wake-matrix:2");
+    let const_input = registry
+        .append_event(
+            "proc-wake-matrix",
+            ProcessEventAppendRequest::new("matrix.const_input", serde_json::json!({}))
+                .with_wake_target_scope(target.clone()),
+        )
+        .await
+        .expect("append const wake")
+        .wake_delivery
+        .expect("const wake");
+    assert_eq!(const_input.input, "constant wake input");
+    let template = registry
+        .append_event(
+            "proc-wake-matrix",
+            ProcessEventAppendRequest::new(
+                "matrix.template",
+                serde_json::json!({"line": "done", "n": 7}),
+            )
+            .with_wake_target_scope(target.clone()),
+        )
+        .await
+        .expect("append template wake")
+        .wake_delivery
+        .expect("template wake");
+    assert_eq!(template.input, "line done #7");
+    let selector_first = registry
+        .append_event(
+            "proc-wake-matrix",
+            ProcessEventAppendRequest::new(
+                "matrix.selector_dedupe",
+                serde_json::json!({"wake_input": "selector one", "dedupe": "group-a"}),
+            )
+            .with_wake_target_scope(target.clone()),
+        )
+        .await
+        .expect("append selector wake one")
+        .wake_delivery
+        .expect("selector wake one");
+    let selector_second = registry
+        .append_event(
+            "proc-wake-matrix",
+            ProcessEventAppendRequest::new(
+                "matrix.selector_dedupe",
+                serde_json::json!({"wake_input": "selector two", "dedupe": "group-a"}),
+            )
+            .with_wake_target_scope(target.clone()),
+        )
+        .await
+        .expect("append selector wake two")
+        .wake_delivery
+        .expect("selector wake two");
+    assert_eq!(selector_first.dedupe_key, "group-a");
+    assert_eq!(
+        selector_first.wake_id, selector_second.wake_id,
+        "selector dedupe must produce a stable wake id for the same target and selector value"
+    );
+    let const_dedupe_first = registry
+        .append_event(
+            "proc-wake-matrix",
+            ProcessEventAppendRequest::new(
+                "matrix.const_dedupe",
+                serde_json::json!({"wake_input": "const one"}),
+            )
+            .with_wake_target_scope(target.clone()),
+        )
+        .await
+        .expect("append const dedupe one")
+        .wake_delivery
+        .expect("const dedupe one");
+    let const_dedupe_second = registry
+        .append_event(
+            "proc-wake-matrix",
+            ProcessEventAppendRequest::new(
+                "matrix.const_dedupe",
+                serde_json::json!({"wake_input": "const two"}),
+            )
+            .with_wake_target_scope(target),
+        )
+        .await
+        .expect("append const dedupe two")
+        .wake_delivery
+        .expect("const dedupe two");
+    assert_eq!(const_dedupe_first.dedupe_key, "constant-dedupe");
+    assert_eq!(
+        const_dedupe_first.wake_id, const_dedupe_second.wake_id,
+        "const dedupe must produce a stable wake id for the same target"
+    );
+    let wake_sequences = registry
+        .wake_events_after("proc-wake-matrix", 0)
+        .await
+        .expect("wake events")
+        .into_iter()
+        .map(|event| event.sequence)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        wake_sequences,
+        vec![2, 3, 4, 5, 6, 7, 8],
+        "wake_events_after must include only events whose wake semantics materialized"
+    );
+}
+
+async fn process_registry_survives_reopen(factory: ReopenableProcessRegistry) {
+    let scope = ProcessScope::new("reopen-session");
+    factory
+        .open
+        .register_process(
+            registration("proc-reopen")
+                .with_extra_event_types([wake_event_type("producer.reopen_wake")]),
+        )
+        .await
+        .expect("register");
+    factory
+        .open
+        .grant_handle(
+            &scope,
+            "proc-reopen",
+            ProcessHandleDescriptor::new(Some("test"), Some("reopen")),
+        )
+        .await
+        .expect("grant");
+    let appended = factory
+        .open
+        .append_event(
+            "proc-reopen",
+            ProcessEventAppendRequest::new(
+                "producer.reopen_wake",
+                serde_json::json!({"wake_input": "survived reopen"}),
+            )
+            .with_replay_key("producer:reopen")
+            .with_wake_target_scope(scope.clone()),
+        )
+        .await
+        .expect("append");
+
+    let reopened_record = factory
+        .reopen
+        .get_process("proc-reopen")
+        .await
+        .expect("process exists after reopen");
+    assert_eq!(reopened_record.id, "proc-reopen");
+    let reopened_events = factory
+        .reopen
+        .events_after("proc-reopen", 0)
+        .await
+        .expect("events after reopen");
+    assert_eq!(reopened_events.len(), 1);
+    assert_eq!(reopened_events[0].sequence, appended.event.sequence);
+    assert_eq!(
+        factory
+            .reopen
+            .list_handle_grants(&scope)
+            .await
+            .expect("grants after reopen")
+            .len(),
+        1
+    );
+    let replayed = factory
+        .reopen
+        .append_event(
+            "proc-reopen",
+            ProcessEventAppendRequest::new(
+                "producer.reopen_wake",
+                serde_json::json!({"wake_input": "survived reopen"}),
+            )
+            .with_replay_key("producer:reopen")
+            .with_wake_target_scope(scope),
+        )
+        .await
+        .expect("replay after reopen");
+    assert_eq!(replayed.event.sequence, appended.event.sequence);
 }
 
 async fn keyed_events_materialize_idempotent_wakes(registry: Arc<dyn ProcessRegistry>) {
@@ -776,6 +1323,15 @@ where
     runtime_persistence_with_options(make, RuntimePersistenceConformance::default()).await;
 }
 
+/// Run the full [`RuntimePersistence`] suite plus durable reopen checks.
+pub async fn runtime_persistence_reopenable<F>(make: F)
+where
+    F: Fn() -> ReopenableRuntimePersistence,
+{
+    runtime_persistence(|| make().open).await;
+    runtime_persistence_survives_reopen(make()).await;
+}
+
 pub async fn runtime_persistence_with_options<F>(make: F, options: RuntimePersistenceConformance)
 where
     F: Fn() -> Arc<dyn RuntimePersistence>,
@@ -793,7 +1349,12 @@ where
     }
     queued_work_source_keys_are_idempotent_and_list_ordered(make()).await;
     queued_work_claims_respect_boundaries_renewal_and_abandon(make()).await;
+    queued_work_respects_availability_limits_exclusivity_reclaim_and_sessions(make()).await;
+    queued_work_join_groups_by_delivery_policy_and_merge_key(make()).await;
     queued_work_completion_is_lease_guarded(make()).await;
+    queue_completion_state_commit_and_journal_clear_are_atomic(make()).await;
+    session_metadata_round_trips(make()).await;
+    tombstone_vacuum_and_gc_are_minimally_consistent(make()).await;
     journal_is_idempotent_and_cleared_on_final_commit(make()).await;
     substrate_native_final_commit_is_idempotent_and_conflicts_on_changed_hash(make()).await;
     active_lease_fences_competing_claims(make()).await;
@@ -829,6 +1390,36 @@ fn queued_draft(
         slot_policy,
         vec![QueuedWorkPayload::turn_input(TurnInput::text(text))],
     )
+}
+
+fn queued_batch_text(batch: &QueuedWorkBatch) -> Option<&str> {
+    let payload = batch.items.first().map(|item| &item.payload)?;
+    match payload {
+        QueuedWorkPayload::TurnInput { input } => input.items.first().and_then(|item| match item {
+            crate::InputItem::Text { text } => Some(text.as_str()),
+            crate::InputItem::ImageRef { .. } => None,
+        }),
+        QueuedWorkPayload::ProcessWake { .. }
+        | QueuedWorkPayload::HostEvent { .. }
+        | QueuedWorkPayload::Timer { .. }
+        | QueuedWorkPayload::Resume { .. } => None,
+    }
+}
+
+fn sample_session_node(id: &str, parent: Option<&str>) -> SessionNodeRecord {
+    SessionNodeRecord {
+        node_id: id.to_string(),
+        parent_node_id: parent.map(ToOwned::to_owned),
+        caused_by: None,
+        agent_frame_id: None,
+        timestamp: "1970-01-01T00:00:00Z".to_string(),
+        payload: SessionNodePayload::Event {
+            event: crate::SessionEventRecord::Protocol(
+                ProtocolEvent::typed("conformance", serde_json::json!({ "node": id }))
+                    .expect("protocol event"),
+            ),
+        },
+    }
 }
 
 fn attachment_intent(id: &str) -> AttachmentIntent {
@@ -1080,6 +1671,11 @@ async fn queued_work_source_keys_are_idempotent_and_list_ordered(
         "replaying a source key must return the original batch"
     );
     assert_eq!(first.items[0].item_id, replay.items[0].item_id);
+    assert_eq!(
+        queued_batch_text(&replay),
+        Some("first"),
+        "source-key replay must return the original stored payload, not the replay attempt"
+    );
     let listed = store
         .list_queued_work("root")
         .await
@@ -1177,6 +1773,266 @@ async fn queued_work_claims_respect_boundaries_renewal_and_abandon(
     assert!(renewed.expires_at_epoch_ms >= reclaimed.expires_at_epoch_ms);
 }
 
+async fn queued_work_respects_availability_limits_exclusivity_reclaim_and_sessions(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "not ready",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Exclusive,
+            )
+            .with_available_at_ms(4_102_444_800_000),
+        )
+        .await
+        .expect("enqueue unavailable work");
+    let exclusive = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "exclusive",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue exclusive work");
+    let joined = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "joined",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("root".to_string())),
+        )
+        .await
+        .expect("enqueue joined work");
+    let other = store
+        .enqueue_queued_work(queued_draft(
+            "other",
+            "other session",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue other session work");
+
+    let claim = store
+        .claim_ready_queued_work("root", "owner-a", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .await
+        .expect("claim root")
+        .expect("root claim");
+    assert_eq!(
+        claim
+            .batches
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![exclusive.batch_id.as_str()],
+        "an exclusive batch must claim alone and unavailable earlier work must be skipped"
+    );
+    let next_root = store
+        .claim_ready_queued_work("root", "owner-b", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .await
+        .expect("claim joined")
+        .expect("joined claim");
+    assert_eq!(next_root.batches[0].batch_id, joined.batch_id);
+    let other_claim = store
+        .claim_ready_queued_work(
+            "other",
+            "owner-c",
+            QueuedWorkClaimBoundary::Idle,
+            60_000,
+            10,
+        )
+        .await
+        .expect("claim other")
+        .expect("other claim");
+    assert_eq!(
+        other_claim.batches[0].batch_id, other.batch_id,
+        "claiming one session must not consume queued work from another session"
+    );
+
+    let reclaimed_source = store
+        .enqueue_queued_work(queued_draft(
+            "reclaim",
+            "expired claim",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue reclaim work");
+    let expired = store
+        .claim_ready_queued_work("reclaim", "owner-a", QueuedWorkClaimBoundary::Idle, 0, 1)
+        .await
+        .expect("claim with zero ttl")
+        .expect("expired claim");
+    let reclaimed = store
+        .claim_ready_queued_work(
+            "reclaim",
+            "owner-b",
+            QueuedWorkClaimBoundary::Idle,
+            60_000,
+            1,
+        )
+        .await
+        .expect("reclaim expired")
+        .expect("reclaimed expired claim");
+    assert_eq!(reclaimed.batches[0].batch_id, reclaimed_source.batch_id);
+    assert!(
+        reclaimed.fencing_token > expired.fencing_token,
+        "reclaiming an expired queued-work claim must bump the fencing token"
+    );
+
+    let limited_first = store
+        .enqueue_queued_work(
+            queued_draft(
+                "limited",
+                "one",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("limited".to_string())),
+        )
+        .await
+        .expect("enqueue limited one");
+    let limited_second = store
+        .enqueue_queued_work(
+            queued_draft(
+                "limited",
+                "two",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("limited".to_string())),
+        )
+        .await
+        .expect("enqueue limited two");
+    let limited_third = store
+        .enqueue_queued_work(
+            queued_draft(
+                "limited",
+                "three",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("limited".to_string())),
+        )
+        .await
+        .expect("enqueue limited three");
+    let limited = store
+        .claim_ready_queued_work("limited", "owner", QueuedWorkClaimBoundary::Idle, 60_000, 2)
+        .await
+        .expect("limited claim")
+        .expect("limited claim exists");
+    assert_eq!(
+        limited
+            .batches
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            limited_first.batch_id.as_str(),
+            limited_second.batch_id.as_str()
+        ],
+        "max_batches must cap a join claim"
+    );
+    let remaining = store
+        .claim_ready_queued_work(
+            "limited",
+            "owner-next",
+            QueuedWorkClaimBoundary::Idle,
+            60_000,
+            10,
+        )
+        .await
+        .expect("remaining claim")
+        .expect("remaining claim exists");
+    assert_eq!(remaining.batches[0].batch_id, limited_third.batch_id);
+}
+
+async fn queued_work_join_groups_by_delivery_policy_and_merge_key(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let first = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "group a one",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("a".to_string())),
+        )
+        .await
+        .expect("enqueue group a one");
+    let second = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "group a two",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("a".to_string())),
+        )
+        .await
+        .expect("enqueue group a two");
+    let different_merge = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "group b",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("b".to_string())),
+        )
+        .await
+        .expect("enqueue group b");
+    let different_delivery = store
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "after commit",
+                DeliveryPolicy::AfterCurrentTurnCommit,
+                SlotPolicy::Join,
+            )
+            .with_merge_key(MergeKey::Group("a".to_string())),
+        )
+        .await
+        .expect("enqueue after-commit");
+
+    let first_claim = store
+        .claim_ready_queued_work("root", "owner-a", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .await
+        .expect("claim first group")
+        .expect("first group claim");
+    assert_eq!(
+        first_claim
+            .batches
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.batch_id.as_str(), second.batch_id.as_str()],
+        "join claims must group only adjacent batches with the same delivery policy and merge key"
+    );
+    let second_claim = store
+        .claim_ready_queued_work("root", "owner-b", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .await
+        .expect("claim second group")
+        .expect("second group claim");
+    assert_eq!(second_claim.batches[0].batch_id, different_merge.batch_id);
+    let third_claim = store
+        .claim_ready_queued_work("root", "owner-c", QueuedWorkClaimBoundary::Idle, 60_000, 10)
+        .await
+        .expect("claim third group")
+        .expect("third group claim");
+    assert_eq!(third_claim.batches[0].batch_id, different_delivery.batch_id);
+}
+
 async fn queued_work_completion_is_lease_guarded(store: Arc<dyn RuntimePersistence>) {
     let first = store
         .enqueue_queued_work(
@@ -1250,6 +2106,305 @@ async fn queued_work_completion_is_lease_guarded(store: Arc<dyn RuntimePersisten
             .await
             .expect("valid completion clears queued work")
             .is_empty()
+    );
+}
+
+async fn queue_completion_state_commit_and_journal_clear_are_atomic(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let batch = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "atomic queue",
+            DeliveryPolicy::EarliestSafeBoundary,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue queue batch");
+    let claim = store
+        .claim_ready_queued_work(
+            "root",
+            "queue-owner",
+            QueuedWorkClaimBoundary::Idle,
+            60_000,
+            1,
+        )
+        .await
+        .expect("claim queue")
+        .expect("queue claim");
+    assert_eq!(claim.batches[0].batch_id, batch.batch_id);
+    let turns = store
+        .embedded_durable_turn_store()
+        .expect("embedded durable turn");
+    let lease = turns
+        .claim_runtime_turn_lease("root", "turn-atomic", "turn-owner", 60_000)
+        .await
+        .expect("turn lease");
+    let record = effect_record("root", "turn-atomic", "atomic-effect");
+    turns
+        .save_runtime_effect_outcome(&lease, record.clone())
+        .await
+        .expect("save journal");
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        turn_index: 41,
+        ..RuntimeSessionState::default()
+    };
+    let base_commit = RuntimeCommit::persisted_state(&state, &[]);
+    let commit_hash = base_commit.turn_commit_hash().expect("turn commit hash");
+    let mut stale_queue_completion = claim.completion();
+    stale_queue_completion.lease_token.push_str(":stale");
+    let err = store
+        .commit_runtime_state(
+            base_commit
+                .clone()
+                .clearing_completed_turn(RuntimeTurnCompletion::from_lease(
+                    &lease,
+                    commit_hash.clone(),
+                ))
+                .completing_queue_claim(stale_queue_completion),
+        )
+        .await
+        .expect_err("stale queue completion must reject the whole final commit");
+    assert!(matches!(err, StoreError::QueuedWorkClaimExpired { .. }));
+    assert!(
+        store
+            .load_session(SessionReadScope::FullGraph)
+            .await
+            .expect("load after rejected atomic commit")
+            .is_none(),
+        "rejected queue completion must not persist session state"
+    );
+    assert_eq!(
+        store
+            .list_queued_work("root")
+            .await
+            .expect("list after rejected atomic commit")
+            .len(),
+        1,
+        "rejected queue completion must preserve queued work"
+    );
+    assert!(
+        store
+            .embedded_durable_turn_store()
+            .expect("embedded durable turn")
+            .load_runtime_effect_outcome("root", "turn-atomic", &record.replay_key)
+            .await
+            .expect("load journal after rejected atomic commit")
+            .is_some(),
+        "rejected queue completion must preserve turn journal rows"
+    );
+
+    store
+        .commit_runtime_state(
+            base_commit
+                .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease, commit_hash))
+                .completing_queue_claim(claim.completion()),
+        )
+        .await
+        .expect("valid final commit clears queue and journal atomically");
+    assert!(
+        store
+            .load_session(SessionReadScope::FullGraph)
+            .await
+            .expect("load after accepted atomic commit")
+            .is_some()
+    );
+    assert!(
+        store
+            .list_queued_work("root")
+            .await
+            .expect("list after accepted atomic commit")
+            .is_empty()
+    );
+    assert!(
+        store
+            .embedded_durable_turn_store()
+            .expect("embedded durable turn")
+            .load_runtime_effect_outcome("root", "turn-atomic", &record.replay_key)
+            .await
+            .expect("load journal after accepted atomic commit")
+            .is_none()
+    );
+}
+
+async fn session_metadata_round_trips(store: Arc<dyn RuntimePersistence>) {
+    let meta = SessionMeta {
+        session_id: "root".to_string(),
+        session_name: "Conformance Root".to_string(),
+        created_at: "2026-06-02T00:00:00Z".to_string(),
+        model: "gpt-5.4-mini".to_string(),
+        cwd: Some("/tmp/lash-conformance".to_string()),
+        relation: SessionRelation::Root,
+    };
+    store
+        .save_session_meta(meta.clone())
+        .await
+        .expect("save session meta");
+    let loaded = store
+        .load_session_meta()
+        .await
+        .expect("load session meta")
+        .expect("session meta present");
+    assert_eq!(loaded.session_id, meta.session_id);
+    assert_eq!(loaded.session_name, meta.session_name);
+    assert_eq!(loaded.created_at, meta.created_at);
+    assert_eq!(loaded.model, meta.model);
+    assert_eq!(loaded.cwd, meta.cwd);
+    assert_eq!(loaded.relation, meta.relation);
+}
+
+async fn tombstone_vacuum_and_gc_are_minimally_consistent(store: Arc<dyn RuntimePersistence>) {
+    let mut state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        session_graph: crate::SessionGraph::from_nodes(
+            vec![
+                sample_session_node("node-live", None),
+                sample_session_node("node-delete", Some("node-live")),
+            ],
+            Some("node-delete".to_string()),
+        ),
+        graph_replace_required: true,
+        ..RuntimeSessionState::default()
+    };
+    state.head_revision = None;
+    store
+        .commit_runtime_state(RuntimeCommit::persisted_state(&state, &[]))
+        .await
+        .expect("commit graph");
+    assert!(
+        store
+            .load_node("node-delete")
+            .await
+            .expect("load node before tombstone")
+            .is_some()
+    );
+    store
+        .tombstone_nodes(&["node-delete".to_string()])
+        .await
+        .expect("tombstone node");
+    assert!(
+        store
+            .load_node("node-delete")
+            .await
+            .expect("load node after tombstone")
+            .is_none(),
+        "tombstoned nodes must be hidden from direct loads"
+    );
+    let read = store
+        .load_session(SessionReadScope::FullGraph)
+        .await
+        .expect("load graph after tombstone")
+        .expect("session after tombstone");
+    assert!(
+        !read
+            .graph
+            .nodes
+            .iter()
+            .any(|node| node.node_id == "node-delete"),
+        "tombstoned nodes must be hidden from session graph loads"
+    );
+    let vacuum = store.vacuum().await.expect("vacuum");
+    assert!(
+        vacuum.removed_node_count <= 1,
+        "vacuum must report only rows removed by this call, got {vacuum:?}"
+    );
+    store
+        .gc_unreachable()
+        .await
+        .expect("gc_unreachable should be safe to call");
+}
+
+async fn runtime_persistence_survives_reopen(factory: ReopenableRuntimePersistence) {
+    let meta = SessionMeta {
+        session_id: "root".to_string(),
+        session_name: "Durable Root".to_string(),
+        created_at: "2026-06-02T00:00:00Z".to_string(),
+        model: "gpt-5.4-mini".to_string(),
+        cwd: Some("/tmp/lash-reopen".to_string()),
+        relation: SessionRelation::Root,
+    };
+    factory
+        .open
+        .save_session_meta(meta.clone())
+        .await
+        .expect("save meta");
+    let state = RuntimeSessionState {
+        session_id: "root".to_string(),
+        tool_state_snapshot: Some(ToolState::default().with_generation(77)),
+        ..RuntimeSessionState::default()
+    };
+    factory
+        .open
+        .commit_runtime_state(RuntimeCommit::persisted_state(&state, &[]))
+        .await
+        .expect("commit state");
+    let queued = factory
+        .open
+        .enqueue_queued_work(
+            queued_draft(
+                "root",
+                "survives reopen",
+                DeliveryPolicy::EarliestSafeBoundary,
+                SlotPolicy::Exclusive,
+            )
+            .with_source_key("reopen:queued"),
+        )
+        .await
+        .expect("enqueue queued work");
+    let attachment = AttachmentId::new("reopen-attachment".to_string());
+    factory
+        .open
+        .record_intent(AttachmentIntent {
+            attachment_id: attachment.clone(),
+            session_id: "root".to_string(),
+            canonical_uri: "sha256:reopen-attachment".to_string(),
+            intent_at_epoch_ms: 100,
+        })
+        .expect("record attachment intent");
+
+    let reopened_meta = factory
+        .reopen
+        .load_session_meta()
+        .await
+        .expect("load reopened meta")
+        .expect("reopened meta");
+    assert_eq!(reopened_meta.session_name, meta.session_name);
+    let reopened = factory
+        .reopen
+        .load_session(SessionReadScope::FullGraph)
+        .await
+        .expect("load reopened state")
+        .expect("reopened state");
+    assert_eq!(reopened.session_id, "root");
+    assert_eq!(
+        reopened
+            .checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.tool_state.as_ref())
+            .map(|tool_state| tool_state.generation()),
+        Some(77)
+    );
+    let reopened_queue = factory
+        .reopen
+        .list_queued_work("root")
+        .await
+        .expect("list reopened queue");
+    assert_eq!(reopened_queue.len(), 1);
+    assert_eq!(reopened_queue[0].batch_id, queued.batch_id);
+    assert_eq!(
+        queued_batch_text(&reopened_queue[0]),
+        Some("survives reopen")
+    );
+    let reopened_intents = factory
+        .reopen
+        .list_uncommitted(200)
+        .expect("list reopened attachment intents");
+    assert!(
+        reopened_intents
+            .iter()
+            .any(|intent| intent.attachment_id == attachment),
+        "attachment intent rows must survive reopening a durable store"
     );
 }
 
@@ -1603,6 +2758,15 @@ where
     attachment_reports_declared_persistence(make(), expected_persistence);
 }
 
+/// Run the full [`AttachmentStore`] suite plus durable reopen checks.
+pub fn attachment_store_reopenable<F>(make: F, expected_persistence: AttachmentStorePersistence)
+where
+    F: Fn() -> ReopenableAttachmentStore,
+{
+    attachment_store(|| make().open, expected_persistence);
+    attachment_store_survives_reopen(make());
+}
+
 fn attachment_meta() -> AttachmentCreateMeta {
     AttachmentCreateMeta::new(
         MediaType::Image(ImageMediaType::Png),
@@ -1673,6 +2837,20 @@ fn attachment_reports_declared_persistence(
     );
 }
 
+fn attachment_store_survives_reopen(factory: ReopenableAttachmentStore) {
+    let reference = factory
+        .open
+        .put(vec![4u8, 3, 2, 1], attachment_meta())
+        .expect("put attachment before reopen");
+    let reopened = factory
+        .reopen
+        .get(&reference.id)
+        .expect("get attachment after reopen");
+    assert_eq!(reopened.bytes, vec![4u8, 3, 2, 1]);
+    assert_eq!(reopened.meta.id, reference.id);
+    assert_eq!(reopened.meta.byte_len, 4);
+}
+
 // ---------------------------------------------------------------------------
 // LashlangArtifactStore conformance
 // ---------------------------------------------------------------------------
@@ -1688,6 +2866,15 @@ where
     artifact_put_get_round_trips(make());
     artifact_get_unknown_is_none(make());
     artifact_reports_declared_tier(make(), expected_tier);
+}
+
+/// Run the full [`LashlangArtifactStore`] suite plus durable reopen checks.
+pub fn lashlang_artifact_store_reopenable<F>(make: F, expected_tier: DurabilityTier)
+where
+    F: Fn() -> ReopenableLashlangArtifactStore,
+{
+    lashlang_artifact_store(|| make().open, expected_tier);
+    lashlang_artifact_store_survives_reopen(make());
 }
 
 fn sample_artifact() -> lashlang::ModuleArtifact {
@@ -1709,8 +2896,6 @@ fn artifact_put_get_round_trips(store: Arc<dyn LashlangArtifactStore>) {
     assert_eq!(loaded.module_ref, artifact.module_ref);
     assert_eq!(loaded.required_surface_ref, artifact.required_surface_ref);
     assert_eq!(loaded.exports, artifact.exports);
-    // A successful `get` already re-ran `verify()` internally; round-tripping
-    // the bytes again must reproduce the identical store encoding.
     assert_eq!(
         loaded.to_store_bytes().expect("re-encode loaded artifact"),
         artifact
@@ -1739,6 +2924,22 @@ fn artifact_reports_declared_tier(store: Arc<dyn LashlangArtifactStore>, expecte
     );
 }
 
+fn lashlang_artifact_store_survives_reopen(factory: ReopenableLashlangArtifactStore) {
+    let artifact = sample_artifact();
+    factory
+        .open
+        .put_module_artifact(&artifact)
+        .expect("put module artifact before reopen");
+    let loaded = factory
+        .reopen
+        .get_module_artifact(&artifact.module_ref)
+        .expect("get module artifact after reopen")
+        .expect("artifact present after reopen");
+    assert_eq!(loaded.module_ref, artifact.module_ref);
+    assert_eq!(loaded.required_surface_ref, artifact.required_surface_ref);
+    assert_eq!(loaded.exports, artifact.exports);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1762,24 +2963,10 @@ mod tests {
         );
     }
 
-    // The corrupt-bytes rejection path is exercised here rather than in the
-    // shared suite: only the in-memory store exposes a raw-bytes injection
-    // seam (`put_raw_module_artifact_bytes`); durable backends re-verify on
-    // read through the same `ModuleArtifact::from_store_bytes` path.
     #[test]
-    fn in_memory_artifact_store_rejects_corrupted_bytes_on_read() {
-        let store = crate::InMemoryLashlangArtifactStore::new();
-        let artifact = sample_artifact();
-        store.put_raw_module_artifact_bytes(
-            artifact.module_ref.clone(),
-            b"not an artifact".to_vec(),
-        );
-        let err = store
-            .get_module_artifact(&artifact.module_ref)
-            .expect_err("corrupted stored bytes must be rejected on read");
-        assert!(
-            matches!(err, lashlang::ArtifactStoreError::Decode(_)),
-            "tampered bytes must surface a decode error, got {err:?}"
-        );
+    fn module_artifact_rejects_corrupted_store_bytes() {
+        let err = lashlang::ModuleArtifact::from_store_bytes(b"not an artifact")
+            .expect_err("corrupted artifact bytes must be rejected");
+        assert!(matches!(err, lashlang::ModuleArtifactError::Codec(_)));
     }
 }

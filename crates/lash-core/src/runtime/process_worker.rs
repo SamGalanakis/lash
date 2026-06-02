@@ -610,7 +610,7 @@ mod boundary_tests {
         fn get_module_artifact(
             &self,
             module_ref: &lashlang::ModuleRef,
-        ) -> Result<Option<lashlang::ModuleArtifact>, lashlang::ArtifactStoreError> {
+        ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
             self.inner.get_module_artifact(module_ref)
         }
     }

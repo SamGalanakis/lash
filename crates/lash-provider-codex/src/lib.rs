@@ -1144,24 +1144,26 @@ mod tests {
                         "incomplete_details": { "reason": "content_filter" },
                         "output": []
                     })),
-                    Scenario::ToolUse => ProviderWire::body(json!({
+                    Scenario::NonStreamingToolUse => ProviderWire::body(json!({
                         "status": "completed",
                         "output": [{
                             "type": "function_call", "id": "fc_1", "call_id": "call_1",
                             "name": "lookup", "arguments": "{\"q\":\"x\"}", "status": "completed"
                         }]
-                    }))
-                    .with_tool_call_stream(
-                        vec![
-                            r#"{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}"#.to_string(),
-                            // arguments deliberately split across two delta events
-                            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"q\":"}"#.to_string(),
-                            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"\"x\"}"}"#.to_string(),
-                            r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}","status":"completed"}}"#.to_string(),
-                        ],
-                        "lookup",
-                        json!({ "q": "x" }),
-                    ),
+                    })),
+                    Scenario::StreamingToolArgumentMerge => {
+                        ProviderWire::body(json!({})).with_tool_call_stream(
+                            vec![
+                                r#"{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}"#.to_string(),
+                                // arguments deliberately split across two delta events
+                                r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"q\":"}"#.to_string(),
+                                r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"\"x\"}"}"#.to_string(),
+                                r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}","status":"completed"}}"#.to_string(),
+                            ],
+                            "lookup",
+                            json!({ "q": "x" }),
+                        )
+                    }
                     Scenario::UsageCacheHit => ProviderWire::body(json!({
                         "status": "completed",
                         "output": [{

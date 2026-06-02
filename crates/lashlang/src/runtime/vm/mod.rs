@@ -673,11 +673,10 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 self.add_assign_value(slot, right)?;
             }
             Instruction::AddAssignNumber { slot, right } => {
-                self.add_assign_value(slot, Value::Number(right))?;
+                self.add_assign_number(slot, right)?;
             }
             Instruction::AddAssignSlot { slot, right } => {
-                let right = self.load_slot(right)?.clone();
-                self.add_assign_value(slot, right)?;
+                self.add_assign_slot(slot, right)?;
             }
             Instruction::AddAssignIndexNumber { slot, right } => {
                 let index = self.pop_stack()?;
@@ -897,6 +896,44 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
         self.record_assignment(slot);
         self.last_value = Some(value);
         Ok(())
+    }
+
+    #[inline(always)]
+    fn add_assign_number(&mut self, slot: usize, right: f64) -> Result<(), RuntimeError> {
+        let slot_name = &self.chunk.slot_names[slot];
+        self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
+        let value = {
+            let left = self
+                .slots
+                .get_mut(slot)
+                .ok_or_else(|| RuntimeError::UndefinedVariable {
+                    name: slot_name.text.to_string(),
+                })?;
+            match left {
+                Value::Number(left) => {
+                    *left += right;
+                    Value::Number(*left)
+                }
+                left => {
+                    let value = add_values(left.clone(), Value::Number(right))?;
+                    *left = value.clone();
+                    value
+                }
+            }
+        };
+        self.record_assignment(slot);
+        self.last_value = Some(value);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn add_assign_slot(&mut self, slot: usize, right: usize) -> Result<(), RuntimeError> {
+        let right = self.load_slot(right)?;
+        if let Value::Number(right) = right {
+            return self.add_assign_number(slot, *right);
+        }
+        let right = right.clone();
+        self.add_assign_value(slot, right)
     }
 
     #[inline(always)]
@@ -1247,29 +1284,42 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 self.stack.push(value);
             }
             IntrinsicOp::PushAssign(slot) => {
-                let item = materialize_projected_async(self.pop_stack()?).await;
+                let mut item = Some(materialize_projected_async(self.pop_stack()?).await);
                 let slot_name = &self.chunk.slot_names[slot];
                 self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
-                let current =
-                    self.slots
-                        .get_mut(slot)
-                        .ok_or_else(|| RuntimeError::UndefinedVariable {
+                let fast_value = {
+                    let current = self.slots.get_mut(slot).ok_or_else(|| {
+                        RuntimeError::UndefinedVariable {
                             name: slot_name.text.to_string(),
-                        })?;
-                let value = if let Value::List(items) = current {
-                    let values = items.make_mut();
-                    if values.len() == values.capacity() {
-                        values.reserve(1);
+                        }
+                    })?;
+                    if let Value::List(items) = current {
+                        let values = items.make_mut();
+                        if values.len() == values.capacity() {
+                            values.reserve(1);
+                        }
+                        values.push(item.take().expect("push item should be available"));
+                        Some(Value::List(items.clone()))
+                    } else {
+                        None
                     }
-                    values.push(item);
-                    Value::List(items.clone())
-                } else {
-                    execute_push_builtin_async(current.clone(), item).await?
                 };
-                self.slots
-                    .assign(slot, value.clone(), &self.chunk.slot_names)?;
-                self.record_assignment(slot);
-                self.last_value = Some(value);
+                if let Some(value) = fast_value {
+                    self.record_assignment(slot);
+                    self.last_value = Some(value);
+                } else {
+                    let item = item.expect("push item should be available");
+                    let current = self.slots.get_mut(slot).ok_or_else(|| {
+                        RuntimeError::UndefinedVariable {
+                            name: slot_name.text.to_string(),
+                        }
+                    })?;
+                    let value = execute_push_builtin_async(current.clone(), item).await?;
+                    self.slots
+                        .assign(slot, value.clone(), &self.chunk.slot_names)?;
+                    self.record_assignment(slot);
+                    self.last_value = Some(value);
+                }
             }
             IntrinsicOp::FormatCompiled(template) => {
                 let template = &self.chunk.format_templates[template];

@@ -30,7 +30,7 @@ impl lashlang::LashlangArtifactStore for CountingArtifactStore {
     fn get_module_artifact(
         &self,
         module_ref: &lashlang::ModuleRef,
-    ) -> Result<Option<lashlang::ModuleArtifact>, lashlang::ArtifactStoreError> {
+    ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
         self.gets.fetch_add(1, AtomicOrdering::SeqCst);
         self.inner.get_module_artifact(module_ref)
     }
@@ -461,10 +461,15 @@ async fn host_event_emission_activates_matching_button_trigger_routes() {
         args.get("event").and_then(|event| event.get("message")),
         Some(&json!("user pressed the red button"))
     );
-    let Some(crate::CausalRef::SessionNode {
+    let process_caused_by = record
+        .provenance
+        .caused_by
+        .clone()
+        .expect("triggered process cause");
+    let crate::CausalRef::SessionNode {
         session_id,
         node_id,
-    }) = record.provenance.caused_by
+    } = &process_caused_by
     else {
         panic!("host-event-triggered process should be caused by the host event session node");
     };
@@ -472,7 +477,7 @@ async fn host_event_emission_activates_matching_button_trigger_routes() {
     let node = runtime
         .state
         .session_graph
-        .find_node(&node_id)
+        .find_node(node_id)
         .expect("host event node");
     match &node.payload {
         crate::SessionNodePayload::Plugin { plugin_type, body } => {
@@ -482,6 +487,44 @@ async fn host_event_emission_activates_matching_button_trigger_routes() {
         }
         _ => panic!("host event should append a plugin session node"),
     }
+
+    let session_store_factory =
+        Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
+    let worker = crate::DurableProcessWorker::new(
+        crate::DurableProcessWorkerConfig::new(
+            Arc::new(crate::PluginHost::new(vec![Arc::new(ButtonTriggerFactory)])),
+            RuntimeHostConfig::in_memory(),
+            session_store_factory.clone(),
+            Arc::clone(&registry),
+        )
+        .with_session_policy(crate::runtime::tests::helpers::standard_test_policy()),
+    );
+    worker
+        .drive_pending_processes()
+        .await
+        .expect("drive button process");
+    registry
+        .await_process(process_id)
+        .await
+        .expect("button-triggered process finishes");
+    let stores = session_store_factory.stores();
+    let store = stores.first().expect("process worker session store");
+    let queued = crate::store::RuntimePersistence::list_queued_work(store.as_ref(), "root")
+        .await
+        .expect("queued wake");
+    assert_eq!(queued.len(), 1);
+    let crate::QueuedWorkPayload::ProcessWake { wake } = &queued[0].items[0].payload else {
+        panic!("expected process wake queue payload");
+    };
+    assert_eq!(wake.process_caused_by, Some(process_caused_by));
+    assert!(matches!(
+        &wake.event_invocation.subject,
+        crate::RuntimeSubject::ProcessEvent {
+            process_id: wake_process_id,
+            sequence: 1,
+            event_type,
+        } if wake_process_id == process_id && event_type == "process.wake"
+    ));
 }
 
 #[tokio::test]

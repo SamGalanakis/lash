@@ -8,7 +8,7 @@
 //! silent in-memory default. Holds the same `RuntimePersistence` contract as the
 //! SQLite backend (verified by the `runtime_persistence` conformance suite).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use super::usage::merge_usage_delta_entries;
@@ -31,6 +31,7 @@ pub struct InMemorySessionStore {
     pub(crate) session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
     pub(crate) session_meta: Mutex<Option<crate::SessionMeta>>,
     pub(crate) session_graph: Mutex<crate::SessionGraph>,
+    tombstoned_node_ids: Mutex<HashSet<String>>,
     pub(crate) checkpoint: Mutex<Option<crate::HydratedSessionCheckpoint>>,
     pub(crate) usage_deltas: Mutex<Vec<crate::TokenLedgerEntry>>,
     pub(crate) runtime_commit_count: Mutex<usize>,
@@ -70,12 +71,32 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         let Some(meta) = self.session_head_meta.lock().expect("lock store").clone() else {
             return Ok(None);
         };
+        let tombstoned = self
+            .tombstoned_node_ids
+            .lock()
+            .expect("lock tombstoned nodes")
+            .clone();
         let mut graph = self.session_graph.lock().expect("lock graph").clone();
         if let crate::store::SessionReadScope::ActivePath { leaf_node_id } = scope {
             if let Some(leaf_node_id) = leaf_node_id.or_else(|| meta.leaf_node_id.clone()) {
                 graph.set_leaf_node_id(Some(leaf_node_id));
             }
             graph = graph.fork_current_path();
+        }
+        if !tombstoned.is_empty() {
+            let leaf_node_id = graph
+                .leaf_node_id
+                .clone()
+                .filter(|leaf| !tombstoned.contains(leaf));
+            graph = crate::SessionGraph::from_nodes(
+                graph
+                    .nodes
+                    .iter()
+                    .filter(|node| !tombstoned.contains(&node.node_id))
+                    .cloned()
+                    .collect(),
+                leaf_node_id,
+            );
         }
         Ok(Some(crate::store::PersistedSessionRead {
             session_id: meta.session_id,
@@ -96,6 +117,14 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         &self,
         node_id: &str,
     ) -> Result<Option<crate::SessionNodeRecord>, crate::store::StoreError> {
+        if self
+            .tombstoned_node_ids
+            .lock()
+            .expect("lock tombstoned nodes")
+            .contains(node_id)
+        {
+            return Ok(None);
+        }
         Ok(self
             .session_graph
             .lock()
@@ -194,20 +223,32 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             });
         }
         let mut graph = self.session_graph.lock().expect("lock graph");
+        let mut committed_node_ids = Vec::new();
         let leaf_node_id = match &commit.graph {
             crate::store::GraphCommitDelta::Unchanged { leaf_node_id } => leaf_node_id.clone(),
             crate::store::GraphCommitDelta::Append {
                 nodes,
                 leaf_node_id,
             } => {
+                committed_node_ids.extend(nodes.iter().map(|node| node.node_id.clone()));
                 graph.extend_node_records(nodes.iter().cloned());
                 leaf_node_id.clone()
             }
             crate::store::GraphCommitDelta::ReplaceFull(next) => {
+                committed_node_ids.extend(next.nodes.iter().map(|node| node.node_id.clone()));
                 *graph = next.clone();
                 next.leaf_node_id.clone()
             }
         };
+        let graph_node_count = graph.nodes.len();
+        drop(graph);
+        if !committed_node_ids.is_empty() {
+            let committed_node_ids = committed_node_ids.into_iter().collect::<HashSet<_>>();
+            self.tombstoned_node_ids
+                .lock()
+                .expect("lock tombstoned nodes")
+                .retain(|node_id| !committed_node_ids.contains(node_id));
+        }
         self.usage_deltas
             .lock()
             .expect("lock usage deltas")
@@ -257,7 +298,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             current_agent_frame_id: commit.current_agent_frame_id,
             checkpoint_ref: Some(checkpoint_ref.clone()),
             leaf_node_id,
-            graph_node_count: graph.nodes.len(),
+            graph_node_count,
             token_ledger: Vec::new(),
         });
         *self
@@ -487,12 +528,40 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         Ok(self.session_meta.lock().expect("lock session meta").clone())
     }
 
-    async fn tombstone_nodes(&self, _ids: &[String]) -> Result<(), crate::store::StoreError> {
+    async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), crate::store::StoreError> {
+        self.tombstoned_node_ids
+            .lock()
+            .expect("lock tombstoned nodes")
+            .extend(ids.iter().cloned());
         Ok(())
     }
 
     async fn vacuum(&self) -> Result<crate::store::VacuumReport, crate::store::StoreError> {
-        Ok(crate::store::VacuumReport::default())
+        let ids = {
+            let mut tombstoned = self
+                .tombstoned_node_ids
+                .lock()
+                .expect("lock tombstoned nodes");
+            if tombstoned.is_empty() {
+                return Ok(crate::store::VacuumReport::default());
+            }
+            std::mem::take(&mut *tombstoned)
+        };
+        let mut graph = self.session_graph.lock().expect("lock graph");
+        let before = graph.nodes.len();
+        let leaf_node_id = graph
+            .leaf_node_id
+            .clone()
+            .filter(|leaf| !ids.contains(leaf));
+        let nodes = graph
+            .nodes
+            .iter()
+            .filter(|node| !ids.contains(&node.node_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed_node_count = before.saturating_sub(nodes.len());
+        *graph = crate::SessionGraph::from_nodes(nodes, leaf_node_id);
+        Ok(crate::store::VacuumReport { removed_node_count })
     }
 
     async fn gc_unreachable(&self) -> Result<crate::store::GcReport, crate::store::StoreError> {

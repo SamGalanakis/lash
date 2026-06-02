@@ -28,9 +28,12 @@ pub enum Scenario {
     /// A turn that stopped because it hit the output-token cap. Terminal
     /// reason: `OutputLimit`.
     OutputCapped,
-    /// A turn that ended by emitting a tool call. Terminal reason: `ToolUse`,
-    /// and the assembled parts contain the tool call.
-    ToolUse,
+    /// A non-streaming response that ended by emitting a tool call. Terminal
+    /// reason: `ToolUse`, and normalized parts contain the tool call.
+    NonStreamingToolUse,
+    /// A streamed response whose tool-call arguments arrive split across
+    /// multiple chunks and must reassemble into one valid `input_json`.
+    StreamingToolArgumentMerge,
     /// A turn stopped by the provider's content filter. Terminal reason:
     /// `ContentFilter`.
     ContentFilter,
@@ -52,7 +55,8 @@ impl Scenario {
     pub const ALL: &'static [Scenario] = &[
         Scenario::PlainTextStop,
         Scenario::OutputCapped,
-        Scenario::ToolUse,
+        Scenario::NonStreamingToolUse,
+        Scenario::StreamingToolArgumentMerge,
         Scenario::ContentFilter,
         Scenario::UsageCacheHit,
         Scenario::UsageReasoning,
@@ -75,6 +79,52 @@ impl CanonicalUsage {
     pub const REASONING: i64 = 15;
 }
 
+/// Explicit provider-specific unsupported scenario list.
+///
+/// Most providers should use [`ProviderConformanceSpec::strict`]. A provider
+/// that cannot express a canonical scenario must list it here with a stable,
+/// human-readable reason. Returning `None` from `wire_for` without declaring
+/// the scenario unsupported is a conformance failure.
+#[derive(Clone, Copy, Debug)]
+pub struct ProviderConformanceSpec {
+    unsupported: &'static [(Scenario, &'static str)],
+}
+
+impl ProviderConformanceSpec {
+    pub const fn strict() -> Self {
+        Self { unsupported: &[] }
+    }
+
+    pub const fn with_unsupported(unsupported: &'static [(Scenario, &'static str)]) -> Self {
+        Self { unsupported }
+    }
+
+    fn unsupported_reason(&self, scenario: Scenario) -> Option<&'static str> {
+        self.unsupported
+            .iter()
+            .find_map(|(candidate, reason)| (*candidate == scenario).then_some(*reason))
+    }
+
+    fn validate(&self, provider: &str) {
+        let mut seen = Vec::new();
+        for &(scenario, reason) in self.unsupported {
+            assert!(
+                Scenario::ALL.contains(&scenario),
+                "[{provider}] unsupported scenario {scenario:?} is not part of Scenario::ALL"
+            );
+            assert!(
+                !reason.trim().is_empty(),
+                "[{provider}] unsupported scenario {scenario:?} must include a non-empty reason"
+            );
+            assert!(
+                seen.iter().all(|existing| *existing != scenario),
+                "[{provider}] unsupported scenario {scenario:?} is listed more than once"
+            );
+            seen.push(scenario);
+        }
+    }
+}
+
 /// One provider's wire-format encoding of a [`Scenario`], plus the few facts
 /// the suite needs to drive assertions. The provider produces this; the suite
 /// owns what "correct" normalization means.
@@ -83,15 +133,17 @@ pub struct ProviderWire {
     /// feeds to [`ProviderNormalizer::parts_from_wire`] /
     /// [`ProviderNormalizer::terminal_from_wire`] / `usage_from_wire`.
     pub body: Value,
-    /// For `Scenario::ToolUse`: the SSE event strings (provider's own format)
-    /// that stream the tool call, deliberately split so the call's arguments
-    /// arrive across ≥2 chunks. `None` for non-streaming scenarios.
+    /// For `Scenario::StreamingToolArgumentMerge`: the SSE event strings
+    /// (provider's own format) that stream the tool call, deliberately split so
+    /// the call's arguments arrive across >=2 chunks. `None` for non-streaming
+    /// scenarios.
     pub tool_call_sse: Option<Vec<String>>,
     /// The expected reassembled tool-call `input_json` (canonical, e.g.
-    /// `{"q":"x"}`) for `Scenario::ToolUse`. The provider states what its
-    /// fixtures encode so the suite can compare regardless of key formatting.
+    /// `{"q":"x"}`) for `Scenario::StreamingToolArgumentMerge`. The provider
+    /// states what its fixtures encode so the suite can compare regardless of
+    /// key formatting.
     pub expected_tool_input_json: Option<Value>,
-    /// The tool name encoded in the `ToolUse` fixtures.
+    /// The tool name encoded in the tool-use fixtures.
     pub expected_tool_name: Option<String>,
     /// For `Scenario::ReasoningExtraction`: the reasoning text the fixtures
     /// encode. The suite asserts an `LlmOutputPart::Reasoning` carrying it.
@@ -156,8 +208,15 @@ pub trait ProviderNormalizer {
     fn name(&self) -> &str;
 
     /// This provider's wire encoding of `scenario`, or `None` if the provider
-    /// genuinely cannot express it (rare; the suite skips with a logged note).
+    /// explicitly declares the scenario unsupported in
+    /// [`ProviderNormalizer::conformance_spec`].
     fn wire_for(&self, scenario: Scenario) -> Option<ProviderWire>;
+
+    /// Provider-specific unsupported scenarios. Defaults to strict: every
+    /// canonical scenario must be supplied by [`ProviderNormalizer::wire_for`].
+    fn conformance_spec(&self) -> ProviderConformanceSpec {
+        ProviderConformanceSpec::strict()
+    }
 
     /// Normalize a non-streaming response body into output parts.
     fn parts_from_wire(&self, body: &Value) -> Vec<LlmOutputPart>;
@@ -176,15 +235,24 @@ pub trait ProviderNormalizer {
 /// Run every [`Scenario`] against `n` and assert the normalized output matches
 /// the canonical expectation. Panics on the first divergence.
 pub fn provider_conformance(n: &dyn ProviderNormalizer) {
+    let spec = n.conformance_spec();
+    spec.validate(n.name());
     for &scenario in Scenario::ALL {
-        let Some(wire) = n.wire_for(scenario) else {
-            // A provider that can't express a scenario opts out explicitly;
-            // make that visible rather than silently passing.
-            eprintln!(
-                "[provider-conformance] {} does not express {scenario:?} — skipped",
+        if let Some(reason) = spec.unsupported_reason(scenario) {
+            assert!(
+                n.wire_for(scenario).is_none(),
+                "[{}] {scenario:?}: scenario is declared unsupported ({reason}) but wire_for \
+                 returned a fixture",
                 n.name()
             );
             continue;
+        };
+        let Some(wire) = n.wire_for(scenario) else {
+            panic!(
+                "[{}] {scenario:?}: supported scenario returned None; either supply a fixture or \
+                 add it to ProviderConformanceSpec with a reason",
+                n.name()
+            );
         };
         check_scenario(n, scenario, wire);
     }
@@ -192,10 +260,10 @@ pub fn provider_conformance(n: &dyn ProviderNormalizer) {
 
 fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: ProviderWire) {
     let who = n.name();
-    let parts = n.parts_from_wire(&wire.body);
 
     match scenario {
         Scenario::PlainTextStop => {
+            let parts = n.parts_from_wire(&wire.body);
             assert_terminal(n, &wire, &parts, LlmTerminalReason::Stop, who, scenario);
             assert_usage(
                 n,
@@ -209,6 +277,7 @@ fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: Provider
             );
         }
         Scenario::OutputCapped => {
+            let parts = n.parts_from_wire(&wire.body);
             assert_terminal(
                 n,
                 &wire,
@@ -219,6 +288,7 @@ fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: Provider
             );
         }
         Scenario::ContentFilter => {
+            let parts = n.parts_from_wire(&wire.body);
             assert_terminal(
                 n,
                 &wire,
@@ -228,17 +298,19 @@ fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: Provider
                 scenario,
             );
         }
-        Scenario::ToolUse => {
+        Scenario::NonStreamingToolUse => {
+            let parts = n.parts_from_wire(&wire.body);
             assert_terminal(n, &wire, &parts, LlmTerminalReason::ToolUse, who, scenario);
-            // Non-streaming parts must carry the tool call.
             assert!(
                 parts.iter().any(is_tool_call),
                 "[{who}] {scenario:?}: non-streaming parts must contain a tool call, got {parts:?}"
             );
-            // Streaming: arguments split across chunks must reassemble identically.
-            let sse = wire.tool_call_sse.as_ref().unwrap_or_else(|| {
-                panic!("[{who}] {scenario:?}: ToolUse must supply tool_call_sse")
-            });
+        }
+        Scenario::StreamingToolArgumentMerge => {
+            let sse = wire
+                .tool_call_sse
+                .as_ref()
+                .unwrap_or_else(|| panic!("[{who}] {scenario:?}: must supply tool_call_sse"));
             assert!(
                 sse.len() >= 2,
                 "[{who}] {scenario:?}: tool-call SSE must split arguments across ≥2 chunks to be \
@@ -304,6 +376,7 @@ fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: Provider
             );
         }
         Scenario::ReasoningExtraction => {
+            let parts = n.parts_from_wire(&wire.body);
             let expected = wire.expected_reasoning_text.as_ref().unwrap_or_else(|| {
                 panic!("[{who}] {scenario:?}: must supply expected_reasoning_text")
             });

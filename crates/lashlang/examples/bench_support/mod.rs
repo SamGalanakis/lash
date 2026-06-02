@@ -1,9 +1,10 @@
 use compact_str::ToCompactString;
 use lashlang::{
-    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ImageValue, LashlangAbilities,
-    LashlangSurface, LinkedModule, ListValue, ProjectedBindings, ProjectedFuture,
-    ProjectedHostValue, ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record,
-    ResourceCatalog, State, TypeExpr, Value, from_json,
+    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ImageValue, LASH_HOST_VALUE_KEY,
+    LASH_HOST_VALUE_TYPE_KEY, LASH_PROCESS_NAME_KEY, LashlangAbilities, LashlangSurface,
+    LinkedModule, ListValue, ProjectedBindings, ProjectedFuture, ProjectedHostValue,
+    ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record, ResourceCatalog, State,
+    TypeExpr, TypeField, Value, from_json,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -26,6 +27,7 @@ pub enum Scenario {
     ToolControlSurface,
     SnapshotProjectedState,
     ContinueAsSeedSurface,
+    TriggerRegistrySurface,
     SyntaxTextSurface,
     IntegerRangeSurface,
     FanoutExpressionSurface,
@@ -50,6 +52,7 @@ impl Scenario {
         Self::ToolControlSurface,
         Self::SnapshotProjectedState,
         Self::ContinueAsSeedSurface,
+        Self::TriggerRegistrySurface,
         Self::SyntaxTextSurface,
         Self::IntegerRangeSurface,
         Self::FanoutExpressionSurface,
@@ -75,6 +78,7 @@ impl Scenario {
             "tool_control_surface" => Self::ToolControlSurface,
             "snapshot_projected_state" => Self::SnapshotProjectedState,
             "continue_as_seed_surface" => Self::ContinueAsSeedSurface,
+            "trigger_registry_surface" => Self::TriggerRegistrySurface,
             "syntax_text_surface" => Self::SyntaxTextSurface,
             "integer_range_surface" => Self::IntegerRangeSurface,
             "fanout_expression_surface" => Self::FanoutExpressionSurface,
@@ -85,7 +89,7 @@ impl Scenario {
 
     #[allow(dead_code)]
     pub fn expected_values() -> &'static str {
-        "baseline, language_surface, async_await, direct_unwrap, general_fanout, loop_control, indexed_assignment, projected_values, large_data, cache_pressure, projected_operations, type_system_stress, wrapped_error_paths, tool_control_surface, snapshot_projected_state, continue_as_seed_surface, syntax_text_surface, integer_range_surface, fanout_expression_surface, image_surface, or all"
+        "baseline, language_surface, async_await, direct_unwrap, general_fanout, loop_control, indexed_assignment, projected_values, large_data, cache_pressure, projected_operations, type_system_stress, wrapped_error_paths, tool_control_surface, snapshot_projected_state, continue_as_seed_surface, trigger_registry_surface, syntax_text_surface, integer_range_surface, fanout_expression_surface, image_surface, or all"
     }
 }
 
@@ -108,6 +112,7 @@ impl fmt::Display for Scenario {
             Self::ToolControlSurface => "tool_control_surface",
             Self::SnapshotProjectedState => "snapshot_projected_state",
             Self::ContinueAsSeedSurface => "continue_as_seed_surface",
+            Self::TriggerRegistrySurface => "trigger_registry_surface",
             Self::SyntaxTextSurface => "syntax_text_surface",
             Self::IntegerRangeSurface => "integer_range_surface",
             Self::FanoutExpressionSurface => "fanout_expression_surface",
@@ -647,6 +652,40 @@ submit {
 }
 "#
         }
+        Scenario::TriggerRegistrySurface => {
+            r#"
+type ButtonPressed = { button: "Red" | "Blue", message: str, pressed_at: str }
+
+process daily_digest(tick: cron.Tick) {
+  finish { kind: "daily_digest", id: tick.id }
+}
+
+process on_button(event: ButtonPressed) {
+  finish { kind: "button", button: event.button }
+}
+
+daily_handle = await triggers.register({
+  source: cron.Schedule({ expr: "0 8 * * *", tz: "UTC" }),
+  target: daily_digest,
+  name: "daily_digest"
+})?
+button_handle = await triggers.register({
+  source: ui.button.pressed({}),
+  target: on_button,
+  name: "button watcher"
+})?
+registrations = await triggers.list({ target: daily_digest })?
+cancelled = await triggers.cancel({ handle: daily_handle })?
+submit {
+  daily_handle: daily_handle.id,
+  button_handle: button_handle.id,
+  registration_count: len(registrations),
+  listed_target: registrations[0].target.process_name,
+  listed_source: registrations[0].source_type,
+  cancelled: cancelled
+}
+"#
+        }
         Scenario::SyntaxTextSurface => {
             r####"
 // Exercise parser-heavy string forms, comments, semicolon recovery, and text builtins.
@@ -764,6 +803,47 @@ submit {
 
 pub fn benchmark_surface() -> LashlangSurface {
     let mut resources = ResourceCatalog::tool_default(["echo", "boom", "missing_tool"]);
+    lashlang::add_trigger_resource_operations(&mut resources);
+    resources.add_trigger_source_constructor(
+        ["cron", "Schedule"],
+        TypeExpr::Object(vec![
+            TypeField {
+                name: "expr".into(),
+                ty: TypeExpr::Str,
+                optional: false,
+            },
+            TypeField {
+                name: "tz".into(),
+                ty: TypeExpr::Str,
+                optional: true,
+            },
+        ]),
+        TypeExpr::Ref("cron.Tick".into()),
+    );
+    resources.add_trigger_source_constructor(
+        ["ui", "button", "pressed"],
+        TypeExpr::Object(Vec::new()),
+        TypeExpr::Object(vec![
+            TypeField {
+                name: "button".into(),
+                ty: TypeExpr::Union(vec![
+                    TypeExpr::Enum(vec!["Red".into()]),
+                    TypeExpr::Enum(vec!["Blue".into()]),
+                ]),
+                optional: false,
+            },
+            TypeField {
+                name: "message".into(),
+                ty: TypeExpr::Str,
+                optional: false,
+            },
+            TypeField {
+                name: "pressed_at".into(),
+                ty: TypeExpr::Str,
+                optional: false,
+            },
+        ]),
+    );
     resources.add_module_instance(["shell"], "Shell");
     resources.add_operation(
         "Shell",
@@ -1362,8 +1442,90 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
         }
         "list_process_handles" => Ok(process_handles_record()),
         "continue_as" => Ok(continue_as_record(args)),
+        "triggers.register" => Ok(trigger_register_record(args)),
+        "triggers.list" => Ok(trigger_list_value(args)),
+        "triggers.cancel" => Ok(Value::Bool(true)),
         _ => Err(unknown_tool(name)),
     }
+}
+
+fn trigger_register_record(args: &Record) -> Value {
+    let source_type = args
+        .get("source")
+        .and_then(Value::as_record)
+        .and_then(|source| source.get(LASH_HOST_VALUE_TYPE_KEY))
+        .and_then(string_ref)
+        .unwrap_or("unknown.Source");
+    let process_name = args
+        .get("target")
+        .and_then(Value::as_record)
+        .and_then(|target| target.get(LASH_PROCESS_NAME_KEY))
+        .and_then(string_ref)
+        .unwrap_or("target");
+
+    let mut record = Record::default();
+    record.insert("type".to_string(), Value::String("trigger_handle".into()));
+    record.insert(
+        "id".to_string(),
+        Value::String(format!("trigger:{source_type}:{process_name}").into()),
+    );
+    record.insert(
+        "source_type".to_string(),
+        Value::String(source_type.to_string().into()),
+    );
+    record.insert(
+        "process_name".to_string(),
+        Value::String(process_name.to_string().into()),
+    );
+    Value::Record(Arc::new(record))
+}
+
+fn trigger_list_value(args: &Record) -> Value {
+    let process_name = args
+        .get("target")
+        .and_then(Value::as_record)
+        .and_then(|target| target.get(LASH_PROCESS_NAME_KEY))
+        .and_then(string_ref)
+        .unwrap_or("target");
+    let source_type = match process_name {
+        "daily_digest" => "cron.Schedule",
+        "on_button" => "ui.button.pressed",
+        _ => "unknown.Source",
+    };
+
+    let mut target = Record::default();
+    target.insert(
+        "process_name".to_string(),
+        Value::String(process_name.to_string().into()),
+    );
+    target.insert("input_name".to_string(), Value::String("event".into()));
+
+    let mut route = Record::default();
+    route.insert(
+        "handle".to_string(),
+        Value::String(format!("trigger:{source_type}:{process_name}").into()),
+    );
+    route.insert(
+        "source_type".to_string(),
+        Value::String(source_type.to_string().into()),
+    );
+    route.insert("source".to_string(), trigger_source_value(source_type));
+    route.insert("target".to_string(), Value::Record(Arc::new(target)));
+    route.insert("enabled".to_string(), Value::Bool(true));
+    Value::List(vec![Value::Record(Arc::new(route))].into())
+}
+
+fn trigger_source_value(source_type: &str) -> Value {
+    let mut source = Record::default();
+    source.insert(
+        LASH_HOST_VALUE_TYPE_KEY.to_string(),
+        Value::String(source_type.to_string().into()),
+    );
+    source.insert(
+        LASH_HOST_VALUE_KEY.to_string(),
+        Value::Record(Arc::new(Record::default())),
+    );
+    Value::Record(Arc::new(source))
 }
 
 fn continue_as_record(args: &Record) -> Value {
@@ -1401,6 +1563,13 @@ fn continue_as_record(args: &Record) -> Value {
         Value::Number(global_count as f64),
     );
     Value::Record(Arc::new(record))
+}
+
+fn string_ref(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(value) => Some(value.as_str()),
+        _ => None,
+    }
 }
 
 fn process_handles_record() -> Value {

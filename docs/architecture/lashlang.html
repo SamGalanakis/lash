@@ -28,18 +28,43 @@
 <div class="section" id="language-reference">
           <div class="section-header">
             <h2>Language Reference</h2>
-            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The parser accepts the full module grammar, but the linked host surface decides which abilities exist: receiver operations, reusable background <code>process</code> work, trigger registry operations, process sleep, and process signals are enabled explicitly by the host and hidden from prompts when disabled. Declarative <code>trigger</code> syntax has been removed; programs construct host-provided trigger-source values and call <code>triggers.register</code>, <code>triggers.list</code>, or <code>triggers.cancel</code>. Timers and recurring jobs are host-owned source policies, not Lashlang syntax. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are foreground effect expressions.</p>
+            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code> / <code>while cond</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The parser accepts the full module grammar, but the linked host surface decides which abilities exist: receiver operations, reusable background <code>process</code> work, trigger registry operations, process sleep, and process signals are enabled explicitly by the host and hidden from prompts when disabled. Declarative <code>trigger</code> syntax has been removed; programs construct host-provided trigger-source values and call <code>triggers.register</code>, <code>triggers.list</code>, or <code>triggers.cancel</code>. Timers and recurring jobs are host-owned source policies, not Lashlang syntax. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are foreground effect expressions.</p>
           </div>
           <dl class="def-list">
             <dt>Values</dt>
             <dd><code>null</code>, booleans, numbers, strings, lists, records, projected host values, result wrappers, and immutable <code>Image</code> handles. Resource handles and process handles appear only when the linked host surface exposes those abilities. Lists and records are value-shaped and copy-on-write at mutation roots.</dd>
             <dt>Program form</dt>
-            <dd>A program is a module with optional <code>type</code> and <code>process</code> declarations plus a foreground main block. Removed declarative <code>trigger</code> syntax is rejected by the parser with a diagnostic that points agents at the trigger registry. Disabled abilities remain syntax-valid where applicable but are rejected by the linker with a source-spanned <code>lashlang feature `...` is disabled by this host</code> diagnostic before runtime calls can be made. Simple and path assignment, receiver operations, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>break</code>, <code>continue</code>, <code>cancel</code>, and <code>submit</code> are expression nodes; assignment and <code>for</code> evaluate to <code>null</code>.</dd>
+            <dd>A program is a module with optional <code>type</code> and <code>process</code> declarations plus a foreground main block. Removed declarative <code>trigger</code> syntax is rejected by the parser with a diagnostic that points agents at the trigger registry. Disabled abilities remain syntax-valid where applicable but are rejected by the linker with a source-spanned <code>lashlang feature `...` is disabled by this host</code> diagnostic before runtime calls can be made. Simple and path assignment, receiver operations, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>while</code>, <code>break</code>, <code>continue</code>, <code>cancel</code>, and <code>submit</code> are expression nodes; assignment and loops evaluate to <code>null</code>.</dd>
             <dt>Expressions</dt>
             <dd>Literals, variables, builtin calls, receiver operations, named process starts, <code>await</code>, field/index access, unary operators, binary operators, ternaries, result unwrap with <code>?</code>, and <code>Type { ... }</code> literals.</dd>
             <dt>Effects</dt>
             <dd>All external work crosses <code>ExecutionHost</code>. Receiver operations return wrapper records when resource operations are enabled, background process starts return handles when process support is enabled, <code>await</code> resolves handles, and <code>print</code> creates model-visible observations. Linked modules are content-addressed <code>ModuleArtifact</code> records in the host/profile artifact store; durable Lashlang process input stores only <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, display name, and JSON args. Nested process starts reload the artifact by ref and verify the required host surface before execution.</dd>
           </dl>
+        </div>
+
+        <div class="section" id="host-surface">
+          <div class="section-header">
+            <h2>Host Surface</h2>
+            <p>The authored language is stable, but the available modules are host-provided. Each turn links against a <code>LashlangSurface</code>: a <code>ResourceCatalog</code> plus <code>LashlangAbilities</code>. Core derives callable tool operations from the current <code>ToolSurface</code>, then merges plugin-provided Lashlang resources such as value constructors and trigger source metadata. The prompt renderer uses that same effective surface, so the model sees only operations, constructors, and lifecycle forms that will link.</p>
+          </div>
+          <dl class="def-list">
+            <dt>Tool operations</dt>
+            <dd>Callable tools become lowercase receiver operations through <code>ToolAgentSurface</code>. A tool declared with <code>ToolAgentSurface::new(["board"], "play")</code> appears to Lashlang as <code>await board.play({ cell: 4 })?</code>, while the host still dispatches the underlying tool name such as <code>play_move</code>. A tool with no explicit agent surface defaults to the <code>tools</code> module and its manifest name as the operation.</dd>
+            <dt>Module authorities</dt>
+            <dd>A module path resolves to a typed authority value such as <code>Board</code>, <code>Web</code>, or <code>Agents</code>. Named processes receive those authorities explicitly: <code>process notify(mail: Gmail) { await mail.send({ body: body })? finish true }</code>, then <code>start notify(mail: gmail.work)</code>. This keeps process authority visible in the process signature instead of hidden in globals.</dd>
+            <dt>Value constructors</dt>
+            <dd>Plugins can add pure constructors with <code>ResourceCatalog::add_value_constructor</code> or <code>add_trigger_source_constructor</code>. Constructors are ordinary expressions, not awaited effects: <code>source = cron.Schedule({ expr: "0 8 * * *", tz: "UTC" })</code>.</dd>
+            <dt>Ability gates</dt>
+            <dd><code>LashlangAbilities</code> gates processes, sleep, process signals, and triggers. Disabled features are not shown to the model and fail during linking before an <code>ExecutionHost</code> operation can run.</dd>
+          </dl>
+          <pre><code>// Host/tool declaration.
+ToolDefinition::raw("tool:play_move", "play_move", "...", input, output)
+  .with_agent_surface(ToolAgentSurface::new(["board"], "play"));
+
+// Lashlang authored by the model.
+board = await board.read({})?
+move = await board.play({ cell: 4 })?
+submit { board: board, move: move }</code></pre>
         </div>
 
         <div class="section" id="program-form">
@@ -140,6 +165,8 @@ submit counts</code></pre>
             <dd>Conditionals use blocks. <code>else if</code> parses as an <code>else</code> block containing another <code>if</code>.</dd>
             <dt><code>for</code></dt>
             <dd><code>for item in iterable { ... }</code> iterates lists. Non-list iteration is a runtime error. <code>range</code> is the usual integer-loop helper.</dd>
+            <dt><code>while</code></dt>
+            <dd><code>while condition { ... }</code> repeats while the condition is truthy. Prefer bounded loops where possible; <code>break</code>, <code>continue</code>, and <code>submit</code> keep their normal meanings inside the loop body.</dd>
             <dt><code>break</code> / <code>continue</code></dt>
             <dd><code>break</code> exits the nearest loop through the iterator cleanup path. <code>continue</code> skips to the next iteration. They are rejected outside loops.</dd>
             <dt><code>submit</code></dt>
@@ -167,6 +194,18 @@ if total > 10 {
   label = "small"
 }
 submit format("seen={} total={} label={}", join(seen, ","), total, label)</code></pre>
+          <p><code>while</code> is useful for bounded retry/fill loops when the limit is computed inside the program.</p>
+          <pre><code>attempts = 0
+items = []
+while len(items) &lt; 3 and attempts &lt; 5 {
+  attempts = attempts + 1
+  candidate = format("item-{}", attempts)
+  if contains(items, candidate) {
+    continue
+  }
+  items = push(items, candidate)
+}
+submit { attempts: attempts, items: items }</code></pre>
         </div>
   </main>
 

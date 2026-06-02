@@ -10,6 +10,12 @@ use sha2::{Digest, Sha256};
 
 #[cfg(feature = "otel")]
 pub mod otel;
+mod process_graph;
+
+pub use process_graph::{
+    TraceProcessEdgeSelection, TraceProcessGraph, TraceProcessGraphChildLink,
+    TraceProcessGraphEdge, TraceProcessGraphNode, TraceProcessGraphStore, TraceProcessNodeStatus,
+};
 
 pub const TRACE_SCHEMA_VERSION: u32 = 2;
 

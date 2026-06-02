@@ -247,17 +247,21 @@ mod tests {
         let mut cache = CompiledProgramCache::with_capacity(2);
         let first = cache.get_or_compile("submit 1").expect("compile first");
         let second = cache.get_or_compile("submit 1").expect("compile cache hit");
+        let same_ast = cache
+            .get_or_compile("submit 1\n")
+            .expect("compile source-distinct program");
         let other = cache.get_or_compile("submit 2").expect("compile second");
         let third = cache.get_or_compile("submit 3").expect("compile third");
 
         assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert!(!std::sync::Arc::ptr_eq(&first, &same_ast));
         assert!(!std::sync::Arc::ptr_eq(&first, &other));
         assert!(!std::sync::Arc::ptr_eq(&other, &third));
 
         let stats = cache.stats();
         assert_eq!(stats.hits, 1);
-        assert_eq!(stats.misses, 3);
-        assert_eq!(stats.evictions, 1);
+        assert_eq!(stats.misses, 4);
+        assert_eq!(stats.evictions, 2);
         assert_eq!(stats.entries, 2);
         assert_eq!(stats.capacity, 2);
     }

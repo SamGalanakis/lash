@@ -43,7 +43,7 @@
             <dt>Semantic event stream</dt>
             <dd>Identity-bearing <code>TurnActivity</code> items: assistant prose deltas, reasoning deltas, tool start/complete pairs with correlation ids, code-block start/complete, terminal <code>SubmittedValue</code>/<code>ToolValue</code>, per-call and rolling usage. Assistant prose deltas are live previews; the settled transcript comes from <code>TurnResult</code> / <code>SessionReadView</code> after the runtime commit.</dd>
             <dt>Tracing as a first-class sink</dt>
-            <dd>Attach <code>TraceSink</code> implementations for structured runtime records. JSONL tracing and the HTML viewer cover turns, tools, LLMs, prompts, stream deltas, and usage; OpenTelemetry export is optional. Lashlang process tracking uses a separate opt-in sink so process-map observability does not mutate process-registry state.</dd>
+            <dd>Attach <code>TraceSink</code> implementations for structured runtime records. JSONL tracing and the HTML viewer cover turns, tools, LLMs, prompts, stream deltas, and usage; OpenTelemetry export is optional. Lashlang process tracking uses a separate opt-in sink so process-map observability does not mutate process-registry state. Use <code>ProcessControl</code> for host commands and <code>TraceProcessGraphStore</code> for optional trace-derived graph snapshots.</dd>
             <dt>Snapshot and restore seams</dt>
             <dd>Plugins, tool state, and the current AgentFrame's Lashlang VM each persist through versioned snapshot writers so a parked session resumes intact across process restarts.</dd>
           </dl>

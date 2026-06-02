@@ -123,11 +123,13 @@ for turns where direct prose may finish without a lashlang block.
 appears when a tool terminal control finishes the turn. Prose-only completion is
 already visible through assistant prose deltas.
 
-In lashlang, the model can call the demo tool with:
+In lashlang, the model calls the demo tools through their host-declared module
+surface. `DemoPlugin` maps the underlying `read_board` tool to `board.read`
+and `play_move` to `board.play` with `ToolAgentSurface`:
 
 ```lashlang
-board = (call read_board {})?
-move = (call play_move { cell: 4 })?
+board = await board.read({})?
+move = await board.play({ cell: 4 })?
 submit "I played the center."
 ```
 

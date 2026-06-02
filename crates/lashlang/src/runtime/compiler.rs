@@ -453,7 +453,7 @@ impl Compiler {
             let slot = self.push_slot(name);
             let has_type_literal = contains_type_literal(expr);
             let const_value = if let Expr::TypeLiteral(ty) = expr {
-                fold_type(ty).map(wrap_type_schema_value)
+                self.fold_type_expr(ty).map(wrap_type_schema_value)
             } else if has_type_literal {
                 None
             } else {
@@ -752,12 +752,7 @@ impl Compiler {
                     eval_binary_values(left, *op, right).ok()
                 }
             },
-            Expr::TypeLiteral(ty) => {
-                let schema = fold_type(ty)?;
-                let mut wrapper = record_with_capacity(1);
-                wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
-                Some(Value::Record(Arc::new(wrapper)))
-            }
+            Expr::TypeLiteral(ty) => self.fold_type_expr(ty).map(wrap_type_schema_value),
             Expr::Block(_)
             | Expr::Assign { .. }
             | Expr::For { .. }
@@ -1409,7 +1404,7 @@ impl Compiler {
     fn compile_type_literal(&mut self, ty: &TypeExpr) {
         self.compile_stats.borrow_mut().type_literals_total += 1;
 
-        if let Some(schema) = fold_type(ty) {
+        if let Some(schema) = self.fold_type_expr(ty) {
             let idx = self.push_const(wrap_type_schema_value(schema));
             self.code.push(Instruction::PushConst(idx));
             self.compile_stats.borrow_mut().type_literals_const_folded += 1;
@@ -1422,7 +1417,7 @@ impl Compiler {
     }
 
     fn compile_type_expr(&mut self, ty: &TypeExpr) {
-        if let Some(value) = fold_type(ty) {
+        if let Some(value) = self.fold_type_expr(ty) {
             let idx = self.push_const(value);
             self.code.push(Instruction::PushConst(idx));
             return;
@@ -1500,6 +1495,69 @@ impl Compiler {
             | TypeExpr::Enum(_) => {
                 unreachable!("scalar/enum types must const-fold")
             }
+        }
+    }
+
+    fn fold_type_expr(&self, ty: &TypeExpr) -> Option<Value> {
+        self.fold_type_expr_inner(ty, &mut SmallVec::new())
+    }
+
+    fn fold_type_expr_inner<'a>(
+        &self,
+        ty: &'a TypeExpr,
+        resolving: &mut SmallVec<[&'a str; 4]>,
+    ) -> Option<Value> {
+        use schema_keys::*;
+        match ty {
+            TypeExpr::Ref(name) => {
+                let name = name.as_str();
+                if resolving.contains(&name) {
+                    return None;
+                }
+                let wrapper = self.const_for_name(name)?;
+                resolving.push(name);
+                let schema = unwrap_type_value(&wrapper).cloned();
+                resolving.pop();
+                schema
+            }
+            TypeExpr::List(inner) => {
+                let inner_value = self.fold_type_expr_inner(inner, resolving)?;
+                let mut rec = record_with_capacity(2);
+                rec.insert(TYPE.into(), Value::String(ARRAY.into()));
+                rec.insert(ITEMS.into(), inner_value);
+                Some(Value::Record(Arc::new(rec)))
+            }
+            TypeExpr::Object(fields) => {
+                let mut properties = record_with_capacity(fields.len());
+                for field in fields {
+                    properties.insert(
+                        field.name.to_string(),
+                        self.fold_type_expr_inner(&field.ty, resolving)?,
+                    );
+                }
+                let required: Vec<Value> = fields
+                    .iter()
+                    .filter(|f| !f.optional)
+                    .map(|f| Value::String(f.name.clone()))
+                    .collect();
+                let mut rec = record_with_capacity(4);
+                rec.insert(TYPE.into(), Value::String(OBJECT.into()));
+                rec.insert(PROPERTIES.into(), Value::Record(Arc::new(properties)));
+                rec.insert(REQUIRED.into(), Value::List(required.into()));
+                rec.insert(ADDITIONAL_PROPERTIES.into(), Value::Bool(false));
+                Some(Value::Record(Arc::new(rec)))
+            }
+            TypeExpr::Union(variants) => {
+                let folded: Option<Vec<Value>> = variants
+                    .iter()
+                    .map(|variant| self.fold_type_expr_inner(variant, resolving))
+                    .collect();
+                let folded = folded?;
+                let mut rec = record_with_capacity(1);
+                rec.insert(ANY_OF.into(), Value::List(folded.into()));
+                Some(Value::Record(Arc::new(rec)))
+            }
+            _ => fold_type(ty),
         }
     }
 

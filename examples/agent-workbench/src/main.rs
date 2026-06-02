@@ -1,6 +1,6 @@
 mod ui;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -27,7 +27,7 @@ use lash::{
     TurnInput, TurnResult,
     tracing::{
         JsonlTraceSink, StderrTraceSink, TeeTraceSink, TraceContext, TraceEvent, TraceLevel,
-        TraceProcessStatus, TraceProcessTrackingEvent, TraceRecord, TraceSink, TraceSinkError,
+        TraceProcessGraph, TraceProcessGraphStore, TraceRecord, TraceSink,
     },
 };
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
@@ -73,7 +73,7 @@ async fn main() -> AnyhowResult<()> {
         "agent-workbench process tracking trace: {}",
         process_tracking_path.display()
     );
-    let process_tracking = Arc::new(ProcessTrackingReducer::default());
+    let process_tracking = Arc::new(TraceProcessGraphStore::default());
     let process_tracking_sink = Arc::new(TeeTraceSink::new([
         Arc::clone(&process_tracking) as Arc<dyn TraceSink>,
         Arc::new(JsonlTraceSink::new(process_tracking_path.clone())) as Arc<dyn TraceSink>,
@@ -221,7 +221,7 @@ struct AppState {
     selected_model: Arc<Mutex<ModelSelection>>,
     web_configured: bool,
     trace_sink: Option<Arc<dyn TraceSink>>,
-    process_tracking: Arc<ProcessTrackingReducer>,
+    process_tracking: Arc<TraceProcessGraphStore>,
     event_tx: broadcast::Sender<StreamItem>,
     queue_runner: SessionQueueRunner,
 }
@@ -370,440 +370,6 @@ struct WorkEvent {
     event_type: String,
     occurred_at_ms: u64,
     payload: Value,
-}
-
-#[derive(Default)]
-struct ProcessTrackingReducer {
-    inner: Mutex<ProcessTrackingState>,
-}
-
-#[derive(Default)]
-struct ProcessTrackingState {
-    seen_event_keys: BTreeSet<String>,
-    processes: BTreeMap<String, ProcessGraphAccumulator>,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-struct ProcessGraph {
-    process_id: String,
-    session_id: String,
-    module_ref: String,
-    process_ref: String,
-    process_name: String,
-    status: String,
-    nodes: Vec<ProcessGraphNode>,
-    edges: Vec<ProcessGraphEdge>,
-    children: Vec<ProcessChildLink>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct ProcessGraphAccumulator {
-    process_id: String,
-    session_id: String,
-    module_ref: String,
-    process_ref: String,
-    process_name: String,
-    status: String,
-    nodes: BTreeMap<String, ProcessGraphNode>,
-    edges: BTreeMap<String, ProcessGraphEdge>,
-    children: Vec<ProcessChildLink>,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-struct ProcessGraphNode {
-    id: String,
-    kind: String,
-    label: String,
-    status: String,
-    first_timestamp: Option<String>,
-    last_timestamp: Option<String>,
-    duration_ms: Option<i64>,
-    latest_error: Option<String>,
-    occurrence: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-struct ProcessGraphEdge {
-    id: String,
-    from: String,
-    to: String,
-    label: String,
-    selected: Option<bool>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct ProcessChildLink {
-    parent_process_id: String,
-    parent_node_id: String,
-    child_process_id: String,
-    child_process_name: String,
-}
-
-impl ProcessTrackingReducer {
-    fn graph(&self, process_id: &str) -> Option<ProcessGraph> {
-        self.inner
-            .lock()
-            .expect("process tracking lock")
-            .processes
-            .get(process_id)
-            .map(ProcessGraphAccumulator::to_graph)
-    }
-}
-
-impl ProcessGraphAccumulator {
-    fn to_graph(&self) -> ProcessGraph {
-        ProcessGraph {
-            process_id: self.process_id.clone(),
-            session_id: self.session_id.clone(),
-            module_ref: self.module_ref.clone(),
-            process_ref: self.process_ref.clone(),
-            process_name: self.process_name.clone(),
-            status: self.status.clone(),
-            nodes: self.nodes.values().cloned().collect(),
-            edges: self.edges.values().cloned().collect(),
-            children: self.children.clone(),
-        }
-    }
-}
-
-impl TraceSink for ProcessTrackingReducer {
-    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
-        let TraceEvent::ProcessTracking { event } = &record.event else {
-            return Ok(());
-        };
-        let Some(event_key) = process_tracking_event_key(event) else {
-            return Ok(());
-        };
-        let mut state = self
-            .inner
-            .lock()
-            .map_err(|_| TraceSinkError::LockPoisoned)?;
-        if !state.seen_event_keys.insert(event_key.to_string()) {
-            return Ok(());
-        }
-        reduce_process_tracking_event(&mut state, event, &record.timestamp);
-        Ok(())
-    }
-}
-
-fn reduce_process_tracking_event(
-    state: &mut ProcessTrackingState,
-    event: &TraceProcessTrackingEvent,
-    timestamp: &str,
-) {
-    match event {
-        TraceProcessTrackingEvent::ProcessStarted {
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
-            process_map,
-            ..
-        } => {
-            let graph = graph_mut(
-                state,
-                process_id,
-                session_id,
-                module_ref,
-                process_ref,
-                process_name,
-            );
-            graph.status = "running".to_string();
-            for node in &process_map.nodes {
-                graph
-                    .nodes
-                    .entry(node.id.clone())
-                    .or_insert_with(|| ProcessGraphNode {
-                        id: node.id.clone(),
-                        kind: node.kind.clone(),
-                        label: node.label.clone(),
-                        status: "unobserved".to_string(),
-                        ..ProcessGraphNode::default()
-                    });
-            }
-            for edge in &process_map.edges {
-                graph
-                    .edges
-                    .entry(edge.id.clone())
-                    .or_insert_with(|| ProcessGraphEdge {
-                        id: edge.id.clone(),
-                        from: edge.from.clone(),
-                        to: edge.to.clone(),
-                        label: edge.label.clone(),
-                        selected: None,
-                    });
-            }
-        }
-        TraceProcessTrackingEvent::ProcessFinished {
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
-            status,
-            ..
-        } => {
-            graph_mut(
-                state,
-                process_id,
-                session_id,
-                module_ref,
-                process_ref,
-                process_name,
-            )
-            .status = process_status_label(*status).to_string();
-        }
-        TraceProcessTrackingEvent::NodeStarted {
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
-            node_id,
-            node_kind,
-            label,
-            occurrence,
-            ..
-        } => {
-            let node = node_mut(
-                state,
-                ProcessNodeIdentity {
-                    process_id,
-                    session_id,
-                    module_ref,
-                    process_ref,
-                    process_name,
-                    node_id,
-                    node_kind,
-                    label,
-                },
-            );
-            if node.first_timestamp.is_none() {
-                node.first_timestamp = Some(timestamp.to_string());
-            }
-            node.last_timestamp = Some(timestamp.to_string());
-            node.status = "running".to_string();
-            node.occurrence = Some(*occurrence);
-        }
-        TraceProcessTrackingEvent::NodeCompleted {
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
-            node_id,
-            node_kind,
-            label,
-            occurrence,
-            ..
-        } => {
-            let node = node_mut(
-                state,
-                ProcessNodeIdentity {
-                    process_id,
-                    session_id,
-                    module_ref,
-                    process_ref,
-                    process_name,
-                    node_id,
-                    node_kind,
-                    label,
-                },
-            );
-            node.last_timestamp = Some(timestamp.to_string());
-            node.duration_ms = duration_ms(node.first_timestamp.as_deref(), Some(timestamp));
-            node.status = "completed".to_string();
-            node.occurrence = Some(*occurrence);
-        }
-        TraceProcessTrackingEvent::NodeFailed {
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
-            node_id,
-            node_kind,
-            label,
-            occurrence,
-            error,
-            ..
-        } => {
-            let node = node_mut(
-                state,
-                ProcessNodeIdentity {
-                    process_id,
-                    session_id,
-                    module_ref,
-                    process_ref,
-                    process_name,
-                    node_id,
-                    node_kind,
-                    label,
-                },
-            );
-            node.last_timestamp = Some(timestamp.to_string());
-            node.duration_ms = duration_ms(node.first_timestamp.as_deref(), Some(timestamp));
-            node.status = "failed".to_string();
-            node.latest_error = Some(error.clone());
-            node.occurrence = Some(*occurrence);
-        }
-        TraceProcessTrackingEvent::BranchSelected {
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
-            node_id,
-            occurrence,
-            edge_id,
-            ..
-        } => {
-            let graph = graph_mut(
-                state,
-                process_id,
-                session_id,
-                module_ref,
-                process_ref,
-                process_name,
-            );
-            if let Some(node) = graph.nodes.get_mut(node_id) {
-                node.status = "completed".to_string();
-                node.last_timestamp = Some(timestamp.to_string());
-                node.occurrence = Some(*occurrence);
-            }
-            let selected_from = graph.edges.get(edge_id).map(|edge| edge.from.clone());
-            if let Some(edge) = graph.edges.get_mut(edge_id) {
-                edge.selected = Some(true);
-            }
-            if let Some(selected_from) = selected_from {
-                for edge in graph.edges.values_mut() {
-                    if edge.from == selected_from
-                        && matches!(edge.label.as_str(), "then" | "else")
-                        && edge.id != *edge_id
-                    {
-                        edge.selected = Some(false);
-                    }
-                }
-            }
-        }
-        TraceProcessTrackingEvent::ChildStarted {
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
-            parent_process_id,
-            parent_node_id,
-            child_process_id,
-            child_process_name,
-            ..
-        } => {
-            let graph = graph_mut(
-                state,
-                process_id,
-                session_id,
-                module_ref,
-                process_ref,
-                process_name,
-            );
-            if !graph.children.iter().any(|child| {
-                child.parent_node_id == *parent_node_id
-                    && child.child_process_id == *child_process_id
-            }) {
-                graph.children.push(ProcessChildLink {
-                    parent_process_id: parent_process_id.clone(),
-                    parent_node_id: parent_node_id.clone(),
-                    child_process_id: child_process_id.clone(),
-                    child_process_name: child_process_name.clone(),
-                });
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ProcessNodeIdentity<'event> {
-    process_id: &'event str,
-    session_id: &'event str,
-    module_ref: &'event str,
-    process_ref: &'event str,
-    process_name: &'event str,
-    node_id: &'event str,
-    node_kind: &'event str,
-    label: &'event str,
-}
-
-fn graph_mut<'a>(
-    state: &'a mut ProcessTrackingState,
-    process_id: &str,
-    session_id: &str,
-    module_ref: &str,
-    process_ref: &str,
-    process_name: &str,
-) -> &'a mut ProcessGraphAccumulator {
-    state
-        .processes
-        .entry(process_id.to_string())
-        .or_insert_with(|| ProcessGraphAccumulator {
-            process_id: process_id.to_string(),
-            session_id: session_id.to_string(),
-            module_ref: module_ref.to_string(),
-            process_ref: process_ref.to_string(),
-            process_name: process_name.to_string(),
-            status: "running".to_string(),
-            ..ProcessGraphAccumulator::default()
-        })
-}
-
-fn node_mut<'a>(
-    state: &'a mut ProcessTrackingState,
-    identity: ProcessNodeIdentity<'_>,
-) -> &'a mut ProcessGraphNode {
-    graph_mut(
-        state,
-        identity.process_id,
-        identity.session_id,
-        identity.module_ref,
-        identity.process_ref,
-        identity.process_name,
-    )
-    .nodes
-    .entry(identity.node_id.to_string())
-    .or_insert_with(|| ProcessGraphNode {
-        id: identity.node_id.to_string(),
-        kind: identity.node_kind.to_string(),
-        label: identity.label.to_string(),
-        status: "unobserved".to_string(),
-        ..ProcessGraphNode::default()
-    })
-}
-
-fn process_tracking_event_key(event: &TraceProcessTrackingEvent) -> Option<&str> {
-    match event {
-        TraceProcessTrackingEvent::ProcessStarted { event_key, .. }
-        | TraceProcessTrackingEvent::ProcessFinished { event_key, .. }
-        | TraceProcessTrackingEvent::NodeStarted { event_key, .. }
-        | TraceProcessTrackingEvent::NodeCompleted { event_key, .. }
-        | TraceProcessTrackingEvent::NodeFailed { event_key, .. }
-        | TraceProcessTrackingEvent::BranchSelected { event_key, .. }
-        | TraceProcessTrackingEvent::ChildStarted { event_key, .. } => Some(event_key),
-    }
-}
-
-fn process_status_label(status: TraceProcessStatus) -> &'static str {
-    match status {
-        TraceProcessStatus::Running => "running",
-        TraceProcessStatus::Completed => "completed",
-        TraceProcessStatus::Failed => "failed",
-        TraceProcessStatus::Cancelled => "cancelled",
-    }
-}
-
-fn duration_ms(first: Option<&str>, last: Option<&str>) -> Option<i64> {
-    let first = chrono::DateTime::parse_from_rfc3339(first?).ok()?;
-    let last = chrono::DateTime::parse_from_rfc3339(last?).ok()?;
-    Some((last - first).num_milliseconds().max(0))
 }
 
 async fn index() -> Html<&'static str> {
@@ -1050,7 +616,7 @@ async fn list_work(State(state): State<AppState>) -> Result<Json<Vec<WorkItem>>,
 async fn process_graph(
     AxumPath(process_id): AxumPath<String>,
     State(state): State<AppState>,
-) -> Result<Json<ProcessGraph>, AppError> {
+) -> Result<Json<TraceProcessGraph>, AppError> {
     state
         .process_tracking
         .graph(&process_id)
@@ -1779,7 +1345,10 @@ Use background processes or subagents only when they clarify the user's request 
 mod tests {
     use super::*;
     use lash::persistence::RuntimePersistence;
-    use lash::tracing::{TraceProcessMap, TraceProcessMapEdge, TraceProcessMapNode};
+    use lash::tracing::{
+        TraceProcessEdgeSelection, TraceProcessMap, TraceProcessMapEdge, TraceProcessMapNode,
+        TraceProcessStatus, TraceProcessTrackingEvent,
+    };
 
     #[test]
     fn reset_session_rotation_replaces_workbench_session_id() {
@@ -1818,11 +1387,11 @@ mod tests {
     }
 
     #[test]
-    fn process_tracking_reducer_builds_graph_state() {
-        let reducer = ProcessTrackingReducer::default();
+    fn process_graph_store_builds_graph_state() {
+        let store = TraceProcessGraphStore::default();
         let context = TraceContext::default().for_session("s1");
         let append = |event: TraceProcessTrackingEvent| {
-            reducer
+            store
                 .append(&TraceRecord::new(
                     context.clone(),
                     TraceEvent::ProcessTracking { event },
@@ -1890,8 +1459,8 @@ mod tests {
             child_process_name: "child".to_string(),
         });
 
-        let graph = reducer.graph("p1").expect("graph");
-        assert_eq!(graph.status, "running");
+        let graph = store.graph("p1").expect("graph");
+        assert_eq!(graph.status, TraceProcessStatus::Running);
         assert_eq!(graph.children.len(), 1);
         assert_eq!(graph.children[0].child_process_id, "p2");
         assert_eq!(
@@ -1899,17 +1468,25 @@ mod tests {
                 .edges
                 .iter()
                 .find(|edge| edge.id == "then-edge")
-                .and_then(|edge| edge.selected),
-            Some(true)
+                .map(|edge| edge.selection),
+            Some(TraceProcessEdgeSelection::Selected)
         );
         assert_eq!(
             graph
                 .edges
                 .iter()
                 .find(|edge| edge.id == "else-edge")
-                .and_then(|edge| edge.selected),
-            Some(false)
+                .map(|edge| edge.selection),
+            Some(TraceProcessEdgeSelection::Rejected)
         );
+    }
+
+    #[test]
+    fn workbench_does_not_define_a_local_process_tracking_reducer() {
+        let source = include_str!("main.rs");
+        let old_reducer_decl = format!("struct {}{}", "ProcessTracking", "Reducer");
+
+        assert!(!source.contains(&old_reducer_decl));
     }
 
     #[test]
@@ -2037,7 +1614,7 @@ mod tests {
             })),
             web_configured: false,
             trace_sink: None,
-            process_tracking: Arc::new(ProcessTrackingReducer::default()),
+            process_tracking: Arc::new(TraceProcessGraphStore::default()),
             event_tx: broadcast::channel(1024).0,
             queue_runner: SessionQueueRunner::inert(),
         };
@@ -2160,7 +1737,7 @@ mod tests {
             })),
             web_configured: false,
             trace_sink: None,
-            process_tracking: Arc::new(ProcessTrackingReducer::default()),
+            process_tracking: Arc::new(TraceProcessGraphStore::default()),
             event_tx,
             queue_runner,
         };
@@ -2302,7 +1879,7 @@ mod tests {
             })),
             web_configured: false,
             trace_sink: None,
-            process_tracking: Arc::new(ProcessTrackingReducer::default()),
+            process_tracking: Arc::new(TraceProcessGraphStore::default()),
             event_tx: broadcast::channel(1024).0,
             queue_runner: SessionQueueRunner::inert(),
         };

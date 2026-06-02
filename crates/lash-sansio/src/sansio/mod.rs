@@ -142,6 +142,7 @@ fn render_message_origin(origin: &MessageOrigin) -> String {
             event_type,
             sequence,
             wake_id,
+            ..
         } => match wake_id {
             Some(wake_id) => {
                 format!("process {process_id} {event_type} #{sequence} ({wake_id})")

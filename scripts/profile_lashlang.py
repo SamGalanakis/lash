@@ -20,6 +20,7 @@ PERF_MODES = [
     "snapshot",
     "artifact_roundtrip",
     "compiled_process_cache",
+    "compiled_program_cache",
 ]
 
 DEFAULT_PERF_MODES = [
@@ -30,6 +31,7 @@ DEFAULT_PERF_MODES = [
     "snapshot",
     "artifact_roundtrip",
     "compiled_process_cache",
+    "compiled_program_cache",
 ]
 
 

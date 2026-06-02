@@ -684,6 +684,10 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
         .expect("process registry")
         .clone();
     let target_scope = crate::ProcessScope::new("root");
+    let process_caused_by = crate::CausalRef::SessionNode {
+        session_id: "root".to_string(),
+        node_id: "host-event:button".to_string(),
+    };
     registry
         .register_process(
             crate::ProcessRegistration::new(
@@ -692,7 +696,11 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
                     metadata: serde_json::Value::Null,
                 },
             )
-            .with_extra_event_types(crate::lashlang_process_event_types()),
+            .with_extra_event_types(crate::lashlang_process_event_types())
+            .with_process_provenance(
+                crate::ProcessProvenance::new(target_scope.clone(), "test-host")
+                    .with_caused_by(Some(process_caused_by.clone())),
+            ),
         )
         .await
         .expect("register wake process");
@@ -846,6 +854,10 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
         .expect("process registry")
         .clone();
     let target_scope = crate::ProcessScope::new("root");
+    let process_caused_by = crate::CausalRef::SessionNode {
+        session_id: "root".to_string(),
+        node_id: "host-event:button".to_string(),
+    };
     registry
         .register_process(
             crate::ProcessRegistration::new(
@@ -854,7 +866,11 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
                     metadata: serde_json::Value::Null,
                 },
             )
-            .with_extra_event_types(crate::lashlang_process_event_types()),
+            .with_extra_event_types(crate::lashlang_process_event_types())
+            .with_process_provenance(
+                crate::ProcessProvenance::new(target_scope.clone(), "test-host")
+                    .with_caused_by(Some(process_caused_by.clone())),
+            ),
         )
         .await
         .expect("register wake process");
@@ -908,6 +924,19 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
         cause.event_type == "process.wake"
             && cause.id == expected_wake_id
             && cause.text == expected_text
+            && matches!(
+                &cause.origin,
+                crate::MessageOrigin::Process {
+                    process_id,
+                    event_type,
+                    sequence: 1,
+                    wake_id,
+                    caused_by,
+                } if process_id == "wake-proc"
+                    && event_type == "process.wake"
+                    && wake_id.as_deref() == Some(expected_wake_id.as_str())
+                    && caused_by.as_ref() == Some(&process_caused_by)
+            )
     }));
 
     assert!(
@@ -943,10 +972,12 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
             event_type,
             sequence,
             wake_id,
+            caused_by,
         }) if process_id == "wake-proc"
             && event_type == "process.wake"
             && sequence == 1
             && wake_id.as_deref() == Some(expected_wake_id.as_str())
+            && caused_by.as_ref() == Some(&process_caused_by)
     ));
     assert!(
         active_conversation_messages(&runtime.state)

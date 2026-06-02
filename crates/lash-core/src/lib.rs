@@ -166,7 +166,9 @@ pub use lash_trace::otel::{OtelTraceOptions, OtelTraceSink};
 pub use lash_trace::{
     JsonlTraceSink, TraceAttachment, TraceBranchSelection, TraceContentBlock, TraceContext,
     TraceError, TraceEvent, TraceLevel, TraceLlmMessage, TraceLlmRequest, TraceLlmResponse,
-    TraceProcessMap, TraceProcessMapEdge, TraceProcessMapNode, TraceProcessStatus,
+    TraceProcessEdgeSelection, TraceProcessGraph, TraceProcessGraphChildLink,
+    TraceProcessGraphEdge, TraceProcessGraphNode, TraceProcessGraphStore, TraceProcessMap,
+    TraceProcessMapEdge, TraceProcessMapNode, TraceProcessNodeStatus, TraceProcessStatus,
     TraceProcessTrackingEvent, TracePromptComponent, TraceProviderStreamEvent, TraceRecord,
     TraceRuntimeStreamEvent, TraceSink, TraceSinkError, TraceTokenUsage, TraceToolSpec,
 };
