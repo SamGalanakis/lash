@@ -120,30 +120,56 @@ impl PluginSession {
         &self.host_events
     }
 
-    pub fn install_lashlang_trigger_source(
+    pub fn register_lashlang_trigger(
         &self,
-        source: &str,
-        surface: lashlang::LashlangSurface,
-        artifact_store: &dyn lashlang::LashlangArtifactStore,
-    ) -> Result<crate::SessionTriggerInstallReport, PluginError> {
-        self.trigger_registry
-            .install_lashlang_source(source, surface, artifact_store)
+        request: serde_json::Value,
+        artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
+    ) -> Result<serde_json::Value, PluginError> {
+        let route = self.trigger_registry.register_route(
+            request,
+            &self.lashlang_resources,
+            artifact_store.as_ref(),
+        )?;
+        Ok(super::trigger_registry::trigger_handle_json(&route.handle))
     }
 
-    pub fn install_linked_lashlang_trigger_source(
+    pub fn list_lashlang_triggers(
         &self,
-        source: &str,
-        linked: &lashlang::LinkedModule,
-        artifact_store: &dyn lashlang::LashlangArtifactStore,
-    ) -> Result<crate::SessionTriggerInstallReport, PluginError> {
-        self.trigger_registry
-            .install_linked_lashlang_source(source, linked, artifact_store)
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, PluginError> {
+        serde_json::to_value(self.trigger_registry.list(request)?).map_err(|err| {
+            PluginError::Session(format!("failed to encode trigger registrations: {err}"))
+        })
     }
 
-    pub(crate) fn installed_lashlang_trigger_routes(
+    pub fn list_all_lashlang_triggers(&self) -> Result<Vec<TriggerRegistration>, PluginError> {
+        self.trigger_registry.list_all()
+    }
+
+    pub fn lashlang_trigger_registrations_by_source_type(
         &self,
-    ) -> Result<Vec<SessionTriggerRoute>, PluginError> {
-        self.trigger_registry.installed_routes()
+        source_type: TriggerSourceType,
+    ) -> Result<Vec<TriggerRegistration>, PluginError> {
+        self.trigger_registry.routes_by_source_type(&source_type)
+    }
+
+    pub fn cancel_lashlang_trigger(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, PluginError> {
+        let changed = self.trigger_registry.cancel(request)?;
+        Ok(serde_json::json!(changed))
+    }
+
+    pub(crate) fn trigger_activation_service(
+        &self,
+        processes: Arc<dyn crate::ProcessService>,
+    ) -> crate::TriggerActivationService {
+        crate::TriggerActivationService::new(
+            self.session_id.clone(),
+            Arc::clone(&self.trigger_registry),
+            processes,
+        )
     }
 
     pub fn host(&self) -> &PluginHost {
@@ -589,6 +615,10 @@ impl PluginSession {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "plugin action invocation carries the explicit host services exposed to actions"
+    )]
     pub async fn invoke_plugin_action(
         &self,
         name: &str,
@@ -635,6 +665,10 @@ impl PluginSession {
         .await)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "typed action invocation mirrors the raw plugin action host service boundary"
+    )]
     pub async fn call_plugin_action<Op: PluginAction>(
         &self,
         args: Op::Args,

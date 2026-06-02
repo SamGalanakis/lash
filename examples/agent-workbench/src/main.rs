@@ -1,6 +1,6 @@
 mod ui;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result as AnyhowResult, anyhow};
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -27,7 +27,7 @@ use lash::{
     TurnInput, TurnResult,
     tracing::{
         JsonlTraceSink, StderrTraceSink, TeeTraceSink, TraceContext, TraceEvent, TraceLevel,
-        TraceRecord, TraceSink,
+        TraceProcessStatus, TraceProcessTrackingEvent, TraceRecord, TraceSink, TraceSinkError,
     },
 };
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
@@ -42,6 +42,8 @@ const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 200_000;
 const BUTTON_TRIGGER_RESOURCE: &str = "Button";
 const BUTTON_TRIGGER_ALIAS: &str = "ui.button";
 const BUTTON_TRIGGER_EVENT: &str = "pressed";
+const BUTTON_TRIGGER_SOURCE_TYPE: &str = "ui.button.pressed";
+const CRON_SCHEDULE_SOURCE_TYPE: &str = "cron.Schedule";
 
 #[tokio::main]
 async fn main() -> AnyhowResult<()> {
@@ -63,6 +65,18 @@ async fn main() -> AnyhowResult<()> {
     let trace_sink = Arc::new(TeeTraceSink::new([
         Arc::new(StderrTraceSink::default()) as Arc<dyn TraceSink>,
         Arc::new(JsonlTraceSink::new(trace_path)),
+    ])) as Arc<dyn TraceSink>;
+    let process_tracking_path = std::env::var("AGENT_WORKBENCH_PROCESS_TRACE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join("process-tracking.jsonl"));
+    eprintln!(
+        "agent-workbench process tracking trace: {}",
+        process_tracking_path.display()
+    );
+    let process_tracking = Arc::new(ProcessTrackingReducer::default());
+    let process_tracking_sink = Arc::new(TeeTraceSink::new([
+        Arc::clone(&process_tracking) as Arc<dyn TraceSink>,
+        Arc::new(JsonlTraceSink::new(process_tracking_path.clone())) as Arc<dyn TraceSink>,
     ])) as Arc<dyn TraceSink>;
 
     let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
@@ -129,6 +143,7 @@ async fn main() -> AnyhowResult<()> {
         )))
         .lashlang_artifact_store(artifact_store)
         .trace_sink(Some(Arc::clone(&trace_sink)))
+        .process_tracking_sink(Some(Arc::clone(&process_tracking_sink)))
         .trace_level(TraceLevel::Extended)
         .configure_plugins(|plugins| {
             plugins.push(Arc::new(WorkbenchPluginFactory::new(
@@ -143,9 +158,7 @@ async fn main() -> AnyhowResult<()> {
             ));
         })
         .advanced()
-        .effect_controller(Arc::new(
-            lash::advanced::InlineRuntimeEffectController::default(),
-        ))
+        .effect_controller(Arc::new(lash::advanced::InlineRuntimeEffectController))
         .process_registry(Arc::clone(&process_registry))
         .build()
         .context("build Lash core")?;
@@ -161,6 +174,7 @@ async fn main() -> AnyhowResult<()> {
         })),
         web_configured: !tavily_api_key.trim().is_empty(),
         trace_sink: Some(Arc::clone(&trace_sink)),
+        process_tracking,
         event_tx,
         queue_runner,
     };
@@ -173,6 +187,7 @@ async fn main() -> AnyhowResult<()> {
             "addr": addr.to_string(),
             "data_dir": data_dir.display().to_string(),
             "trace_path": trace_path_display,
+            "process_tracking_path": process_tracking_path.display().to_string(),
             "model": serde_json::to_value(state.selected_model()).unwrap_or(Value::Null),
             "web_configured": state.web_configured,
         }),
@@ -186,6 +201,7 @@ async fn main() -> AnyhowResult<()> {
         .route("/api/reset", post(reset_chat))
         .route("/api/button-trigger", post(button_trigger))
         .route("/api/work", get(list_work))
+        .route("/api/process-graph/{process_id}", get(process_graph))
         .with_state(state);
 
     println!("agent-workbench listening on http://{addr}");
@@ -205,6 +221,7 @@ struct AppState {
     selected_model: Arc<Mutex<ModelSelection>>,
     web_configured: bool,
     trace_sink: Option<Arc<dyn TraceSink>>,
+    process_tracking: Arc<ProcessTrackingReducer>,
     event_tx: broadcast::Sender<StreamItem>,
     queue_runner: SessionQueueRunner,
 }
@@ -353,6 +370,440 @@ struct WorkEvent {
     event_type: String,
     occurred_at_ms: u64,
     payload: Value,
+}
+
+#[derive(Default)]
+struct ProcessTrackingReducer {
+    inner: Mutex<ProcessTrackingState>,
+}
+
+#[derive(Default)]
+struct ProcessTrackingState {
+    seen_event_keys: BTreeSet<String>,
+    processes: BTreeMap<String, ProcessGraphAccumulator>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct ProcessGraph {
+    process_id: String,
+    session_id: String,
+    module_ref: String,
+    process_ref: String,
+    process_name: String,
+    status: String,
+    nodes: Vec<ProcessGraphNode>,
+    edges: Vec<ProcessGraphEdge>,
+    children: Vec<ProcessChildLink>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ProcessGraphAccumulator {
+    process_id: String,
+    session_id: String,
+    module_ref: String,
+    process_ref: String,
+    process_name: String,
+    status: String,
+    nodes: BTreeMap<String, ProcessGraphNode>,
+    edges: BTreeMap<String, ProcessGraphEdge>,
+    children: Vec<ProcessChildLink>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct ProcessGraphNode {
+    id: String,
+    kind: String,
+    label: String,
+    status: String,
+    first_timestamp: Option<String>,
+    last_timestamp: Option<String>,
+    duration_ms: Option<i64>,
+    latest_error: Option<String>,
+    occurrence: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct ProcessGraphEdge {
+    id: String,
+    from: String,
+    to: String,
+    label: String,
+    selected: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProcessChildLink {
+    parent_process_id: String,
+    parent_node_id: String,
+    child_process_id: String,
+    child_process_name: String,
+}
+
+impl ProcessTrackingReducer {
+    fn graph(&self, process_id: &str) -> Option<ProcessGraph> {
+        self.inner
+            .lock()
+            .expect("process tracking lock")
+            .processes
+            .get(process_id)
+            .map(ProcessGraphAccumulator::to_graph)
+    }
+}
+
+impl ProcessGraphAccumulator {
+    fn to_graph(&self) -> ProcessGraph {
+        ProcessGraph {
+            process_id: self.process_id.clone(),
+            session_id: self.session_id.clone(),
+            module_ref: self.module_ref.clone(),
+            process_ref: self.process_ref.clone(),
+            process_name: self.process_name.clone(),
+            status: self.status.clone(),
+            nodes: self.nodes.values().cloned().collect(),
+            edges: self.edges.values().cloned().collect(),
+            children: self.children.clone(),
+        }
+    }
+}
+
+impl TraceSink for ProcessTrackingReducer {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
+        let TraceEvent::ProcessTracking { event } = &record.event else {
+            return Ok(());
+        };
+        let Some(event_key) = process_tracking_event_key(event) else {
+            return Ok(());
+        };
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| TraceSinkError::LockPoisoned)?;
+        if !state.seen_event_keys.insert(event_key.to_string()) {
+            return Ok(());
+        }
+        reduce_process_tracking_event(&mut state, event, &record.timestamp);
+        Ok(())
+    }
+}
+
+fn reduce_process_tracking_event(
+    state: &mut ProcessTrackingState,
+    event: &TraceProcessTrackingEvent,
+    timestamp: &str,
+) {
+    match event {
+        TraceProcessTrackingEvent::ProcessStarted {
+            process_id,
+            session_id,
+            module_ref,
+            process_ref,
+            process_name,
+            process_map,
+            ..
+        } => {
+            let graph = graph_mut(
+                state,
+                process_id,
+                session_id,
+                module_ref,
+                process_ref,
+                process_name,
+            );
+            graph.status = "running".to_string();
+            for node in &process_map.nodes {
+                graph
+                    .nodes
+                    .entry(node.id.clone())
+                    .or_insert_with(|| ProcessGraphNode {
+                        id: node.id.clone(),
+                        kind: node.kind.clone(),
+                        label: node.label.clone(),
+                        status: "unobserved".to_string(),
+                        ..ProcessGraphNode::default()
+                    });
+            }
+            for edge in &process_map.edges {
+                graph
+                    .edges
+                    .entry(edge.id.clone())
+                    .or_insert_with(|| ProcessGraphEdge {
+                        id: edge.id.clone(),
+                        from: edge.from.clone(),
+                        to: edge.to.clone(),
+                        label: edge.label.clone(),
+                        selected: None,
+                    });
+            }
+        }
+        TraceProcessTrackingEvent::ProcessFinished {
+            process_id,
+            session_id,
+            module_ref,
+            process_ref,
+            process_name,
+            status,
+            ..
+        } => {
+            graph_mut(
+                state,
+                process_id,
+                session_id,
+                module_ref,
+                process_ref,
+                process_name,
+            )
+            .status = process_status_label(*status).to_string();
+        }
+        TraceProcessTrackingEvent::NodeStarted {
+            process_id,
+            session_id,
+            module_ref,
+            process_ref,
+            process_name,
+            node_id,
+            node_kind,
+            label,
+            occurrence,
+            ..
+        } => {
+            let node = node_mut(
+                state,
+                ProcessNodeIdentity {
+                    process_id,
+                    session_id,
+                    module_ref,
+                    process_ref,
+                    process_name,
+                    node_id,
+                    node_kind,
+                    label,
+                },
+            );
+            if node.first_timestamp.is_none() {
+                node.first_timestamp = Some(timestamp.to_string());
+            }
+            node.last_timestamp = Some(timestamp.to_string());
+            node.status = "running".to_string();
+            node.occurrence = Some(*occurrence);
+        }
+        TraceProcessTrackingEvent::NodeCompleted {
+            process_id,
+            session_id,
+            module_ref,
+            process_ref,
+            process_name,
+            node_id,
+            node_kind,
+            label,
+            occurrence,
+            ..
+        } => {
+            let node = node_mut(
+                state,
+                ProcessNodeIdentity {
+                    process_id,
+                    session_id,
+                    module_ref,
+                    process_ref,
+                    process_name,
+                    node_id,
+                    node_kind,
+                    label,
+                },
+            );
+            node.last_timestamp = Some(timestamp.to_string());
+            node.duration_ms = duration_ms(node.first_timestamp.as_deref(), Some(timestamp));
+            node.status = "completed".to_string();
+            node.occurrence = Some(*occurrence);
+        }
+        TraceProcessTrackingEvent::NodeFailed {
+            process_id,
+            session_id,
+            module_ref,
+            process_ref,
+            process_name,
+            node_id,
+            node_kind,
+            label,
+            occurrence,
+            error,
+            ..
+        } => {
+            let node = node_mut(
+                state,
+                ProcessNodeIdentity {
+                    process_id,
+                    session_id,
+                    module_ref,
+                    process_ref,
+                    process_name,
+                    node_id,
+                    node_kind,
+                    label,
+                },
+            );
+            node.last_timestamp = Some(timestamp.to_string());
+            node.duration_ms = duration_ms(node.first_timestamp.as_deref(), Some(timestamp));
+            node.status = "failed".to_string();
+            node.latest_error = Some(error.clone());
+            node.occurrence = Some(*occurrence);
+        }
+        TraceProcessTrackingEvent::BranchSelected {
+            process_id,
+            session_id,
+            module_ref,
+            process_ref,
+            process_name,
+            node_id,
+            occurrence,
+            edge_id,
+            ..
+        } => {
+            let graph = graph_mut(
+                state,
+                process_id,
+                session_id,
+                module_ref,
+                process_ref,
+                process_name,
+            );
+            if let Some(node) = graph.nodes.get_mut(node_id) {
+                node.status = "completed".to_string();
+                node.last_timestamp = Some(timestamp.to_string());
+                node.occurrence = Some(*occurrence);
+            }
+            let selected_from = graph.edges.get(edge_id).map(|edge| edge.from.clone());
+            if let Some(edge) = graph.edges.get_mut(edge_id) {
+                edge.selected = Some(true);
+            }
+            if let Some(selected_from) = selected_from {
+                for edge in graph.edges.values_mut() {
+                    if edge.from == selected_from
+                        && matches!(edge.label.as_str(), "then" | "else")
+                        && edge.id != *edge_id
+                    {
+                        edge.selected = Some(false);
+                    }
+                }
+            }
+        }
+        TraceProcessTrackingEvent::ChildStarted {
+            process_id,
+            session_id,
+            module_ref,
+            process_ref,
+            process_name,
+            parent_process_id,
+            parent_node_id,
+            child_process_id,
+            child_process_name,
+            ..
+        } => {
+            let graph = graph_mut(
+                state,
+                process_id,
+                session_id,
+                module_ref,
+                process_ref,
+                process_name,
+            );
+            if !graph.children.iter().any(|child| {
+                child.parent_node_id == *parent_node_id
+                    && child.child_process_id == *child_process_id
+            }) {
+                graph.children.push(ProcessChildLink {
+                    parent_process_id: parent_process_id.clone(),
+                    parent_node_id: parent_node_id.clone(),
+                    child_process_id: child_process_id.clone(),
+                    child_process_name: child_process_name.clone(),
+                });
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProcessNodeIdentity<'event> {
+    process_id: &'event str,
+    session_id: &'event str,
+    module_ref: &'event str,
+    process_ref: &'event str,
+    process_name: &'event str,
+    node_id: &'event str,
+    node_kind: &'event str,
+    label: &'event str,
+}
+
+fn graph_mut<'a>(
+    state: &'a mut ProcessTrackingState,
+    process_id: &str,
+    session_id: &str,
+    module_ref: &str,
+    process_ref: &str,
+    process_name: &str,
+) -> &'a mut ProcessGraphAccumulator {
+    state
+        .processes
+        .entry(process_id.to_string())
+        .or_insert_with(|| ProcessGraphAccumulator {
+            process_id: process_id.to_string(),
+            session_id: session_id.to_string(),
+            module_ref: module_ref.to_string(),
+            process_ref: process_ref.to_string(),
+            process_name: process_name.to_string(),
+            status: "running".to_string(),
+            ..ProcessGraphAccumulator::default()
+        })
+}
+
+fn node_mut<'a>(
+    state: &'a mut ProcessTrackingState,
+    identity: ProcessNodeIdentity<'_>,
+) -> &'a mut ProcessGraphNode {
+    graph_mut(
+        state,
+        identity.process_id,
+        identity.session_id,
+        identity.module_ref,
+        identity.process_ref,
+        identity.process_name,
+    )
+    .nodes
+    .entry(identity.node_id.to_string())
+    .or_insert_with(|| ProcessGraphNode {
+        id: identity.node_id.to_string(),
+        kind: identity.node_kind.to_string(),
+        label: identity.label.to_string(),
+        status: "unobserved".to_string(),
+        ..ProcessGraphNode::default()
+    })
+}
+
+fn process_tracking_event_key(event: &TraceProcessTrackingEvent) -> Option<&str> {
+    match event {
+        TraceProcessTrackingEvent::ProcessStarted { event_key, .. }
+        | TraceProcessTrackingEvent::ProcessFinished { event_key, .. }
+        | TraceProcessTrackingEvent::NodeStarted { event_key, .. }
+        | TraceProcessTrackingEvent::NodeCompleted { event_key, .. }
+        | TraceProcessTrackingEvent::NodeFailed { event_key, .. }
+        | TraceProcessTrackingEvent::BranchSelected { event_key, .. }
+        | TraceProcessTrackingEvent::ChildStarted { event_key, .. } => Some(event_key),
+    }
+}
+
+fn process_status_label(status: TraceProcessStatus) -> &'static str {
+    match status {
+        TraceProcessStatus::Running => "running",
+        TraceProcessStatus::Completed => "completed",
+        TraceProcessStatus::Failed => "failed",
+        TraceProcessStatus::Cancelled => "cancelled",
+    }
+}
+
+fn duration_ms(first: Option<&str>, last: Option<&str>) -> Option<i64> {
+    let first = chrono::DateTime::parse_from_rfc3339(first?).ok()?;
+    let last = chrono::DateTime::parse_from_rfc3339(last?).ok()?;
+    Some((last - first).num_milliseconds().max(0))
 }
 
 async fn index() -> Html<&'static str> {
@@ -596,6 +1047,17 @@ async fn list_work(State(state): State<AppState>) -> Result<Json<Vec<WorkItem>>,
     Ok(Json(work))
 }
 
+async fn process_graph(
+    AxumPath(process_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<ProcessGraph>, AppError> {
+    state
+        .process_tracking
+        .graph(&process_id)
+        .map(Json)
+        .ok_or_else(|| AppError::not_found(format!("no process graph for `{process_id}`")))
+}
+
 async fn queue_user_turn(
     state: &AppState,
     session: &lash::LashSession,
@@ -745,7 +1207,7 @@ async fn run_next_queued_turn(state: &AppState, reason: &str) -> Result<bool, la
 
 fn started_process_text(count: usize) -> String {
     match count {
-        0 => "no trigger handled the button event".to_string(),
+        0 => "no trigger handled the event".to_string(),
         1 => "started 1 background process".to_string(),
         count => format!("started {count} background processes"),
     }
@@ -813,6 +1275,7 @@ async fn emit_button_host_event(
             "resource_type": BUTTON_TRIGGER_RESOURCE,
             "alias": BUTTON_TRIGGER_ALIAS,
             "event": BUTTON_TRIGGER_EVENT,
+            "source_type": BUTTON_TRIGGER_SOURCE_TYPE,
             "payload": payload.clone(),
         }),
     );
@@ -832,7 +1295,10 @@ fn button_trigger_event_type() -> lashlang::TypeExpr {
     lashlang::TypeExpr::Object(vec![
         lashlang::TypeField {
             name: "button".into(),
-            ty: lashlang::TypeExpr::Enum(vec!["Red".into(), "Blue".into()]),
+            ty: lashlang::TypeExpr::Union(vec![
+                lashlang::TypeExpr::Enum(vec!["Red".into()]),
+                lashlang::TypeExpr::Enum(vec!["Blue".into()]),
+            ]),
             optional: false,
         },
         lashlang::TypeField {
@@ -1162,6 +1628,13 @@ impl AppError {
         }
     }
 
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
     fn internal(message: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -1200,7 +1673,7 @@ impl PluginFactory for WorkbenchPluginFactory {
     }
 
     fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
-        button_trigger_lashlang_resources()
+        workbench_lashlang_resources()
     }
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
@@ -1248,12 +1721,27 @@ impl SessionPlugin for WorkbenchSessionPlugin {
     }
 }
 
-fn button_trigger_lashlang_resources() -> lashlang::ResourceCatalog {
+fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
     let mut resources = lashlang::ResourceCatalog::new();
-    resources.add_module_instance(["ui", "button"], BUTTON_TRIGGER_RESOURCE);
-    resources.add_trigger_event(
-        BUTTON_TRIGGER_RESOURCE,
-        BUTTON_TRIGGER_EVENT,
+    resources.add_trigger_source_constructor(
+        CRON_SCHEDULE_SOURCE_TYPE.split('.'),
+        lashlang::TypeExpr::Object(vec![
+            lashlang::TypeField {
+                name: "expr".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            },
+            lashlang::TypeField {
+                name: "tz".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: true,
+            },
+        ]),
+        lashlang::TypeExpr::Ref("cron.Tick".into()),
+    );
+    resources.add_trigger_source_constructor(
+        ["ui", "button", "pressed"],
+        lashlang::TypeExpr::Object(vec![]),
         button_trigger_event_type(),
     );
     resources
@@ -1265,7 +1753,25 @@ Available host features:
 - Web access is limited to `web.search(...)` and `web.fetch(...)`, both backed by the same Tavily tools the CLI uses.
 - You may call `agents.spawn(...)` for independent investigation.
 - You may use Lashlang background processes or subagents for work that should continue independently.
-- The red and blue UI buttons emit the host event listed under Host Events.
+- The red and blue UI buttons emit `ui.button.pressed`. Register `ui.button.pressed({})`; the selected button arrives in the event payload, not in the source config:
+
+```lash
+type ButtonPressed = { button: "Red" | "Blue", message: str, pressed_at: str }
+
+process on_button(event: ButtonPressed) {
+  wake { kind: "button_pressed", button: event.button, message: event.message }
+  finish true
+}
+
+handle = await triggers.register({
+  source: ui.button.pressed({}),
+  target: on_button,
+  name: "button watcher"
+})?
+submit handle
+```
+
+- For schedule requests, build `cron.Schedule(...)` values and register a single-input process with `await triggers.register(...)`. Timers are host-owned; the workbench sidebar only advertises the schedule source instead of firing synthetic ticks.
 
 Use background processes or subagents only when they clarify the user's request or make parallel progress. Keep the visible answer concise and mention any background work you started."#;
 
@@ -1273,7 +1779,7 @@ Use background processes or subagents only when they clarify the user's request 
 mod tests {
     use super::*;
     use lash::persistence::RuntimePersistence;
-    use lashlang::LashlangArtifactStore;
+    use lash::tracing::{TraceProcessMap, TraceProcessMapEdge, TraceProcessMapNode};
 
     #[test]
     fn reset_session_rotation_replaces_workbench_session_id() {
@@ -1312,6 +1818,101 @@ mod tests {
     }
 
     #[test]
+    fn process_tracking_reducer_builds_graph_state() {
+        let reducer = ProcessTrackingReducer::default();
+        let context = TraceContext::default().for_session("s1");
+        let append = |event: TraceProcessTrackingEvent| {
+            reducer
+                .append(&TraceRecord::new(
+                    context.clone(),
+                    TraceEvent::ProcessTracking { event },
+                ))
+                .expect("append tracking event");
+        };
+
+        append(TraceProcessTrackingEvent::ProcessStarted {
+            event_key: "p1:start".to_string(),
+            process_id: "p1".to_string(),
+            session_id: "s1".to_string(),
+            module_ref: "m1".to_string(),
+            process_ref: "r1:0".to_string(),
+            process_name: "main".to_string(),
+            process_map: TraceProcessMap {
+                module_ref: "m1".to_string(),
+                process_ref: "r1:0".to_string(),
+                process_name: "main".to_string(),
+                nodes: vec![TraceProcessMapNode {
+                    id: "branch".to_string(),
+                    kind: "branch".to_string(),
+                    label: "if".to_string(),
+                }],
+                edges: vec![
+                    TraceProcessMapEdge {
+                        id: "then-edge".to_string(),
+                        from: "branch".to_string(),
+                        to: "then".to_string(),
+                        label: "then".to_string(),
+                    },
+                    TraceProcessMapEdge {
+                        id: "else-edge".to_string(),
+                        from: "branch".to_string(),
+                        to: "else".to_string(),
+                        label: "else".to_string(),
+                    },
+                ],
+            },
+        });
+        append(TraceProcessTrackingEvent::BranchSelected {
+            event_key: "p1:branch".to_string(),
+            process_id: "p1".to_string(),
+            session_id: "s1".to_string(),
+            module_ref: "m1".to_string(),
+            process_ref: "r1:0".to_string(),
+            process_name: "main".to_string(),
+            node_id: "branch".to_string(),
+            occurrence: 1,
+            edge_id: "then-edge".to_string(),
+            selected: lash::tracing::TraceBranchSelection::Then,
+        });
+        append(TraceProcessTrackingEvent::ChildStarted {
+            event_key: "p1:child".to_string(),
+            process_id: "p1".to_string(),
+            session_id: "s1".to_string(),
+            module_ref: "m1".to_string(),
+            process_ref: "r1:0".to_string(),
+            process_name: "main".to_string(),
+            parent_process_id: "p1".to_string(),
+            parent_node_id: "branch".to_string(),
+            occurrence: 1,
+            child_process_id: "p2".to_string(),
+            child_module_ref: "m1".to_string(),
+            child_process_ref: "r2:1".to_string(),
+            child_process_name: "child".to_string(),
+        });
+
+        let graph = reducer.graph("p1").expect("graph");
+        assert_eq!(graph.status, "running");
+        assert_eq!(graph.children.len(), 1);
+        assert_eq!(graph.children[0].child_process_id, "p2");
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .find(|edge| edge.id == "then-edge")
+                .and_then(|edge| edge.selected),
+            Some(true)
+        );
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .find(|edge| edge.id == "else-edge")
+                .and_then(|edge| edge.selected),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn empty_model_variant_request_clears_selected_variant() {
         let selected_model = ModelSelection {
             model: "x-ai/grok-build-0.1".to_string(),
@@ -1334,7 +1935,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn button_host_event_starts_visible_lashlang_process() {
+    async fn button_trigger_activation_starts_visible_lashlang_process() {
         let data_dir = std::env::temp_dir().join(format!(
             "agent-workbench-processes-{}",
             uuid::Uuid::new_v4()
@@ -1349,9 +1950,7 @@ mod tests {
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&db_path).expect("open registry"),
         ) as Arc<dyn lash::advanced::ProcessRegistry>;
-        let provider = ProviderHandle::new(
-            OpenAiCompatibleProvider::new(String::new(), OPENROUTER_BASE_URL).into_components(),
-        );
+        let provider = trigger_registration_provider();
         let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
             .expect("model spec");
         let session_ids = WorkbenchSessionIds::fresh();
@@ -1368,9 +1967,7 @@ mod tests {
             .in_memory_stores()
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .advanced()
-            .effect_controller(Arc::new(
-                lash::advanced::InlineRuntimeEffectController::default(),
-            ))
+            .effect_controller(Arc::new(lash::advanced::InlineRuntimeEffectController))
             .process_registry(Arc::clone(&process_registry))
             .build()
             .expect("build core");
@@ -1380,12 +1977,7 @@ mod tests {
             .open()
             .await
             .expect("open session");
-        let install = session
-            .triggers()
-            .install_lashlang_source(test_button_trigger_source())
-            .await
-            .expect("install trigger source");
-        assert_eq!(install.installed, vec!["remembered"]);
+        register_test_trigger(&session).await;
         let tool_names = session
             .tools()
             .active_definitions()
@@ -1397,20 +1989,7 @@ mod tests {
         let removed_tool_name = ["attach", "button", "trigger"].join("_");
         assert!(!tool_names.iter().any(|name| name == &removed_tool_name));
 
-        let report = session
-            .host_events()
-            .emit(
-                BUTTON_TRIGGER_RESOURCE,
-                BUTTON_TRIGGER_ALIAS,
-                BUTTON_TRIGGER_EVENT,
-                json!({
-                    "button": "Blue",
-                    "message": "user pressed the blue button",
-                    "pressed_at": "2026-05-27T00:00:00Z"
-                }),
-            )
-            .await
-            .expect("emit host event");
+        let report = emit_test_button_trigger(&session, ButtonChoice::Red).await;
 
         assert_eq!(report.started_process_ids.len(), 1);
         process_registry
@@ -1423,8 +2002,8 @@ mod tests {
             .await
             .expect("list handles");
         assert_eq!(handles.len(), 1);
-        assert_eq!(handles[0].0.descriptor.kind.as_deref(), Some("lashlang"));
-        assert_eq!(handles[0].0.descriptor.label.as_deref(), Some("remember"));
+        assert_eq!(handles[0].descriptor.kind.as_deref(), Some("lashlang"));
+        assert_eq!(handles[0].descriptor.label.as_deref(), Some("remember"));
         session.close().await.expect("close session");
 
         let reopened = core
@@ -1439,7 +2018,12 @@ mod tests {
             .await
             .expect("list handles after reopen");
         assert_eq!(reopened_handles.len(), 1);
-        assert_eq!(terminal_label(&reopened_handles[0].1), "completed");
+        assert_eq!(
+            reopened_handles[0].status.label(),
+            "completed",
+            "{:?}",
+            reopened_handles[0].status
+        );
         drop(reopened);
 
         let state = AppState {
@@ -1453,6 +2037,7 @@ mod tests {
             })),
             web_configured: false,
             trace_sink: None,
+            process_tracking: Arc::new(ProcessTrackingReducer::default()),
             event_tx: broadcast::channel(1024).0,
             queue_runner: SessionQueueRunner::inert(),
         };
@@ -1471,7 +2056,8 @@ mod tests {
         else {
             panic!("expected process wake queue payload");
         };
-        assert!(wake.input.contains("user pressed the blue button"));
+        assert!(wake.input.contains("button_pressed"));
+        assert!(wake.input.contains("Red"));
         assert_eq!(wake.target_scope_id, target_scope_id);
         let Json(work) = list_work(State(state)).await.expect("list work");
         assert_eq!(work.len(), 1);
@@ -1492,7 +2078,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn button_host_event_wake_is_consumed_by_session_queue_runner() {
+    async fn button_trigger_activation_wake_is_consumed_by_session_queue_runner() {
         let data_dir = std::env::temp_dir().join(format!(
             "agent-workbench-queue-runner-{}",
             uuid::Uuid::new_v4()
@@ -1515,19 +2101,26 @@ mod tests {
             artifact_store.clone();
         let seen_models = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
         let seen_models_for_provider = Arc::clone(&seen_models);
+        let response_index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let response_index_for_provider = Arc::clone(&response_index);
         let provider = lash::testing::TestProvider::builder()
             .kind("workbench-test")
             .supported_variants(|_| &["low", "medium", "high"])
             .complete(move |request| {
                 let seen_models = Arc::clone(&seen_models_for_provider);
+                let response_index = Arc::clone(&response_index_for_provider);
                 async move {
                     seen_models
                         .lock()
                         .expect("seen models lock")
                         .push((request.model, request.model_variant));
-                    Ok(text_response(
-                        "```lashlang\nsubmit \"blue button joke delivered\"\n```",
-                    ))
+                    if response_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        Ok(trigger_registration_response())
+                    } else {
+                        Ok(text_response(
+                            "```lashlang\nsubmit \"blue button joke delivered\"\n```",
+                        ))
+                    }
                 }
             })
             .build()
@@ -1552,7 +2145,7 @@ mod tests {
                     let mut config = lash::advanced::RuntimeHostConfig::in_memory();
                     config.durability.lashlang_artifact_store = artifact_store_for_core;
                     config.control.effect_controller =
-                        Arc::new(lash::advanced::InlineRuntimeEffectController::default());
+                        Arc::new(lash::advanced::InlineRuntimeEffectController);
                     config
                 })
                 .process_registry(Arc::clone(&process_registry))
@@ -1567,6 +2160,7 @@ mod tests {
             })),
             web_configured: false,
             trace_sink: None,
+            process_tracking: Arc::new(ProcessTrackingReducer::default()),
             event_tx,
             queue_runner,
         };
@@ -1578,12 +2172,7 @@ mod tests {
             .open()
             .await
             .expect("open session");
-        let install = session
-            .triggers()
-            .install_lashlang_source(test_button_trigger_source())
-            .await
-            .expect("install trigger source");
-        assert_eq!(install.installed, vec!["remembered"]);
+        register_test_trigger(&session).await;
         drop(session);
 
         let mut events = state.event_tx.subscribe();
@@ -1600,6 +2189,14 @@ mod tests {
         let selected_model = state.selected_model();
         assert_eq!(selected_model.model, "button-model");
         assert_eq!(selected_model.model_variant.as_deref(), Some("high"));
+        assert!(
+            state
+                .messages_snapshot()
+                .iter()
+                .any(|message| message.role == "event"
+                    && message.text == "started 1 background process"),
+            "button click should publish the started-process event"
+        );
 
         let mut saw_wake = false;
         let mut seen_events = Vec::new();
@@ -1670,9 +2267,7 @@ mod tests {
             lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
                 .expect("open registry"),
         ) as Arc<dyn lash::advanced::ProcessRegistry>;
-        let provider = ProviderHandle::new(
-            OpenAiCompatibleProvider::new(String::new(), OPENROUTER_BASE_URL).into_components(),
-        );
+        let provider = trigger_registration_provider();
         let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
             .expect("model spec");
         let core = LashCore::builder()
@@ -1687,9 +2282,7 @@ mod tests {
             .in_memory_stores()
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .advanced()
-            .effect_controller(Arc::new(
-                lash::advanced::InlineRuntimeEffectController::default(),
-            ))
+            .effect_controller(Arc::new(lash::advanced::InlineRuntimeEffectController))
             .process_registry(Arc::clone(&process_registry))
             .build()
             .expect("build core");
@@ -1709,6 +2302,7 @@ mod tests {
             })),
             web_configured: false,
             trace_sink: None,
+            process_tracking: Arc::new(ProcessTrackingReducer::default()),
             event_tx: broadcast::channel(1024).0,
             queue_runner: SessionQueueRunner::inert(),
         };
@@ -1720,25 +2314,8 @@ mod tests {
             .open()
             .await
             .expect("open old session");
-        session
-            .triggers()
-            .install_lashlang_source(test_button_trigger_source())
-            .await
-            .expect("install trigger source");
-        let started = session
-            .host_events()
-            .emit(
-                BUTTON_TRIGGER_RESOURCE,
-                BUTTON_TRIGGER_ALIAS,
-                BUTTON_TRIGGER_EVENT,
-                json!({
-                    "button": "Red",
-                    "message": "user pressed the red button",
-                    "pressed_at": "2026-05-27T00:00:00Z"
-                }),
-            )
-            .await
-            .expect("emit host event");
+        register_test_trigger(&session).await;
+        let started = emit_test_button_trigger(&session, ButtonChoice::Red).await;
         assert_eq!(started.started_process_ids.len(), 1);
         let old_process_scope = session.observe().process_scope();
         assert_eq!(
@@ -1792,15 +2369,6 @@ mod tests {
         let artifact_store_path = data_dir.join("artifacts.db");
         let session_id = WorkbenchSessionIds::fresh().current();
 
-        let linked = lashlang::LinkedModule::link(
-            lashlang::parse(test_button_trigger_source()).expect("parse trigger source"),
-            lashlang::LashlangSurface::new(
-                button_trigger_lashlang_resources(),
-                workbench_lashlang_abilities(),
-            ),
-        )
-        .expect("link trigger source");
-
         {
             let artifact_store = Arc::new(
                 lash_sqlite_store::Store::open(&artifact_store_path).expect("open artifacts"),
@@ -1822,30 +2390,13 @@ mod tests {
                 .open()
                 .await
                 .expect("open session");
-            let install = session
-                .triggers()
-                .install_lashlang_source(test_button_trigger_source())
-                .await
-                .expect("install trigger source");
-            assert_eq!(install.installed, vec!["remembered"]);
-            assert!(
-                artifact_store
-                    .get_module_artifact(&linked.module_ref)
-                    .expect("load stored module artifact")
-                    .is_some()
-            );
+            register_test_trigger(&session).await;
             drop(session);
             drop(core);
         }
 
         let artifact_store = Arc::new(
             lash_sqlite_store::Store::open(&artifact_store_path).expect("reopen artifacts"),
-        );
-        assert!(
-            artifact_store
-                .get_module_artifact(&linked.module_ref)
-                .expect("load reopened module artifact")
-                .is_some()
         );
         let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
             artifact_store.clone();
@@ -1864,20 +2415,7 @@ mod tests {
             .open()
             .await
             .expect("reopen session");
-        let report = reopened
-            .host_events()
-            .emit(
-                BUTTON_TRIGGER_RESOURCE,
-                BUTTON_TRIGGER_ALIAS,
-                BUTTON_TRIGGER_EVENT,
-                json!({
-                    "button": "Red",
-                    "message": "user pressed the red button",
-                    "pressed_at": "2026-05-27T00:00:00Z"
-                }),
-            )
-            .await
-            .expect("emit reopened host event");
+        let report = emit_test_button_trigger(&reopened, ButtonChoice::Blue).await;
         assert_eq!(report.started_process_ids.len(), 1);
         process_registry
             .await_process(&report.started_process_ids[0])
@@ -1892,9 +2430,7 @@ mod tests {
         process_registry: Arc<dyn lash::advanced::ProcessRegistry>,
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     ) -> LashCore {
-        let provider = ProviderHandle::new(
-            OpenAiCompatibleProvider::new(String::new(), OPENROUTER_BASE_URL).into_components(),
-        );
+        let provider = trigger_registration_provider();
         let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
             .expect("model spec");
         LashCore::builder()
@@ -1912,7 +2448,7 @@ mod tests {
                 let mut config = lash::advanced::RuntimeHostConfig::in_memory();
                 config.durability.lashlang_artifact_store = artifact_store;
                 config.control.effect_controller =
-                    Arc::new(lash::advanced::InlineRuntimeEffectController::default());
+                    Arc::new(lash::advanced::InlineRuntimeEffectController);
                 config
             })
             .process_registry(process_registry)
@@ -1931,23 +2467,68 @@ mod tests {
         }
     }
 
+    fn trigger_registration_response() -> lash::direct::LlmResponse {
+        text_response(&format!(
+            "```lashlang\n{}\n```",
+            test_button_trigger_source().trim()
+        ))
+    }
+
+    async fn register_test_trigger(session: &lash::LashSession) {
+        let output = session
+            .turn(lash::TurnInput::text("register trigger"))
+            .run()
+            .await
+            .expect("register trigger route");
+        assert_eq!(
+            output.submitted_value(),
+            Some(&serde_json::json!("registered"))
+        );
+    }
+
+    async fn emit_test_button_trigger(
+        session: &lash::LashSession,
+        button: ButtonChoice,
+    ) -> lash::HostEventEmitReport {
+        session
+            .host_events()
+            .emit(
+                BUTTON_TRIGGER_RESOURCE,
+                BUTTON_TRIGGER_ALIAS,
+                BUTTON_TRIGGER_EVENT,
+                json!({
+                    "button": button.as_str(),
+                    "message": format!("user pressed the {} button", button.lower()),
+                    "pressed_at": "2026-06-02T12:00:00Z"
+                }),
+            )
+            .await
+            .expect("emit button trigger")
+    }
+
+    fn trigger_registration_provider() -> ProviderHandle {
+        lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .complete(|_| async { Ok(trigger_registration_response()) })
+            .build()
+            .into_handle()
+    }
+
     fn test_button_trigger_source() -> &'static str {
         r#"
-        type ButtonChoice = enum["Red", "Blue"]
-        type ButtonPressed = { button: ButtonChoice, message: str, pressed_at: str }
+        type ButtonPressed = { button: "Red" | "Blue", message: str, pressed_at: str }
 
         process remember(event: ButtonPressed) {
-          checked = validate(event, Type {
-            button: enum["Red", "Blue"],
-            message: str,
-            pressed_at: str
-          })
-          wake { button: checked.button, message: checked.message }
-          finish { button: checked.button, ok: true }
+          wake { kind: "button_pressed", button: event.button, message: event.message }
+          finish { button: event.button, ok: true }
         }
 
-        trigger remembered on ui.button.pressed as event
-          -> remember(event: event)
+        handle = await triggers.register({
+          source: ui.button.pressed({}),
+          target: remember,
+          name: "remembered"
+        })?
+        submit "registered"
         "#
     }
 }

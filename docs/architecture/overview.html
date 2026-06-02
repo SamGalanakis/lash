@@ -12,23 +12,23 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../styles.css?v=2">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js" defer></script>
+<script src="../docs.js?v=2" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>Cargo.toml</code>, <code>crates/lash-core</code>, <code>crates/lash</code>, <code>crates/lash-sansio</code>.">
 <section class="opener">
     <h1 class="opener__title">overview<span class="slash">/</span>map</h1>
-    <p class="opener__lede">Lash is organized as a narrow protocol kernel plus an async host runtime. The app-facing <code>lash</code> facade and the CLI compose replaceable edges — providers, protocol plugins, tools, dynamic tool plugins (including MCP via <code>lash-plugin-mcp</code>), UI extensions, persistence, tracing, and the TUI — around that core.</p>
+    <p class="opener__lede">Lash is organized around one runtime boundary. The app-facing <code>lash</code> facade and the CLI compose replaceable host edges — providers, protocol plugins, tools, dynamic tool plugins (including MCP via <code>lash-plugin-mcp</code>), UI extensions, persistence, tracing, and the TUI — around a core that owns session records, effect control, process execution, and durable commits.</p>
   </section>
 
   <main class="body" id="content">
 <div class="section">
           <div class="section-header">
             <h2>System Shape</h2>
-            <p>Dependency direction runs from host surfaces inward to the runtime, then into the sans-IO protocol model. Providers, protocol plugins, tools, and plugins are replaceable edges around the runtime core.</p>
+            <p>Dependency direction runs from host-owned surfaces inward to the runtime, then into the sans-IO protocol model. Providers, protocol plugins, tools, stores, and plugins are replaceable edges around the runtime core.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Workspace topology</div>
@@ -141,7 +141,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Runtime host capabilities are trait-shaped.</h3>
-                <p><code>RuntimeSessionServices</code> implements focused plugin host traits for snapshots, tool catalogs, session tool state, session lifecycle, turns, processes, the session graph, prompt state, direct completion, and tracing. Public tools see these through named <code>ToolContext</code> capabilities, not through a general host escape hatch. A configured process registry is also the source of Lashlang process/lifecycle ability enablement for session surfaces.</p>
+                <p><code>RuntimeSessionServices</code> implements focused plugin host traits for snapshots, tool catalogs, session tool state, session lifecycle, turns, processes, the session graph, prompt state, direct completion, and tracing. Public tools see these through named <code>ToolContext</code> capabilities, not through a general host escape hatch. A configured process registry is the source of Lashlang process/lifecycle ability enablement, while <code>ProcessCancelAbility</code> lets the host customize intentional cancellation.</p>
               </div>
             </li>
           </ol>

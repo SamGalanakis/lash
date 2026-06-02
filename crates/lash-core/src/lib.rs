@@ -46,7 +46,7 @@ pub use direct::{
     DirectRequest, DirectRole,
 };
 pub use host_events::{
-    HostEvent, HostEventCatalog, HostEventEmitReport, HostEventKey, SessionTriggerInstallReport,
+    HostEvent, HostEventCatalog, HostEventEmitReport, HostEventKey, host_event_source_type,
 };
 pub use lash_sansio::llm::types::{
     GenerationOptions, LlmOutputPart, LlmRequest, LlmResponse, LlmTerminalReason,
@@ -75,6 +75,7 @@ pub use lash_sansio::{
 };
 pub use lashlang::{DurabilityTier, InMemoryLashlangArtifactStore, LashlangArtifactStore};
 pub use protocol_build::ProtocolBuildInput;
+pub use session::triggers::TriggerActivationService;
 pub use tool_registry::{
     ReconfigureError, ToolRegistry, ToolSourceHandle, ToolState, ToolStateEntry,
 };
@@ -163,10 +164,11 @@ pub type TurnMachineConfig = lash_sansio::TurnMachineConfig<HostTurnProtocol>;
 #[cfg(feature = "otel-trace")]
 pub use lash_trace::otel::{OtelTraceOptions, OtelTraceSink};
 pub use lash_trace::{
-    JsonlTraceSink, TraceAttachment, TraceContentBlock, TraceContext, TraceError, TraceEvent,
-    TraceLevel, TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TracePromptComponent,
-    TraceProviderStreamEvent, TraceRecord, TraceRuntimeStreamEvent, TraceSink, TraceSinkError,
-    TraceTokenUsage, TraceToolSpec,
+    JsonlTraceSink, TraceAttachment, TraceBranchSelection, TraceContentBlock, TraceContext,
+    TraceError, TraceEvent, TraceLevel, TraceLlmMessage, TraceLlmRequest, TraceLlmResponse,
+    TraceProcessMap, TraceProcessMapEdge, TraceProcessMapNode, TraceProcessStatus,
+    TraceProcessTrackingEvent, TracePromptComponent, TraceProviderStreamEvent, TraceRecord,
+    TraceRuntimeStreamEvent, TraceSink, TraceSinkError, TraceTokenUsage, TraceToolSpec,
 };
 pub use llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 pub use model::{ModelLimits, ModelSpec};
@@ -190,8 +192,9 @@ pub use plugin::{
     SessionToolAccess, SnapshotReader, SnapshotWriter, SubagentSessionContext,
     ToolDiscoveryContext, ToolDiscoveryContribution, ToolDiscoveryContributor,
     ToolDiscoveryToolContribution, ToolResultProjectionContext, ToolResultProjector,
-    ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
-    TurnResultSummary, TurnTransformContext, plugin_action_def,
+    ToolSurfaceContribution, TriggerRegistration, TriggerSourceType, TriggerTargetSummary,
+    TurnContextTransform, TurnHookContext, TurnResultHookContext, TurnResultSummary,
+    TurnTransformContext, plugin_action_def,
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{
@@ -203,30 +206,31 @@ pub use provider::{
 #[cfg(any(test, feature = "testing"))]
 pub use runtime::TestLocalProcessRegistry;
 pub use runtime::{
-    AgentFrameRun, AssembledTurn, AssistantOutput, CausalRef, CodeOutputRecord, DeliveryPolicy,
-    DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig,
-    DurableSubstrateFacet, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink,
-    ExecutionSummary, InMemorySessionStore, InMemorySessionStoreFactory, InlineProcessRunHandle,
-    InlineRuntimeEffectController, InputItem, LashRuntime, MergeKey, NoopEventSink,
-    NoopTurnActivitySink, OutputState, PROCESS_LEASE_SCHEMA_VERSION, ParkedSession,
-    ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessEventType, ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor,
-    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessLease,
-    ProcessLeaseCompletion, ProcessListMode, ProcessOpScope, ProcessProvenance, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost, ProcessScope,
-    ProcessScopeId, ProcessService, ProcessSessionDeleteReport, ProcessStartGrant,
-    ProcessStartOptions, ProcessStatus, ProcessTerminalSemantics, ProcessTerminalSpec,
-    ProcessTerminalState, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
-    ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkPoke, ProcessWorkRunner, PromptUsage,
-    ProtocolSessionExtension, ProtocolSessionExtensionHandle, ProtocolTurnExtension,
-    ProtocolTurnExtensionHandle, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder,
-    RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeHostConfig, RuntimeObservation,
-    SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, SlotPolicy,
-    TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink,
-    TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions, UnavailableProcessService,
-    UsageReportRow, UsageTotals, current_epoch_ms, diff_token_ledger, diff_usage_reports,
-    ensure_durable_turn_input, epoch_ms_from_system_time, lashlang_process_event_types,
-    system_time_from_epoch_ms,
+    AgentFrameRun, AssembledTurn, AssistantOutput, CausalRef, CodeOutputRecord,
+    DefaultProcessCancelAbility, DeliveryPolicy, DirectCompletionClient, DurableProcessWorker,
+    DurableProcessWorkerConfig, DurableSubstrateFacet, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost,
+    EventSink, ExecutionSummary, InMemorySessionStore, InMemorySessionStoreFactory,
+    InlineProcessRunHandle, InlineRuntimeEffectController, InputItem, LashRuntime, MergeKey,
+    NoopEventSink, NoopTurnActivitySink, OutputState, PROCESS_LEASE_SCHEMA_VERSION, ParkedSession,
+    ProcessAwaitOutput, ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest,
+    ProcessCancelSource, ProcessCancelSummary, ProcessEvent, ProcessEventAppendRequest,
+    ProcessEventAppendResult, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary, ProcessId, ProcessInput,
+    ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListMode, ProcessOpScope,
+    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
+    ProcessRuntimeHost, ProcessScope, ProcessScopeId, ProcessService, ProcessSessionDeleteReport,
+    ProcessStartGrant, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
+    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
+    ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkPoke,
+    ProcessWorkRunner, PromptUsage, ProtocolSessionExtension, ProtocolSessionExtensionHandle,
+    ProtocolTurnExtension, ProtocolTurnExtensionHandle, Residency, RuntimeEnvironment,
+    RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeHostConfig,
+    RuntimeObservation, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport,
+    SlotPolicy, TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId,
+    TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions,
+    UnavailableProcessService, UsageReportRow, UsageTotals, current_epoch_ms, diff_token_ledger,
+    diff_usage_reports, ensure_durable_turn_input, epoch_ms_from_system_time,
+    lashlang_process_event_types, system_time_from_epoch_ms,
 };
 #[allow(unused_imports)]
 pub(crate) use runtime::{

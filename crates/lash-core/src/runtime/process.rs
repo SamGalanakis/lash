@@ -19,14 +19,18 @@ pub use events::{
 };
 pub use materialization::materialize_process_event_semantics;
 pub use model::{
-    PROCESS_LEASE_SCHEMA_VERSION, ProcessExecutionContext, ProcessExternalRef,
-    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
-    ProcessLease, ProcessLeaseCompletion, ProcessListMode, ProcessOpScope, ProcessProvenance,
-    ProcessRecord, ProcessRegistration, ProcessScope, ProcessScopeId, ProcessSessionDeleteReport,
-    ProcessStartGrant, ProcessStartOptions, ProcessStatus,
+    PROCESS_LEASE_SCHEMA_VERSION, ProcessCancelSummary, ProcessExecutionContext,
+    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
+    ProcessHandleSummary, ProcessId, ProcessInput, ProcessLease, ProcessLeaseCompletion,
+    ProcessLifecycleStatus, ProcessListMode, ProcessOpScope, ProcessProvenance, ProcessRecord,
+    ProcessRegistration, ProcessScope, ProcessScopeId, ProcessSessionDeleteReport,
+    ProcessStartGrant, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
 };
 pub use registry::ProcessRegistry;
-pub use service::{ProcessService, UnavailableProcessService};
+pub use service::{
+    DefaultProcessCancelAbility, ProcessCancelAbility, ProcessCancelAllRequest,
+    ProcessCancelRequest, ProcessCancelSource, ProcessService, UnavailableProcessService,
+};
 #[cfg(any(test, feature = "testing"))]
 pub use testing::*;
 pub use time::{current_epoch_ms, epoch_ms_from_system_time, system_time_from_epoch_ms};

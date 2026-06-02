@@ -311,9 +311,12 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
     resources: lashlang::ResourceCatalog,
 ) -> crate::RuntimeExecutionContext<'static> {
     let session_id = "test-session".to_string();
-    let plugins = crate::PluginHost::new(test_rlm_protocol_factories())
+    let plugin_host = crate::PluginHost::new(test_rlm_protocol_factories());
+    let mut merged_resources = plugin_host.lashlang_resources();
+    merged_resources.extend(resources);
+    let plugins = plugin_host
         .with_lashlang_abilities(abilities)
-        .with_lashlang_resources(resources)
+        .with_lashlang_resources(merged_resources)
         .build_session(session_id.clone(), None)
         .expect("test plugin session");
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
@@ -329,8 +332,9 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         session_lifecycle: Arc::new(MockSessionManager::default()),
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(UnavailableProcessService),
+        process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
         effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-            crate::InlineRuntimeEffectController::default(),
+            crate::InlineRuntimeEffectController,
         )),
         direct_completions: crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
@@ -559,7 +563,7 @@ impl crate::ProcessService for MockSessionManager {
         session_id: &str,
         mode: crate::ProcessListMode,
         scope: crate::ProcessOpScope<'_>,
-    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
+    ) -> Result<Vec<crate::runtime::ProcessHandleGrantEntry>, PluginError> {
         let owner_scope = scope
             .agent_frame_id
             .as_deref()
@@ -608,7 +612,7 @@ impl crate::ProcessService for MockSessionManager {
         process_id: &str,
         _scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessRecord, PluginError> {
-        crate::InlineRuntimeEffectController::default()
+        crate::InlineRuntimeEffectController
             .request_process_cancel(
                 self.process_registry.clone(),
                 process_id,
@@ -633,27 +637,6 @@ impl crate::ProcessService for MockSessionManager {
             )
             .await
             .map(|result| result.event)
-    }
-
-    async fn cancel_all(
-        &self,
-        session_id: &str,
-        scope: crate::ProcessOpScope<'_>,
-    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        let entries = self
-            .list_visible(session_id, crate::ProcessListMode::Live, scope.clone())
-            .await?;
-        let mut cancelled = Vec::new();
-        for (grant, record) in entries {
-            if record.is_terminal() {
-                continue;
-            }
-            cancelled.push(
-                self.cancel(session_id, &grant.process_id, scope.clone())
-                    .await?,
-            );
-        }
-        Ok(cancelled)
     }
 
     async fn transfer(
@@ -716,7 +699,7 @@ impl crate::ProcessService for MockSessionManager {
                 continue;
             }
             cancelled.push(
-                crate::InlineRuntimeEffectController::default()
+                crate::InlineRuntimeEffectController
                     .request_process_cancel(
                         self.process_registry.clone(),
                         &grant.process_id,

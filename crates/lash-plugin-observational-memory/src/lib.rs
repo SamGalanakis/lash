@@ -142,7 +142,7 @@ fn observational_memory_event_hook(
         let config = config.clone();
         Box::pin(async move {
             if let PluginLifecycleEvent::TurnPersisted(ctx) = event {
-                maybe_spawn_post_persist_memory_maintenance(config, ctx).await?;
+                maybe_spawn_post_persist_memory_maintenance(config, *ctx).await?;
             }
             Ok(())
         })
@@ -154,7 +154,7 @@ async fn maybe_spawn_post_persist_memory_maintenance(
     ctx: SessionStateChangedContext,
 ) -> Result<(), PluginError> {
     let graph = ctx.state.session_graph();
-    if !should_run_async_maintenance(&config, &graph) {
+    if !should_run_async_maintenance(&config, graph) {
         return Ok(());
     }
     run_async_maintenance(config, graph, &ctx).await

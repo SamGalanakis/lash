@@ -110,7 +110,6 @@ impl HostBridge<'_> {
                 "module operation `{operation}` requires a module authority receiver"
             )));
         }
-        let index = self.next_index();
         let mut payload = if let [FlowValue::Record(record)] = args.as_slice() {
             flow_record_json(record).await
         } else {
@@ -121,6 +120,15 @@ impl HostBridge<'_> {
         payload
             .as_object_mut()
             .ok_or_else(|| ExecutionHostError::new("module operation payload must be an object"))?;
+        if operation.starts_with("triggers.") {
+            let value = self
+                .ctx
+                .perform_lashlang_trigger_operation(&operation, payload)
+                .await
+                .map_err(ExecutionHostError::new)?;
+            return Ok(lashlang::from_json(value));
+        }
+        let index = self.next_index();
         let reply = self
             .ctx
             .call_tool(

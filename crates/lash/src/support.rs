@@ -21,12 +21,11 @@ pub(crate) use lash_core::TestLocalProcessRegistry;
 pub(crate) use lash_core::plugin::runtime_host::SessionStateService;
 pub(crate) use lash_core::{
     AssembledTurn, AttachmentStore, EventSink, ExecutionSummary, Message, PluginFactory,
-    PluginMessage, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistry, ProcessScope,
-    ProtocolTurnOptions, ProviderHandle, Residency, RewriteTrigger, RuntimeErrorCode,
-    RuntimePersistence, SessionCreateRequest, SessionError, SessionHandle, SessionReadView,
-    SessionSnapshot, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport,
-    TerminationPolicy, ToolAvailability, ToolCallRecord, ToolManifest, ToolProvider, ToolResult,
-    ToolSourceHandle, TurnActivitySink, TurnOutcome,
+    PluginMessage, ProcessRegistry, ProcessScope, ProtocolTurnOptions, ProviderHandle, Residency,
+    RewriteTrigger, RuntimeErrorCode, RuntimePersistence, SessionCreateRequest, SessionError,
+    SessionHandle, SessionReadView, SessionSnapshot, SessionStoreCreateRequest,
+    SessionStoreFactory, SessionUsageReport, TerminationPolicy, ToolAvailability, ToolCallRecord,
+    ToolManifest, ToolProvider, ToolResult, ToolSourceHandle, TurnActivitySink, TurnOutcome,
 };
 pub(crate) use lash_core::{InputItem, TokenLedgerEntry, TokenUsage};
 pub(crate) use lash_core::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};

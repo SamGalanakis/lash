@@ -1,6 +1,6 @@
 use lashlang::{
     AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ExecutionOutcome, Record,
-    RuntimeError, State, Value, parse,
+    RuntimeError, State, TypeExpr, Value, parse,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -147,10 +147,16 @@ async fn execute<H: ExecutionHost>(
 fn test_surface() -> lashlang::LashlangSurface {
     let mut resources = lashlang::ResourceCatalog::new();
     resources.add_module_instance(["files"], "Files");
-    resources.add_operation("Files", "read", "read_file");
-    resources.add_operation("Files", "glob", "glob");
+    resources.add_operation("Files", "read", "read_file", TypeExpr::Any, TypeExpr::Any);
+    resources.add_operation("Files", "glob", "glob", TypeExpr::Any, TypeExpr::Any);
     resources.add_module_instance(["agents"], "Agents");
-    resources.add_operation("Agents", "spawn", "spawn_agent");
+    resources.add_operation(
+        "Agents",
+        "spawn",
+        "spawn_agent",
+        TypeExpr::Any,
+        TypeExpr::Any,
+    );
     lashlang::LashlangSurface::new(resources, lashlang::LashlangAbilities::all())
 }
 

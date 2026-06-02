@@ -40,7 +40,7 @@ pub fn format_budget_suffix(
         format!("Turn: {turn_index} · Tokens: {used} · frame switch threshold: {max} ({pct}%).");
     if pct >= 60 {
         let tail = if used >= max {
-            "Past the frame switch threshold. End this block with `control.continue_as(...)` now; do not call `submit` or do more work after it. Pack only what the new frame needs into `task` + `seed`; carry only necessary live process handles."
+            "Past the frame switch threshold. End this block with `control.continue_as(...)` now; do not call `submit` or do more work after it. Pack only what the new frame needs into `task` + `seed`."
         } else if pct >= 90 {
             "Budget tight — finish only the current step, then end the block with `control.continue_as(...)`."
         } else {

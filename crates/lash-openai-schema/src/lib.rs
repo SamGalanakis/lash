@@ -14,8 +14,8 @@ pub fn model_id(model: &str) -> &str {
 /// non-2xx Responses body) is retryable. Unlike the HTTP-status-based central
 /// classifier, this inspects the structured `error` object that the Responses
 /// stream surfaces *without* an HTTP status (numeric `code`/`status` of 429 or
-/// >= 500, or a known transient `code`/`type`/`status` string). Shared by the
-/// OpenAI Responses and Codex providers.
+/// at least 500, or a known transient `code`/`type`/`status` string). Shared by
+/// the OpenAI Responses and Codex providers.
 pub fn responses_error_is_retryable(value: &Value) -> bool {
     let numeric_code = value
         .get("code")

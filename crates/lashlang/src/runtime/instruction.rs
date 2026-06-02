@@ -12,6 +12,7 @@ use std::sync::{Arc, OnceLock};
 use crate::artifact::CompiledModuleContext;
 use crate::ast::{BinaryOp, UnaryOp};
 use crate::lexer::Span;
+use crate::tracking::ProcessTrackingSite;
 
 use super::record::{Symbol, intern_symbol, symbol_name};
 use super::schema::ValidationPlan;
@@ -22,6 +23,7 @@ pub(crate) struct Chunk {
     pub(crate) module_context: Option<CompiledModuleContext>,
     pub(crate) code: Vec<Instruction>,
     pub(crate) spans: Vec<Option<Span>>,
+    pub(crate) process_tracking_sites: Vec<Option<ProcessTrackingSite>>,
     pub(crate) constants: Vec<Value>,
     pub(crate) names: Vec<Name>,
     pub(crate) slot_names: Vec<Name>,
@@ -218,6 +220,7 @@ pub(crate) enum Instruction {
     EndIter,
     ResolveTypeRef(usize),
     WrapTypeLiteral,
+    WrapHostValue(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -332,7 +335,9 @@ impl Instruction {
             Instruction::IterNext { .. } => InstructionProfileTag::IterNext,
             Instruction::EndIter => InstructionProfileTag::EndIter,
             Instruction::ResolveTypeRef(_) => InstructionProfileTag::ResolveTypeRef,
-            Instruction::WrapTypeLiteral => InstructionProfileTag::WrapTypeLiteral,
+            Instruction::WrapTypeLiteral | Instruction::WrapHostValue(_) => {
+                InstructionProfileTag::WrapTypeLiteral
+            }
         }
     }
 }

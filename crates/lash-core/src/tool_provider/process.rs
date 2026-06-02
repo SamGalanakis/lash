@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::ProcessRecord;
 use crate::plugin::PluginError;
 
 #[derive(Clone)]
@@ -8,6 +7,7 @@ pub struct ToolProcessControl<'run> {
     pub(super) session_id: String,
     pub(super) agent_frame_id: crate::AgentFrameId,
     pub(super) processes: Arc<dyn crate::ProcessService>,
+    pub(super) process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
     pub(super) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
     pub(super) tool_call_id: Option<String>,
@@ -22,22 +22,16 @@ impl ToolProcessControl<'_> {
     }
 
     /// Start a process owned by this session and registered to wake it,
-    /// returning its durable record. Routes through the same
-    /// [`crate::ProcessService::start`] path the runtime uses for every other
-    /// process start, so the child is provider-re-supplied, durable, and
-    /// recoverable through the worker.
+    /// returning its public handle summary. Routes through the same
+    /// [`crate::ProcessService::start_from_request`] path the runtime uses for
+    /// every request-shaped process start, so the child is provider-re-supplied,
+    /// durable, and recoverable through the worker.
     pub async fn start(
         &self,
-        registration: crate::ProcessRegistration,
-        descriptor: crate::ProcessHandleDescriptor,
-    ) -> Result<crate::ProcessRecord, PluginError> {
+        request: crate::ProcessStartRequest,
+    ) -> Result<crate::ProcessHandleSummary, PluginError> {
         self.processes
-            .start(
-                &self.session_id,
-                registration,
-                crate::ProcessStartOptions::new().with_descriptor(descriptor),
-                self.process_scope(),
-            )
+            .start_from_request(&self.session_id, request, self.process_scope())
             .await
     }
 
@@ -51,26 +45,32 @@ impl ToolProcessControl<'_> {
             .await
     }
 
-    pub async fn list_handles(&self) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
-        self.processes
+    pub async fn list_handles(&self) -> Result<Vec<crate::ProcessHandleSummary>, PluginError> {
+        Ok(self
+            .processes
             .list_visible(
                 &self.session_id,
                 crate::ProcessListMode::Live,
                 self.process_scope(),
             )
-            .await
+            .await?
+            .into_iter()
+            .map(crate::ProcessHandleSummary::from)
+            .collect())
     }
 
-    pub async fn list_all_handles(
-        &self,
-    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
-        self.processes
+    pub async fn list_all_handles(&self) -> Result<Vec<crate::ProcessHandleSummary>, PluginError> {
+        Ok(self
+            .processes
             .list_visible(
                 &self.session_id,
                 crate::ProcessListMode::All,
                 self.process_scope(),
             )
-            .await
+            .await?
+            .into_iter()
+            .map(crate::ProcessHandleSummary::from)
+            .collect())
     }
 
     pub async fn validate_handles(&self, handle_ids: &[String]) -> Result<(), PluginError> {
@@ -79,9 +79,19 @@ impl ToolProcessControl<'_> {
             .await
     }
 
-    pub async fn cancel(&self, process_id: &str) -> Result<ProcessRecord, PluginError> {
-        self.processes
-            .cancel(&self.session_id, process_id, self.process_scope())
+    pub async fn cancel(
+        &self,
+        process_id: &str,
+    ) -> Result<crate::ProcessCancelSummary, PluginError> {
+        let request = crate::ProcessCancelRequest::new(
+            &self.session_id,
+            process_id,
+            self.process_scope(),
+            crate::ProcessCancelSource::Tool,
+        )
+        .with_reason("requested by tool");
+        self.process_cancel_ability
+            .cancel_summary(self.processes.as_ref(), request)
             .await
     }
 
@@ -105,9 +115,17 @@ impl ToolProcessControl<'_> {
             .await
     }
 
-    pub async fn cancel_all(&self) -> Result<Vec<ProcessRecord>, PluginError> {
-        self.processes
-            .cancel_all(&self.session_id, self.process_scope())
+    pub async fn cancel_all(&self) -> Result<Vec<crate::ProcessCancelSummary>, PluginError> {
+        self.process_cancel_ability
+            .cancel_all_visible(
+                self.processes.as_ref(),
+                crate::ProcessCancelAllRequest::new(
+                    &self.session_id,
+                    self.process_scope(),
+                    crate::ProcessCancelSource::Tool,
+                )
+                .with_reason("requested by tool"),
+            )
             .await
     }
 
@@ -145,9 +163,13 @@ impl ToolProcessControl<'_> {
     pub async fn cancel_unreferenced_handles(
         &self,
         keep_process_ids: Vec<String>,
-    ) -> Result<Vec<ProcessRecord>, PluginError> {
-        self.processes
+    ) -> Result<Vec<crate::ProcessCancelSummary>, PluginError> {
+        Ok(self
+            .processes
             .cancel_unreferenced(&self.session_id, keep_process_ids, self.process_scope())
-            .await
+            .await?
+            .into_iter()
+            .map(crate::ProcessCancelSummary::from_record)
+            .collect())
     }
 }

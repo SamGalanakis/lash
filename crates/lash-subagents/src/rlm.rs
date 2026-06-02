@@ -58,18 +58,18 @@ impl RlmSubagentToolsProvider {
             return Err("subagent spawning is unavailable in this session".to_string());
         }
 
-        let registration = lash_core::ProcessRegistration::new(
+        let request = lash_core::ProcessStartRequest::new(
             prepared.process_id.clone(),
             lash_core::ProcessInput::SessionTurn {
                 create_request: prepared.create_request,
                 turn_input: Box::new(prepared.turn_input),
                 output_contract: lash_core::ToolOutputContract::Static,
             },
+            lash_core::ProcessHandleDescriptor::new(Some("subagent"), Some("spawn")),
         );
-        let descriptor = lash_core::ProcessHandleDescriptor::new(Some("subagent"), Some("spawn"));
         context
             .processes()
-            .start(registration, descriptor)
+            .start(request)
             .await
             .map_err(|err| format!("failed to start subagent process: {err}"))?;
         let output = context

@@ -128,9 +128,9 @@ async fn maintenance_uses_post_persist_leaf_as_append_cas_ancestor() {
     let completion = "<observations>\nDate: May 19, 2026\n- User needs the post-persist graph as the CAS base.\n</observations>\n<current-task>\nVerify OM append ancestry.\n</current-task>\n<suggested-response>\nContinue.\n</suggested-response>"
         .to_string();
 
-    hook(PluginLifecycleEvent::TurnPersisted(
+    hook(PluginLifecycleEvent::TurnPersisted(Box::new(
         post_persist_context_with_completion("session", graph, host.clone(), completion),
-    ))
+    )))
     .await
     .expect("turn persisted hook");
 
@@ -187,14 +187,14 @@ async fn maintenance_hook_only_runs_from_post_persisted_graph() {
 
     let mut graph = SessionGraph::default();
     graph.append_message(user_message("post-persist-message", "x".repeat(64).as_str()).message);
-    hook(PluginLifecycleEvent::TurnPersisted(
+    hook(PluginLifecycleEvent::TurnPersisted(Box::new(
         post_persist_context_with_completion(
             "session",
             graph,
             host.clone(),
             "<observations>\n- Persisted graph only.\n</observations>".to_string(),
         ),
-    ))
+    )))
     .await
     .expect("turn persisted hook");
 

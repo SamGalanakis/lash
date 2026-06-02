@@ -6,6 +6,8 @@
 (function () {
   "use strict";
 
+  const SCENE_ASSET_VERSION = "2";
+
   // ── single global TOC structure for the docs ──────────────
   // Edit this when adding / renaming / reordering pages.
   // hrefs are relative to /docs/ (top level); architecture pages
@@ -1026,7 +1028,7 @@
     // load the scene script if it isn't already on the page
     if (!document.querySelector('script[data-scene]')) {
       const s = document.createElement("script");
-      s.src = base + "scene.js";
+      s.src = `${base}scene.js?v=${SCENE_ASSET_VERSION}`;
       s.defer = true;
       s.setAttribute("data-scene", "");
       document.head.appendChild(s);

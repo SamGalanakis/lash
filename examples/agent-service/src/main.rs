@@ -141,7 +141,7 @@ async fn main() -> anyhow_like::Result<()> {
     let core = match durability {
         AgentServiceDurability::Local => core_builder
             .advanced()
-            .effect_controller(Arc::new(InlineRuntimeEffectController::default()))
+            .effect_controller(Arc::new(InlineRuntimeEffectController))
             .process_registry(Arc::clone(&process_registry))
             .build()
             .map_err(|err| err.to_string())?,
@@ -156,7 +156,7 @@ async fn main() -> anyhow_like::Result<()> {
                 // core its poke (fired after every successful process start).
                 core_builder
                     .advanced()
-                    .effect_controller(Arc::new(InlineRuntimeEffectController::default()))
+                    .effect_controller(Arc::new(InlineRuntimeEffectController))
                     .process_registry(Arc::clone(&process_registry))
                     .disable_default_process_work_runner()
                     .with_process_work_runner(

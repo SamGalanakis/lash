@@ -15,6 +15,9 @@ use std::time::Instant;
 use rustc_hash::FxHashMap;
 
 use crate::ast::UnaryOp;
+use crate::{
+    ProcessBranchSelection, ProcessTrackingChild, ProcessTrackingObservation, ProcessTrackingSite,
+};
 
 mod control;
 mod effects;
@@ -30,9 +33,10 @@ use super::schema::{
 use super::value::ProjectedValue;
 use super::{
     Chunk, ExecutionHost, ExecutionScratch, Instruction, InstructionProfileTag, IntrinsicOp,
-    LASH_TYPE_KEY, ListValue, Name, ProfileAccumulator, ProfileReport, ProjectedBindings,
-    RuntimeError, Value, add_assign_index_number, add_values, as_number, assign_path,
-    eval_binary_values, eval_compare_values, eval_number_binary_values, eval_number_compare_values,
+    LASH_HOST_VALUE_KEY, LASH_HOST_VALUE_TYPE_KEY, LASH_TYPE_KEY, ListValue, Name,
+    ProfileAccumulator, ProfileReport, ProjectedBindings, RuntimeError, Value,
+    add_assign_index_number, add_values, as_number, assign_path, eval_binary_values,
+    eval_compare_values, eval_number_binary_values, eval_number_compare_values,
     eval_number_numeric_binary_value, execute_compiled_format, execute_compiled_format_direct,
     execute_compiled_format_one_number_compact_direct, execute_intrinsic,
     execute_push_builtin_async, is_truthy, is_truthy_async, iterable_values,
@@ -212,8 +216,15 @@ pub(crate) struct Vm<'a, H> {
     host: &'a H,
     mode: VmMode,
     iter_stack: Vec<IterState>,
+    process_tracking_occurrences: FxHashMap<String, u64>,
     profile: Option<ProfileAccumulator>,
     validation_plans: FxHashMap<usize, (Arc<Record>, ValidationPlan)>,
+}
+
+#[derive(Clone)]
+pub(super) struct ActiveProcessTrackingNode {
+    pub(super) site: ProcessTrackingSite,
+    pub(super) occurrence: u64,
 }
 
 fn validation_plan_cache_entry(schema: &Value) -> Option<(usize, Arc<Record>)> {
@@ -239,6 +250,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             host,
             mode: VmMode::from(mode),
             iter_stack: Vec::new(),
+            process_tracking_occurrences: FxHashMap::default(),
             profile: None,
             validation_plans: FxHashMap::default(),
         }
@@ -260,6 +272,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             host,
             mode: VmMode::from(mode),
             iter_stack: std::mem::take(&mut scratch.iter_stack),
+            process_tracking_occurrences: FxHashMap::default(),
             profile: None,
             validation_plans: FxHashMap::default(),
         }
@@ -267,6 +280,102 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
 
     pub(crate) fn enable_profile(&mut self) {
         self.profile = Some(ProfileAccumulator::default());
+    }
+
+    fn process_tracking_site_at(&self, instruction_ip: usize) -> Option<&ProcessTrackingSite> {
+        if self.mode != VmMode::Process {
+            return None;
+        }
+        self.chunk
+            .process_tracking_sites
+            .get(instruction_ip)
+            .and_then(Option::as_ref)
+    }
+
+    fn begin_process_tracking(
+        &mut self,
+        instruction_ip: usize,
+    ) -> Option<ActiveProcessTrackingNode> {
+        let site = self.process_tracking_site_at(instruction_ip)?.clone();
+        let occurrence = self
+            .process_tracking_occurrences
+            .entry(site.node_id.clone())
+            .and_modify(|value| *value += 1)
+            .or_insert(1);
+        let occurrence = *occurrence;
+        self.host
+            .observe_process_tracking(ProcessTrackingObservation::NodeStarted {
+                site: site.clone(),
+                occurrence,
+            });
+        Some(ActiveProcessTrackingNode { site, occurrence })
+    }
+
+    pub(super) fn complete_process_tracking(&self, active: &ActiveProcessTrackingNode) {
+        self.host
+            .observe_process_tracking(ProcessTrackingObservation::NodeCompleted {
+                site: active.site.clone(),
+                occurrence: active.occurrence,
+            });
+    }
+
+    pub(super) fn fail_process_tracking(
+        &self,
+        active: &ActiveProcessTrackingNode,
+        error: impl Into<String>,
+    ) {
+        self.host
+            .observe_process_tracking(ProcessTrackingObservation::NodeFailed {
+                site: active.site.clone(),
+                occurrence: active.occurrence,
+                error: error.into(),
+            });
+    }
+
+    pub(super) fn observe_child_started(
+        &self,
+        active: &ActiveProcessTrackingNode,
+        child: ProcessTrackingChild,
+    ) {
+        self.host
+            .observe_process_tracking(ProcessTrackingObservation::ChildStarted {
+                site: active.site.clone(),
+                occurrence: active.occurrence,
+                child,
+            });
+    }
+
+    fn observe_branch_selection(
+        &mut self,
+        instruction_ip: usize,
+        selected: ProcessBranchSelection,
+    ) {
+        let Some(site) = self.process_tracking_site_at(instruction_ip).cloned() else {
+            return;
+        };
+        let Some(branch) = site.branch.as_ref() else {
+            return;
+        };
+        let occurrence = self
+            .process_tracking_occurrences
+            .entry(site.node_id.clone())
+            .and_modify(|value| *value += 1)
+            .or_insert(1);
+        let edge_id = match selected {
+            ProcessBranchSelection::Then => branch.then_edge_id.clone(),
+            ProcessBranchSelection::Else => branch.else_edge_id.clone(),
+        };
+        self.host
+            .observe_process_tracking(ProcessTrackingObservation::BranchSelected {
+                site,
+                occurrence: *occurrence,
+                edge_id,
+                selected,
+            });
+    }
+
+    fn current_instruction_ip(&self) -> usize {
+        self.ip.saturating_sub(1)
     }
 
     fn execute_dynamic_validate(
@@ -441,7 +550,16 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 }
                 let value = self.pop_stack()?;
                 if !is_truthy(&value) {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Else,
+                    );
                     self.ip = target;
+                } else {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Then,
+                    );
                 }
             }
             Instruction::JumpIfCompareFalse { op, target } => {
@@ -455,7 +573,16 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 let right = self.pop_stack()?;
                 let left = self.pop_stack()?;
                 if !eval_compare_values(left, op, right)? {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Else,
+                    );
                     self.ip = target;
+                } else {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Then,
+                    );
                 }
             }
             Instruction::JumpIfSlotNumberCompareFalse {
@@ -470,7 +597,16 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     value => eval_compare_values(value.clone(), op, Value::Number(right))?,
                 };
                 if !truthy {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Else,
+                    );
                     self.ip = target;
+                } else {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Then,
+                    );
                 }
             }
             Instruction::JumpIfSlotNumberBinaryCompareFalse {
@@ -498,7 +634,16 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     }
                 };
                 if !truthy {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Else,
+                    );
                     self.ip = target;
+                } else {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Then,
+                    );
                 }
             }
             Instruction::JumpIfTrue(target) => {
@@ -511,7 +656,16 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 }
                 let value = self.pop_stack()?;
                 if is_truthy(&value) {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Then,
+                    );
                     self.ip = target;
+                } else {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Else,
+                    );
                 }
             }
             Instruction::AddAssign(slot) => {
@@ -898,7 +1052,16 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     _ => is_truthy(&value),
                 };
                 if !truthy {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Else,
+                    );
                     self.ip = target;
+                } else {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Then,
+                    );
                 }
             }
             Instruction::JumpIfCompareFalse { .. } => {
@@ -919,7 +1082,16 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     _ => is_truthy(&value),
                 };
                 if truthy {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Then,
+                    );
                     self.ip = target;
+                } else {
+                    self.observe_branch_selection(
+                        self.current_instruction_ip(),
+                        ProcessBranchSelection::Else,
+                    );
                 }
             }
             Instruction::ResourceCall { operation, argc } => {
@@ -1005,6 +1177,16 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 let schema = self.pop_stack()?;
                 let mut wrapper = record_with_capacity(1);
                 wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
+                self.stack.push(Value::Record(Arc::new(wrapper)));
+            }
+            Instruction::WrapHostValue(type_name) => {
+                let value = self.pop_stack()?;
+                let mut wrapper = record_with_capacity(2);
+                wrapper.insert(
+                    LASH_HOST_VALUE_TYPE_KEY.to_string(),
+                    Value::String(self.chunk.names[type_name].text.as_ref().into()),
+                );
+                wrapper.insert(LASH_HOST_VALUE_KEY.to_string(), value);
                 self.stack.push(Value::Record(Arc::new(wrapper)));
             }
             // Every remaining opcode is fully handled by `step_instruction_fast`

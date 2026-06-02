@@ -214,6 +214,10 @@ impl LashRuntime {
             .map(|services| services.process_service())
     }
 
+    pub fn process_cancel_ability(&self) -> Arc<dyn crate::ProcessCancelAbility> {
+        Arc::clone(&self.host.core.control.process_cancel_ability)
+    }
+
     pub async fn enqueue_turn_input(
         &self,
         input: crate::TurnInput,

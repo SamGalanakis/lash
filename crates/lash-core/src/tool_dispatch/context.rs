@@ -43,6 +43,7 @@ pub struct ToolDispatchContext<'run> {
     pub session_lifecycle: Arc<dyn SessionLifecycleService>,
     pub session_graph: Arc<dyn SessionGraphService>,
     pub processes: Arc<dyn crate::ProcessService>,
+    pub process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,

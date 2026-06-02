@@ -219,46 +219,6 @@ impl LashRuntime {
         Ok(())
     }
 
-    pub async fn install_lashlang_trigger_source(
-        &mut self,
-        source: &str,
-    ) -> Result<crate::SessionTriggerInstallReport, SessionError> {
-        let Some(session) = self.session.as_ref() else {
-            return Err(SessionError::Protocol(
-                "runtime session not available".to_string(),
-            ));
-        };
-        let tool_surface = session
-            .tool_surface(&self.state.session_id)
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        let surface = crate::session::lashlang_surface_from_tool_surface(
-            &tool_surface,
-            session.plugins().lashlang_abilities(),
-            session.plugins().lashlang_resources(),
-        );
-        let report = session
-            .plugins()
-            .install_lashlang_trigger_source(
-                source,
-                surface,
-                self.host.core.durability.lashlang_artifact_store.as_ref(),
-            )
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        self.stamp_live_plugin_state();
-        if let Some(store) = self
-            .session
-            .as_ref()
-            .and_then(|session| session.history_store())
-        {
-            let commit = crate::store::RuntimeCommit::persisted_state(&self.state, &[]);
-            let result = store.commit_runtime_state(commit).await.map_err(|err| {
-                SessionError::Protocol(format!("failed to persist trigger registry state: {err}"))
-            })?;
-            self.state.apply_persisted_commit_result(result);
-        }
-        Ok(report)
-    }
-
     pub async fn emit_host_event(
         &mut self,
         resource_type: &str,
@@ -281,6 +241,7 @@ impl LashRuntime {
             )
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
         }
+        let source_type = crate::host_event_source_type(alias, event);
         let append = self
             .append_session_nodes(crate::AppendSessionNodesRequest {
                 nodes: vec![crate::SessionAppendNode::plugin(
@@ -289,6 +250,7 @@ impl LashRuntime {
                         "resource_type": resource_type,
                         "alias": alias,
                         "event": event,
+                        "source_type": source_type.clone(),
                         "payload": payload.clone(),
                     }),
                 )],
@@ -320,18 +282,154 @@ impl LashRuntime {
         let manager = self
             .runtime_session_services()
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        crate::session::triggers::emit_host_event(
+        let activation = session
+            .plugins()
+            .trigger_activation_service(manager.process_service());
+        let started_process_ids = activation
+            .activate_source_type(&source_type, payload, Some(host_event_invocation))
+            .await
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        Ok(crate::HostEventEmitReport {
+            started_process_ids,
+        })
+    }
+
+    pub async fn activate_lashlang_trigger(
+        &mut self,
+        handle: &str,
+        payload: serde_json::Value,
+    ) -> Result<crate::HostEventEmitReport, SessionError> {
+        let append = self
+            .append_session_nodes(crate::AppendSessionNodesRequest {
+                nodes: vec![crate::SessionAppendNode::plugin(
+                    "lash.trigger_activation",
+                    serde_json::json!({
+                        "handle": handle,
+                        "payload": payload.clone(),
+                    }),
+                )],
+                requires_ancestor_node_id: None,
+            })
+            .await?;
+        let activation_node_id = match append {
+            crate::AppendSessionNodesResult::Appended { node_ids, .. } => {
+                node_ids.into_iter().next().unwrap_or_default()
+            }
+            crate::AppendSessionNodesResult::StaleBranch {
+                current_leaf_node_id,
+            } => {
+                return Err(SessionError::Protocol(format!(
+                    "trigger activation append targeted a stale session branch at {:?}",
+                    current_leaf_node_id
+                )));
+            }
+        };
+        let activation_invocation = crate::runtime::causal::session_node_invocation(
             &self.state.session_id,
-            Arc::clone(session.plugins()),
-            manager.process_service(),
-            host_event_invocation,
-            resource_type,
-            alias,
-            event,
-            payload,
-        )
-        .await
-        .map_err(|err| SessionError::Protocol(err.to_string()))
+            activation_node_id,
+        );
+        let Some(session) = self.session.as_ref() else {
+            return Err(SessionError::Protocol(
+                "runtime session not available".to_string(),
+            ));
+        };
+        let manager = self
+            .runtime_session_services()
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        let activation = session
+            .plugins()
+            .trigger_activation_service(manager.process_service());
+        let started = activation
+            .activate(handle, payload, Some(activation_invocation))
+            .await
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        Ok(crate::HostEventEmitReport {
+            started_process_ids: started.into_iter().collect(),
+        })
+    }
+
+    pub async fn activate_lashlang_trigger_source_type(
+        &mut self,
+        source_type: impl AsRef<str>,
+        payload: serde_json::Value,
+    ) -> Result<crate::HostEventEmitReport, SessionError> {
+        let source_type = source_type.as_ref().to_string();
+        let append = self
+            .append_session_nodes(crate::AppendSessionNodesRequest {
+                nodes: vec![crate::SessionAppendNode::plugin(
+                    "lash.trigger_source_activation",
+                    serde_json::json!({
+                        "source_type": source_type.clone(),
+                        "payload": payload.clone(),
+                    }),
+                )],
+                requires_ancestor_node_id: None,
+            })
+            .await?;
+        let activation_node_id = match append {
+            crate::AppendSessionNodesResult::Appended { node_ids, .. } => {
+                node_ids.into_iter().next().unwrap_or_default()
+            }
+            crate::AppendSessionNodesResult::StaleBranch {
+                current_leaf_node_id,
+            } => {
+                return Err(SessionError::Protocol(format!(
+                    "trigger source activation append targeted a stale session branch at {:?}",
+                    current_leaf_node_id
+                )));
+            }
+        };
+        let activation_invocation = crate::runtime::causal::session_node_invocation(
+            &self.state.session_id,
+            activation_node_id,
+        );
+        let Some(session) = self.session.as_ref() else {
+            return Err(SessionError::Protocol(
+                "runtime session not available".to_string(),
+            ));
+        };
+        let manager = self
+            .runtime_session_services()
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        let activation = session
+            .plugins()
+            .trigger_activation_service(manager.process_service());
+        let started_process_ids = activation
+            .activate_source_type(&source_type, payload, Some(activation_invocation))
+            .await
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        Ok(crate::HostEventEmitReport {
+            started_process_ids,
+        })
+    }
+
+    pub fn list_lashlang_trigger_registrations(
+        &self,
+    ) -> Result<Vec<crate::TriggerRegistration>, SessionError> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(SessionError::Protocol(
+                "runtime session not available".to_string(),
+            ));
+        };
+        session
+            .plugins()
+            .list_all_lashlang_triggers()
+            .map_err(|err| SessionError::Protocol(err.to_string()))
+    }
+
+    pub fn lashlang_trigger_registrations_by_source_type(
+        &self,
+        source_type: impl Into<crate::TriggerSourceType>,
+    ) -> Result<Vec<crate::TriggerRegistration>, SessionError> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(SessionError::Protocol(
+                "runtime session not available".to_string(),
+            ));
+        };
+        session
+            .plugins()
+            .lashlang_trigger_registrations_by_source_type(source_type.into())
+            .map_err(|err| SessionError::Protocol(err.to_string()))
     }
 
     pub async fn invoke_plugin_action(

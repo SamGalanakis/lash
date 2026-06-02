@@ -600,10 +600,10 @@ submit value
         .expect("tool provider entered");
 
     let processes = session.process_control().list().await?;
-    let running_app_lookup = processes.iter().any(|(grant, record)| {
-        grant.descriptor.kind.as_deref() == Some("lashlang")
-            && grant.descriptor.label.as_deref() == Some("lookup")
-            && !record.status.is_terminal()
+    let running_app_lookup = processes.iter().any(|process| {
+        process.descriptor.kind.as_deref() == Some("lashlang")
+            && process.descriptor.label.as_deref() == Some("lookup")
+            && !process.status.is_terminal()
     });
     assert!(
         running_app_lookup,

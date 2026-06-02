@@ -37,10 +37,28 @@ fn prompt_surface(
 fn tool_resources() -> lashlang::ResourceCatalog {
     let mut resources = lashlang::ResourceCatalog::new();
     resources.add_module_instance(["web"], "Web");
-    resources.add_operation("Web", "search", "search_web");
-    resources.add_operation("Web", "fetch", "fetch_url");
+    resources.add_operation(
+        "Web",
+        "search",
+        "search_web",
+        lashlang::TypeExpr::Any,
+        lashlang::TypeExpr::Any,
+    );
+    resources.add_operation(
+        "Web",
+        "fetch",
+        "fetch_url",
+        lashlang::TypeExpr::Any,
+        lashlang::TypeExpr::Any,
+    );
     resources.add_module_instance(["files"], "Files");
-    resources.add_operation("Files", "read", "read_file");
+    resources.add_operation(
+        "Files",
+        "read",
+        "read_file",
+        lashlang::TypeExpr::Any,
+        lashlang::TypeExpr::Any,
+    );
     resources
 }
 
@@ -87,7 +105,7 @@ fn execution_section_shows_sleep_without_processes() {
 }
 
 #[test]
-fn execution_section_hides_trigger_and_schedule_language_when_disabled() {
+fn execution_section_hides_trigger_registry_language_when_disabled() {
     let surface = prompt_surface(
         tool_resources(),
         lashlang::LashlangAbilities::default()
@@ -97,43 +115,58 @@ fn execution_section_hides_trigger_and_schedule_language_when_disabled() {
     );
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 
-    assert!(!section.contains("trigger name"));
-    assert!(!section.contains("schedule name"));
-    assert!(!section.contains("cron("));
-    assert!(!section.contains("triggers, or schedules"));
+    assert!(!section.contains("Trigger registry"));
 }
 
 #[test]
-fn execution_section_hides_trigger_language_without_processes() {
+fn execution_section_hides_trigger_registry_language_without_processes() {
     let surface = prompt_surface(
         tool_resources(),
         lashlang::LashlangAbilities::default().with_triggers(),
     );
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 
-    assert!(!section.contains("trigger name"));
-    assert!(!section.contains("module-event declarations"));
+    assert!(!section.contains("Trigger registry"));
+    assert!(!section.contains("triggers.register"));
 }
 
 #[test]
-fn execution_section_lists_exposed_host_event_resources_with_formatted_payloads() {
+fn execution_section_lists_typed_operations_constructors_and_trigger_sources() {
     let mut resources = lashlang::ResourceCatalog::new();
-    resources.add_module_instance(["ui", "button"], "Button");
-    resources.add_trigger_event(
-        "Button",
-        "pressed",
+    resources.add_module_instance(["triggers"], "Triggers");
+    resources.add_operation(
+        "Triggers",
+        "register",
+        "triggers.register",
         lashlang::TypeExpr::Object(vec![
             lashlang::TypeField {
-                name: "button".into(),
-                ty: lashlang::TypeExpr::Enum(vec!["Red".into(), "Blue".into()]),
+                name: "source".into(),
+                ty: lashlang::TypeExpr::Any,
                 optional: false,
             },
             lashlang::TypeField {
-                name: "pressed_at".into(),
-                ty: lashlang::TypeExpr::Str,
+                name: "target".into(),
+                ty: lashlang::TypeExpr::Any,
                 optional: false,
             },
         ]),
+        lashlang::TypeExpr::TriggerHandle(Box::new(lashlang::TypeExpr::Any)),
+    );
+    resources.add_trigger_source_constructor(
+        ["timer", "Schedule"],
+        lashlang::TypeExpr::Object(vec![
+            lashlang::TypeField {
+                name: "expr".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            },
+            lashlang::TypeField {
+                name: "tz".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: true,
+            },
+        ]),
+        lashlang::TypeExpr::Ref("timer.Tick".into()),
     );
     let surface = prompt_surface(
         resources,
@@ -144,10 +177,16 @@ fn execution_section_lists_exposed_host_event_resources_with_formatted_payloads(
 
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 
-    assert!(section.contains("### Host Events"));
-    assert!(section.contains("`ui.button.pressed`"));
-    assert!(section.contains(r#"{ button: enum["Red", "Blue"], pressed_at: str }"#));
-    assert!(section.contains("host events are not tools"));
+    assert!(section.contains("### Host Surface"));
+    assert!(section.contains(
+        "`await triggers.register({ source: any, target: any })? -> TriggerHandle<any>`"
+    ));
+    assert!(section.contains("`timer.Schedule({ expr: str, tz: str? }) -> timer.Schedule`"));
+    assert!(
+        section.contains(
+            "`timer.Schedule` can be passed to `triggers.register` and emits `timer.Tick`"
+        )
+    );
 }
 
 #[test]

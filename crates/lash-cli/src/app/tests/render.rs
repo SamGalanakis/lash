@@ -3,36 +3,26 @@ use super::*;
 #[test]
 fn background_subagent_status_is_transient_and_freezes_duration() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let grant = lash_core::ProcessHandleGrant {
-        session_id: "test-session-id".to_string(),
+    let running = lash_core::ProcessHandleSummary {
+        handle_type: "process".to_string(),
+        id: "subagent:smoke".to_string(),
         process_id: "subagent:smoke".to_string(),
         descriptor: lash_core::ProcessHandleDescriptor::new(Some("subagent"), Some("smoke")),
+        status: lash_core::ProcessLifecycleStatus::Running,
     };
-    let running = lash_core::ProcessRecord::from_registration(lash_core::ProcessRegistration::new(
-        "subagent:smoke",
-        lash_core::ProcessInput::External {
-            metadata: serde_json::Value::Null,
-        },
-    ));
-    app.update_processes(vec![(grant.clone(), running)]);
+    app.update_processes(vec![running]);
     app.processes[0].first_seen = std::time::Instant::now() - std::time::Duration::from_secs(125);
     assert_eq!(app.processes.len(), 1);
     assert_eq!(app.processes[0].status_duration, None);
 
-    let mut completed =
-        lash_core::ProcessRecord::from_registration(lash_core::ProcessRegistration::new(
-            "subagent:smoke",
-            lash_core::ProcessInput::External {
-                metadata: serde_json::Value::Null,
-            },
-        ));
-    completed.status = lash_core::ProcessStatus::Completed {
-        await_output: lash_core::ProcessAwaitOutput::Success {
-            value: serde_json::json!({}),
-            control: None,
-        },
+    let completed = lash_core::ProcessHandleSummary {
+        handle_type: "process".to_string(),
+        id: "subagent:smoke".to_string(),
+        process_id: "subagent:smoke".to_string(),
+        descriptor: lash_core::ProcessHandleDescriptor::new(Some("subagent"), Some("smoke")),
+        status: lash_core::ProcessLifecycleStatus::Completed,
     };
-    app.update_processes(vec![(grant, completed)]);
+    app.update_processes(vec![completed]);
 
     assert_eq!(app.processes.len(), 1);
     assert_eq!(

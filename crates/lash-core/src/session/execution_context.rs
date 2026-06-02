@@ -34,6 +34,8 @@ pub(crate) fn lashlang_resources_from_tool_surface(
                 agent_surface.authority_type,
                 agent_surface.operation,
                 entry.manifest.name.clone(),
+                lashlang::TypeExpr::Any,
+                lashlang::TypeExpr::Any,
             );
         }
     }
@@ -243,33 +245,29 @@ impl<'run> RuntimeExecutionContext<'run> {
             .map_err(|err| err.to_string())
     }
 
-    pub fn install_lashlang_trigger_source(
+    pub async fn perform_lashlang_trigger_operation(
         &self,
-        source: &str,
-    ) -> Result<crate::SessionTriggerInstallReport, String> {
-        self.dispatch
-            .plugins
-            .install_lashlang_trigger_source(
-                source,
-                self.lashlang_surface(),
-                self.lashlang_artifact_store.as_ref(),
-            )
-            .map_err(|err| err.to_string())
-    }
-
-    pub fn install_linked_lashlang_trigger_source(
-        &self,
-        source: &str,
-        linked: &lashlang::LinkedModule,
-    ) -> Result<crate::SessionTriggerInstallReport, String> {
-        self.dispatch
-            .plugins
-            .install_linked_lashlang_trigger_source(
-                source,
-                linked,
-                self.lashlang_artifact_store.as_ref(),
-            )
-            .map_err(|err| err.to_string())
+        operation: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        match lashlang::TriggerHostOperation::from_host_operation(operation) {
+            Some(lashlang::TriggerHostOperation::Register) => self
+                .dispatch
+                .plugins
+                .register_lashlang_trigger(payload, Arc::clone(&self.lashlang_artifact_store))
+                .map_err(|err| err.to_string()),
+            Some(lashlang::TriggerHostOperation::List) => self
+                .dispatch
+                .plugins
+                .list_lashlang_triggers(payload)
+                .map_err(|err| err.to_string()),
+            Some(lashlang::TriggerHostOperation::Cancel) => self
+                .dispatch
+                .plugins
+                .cancel_lashlang_trigger(payload)
+                .map_err(|err| err.to_string()),
+            None => Err(format!("unknown trigger operation `{operation}`")),
+        }
     }
 
     pub fn tool_argument_projection_policy(
@@ -389,8 +387,9 @@ mod tests {
             session_lifecycle: Arc::new(crate::testing::MockSessionManager::default()),
             session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
+            process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController::default(),
+                crate::InlineRuntimeEffectController,
             )),
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
@@ -448,8 +447,9 @@ mod tests {
             session_lifecycle: Arc::new(crate::testing::MockSessionManager::default()),
             session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
+            process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController::default(),
+                crate::InlineRuntimeEffectController,
             )),
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn lashlang_surface_reflects_host_abilities_without_default_cron() {
+    fn lashlang_surface_reflects_host_abilities() {
         let tool = crate::ToolDefinition::raw(
             "tool:alpha",
             "alpha",
@@ -537,8 +537,9 @@ mod tests {
             session_lifecycle: Arc::new(crate::testing::MockSessionManager::default()),
             session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
+            process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController::default(),
+                crate::InlineRuntimeEffectController,
             )),
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
@@ -571,7 +572,6 @@ mod tests {
         assert!(surface.abilities.sleep);
         assert!(surface.abilities.process_signals);
         assert!(!surface.abilities.triggers);
-        assert!(!surface.abilities.schedules.cron);
         assert!(
             surface
                 .resources
@@ -583,10 +583,20 @@ mod tests {
     #[test]
     fn lashlang_surface_reflects_host_resource_contributions() {
         let mut resources = lashlang::ResourceCatalog::new();
-        resources.add_module_instance(["ui", "button"], "Button");
-        resources.add_trigger_event("Button", "pressed", lashlang::TypeExpr::Any);
-        let plugins = crate::plugin::PluginHost::empty()
-            .with_lashlang_resources(resources)
+        resources.add_trigger_source_constructor(
+            ["clock", "Alarm"],
+            lashlang::TypeExpr::Object(vec![lashlang::TypeField {
+                name: "at".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            }]),
+            lashlang::TypeExpr::Ref("clock.Tick".into()),
+        );
+        let plugin_host = crate::plugin::PluginHost::empty();
+        let mut merged_resources = plugin_host.lashlang_resources();
+        merged_resources.extend(resources);
+        let plugins = plugin_host
+            .with_lashlang_resources(merged_resources)
             .build_session("session", None)
             .expect("plugin session");
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
@@ -601,8 +611,9 @@ mod tests {
             session_lifecycle: Arc::new(crate::testing::MockSessionManager::default()),
             session_graph: Arc::new(crate::testing::MockSessionManager::default()),
             processes: Arc::new(crate::UnavailableProcessService),
+            process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController::default(),
+                crate::InlineRuntimeEffectController,
             )),
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
@@ -633,21 +644,27 @@ mod tests {
         assert!(
             surface
                 .resources
-                .trigger_event("Button", "pressed")
+                .resolve_value_constructor(&["clock", "Alarm"])
                 .is_some()
+        );
+        assert!(
+            surface
+                .resources
+                .trigger_sources
+                .contains_key("clock.Alarm")
         );
         lashlang::LinkedModule::link(
             lashlang::parse(
                 r#"
-                process remember(event: any) {
-                  finish event
+                process remember(tick: clock.Tick) {
+                  finish true
                 }
 
-                trigger remembered on ui.button.pressed as event
-                  -> remember(event: event)
+                source = clock.Alarm({ at: "08:00" })
+                await triggers.register({ source: source, target: remember })?
                 "#,
             )
-            .expect("parse trigger module"),
+            .expect("parse trigger registry module"),
             surface,
         )
         .expect("host resource contribution should be linkable");

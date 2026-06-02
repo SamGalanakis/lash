@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use lash_core::{
-    ToolArgumentProjectionPolicy, ToolAvailabilityConfig, ToolCall, ToolContext, ToolContract,
-    ToolControl, ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
+    ToolArgumentProjectionPolicy, ToolAvailabilityConfig, ToolCall, ToolContract, ToolControl,
+    ToolDefinition, ToolManifest, ToolProvider, ToolResult, ToolScheduling,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -22,7 +22,7 @@ impl ToolProvider for RlmControlToolsProvider {
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let result = match call.name {
-            "continue_as" => continue_as_switch_frame(call.args, call.context).await,
+            "continue_as" => continue_as_switch_frame(call.args),
             _ => return ToolResult::err_fmt(format_args!("Unknown tool: {}", call.name)),
         };
         finalise_tool_result(result)
@@ -33,7 +33,7 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "tool:continue_as",
         "continue_as",
-        "Tail-call into a fresh RLM AgentFrame inside the current session with a clean window.\n\nThe new frame inherits **nothing** implicitly — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected in the new frame (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `control.continue_as(...)` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the new frame must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the new frame needs in scope; leave bulky raw output behind.\n- If live async work is needed after the switch, include its handle in `seed` (for example from `processes.list(...)`). Referenced handles transfer to the new frame and can be awaited there. Live handles not included in `seed` are cancelled when `control.continue_as(...)` succeeds.",
+        "Tail-call into a fresh RLM AgentFrame inside the current session with a clean window.\n\nThe new frame inherits **nothing** implicitly — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected in the new frame (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `control.continue_as(...)` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the new frame must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the new frame needs in scope; leave bulky raw output behind.\n- `continue_as` only changes the active AgentFrame. It does not start, transfer, list, cancel, or otherwise manage processes.",
         continue_as_input_schema(),
         continue_as_output_schema(),
     )
@@ -59,16 +59,14 @@ fn continue_as_output_schema() -> Value {
                 "items": { "type": "string" }
             },
             "projected_count": { "type": "integer", "minimum": 0 },
-            "global_count": { "type": "integer", "minimum": 0 },
-            "handle_count": { "type": "integer", "minimum": 0 }
+            "global_count": { "type": "integer", "minimum": 0 }
         },
         "required": [
             "frame_id",
             "task",
             "seed_keys",
             "projected_count",
-            "global_count",
-            "handle_count"
+            "global_count"
         ],
         "additionalProperties": false
     })
@@ -93,20 +91,9 @@ pub fn continue_as_input_schema() -> Value {
     })
 }
 
-async fn continue_as_switch_frame(
-    args: &Value,
-    context: &ToolContext<'_>,
-) -> Result<ContinueAsResult, String> {
+fn continue_as_switch_frame(args: &Value) -> Result<ContinueAsResult, String> {
     let task = required_string(args, "task")?;
     let seed = RlmSeed::from_tool_args(args).map_err(|err| format!("continue_as {err}"))?;
-    let referenced_handles = seed.referenced_process_handle_ids();
-    let referenced_handles_vec = referenced_handles.into_iter().collect::<Vec<_>>();
-    let processes = context.processes();
-    processes
-        .validate_handles(&referenced_handles_vec)
-        .await
-        .map_err(|err| format!("continue_as process handle validation failed: {err}"))?;
-
     let frame_id = uuid::Uuid::new_v4().to_string();
     let initial_nodes = crate::rlm_seed_initial_nodes(seed);
     let initial_nodes = initial_nodes
@@ -116,20 +103,6 @@ async fn continue_as_switch_frame(
                 .map_err(|err| format!("failed to encode continue_as frame seed node: {err}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if let Err(err) = processes
-        .transfer_handles_to_frame(&frame_id, referenced_handles_vec.clone())
-        .await
-    {
-        return Err(format!("continue_as process handle transfer failed: {err}"));
-    }
-    if let Err(err) = processes
-        .cancel_unreferenced_handles(referenced_handles_vec.clone())
-        .await
-    {
-        return Err(format!(
-            "continue_as process handle cleanup failed after frame creation: {err}"
-        ));
-    }
 
     Ok(ContinueAsResult {
         value: json!({
@@ -170,7 +143,6 @@ fn finalise_tool_result(result: Result<ContinueAsResult, String>) -> ToolResult 
 mod tests {
     use super::*;
     use crate::projection::{decode_rlm_protocol_event, rlm_protocol_event};
-    use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
     use lash_core::plugin::runtime_host::{
@@ -199,13 +171,12 @@ mod tests {
                 "task",
                 "seed_keys",
                 "projected_count",
-                "global_count",
-                "handle_count"
+                "global_count"
             ])
         );
         let rendered = definition.compact_contract().render_signature();
         assert!(rendered.contains("frame_id"), "{rendered}");
-        assert!(rendered.contains("handle_count"), "{rendered}");
+        assert!(!rendered.contains("handle_count"), "{rendered}");
     }
 
     #[derive(Default)]
@@ -213,9 +184,6 @@ mod tests {
         snapshot: RuntimeSessionState,
         created: Mutex<Vec<SessionCreateRequest>>,
         closed: Mutex<Vec<String>>,
-        visible_handles: Mutex<BTreeSet<String>>,
-        transferred: Mutex<Vec<(String, String, Vec<String>)>>,
-        cleanup_keep: Mutex<Vec<Vec<String>>>,
     }
 
     #[test]
@@ -301,21 +269,19 @@ mod tests {
             _session_id: &str,
             _mode: lash_core::ProcessListMode,
             _scope: lash_core::ProcessOpScope<'_>,
-        ) -> Result<Vec<lash_core::ProcessHandleGrantEntry>, PluginError> {
+        ) -> Result<Vec<lash_core::runtime::ProcessHandleGrantEntry>, PluginError> {
             Ok(Vec::new())
         }
 
         async fn validate_visible(
             &self,
             _session_id: &str,
-            handle_ids: &[String],
+            _handle_ids: &[String],
             _scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<(), PluginError> {
-            let visible = self.visible_handles.lock().expect("visible handles");
-            if let Some(missing) = handle_ids.iter().find(|id| !visible.contains(*id)) {
-                return Err(PluginError::Session(format!("missing {missing}")));
-            }
-            Ok(())
+            Err(PluginError::Session(
+                "continue_as must not validate process handles".to_string(),
+            ))
         }
 
         async fn cancel(
@@ -342,43 +308,27 @@ mod tests {
             ))
         }
 
-        async fn cancel_all(
-            &self,
-            _session_id: &str,
-            _scope: lash_core::ProcessOpScope<'_>,
-        ) -> Result<Vec<lash_core::ProcessRecord>, PluginError> {
-            Ok(Vec::new())
-        }
-
         async fn transfer(
             &self,
-            from_session_id: &str,
-            to_session_id: &str,
-            process_ids: Vec<String>,
-            scope: lash_core::ProcessOpScope<'_>,
+            _from_session_id: &str,
+            _to_session_id: &str,
+            _process_ids: Vec<String>,
+            _scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<(), PluginError> {
-            self.transferred.lock().expect("transferred").push((
-                from_session_id.to_string(),
-                scope
-                    .target_agent_frame_id
-                    .clone()
-                    .unwrap_or_else(|| to_session_id.to_string()),
-                process_ids,
-            ));
-            Ok(())
+            Err(PluginError::Session(
+                "continue_as must not transfer process handles".to_string(),
+            ))
         }
 
         async fn cancel_unreferenced(
             &self,
             _session_id: &str,
-            keep_process_ids: Vec<String>,
+            _keep_process_ids: Vec<String>,
             _scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<Vec<lash_core::ProcessRecord>, PluginError> {
-            self.cleanup_keep
-                .lock()
-                .expect("cleanup keep")
-                .push(keep_process_ids);
-            Ok(Vec::new())
+            Err(PluginError::Session(
+                "continue_as must not cancel process handles".to_string(),
+            ))
         }
     }
 
@@ -557,7 +507,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continue_as_transfers_handles_found_recursively_in_seed() {
+    async fn continue_as_preserves_process_shaped_seed_without_process_control() {
         let manager = Arc::new(BatonManager {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
@@ -567,7 +517,6 @@ mod tests {
                 ..RuntimeSessionState::default()
             },
             created: Mutex::new(Vec::new()),
-            visible_handles: Mutex::new(BTreeSet::from_iter(["h1".to_string(), "h2".to_string()])),
             ..BatonManager::default()
         });
         let provider = RlmControlToolsProvider;
@@ -582,28 +531,36 @@ mod tests {
         let result = run_continue_as(&provider, manager.clone(), &args).await;
 
         assert!(result.is_success(), "{:?}", result.value_for_projection());
-        let value = result.value_for_projection();
-        let frame_id = value
-            .get("frame_id")
-            .and_then(Value::as_str)
-            .expect("frame")
-            .to_string();
+        let Some(ToolControl::SwitchAgentFrame { initial_nodes, .. }) =
+            result.as_output().control.as_ref()
+        else {
+            panic!("expected frame switch control");
+        };
+        let node = serde_json::from_value::<SessionAppendNode>(initial_nodes[0].clone())
+            .expect("decode initial node");
+        let SessionAppendNode::ProtocolEvent {
+            event: protocol_event,
+            ..
+        } = node
+        else {
+            panic!("expected seed globals event");
+        };
+        let Some(RlmProtocolEvent::RlmSeed(seed)) = decode_rlm_protocol_event(&protocol_event)
+        else {
+            panic!("expected RlmSeed");
+        };
         assert_eq!(
-            *manager.transferred.lock().expect("transferred"),
-            vec![(
-                "test-session".to_string(),
-                frame_id,
-                vec!["h1".to_string(), "h2".to_string()]
-            )]
+            seed.globals["one"],
+            json!({ "__handle__": "process", "id": "h1", "tool": "slow" })
         );
         assert_eq!(
-            *manager.cleanup_keep.lock().expect("cleanup keep"),
-            vec![vec!["h1".to_string(), "h2".to_string()]]
+            seed.globals["nested"],
+            json!([{ "h": { "__handle__": "process", "id": "h2", "tool": "slow" } }])
         );
     }
 
     #[tokio::test]
-    async fn continue_as_rejects_unknown_seed_handle_before_creating_frame() {
+    async fn continue_as_does_not_validate_unknown_seed_handles() {
         let manager = Arc::new(BatonManager {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
@@ -623,15 +580,7 @@ mod tests {
         });
         let result = run_continue_as(&provider, manager.clone(), &args).await;
 
-        assert!(!result.is_success());
+        assert!(result.is_success(), "{:?}", result.value_for_projection());
         assert!(manager.created.lock().expect("created").is_empty());
-        assert!(manager.transferred.lock().expect("transferred").is_empty());
-        assert!(
-            manager
-                .cleanup_keep
-                .lock()
-                .expect("cleanup keep")
-                .is_empty()
-        );
     }
 }

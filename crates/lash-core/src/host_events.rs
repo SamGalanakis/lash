@@ -36,6 +36,10 @@ impl HostEvent {
             event: self.event.clone(),
         }
     }
+
+    pub fn source_type(&self) -> String {
+        host_event_source_type(&self.alias, &self.event)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -57,6 +61,14 @@ impl HostEventKey {
             event: event.into(),
         }
     }
+
+    pub fn source_type(&self) -> String {
+        host_event_source_type(&self.alias, &self.event)
+    }
+}
+
+pub fn host_event_source_type(alias: &str, event: &str) -> String {
+    format!("{alias}.{event}")
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +87,22 @@ impl HostEventCatalog {
             return Err(format!(
                 "duplicate host event `{}.{}.{}`",
                 key.resource_type, key.alias, key.event
+            ));
+        }
+        let source_type = event.source_type();
+        if let Some(existing) = self
+            .events
+            .values()
+            .find(|existing| existing.source_type() == source_type)
+        {
+            return Err(format!(
+                "duplicate host event source `{source_type}` declared by `{}.{}.{}` and `{}.{}.{}`",
+                existing.resource_type,
+                existing.alias,
+                existing.event,
+                key.resource_type,
+                key.alias,
+                key.event
             ));
         }
         self.events.insert(key, event);
@@ -104,24 +132,6 @@ impl HostEventCatalog {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionTriggerInstallReport {
-    pub installed: Vec<String>,
-    pub replaced: Vec<String>,
-    pub unchanged: Vec<String>,
-}
-
-impl SessionTriggerInstallReport {
-    pub fn trigger_names(&self) -> Vec<String> {
-        self.installed
-            .iter()
-            .chain(self.replaced.iter())
-            .chain(self.unchanged.iter())
-            .cloned()
-            .collect()
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostEventEmitReport {
     pub started_process_ids: Vec<String>,
 }
@@ -129,5 +139,24 @@ pub struct HostEventEmitReport {
 impl HostEventEmitReport {
     pub fn empty() -> Self {
         Self::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_event_catalog_rejects_duplicate_trigger_source_identity() {
+        let mut catalog = HostEventCatalog::new();
+        catalog
+            .declare(HostEvent::new("Button", "ui.button", "pressed"))
+            .expect("first host event");
+
+        let err = catalog
+            .declare(HostEvent::new("AlternateButton", "ui.button", "pressed"))
+            .expect_err("duplicate public source identity should be rejected");
+
+        assert!(err.contains("duplicate host event source `ui.button.pressed`"));
     }
 }

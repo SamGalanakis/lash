@@ -218,6 +218,16 @@ impl TraceStats {
                         + usage.cached_input_tokens
                         + usage.reasoning_tokens;
                 }
+                lash_trace::TraceEvent::ProcessTracking {
+                    event:
+                        lash_trace::TraceProcessTrackingEvent::NodeFailed { .. }
+                        | lash_trace::TraceProcessTrackingEvent::ProcessFinished {
+                            status: lash_trace::TraceProcessStatus::Failed,
+                            ..
+                        },
+                } => {
+                    stats.failures += 1;
+                }
                 _ => {}
             }
         }
@@ -606,6 +616,7 @@ function eventCard(record, index, className = 'event') {
   const badgeClass = kind.includes('failed') || isFailed(record) ? 'fail'
     : kind.startsWith('llm') ? 'llm'
     : kind.startsWith('tool') ? 'tool'
+    : kind === 'process_tracking' ? 'stream'
     : kind.endsWith('stream_event') ? 'stream'
     : '';
   card.innerHTML = `
@@ -656,6 +667,8 @@ function eventTitle(record) {
       return record.event.event_name;
     case 'turn_completed':
       return `${record.status}: ${record.done_reason}`;
+    case 'process_tracking':
+      return processTrackingTitle(record.event);
     case 'custom':
       return record.name;
     case 'prompt_built':
@@ -685,6 +698,8 @@ function eventSummary(record) {
       return `${record.plugin_id}\n${JSON.stringify(record.payload)}`;
     case 'token_usage':
       return usageText(record.usage, record.cumulative);
+    case 'process_tracking':
+      return processTrackingSummary(record.event);
     case 'custom':
       return JSON.stringify(record.payload);
     case 'prompt_built':
@@ -716,6 +731,43 @@ function usageText(usage, cumulative = null) {
     text += `\ncumulative ${ctotal}`;
   }
   return text;
+}
+
+function processTrackingTitle(event) {
+  if (!event) return 'process tracking';
+  switch (event.kind) {
+    case 'process_started':
+      return `${event.process_name} started`;
+    case 'process_finished':
+      return `${event.process_name} ${event.status}`;
+    case 'node_started':
+      return `${event.label} started`;
+    case 'node_completed':
+      return `${event.label} completed`;
+    case 'node_failed':
+      return `${event.label} failed`;
+    case 'branch_selected':
+      return `branch selected: ${event.selected}`;
+    case 'child_started':
+      return `${event.process_name} started child ${event.child_process_name}`;
+    default:
+      return event.kind || 'process tracking';
+  }
+}
+
+function processTrackingSummary(event) {
+  if (!event) return '';
+  const parts = [`process ${event.process_id}`];
+  if (event.node_id) parts.push(`node ${event.node_id}`);
+  if (event.occurrence) parts.push(`occurrence ${event.occurrence}`);
+  if (event.edge_id) parts.push(`edge ${event.edge_id}`);
+  if (event.child_process_id) parts.push(`child ${event.child_process_id}`);
+  if (event.error) parts.push(`error ${event.error}`);
+  if (event.process_map) {
+    parts.push(`${event.process_map.nodes?.length || 0} nodes`);
+    parts.push(`${event.process_map.edges?.length || 0} edges`);
+  }
+  return parts.join('\n');
 }
 
 function pillRow(record) {

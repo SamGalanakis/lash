@@ -12,10 +12,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../styles.css?v=2">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js" defer></script>
+<script src="../docs.js?v=2" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -28,13 +28,13 @@
 <div class="section" id="language-reference">
           <div class="section-header">
             <h2>Language Reference</h2>
-            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The parser accepts the full module grammar, but the linked host surface decides which abilities exist: receiver operations, reusable background <code>process</code> work, triggers, schedules, process sleep, and process signals are enabled explicitly by the host and hidden from prompts when disabled. Trigger declarations are declaration-only bindings from typed resource events to named processes; installing them writes the linked module artifact once and stores activation routes over artifact refs. Host event emits append causal session-history nodes and start the routed process from those refs. Cron schedule declarations still carry bodies, and cron activation remains follow-up work. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are foreground effect expressions.</p>
+            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The parser accepts the full module grammar, but the linked host surface decides which abilities exist: receiver operations, reusable background <code>process</code> work, trigger registry operations, process sleep, and process signals are enabled explicitly by the host and hidden from prompts when disabled. Declarative <code>trigger</code> syntax has been removed; programs construct host-provided trigger-source values and call <code>triggers.register</code>, <code>triggers.list</code>, or <code>triggers.cancel</code>. Timers and recurring jobs are host-owned source policies, not Lashlang syntax. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are foreground effect expressions.</p>
           </div>
           <dl class="def-list">
             <dt>Values</dt>
             <dd><code>null</code>, booleans, numbers, strings, lists, records, projected host values, result wrappers, and immutable <code>Image</code> handles. Resource handles and process handles appear only when the linked host surface exposes those abilities. Lists and records are value-shaped and copy-on-write at mutation roots.</dd>
             <dt>Program form</dt>
-            <dd>A program is a module with optional <code>type</code>, <code>process</code>, <code>trigger</code>, and <code>schedule</code> declarations plus a foreground main block. Disabled declarations remain valid syntax but are rejected by the linker with a source-spanned <code>lashlang feature `...` is disabled by this host</code> diagnostic before runtime calls can be made. Simple and path assignment, receiver operations, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>break</code>, <code>continue</code>, <code>cancel</code>, and <code>submit</code> are expression nodes; assignment and <code>for</code> evaluate to <code>null</code>.</dd>
+            <dd>A program is a module with optional <code>type</code> and <code>process</code> declarations plus a foreground main block. Removed declarative <code>trigger</code> syntax is rejected by the parser with a diagnostic that points agents at the trigger registry. Disabled abilities remain syntax-valid where applicable but are rejected by the linker with a source-spanned <code>lashlang feature `...` is disabled by this host</code> diagnostic before runtime calls can be made. Simple and path assignment, receiver operations, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>break</code>, <code>continue</code>, <code>cancel</code>, and <code>submit</code> are expression nodes; assignment and <code>for</code> evaluate to <code>null</code>.</dd>
             <dt>Expressions</dt>
             <dd>Literals, variables, builtin calls, receiver operations, named process starts, <code>await</code>, field/index access, unary operators, binary operators, ternaries, result unwrap with <code>?</code>, and <code>Type { ... }</code> literals.</dd>
             <dt>Effects</dt>
@@ -53,16 +53,16 @@
             <dt>Completion</dt>
             <dd><code>submit</code> ends the program and turn. When the host exposes a continuation operation, <code>await control.continue_as({ task: ..., seed: { ... } })?</code> is a receiver operation (not a keyword) that ends the current trajectory and activates a fresh-window AgentFrame in the same session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</dd>
           </dl>
-          <p>The examples below assume the host has linked a <code>TOOL.default</code> resource with the shown operations enabled.</p>
+          <p>The examples below assume the host has linked a lowercase <code>workspace.default</code> resource with the shown operations enabled.</p>
           <pre><code>```lashlang
-text = await TOOL.default.read_file({ path: "Cargo.toml" })?
+text = await workspace.default.read_file({ path: "Cargo.toml" })?
 print { chars: len(text), head: slice(text, 0, 1200) }
 ```</code></pre>
           <p>A typical AgentFrame switch packs the concrete state the AgentFrame needs and ends the block. Computed expressions default to global state on the AgentFrame; values rooted at a projected binding (like <code>input.prompt</code>) stay projected, preserving their <code>ProjectionRef</code> when one exists.</p>
           <pre><code>```lashlang
 findings = []
-for path in await TOOL.default.glob({ pattern: "src/**/*.rs" })? {
-  text = await TOOL.default.read_file({ path: path })?
+for path in await workspace.default.glob({ pattern: "src/**/*.rs" })? {
+  text = await workspace.default.read_file({ path: path })?
   if contains(text, "TODO") {
     findings = push(findings, { path: path, chars: len(text) })
   }

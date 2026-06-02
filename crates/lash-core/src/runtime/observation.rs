@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tokio::sync::Mutex;
 
-use super::{LashRuntime, ProcessHandleGrantEntry, ProcessRegistry};
+use super::{LashRuntime, ProcessHandleGrantEntry, ProcessHandleSummary, ProcessRegistry};
 
 #[derive(Clone)]
 pub struct RuntimeObservation {
@@ -78,7 +78,7 @@ impl RuntimeObservation {
         self.process_scope().id()
     }
 
-    pub async fn list_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
+    pub async fn list_process_handles(&self) -> Vec<ProcessHandleSummary> {
         let Some(executor) = self.process_registry.as_ref() else {
             return Vec::new();
         };
@@ -86,7 +86,7 @@ impl RuntimeObservation {
             .await
     }
 
-    pub async fn list_all_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
+    pub async fn list_all_process_handles(&self) -> Vec<ProcessHandleSummary> {
         let Some(executor) = self.process_registry.as_ref() else {
             return Vec::new();
         };
@@ -98,7 +98,7 @@ impl RuntimeObservation {
         &self,
         executor: &Arc<dyn crate::ProcessRegistry>,
         mode: crate::ProcessListMode,
-    ) -> Vec<ProcessHandleGrantEntry> {
+    ) -> Vec<ProcessHandleSummary> {
         let root_scope = self.process_scope();
         let mut entries = list_scope_process_handles(executor, &root_scope, mode).await;
         let agent_frame_id = self.persisted_state.current_agent_frame_id.as_str();
@@ -112,6 +112,9 @@ impl RuntimeObservation {
             }
         }
         entries
+            .into_iter()
+            .map(ProcessHandleSummary::from)
+            .collect()
     }
 }
 

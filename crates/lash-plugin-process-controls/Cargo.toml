@@ -21,3 +21,4 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.18", default-features = false, features = ["testing"] }
+tokio = { workspace = true, features = ["rt", "macros"] }

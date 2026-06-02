@@ -50,6 +50,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
+use lash_core::runtime::ProcessHandleGrantEntry;
 use lash_core::runtime::{
     QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
     QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, prepare_process_event_append,
@@ -66,9 +67,9 @@ use lash_core::{
     AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef,
     DeliveryPolicy, DurabilityTier, GcReport, MergeKey, PROCESS_LEASE_SCHEMA_VERSION,
     ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessLease, ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
-    ProcessScope, RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope,
+    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease,
+    ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
+    RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope,
     SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, VacuumReport,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};

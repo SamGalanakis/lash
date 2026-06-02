@@ -61,8 +61,6 @@ impl PartialEq for Program {
 pub enum Declaration {
     Type(TypeDecl),
     Process(ProcessDecl),
-    Trigger(TriggerDecl),
-    Schedule(ScheduleDecl),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -84,52 +82,6 @@ pub struct ProcessDecl {
 pub struct ProcessParam {
     pub name: AstString,
     pub ty: TypeExpr,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TriggerDecl {
-    pub name: AstString,
-    pub source: TriggerSource,
-    pub event_binding: AstString,
-    pub process_name: AstString,
-    pub args: Vec<(AstString, TriggerArg)>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum TriggerSource {
-    Binding {
-        resource: ResourceRefExpr,
-        event: AstString,
-    },
-    Each {
-        resource_type: AstString,
-        event: AstString,
-        resource_binding: AstString,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum TriggerArg {
-    EventBinding(AstString),
-    ResourceBinding(AstString),
-    ResourceRef(ResourceRefExpr),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ScheduleDecl {
-    pub name: AstString,
-    pub cadence: ScheduleCadence,
-    pub tick_binding: AstString,
-    pub body: Expr,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum ScheduleCadence {
-    Cron {
-        expression: Expr,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        options: Vec<(AstString, Expr)>,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -189,6 +141,13 @@ pub enum Expr {
     Break,
     Continue,
     StartProcess(ProcessStartExpr),
+    ProcessRef {
+        process: AstString,
+    },
+    HostValueConstructor {
+        type_name: AstString,
+        input: Box<Expr>,
+    },
     ResourceRef(ResourceRefExpr),
     ReceiverCall {
         receiver: Box<Expr>,
@@ -243,7 +202,8 @@ impl Expr {
     /// about the node's own kind) can fold over `children()` instead of
     /// re-spelling the full `match`. Leaf nodes (`Null`, `Bool`, `Number`,
     /// `String`, `Variable`, `Break`, `Continue`, `WaitSignal`,
-    /// `ResourceRef`, `TypeLiteral`) yield nothing.
+    /// `ResourceRef`, `ProcessRef`, `HostValueConstructor` metadata, and
+    /// `TypeLiteral`) yield nothing.
     ///
     /// `Assign` includes any dynamic index expressions in its `target` path
     /// (in path order) before the assigned value, matching the order in which
@@ -259,6 +219,7 @@ impl Expr {
             | Expr::Break
             | Expr::Continue
             | Expr::WaitSignal
+            | Expr::ProcessRef { .. }
             | Expr::ResourceRef(_)
             | Expr::TypeLiteral(_) => {}
             Expr::Block(expressions) | Expr::List(expressions) => {
@@ -291,6 +252,7 @@ impl Expr {
                 buffer.push(body);
             }
             Expr::StartProcess(start) => buffer.extend(start.args.iter().map(|(_, value)| value)),
+            Expr::HostValueConstructor { input, .. } => buffer.push(input),
             Expr::ReceiverCall { receiver, args, .. } => {
                 buffer.push(receiver);
                 buffer.extend(args.iter());
@@ -437,6 +399,11 @@ where
                 .collect();
             Expr::StartProcess(start)
         }
+        Expr::ProcessRef { process } => Expr::ProcessRef { process },
+        Expr::HostValueConstructor { type_name, input } => Expr::HostValueConstructor {
+            type_name,
+            input: Box::new(folder.fold_expr(*input)),
+        },
         Expr::ReceiverCall {
             receiver,
             operation,
@@ -533,6 +500,12 @@ pub enum TypeExpr {
     List(Box<TypeExpr>),
     Object(Vec<TypeField>),
     Ref(AstString),
+    Process {
+        input: Box<TypeExpr>,
+        output: Box<TypeExpr>,
+        input_count: usize,
+    },
+    TriggerHandle(Box<TypeExpr>),
     /// Union of alternative type shapes, e.g. `str | int | null`.
     /// Always has two or more variants; single-variant parses collapse
     /// to the underlying `TypeExpr` in the parser.
@@ -574,6 +547,16 @@ pub fn format_type_expr(ty: &TypeExpr) -> String {
             format!("{{ {fields} }}")
         }
         TypeExpr::Ref(name) => name.to_string(),
+        TypeExpr::Process { input, output, .. } => {
+            format!(
+                "Process<{}, {}>",
+                format_type_expr(input),
+                format_type_expr(output)
+            )
+        }
+        TypeExpr::TriggerHandle(event) => {
+            format!("TriggerHandle<{}>", format_type_expr(event))
+        }
         TypeExpr::Union(items) => items
             .iter()
             .map(format_type_expr)

@@ -6,6 +6,8 @@ mod lexer;
 mod linker;
 mod parser;
 mod runtime;
+mod tracking;
+mod trigger;
 
 pub use artifact::{
     ArtifactStoreError, ContentHash, DurabilityTier, InMemoryLashlangArtifactStore,
@@ -16,9 +18,8 @@ pub use artifact::{
 };
 pub use ast::{
     AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ExprFolder, ExprVisitor,
-    ProcessDecl, ProcessParam, ProcessStartExpr, Program, ResourceRefExpr, ScheduleCadence,
-    ScheduleDecl, TriggerArg, TriggerDecl, TriggerSource, TypeDecl, TypeExpr, TypeField, UnaryOp,
-    fold_expr_children, format_type_expr, walk_expr,
+    ProcessDecl, ProcessParam, ProcessStartExpr, Program, ResourceRefExpr, TypeDecl, TypeExpr,
+    TypeField, UnaryOp, fold_expr_children, format_type_expr, walk_expr,
 };
 pub use graph::{
     ProcessMap, ProcessMapEdge, ProcessMapNode, ProcessMapOptions, linked_static_graph_json,
@@ -26,21 +27,33 @@ pub use graph::{
 };
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{
-    LashlangAbilities, LashlangScheduleAbilities, LashlangSurface, LinkError, LinkedModule,
-    ResourceCatalog, ResourceOperationBinding, ResourceTypeCatalog, TriggerEventBinding,
+    LashlangAbilities, LashlangSurface, LinkError, LinkedModule, ResourceCatalog,
+    ResourceOperationBinding, ResourceTypeCatalog, TriggerSourceBinding, ValueConstructorBinding,
 };
 pub use parser::{ParseError, parse};
 pub use runtime::{
     AbilityOp, AbilityResult, CompileStats, CompiledProcessCache, CompiledProcessCacheKey,
     CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats, ExecutableProgram,
     ExecutionEnvironment, ExecutionHost, ExecutionHostError, ExecutionMode, ExecutionOutcome,
-    ExecutionScratch, ImageValue, LASH_TYPE_KEY, ListValue, ProcessEvent, ProcessEventKind,
+    ExecutionScratch, ImageValue, LASH_HOST_VALUE_KEY, LASH_HOST_VALUE_TYPE_KEY,
+    LASH_MODULE_REF_KEY, LASH_PROCESS_NAME_KEY, LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY,
+    LASH_REQUIRED_SURFACE_REF_KEY, LASH_TYPE_KEY, ListValue, ProcessEvent, ProcessEventKind,
     ProcessSignal, ProcessStart, ProfileReport, ProfileStat, ProjectedBindingError,
     ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
     ProjectedReadResponse, ProjectedValue, Record, ResourceHandle, ResourceOperation, RuntimeError,
     RuntimeFailure, Sleep, SleepKind, Snapshot, State, Value, compile, compile_linked,
     compile_linked_process, compile_module_artifact_process, compile_process, execute, from_json,
     prewarm, unwrap_type_value,
+};
+pub use tracking::{
+    ProcessBranchSelection, ProcessBranchSite, ProcessTrackingChild, ProcessTrackingObservation,
+    ProcessTrackingSite, process_ref_key,
+};
+pub use trigger::{
+    TriggerCancelRequest, TriggerHostOperation, TriggerListRequest, TriggerRegistrationRequest,
+    TriggerSourceValue, TriggerTargetIdentity, TriggerTargetValidation,
+    TriggerTargetValidationError, add_trigger_resource_operations, cancel_call_args,
+    event_type_for_source, list_call_args, register_call_args, validate_trigger_target,
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {
@@ -103,9 +116,9 @@ fn parse_hint(error: &ParseError) -> Option<&'static str> {
         ParseError::Expected { expected, .. } if expected.contains("type literals must start") => {
             Some("write nested object types as `Type { field: type }`")
         }
-        ParseError::TriggerBodyNotAllowed { .. } => {
-            Some("bind every target process parameter in `-> process_name(param: event)`")
-        }
+        ParseError::DeclarativeTriggerRemoved { .. } => Some(
+            "construct a host-provided trigger source value and call the trigger registry register operation",
+        ),
         _ => None,
     }
 }

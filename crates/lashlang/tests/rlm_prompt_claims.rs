@@ -117,14 +117,44 @@ async fn execute<H: ExecutionHost>(
 fn test_surface() -> lashlang::LashlangSurface {
     let mut resources = lashlang::ResourceCatalog::tool_default(["echo", "boom"]);
     resources.add_module_instance(["files"], "Files");
-    resources.add_operation("Files", "read", "read_file");
-    resources.add_operation("Files", "patch", "apply_patch");
+    resources.add_operation(
+        "Files",
+        "read",
+        "read_file",
+        lashlang::TypeExpr::Any,
+        lashlang::TypeExpr::Any,
+    );
+    resources.add_operation(
+        "Files",
+        "patch",
+        "apply_patch",
+        lashlang::TypeExpr::Any,
+        lashlang::TypeExpr::Any,
+    );
     resources.add_module_instance(["shell"], "Shell");
-    resources.add_operation("Shell", "exec", "exec_command");
+    resources.add_operation(
+        "Shell",
+        "exec",
+        "exec_command",
+        lashlang::TypeExpr::Any,
+        lashlang::TypeExpr::Any,
+    );
     resources.add_module_instance(["agents"], "Agents");
-    resources.add_operation("Agents", "spawn", "spawn_agent");
+    resources.add_operation(
+        "Agents",
+        "spawn",
+        "spawn_agent",
+        lashlang::TypeExpr::Any,
+        lashlang::TypeExpr::Any,
+    );
     resources.add_module_instance(["processes"], "Processes");
-    resources.add_operation("Processes", "list", "list_process_handles");
+    resources.add_operation(
+        "Processes",
+        "list",
+        "list_process_handles",
+        lashlang::TypeExpr::Any,
+        lashlang::TypeExpr::Any,
+    );
     lashlang::LashlangSurface::new(resources, lashlang::LashlangAbilities::all())
 }
 

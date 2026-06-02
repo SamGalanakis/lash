@@ -91,9 +91,8 @@ pub use surface::{
     TurnPreparation,
 };
 pub(crate) use surface::{emit_plugin_runtime_events, plugin_runtime_session_events};
-pub(crate) use trigger_registry::{
-    SessionTriggerMatcher, SessionTriggerRegistry, SessionTriggerRoute,
-};
+pub(crate) use trigger_registry::{SessionTriggerRegistry, SessionTriggerRoute};
+pub use trigger_registry::{TriggerRegistration, TriggerSourceType, TriggerTargetSummary};
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     // Protocol plugins must be registered by the embedder before calling
     // `PluginHost::build_session`. Unit tests use an in-tree fake to avoid
@@ -209,8 +208,15 @@ mod tests {
 
         fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
             let mut resources = lashlang::ResourceCatalog::new();
-            resources.add_module_instance(["ui", "button"], "Button");
-            resources.add_trigger_event("Button", "pressed", lashlang::TypeExpr::Any);
+            resources.add_trigger_source_constructor(
+                ["clock", "Alarm"],
+                lashlang::TypeExpr::Object(vec![lashlang::TypeField {
+                    name: "at".into(),
+                    ty: lashlang::TypeExpr::Str,
+                    optional: false,
+                }]),
+                lashlang::TypeExpr::Ref("clock.Tick".into()),
+            );
             resources
         }
 
@@ -306,14 +312,14 @@ mod tests {
 
         assert!(
             host.lashlang_resources()
-                .trigger_event("Button", "pressed")
+                .resolve_value_constructor(&["clock", "Alarm"])
                 .is_some()
         );
         let session = host.build_session("root", None).expect("session");
         assert!(
             session
                 .lashlang_resources()
-                .trigger_event("Button", "pressed")
+                .resolve_value_constructor(&["clock", "Alarm"])
                 .is_some()
         );
     }
@@ -353,9 +359,10 @@ mod tests {
         let host = PluginHost::new(vec![Arc::new(HostEventOnlyFactory)]);
 
         assert!(
-            host.lashlang_resources()
-                .trigger_event("Button", "pressed")
-                .is_none()
+            !host
+                .lashlang_resources()
+                .trigger_sources
+                .contains_key("ui.button.pressed")
         );
         let session = host.build_session("root", None).expect("session");
         assert!(
@@ -365,10 +372,10 @@ mod tests {
                 .is_some()
         );
         assert!(
-            session
+            !session
                 .lashlang_resources()
-                .trigger_event("Button", "pressed")
-                .is_none()
+                .trigger_sources
+                .contains_key("ui.button.pressed")
         );
     }
 

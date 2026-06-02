@@ -133,6 +133,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: var(--space-xs);
       width: 100%;
+      max-width: 13rem;
     }
 
     .host-trigger {
@@ -197,6 +198,45 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       font-size: 0.75rem;
       line-height: 1.5;
       color: var(--ash-text);
+    }
+
+    .schedule-card {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        linear-gradient(135deg, var(--sodium-tint), transparent 58%),
+        var(--form-raised);
+      padding: var(--space-sm);
+      display: grid;
+      gap: var(--space-2xs);
+    }
+
+    .schedule-card-label,
+    .schedule-card-code {
+      font-family: var(--font-ui);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .schedule-card-label {
+      color: var(--sodium-soft);
+      font-size: 0.68rem;
+    }
+
+    .schedule-card-code {
+      color: var(--chalk);
+      font-size: 0.82rem;
+      letter-spacing: 0.04em;
+      text-transform: none;
+      overflow-wrap: anywhere;
+    }
+
+    .schedule-card p {
+      margin: 0;
+      color: var(--chalk-dim);
+      font-size: 0.88rem;
+      line-height: 1.45;
     }
 
     .model-config { display: grid; gap: var(--space-md); }
@@ -637,7 +677,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       border-left: 1px solid var(--line);
       background: var(--form);
       display: grid;
-      grid-template-rows: auto 1fr;
+      grid-template-rows: auto minmax(160px, 0.85fr) minmax(220px, 1.15fr);
       min-height: 0;
     }
 
@@ -671,7 +711,10 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       gap: var(--space-2xs);
       padding: var(--space-md) 0;
       border-bottom: 1px solid var(--line);
+      cursor: pointer;
     }
+
+    .work-card.selected { background: rgba(209, 169, 74, 0.08); }
 
     .work-top { display: flex; align-items: center; gap: var(--space-xs); min-width: 0; }
 
@@ -708,6 +751,102 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       font-size: 0.75rem;
       line-height: 1.5;
       color: var(--ash-text);
+      overflow-wrap: anywhere;
+    }
+
+    .process-graph-panel {
+      min-width: 0;
+      min-height: 0;
+      border-top: 1px solid var(--line);
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .graph-head {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-sm);
+      padding: var(--space-sm) var(--space-lg);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .graph-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--chalk);
+      font-size: 0.86rem;
+      font-weight: 650;
+    }
+
+    .graph-status {
+      font-family: var(--font-ui);
+      font-size: 0.68rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ash-text);
+      white-space: nowrap;
+    }
+
+    .process-graph {
+      min-width: 0;
+      min-height: 0;
+      overflow: auto;
+      padding: var(--space-md) var(--space-lg);
+      display: grid;
+      gap: var(--space-sm);
+      align-content: start;
+    }
+
+    .graph-section {
+      display: grid;
+      gap: var(--space-2xs);
+      min-width: 0;
+    }
+
+    .graph-section-title {
+      font-family: var(--font-ui);
+      font-size: 0.68rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ash-text);
+    }
+
+    .graph-node,
+    .graph-edge,
+    .graph-child {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: var(--space-xs);
+      background: rgba(255, 255, 255, 0.018);
+      display: grid;
+      gap: 2px;
+    }
+
+    .graph-node.unobserved { opacity: 0.44; }
+    .graph-node.running { border-color: var(--sodium); }
+    .graph-node.completed { border-color: rgba(139, 179, 120, 0.72); }
+    .graph-node.failed { border-color: var(--error); }
+    .graph-edge.dimmed { opacity: 0.34; }
+    .graph-edge.selected { border-color: var(--sodium); }
+
+    .graph-primary {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--chalk);
+      font-size: 0.78rem;
+    }
+
+    .graph-secondary {
+      color: var(--ash-text);
+      font-family: var(--font-ui);
+      font-size: 0.68rem;
       overflow-wrap: anywhere;
     }
 
@@ -820,7 +959,12 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
             </span>
           </button>
         </div>
-        <p class="trigger-caption">click a dial to emit its button event</p>
+        <p class="trigger-caption">red and blue emit host events</p>
+        <section class="schedule-card" aria-label="Cron schedule example">
+          <div class="schedule-card-label">try scheduling</div>
+          <div class="schedule-card-code">cron.Schedule(...)</div>
+          <p>Ask the agent to schedule something; it can register a trigger for a host-owned timer.</p>
+        </section>
       </div>
 
       <form class="model-config" id="modelConfig">
@@ -864,11 +1008,11 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
               <dt>shift + enter</dt><dd>insert a newline</dd>
               <dt>esc</dt><dd>stop the running turn</dd>
               <dt>↑ (empty composer)</dt><dd>recall your last prompt</dd>
-              <dt>click a dial</dt><dd>emit the host event</dd>
+              <dt>click red or blue</dt><dd>emit a host event</dd>
             </dl>
             <h2>what's what</h2>
             <dl>
-              <dt>trigger</dt><dd>fires a host-owned turn — a scheduled or external event, not your prompt</dd>
+              <dt>trigger</dt><dd>starts background work from a registered source</dd>
               <dt>work</dt><dd>background processes (sub-agents and tools) the turn spawned</dd>
               <dt>model · thinking</dt><dd>apply to the next turn you send</dd>
             </dl>
@@ -878,7 +1022,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
       <section id="timeline" class="timeline" aria-busy="false">
         <div id="timelineEmpty" class="empty">
-          no turns yet. ask the agent something below, or click a dial to fire the host event.
+          no turns yet. ask the agent something below, or click red or blue to fire a host event.
         </div>
       </section>
 
@@ -894,6 +1038,13 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         <div id="workCount" class="rail-count">0 processes</div>
       </div>
       <div id="workList" class="work-list"></div>
+      <section class="process-graph-panel">
+        <div class="graph-head">
+          <div id="graphTitle" class="graph-title">process graph</div>
+          <div id="graphStatus" class="graph-status">idle</div>
+        </div>
+        <div id="processGraph" class="process-graph empty">select a process</div>
+      </section>
     </aside>
   </div>
 
@@ -902,11 +1053,15 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     const timelineEmpty = document.getElementById("timelineEmpty");
     const workList = document.getElementById("workList");
     const workCount = document.getElementById("workCount");
+    const graphTitle = document.getElementById("graphTitle");
+    const graphStatus = document.getElementById("graphStatus");
+    const processGraph = document.getElementById("processGraph");
     const composer = document.getElementById("composer");
     const promptInput = document.getElementById("prompt");
     const sendButton = document.getElementById("send");
     const stopButton = document.getElementById("stop");
-    const triggerButtons = Array.from(document.querySelectorAll("[data-trigger-button]"));
+    const buttonTriggerButtons = Array.from(document.querySelectorAll("[data-trigger-button]"));
+    const triggerButtons = buttonTriggerButtons;
     const modelInput = document.getElementById("modelInput");
     const variantSelect = document.getElementById("variantSelect");
     const streamState = document.getElementById("streamState");
@@ -924,6 +1079,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     let controller = null;
     let lastRequest = null;
     let workStale = false;
+    let selectedProcessId = null;
     let turnTimer = 0;
     let turnStart = 0;
 
@@ -1396,7 +1552,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       const empty = document.createElement("div");
       empty.id = "timelineEmpty";
       empty.className = "empty";
-      empty.textContent = "no turns yet. ask the agent something below, or click a dial to fire the host event.";
+      empty.textContent = "no turns yet. ask the agent something below, or click red or blue to fire a host event.";
       timeline.appendChild(empty);
     }
 
@@ -1473,15 +1629,15 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       }
     });
 
-    function fireTrigger(event) {
+    function fireButtonTrigger(event) {
       const button = event.currentTarget;
       if (busy || button.getAttribute("aria-disabled") === "true") return;
       if (modelEmpty()) { validateModel(); modelInput.focus(); return; }
       postCommand("/api/button-trigger", { button: button.dataset.button, ...selectedModelPayload() });
     }
 
-    for (const button of triggerButtons) {
-      button.addEventListener("click", fireTrigger);
+    for (const button of buttonTriggerButtons) {
+      button.addEventListener("click", fireButtonTrigger);
     }
 
     const knownModels = new Set();
@@ -1558,8 +1714,13 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       }
       for (const item of items) {
         const card = document.createElement("article");
-        card.className = "work-card " + item.terminal;
+        card.className = "work-card " + item.terminal + (item.process_id === selectedProcessId ? " selected" : "");
         card.title = "process " + item.process_id;
+        card.addEventListener("click", () => {
+          selectedProcessId = item.process_id;
+          renderWork(items);
+          refreshProcessGraph(item.process_id);
+        });
 
         const top = document.createElement("div");
         top.className = "work-top";
@@ -1587,13 +1748,99 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         card.append(top, meta, events);
         workList.appendChild(card);
       }
+      if (!selectedProcessId && items[0]) {
+        selectedProcessId = items[0].process_id;
+        refreshProcessGraph(selectedProcessId);
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function renderProcessGraph(graph) {
+      graphTitle.textContent = graph.process_name || graph.process_id;
+      graphStatus.textContent = graph.status || "observed";
+      processGraph.classList.remove("empty");
+      processGraph.innerHTML = "";
+      processGraph.appendChild(graphSection("nodes", graph.nodes || [], renderGraphNode));
+      processGraph.appendChild(graphSection("edges", graph.edges || [], renderGraphEdge));
+      if ((graph.children || []).length) {
+        processGraph.appendChild(graphSection("children", graph.children, renderGraphChild));
+      }
+    }
+
+    function graphSection(title, items, renderItem) {
+      const section = document.createElement("section");
+      section.className = "graph-section";
+      const heading = document.createElement("div");
+      heading.className = "graph-section-title";
+      heading.textContent = title + " " + items.length;
+      section.appendChild(heading);
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "graph-secondary";
+        empty.textContent = "none";
+        section.appendChild(empty);
+        return section;
+      }
+      for (const item of items) section.appendChild(renderItem(item));
+      return section;
+    }
+
+    function renderGraphNode(node) {
+      const el = document.createElement("div");
+      el.className = "graph-node " + (node.status || "unobserved");
+      el.innerHTML = `<div class="graph-primary">${escapeHtml(node.label || node.id)}</div>
+        <div class="graph-secondary">${escapeHtml([node.kind, node.status, node.occurrence ? "x" + node.occurrence : ""].filter(Boolean).join(" · "))}</div>
+        ${node.latest_error ? `<div class="graph-secondary">${escapeHtml(node.latest_error)}</div>` : ""}`;
+      return el;
+    }
+
+    function renderGraphEdge(edge) {
+      const el = document.createElement("div");
+      const selectedClass = edge.selected === true ? " selected" : edge.selected === false ? " dimmed" : "";
+      el.className = "graph-edge" + selectedClass;
+      el.innerHTML = `<div class="graph-primary">${escapeHtml(edge.label || "edge")}</div>
+        <div class="graph-secondary">${escapeHtml(edge.from)} → ${escapeHtml(edge.to)}</div>`;
+      return el;
+    }
+
+    function renderGraphChild(child) {
+      const el = document.createElement("div");
+      el.className = "graph-child";
+      el.innerHTML = `<div class="graph-primary">${escapeHtml(child.child_process_name || child.child_process_id)}</div>
+        <div class="graph-secondary">${escapeHtml(child.parent_node_id)} → ${escapeHtml(child.child_process_id)}</div>`;
+      return el;
+    }
+
+    async function refreshProcessGraph(processId) {
+      if (!processId) return;
+      graphTitle.textContent = "process graph";
+      graphStatus.textContent = "loading";
+      try {
+        const response = await fetch("/api/process-graph/" + encodeURIComponent(processId));
+        if (!response.ok) throw new Error("graph unavailable");
+        renderProcessGraph(await response.json());
+      } catch (_) {
+        graphStatus.textContent = "unobserved";
+        processGraph.classList.add("empty");
+        processGraph.textContent = "no graph observed";
+      }
     }
 
     async function refreshWork() {
       try {
         const response = await fetch("/api/work");
         if (!response.ok) throw new Error("work request failed");
-        renderWork(await response.json());
+        const items = await response.json();
+        renderWork(items);
+        if (selectedProcessId) refreshProcessGraph(selectedProcessId);
       } catch (_) {
         if (!workStale) {
           workStale = true;

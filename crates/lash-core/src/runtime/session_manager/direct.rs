@@ -215,7 +215,7 @@ impl DirectCompletionCapability {
         } = plan;
         let journal_store = context
             .turn_lease
-            .and_then(|_| current.store.as_ref())
+            .and(current.store.as_ref())
             .and_then(|store| store.embedded_durable_turn_store());
         crate::runtime::invoke_embedded_journaled_effect(
             journal_store,

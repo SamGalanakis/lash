@@ -6,12 +6,12 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::ast::{
-    AssignPathStep, BinaryOp, Declaration, Expr, ProcessDecl, Program, ResourceRefExpr,
-    ScheduleCadence, TriggerArg, TriggerSource, TypeExpr, UnaryOp,
+    AssignPathStep, BinaryOp, Declaration, Expr, ProcessDecl, Program, ResourceRefExpr, TypeExpr,
+    UnaryOp,
 };
 use crate::linker::{LashlangAbilities, ResourceCatalog};
 
-pub const LASHLANG_SEMANTIC_HASH_VERSION: &str = "lashlang-semantic-v1";
+pub const LASHLANG_SEMANTIC_HASH_VERSION: &str = "lashlang-semantic-v2";
 pub const LASHLANG_COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const LASHLANG_VM_ABI_VERSION: &str = "lashlang-vm-abi-v1";
 
@@ -413,7 +413,6 @@ fn write_surface_requirements(writer: &mut HashWriter, requirements: &SurfaceReq
     writer.bool(requirements.abilities.sleep);
     writer.bool(requirements.abilities.process_signals);
     writer.bool(requirements.abilities.triggers);
-    writer.bool(requirements.abilities.schedules.cron);
     writer.atom("resources");
     writer.atom("modules");
     writer.usize(requirements.resources.module_instances.len());
@@ -430,13 +429,23 @@ fn write_surface_requirements(writer: &mut HashWriter, requirements: &SurfaceReq
         for (operation, binding) in &catalog.operations {
             writer.atom(operation);
             writer.atom(&binding.host_operation);
+            write_type(writer, &binding.input_ty);
+            write_type(writer, &binding.output_ty);
         }
-        writer.atom("trigger-events");
-        writer.usize(catalog.trigger_events.len());
-        for (event, binding) in &catalog.trigger_events {
-            writer.atom(event);
-            write_type(writer, &binding.payload_ty);
-        }
+    }
+    writer.atom("constructors");
+    writer.usize(requirements.resources.value_constructors.len());
+    for (path, constructor) in &requirements.resources.value_constructors {
+        writer.atom(path);
+        writer.atom(&constructor.type_name);
+        write_type(writer, &constructor.input_ty);
+        write_type(writer, &constructor.output_ty);
+    }
+    writer.atom("trigger-sources");
+    writer.usize(requirements.resources.trigger_sources.len());
+    for (source_ty, binding) in &requirements.resources.trigger_sources {
+        writer.atom(source_ty);
+        write_type(writer, &binding.event_ty);
     }
 }
 
@@ -459,61 +468,6 @@ fn write_declaration(writer: &mut HashWriter, declaration: &Declaration) {
             write_type(writer, &type_decl.ty);
         }
         Declaration::Process(process) => write_process(writer, process),
-        Declaration::Trigger(trigger) => {
-            writer.atom("trigger-decl");
-            writer.atom(trigger.name.as_str());
-            match &trigger.source {
-                TriggerSource::Binding { resource, event } => {
-                    writer.atom("trigger-binding");
-                    write_resource_ref(writer, resource);
-                    writer.atom(event.as_str());
-                }
-                TriggerSource::Each {
-                    resource_type,
-                    event,
-                    resource_binding,
-                } => {
-                    writer.atom("trigger-each");
-                    writer.atom(resource_type.as_str());
-                    writer.atom(event.as_str());
-                    writer.atom(resource_binding.as_str());
-                }
-            }
-            writer.atom(trigger.event_binding.as_str());
-            writer.atom(trigger.process_name.as_str());
-            writer.usize(trigger.args.len());
-            for (name, arg) in &trigger.args {
-                writer.atom(name.as_str());
-                write_trigger_arg(writer, arg);
-            }
-        }
-        Declaration::Schedule(schedule) => {
-            writer.atom("schedule-decl");
-            writer.atom(schedule.name.as_str());
-            match &schedule.cadence {
-                ScheduleCadence::Cron {
-                    expression,
-                    options,
-                } => {
-                    writer.atom("cron");
-                    let mut normalizer = NameNormalizer::default();
-                    normalizer.bind_abi(schedule.tick_binding.as_str());
-                    normalizer.collect_expr(expression);
-                    for (_, option) in options {
-                        normalizer.collect_expr(option);
-                    }
-                    normalizer.collect_expr(&schedule.body);
-                    write_expr(writer, expression, &normalizer);
-                    writer.usize(options.len());
-                    for (key, value) in options {
-                        writer.atom(key.as_str());
-                        write_expr(writer, value, &normalizer);
-                    }
-                    writer.atom(schedule.tick_binding.as_str());
-                    write_expr(writer, &schedule.body, &normalizer);
-                }
-            }
-        }
     }
 }
 
@@ -574,6 +528,20 @@ fn write_type(writer: &mut HashWriter, ty: &TypeExpr) {
         TypeExpr::Ref(name) => {
             writer.atom("type:ref");
             writer.atom(name.as_str());
+        }
+        TypeExpr::Process {
+            input,
+            output,
+            input_count,
+        } => {
+            writer.atom("type:process");
+            writer.usize(*input_count);
+            write_type(writer, input);
+            write_type(writer, output);
+        }
+        TypeExpr::TriggerHandle(event) => {
+            writer.atom("type:trigger-handle");
+            write_type(writer, event);
         }
         TypeExpr::Union(items) => {
             writer.atom("type:union");
@@ -680,6 +648,15 @@ fn write_expr(writer: &mut HashWriter, expr: &Expr, normalizer: &NameNormalizer)
                 write_expr(writer, value, normalizer);
             }
         }
+        Expr::ProcessRef { process } => {
+            writer.atom("process-ref");
+            writer.atom(process.as_str());
+        }
+        Expr::HostValueConstructor { type_name, input } => {
+            writer.atom("host-value-constructor");
+            writer.atom(type_name.as_str());
+            write_expr(writer, input, normalizer);
+        }
         Expr::ResourceRef(resource) => {
             writer.atom("resource-ref");
             write_resource_ref(writer, resource);
@@ -785,23 +762,6 @@ fn write_resource_ref(writer: &mut HashWriter, resource: &ResourceRefExpr) {
     writer.atom("handle");
     writer.atom(resource.resource_type.as_str());
     writer.atom(resource.alias.as_str());
-}
-
-fn write_trigger_arg(writer: &mut HashWriter, arg: &TriggerArg) {
-    match arg {
-        TriggerArg::EventBinding(name) => {
-            writer.atom("event-binding");
-            writer.atom(name.as_str());
-        }
-        TriggerArg::ResourceBinding(name) => {
-            writer.atom("resource-binding");
-            writer.atom(name.as_str());
-        }
-        TriggerArg::ResourceRef(resource) => {
-            writer.atom("resource-ref");
-            write_resource_ref(writer, resource);
-        }
-    }
 }
 
 fn write_unary_op(writer: &mut HashWriter, op: UnaryOp) {
@@ -988,6 +948,7 @@ impl<'program> RequirementsCollector<'program> {
                         self.collect_type(&param.ty);
                         if let TypeExpr::Ref(name) = &param.ty
                             && !self.type_names.contains(name.as_str())
+                            && self.is_resource_type_name(name)
                         {
                             self.requirements
                                 .resources
@@ -1009,74 +970,11 @@ impl<'program> RequirementsCollector<'program> {
                     scope.insert("inputs".to_string(), RequirementBinding::Value);
                     self.collect_expr(&process.body, &mut scope);
                 }
-                Declaration::Trigger(trigger) => {
-                    self.requirements.abilities.triggers = true;
-                    self.requirements.abilities.processes = true;
-                    match &trigger.source {
-                        TriggerSource::Binding { resource, event } => {
-                            self.require_resource_ref(resource);
-                            let payload_ty =
-                                self.trigger_payload_ty(resource.resource_type.as_str(), event);
-                            self.requirements.resources.add_trigger_event(
-                                resource.resource_type.to_string(),
-                                event.to_string(),
-                                payload_ty,
-                            );
-                        }
-                        TriggerSource::Each {
-                            resource_type,
-                            event,
-                            ..
-                        } => {
-                            self.requirements
-                                .resources
-                                .ensure_resource_type(resource_type.to_string());
-                            let payload_ty = self.trigger_payload_ty(resource_type, event);
-                            self.requirements.resources.add_trigger_event(
-                                resource_type.to_string(),
-                                event.to_string(),
-                                payload_ty,
-                            );
-                        }
-                    }
-                    for (_, arg) in &trigger.args {
-                        match arg {
-                            TriggerArg::ResourceRef(resource) => {
-                                self.require_resource_ref(resource)
-                            }
-                            TriggerArg::ResourceBinding(_) | TriggerArg::EventBinding(_) => {}
-                        }
-                    }
-                }
-                Declaration::Schedule(schedule) => {
-                    let mut scope = BTreeMap::new();
-                    scope.insert(schedule.tick_binding.to_string(), RequirementBinding::Value);
-                    match &schedule.cadence {
-                        ScheduleCadence::Cron {
-                            expression,
-                            options,
-                        } => {
-                            self.requirements.abilities.schedules.cron = true;
-                            self.collect_expr(expression, &mut scope);
-                            for (_, option) in options {
-                                self.collect_expr(option, &mut scope);
-                            }
-                        }
-                    }
-                    self.collect_expr(&schedule.body, &mut scope);
-                }
             }
         }
         let mut top_level = BTreeMap::new();
         self.collect_expr(&self.program.main, &mut top_level);
         self.requirements
-    }
-
-    fn trigger_payload_ty(&self, resource_type: &str, event: &str) -> TypeExpr {
-        self.resource_catalog
-            .and_then(|catalog| catalog.trigger_event(resource_type, event))
-            .map(|binding| binding.payload_ty.clone())
-            .unwrap_or(TypeExpr::Any)
     }
 
     fn collect_type(&mut self, ty: &TypeExpr) {
@@ -1092,7 +990,14 @@ impl<'program> RequirementsCollector<'program> {
                     self.collect_type(item);
                 }
             }
-            TypeExpr::Ref(name) if !self.type_names.contains(name.as_str()) => {
+            TypeExpr::Process { input, output, .. } => {
+                self.collect_type(input);
+                self.collect_type(output);
+            }
+            TypeExpr::TriggerHandle(event) => self.collect_type(event),
+            TypeExpr::Ref(name)
+                if !self.type_names.contains(name.as_str()) && self.is_resource_type_name(name) =>
+            {
                 self.requirements
                     .resources
                     .ensure_resource_type(name.to_string());
@@ -1107,6 +1012,12 @@ impl<'program> RequirementsCollector<'program> {
             | TypeExpr::Enum(_)
             | TypeExpr::Ref(_) => {}
         }
+    }
+
+    fn is_resource_type_name(&self, name: &str) -> bool {
+        self.resource_catalog
+            .map(|catalog| catalog.has_resource_type(name))
+            .unwrap_or(true)
     }
 
     fn collect_expr(
@@ -1191,6 +1102,33 @@ impl<'program> RequirementsCollector<'program> {
                 }
                 Some(RequirementBinding::Value)
             }
+            Expr::ProcessRef { .. } => {
+                self.requirements.abilities.processes = true;
+                Some(RequirementBinding::Value)
+            }
+            Expr::HostValueConstructor { type_name, input } => {
+                if let Some(catalog) = self.resource_catalog
+                    && let Some(constructor) = catalog
+                        .value_constructors
+                        .values()
+                        .find(|constructor| constructor.type_name == type_name.as_str())
+                {
+                    self.requirements.resources.add_value_constructor(
+                        constructor.path.iter().map(String::as_str),
+                        constructor.input_ty.clone(),
+                        constructor.output_ty.clone(),
+                    );
+                }
+                if let Some(catalog) = self.resource_catalog
+                    && let Some(binding) = catalog.trigger_sources.get(type_name.as_str())
+                {
+                    self.requirements
+                        .resources
+                        .add_trigger_source_type(type_name.to_string(), binding.event_ty.clone());
+                }
+                self.collect_expr(input, scope);
+                Some(RequirementBinding::Value)
+            }
             Expr::ResourceRef(resource) => {
                 self.require_resource_ref(resource);
                 Some(RequirementBinding::Resource {
@@ -1204,12 +1142,14 @@ impl<'program> RequirementsCollector<'program> {
             } => {
                 let receiver = self.collect_expr(receiver, scope);
                 if let Some(RequirementBinding::Resource { resource_type }) = receiver {
-                    let (operation, host_operation) =
+                    let (operation, host_operation, input_ty, output_ty) =
                         self.resource_operation_requirement(&resource_type, operation.as_str());
                     self.requirements.resources.add_operation(
                         resource_type,
                         operation,
                         host_operation,
+                        input_ty,
+                        output_ty,
                     );
                 }
                 for arg in args {
@@ -1293,10 +1233,15 @@ impl<'program> RequirementsCollector<'program> {
         &self,
         resource_type: &str,
         operation: &str,
-    ) -> (String, String) {
+    ) -> (String, String, TypeExpr, TypeExpr) {
         if let Some(catalog) = self.resource_catalog {
             if let Some(binding) = catalog.resolve_operation(resource_type, operation) {
-                return (operation.to_string(), binding.host_operation.clone());
+                return (
+                    operation.to_string(),
+                    binding.host_operation.clone(),
+                    binding.input_ty.clone(),
+                    binding.output_ty.clone(),
+                );
             }
             if let Some((surface_operation, binding)) =
                 catalog.resolve_operation_by_host(resource_type, operation)
@@ -1304,9 +1249,16 @@ impl<'program> RequirementsCollector<'program> {
                 return (
                     surface_operation.to_string(),
                     binding.host_operation.clone(),
+                    binding.input_ty.clone(),
+                    binding.output_ty.clone(),
                 );
             }
         }
-        (operation.to_string(), operation.to_string())
+        (
+            operation.to_string(),
+            operation.to_string(),
+            TypeExpr::Any,
+            TypeExpr::Any,
+        )
     }
 }

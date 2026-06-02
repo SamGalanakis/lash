@@ -119,10 +119,34 @@ fn compile_program(program: &Program) -> CompiledProgram {
 fn runtime_test_surface() -> crate::LashlangSurface {
     let mut resources = crate::ResourceCatalog::new();
     resources.add_module_instance(["tools"], "Tools");
-    resources.add_operation("Tools", "echo", "echo");
-    resources.add_operation("Tools", "err", "err");
-    resources.add_operation("Tools", "missing", "missing");
-    resources.add_operation("Tools", "spawn", "spawn");
+    resources.add_operation(
+        "Tools",
+        "echo",
+        "echo",
+        crate::TypeExpr::Any,
+        crate::TypeExpr::Any,
+    );
+    resources.add_operation(
+        "Tools",
+        "err",
+        "err",
+        crate::TypeExpr::Any,
+        crate::TypeExpr::Any,
+    );
+    resources.add_operation(
+        "Tools",
+        "missing",
+        "missing",
+        crate::TypeExpr::Any,
+        crate::TypeExpr::Any,
+    );
+    resources.add_operation(
+        "Tools",
+        "spawn",
+        "spawn",
+        crate::TypeExpr::Any,
+        crate::TypeExpr::Any,
+    );
     crate::LashlangSurface::new(resources, crate::LashlangAbilities::all())
 }
 
@@ -592,6 +616,9 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
             format!("resolve_type_ref {slot}:{}", slot_name(chunk, slot))
         }
         Instruction::WrapTypeLiteral => "wrap_type_literal".to_string(),
+        Instruction::WrapHostValue(type_name) => {
+            format!("wrap_host_value {}", name_text(chunk, type_name))
+        }
     }
 }
 
@@ -3183,53 +3210,43 @@ impl ExecutionHost for AsyncHost {
     }
 }
 
-#[test]
-fn linked_trigger_declaration_records_process_binding() {
+#[tokio::test(flavor = "current_thread")]
+async fn linked_value_constructor_wraps_host_value() {
     let mut resources = crate::ResourceCatalog::new();
-    resources.add_module_instance(["tools"], "Tools");
-    resources.add_operation("Tools", "echo", "echo");
-    resources.add_trigger_event(
-        "Tools",
-        "changed",
+    resources.add_value_constructor(
+        ["timer", "Schedule"],
         crate::TypeExpr::Object(vec![crate::TypeField {
-            name: "path".into(),
+            name: "expr".into(),
             ty: crate::TypeExpr::Str,
             optional: false,
         }]),
+        crate::TypeExpr::Ref("timer.Schedule".into()),
     );
     let surface = crate::LashlangSurface::new(resources, crate::LashlangAbilities::all());
     let program = crate::parse(
         r#"
-        type Changed = { path: str }
-        process scan(tool: Tools, event: Changed) {
-          finish event.path
-        }
-
-        trigger changed on tools.changed as event
-          -> scan(tool: tools, event: event)
+        source = timer.Schedule({ expr: "0 8 * * *" })
+        submit source
         "#,
     )
     .expect("program should parse");
     let linked = crate::LinkedModule::link(program, surface).expect("program should link");
-    let trigger = linked
-        .artifact
-        .canonical_ir
-        .declarations
-        .iter()
-        .find_map(|declaration| match declaration {
-            crate::Declaration::Trigger(trigger) => Some(trigger),
-            _ => None,
-        })
-        .expect("trigger declaration");
-    assert_eq!(trigger.process_name, "scan");
-    assert!(matches!(
-        trigger.args[0].1,
-        crate::TriggerArg::ResourceRef(_)
-    ));
-    assert!(matches!(
-        trigger.args[1].1,
-        crate::TriggerArg::EventBinding(ref name) if name == "event"
-    ));
+    let compiled = crate::compile_linked(&linked);
+    let mut state = State::new();
+    let outcome = execute_compiled(&compiled, &mut state, &Host)
+        .await
+        .expect("program should run");
+    let ExecutionOutcome::Finished(Value::Record(record)) = outcome else {
+        panic!("expected host value record, got {outcome:?}");
+    };
+    assert_eq!(
+        record.get(crate::LASH_HOST_VALUE_TYPE_KEY),
+        Some(&Value::String("timer.Schedule".into()))
+    );
+    let Some(Value::Record(source)) = record.get(crate::LASH_HOST_VALUE_KEY) else {
+        panic!("expected wrapped source record");
+    };
+    assert_eq!(source.get("expr"), Some(&Value::String("0 8 * * *".into())));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -3263,7 +3280,7 @@ async fn start_process_returns_raw_handle_and_passes_explicit_input() {
     let host = RecordingProcessHost::default();
     let program = crate::parse(
         r#"
-        process scan(root: string) -> null {
+        process scan(root: str) -> str {
           finish root
         }
         handle = start scan(root: ".")

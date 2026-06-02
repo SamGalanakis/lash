@@ -96,25 +96,6 @@ async fn execute_code_inner(
             };
         }
     };
-    let trigger_observation = if declares_triggers(&linked.artifact.canonical_ir) {
-        match ctx.install_linked_lashlang_trigger_source(code, &linked) {
-            Ok(report) => Some(format_trigger_install_observation(&report)),
-            Err(err) => {
-                return ExecResponse {
-                    observations: Vec::new(),
-                    observation_truncation: Vec::new(),
-                    tool_calls: Vec::new(),
-                    images: Vec::new(),
-                    printed_images: Vec::new(),
-                    error: Some(err),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    terminal_finish: None,
-                };
-            }
-        }
-    } else {
-        None
-    };
     if let Err(err) = ctx.put_lashlang_module_artifact(&linked.artifact) {
         return ExecResponse {
             observations: Vec::new(),
@@ -127,27 +108,13 @@ async fn execute_code_inner(
             terminal_finish: None,
         };
     }
-    if !has_foreground_expressions(&linked.artifact.canonical_ir)
-        && let Some(observation) = trigger_observation.clone()
-    {
-        return ExecResponse {
-            observations: vec![observation],
-            observation_truncation: Vec::new(),
-            tool_calls: Vec::new(),
-            images: Vec::new(),
-            printed_images: Vec::new(),
-            error: None,
-            duration_ms: start.elapsed().as_millis() as u64,
-            terminal_finish: None,
-        };
-    }
     let compiled = Arc::new(lashlang::compile_linked(&linked));
 
     if let Err(err) =
         rehydrate_projected_globals(&mut state.rlm, Arc::clone(&projection_resolver)).await
     {
         return ExecResponse {
-            observations: trigger_observation.into_iter().collect(),
+            observations: Vec::new(),
             observation_truncation: Vec::new(),
             tool_calls: Vec::new(),
             images: Vec::new(),
@@ -163,7 +130,7 @@ async fn execute_code_inner(
             Ok(projected) => projected,
             Err(err) => {
                 return ExecResponse {
-                    observations: trigger_observation.into_iter().collect(),
+                    observations: Vec::new(),
                     observation_truncation: Vec::new(),
                     tool_calls: Vec::new(),
                     images: Vec::new(),
@@ -194,10 +161,7 @@ async fn execute_code_inner(
         Ok(ExecutionOutcome::Finished(value)) => Some(flow_to_json_value(&value).await),
         Ok(ExecutionOutcome::Continued) => None,
         Ok(ExecutionOutcome::Failed(value)) => {
-            let mut collected = host.into_collected();
-            if let Some(observation) = trigger_observation {
-                collected.observations.insert(0, observation);
-            }
+            let collected = host.into_collected();
             return ExecResponse {
                 observations: collected.observations,
                 observation_truncation: collected.observation_truncation,
@@ -211,10 +175,7 @@ async fn execute_code_inner(
         }
         Err(error) => {
             let failure = runtime_failure.unwrap_or(lashlang::RuntimeFailure { error, span: None });
-            let mut collected = host.into_collected();
-            if let Some(observation) = trigger_observation {
-                collected.observations.insert(0, observation);
-            }
+            let collected = host.into_collected();
             return ExecResponse {
                 observations: collected.observations,
                 observation_truncation: collected.observation_truncation,
@@ -231,10 +192,7 @@ async fn execute_code_inner(
             };
         }
     };
-    let mut collected = host.into_collected();
-    if let Some(observation) = trigger_observation {
-        collected.observations.insert(0, observation);
-    }
+    let collected = host.into_collected();
     ExecResponse {
         observations: collected.observations,
         observation_truncation: collected.observation_truncation,
@@ -245,27 +203,6 @@ async fn execute_code_inner(
         duration_ms: start.elapsed().as_millis() as u64,
         terminal_finish,
     }
-}
-
-fn declares_triggers(program: &lashlang::Program) -> bool {
-    program
-        .declarations
-        .iter()
-        .any(|declaration| matches!(declaration, lashlang::Declaration::Trigger(_)))
-}
-
-fn has_foreground_expressions(program: &lashlang::Program) -> bool {
-    match &program.main {
-        lashlang::Expr::Block(expressions) => !expressions.is_empty(),
-        _ => true,
-    }
-}
-
-fn format_trigger_install_observation(report: &lash_core::SessionTriggerInstallReport) -> String {
-    format!(
-        "installed trigger declarations: {}",
-        report.trigger_names().join(", ")
-    )
 }
 
 fn tool_result_projectors(ctx: &RuntimeExecutionContext<'_>) -> Vec<crate::RlmToolResultProjector> {
@@ -435,8 +372,18 @@ mod tests {
         code: &str,
         abilities: lashlang::LashlangAbilities,
     ) -> ExecResponse {
+        execute_with_lashlang_surface(code, abilities, lashlang::ResourceCatalog::new()).await
+    }
+
+    async fn execute_with_lashlang_surface(
+        code: &str,
+        abilities: lashlang::LashlangAbilities,
+        resources: lashlang::ResourceCatalog,
+    ) -> ExecResponse {
         let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
-        let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities(abilities);
+        let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
+            abilities, resources,
+        );
         let (_, response) = execute_code(
             state,
             ctx,
@@ -452,126 +399,112 @@ mod tests {
         response
     }
 
-    fn trigger_resources() -> lashlang::ResourceCatalog {
+    fn timer_trigger_resources() -> lashlang::ResourceCatalog {
         let mut resources = lashlang::ResourceCatalog::new();
-        resources.add_module_instance(["ui", "button"], "Button");
-        resources.add_trigger_event("Button", "pressed", lashlang::TypeExpr::Any);
+        resources.add_trigger_source_constructor(
+            ["timer", "Schedule"],
+            lashlang::TypeExpr::Object(vec![
+                lashlang::TypeField {
+                    name: "expr".into(),
+                    ty: lashlang::TypeExpr::Str,
+                    optional: false,
+                },
+                lashlang::TypeField {
+                    name: "tz".into(),
+                    ty: lashlang::TypeExpr::Str,
+                    optional: true,
+                },
+            ]),
+            lashlang::TypeExpr::Ref("timer.Tick".into()),
+        );
         resources
     }
 
     async fn execute_with_trigger_surface(code: &str) -> ExecResponse {
-        let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
-        let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
+        execute_with_lashlang_surface(
+            code,
             lashlang::LashlangAbilities::default()
                 .with_processes()
                 .with_triggers(),
-            trigger_resources(),
-        );
-        let (_, response) = execute_code(
-            state,
-            ctx,
-            ExecRequest {
-                code: code.to_string(),
-                accept_finish: true,
-            },
-            RlmProjectedBindings::default(),
-            Arc::new(ProjectionRegistry::new()),
+            timer_trigger_resources(),
         )
         .await
-        .expect("execute code");
-        response
     }
 
     #[test]
-    fn mixed_trigger_declarations_execute_foreground_code() {
+    fn trigger_registry_operations_execute_foreground_code() {
         block_on(async {
             let response = execute_with_trigger_surface(
                 r#"
-                process remember(event: any) {
-                  finish event
+                process remember(tick: timer.Tick) {
+                  finish true
                 }
 
-                trigger remembered on ui.button.pressed as event
-                  -> remember(event: event)
+                source = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+                handle = await triggers.register({
+                  source: source,
+                  target: remember,
+                  name: "remembered"
+                })?
+                registrations = await triggers.list({ target: remember })?
 
-                submit { answer: "foreground ran" }
+                submit { answer: "foreground ran", handle: handle, registrations: registrations }
                 "#,
             )
             .await;
 
             assert!(response.error.is_none(), "{:?}", response.error);
+            assert!(response.observations.is_empty());
+            let finish = response.terminal_finish.expect("terminal finish");
+            assert_eq!(finish["answer"], serde_json::json!("foreground ran"));
             assert_eq!(
-                response.observations,
-                vec!["installed trigger declarations: remembered"]
+                finish["handle"]["type"],
+                serde_json::json!("trigger_handle")
             );
+            assert_eq!(
+                finish["registrations"][0]["name"],
+                serde_json::json!("remembered")
+            );
+        });
+    }
+
+    #[test]
+    fn trigger_cancel_disables_future_registry_entries() {
+        block_on(async {
+            let response = execute_with_trigger_surface(
+                r#"
+                process remember(tick: timer.Tick) {
+                  finish true
+                }
+
+                source = timer.Schedule({ expr: "0 8 * * *" })
+                handle = await triggers.register({ source: source, target: remember, name: "remembered" })?
+                cancelled = await triggers.cancel({ handle: handle })?
+                registrations = await triggers.list({ target: remember })?
+                submit { cancelled: cancelled, enabled: registrations[0].enabled }
+                "#,
+            )
+            .await;
+
+            assert!(response.error.is_none(), "{:?}", response.error);
             assert_eq!(
                 response.terminal_finish,
-                Some(serde_json::json!({ "answer": "foreground ran" }))
+                Some(serde_json::json!({ "cancelled": true, "enabled": false }))
             );
         });
     }
 
     #[test]
-    fn declaration_only_trigger_modules_still_report_installation() {
+    fn trigger_registration_failure_prevents_foreground_execution() {
         block_on(async {
             let response = execute_with_trigger_surface(
                 r#"
-                process remember(event: any) {
-                  finish event
+                process remember(tick: str) {
+                  finish tick
                 }
 
-                trigger remembered on ui.button.pressed as event
-                  -> remember(event: event)
-                "#,
-            )
-            .await;
-
-            assert!(response.error.is_none(), "{:?}", response.error);
-            assert_eq!(
-                response.observations,
-                vec!["installed trigger declarations: remembered"]
-            );
-            assert!(response.terminal_finish.is_none());
-        });
-    }
-
-    #[test]
-    fn direct_trigger_install_accepts_mixed_module_without_running_foreground() {
-        let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
-            lashlang::LashlangAbilities::default()
-                .with_processes()
-                .with_triggers(),
-            trigger_resources(),
-        );
-        let report = ctx
-            .install_lashlang_trigger_source(
-                r#"
-                process remember(event: any) {
-                  finish event
-                }
-
-                trigger remembered on ui.button.pressed as event
-                  -> remember(event: event)
-
-                submit len(1)
-                "#,
-            )
-            .expect("mixed trigger source should install without executing foreground");
-
-        assert_eq!(report.installed, vec!["remembered"]);
-    }
-
-    #[test]
-    fn trigger_install_failure_prevents_foreground_execution() {
-        block_on(async {
-            let response = execute_with_trigger_surface(
-                r#"
-                process remember(event: any) {
-                  finish event
-                }
-
-                trigger remembered on ui.button.missing as event
-                  -> remember(event: event)
+                source = timer.Schedule({ expr: "0 8 * * *" })
+                await triggers.register({ source: source, target: remember })?
 
                 submit "should not run"
                 "#,
@@ -581,11 +514,8 @@ mod tests {
             let error = response
                 .error
                 .as_deref()
-                .expect("unknown host event should fail");
-            assert!(
-                error.contains("does not declare trigger event `missing`"),
-                "{error}"
-            );
+                .expect("event mismatch should fail");
+            assert!(error.contains("trigger source emits"), "{error}");
             assert!(response.observations.is_empty());
             assert!(response.terminal_finish.is_none());
         });
@@ -614,6 +544,7 @@ mod tests {
             name: &'static str,
             code: &'static str,
             abilities: lashlang::LashlangAbilities,
+            resources: fn() -> lashlang::ResourceCatalog,
             feature: &'static str,
         }
 
@@ -622,54 +553,47 @@ mod tests {
                 name: "process declaration",
                 code: "process worker() { finish null }",
                 abilities: lashlang::LashlangAbilities::default(),
+                resources: lashlang::ResourceCatalog::new,
                 feature: "processes",
             },
             DisabledCase {
                 name: "process start",
                 code: "start worker()",
                 abilities: lashlang::LashlangAbilities::default(),
+                resources: lashlang::ResourceCatalog::new,
                 feature: "processes",
             },
             DisabledCase {
                 name: "sleep",
                 code: r#"sleep for "1s""#,
                 abilities: lashlang::LashlangAbilities::default(),
+                resources: lashlang::ResourceCatalog::new,
                 feature: "sleep",
             },
             DisabledCase {
                 name: "wait signal",
                 code: "process worker() { payload = wait signal }",
                 abilities: lashlang::LashlangAbilities::default().with_processes(),
+                resources: lashlang::ResourceCatalog::new,
                 feature: "process signals",
             },
             DisabledCase {
                 name: "signal run",
                 code: "process worker(target: any) { signal run target with null }",
                 abilities: lashlang::LashlangAbilities::default().with_processes(),
+                resources: lashlang::ResourceCatalog::new,
                 feature: "process signals",
             },
             DisabledCase {
                 name: "trigger",
                 code: r#"
-                    trigger changed on tools.changed as event
-                      -> worker(event: event)
+                    process worker(tick: timer.Tick) { finish true }
+                    source = timer.Schedule({ expr: "0 8 * * *" })
+                    await triggers.register({ source: source, target: worker })?
                 "#,
-                abilities: lashlang::LashlangAbilities::default().with_cron_schedules(),
+                abilities: lashlang::LashlangAbilities::default().with_processes(),
+                resources: timer_trigger_resources,
                 feature: "triggers",
-            },
-            DisabledCase {
-                name: "cron schedule",
-                code: r#"
-                    schedule hourly every cron("0 * * * *") as tick {
-                      print tick
-                    }
-                "#,
-                abilities: lashlang::LashlangAbilities::default()
-                    .with_processes()
-                    .with_sleep()
-                    .with_process_signals()
-                    .with_triggers(),
-                feature: "cron schedules",
             },
         ];
 
@@ -677,7 +601,9 @@ mod tests {
             for case in cases {
                 lashlang::parse(case.code)
                     .unwrap_or_else(|err| panic!("{} should parse: {err}", case.name));
-                let response = execute_with_lashlang_abilities(case.code, case.abilities).await;
+                let response =
+                    execute_with_lashlang_surface(case.code, case.abilities, (case.resources)())
+                        .await;
                 let error = response
                     .error
                     .as_deref()

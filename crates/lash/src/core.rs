@@ -244,6 +244,7 @@ pub struct LashCoreBuilder {
     // Benign core overrides applied on top of the resolved core.
     prompt: Option<PromptLayer>,
     trace_sink: Option<Arc<dyn lash_trace::TraceSink>>,
+    process_tracking_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     trace_level: Option<lash_trace::TraceLevel>,
     trace_context: Option<lash_trace::TraceContext>,
     termination: Option<TerminationPolicy>,
@@ -403,6 +404,21 @@ impl LashCoreBuilder {
         self
     }
 
+    pub fn process_tracking_sink(
+        mut self,
+        process_tracking_sink: Option<Arc<dyn lash_trace::TraceSink>>,
+    ) -> Self {
+        self.process_tracking_sink = process_tracking_sink;
+        self
+    }
+
+    pub fn process_tracking_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.process_tracking_sink = path.map(|path| {
+            Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
+        });
+        self
+    }
+
     pub fn trace_level(mut self, trace_level: lash_trace::TraceLevel) -> Self {
         self.trace_level = Some(trace_level);
         self
@@ -456,6 +472,9 @@ impl LashCoreBuilder {
         }
         if let Some(trace_sink) = self.trace_sink.take() {
             core.tracing.trace_sink = Some(trace_sink);
+        }
+        if let Some(process_tracking_sink) = self.process_tracking_sink.take() {
+            core.tracing.process_tracking_sink = Some(process_tracking_sink);
         }
         if let Some(trace_level) = self.trace_level.take() {
             core.tracing.trace_level = trace_level;
@@ -651,6 +670,10 @@ impl LashCoreBuilder {
     ///   present; without one the inline worker cannot rebuild session runtimes,
     ///   so no runner is spawned (the registry-only inline host keeps its prior
     ///   behavior — `build()` still succeeds).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "builder boundary combines process registry, worker host, policy, and residency inputs"
+    )]
     fn resolve_process_work_runner(
         process_registry: Option<&Arc<dyn ProcessRegistry>>,
         worker_plugin_host: &PluginHost,
@@ -794,6 +817,21 @@ impl AdvancedLashCoreBuilder {
 
     pub fn termination(mut self, termination: TerminationPolicy) -> Self {
         self.builder.termination = Some(termination);
+        self
+    }
+
+    pub fn process_tracking_sink(
+        mut self,
+        process_tracking_sink: Option<Arc<dyn lash_trace::TraceSink>>,
+    ) -> Self {
+        self.builder.process_tracking_sink = process_tracking_sink;
+        self
+    }
+
+    pub fn process_tracking_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.builder.process_tracking_sink = path.map(|path| {
+            Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
+        });
         self
     }
 

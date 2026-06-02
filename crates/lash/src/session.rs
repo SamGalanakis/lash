@@ -350,12 +350,12 @@ impl LashSession {
         ToolsControl::new(self.control())
     }
 
-    pub fn triggers(&self) -> TriggersControl {
-        self.control().triggers()
-    }
-
     pub fn host_events(&self) -> HostEventsControl {
         self.control().host_events()
+    }
+
+    pub fn triggers(&self) -> TriggersControl {
+        self.control().triggers()
     }
 
     pub fn process_control(&self) -> ProcessControl {
@@ -454,11 +454,11 @@ impl ObservableSession {
             .unwrap_or_default()
     }
 
-    pub async fn list_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
+    pub async fn list_process_handles(&self) -> Vec<lash_core::ProcessHandleSummary> {
         self.snapshot().list_process_handles().await
     }
 
-    pub async fn list_all_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
+    pub async fn list_all_process_handles(&self) -> Vec<lash_core::ProcessHandleSummary> {
         self.snapshot().list_all_process_handles().await
     }
 

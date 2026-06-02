@@ -24,7 +24,7 @@ Every completed turn lands as one semantic `RuntimeCommit` against a `SessionGra
 
 ### Lashlang
 
-A small typed DSL the model can emit and the runtime can execute deterministically. Host capabilities are exposed as lowercase module operations such as `web.search(...)`, `files.read(...)`, and `agents.spawn(...)`; named background `process` declarations receive typed module authorities explicitly. Unavailable abilities still parse, but fail during linking and are omitted from the RLM prompt. Linked modules are content-addressed as `ModuleRef`/`RequiredSurfaceRef` artifacts; durable Lashlang process rows store only module/process refs plus JSON args, and workers reload the artifact from the host/profile artifact store for nested starts. Trigger declarations install activation routes from typed module events to named process starts; host event emits append causal session-history nodes and start the routed process from artifact refs. Cron schedule declarations are parsed and gated by the same host surface; runtime activation for cron ticks remains a follow-up.
+A small typed DSL the model can emit and the runtime can execute deterministically. Host capabilities are exposed as lowercase module operations such as `web.search(...)`, `files.read(...)`, and `agents.spawn(...)`; named background `process` declarations receive typed module authorities explicitly. Unavailable abilities still parse, but fail during linking and are omitted from the RLM prompt. Linked modules are content-addressed as `ModuleRef`/`RequiredSurfaceRef` artifacts; durable Lashlang process rows store only module/process refs plus JSON args, and workers reload the artifact from the host/profile artifact store for nested starts. Trigger registration installs activation routes from host-provided source values to named process starts; source owners activate exact trigger handles and the started process runs from artifact refs. Timers and recurring jobs are host/plugin concerns, not core syntax or built-in sources.
 
 ### Plugin architecture
 
@@ -36,7 +36,7 @@ First-party crates for Anthropic, OpenAI Responses, any OpenAI-compatible Chat C
 
 ### Tracing as a first-class sink
 
-JSONL by default with a self-contained HTML viewer; optional OpenTelemetry export.
+Attach a `TraceSink` for structured turn, tool, LLM, prompt, stream, and usage records. The bundled JSONL sink pairs with a self-contained HTML viewer; OpenTelemetry export is feature-gated. Lashlang process tracking is a separate opt-in sink for process maps and node/branch/child events, so host observability can be richer without changing process registry state.
 
 ## Workspace layout
 
@@ -57,8 +57,8 @@ the explicit pre-release tag:
 
 ```toml
 [dependencies]
-lash-runtime         = "=0.1.0-alpha.16"
-lash-provider-openai = "=0.1.0-alpha.16"
+lash-runtime         = "=0.1.0-alpha.17"
+lash-provider-openai = "=0.1.0-alpha.17"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }
 ```

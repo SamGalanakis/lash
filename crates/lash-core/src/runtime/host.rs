@@ -45,12 +45,14 @@ pub struct RuntimePromptConfig {
 #[derive(Clone)]
 pub struct RuntimeControlConfig {
     pub effect_controller: Arc<dyn RuntimeEffectController>,
+    pub process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
     pub termination: TerminationPolicy,
 }
 
 #[derive(Clone)]
 pub struct RuntimeTracingConfig {
     pub trace_sink: Option<Arc<dyn TraceSink>>,
+    pub process_tracking_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
 }
@@ -87,9 +89,11 @@ impl RuntimeHostConfig {
             control: RuntimeControlConfig {
                 termination: TerminationPolicy::default(),
                 effect_controller,
+                process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
             },
             tracing: RuntimeTracingConfig {
                 trace_sink: None,
+                process_tracking_sink: None,
                 trace_level: TraceLevel::Standard,
                 trace_context: TraceContext::default(),
             },
@@ -104,10 +108,18 @@ impl RuntimeHostConfig {
     /// choice is never silent.
     pub fn in_memory() -> Self {
         Self::new(
-            Arc::new(InlineRuntimeEffectController::default()),
+            Arc::new(InlineRuntimeEffectController),
             lashlang::global_in_memory_lashlang_artifact_store(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
         )
+    }
+
+    pub fn with_process_cancel_ability(
+        mut self,
+        process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
+    ) -> Self {
+        self.control.process_cancel_ability = process_cancel_ability;
+        self
     }
 }
 

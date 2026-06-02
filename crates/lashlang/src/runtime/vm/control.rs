@@ -138,7 +138,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
             };
             let result = match step {
                 Ok(VmStep::Continue) => Ok(None),
-                Ok(VmStep::Effect(effect)) => self.resolve_effect(effect).await,
+                Ok(VmStep::Effect(effect)) => self.resolve_effect(effect, instruction_ip).await,
                 Err(error) => Err(error),
             };
             if let Some((tag, start)) = profile {

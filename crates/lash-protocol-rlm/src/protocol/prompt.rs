@@ -131,7 +131,7 @@ pub fn rlm_execution_section_for_surface(
         has_operations,
         &surface.abilities,
     ));
-    if let Some(section) = render_host_events_section(surface) {
+    if let Some(section) = render_host_surface_section(surface) {
         sections.push(section);
     }
     sections.push(if features.images {
@@ -154,26 +154,57 @@ pub fn rlm_execution_section_for_surface(
     sections.join("\n\n")
 }
 
-fn render_host_events_section(surface: &lashlang::LashlangSurface) -> Option<String> {
-    let mut lines = Vec::new();
+fn render_host_surface_section(surface: &lashlang::LashlangSurface) -> Option<String> {
+    let mut operation_lines = Vec::new();
     for module in surface.resources.module_instances.values() {
         if let Some(resource_type) = surface.resources.resource_types.get(&module.resource_type) {
-            for (event, binding) in &resource_type.trigger_events {
-                lines.push(format!(
-                    "- `{}.{event}` payload `{}`",
+            for (operation, binding) in &resource_type.operations {
+                operation_lines.push(format!(
+                    "- `await {}.{}({})? -> {}`",
                     module.alias,
-                    lashlang::format_type_expr(&binding.payload_ty)
+                    operation,
+                    lashlang::format_type_expr(&binding.input_ty),
+                    lashlang::format_type_expr(&binding.output_ty)
                 ));
             }
         }
     }
-    if lines.is_empty() {
+    let mut constructor_lines = Vec::new();
+    for constructor in surface.resources.value_constructors.values() {
+        constructor_lines.push(format!(
+            "- `{}({}) -> {}`",
+            constructor.path.join("."),
+            lashlang::format_type_expr(&constructor.input_ty),
+            lashlang::format_type_expr(&constructor.output_ty)
+        ));
+    }
+    let mut protocol_lines = Vec::new();
+    let trigger_register = lashlang::TriggerHostOperation::Register.host_operation();
+    for (source_ty, binding) in &surface.resources.trigger_sources {
+        protocol_lines.push(format!(
+            "- `{}` can be passed to `{}` and emits `{}`",
+            source_ty,
+            trigger_register,
+            lashlang::format_type_expr(&binding.event_ty)
+        ));
+    }
+    if operation_lines.is_empty() && constructor_lines.is_empty() && protocol_lines.is_empty() {
         return None;
     }
-    Some(format!(
-        "### Host Events\n\nHosts may emit these typed events. Declare `trigger` bindings against them; host events are not tools and cannot be called directly.\n\n{}",
-        lines.join("\n")
-    ))
+    let mut section = String::from("### Host Surface");
+    if !operation_lines.is_empty() {
+        section.push_str("\n\nAwaited runtime operations:\n\n");
+        section.push_str(&operation_lines.join("\n"));
+    }
+    if !constructor_lines.is_empty() {
+        section.push_str("\n\nPure value constructors. Do not `await` these; use them wherever expressions are allowed:\n\n");
+        section.push_str(&constructor_lines.join("\n"));
+    }
+    if !protocol_lines.is_empty() {
+        section.push_str("\n\nTrigger source protocol metadata:\n\n");
+        section.push_str(&protocol_lines.join("\n"));
+    }
+    Some(section)
 }
 
 fn render_execution_intro(has_operations: bool) -> String {
@@ -257,7 +288,7 @@ fn render_language_section(
     bullets.push("- Strings: `\"...\"` supports `\\n`, `\\r`, `\\t`, `\\\"`, and `\\\\`; `\"\"\"...\"\"\"` is multiline with the same escapes; `r\"\"\"...\"\"\"` and `r'''...'''` are raw multiline strings and preserve content exactly. Use raw multiline strings for JSON, Markdown, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.".to_string());
     bullets.push("- Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.".to_string());
     if has_operations {
-        bullets.push("- Module operations: call host capabilities through documented lowercase module paths, e.g. `await agents.spawn({ task: task })?`, `await web.search({ query: q })?`, or `await gmail.work.send({ to: to, body: body })?`. Bare calls are builtins only, not tools. `?` aborts the block with sanitized operation metadata if the operation fails.".to_string());
+        bullets.push("- Module operations: call host capabilities through documented lowercase module paths, e.g. `await agents.spawn({ task: task })?`, `await web.search({ query: q })?`, or `await gmail.work.send({ to: to, body: body })?`. Host operations are awaited effects; pure UpperCamel value constructors shown in the Host Surface are ordinary expressions and must not be awaited. Bare calls are builtins only, not tools. `?` aborts the block with sanitized operation metadata if the operation fails.".to_string());
     }
     if abilities.sleep {
         bullets.push("- Sleep: pause foreground code or process code with `sleep for \"5s\"` or `sleep until deadline`. Durations accept milliseconds, `ms`, `s`, `m`, or `h`; deadlines accept RFC3339 text or Unix epoch milliseconds.".to_string());
@@ -279,10 +310,10 @@ fn render_language_section(
         ));
     }
     if abilities.triggers && abilities.processes {
-        bullets.push("- Triggers: module-event declarations that may appear alongside normal foreground code. Use `trigger clicked on ui.button.pressed as event -> handle_click(event: event, ui: ui.button)` or `trigger changed on each file.changed as file, event -> process_name(file: file, event: event)`. Bind every target process parameter explicitly. Trigger args may only be the whole event payload, a concrete module authority, or the authority handle from `on each`; trigger declarations cannot contain code, `await`, `print`, `submit`, loops, assignments, module operations, or computed records.".to_string());
-    }
-    if abilities.schedules.cron {
-        bullets.push("- Schedules: declare cron activation with `schedule name every cron(\"0 * * * *\") as tick { ... }`.".to_string());
+        let trigger_register = lashlang::TriggerHostOperation::Register.host_operation();
+        let trigger_list = lashlang::TriggerHostOperation::List.host_operation();
+        let trigger_cancel = lashlang::TriggerHostOperation::Cancel.host_operation();
+        bullets.push(format!("- Trigger registry: build a typed source value with a documented constructor from the Host Surface, then register it with `handle = await {trigger_register}({{ source: source, target: daily_digest, name: \"daily_digest\" }})?`. Constructors only build source values; the host/plugin that owns the source decides when to activate the returned handle. The target is the process value itself, not a call. The target process must have exactly one input whose type matches the source event type. Use `await {trigger_list}({{ target: daily_digest }})?` to inspect registrations for that concrete process and `await {trigger_cancel}({{ handle: handle }})?` to disable future activations."));
     }
     if has_operations {
         let tail = if abilities.processes {

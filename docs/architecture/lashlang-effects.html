@@ -12,16 +12,16 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../styles.css?v=2">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js" defer></script>
+<script src="../docs.js?v=2" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">lashlang<span class="slash">/</span>effects</h1>
-    <p class="opener__lede">How Lashlang programs reach the outside: host-projected bindings, resource operations, process handles, triggers and schedules, async fanout, builtins, and type literals.</p>
+    <p class="opener__lede">How Lashlang programs reach the outside: host-projected bindings, resource operations, process handles, triggers, async fanout, builtins, and type literals.</p>
   </section>
 
   <main class="body" id="content">
@@ -53,7 +53,7 @@
         <div class="section" id="tool-calls-and-async-handles">
           <div class="section-header">
             <h2>Resource Operations And Process Handles</h2>
-            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, triggers, and cron schedules are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. Trigger declarations are typed bindings to process starts; installing them stores activation routes over content-addressed module artifacts, and host event emits start the routed process with the event node as causal parent. Cron schedules still compile bodies; cron tick activation is not wired yet.</p>
+            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, and trigger registry operations are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. Runtime trigger routes are registered by calling <code>triggers.register</code> with a host-provided source value and a single-input process value; source owners later activate exact handles. Timers and recurring jobs are host-owned source policies, not Lashlang syntax.</p>
           </div>
           <dl class="def-list">
             <dt><code>await RESOURCE.alias.operation({ ... })</code></dt>
@@ -65,21 +65,21 @@
             <dt><code>cancel</code></dt>
             <dd><code>cancel handle</code> asks the host to stop background work. Cancellation is best-effort and uses the same handle identity exposed by <code>list_process_handles</code>.</dd>
             <dt>Ability gates</dt>
-            <dd>Disabled Lashlang abilities are syntax-valid but link-invalid. The linker returns <code>lashlang feature `...` is disabled by this host</code> before execution, so a disabled <code>process</code>, <code>start</code>, <code>sleep</code>, <code>wait signal</code>, <code>signal run</code>, <code>trigger</code>, or cron <code>schedule</code> cannot produce tool calls or observations.</dd>
+            <dd>Disabled Lashlang abilities are syntax-valid but link-invalid. The linker returns <code>lashlang feature `...` is disabled by this host</code> before execution, so a disabled <code>process</code>, <code>start</code>, <code>sleep</code>, <code>wait signal</code>, <code>signal run</code>, or <code>trigger</code> cannot produce tool calls or observations.</dd>
           </dl>
-          <p>Use <code>?</code> for the happy path and inspect the wrapper when failures are expected. Mixing both styles in one block keeps fatal errors fail-fast while letting probes branch on outcome. The examples in this section assume the host linked a <code>TOOL.default</code> resource and enabled process support.</p>
+          <p>Use <code>?</code> for the happy path and inspect the wrapper when failures are expected. Mixing both styles in one block keeps fatal errors fail-fast while letting probes branch on outcome. The examples in this section assume the host linked a <code>workspace.default</code> resource and enabled process support.</p>
           <pre><code>// Fail-fast: the block aborts if the file can't be read.
-manifest = await TOOL.default.read_file({ path: "Cargo.toml" })?
+manifest = await workspace.default.read_file({ path: "Cargo.toml" })?
 lines = split(manifest, "\n")
 
 // Inspect-the-wrapper: we expect this read might miss.
-optional = await TOOL.default.read_file({ path: "CHANGELOG.md" })
+optional = await workspace.default.read_file({ path: "CHANGELOG.md" })
 notes = optional.ok ? slice(optional.value, 0, 200) : format("no changelog: {}", optional.error)
 
 // Iterate over a glob and skip files that fail to read.
 items = []
-for path in await TOOL.default.glob({ pattern: "src/**/*.rs" })? {
-  hit = await TOOL.default.read_file({ path: path })
+for path in await workspace.default.glob({ pattern: "src/**/*.rs" })? {
+  hit = await workspace.default.read_file({ path: path })
   if !hit.ok {
     continue
   }
@@ -87,8 +87,8 @@ for path in await TOOL.default.glob({ pattern: "src/**/*.rs" })? {
 }
 submit { line_count: len(lines), notes: notes, items: items }</code></pre>
           <p>When process support is enabled, background work uses named processes; results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to receiver operations. Linking writes a content-addressed <code>ModuleArtifact</code> to the host/profile artifact store; the durable process input stores only <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, display name, and JSON args. Nested <code>start</code> calls compile from the same artifact while the runner still checks that the current host surface satisfies the recorded requirements.</p>
-          <pre><code>process audit(tool: TOOL, task: str) {
-  result = await tool.spawn_agent({
+          <pre><code>process audit(agent: Agents, task: str) {
+  result = await agent.spawn({
     task: task,
     capability: "explore"
   })?
@@ -96,8 +96,8 @@ submit { line_count: len(lines), notes: notes, items: items }</code></pre>
 }
 
 // Kick off two long-running subagents in the background.
-left = start audit(tool: TOOL.default, task: "audit module a")
-right = start audit(tool: TOOL.default, task: "audit module b")
+left = start audit(agent: agents.default, task: "audit module a")
+right = start audit(agent: agents.default, task: "audit module b")
 
 // Resolve both concurrently as a record of wrappers.
 results = await { a: left, b: right }
@@ -110,31 +110,42 @@ submit {
 }</code></pre>
         </div>
 
-        <div class="section" id="triggers-and-schedules">
+        <div class="section" id="triggers">
           <div class="section-header">
-            <h2>Triggers And Schedules</h2>
-            <p>A module can also declare background entry points that activate without a foreground block. A <code>trigger</code> has no executable body: it names a host resource event, binds the whole event payload, and explicitly binds every target process parameter in <code>-> process(...)</code>. Trigger arguments may only be the event payload, a concrete catalog resource alias, or the resource handle produced by <code>on each</code>; any derived fields are computed inside the process. A <code>schedule</code> runs its body on a cron cadence declared with <code>cron("…")</code> (with an optional <code>tz:</code>), and its bound name carries the tick payload. As with every ability, triggers and schedules are advertised only when the linked <code>LashlangSurface</code> enables them.</p>
+            <h2>Triggers</h2>
+          <p>Lashlang owns the canonical trigger registry contract. A host exposes pure value constructors such as <code>timer.Schedule(...)</code> and declares protocol metadata saying the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Code then passes that source value and a single-input process value to awaited registry operations such as <code>triggers.register</code>, process-scoped <code>triggers.list</code>, and <code>triggers.cancel</code>. The linker and runtime use the same operation names, field shapes, source decoding, target identity, alias resolution, and event-to-input assignability rules. Core owns durable route storage and exact-handle activation; concrete sources belong to plugins or host applications.</p>
           </div>
-          <pre><code>type NewMessage = { message_id: str, subject: str }
-
-process triage(gmail: GMAIL, calendar: GCAL, event: NewMessage) {
-  msg = await gmail.get_message({ id: event.message_id })?
-  slots = await calendar.find_open_slots({ days: 3 })?
-  finish { message: msg, slots: slots }
+          <pre><code>process daily_digest(tick: timer.Tick) {
+  wake { kind: "daily_digest_due", tick: tick }
+  finish true
 }
 
-trigger personal_mail on GMAIL.personal.new_message as event
-  -> triage(gmail: GMAIL.personal, calendar: GCAL.primary, event: event)
+source = timer.Schedule({
+  expr: "0 8 * * *",
+  tz: "UTC"
+})
 
-trigger any_mail on each GMAIL.new_message as mailbox, event
-  -> triage(gmail: mailbox, calendar: GCAL.primary, event: event)
+handle = await triggers.register({
+  source: source,
+  target: daily_digest,
+  name: "daily_digest"
+})?
+registrations = await triggers.list({ target: daily_digest })?
 
-schedule daily every cron("0 8 * * *", tz: "UTC") as tick {
-  start triage(
-    gmail: GMAIL.personal,
-    calendar: GCAL.primary,
-    event: { message_id: tick.message_id, subject: tick.subject }
-  )
+submit handle</code></pre>
+          <p>The matching host contract exposes the constructor and trigger-source relation. The source owner can query registrations for that source type and activate exact trigger handles through the session trigger control:</p>
+          <pre><code>resources.add_value_constructor(
+    ["timer", "Schedule"],
+    TypeExpr::Object(vec![expr_field, tz_field]),
+    TypeExpr::Ref("timer.Schedule".into()),
+);
+resources.add_trigger_source_type(
+    "timer.Schedule",
+    TypeExpr::Ref("timer.Tick".into()),
+);
+
+for route in session.triggers().by_source_type("timer.Schedule").await? {
+    session.triggers().activate(route.handle, payload.clone()).await?;
 }</code></pre>
         </div>
 
@@ -166,13 +177,13 @@ schedule daily every cron("0 8 * * *", tz: "UTC") as tick {
             <dt>Positional joins</dt>
             <dd><code>await [h1, h2]</code> resolves handles concurrently and returns wrappers in list order. Use ordinary list/record expressions for computed values; fanout branches must naturally produce handles.</dd>
           </dl>
-          <pre><code>process read_task(tool: TOOL, task: str) {
-  result = await tool.spawn_agent({ task: task, capability: "explore" })?
+          <pre><code>process read_task(agent: Agents, task: str) {
+  result = await agent.spawn({ task: task, capability: "explore" })?
   finish result
 }
 
-a = start read_task(tool: TOOL.default, task: "Read file A")
-b = start read_task(tool: TOOL.default, task: "Read file B")
+a = start read_task(agent: agents.default, task: "Read file A")
+b = start read_task(agent: agents.default, task: "Read file B")
 results = await { one: a, two: b }
 submit { a: results.one?, b: results.two? }</code></pre>
         </div>
@@ -239,12 +250,12 @@ validated = validate(candidate, Payload)</code></pre>
   }
 }
 
-raw = await TOOL.default.read_file({ path: "package.json" })?
+raw = await workspace.default.read_file({ path: "package.json" })?
 parsed = json_parse(raw)
 package = validate(parsed, Package)
 
 // Constrain a subagent's output shape via the same Type literal.
-result = await TOOL.default.spawn_agent({
+result = await agents.spawn({
   task: format("summarize {} v{}", package.name, package.version),
   capability: "summarize",
   output: Type { headline: str, bullets: list[str] }
