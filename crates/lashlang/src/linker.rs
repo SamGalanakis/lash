@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -371,8 +372,12 @@ pub struct LinkedModule {
 }
 
 impl LinkedModule {
-    pub fn link(program: Program, surface: LashlangSurface) -> Result<Self, LinkError> {
-        let mut linker = Linker::new(&program, &surface);
+    pub fn link(
+        program: Program,
+        surface: impl Borrow<LashlangSurface>,
+    ) -> Result<Self, LinkError> {
+        let surface = surface.borrow();
+        let mut linker = Linker::new(&program, surface);
         let program = linker.link_program()?;
         let requirements =
             surface_requirements_for_program_with_catalog(&program, &surface.resources);

@@ -7,7 +7,7 @@ use lashlang::{
     TypeExpr, TypeField, Value, from_json,
 };
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Scenario {
@@ -801,7 +801,12 @@ submit {
     format!("{BENCH_PROCESS_DECLS}\n{main}")
 }
 
-pub fn benchmark_surface() -> LashlangSurface {
+pub fn benchmark_surface() -> &'static LashlangSurface {
+    static SURFACE: OnceLock<LashlangSurface> = OnceLock::new();
+    SURFACE.get_or_init(build_benchmark_surface)
+}
+
+fn build_benchmark_surface() -> LashlangSurface {
     let mut resources = ResourceCatalog::tool_default(["echo", "boom", "missing_tool"]);
     lashlang::add_trigger_resource_operations(&mut resources);
     resources.add_trigger_source_constructor(

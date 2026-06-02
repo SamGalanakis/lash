@@ -751,6 +751,11 @@ pre code .language-bash .token.environment { color: var(--tok-builtin); }
 .defs dt,
 .def-list dt {
   grid-column: 1;
+  /* Grid items default to min-width:auto (min-content); a long
+     unbreakable mono identifier would then spill out of the capped
+     label track and over the prose column. Let it shrink and wrap. */
+  min-width: 0;
+  overflow-wrap: anywhere;
   padding: var(--space-md) 0 var(--space-xs);
   border-top: 1px solid var(--rule);
   font-family: var(--font-mono);
@@ -764,6 +769,8 @@ pre code .language-bash .token.environment { color: var(--tok-builtin); }
 .defs dd,
 .def-list dd {
   grid-column: 2;
+  min-width: 0;
+  overflow-wrap: anywhere;
   margin: 0;
   padding: var(--space-md) 0;
   border-top: 1px solid var(--rule);

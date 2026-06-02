@@ -47,6 +47,7 @@ pub struct RuntimeExecutionContext<'run> {
     pub(super) session_id: String,
     pub(super) dispatch: Arc<ToolDispatchContext<'run>>,
     lashlang_abilities: lashlang::LashlangAbilities,
+    lashlang_surface: lashlang::LashlangSurface,
     lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     attachment_store: Arc<dyn crate::AttachmentStore>,
     chronological_projection: Arc<crate::ChronologicalProjection>,
@@ -84,10 +85,16 @@ impl<'run> RuntimeExecutionContext<'run> {
         protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
         turn_context: crate::TurnContext,
     ) -> Self {
+        let lashlang_surface = lashlang_surface_from_tool_surface(
+            &dispatch.surface,
+            lashlang_abilities,
+            dispatch.plugins.lashlang_resources(),
+        );
         Self {
             session_id,
             dispatch,
             lashlang_abilities,
+            lashlang_surface,
             lashlang_artifact_store,
             attachment_store,
             chronological_projection,
@@ -225,12 +232,8 @@ impl<'run> RuntimeExecutionContext<'run> {
         Ok((registration, display_name))
     }
 
-    pub fn lashlang_surface(&self) -> lashlang::LashlangSurface {
-        lashlang_surface_from_tool_surface(
-            &self.dispatch.surface,
-            self.lashlang_abilities,
-            self.dispatch.plugins.lashlang_resources(),
-        )
+    pub fn lashlang_surface(&self) -> &lashlang::LashlangSurface {
+        &self.lashlang_surface
     }
 
     pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
@@ -568,6 +571,7 @@ mod tests {
 
         let surface = ctx.lashlang_surface();
 
+        assert!(std::ptr::eq(surface, ctx.lashlang_surface()));
         assert!(surface.abilities.processes);
         assert!(surface.abilities.sleep);
         assert!(surface.abilities.process_signals);
