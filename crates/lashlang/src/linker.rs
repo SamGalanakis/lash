@@ -2611,7 +2611,7 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_artifact_store_rejects_corrupted_module_bytes() {
+    fn module_artifact_store_bytes_reject_corruption() {
         use crate::LashlangArtifactStore;
 
         let linked = LinkedModule::link(
@@ -2633,7 +2633,6 @@ mod tests {
             linked.module_ref
         );
 
-        store.put_raw_module_artifact_bytes(linked.module_ref.clone(), b"not json".to_vec());
-        assert!(store.get_module_artifact(&linked.module_ref).is_err());
+        assert!(ModuleArtifact::from_store_bytes(b"not json").is_err());
     }
 }

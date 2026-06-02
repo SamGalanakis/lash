@@ -260,23 +260,17 @@ pub trait LashlangArtifactStore: Send + Sync {
     fn get_module_artifact(
         &self,
         module_ref: &ModuleRef,
-    ) -> Result<Option<ModuleArtifact>, ArtifactStoreError>;
+    ) -> Result<Option<Arc<ModuleArtifact>>, ArtifactStoreError>;
 }
 
 #[derive(Clone, Default)]
 pub struct InMemoryLashlangArtifactStore {
-    modules: Arc<Mutex<BTreeMap<ModuleRef, Vec<u8>>>>,
+    modules: Arc<Mutex<BTreeMap<ModuleRef, Arc<ModuleArtifact>>>>,
 }
 
 impl InMemoryLashlangArtifactStore {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn put_raw_module_artifact_bytes(&self, module_ref: ModuleRef, bytes: Vec<u8>) {
-        if let Ok(mut modules) = self.modules.lock() {
-            modules.insert(module_ref, bytes);
-        }
     }
 }
 
@@ -289,29 +283,23 @@ pub fn global_in_memory_lashlang_artifact_store() -> Arc<InMemoryLashlangArtifac
 
 impl LashlangArtifactStore for InMemoryLashlangArtifactStore {
     fn put_module_artifact(&self, artifact: &ModuleArtifact) -> Result<(), ArtifactStoreError> {
-        let bytes = artifact
-            .to_store_bytes()
-            .map_err(|err| ArtifactStoreError::Encode(err.to_string()))?;
         let mut modules = self
             .modules
             .lock()
             .map_err(|_| ArtifactStoreError::Backend("artifact store lock poisoned".to_string()))?;
-        modules.insert(artifact.module_ref.clone(), bytes);
+        modules.insert(artifact.module_ref.clone(), Arc::new(artifact.clone()));
         Ok(())
     }
 
     fn get_module_artifact(
         &self,
         module_ref: &ModuleRef,
-    ) -> Result<Option<ModuleArtifact>, ArtifactStoreError> {
+    ) -> Result<Option<Arc<ModuleArtifact>>, ArtifactStoreError> {
         let modules = self
             .modules
             .lock()
             .map_err(|_| ArtifactStoreError::Backend("artifact store lock poisoned".to_string()))?;
-        modules
-            .get(module_ref)
-            .map(|bytes| ModuleArtifact::from_store_bytes(bytes).map_err(ArtifactStoreError::from))
-            .transpose()
+        Ok(modules.get(module_ref).cloned())
     }
 }
 

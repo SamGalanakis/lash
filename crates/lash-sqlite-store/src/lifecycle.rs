@@ -13,6 +13,7 @@ impl Store {
         ensure_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            artifact_cache: Mutex::new(BTreeMap::new()),
             options,
             commit_count: AtomicU64::new(0),
         })
@@ -25,6 +26,7 @@ impl Store {
         conn.execute_batch("PRAGMA cache_size = -500;")?;
         Ok(Self {
             conn: Mutex::new(conn),
+            artifact_cache: Mutex::new(BTreeMap::new()),
             options: StoreOptions::default(),
             commit_count: AtomicU64::new(0),
         })
@@ -83,6 +85,7 @@ impl Store {
         ensure_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            artifact_cache: Mutex::new(BTreeMap::new()),
             options,
             commit_count: AtomicU64::new(0),
         })

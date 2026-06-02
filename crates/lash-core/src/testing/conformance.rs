@@ -2896,8 +2896,6 @@ fn artifact_put_get_round_trips(store: Arc<dyn LashlangArtifactStore>) {
     assert_eq!(loaded.module_ref, artifact.module_ref);
     assert_eq!(loaded.required_surface_ref, artifact.required_surface_ref);
     assert_eq!(loaded.exports, artifact.exports);
-    // A successful `get` already re-ran `verify()` internally; round-tripping
-    // the bytes again must reproduce the identical store encoding.
     assert_eq!(
         loaded.to_store_bytes().expect("re-encode loaded artifact"),
         artifact
@@ -2965,24 +2963,10 @@ mod tests {
         );
     }
 
-    // The corrupt-bytes rejection path is exercised here rather than in the
-    // shared suite: only the in-memory store exposes a raw-bytes injection
-    // seam (`put_raw_module_artifact_bytes`); durable backends re-verify on
-    // read through the same `ModuleArtifact::from_store_bytes` path.
     #[test]
-    fn in_memory_artifact_store_rejects_corrupted_bytes_on_read() {
-        let store = crate::InMemoryLashlangArtifactStore::new();
-        let artifact = sample_artifact();
-        store.put_raw_module_artifact_bytes(
-            artifact.module_ref.clone(),
-            b"not an artifact".to_vec(),
-        );
-        let err = store
-            .get_module_artifact(&artifact.module_ref)
-            .expect_err("corrupted stored bytes must be rejected on read");
-        assert!(
-            matches!(err, lashlang::ArtifactStoreError::Decode(_)),
-            "tampered bytes must surface a decode error, got {err:?}"
-        );
+    fn module_artifact_rejects_corrupted_store_bytes() {
+        let err = lashlang::ModuleArtifact::from_store_bytes(b"not an artifact")
+            .expect_err("corrupted artifact bytes must be rejected");
+        assert!(matches!(err, lashlang::ModuleArtifactError::Codec(_)));
     }
 }
