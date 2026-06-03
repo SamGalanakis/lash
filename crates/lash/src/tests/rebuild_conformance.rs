@@ -12,27 +12,6 @@
 
 use super::*;
 use crate::testing::conformance::{RuntimeRebuildBackend, runtime_rebuild_and_worker_recovery};
-use std::future::Future;
-
-fn run_async_test_on_large_stack<F, Fut>(name: &str, test: F)
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = ()> + 'static,
-{
-    std::thread::Builder::new()
-        .name(name.to_string())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime")
-                .block_on(test())
-        })
-        .expect("spawn large-stack test thread")
-        .join()
-        .expect("large-stack test thread");
-}
 
 fn fresh_sqlite_session_backend(
     root: &std::path::Path,

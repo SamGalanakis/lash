@@ -76,17 +76,11 @@ impl crate::plugin::SessionLifecycleService for RuntimeSessionLifecycleService {
 
     async fn start_turn(
         &self,
-        session_id: &str,
-        input: TurnInput,
+        request: crate::SessionTurnRequest<'_>,
     ) -> Result<AssembledTurn, crate::PluginError> {
         self.services
             .managed
-            .start_turn(
-                &self.services.current,
-                &self.services.usage,
-                session_id,
-                input,
-            )
+            .start_turn(&self.services.current, &self.services.usage, request)
             .await
     }
 }

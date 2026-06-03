@@ -145,7 +145,7 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
             <li>
               <div>
                 <h3 id="parser">Parser</h3>
-                <p>The lexer tokenizes strings (including <code>r"""..."""</code> / <code>r'''...'''</code> raws), <code>//</code> comments, operators, annotation sigils, and keywords. The parser builds a module AST rooted at <code>Program</code>, with declarations, assignment targets, receiver operations, named process starts, blocks, control flow, type expressions, and optional <code>@label</code> metadata on process declarations or process-map node statements. Host ability and language-feature checks happen later in the linker, not in the grammar.</p>
+                <p>The lexer tokenizes strings (including <code>r"""..."""</code> / <code>r'''...'''</code> raws), <code>#</code> and <code>//</code> line comments, operators, annotation sigils, and keywords. The parser builds a module AST rooted at <code>Program</code>, with declarations, assignment targets, receiver operations, named process starts, blocks, control flow, type expressions, and optional <code>@label</code> metadata on process declarations or process-map node statements. Host ability and language-feature checks happen later in the linker, not in the grammar.</p>
               </div>
             </li>
             <li>

@@ -84,7 +84,7 @@ fn post_persist_context_with_completion(
     graph: SessionGraph,
     host: Arc<RecordingHost>,
     completion_text: String,
-) -> SessionStateChangedContext {
+) -> SessionStateChangedContext<'static> {
     let sessions: Arc<dyn SessionStateService> = host.clone();
     let session_graph: Arc<dyn SessionGraphService> = host;
     SessionStateChangedContext {

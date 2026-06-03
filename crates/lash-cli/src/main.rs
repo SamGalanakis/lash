@@ -78,6 +78,8 @@ pub(crate) use interactive::generate_session_name;
 pub(crate) use interactive::{injected_image_part_indices, make_injected_plugin_message};
 pub(crate) use skill_catalog::{LoadedSkill, SkillCatalog};
 
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_GIT_HEAD: &str = env!("LASH_BUILD_GIT_HEAD");
 const LONG_VERSION: &str = concat!(
@@ -432,13 +434,21 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse_from(normalized_cli_args());
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
-    #[cfg(feature = "bench")]
-    if args.runtime_perf_benchmark
-        && let Some(stack_bytes) = args.runtime_perf_worker_stack_bytes
-    {
-        runtime.thread_stack_size(stack_bytes);
-    }
+    runtime.thread_stack_size(tokio_thread_stack_bytes(&args));
     runtime.build()?.block_on(async_main(args))
+}
+
+fn tokio_thread_stack_bytes(_args: &Args) -> usize {
+    #[cfg(feature = "bench")]
+    if _args.runtime_perf_benchmark
+        && let Some(stack_bytes) = _args.runtime_perf_worker_stack_bytes
+    {
+        return stack_bytes;
+    }
+    std::env::var("LASH_TOKIO_STACK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOKIO_THREAD_STACK_BYTES)
 }
 
 async fn async_main(args: Args) -> anyhow::Result<()> {

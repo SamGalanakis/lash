@@ -314,7 +314,7 @@ impl SessionReadView {
 
 /// Context passed to a turn-context transform.
 #[derive(Clone)]
-pub struct TurnTransformContext {
+pub struct TurnTransformContext<'run> {
     pub session_id: String,
     pub state: SessionReadView,
     pub prompt_usage: Option<crate::runtime::PromptUsage>,
@@ -322,18 +322,20 @@ pub struct TurnTransformContext {
     pub sessions: Arc<dyn super::SessionStateService>,
     pub session_lifecycle: Arc<dyn super::SessionLifecycleService>,
     pub session_graph: Arc<dyn super::SessionGraphService>,
-    pub direct_completions: crate::DirectCompletionClient<'static>,
+    pub scoped_effect_controller: crate::ScopedEffectController<'run>,
+    pub direct_completions: crate::DirectCompletionClient<'run>,
 }
 
 /// Context passed to a history rewriter.
 #[derive(Clone)]
-pub struct RewriteContext {
+pub struct RewriteContext<'run> {
     pub session_id: String,
     pub trigger: RewriteTrigger,
     pub state: SessionReadView,
     pub sessions: Arc<dyn super::SessionStateService>,
     pub session_lifecycle: Arc<dyn super::SessionLifecycleService>,
     pub session_graph: Arc<dyn super::SessionGraphService>,
+    pub scoped_effect_controller: crate::ScopedEffectController<'run>,
 }
 
 #[derive(Debug, thiserror::Error, Clone)]
@@ -356,7 +358,7 @@ pub trait TurnContextTransform: Send + Sync {
     fn id(&self) -> &'static str;
     async fn transform(
         &self,
-        ctx: &TurnTransformContext,
+        ctx: &TurnTransformContext<'_>,
         input: crate::session_model::context::PreparedContext,
     ) -> Result<crate::session_model::context::PreparedContext, HistoryError>;
 }
@@ -371,7 +373,7 @@ pub trait HistoryRewriter: Send + Sync {
     }
     async fn rewrite(
         &self,
-        ctx: &RewriteContext,
+        ctx: &RewriteContext<'_>,
         input: HistoryState,
     ) -> Result<HistoryState, HistoryError>;
 }

@@ -36,7 +36,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
 
     async fn transform(
         &self,
-        ctx: &TurnTransformContext,
+        ctx: &TurnTransformContext<'_>,
         input: PreparedContext,
     ) -> Result<PreparedContext, HistoryError> {
         let graph = ctx.state.session_graph();

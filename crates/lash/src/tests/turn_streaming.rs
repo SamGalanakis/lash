@@ -1,5 +1,4 @@
 use super::*;
-use std::future::Future;
 
 #[derive(Clone, Debug)]
 struct DurableEffectInvocation {
@@ -48,26 +47,6 @@ impl lash_core::RuntimeEffectController for RecordingDurableEffectController {
             });
         local_executor.execute(envelope).await
     }
-}
-
-fn run_async_test_on_large_stack<F, Fut>(name: &str, test: F) -> Result<()>
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = Result<()>> + 'static,
-{
-    std::thread::Builder::new()
-        .name(name.to_string())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime")
-                .block_on(test())
-        })
-        .expect("spawn large-stack test thread")
-        .join()
-        .expect("large-stack test thread")
 }
 
 struct BlockingAppTools {

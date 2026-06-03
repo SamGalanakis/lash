@@ -41,6 +41,7 @@ testing = ["lash-core/testing"]
 
 [dev-dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.21", features = ["testing"] }
+lash-subagents = { path = "../lash-subagents", version = "=0.1.0-alpha.21" }
 lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.21" }
 rusqlite = { version = "0.33", features = ["bundled"] }
 tempfile = { workspace = true }

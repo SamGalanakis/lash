@@ -312,7 +312,11 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
         let children = children.clone();
         tokio::spawn(async move {
             children
-                .start_turn("child-observation", TurnInput::text("blocked child"))
+                .start_turn(
+                    "child-observation",
+                    "child-observation-turn",
+                    TurnInput::text("blocked child"),
+                )
                 .await
         })
     };
@@ -356,7 +360,11 @@ async fn session_control_manages_child_session_turns() -> Result<()> {
         .await?;
 
     let assembled = children
-        .start_turn(&child.session_id, TurnInput::text("child"))
+        .start_turn(
+            &child.session_id,
+            "child-control-turn",
+            TurnInput::text("child"),
+        )
         .await?;
     assert_eq!(assembled.state.session_id, "child-control");
     children.close_session(&child.session_id).await?;

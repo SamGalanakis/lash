@@ -57,8 +57,8 @@ the explicit pre-release tag:
 
 ```toml
 [dependencies]
-lash-runtime         = "=0.1.0-alpha.19"
-lash-provider-openai = "=0.1.0-alpha.19"
+lash-runtime         = "=0.1.0-alpha.21"
+lash-provider-openai = "=0.1.0-alpha.21"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }
 ```
@@ -104,15 +104,25 @@ async fn main() -> anyhow::Result<()> {
 
 See [`docs/quickstart.html`](https://lash.run/quickstart.html) for the full walkthrough, and [`docs/embedding.html`](https://lash.run/embedding.html) for the complete facade API — session specs, plugin stacks, turn streaming, persistence, subagents, MCP wiring, and durable-workflow integration.
 
-## Run the example
+## Examples
 
-`examples/agent-service` is a localhost SQLite-backed chat app that exercises the `lash` facade end-to-end: RLM protocol, typed session plugin activation, app-owned board tools, semantic streaming, per-chat model selection, SQLite runtime persistence, and optional Restate-backed turns.
+Two runnable apps under `examples/` drive the `lash` facade end-to-end — full hosts with a browser UI, real persistence, and optional durable execution. The docs walk through both at <https://lash.run/examples.html>.
+
+`examples/agent-service` is a localhost SQLite-backed chat app: RLM protocol, typed session plugin activation, app-owned board tools, semantic streaming, per-chat model selection, SQLite runtime persistence, and optional Restate-backed turns.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... cargo run -p agent-service
 ```
 
 Then open <http://127.0.0.1:3000>. See [`examples/agent-service/README.md`](examples/agent-service/README.md) for the optional environment knobs (`OPENROUTER_MODEL`, `AGENT_SERVICE_ADDR`, `AGENT_SERVICE_DATA_DIR`, `AGENT_SERVICE_TRACE`, `AGENT_SERVICE_DURABILITY`, …) and the one-command Restate E2E recipe.
+
+`examples/agent-workbench` adds durable background work: Lashlang background processes, subagents, web tools, `ui.button.pressed` host events, and Restate-backed cron triggers. Restate is required — the bundled entrypoint starts it in Docker, registers the in-process endpoint, and opens the browser.
+
+```bash
+OPENROUTER_API_KEY=sk-or-... just agent-workbench
+```
+
+Then open <http://127.0.0.1:3030>. See [`examples/agent-workbench/README.md`](examples/agent-workbench/README.md) for the trigger sources, cron sync, and the full environment list.
 
 ## The CLI
 

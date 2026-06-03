@@ -93,8 +93,7 @@ pub trait SessionLifecycleService: Send + Sync {
 
     async fn start_turn(
         &self,
-        _session_id: &str,
-        _input: TurnInput,
+        _request: SessionTurnRequest<'_>,
     ) -> Result<AssembledTurn, PluginError> {
         Err(PluginError::Session(
             "session execution is unavailable in this runtime".to_string(),
@@ -134,6 +133,81 @@ pub struct DirectCompletion {
 pub struct DirectLlmCompletion {
     pub response: crate::LlmResponse,
     pub usage: crate::TokenUsage,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionTurnInput {
+    pub session_id: String,
+    pub turn_id: String,
+    pub input: TurnInput,
+}
+
+pub struct SessionTurnRequest<'run> {
+    turn: SessionTurnInput,
+    scoped_effect_controller: crate::ScopedEffectController<'run>,
+}
+
+impl<'run> SessionTurnRequest<'run> {
+    pub fn new(
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+        mut input: TurnInput,
+        scoped_effect_controller: crate::ScopedEffectController<'run>,
+    ) -> Result<Self, PluginError> {
+        let session_id = session_id.into();
+        let turn_id = turn_id.into();
+        if turn_id.trim().is_empty() {
+            return Err(PluginError::Session(
+                "session turns require a non-empty stable turn id".to_string(),
+            ));
+        }
+        if scoped_effect_controller.turn_id() != Some(turn_id.as_str()) {
+            return Err(PluginError::Session(format!(
+                "session turn `{turn_id}` requires an effect turn scope with the same id"
+            )));
+        }
+        if scoped_effect_controller.effect_scope().session_id() != Some(session_id.as_str()) {
+            return Err(PluginError::Session(format!(
+                "session turn `{turn_id}` requires an effect scope for session `{session_id}`"
+            )));
+        }
+        if let Some(input_turn_id) = input.trace_turn_id.as_deref() {
+            if input_turn_id != turn_id {
+                return Err(PluginError::Session(format!(
+                    "input trace_turn_id `{input_turn_id}` does not match turn id `{turn_id}`"
+                )));
+            }
+        }
+        input.trace_turn_id = Some(turn_id.clone());
+        Ok(Self {
+            turn: SessionTurnInput {
+                session_id,
+                turn_id,
+                input,
+            },
+            scoped_effect_controller,
+        })
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.turn.session_id
+    }
+
+    pub fn turn_id(&self) -> &str {
+        &self.turn.turn_id
+    }
+
+    pub fn input(&self) -> &TurnInput {
+        &self.turn.input
+    }
+
+    pub fn scoped_effect_controller(&self) -> &crate::ScopedEffectController<'run> {
+        &self.scoped_effect_controller
+    }
+
+    pub fn into_parts(self) -> (SessionTurnInput, crate::ScopedEffectController<'run>) {
+        (self.turn, self.scoped_effect_controller)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

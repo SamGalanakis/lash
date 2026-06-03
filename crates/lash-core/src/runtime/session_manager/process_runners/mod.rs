@@ -792,6 +792,189 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct RejectingDeploymentEffectHost {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::EffectHost for RejectingDeploymentEffectHost {
+        fn scoped<'run>(
+            &'run self,
+            scope: crate::EffectScope,
+        ) -> Result<crate::ScopedEffectController<'run>, crate::RuntimeError> {
+            crate::ScopedEffectController::shared(
+                Arc::new(RejectingEffectController {
+                    attempts: Arc::clone(&self.attempts),
+                }),
+                scope,
+            )
+        }
+
+        fn scoped_static(
+            &self,
+            scope: crate::EffectScope,
+        ) -> Result<Option<crate::ScopedEffectController<'static>>, crate::RuntimeError> {
+            Ok(Some(crate::ScopedEffectController::shared(
+                Arc::new(RejectingEffectController {
+                    attempts: Arc::clone(&self.attempts),
+                }),
+                scope,
+            )?))
+        }
+    }
+
+    struct RejectingEffectController {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::RuntimeEffectController for RejectingEffectController {
+        async fn execute_effect(
+            &self,
+            _envelope: crate::RuntimeEffectEnvelope,
+            _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<crate::RuntimeEffectOutcome, crate::RuntimeEffectControllerError> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(crate::RuntimeEffectControllerError::new(
+                "rejecting_deployment_effect_host",
+                "deployment effect host must not execute this child turn",
+            ))
+        }
+    }
+
+    fn rejecting_host_worker(
+        registry: Arc<dyn crate::ProcessRegistry>,
+        factory: Arc<dyn crate::SessionStoreFactory>,
+    ) -> (
+        crate::DurableProcessWorker,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker = process_worker_with_core(registry, factory, {
+            let mut config = crate::RuntimeHostConfig::in_memory();
+            config.profile.host_profile_id = "worker-profile".to_string();
+            config.control.effect_host = Arc::new(RejectingDeploymentEffectHost {
+                attempts: Arc::clone(&attempts),
+            });
+            config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+                mock_provider(vec![MockCall {
+                    stream_events: Vec::new(),
+                    response: Ok(successful_text_response("child done")),
+                }])
+                .into_handle(),
+            ));
+            config
+        });
+        (worker, attempts)
+    }
+
+    fn session_turn_registration(
+        process_id: &str,
+        child_session_id: &str,
+    ) -> crate::ProcessRegistration {
+        let child_policy = standard_test_policy();
+        worker_registration(crate::ProcessRegistration::new(
+            process_id,
+            crate::ProcessInput::SessionTurn {
+                create_request: Box::new(
+                    crate::SessionCreateRequest::child(
+                        "root",
+                        crate::SessionStartPoint::Empty,
+                        child_policy,
+                        crate::PluginOptions::default(),
+                        "worker-test",
+                    )
+                    .with_session_id(child_session_id),
+                ),
+                turn_input: Box::new(crate::TurnInput::text("run child")),
+                output_contract: crate::ToolOutputContract::Static,
+            },
+        ))
+    }
+
+    #[tokio::test]
+    async fn session_turn_process_uses_supplied_scoped_controller() {
+        let registry = Arc::new(crate::TestLocalProcessRegistry::default());
+        let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
+        let factory =
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
+        let factory_dyn = Arc::clone(&factory) as Arc<dyn crate::SessionStoreFactory>;
+        let (worker, rejecting_attempts) =
+            rejecting_host_worker(Arc::clone(&registry_dyn), factory_dyn);
+        let registration = session_turn_registration("scoped-session-turn", "scoped-child");
+        let controller = RecordingProcessEffectController::default();
+        let scoped_effect_controller = crate::ScopedEffectController::borrowed(
+            &controller,
+            crate::EffectScope::process("scoped-session-turn"),
+        )
+        .expect("process scoped controller");
+
+        let output = worker
+            .run_process_with_scoped_effect_controller(
+                registration,
+                crate::ProcessExecutionContext::default(),
+                scoped_effect_controller,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("session turn process should run");
+
+        assert!(matches!(output, crate::ProcessAwaitOutput::Success { .. }));
+        assert_eq!(
+            rejecting_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "explicit scoped execution must not touch the deployment effect host"
+        );
+        let records = controller.records();
+        assert!(
+            records
+                .iter()
+                .any(|record| record.scope.turn_id.as_deref() == Some("scoped-session-turn")),
+            "child turn effects should use the process id as the turn id: {records:#?}"
+        );
+        assert!(
+            records
+                .iter()
+                .all(|record| { record.scope.turn_id.as_deref() == Some("scoped-session-turn") }),
+            "all child turn effects should stay in the child turn scope: {records:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_turn_process_fails_on_deployment_effect_host_fallback() {
+        let registry = Arc::new(crate::TestLocalProcessRegistry::default());
+        let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
+        let factory =
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
+        let factory_dyn = Arc::clone(&factory) as Arc<dyn crate::SessionStoreFactory>;
+        let (worker, rejecting_attempts) =
+            rejecting_host_worker(Arc::clone(&registry_dyn), factory_dyn);
+        let registration = session_turn_registration("fallback-session-turn", "fallback-child");
+
+        let output = worker
+            .run_process(
+                registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("process runner should return process output");
+
+        let crate::ProcessAwaitOutput::Failure { code, message, .. } = output else {
+            panic!("expected fallback to fail, got {output:#?}");
+        };
+        assert_eq!(code, "process_session_turn_failed");
+        assert!(
+            !message.trim().is_empty(),
+            "fallback should surface a process failure message"
+        );
+        assert!(
+            rejecting_attempts.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "fallback path should execute through the rejecting deployment effect host"
+        );
+    }
+
     #[tokio::test]
     async fn durable_process_worker_rebuilds_context_for_tool_lashlang_and_session_turn() {
         let registry = Arc::new(crate::TestLocalProcessRegistry::default());

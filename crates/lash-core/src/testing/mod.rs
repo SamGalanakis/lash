@@ -21,8 +21,8 @@ use crate::provider::{Provider, ProviderComponents, ProviderHandle, ProviderMode
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, ExecutionSummary, ModelSpec, OutputState, ProcessRegistry,
-    ProviderOptions, RuntimeSessionState, SessionPolicy, TokenUsage, TurnFinish, TurnInput,
-    TurnOutcome, TurnStop, UnavailableProcessService,
+    ProviderOptions, RuntimeSessionState, SessionPolicy, TokenUsage, TurnFinish, TurnOutcome,
+    TurnStop, UnavailableProcessService,
 };
 
 type CompletionFuture =
@@ -400,6 +400,7 @@ pub struct MockSessionManager {
     pub process_registry: Arc<crate::TestLocalProcessRegistry>,
     pub created: Mutex<Vec<SessionCreateRequest>>,
     pub closed: Mutex<Vec<String>>,
+    pub turns: Mutex<Vec<(String, String, Option<String>, crate::EffectScope)>>,
 }
 
 impl Default for MockSessionManager {
@@ -412,6 +413,7 @@ impl Default for MockSessionManager {
             process_registry: Arc::new(crate::TestLocalProcessRegistry::default()),
             created: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
+            turns: Mutex::new(Vec::new()),
         }
     }
 }
@@ -512,9 +514,15 @@ impl crate::plugin::SessionLifecycleService for MockSessionManager {
     }
     async fn start_turn(
         &self,
-        _session_id: &str,
-        _input: TurnInput,
+        request: crate::SessionTurnRequest<'_>,
     ) -> Result<AssembledTurn, PluginError> {
+        let (turn, scoped_effect_controller) = request.into_parts();
+        self.turns.lock().expect("turns lock").push((
+            turn.session_id,
+            turn.turn_id,
+            turn.input.trace_turn_id,
+            scoped_effect_controller.effect_scope().clone(),
+        ));
         Ok(self.turn.clone())
     }
 }

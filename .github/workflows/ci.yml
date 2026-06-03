@@ -274,6 +274,42 @@ jobs:
           name: runtime-perf
           path: .benchmarks/runtime-perf/ci.json
 
+  restate-e2e:
+    name: Restate E2E
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig
+        uses: ./.github/actions/setup-ci-zig
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Install system dependencies
+        run: scripts/ci-install-apt-packages.sh protobuf-compiler
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      # Each recipe boots a `restatedev/restate` container with host networking,
+      # waits for the admin port, then runs the crate's `#[ignore]`d live e2e
+      # test against it. The recipes own container lifecycle (cleanup on EXIT)
+      # and use distinct ports/names, so they run back-to-back safely.
+      - name: agent-service live Restate ingress e2e
+        run: just agent-service-restate-e2e
+
+      - name: agent-workbench live Restate cron e2e
+        run: just agent-workbench-restate-e2e
+
   prepare-release:
     name: Prepare release
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[skip ci]')
@@ -282,6 +318,7 @@ jobs:
       - build-release-assets
       - ui-perf
       - runtime-perf
+      - restate-e2e
     runs-on: ubuntu-latest
     concurrency:
       group: lash-release-main

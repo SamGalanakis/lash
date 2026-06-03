@@ -8,26 +8,6 @@ use lash_core::llm::types::{
 };
 use tokio::sync::{Mutex as TokioMutex, oneshot};
 
-fn model_spec(
-    model: impl Into<String>,
-    variant: Option<String>,
-    context_window_tokens: usize,
-) -> lash_core::ModelSpec {
-    lash_core::ModelSpec::from_token_limits(model, variant, context_window_tokens, None, None)
-        .expect("valid model spec")
-}
-
-fn mock_model_spec() -> lash_core::ModelSpec {
-    model_spec("mock-model", None, 200_000)
-}
-
-fn test_current_epoch_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default()
-}
-
 #[derive(Default)]
 struct SnapshotStore {
     read: std::sync::Mutex<Option<lash_core::store::PersistedSessionRead>>,
@@ -994,6 +974,9 @@ fn text_message(role: lash_core::MessageRole, text: &str) -> lash_core::Message 
 
 mod control_admin;
 mod core_session_builder;
+mod harness;
+use harness::{mock_model_spec, model_spec, run_async_test_on_large_stack, test_current_epoch_ms};
+mod lash_e2e;
 mod plugin_stack;
 mod rebuild_conformance;
 mod turn_streaming;

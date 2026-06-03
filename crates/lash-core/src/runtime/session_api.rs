@@ -1,5 +1,18 @@
 use super::*;
 
+fn rewrite_history_scope_id(
+    session_id: &str,
+    turn_index: usize,
+    trigger: &crate::RewriteTrigger,
+) -> String {
+    let trigger_id = match trigger {
+        crate::RewriteTrigger::Manual { .. } => "manual",
+        crate::RewriteTrigger::WindowShrink { .. } => "window-shrink",
+        crate::RewriteTrigger::Periodic => "periodic",
+    };
+    format!("{session_id}:rewrite-history:{trigger_id}:{turn_index}")
+}
+
 impl LashRuntime {
     pub fn session_id(&self) -> &str {
         &self.state.session_id
@@ -256,11 +269,24 @@ impl LashRuntime {
         };
         let ctx = crate::RewriteContext {
             session_id: self.state.session_id.clone(),
-            trigger,
+            trigger: trigger.clone(),
             state: self.read_view(),
             sessions: services.state_service(),
             session_lifecycle: services.lifecycle_service(),
             session_graph: services.graph_service(),
+            scoped_effect_controller: self
+                .host
+                .core
+                .control
+                .effect_host
+                .scoped(crate::EffectScope::runtime_operation(
+                    rewrite_history_scope_id(
+                        &self.state.session_id,
+                        self.state.turn_index,
+                        &trigger,
+                    ),
+                ))
+                .map_err(|err| PluginActionInvokeError::Unknown(err.to_string()))?,
         };
         let input = crate::HistoryState::from_snapshot(&self.state.to_snapshot());
         let baseline_messages = input.messages.len();

@@ -399,6 +399,31 @@ submit result
 }
 
 #[tokio::test]
+async fn rlm_spawn_record_shorthand_returns_child_submitted_value() {
+    let (outcome, _) = run_seed_probe(
+        r#"```lashlang
+@label(title: "Spawn subagent")
+direct = await agents.spawn({
+  capability: "default",
+  task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+  seed: { chunk: ["a", "b"] },
+  output: { len: "int" }
+})?
+submit direct
+```"#,
+        TurnInput::text("spawn a child with record shorthand output"),
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+            value: json!({ "len": 2 })
+        })
+    );
+}
+
+#[tokio::test]
 async fn rlm_spawn_process_handle_returns_child_submitted_value() {
     let (outcome, prompt) = run_seed_probe(
         r#"```lashlang
@@ -416,6 +441,73 @@ result = (await handle)?
 submit result
 ```"#,
         TurnInput::text("spawn a child with a seeded chunk through start/await"),
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+            value: json!({ "len": 2 })
+        })
+    );
+    assert!(
+        prompt.contains("- `chunk`:"),
+        "child prompt did not advertise seeded `chunk` variable:\n{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn rlm_spawn_labeled_inside_process_returns_child_submitted_value() {
+    let (outcome, prompt) = run_seed_probe(
+        r#"```lashlang
+process spawn_child() {
+  @label(title: "Spawn subagent inside process")
+  result = await agents.spawn({
+    capability: "default",
+    task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+    seed: { chunk: ["a", "b"] },
+    output: Type { len: int }
+  })?
+  finish result
+}
+handle = start spawn_child()
+result = (await handle)?
+submit result
+```"#,
+        TurnInput::text("spawn a labeled child inside a Lashlang process"),
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+            value: json!({ "len": 2 })
+        })
+    );
+    assert!(
+        prompt.contains("- `chunk`:"),
+        "child prompt did not advertise seeded `chunk` variable:\n{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn rlm_spawn_captured_process_authority_returns_child_submitted_value() {
+    let (outcome, prompt) = run_seed_probe(
+        r#"```lashlang
+process spawn_child() {
+  result = await agents.spawn({
+    capability: "default",
+    task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+    seed: { chunk: ["a", "b"] },
+    output: Type { len: int }
+  })?
+  finish result
+}
+handle = start spawn_child()
+result = (await handle)?
+submit result
+```"#,
+        TurnInput::text("spawn a child with captured agents authority through start/await"),
     )
     .await;
 
@@ -644,7 +736,11 @@ async fn run_seed_probe_inner(
     let provider = seed_probe_provider(Arc::clone(&state)).into_handle();
 
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
-        Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::default()),
+        Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::new(
+            lash_protocol_rlm::RlmProtocolPluginConfig::default().with_lashlang_language_features(
+                lash_protocol_rlm::LashlangLanguageFeatures::default().with_label_annotations(),
+            ),
+        )),
         Arc::new(SubagentsPluginFactory::new(Arc::new(
             CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
                 "default",
@@ -730,7 +826,7 @@ async fn run_seed_probe_inner(
         .lock()
         .expect("captured prompt")
         .clone()
-        .expect("child prompt was captured");
+        .unwrap_or_else(|| panic!("child prompt was not captured; outcome={:?}", turn.outcome));
     (turn.outcome, prompt)
 }
 

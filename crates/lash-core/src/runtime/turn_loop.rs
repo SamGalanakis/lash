@@ -65,19 +65,19 @@ fn queued_work_batch_ids(claim: &crate::QueuedWorkClaim) -> Vec<String> {
         .collect()
 }
 
-fn scoped_runtime_operation_handle(
-    effect_host: &Arc<dyn EffectHost>,
-    operation_id: impl Into<String>,
-) -> Result<RuntimeEffectControllerHandle<'static>, RuntimeError> {
-    let scoped = effect_host
-        .scoped_static(EffectScope::runtime_operation(operation_id))?
-        .ok_or_else(|| {
-            RuntimeError::new(
-                "effect_host_static_scope_unavailable",
-                "this plugin lifecycle hook requires an effect host that can provide a static scoped controller",
-            )
-        })?;
-    Ok(RuntimeEffectControllerHandle::borrowed(scoped))
+fn turn_phase_id(parent_turn_id: &str, phase: &str) -> String {
+    format!("{parent_turn_id}:{phase}")
+}
+
+fn scoped_child_turn_controller<'run>(
+    scoped_effect_controller: &'run ScopedEffectController<'_>,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<ScopedEffectController<'run>, RuntimeError> {
+    ScopedEffectController::borrowed(
+        scoped_effect_controller.controller(),
+        EffectScope::turn(session_id, turn_id),
+    )
 }
 
 pub(in crate::runtime) fn queued_work_trace_payload(
@@ -182,6 +182,7 @@ impl LashRuntime {
         &mut self,
         finish: TurnFinishInput,
         events: &dyn EventSink,
+        scoped_effect_controller: &ScopedEffectController<'_>,
         cancel_state: &CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         let TurnFinishInput {
@@ -325,7 +326,8 @@ impl LashRuntime {
             );
         }
         self.mark_phase_begin(RuntimeTurnPhase::PostPersistHooks);
-        self.emit_turn_persisted_event(&returned_turn).await;
+        self.emit_turn_persisted_event(&returned_turn, scoped_effect_controller, &trace_turn_id)
+            .await?;
         self.mark_phase_end(RuntimeTurnPhase::PostPersistHooks);
         self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
 
@@ -363,20 +365,28 @@ impl LashRuntime {
         );
     }
 
-    async fn emit_turn_persisted_event(&self, returned_turn: &AssembledTurn) {
+    async fn emit_turn_persisted_event(
+        &self,
+        returned_turn: &AssembledTurn,
+        scoped_effect_controller: &ScopedEffectController<'_>,
+        trace_turn_id: &str,
+    ) -> Result<(), RuntimeError> {
         let Some(session) = self.session.as_ref() else {
-            return;
+            return Ok(());
         };
         let Ok(manager) = self.runtime_session_services() else {
-            return;
+            return Ok(());
         };
-        let Ok(effect_controller) = scoped_runtime_operation_handle(
-            &self.host.core.control.effect_host,
-            format!("turn-persisted:{}", returned_turn.state.turn_index),
-        ) else {
-            return;
-        };
-        let direct_completions = manager.direct_completion_client(effect_controller, None);
+        let phase_turn_id = turn_phase_id(trace_turn_id, "turn-persisted");
+        let phase_controller = scoped_child_turn_controller(
+            scoped_effect_controller,
+            &self.state.session_id,
+            &phase_turn_id,
+        )?;
+        let direct_completions = manager.direct_completion_client(
+            RuntimeEffectControllerHandle::borrowed(phase_controller),
+            Some(phase_turn_id),
+        );
 
         session
             .plugins()
@@ -393,6 +403,7 @@ impl LashRuntime {
                 self.turn_phase_probe.clone(),
             )
             .await;
+        Ok(())
     }
 
     /// Run a single turn and stream events to the host sink.
@@ -910,6 +921,12 @@ impl LashRuntime {
                     "runtime session not available",
                 )
             })?;
+        let prepare_phase_turn_id = turn_phase_id(&trace_turn_id, "prepare-turn");
+        let prepare_phase_controller = scoped_child_turn_controller(
+            &scoped_effect_controller,
+            &self.state.session_id,
+            &prepare_phase_turn_id,
+        )?;
         let turn_ctx = crate::TurnTransformContext {
             session_id: self.state.session_id.clone(),
             state: self.read_view(),
@@ -918,12 +935,10 @@ impl LashRuntime {
             sessions: manager.state_service(),
             session_lifecycle: manager.lifecycle_service(),
             session_graph: manager.graph_service(),
+            scoped_effect_controller: scoped_effect_controller.clone(),
             direct_completions: manager.direct_completion_client(
-                scoped_runtime_operation_handle(
-                    &self.host.core.control.effect_host,
-                    format!("prepare-turn:{}", self.state.turn_index + 1),
-                )?,
-                None,
+                RuntimeEffectControllerHandle::borrowed(prepare_phase_controller),
+                Some(prepare_phase_turn_id),
             ),
         };
         self.mark_phase_begin(RuntimeTurnPhase::ContextTransform);
@@ -1168,6 +1183,7 @@ impl LashRuntime {
                 RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
             })?;
         let cancel_state = cancel.clone();
+        let finish_scoped_effect_controller = scoped_effect_controller.clone();
         let session = self
             .session
             .take()
@@ -1241,6 +1257,7 @@ impl LashRuntime {
                 trace_turn_id,
             },
             events,
+            &finish_scoped_effect_controller,
             &cancel_state,
         )
         .await

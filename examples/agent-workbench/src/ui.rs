@@ -1552,6 +1552,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     let controller = null;
     let lastRequest = null;
     let workStale = false;
+    let workRefreshGeneration = 0;
     let selectedWorkKey = null;
     let activeExecutionGraphKey = null;
     let currentExecutionExport = null;
@@ -1903,8 +1904,12 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       return el;
     }
 
+    function isCurrentTimelineHead(node) {
+      return node && node.parentNode === timeline && timeline.lastElementChild === node;
+    }
+
     function appendReasoning(delta) {
-      if (!reasoning) {
+      if (!isCurrentTimelineHead(reasoning)) {
         clearEmpty();
         reasoning = thinkingPanel("thinking");
         timeline.appendChild(reasoning);
@@ -2082,16 +2087,15 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
     async function doReset() {
       resetButton.disabled = true;
+      workRefreshGeneration += 1;
       try {
         const response = await fetch("/api/reset", { method: "POST" });
         if (!response.ok) throw new Error("reset failed (" + response.status + ")");
         const state = await response.json();
         clearTranscript();
-        selectedWorkKey = null;
-        closeExecutionExplorer();
+        clearExecutionState();
         lastRequest = null;
         sessionId.textContent = state.settings.session_id || "—";
-        renderWork([]);
         setBusy(false, "ready");
       } catch (error) {
         renderError(cleanErrorText(error.message || error));
@@ -2792,6 +2796,16 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       applyExecutionTransform();
     }
 
+    function clearExecutionState() {
+      selectedWorkKey = null;
+      activeExecutionGraphKey = null;
+      currentExecutionExport = null;
+      graphIndex = { graphs: [], lineage_edges: [] };
+      graphIndexByKey = new Map();
+      closeExecutionExplorer();
+      renderWork([]);
+    }
+
     function toggleExecutionFullscreen() {
       shell.classList.toggle("execution-fullscreen");
       requestAnimationFrame(fitExecutionGraph);
@@ -3080,11 +3094,15 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
     async function refreshExecutionGraph(graphKey) {
       if (!graphKey || executionExplorer.hidden) return;
+      const generation = workRefreshGeneration;
       try {
         const response = await fetch("/api/lashlang-graph/" + encodeURIComponent(graphKey));
         if (!response.ok) throw new Error("graph unavailable");
-        renderExecutionGraph(await response.json());
+        const graph = await response.json();
+        if (generation !== workRefreshGeneration || activeExecutionGraphKey !== graphKey) return;
+        renderExecutionGraph(graph);
       } catch (_) {
+        if (generation !== workRefreshGeneration || activeExecutionGraphKey !== graphKey) return;
         executionStatus.textContent = "unavailable";
         executionMeta.textContent = "id " + shortId(graphKey);
         renderDiagramEmpty("no diagram data yet");
@@ -3092,6 +3110,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     }
 
     async function refreshWork() {
+      const generation = workRefreshGeneration;
       try {
         const [workResponse, graphResponse] = await Promise.all([
           fetch("/api/work"),
@@ -3100,7 +3119,9 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         if (!workResponse.ok) throw new Error("work request failed");
         if (!graphResponse.ok) throw new Error("graph index request failed");
         const items = await workResponse.json();
-        graphIndex = await graphResponse.json();
+        const nextGraphIndex = await graphResponse.json();
+        if (generation !== workRefreshGeneration) return;
+        graphIndex = nextGraphIndex;
         graphIndexByKey = new Map((graphIndex.graphs || []).map(graph => [graph.graph_key, graph]));
         renderWork(items);
         if (activeExecutionGraphKey) {
@@ -3108,6 +3129,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
           refreshExecutionGraph(activeExecutionGraphKey);
         }
       } catch (_) {
+        if (generation !== workRefreshGeneration) return;
         if (!workStale) {
           workStale = true;
           workCount.textContent = "updates paused — retry";

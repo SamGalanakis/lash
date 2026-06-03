@@ -167,9 +167,10 @@ A generalization of code that already existed for turns — not a new subsystem:
 
 Two layers, both in place. **Start-idempotency**: the registry's `process_id`
 uniqueness is the replay boundary for process control issued outside a turn
-lease (see the comment at `process_runners/control.rs` — "process
-registry/workflow idempotency is the replay boundary when a process control call
-is issued outside an active turn lease"). **Execution-idempotency**: the
+lease — `ProcessCommandRunner::run` (`process_runners/control.rs`) routes every
+command through the explicitly selected controller and pokes the work runner
+after a successful `Start`, and a duplicate `Start` re-registers the same row
+rather than spawning a second execution. **Execution-idempotency**: the
 `ProcessLease` ensures a recovered, non-terminal process is re-run by exactly
 one owner. Process execution identity is the persisted `process_id` end-to-end
 (the Restate invocation is already keyed `LashProcessWorkflow/{process_id}`); a
@@ -215,7 +216,7 @@ silent `effect_controller.unwrap_or(...)` fallback at
 `process_runners/control.rs` is gone — out of turn there is no turn-scoped
 controller, so the host's explicitly named build-time effect host is used. A
 `Start` only *registers* the row (the inline off-lease `tokio::spawn` is
-deleted), and `execute_process_effect` pokes the host's
+deleted), and `ProcessCommandRunner::run` pokes the host's
 `ProcessWorkRunner` after a successful `Start`. The runner is wired by the host:
 the `lash` facade lazily spawns a default inline runner on first
 `session().open()` when a process registry **and** a store factory are present

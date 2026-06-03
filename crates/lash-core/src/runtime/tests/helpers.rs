@@ -681,6 +681,7 @@ impl crate::ToolProvider for ChildSessionTool {
             .sessions()
             .start_turn(
                 &child.session_id,
+                "subagent-child-turn",
                 TurnInput {
                     items: vec![InputItem::Text {
                         text: "child turn".to_string(),

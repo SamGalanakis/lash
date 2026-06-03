@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
+<title>agent workbench example · lash docs</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css?v=9">
+<script src="./theme.js"></script>
+<script src="./docs.js?v=3" defer></script>
+<script src="./syntax.js" defer></script>
+</head>
+<body class="docs-page" data-cover-source="<code>examples/agent-workbench</code>, <code>crates/lash</code>, <code>crates/lash-restate</code>.">
+  <section class="opener">
+    <h1 class="opener__title">agent<span class="slash">/</span>workbench</h1>
+    <p class="opener__lede">The workbench in <code>examples/agent-workbench</code> is an RLM chat app built around durable background work: it starts Lashlang processes and subagents, runs web tools, takes host-event button presses, and registers Restate-backed cron triggers. Restate is required — the bundled <code>just agent-workbench</code> entrypoint starts it in Docker, registers the in-process endpoint through Restate Admin, then opens the browser.</p>
+  </section>
+
+  <main class="body" id="content">
+    <div class="section" id="run-it">
+      <div class="section-header">
+        <h2>Run It</h2>
+        <p>Run from the repo root. The entrypoint checks for Restate ingress/admin on the configured ports; if they are not already up it starts <code>restatedev/restate:1.6.2</code> with host networking, waits for it, launches the workbench and its in-process Restate endpoint, registers the endpoint, then opens the browser.</p>
+      </div>
+      <pre><code>OPENROUTER_API_KEY=... just agent-workbench
+# then open http://127.0.0.1:3030</code></pre>
+      <dl class="def-list">
+        <dt><code>TAVILY_API_KEY</code></dt>
+        <dd>Key for the <code>web.search(...)</code> and <code>web.fetch(...)</code> tools, matching the CLI web tools. Optional — the rest of the workbench runs without it.</dd>
+        <dt><code>OPENROUTER_MODEL</code></dt>
+        <dd>Default model id for new chats. Defaults to <code>anthropic/claude-sonnet-4.6</code>.</dd>
+        <dt><code>OPENROUTER_MODEL_VARIANT</code></dt>
+        <dd>Default reasoning variant. Defaults to <code>high</code>; choose <code>provider default</code> in the UI to send no variant for models without configurable thinking.</dd>
+        <dt><code>AGENT_WORKBENCH_ADDR</code></dt>
+        <dd>Browser bind address. Defaults to <code>127.0.0.1:3030</code>.</dd>
+        <dt><code>AGENT_WORKBENCH_DATA_DIR</code></dt>
+        <dd>Persistence, plus the JSONL turn and Lashlang-execution traces. Defaults to <code>.agent-workbench</code>.</dd>
+      </dl>
+      <p>The entrypoint also manages the Restate container ports (<code>AGENT_WORKBENCH_RESTATE_ADDR</code>, admin <code>19070</code>, node <code>19071</code>) and the Tokio worker stack (<code>AGENT_WORKBENCH_TOKIO_STACK_BYTES</code>, default 16&nbsp;MiB — RLM + Restate + Lashlang execution has deep debug-build futures). See <code>examples/agent-workbench/README.md</code> for the full list.</p>
+    </div>
+
+    <div class="section" id="demonstrates">
+      <div class="section-header">
+        <h2>What It Demonstrates</h2>
+        <p>The browser UI has three work areas: a left rail of host-event buttons, a cron schedule card, and per-turn model controls; a center chat/event stream; and a right rail that polls the process registry for visible background work.</p>
+      </div>
+      <div class="module-grid">
+        <article class="panel"><h3>Background processes</h3><p>The model emits named Lashlang <code>process</code> declarations and <code>start name(...)</code>; started processes appear in the right-rail registry view.</p></article>
+        <article class="panel"><h3>Subagents</h3><p><code>agents.spawn(...)</code> runs child sessions as background process work, observed through the same registry and graph panel.</p></article>
+        <article class="panel"><h3>Web tools</h3><p><code>web.search(...)</code> and <code>web.fetch(...)</code> back onto Tavily, the same web tools the CLI exposes.</p></article>
+        <article class="panel"><h3>Host-event buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code>; a registered trigger wakes a process with the validated event payload.</p></article>
+        <article class="panel"><h3>Restate cron triggers</h3><p>An enabled <code>cron.Schedule</code> registration syncs to a Restate virtual object that owns the timer and fires <code>cron.Tick</code>s.</p></article>
+        <article class="panel"><h3>Lashlang graph</h3><p>The graph panel is backed by <code>TraceLashlangGraphStore</code>; command operations still go through the session's <code>ProcessControl</code> facade.</p></article>
+      </div>
+    </div>
+
+    <div class="section" id="host-events">
+      <div class="section-header">
+        <h2>Host-Event Buttons</h2>
+        <p>The buttons are a zero-config trigger source — the source config is <code>{}</code>, and red/blue selection arrives in the event payload. The model registers a trigger that wakes a process when a button is pressed.</p>
+      </div>
+      <pre><code>process on_button(event: ui.button.Pressed) {
+  wake { kind: "button_pressed", button: event.button, message: event.message }
+  finish true
+}
+
+handle = await triggers.register({
+  source: ui.button.pressed({}),
+  target: on_button,
+  inputs: { event: trigger.event },
+  name: "button watcher"
+})?
+registrations = await triggers.list({ name: "button watcher" })?
+submit { handle: handle, registrations: registrations }</code></pre>
+    </div>
+
+    <div class="section" id="cron">
+      <div class="section-header">
+        <h2>Cron Triggers</h2>
+        <p>The cron card is the schedule-reference integration: there is no Lashlang <code>schedule</code> syntax and no UI tick button. Restate owns the timer policy. The plugin declares the <code>cron.Schedule</code> source; Lashlang builds a <code>cron.Schedule</code> value and registers it with the runtime trigger registry.</p>
+      </div>
+      <pre><code>process daily_digest(tick: cron.Tick) {
+  wake { kind: "daily_digest_due", tick: tick }
+  finish true
+}
+
+source = cron.Schedule({ expr: "0 8 * * *", tz: "UTC" })
+handle = await triggers.register({
+  source: source,
+  target: daily_digest,
+  inputs: { tick: trigger.event },
+  name: "daily_digest"
+})?
+submit { handle: handle, registrations: await triggers.list({ target: daily_digest })? }</code></pre>
+      <p>After a Restate-backed turn registers an enabled <code>cron.Schedule</code>, the workbench syncs that trigger to <code>WorkbenchCronJob/{session_id}:{trigger_handle}</code>. The virtual object stores the source request, the next execution timestamp, and the Restate invocation id in Restate K/V state. Its <code>run</code> handler activates that exact trigger handle with a validated <code>cron.Tick</code> payload, then schedules its next <code>run</code> with a delayed Restate send. Resetting the workbench cancels known cron objects for the old session. The trace JSONL includes <code>agent_workbench.cron.restate.sync_upserted</code> and <code>agent_workbench.cron.restate.run</code> events.</p>
+    </div>
+
+    <div class="section" id="host-wiring">
+      <div class="section-header">
+        <h2>Host Wiring</h2>
+        <p>The host declares the trigger source constructors through the plugin's <code>lashlang_resources()</code> hook, and registers the button's event type through host-event registration. The button payload is a union of <code>Red</code> / <code>Blue</code> plus a message and timestamp.</p>
+      </div>
+      <pre><code>fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
+    let mut resources = lashlang::ResourceCatalog::new();
+    resources.add_trigger_source_constructor(
+        ["cron", "Schedule"],
+        schedule_config_type(),
+        cron_tick_event_type(),
+    ).expect("valid cron trigger source");
+    resources.add_trigger_source_constructor(
+        ["ui", "button", "pressed"],
+        lashlang::TypeExpr::Object(vec![]),
+        button_trigger_event_type(),
+    ).expect("valid button trigger source");
+    resources
+}
+
+reg.host_events().declare(
+    HostEvent::new("Button", "ui.button", "pressed", button_trigger_event_type()),
+)?;</code></pre>
+    </div>
+
+    <div class="section" id="live-smoke">
+      <div class="section-header">
+        <h2>Live Smoke</h2>
+        <p>A model-free live check that starts Restate, registers the endpoint through Admin, schedules a fast cron, waits for a tick, and checks the JSONL trace.</p>
+      </div>
+      <pre><code>just agent-workbench-restate-e2e</code></pre>
+      <p>The recipe schedules <code>cron.Schedule({ expr: "*/2 * * * * *", tz: "UTC" })</code>, waits for the Restate virtual object to fire a <code>cron.Tick</code>, asserts the queued turn ran, and removes the container on exit.</p>
+    </div>
+  </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./example-agent-service.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>agent service</strong></a>
+    <a class="pager__next" href="./cli.html"><span>next</span><strong>cli</strong><span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</section>
+</body>
+</html>

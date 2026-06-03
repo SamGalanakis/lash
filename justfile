@@ -15,7 +15,7 @@ agent-workbench:
 agent-service-restate-e2e:
   #!/usr/bin/env bash
   set -euo pipefail
-  image="${AGENT_SERVICE_RESTATE_IMAGE:-restatedev/restate:latest}"
+  image="${AGENT_SERVICE_RESTATE_IMAGE:-restatedev/restate:1.6.2}"
   container="${AGENT_SERVICE_RESTATE_CONTAINER:-lash-agent-service-restate-e2e}"
   admin_port="${RESTATE_ADMIN_PORT:-19070}"
   ingress_port="${RESTATE_INGRESS_PORT:-18080}"
@@ -46,6 +46,14 @@ agent-service-restate-e2e:
     fi
     sleep 1
   done
+  until (echo >"/dev/tcp/127.0.0.1/$ingress_port") >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      docker logs "$container" >&2 || true
+      echo "Restate ingress port $ingress_port did not become ready" >&2
+      exit 1
+    fi
+    sleep 1
+  done
 
   RESTATE_INGRESS_URL="$ingress_url" \
   RESTATE_ADMIN_URL="$admin_url" \
@@ -57,7 +65,7 @@ agent-service-restate-e2e:
 agent-workbench-restate-e2e:
   #!/usr/bin/env bash
   set -euo pipefail
-  image="${AGENT_WORKBENCH_RESTATE_IMAGE:-restatedev/restate:latest}"
+  image="${AGENT_WORKBENCH_RESTATE_IMAGE:-restatedev/restate:1.6.2}"
   container="${AGENT_WORKBENCH_RESTATE_CONTAINER:-lash-agent-workbench-restate-e2e}"
   admin_port="${AGENT_WORKBENCH_RESTATE_ADMIN_PORT:-19071}"
   ingress_port="${AGENT_WORKBENCH_RESTATE_INGRESS_PORT:-18081}"
@@ -84,6 +92,14 @@ agent-workbench-restate-e2e:
     if (( SECONDS >= deadline )); then
       docker logs "$container" >&2 || true
       echo "Restate admin port $admin_port did not become ready" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  until (echo >"/dev/tcp/127.0.0.1/$ingress_port") >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      docker logs "$container" >&2 || true
+      echo "Restate ingress port $ingress_port did not become ready" >&2
       exit 1
     fi
     sleep 1

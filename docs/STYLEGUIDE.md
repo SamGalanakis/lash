@@ -35,39 +35,43 @@ All HTML pages link the same stylesheet. Root-level docs pages use
 
 ### Color
 
-The palette is a warm-iron neutral ramp (hue ~75–90, perceptually uniform
-OKLCH) plus four signal accents.
+The palette is a warm-iron neutral ramp (warm-black surfaces, chalk-warm ink)
+plus the sodium accent. Color tokens are defined per theme — the shared
+`:root` carries only spacing, type, and layout; `:root[data-theme="dark"]` and
+`:root[data-theme="light"]` each redefine the color tokens, so every surface
+and text token flips with the theme toggle.
 
 | Token | Use |
 |---|---|
-| `--form-deep` | page background, deepest field |
-| `--form` | history background, dominant surface |
-| `--form-raised` | cards, panels, status bar, framed surfaces |
-| `--surface-hover` | hover state for `.chapter-list a` and similar list rows |
-| `--ash` | structural lines (most borders go through `--line` instead) |
-| `--ash-mid` | passive labels, thin chrome |
-| `--ash-text` | eyebrows, footer text, chapter-arrow — **WCAG AA compliant against `--form`** |
-| `--chalk-dim` | swatch descriptions, history copy, stat-note |
-| `--chalk-mid` | body prose, descriptions |
-| `--chalk` | assistant prose, key readable text |
+| `--bg` | page background, deepest field |
+| `--bg-elev` | dominant raised surface — cards, panels, status bar |
+| `--bg-faint` | quiet inset surface, secondary fill |
+| `--bg-tint` | strongest neutral fill, framed surfaces |
+| `--ink` | assistant prose, key readable text |
+| `--ink-mid` | body prose, descriptions |
+| `--ink-dim` | swatch descriptions, footer text, passive copy |
+| `--ink-faint` | thin chrome, structural lines, faint labels |
+| `--rule` | hairline borders |
+| `--rule-strong` | hover/active borders, heavier dividers |
 | `--sodium` | the active edge — prompts, plan mode, key labels, plan updates |
-| `--sodium-soft` | the lighter end of the brand-mark accent bar |
-| `--lichen` | completion, quiet success |
-| `--info` | ambient metadata, scroll position, expansion level |
-| `--error` | failures, dangerous edges |
-| `--ghost-bar` | assistant bar, subtle live-work trace |
-| `--line` | hairline borders (`oklch(... / 0.12)` of chalk) |
-| `--line-strong` | hover/active borders (`oklch(... / 0.32)` of sodium) |
-| `--focus-ring` | use as `box-shadow` for visible focus on interactive elements |
+| `--sodium-deep` | the brighter end of the sodium accent |
+| `--sodium-soft` | the soft accent wash (`color-mix` of sodium toward transparent) |
+| `--code-bg` | code-block background |
+| `--code-rule` | code-block border |
+| `--code-ink` | code-block text |
+
+Scene tokens (`--range-*`, `--sky-*`, `--ground*`, `--nun-*`, …) and syntax
+tokens (`--tok-*`) are also theme-scoped; touch them only when working on the
+landing scene or the code-highlighter.
 
 **Rules**:
 
-1. Only `--sodium`, `--lichen`, `--info`, and `--error` are accents. Everything
-   else is structure. Accents work because they're rare.
-2. **Don't introduce new hex literals.** If you need a new color, add a token.
-3. **Don't drop ash-text or chalk-dim below their current lightness** — they
-   are tuned to clear WCAG AA against `--form`. Use `/audit` to verify if you
-   change them.
+1. Only `--sodium` (and its `--sodium-deep` / `--sodium-soft` variants) is an
+   accent. Everything else is structure. The accent works because it's rare.
+2. **Don't introduce new hex literals outside the per-theme token blocks.** If
+   you need a new color, add a token to both theme blocks.
+3. **Don't drop `--ink-dim` below its current lightness** — it carries passive
+   copy and footer text. Use `/audit` to verify contrast if you change it.
 4. **Don't apply `--sodium` to body text or backgrounds.** It's for labels,
    markers, chapter numbers, and the active state of interactive chrome.
 
@@ -79,15 +83,14 @@ scales with the fluid root `font-size`. Always use the tokens — never raw px.
 ```
 --space-3xs: 0.125rem   --space-md:  1rem      --space-3xl: 4rem
 --space-2xs: 0.25rem    --space-lg:  1.5rem    --space-4xl: 6rem
---space-xs:  0.5rem     --space-xl:  2rem      --space-5xl: 9rem
+--space-xs:  0.5rem     --space-xl:  2rem
 --space-sm:  0.75rem    --space-2xl: 3rem
 ```
 
-At base 16px these resolve to the same 2/4/8/12/16/24/32/48/64/96/144 px
-values as before. On larger viewports the root scales up via `clamp()`, and
-spacing scales with it. Use `gap` for sibling spacing, not margins. Vary
-spacing for hierarchy — a heading with extra space above reads as more
-important.
+At base 16px these resolve to 2/4/8/12/16/24/32/48/64/96 px. On larger
+viewports the root scales up via `clamp()`, and spacing scales with it. Use
+`gap` for sibling spacing, not margins. Vary spacing for hierarchy — a heading
+with extra space above reads as more important.
 
 ### Type
 
@@ -290,13 +293,13 @@ hold its side of the grid.
 These are the bans specific to this project. They are non-negotiable.
 
 1. **No glassmorphism on cards or content panels.** `backdrop-filter: blur(...)`
-   is allowed only on `.nav` (sticky overlay over scrolling content). Anywhere
-   else, use solid `var(--form-raised)`.
+   is allowed only on true overlays over scrolling content (the command-palette
+   dimmer, the diagram-modal backdrop). Anywhere else, use solid `var(--bg-elev)`.
 2. **No side-stripe borders.** No `border-left:` or `border-right:` greater
    than 1px as a colored accent. Use chapter numbers, full borders, or
    background tints instead.
 3. **No gradient text.** No `background-clip: text` with a gradient. Headings
-   are solid `var(--chalk)` or `var(--sodium)`.
+   are solid `var(--ink)` or `var(--sodium)`.
 4. **No new card grid where editorial layout fits.** If you find yourself
    writing `repeat(N, minmax(0, 1fr))` for the third time on a page, stop.
    Convert one of those sections to `.chapter-list`, `.principle-list`, or a
@@ -305,8 +308,9 @@ These are the bans specific to this project. They are non-negotiable.
 6. **No raw hex.** Add a token instead. Exceptions: literal swatch chips in
    dedicated color-spec examples.
 7. **No raw px for spacing.** Use `--space-*` tokens.
-8. **No `outline: none` without a replacement focus indicator.** Use
-   `box-shadow: var(--focus-ring)` on `:focus-visible`.
+8. **No `outline: none` without a replacement focus indicator.** On
+   `:focus-visible`, use a visible `outline: 2px solid var(--sodium)` or a
+   `box-shadow` accent ring (`0 0 0 3px var(--sodium-soft)`).
 9. **No auto-redirect (`<meta http-equiv="refresh">`) on stub pages.** Style
    the stub and provide a manual link.
 10. **No comma-stuffed list-as-sentence prose.** Five+ commas in one paragraph

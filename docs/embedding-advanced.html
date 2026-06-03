@@ -68,9 +68,9 @@ let core = LashCore::rlm()
         <div class="section" id="durable-workflows">
           <div class="section-header">
             <h2>Durable Workflows</h2>
-            <p>Standard <code>LashCore</code> persists at the turn boundary. For durable in-flight effects — expensive LLM calls, long tool calls, process control, mid-turn worker migration — run the turn with a scoped <code>RuntimeEffectController</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
+            <p>Standard <code>LashCore</code> persists at the turn boundary. For durable in-flight effects — expensive LLM calls, long tool calls, process control, mid-turn worker migration — wire an <code>EffectHost</code> on the builder and run the turn against a <code>ScopedEffectController</code> via <code>TurnBuilder::run_with_effect_scope</code> / <code>stream_with_effect_scope</code>. The <code>EffectHost</code> is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap; the default <code>InlineEffectHost</code> runs in process and is not in-flight durable.</p>
           </div>
-          <p>Shape: the runtime driver polls <code>TurnMachine</code>. For each reply-producing turn effect it builds a <code>RuntimeEffectEnvelope</code> with a typed <code>RuntimeInvocation</code>, invokes the active scoped controller, and feeds the returned outcome back as the matching response. The inline controller runs locally and is not in-flight durable. A durable workflow controller such as Restate records effects in workflow history, uses durable timers for sleeps, and reruns the handler with the same turn id before Lash retries the final idempotent commit.</p>
+          <p>Shape: the runtime driver polls <code>TurnMachine</code>. For each reply-producing turn effect it builds a <code>RuntimeEffectEnvelope</code> with a typed <code>RuntimeInvocation</code>, invokes the active <code>ScopedEffectController</code>, and feeds the returned outcome back as the matching response. The <code>InlineEffectHost</code> runs locally and is not in-flight durable. A durable workflow <code>EffectHost</code> such as Restate records effects in workflow history, uses durable timers for sleeps, and reruns the handler with the same turn id before Lash retries the final idempotent commit.</p>
           <p>Full contract: <a href="./architecture/durability.html">Architecture → Durability</a>. Embedders without workflow orchestration use the regular <a href="./persistence.html">session-store path</a>.</p>
         </div>
 
@@ -190,7 +190,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
             <article class="panel"><h3><a href="./tracing.html">Tracing</a></h3><p><code>TraceSink</code>, JSONL schema v2, Lashlang execution graphs, fan-out, <code>lash-trace-viewer</code>, OTel export.</p></article>
             <article class="panel"><h3><a href="./cli.html">CLI</a></h3><p>Slash commands, keyboard shortcuts, config schema, env vars, resume/fork.</p></article>
             <article class="panel"><h3><a href="./architecture/">Architecture</a></h3><p>Crate map, residency, session graph, plugin host traits, providers, Lashlang internals.</p></article>
-            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p><code>RuntimeEffectController</code>, <code>RuntimeInvocation</code>, replay keys, checkpoint / restore, workflow adapter seam.</p></article>
+            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p><code>EffectHost</code>, <code>ScopedEffectController</code>, <code>RuntimeInvocation</code>, replay keys, checkpoint / restore, workflow adapter seam.</p></article>
           </div>
         </div>
   </main>
@@ -199,7 +199,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
   <div class="pager__rail">read on &middot;</div>
   <div class="pager__main">
     <a class="pager__prev" href="./embedding-prompts.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>lash api · prompts</strong></a>
-    <a class="pager__next" href="./example-agent-service.html"><span>next</span><strong>agent service</strong><span class="arrow" aria-hidden="true">→</span></a>
+    <a class="pager__next" href="./examples.html"><span>next</span><strong>examples</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
 </section>
 </body>
