@@ -14,6 +14,32 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
 <link rel="stylesheet" href="./styles.css?v=9">
 <style>
+  /* legacy-token shim — this page predates the styles.css token rename
+     (--form/--chalk/--ash/--line/--font-ui → --bg/--ink/--rule/--font-mono).
+     Map the old names onto the current palette so the page renders again
+     and follows the light/dark theme. The three status accents have no
+     equivalent in the current minimal palette, so they keep their original
+     OKLCH values. */
+  :root {
+    --form-deep:   var(--bg);
+    --form:        var(--bg-elev);
+    --form-raised: var(--bg-faint);
+    --ash:         var(--rule);
+    --ash-mid:     var(--ink-faint);
+    --ash-text:    var(--ink-dim);
+    --chalk-dim:   var(--ink-dim);
+    --chalk-mid:   var(--ink-mid);
+    --chalk:       var(--ink);
+    --line:        var(--rule);
+    --line-strong: var(--rule-strong);
+    --font-ui:     var(--font-mono);
+    --lichen:      oklch(0.66 0.060 130);
+    --info:        oklch(0.68 0.040 245);
+    --error:       oklch(0.58 0.180 25);
+    --shadow:      0 2px 8px rgb(0 0 0 / 0.35);
+  }
+</style>
+<style>
   /* ───────────────────────────────────────────────────────────────
      trace export · cross-session edges
      mockup of the html exporter's two-edge model

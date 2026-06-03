@@ -1,3 +1,4 @@
+#[cfg(any(test, feature = "testing"))]
 use std::pin::Pin;
 use std::sync::Arc;
 

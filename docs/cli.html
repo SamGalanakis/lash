@@ -82,14 +82,14 @@
               <dl class="def-list">
                 <dt><kbd>Ctrl+U</kbd> / <kbd>Ctrl+D</kbd></dt><dd>Scroll history up / down half a page.</dd>
                 <dt><kbd>PageUp</kbd> / <kbd>PageDown</kbd></dt><dd>Scroll history a full page.</dd>
-                <dt><kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Single-line scroll when not editing the prompt.</dd>
+                <dt><kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Cycle the input-draft history when not navigating a suggestion popup.</dd>
               </dl>
             </article>
             <article class="panel">
               <h3>Prompt editing</h3>
               <dl class="def-list">
                 <dt><kbd>Enter</kbd></dt><dd>Submit the prompt, or pick from a picker.</dd>
-                <dt><kbd>Tab</kbd></dt><dd>Accept an autocomplete suggestion or toggle a multi-select option.</dd>
+                <dt><kbd>Tab</kbd></dt><dd>Accept an autocomplete suggestion when the popup is open; otherwise queue the next turn (or submit a plain draft when idle).</dd>
                 <dt><kbd>Ctrl+←</kbd> / <kbd>Ctrl+→</kbd></dt><dd>Move the cursor by word.</dd>
                 <dt><kbd>Home</kbd> / <kbd>End</kbd></dt><dd>Jump to the start / end of the prompt.</dd>
               </dl>
@@ -195,9 +195,9 @@ $ lash --print "Investigate the latest test failure." \
           <pre><code>{
   "active_provider": "openai",
   "providers": {
-    "openai": { "kind": "openai", "api_key": "sk-..." },
+    "openai": { "type": "openai", "api_key": "sk-..." },
     "anthropic": {
-      "kind": "anthropic",
+      "type": "anthropic",
       "api_key": "sk-ant-...",
       "options": {
         "cache_retention": "long",
@@ -269,7 +269,7 @@ $ lash --print "Investigate the latest test failure." \
   <section class="pager" aria-label="chapter navigation">
   <div class="pager__rail">read on &middot;</div>
   <div class="pager__main">
-    <a class="pager__prev" href="./example-agent-service.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>agent service</strong></a>
+    <a class="pager__prev" href="./example-agent-workbench.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>agent workbench</strong></a>
     <a class="pager__next" href="./plugins.html"><span>next</span><strong>plugins</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
 </section>

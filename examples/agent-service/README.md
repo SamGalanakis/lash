@@ -33,7 +33,7 @@ For the app run, start Restate, run the feature-gated binary, then register the
 endpoint:
 
 ```bash
-docker run --rm -p 8080:8080 -p 9070:9070 -p 9071:9071 restatedev/restate:latest
+docker run --rm -p 8080:8080 -p 9070:9070 -p 9071:9071 restatedev/restate:1.6.2
 OPENROUTER_API_KEY=... \
 AGENT_SERVICE_DURABILITY=restate \
 AGENT_SERVICE_RESTATE_ADDR=127.0.0.1:9080 \
@@ -53,7 +53,7 @@ outbox/message persistence, and removes the container on exit:
 just agent-service-restate-e2e
 ```
 
-The recipe starts `restatedev/restate:latest` with host networking on admin
+The recipe starts `restatedev/restate:1.6.2` with host networking on admin
 `19070`, ingress `18080`, and node `15122`. Override
 `AGENT_SERVICE_RESTATE_IMAGE`, `AGENT_SERVICE_RESTATE_CONTAINER`,
 `RESTATE_ADMIN_PORT`, `RESTATE_INGRESS_PORT`, `RESTATE_NODE_PORT`,
@@ -62,8 +62,8 @@ local Docker networking needs different addresses.
 
 In Restate mode the Axum app still serves `AGENT_SERVICE_ADDR`, the same process
 also serves a Restate endpoint on `AGENT_SERVICE_RESTATE_ADDR`, and browser
-turns submit the app-specific `AgentServiceTurnWorkflow/{turn_id}/run` through
-`RESTATE_INGRESS_URL`. The endpoint also binds Lash's generic
+turns submit the app-specific `AgentServiceTurnWorkflow/{turn_id}/run/send`
+through `RESTATE_INGRESS_URL`. The endpoint also binds Lash's generic
 `LashProcessWorkflow`, backed by `RestateCoreProcessRunner` and the same
 deployment-level `processes.db`, so background process starts from a turn are
 reconstructed from SQLite session stores instead of running in the route

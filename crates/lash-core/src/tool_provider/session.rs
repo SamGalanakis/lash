@@ -60,9 +60,9 @@ impl<'run> ToolSessionControl<'run> {
             crate::EffectScope::turn(session_id, turn_id),
         )
         .map_err(|err| PluginError::Session(err.to_string()))?;
-        self.session_lifecycle
-            .start_turn(session_id, turn_id, input, scoped_effect_controller)
-            .await
+        let request =
+            crate::SessionTurnRequest::new(session_id, turn_id, input, scoped_effect_controller)?;
+        self.session_lifecycle.start_turn(request).await
     }
 
     pub async fn tool_catalog(&self) -> Result<Vec<serde_json::Value>, PluginError> {

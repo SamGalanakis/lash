@@ -67,11 +67,15 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
 pub struct RuntimeCommit {
     pub session_id: String,
     pub expected_head_revision: Option&lt;u64&gt;,
+    pub config: PersistedSessionConfig,
+    pub agent_frames: Vec&lt;AgentFrameRecord&gt;,
+    pub current_agent_frame_id: AgentFrameId,
     pub graph: GraphCommitDelta,
     pub checkpoint: HydratedSessionCheckpoint,
     pub usage_deltas: Vec&lt;TokenLedgerEntry&gt;,
     pub turn_commit: Option&lt;RuntimeTurnCommitStamp&gt;,
     pub completed_queue_claims: Vec&lt;QueuedWorkCompletion&gt;,
+    pub committed_attachment_ids: Vec&lt;AttachmentId&gt;,
 }</code></pre>
           <p><code>SessionStoreFactory</code> produces one store per session, keyed by session id, relation, and policy:</p>
           <pre><code>pub trait SessionStoreFactory: Send + Sync {

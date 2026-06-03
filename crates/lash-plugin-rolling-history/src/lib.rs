@@ -603,21 +603,21 @@ async fn summarize_compaction_prefix(
         lash_core::EffectScope::turn(&handle.session_id, &turn_id),
     )
     .map_err(|err| HistoryError::Session(err.to_string()))?;
-    let turn = session_lifecycle
-        .start_turn(
-            &handle.session_id,
-            &turn_id,
-            TurnInput {
-                items: vec![InputItem::Text { text: prompt_text }],
-                image_blobs: HashMap::new(),
-                protocol_turn_options: None,
-                trace_turn_id: Some(turn_id.clone()),
-                protocol_extension: None,
-                turn_context: lash_core::TurnContext::default(),
-            },
-            compaction_effect_controller,
-        )
-        .await;
+    let request = lash_core::SessionTurnRequest::new(
+        &handle.session_id,
+        &turn_id,
+        TurnInput {
+            items: vec![InputItem::Text { text: prompt_text }],
+            image_blobs: HashMap::new(),
+            protocol_turn_options: None,
+            trace_turn_id: None,
+            protocol_extension: None,
+            turn_context: lash_core::TurnContext::default(),
+        },
+        compaction_effect_controller,
+    )
+    .map_err(|err| HistoryError::Session(err.to_string()))?;
+    let turn = session_lifecycle.start_turn(request).await;
     let _ = session_lifecycle.close_session(&handle.session_id).await;
     let turn = turn.map_err(HistoryError::from)?;
     let summary = turn.assistant_output.safe_text.trim().to_string();

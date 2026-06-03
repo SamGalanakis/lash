@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use sha2::{Digest, Sha256};
 
 use super::*;
@@ -461,19 +462,27 @@ impl PluginSession {
         phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     ) {
         let hook_kind = lifecycle_event_hook_kind(&event);
+        let mut pending = FuturesUnordered::new();
         for registered in &self.contributions.runtime_event_hooks {
             let hook = Arc::clone(&registered.hook);
+            let plugin_id = registered.plugin_id.clone();
             let phase_name = plugin_hook_phase_name(hook_kind, registered.plugin_id.as_str());
             let event = event.clone();
-            if let Some(probe) = phase_probe.as_ref() {
-                probe.begin_named(&phase_name);
-            }
-            let result = hook(event).await;
-            if let Some(probe) = phase_probe.as_ref() {
-                probe.end_named(&phase_name);
-            }
+            let phase_probe = phase_probe.clone();
+            pending.push(async move {
+                if let Some(probe) = phase_probe.as_ref() {
+                    probe.begin_named(&phase_name);
+                }
+                let result = hook(event).await;
+                if let Some(probe) = phase_probe.as_ref() {
+                    probe.end_named(&phase_name);
+                }
+                (plugin_id, result)
+            });
+        }
+        while let Some((plugin_id, result)) = pending.next().await {
             if let Err(err) = result {
-                tracing::warn!("plugin runtime event hook failed: {err}");
+                tracing::warn!(plugin_id, "plugin runtime event hook failed: {err}");
             }
         }
     }

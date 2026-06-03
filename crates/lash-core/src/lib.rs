@@ -193,12 +193,12 @@ pub use plugin::{
     SessionCreateRequest, SessionGraphService, SessionHandle, SessionLifecycleService,
     SessionParam, SessionPlugin, SessionPluginSource, SessionReadView, SessionRelation,
     SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionStateService,
-    SessionToolAccess, SnapshotReader, SnapshotWriter, SubagentSessionContext,
-    ToolDiscoveryContext, ToolDiscoveryContribution, ToolDiscoveryContributor,
-    ToolDiscoveryToolContribution, ToolResultProjectionContext, ToolResultProjector,
-    ToolSurfaceContribution, TriggerRegistration, TriggerSourceType, TriggerTargetSummary,
-    TurnContextTransform, TurnHookContext, TurnResultHookContext, TurnResultSummary,
-    TurnTransformContext, plugin_action_def,
+    SessionToolAccess, SessionTurnInput, SessionTurnRequest, SnapshotReader, SnapshotWriter,
+    SubagentSessionContext, ToolDiscoveryContext, ToolDiscoveryContribution,
+    ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolResultProjectionContext,
+    ToolResultProjector, ToolSurfaceContribution, TriggerRegistration, TriggerSourceType,
+    TriggerTargetSummary, TurnContextTransform, TurnHookContext, TurnResultHookContext,
+    TurnResultSummary, TurnTransformContext, plugin_action_def,
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{

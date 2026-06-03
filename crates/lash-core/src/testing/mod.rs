@@ -21,8 +21,8 @@ use crate::provider::{Provider, ProviderComponents, ProviderHandle, ProviderMode
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, ExecutionSummary, ModelSpec, OutputState, ProcessRegistry,
-    ProviderOptions, RuntimeSessionState, SessionPolicy, TokenUsage, TurnFinish, TurnInput,
-    TurnOutcome, TurnStop, UnavailableProcessService,
+    ProviderOptions, RuntimeSessionState, SessionPolicy, TokenUsage, TurnFinish, TurnOutcome,
+    TurnStop, UnavailableProcessService,
 };
 
 type CompletionFuture =
@@ -514,15 +514,13 @@ impl crate::plugin::SessionLifecycleService for MockSessionManager {
     }
     async fn start_turn(
         &self,
-        session_id: &str,
-        turn_id: &str,
-        input: TurnInput,
-        scoped_effect_controller: crate::ScopedEffectController<'_>,
+        request: crate::SessionTurnRequest<'_>,
     ) -> Result<AssembledTurn, PluginError> {
+        let (turn, scoped_effect_controller) = request.into_parts();
         self.turns.lock().expect("turns lock").push((
-            session_id.to_string(),
-            turn_id.to_string(),
-            input.trace_turn_id.clone(),
+            turn.session_id,
+            turn.turn_id,
+            turn.input.trace_turn_id,
             scoped_effect_controller.effect_scope().clone(),
         ));
         Ok(self.turn.clone())

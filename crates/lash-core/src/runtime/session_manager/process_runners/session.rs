@@ -5,7 +5,7 @@ impl RuntimeSessionServices {
         &self,
         registration: crate::ProcessRegistration,
         mut create_request: crate::SessionCreateRequest,
-        mut turn_input: crate::TurnInput,
+        turn_input: crate::TurnInput,
         scoped_effect_controller: crate::ScopedEffectController<'_>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
@@ -50,15 +50,28 @@ impl RuntimeSessionServices {
                 );
             }
         };
-        turn_input.trace_turn_id = Some(child_turn_id.clone());
-        let turn = self.managed.start_turn(
-            &self.current,
-            &self.usage,
+        let request = match crate::SessionTurnRequest::new(
             &child_session_id,
             &child_turn_id,
             turn_input,
             child_scoped_effect_controller,
-        );
+        ) {
+            Ok(request) => request,
+            Err(err) => {
+                let _ = self
+                    .managed
+                    .close_session(&self.current, &self.usage, &child_session_id)
+                    .await;
+                return crate::ProcessAwaitOutput::from_tool_output(
+                    crate::ToolCallOutput::failure(crate::ToolFailure::tool(
+                        crate::ToolFailureClass::Execution,
+                        "process_session_turn_scope_failed",
+                        err.to_string(),
+                    )),
+                );
+            }
+        };
+        let turn = self.managed.start_turn(&self.current, &self.usage, request);
         tokio::pin!(turn);
         let outcome = tokio::select! {
             _ = cancellation.cancelled() => {

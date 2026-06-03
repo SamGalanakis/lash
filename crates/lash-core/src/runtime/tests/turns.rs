@@ -1153,24 +1153,23 @@ async fn session_manager_can_run_child_session_turn() {
         crate::EffectScope::turn(&handle.session_id, turn_id),
     )
     .expect("scoped child turn");
-    let assembled = lifecycle
-        .start_turn(
-            &handle.session_id,
-            turn_id,
-            TurnInput {
-                items: vec![InputItem::Text {
-                    text: "hello".to_string(),
-                }],
-                image_blobs: HashMap::new(),
-                protocol_turn_options: None,
-                trace_turn_id: None,
-                protocol_extension: None,
-                turn_context: crate::TurnContext::default(),
-            },
-            scoped_effect_controller,
-        )
-        .await
-        .expect("child turn");
+    let request = crate::SessionTurnRequest::new(
+        &handle.session_id,
+        turn_id,
+        TurnInput {
+            items: vec![InputItem::Text {
+                text: "hello".to_string(),
+            }],
+            image_blobs: HashMap::new(),
+            protocol_turn_options: None,
+            trace_turn_id: None,
+            protocol_extension: None,
+            turn_context: crate::TurnContext::default(),
+        },
+        scoped_effect_controller,
+    )
+    .expect("child turn request");
+    let assembled = lifecycle.start_turn(request).await.expect("child turn");
     assert_eq!(handle.session_id, "child");
     assert_eq!(handle.policy.model.id, "mock-model");
     assert_eq!(assembled.state.session_id, "child");
@@ -1352,29 +1351,28 @@ async fn runtime_can_activate_managed_child_session() {
         .expect("activate child");
 
     assert_eq!(runtime.session_id(), "child");
+    let activated_child_request = crate::SessionTurnRequest::new(
+        "child",
+        "activated-child-turn",
+        TurnInput {
+            items: vec![InputItem::Text {
+                text: "old manager should not own activated child".to_string(),
+            }],
+            image_blobs: HashMap::new(),
+            protocol_turn_options: None,
+            trace_turn_id: None,
+            protocol_extension: None,
+            turn_context: crate::TurnContext::default(),
+        },
+        crate::ScopedEffectController::shared(
+            Arc::new(crate::InlineRuntimeEffectController),
+            crate::EffectScope::turn("child", "activated-child-turn"),
+        )
+        .expect("scoped activated child turn"),
+    )
+    .expect("activated child request");
     assert!(
-        lifecycle
-            .start_turn(
-                "child",
-                "activated-child-turn",
-                TurnInput {
-                    items: vec![InputItem::Text {
-                        text: "old manager should not own activated child".to_string(),
-                    }],
-                    image_blobs: HashMap::new(),
-                    protocol_turn_options: None,
-                    trace_turn_id: None,
-                    protocol_extension: None,
-                    turn_context: crate::TurnContext::default(),
-                },
-                crate::ScopedEffectController::shared(
-                    Arc::new(crate::InlineRuntimeEffectController),
-                    crate::EffectScope::turn("child", "activated-child-turn"),
-                )
-                .expect("scoped activated child turn"),
-            )
-            .await
-            .is_err(),
+        lifecycle.start_turn(activated_child_request).await.is_err(),
         "activated child runtime should leave the parent manager registry"
     );
 }

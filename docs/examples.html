@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
+<title>examples · lash docs</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css?v=9">
+<script src="./theme.js"></script>
+<script src="./docs.js?v=3" defer></script>
+<script src="./syntax.js" defer></script>
+</head>
+<body class="docs-page" data-cover-source="<code>examples/agent-service</code>, <code>examples/agent-workbench</code>.">
+  <section class="opener">
+    <h1 class="opener__title">example<span class="slash">/</span>apps</h1>
+    <p class="opener__lede">Two runnable apps in <code>examples/</code> drive the <code>lash</code> facade end to end — full hosts with a browser UI, real persistence, and optional durable execution, not toy snippets. <code>agent-service</code> is the focused starting point; <code>agent-workbench</code> adds background processes, host events, and Restate-backed cron triggers.</p>
+  </section>
+
+  <main class="body" id="content">
+    <div class="section" id="whats-here">
+      <div class="section-header">
+        <h2>What's Here</h2>
+        <p>Both run from the repo root and reach OpenRouter through the OpenAI-compatible provider. Each example has a full walkthrough; this page is the at-a-glance map.</p>
+      </div>
+      <dl class="def-list">
+        <dt><a href="./example-agent-service.html">agent service</a></dt>
+        <dd>Localhost SQLite chat app — the smallest realistic host. RLM mode, a typed session plugin, app-owned board tools, semantic streaming, per-chat model choice, and optional Restate-backed turns.</dd>
+        <dt><a href="./example-agent-workbench.html">agent workbench</a></dt>
+        <dd>RLM chat workbench for durable background work — background processes, subagents, web tools, host-event buttons, and Restate-backed cron triggers. Restate is required and starts automatically in Docker.</dd>
+      </dl>
+    </div>
+
+    <div class="section" id="agent-service">
+      <div class="section-header">
+        <h2>Agent Service</h2>
+        <p>A SQLite-backed chat app that exercises the app-facing API in a realistic Axum host. Read it when checking whether an app wires the <code>lash</code> facade correctly.</p>
+      </div>
+      <div class="module-grid">
+        <article class="panel"><h3>RLM + typed plugin</h3><p>Installs RLM with <code>ModePreset::rlm()</code> and activates a <code>DemoPlugin</code> per chat through <code>SessionBuilder::plugin::&lt;DemoPlugin&gt;(...)</code>.</p></article>
+        <article class="panel"><h3>App-owned tools</h3><p>A tic-tac-toe board lives in the app's <code>chat_boards</code> table; the plugin's <code>ToolProvider</code> exposes <code>board.read</code> / <code>board.play</code> over it.</p></article>
+        <article class="panel"><h3>Semantic stream</h3><p>The browser renders <code>TurnEvent</code>s — reasoning deltas, assistant prose, tool cards, usage, and the RLM <code>submit</code> value.</p></article>
+        <article class="panel"><h3>Optional Restate</h3><p>With the <code>restate</code> feature, browser turns run through Restate ingress with a handler-scoped effect controller; board state stays app-owned.</p></article>
+      </div>
+      <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
+# then open http://127.0.0.1:3000</code></pre>
+      <p>Full walkthrough — core wiring, the turn path, and Restate mode: <a href="./example-agent-service.html">agent service →</a></p>
+    </div>
+
+    <div class="section" id="agent-workbench">
+      <div class="section-header">
+        <h2>Agent Workbench</h2>
+        <p>An RLM chat workbench built around durable background work and triggers. Restate is required; the bundled entrypoint starts it in Docker, registers the in-process endpoint, then opens the browser.</p>
+      </div>
+      <div class="module-grid">
+        <article class="panel"><h3>Background work</h3><p>The model starts named Lashlang <code>process</code>es and spawns subagents; the right rail polls the process registry for live runs.</p></article>
+        <article class="panel"><h3>Host-event buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> host events that activate a registered trigger with a validated payload.</p></article>
+        <article class="panel"><h3>Restate cron</h3><p>A registered <code>cron.Schedule</code> source syncs to a <code>WorkbenchCronJob</code> Restate virtual object that fires <code>cron.Tick</code>s on its own timer.</p></article>
+        <article class="panel"><h3>Lashlang graph</h3><p>The graph panel reads <code>TraceLashlangGraphStore</code> — a trace-derived view of foreground blocks, durable runs, and child links.</p></article>
+      </div>
+      <pre><code>OPENROUTER_API_KEY=... just agent-workbench
+# starts Restate in Docker, then opens http://127.0.0.1:3030</code></pre>
+      <p>Full walkthrough — triggers, cron sync, and host wiring: <a href="./example-agent-workbench.html">agent workbench →</a></p>
+    </div>
+  </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./embedding-advanced.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>lash api · advanced</strong></a>
+    <a class="pager__next" href="./example-agent-service.html"><span>next</span><strong>agent service</strong><span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</section>
+</body>
+</html>

@@ -1,5 +1,5 @@
 use crate::support::*;
-use std::{collections::VecDeque, future::Future};
+use std::collections::VecDeque;
 
 use lash_core::LlmOutputPart;
 use lash_core::llm::transport::LlmTransportError;
@@ -7,26 +7,6 @@ use lash_core::llm::types::{
     LlmContentBlock, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, ResponseTextMeta,
 };
 use tokio::sync::{Mutex as TokioMutex, oneshot};
-
-fn model_spec(
-    model: impl Into<String>,
-    variant: Option<String>,
-    context_window_tokens: usize,
-) -> lash_core::ModelSpec {
-    lash_core::ModelSpec::from_token_limits(model, variant, context_window_tokens, None, None)
-        .expect("valid model spec")
-}
-
-fn mock_model_spec() -> lash_core::ModelSpec {
-    model_spec("mock-model", None, 200_000)
-}
-
-fn test_current_epoch_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default()
-}
 
 #[derive(Default)]
 struct SnapshotStore {
@@ -456,26 +436,6 @@ impl TurnActivitySink for RecordingEvents {
     async fn emit(&self, activity: TurnActivity) {
         self.events.lock().await.push(activity);
     }
-}
-
-fn run_async_test_on_large_stack<F, Fut>(name: &str, test: F) -> Result<()>
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = Result<()>> + 'static,
-{
-    std::thread::Builder::new()
-        .name(name.to_string())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime")
-                .block_on(test())
-        })
-        .expect("spawn large-stack test thread")
-        .join()
-        .expect("large-stack test thread")
 }
 
 fn test_activity(correlation_id: &str, event: TurnEvent) -> TurnActivity {
@@ -1014,6 +974,8 @@ fn text_message(role: lash_core::MessageRole, text: &str) -> lash_core::Message 
 
 mod control_admin;
 mod core_session_builder;
+mod harness;
+use harness::{mock_model_spec, model_spec, run_async_test_on_large_stack, test_current_epoch_ms};
 mod lash_e2e;
 mod plugin_stack;
 mod rebuild_conformance;

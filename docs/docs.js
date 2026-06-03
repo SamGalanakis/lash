@@ -20,9 +20,8 @@
     {
       label: "start",
       items: [
-        { name: "quickstart",    href: "quickstart.html" },
-        { name: "cli",           href: "cli.html" },
-        { name: "agent service", href: "example-agent-service.html" },
+        { name: "quickstart", href: "quickstart.html" },
+        { name: "cli",        href: "cli.html" },
       ],
     },
     {
@@ -32,6 +31,14 @@
         { name: "turns",    href: "embedding-turns.html" },
         { name: "prompts",  href: "embedding-prompts.html" },
         { name: "advanced", href: "embedding-advanced.html" },
+      ],
+    },
+    {
+      label: "examples",
+      items: [
+        { name: "overview",        href: "examples.html" },
+        { name: "agent service",   href: "example-agent-service.html" },
+        { name: "agent workbench", href: "example-agent-workbench.html" },
       ],
     },
     {

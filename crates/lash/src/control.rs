@@ -623,10 +623,14 @@ impl SessionControl {
                 })?;
             (lifecycle, scoped_effect_controller)
         };
-        lifecycle
-            .start_turn(session_id, turn_id, input, scoped_effect_controller)
-            .await
-            .map_err(Into::into)
+        let request = lash_core::SessionTurnRequest::new(
+            session_id,
+            turn_id,
+            input,
+            scoped_effect_controller,
+        )
+        .map_err(EmbedError::from)?;
+        lifecycle.start_turn(request).await.map_err(Into::into)
     }
 
     async fn close_child_session(&self, session_id: &str) -> Result<()> {

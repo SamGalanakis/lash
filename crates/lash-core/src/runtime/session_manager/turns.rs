@@ -5,37 +5,19 @@ impl ManagedSessionCapability {
         &self,
         current: &CurrentSessionCapability,
         usage: &UsageCapability,
-        session_id: &str,
-        turn_id: &str,
-        mut input: TurnInput,
-        scoped_effect_controller: crate::ScopedEffectController<'_>,
+        request: crate::SessionTurnRequest<'_>,
     ) -> Result<AssembledTurn, crate::PluginError> {
-        if turn_id.trim().is_empty() {
-            return Err(crate::PluginError::Session(
-                "session turns require a non-empty stable turn id".to_string(),
-            ));
-        }
-        if scoped_effect_controller.turn_id() != Some(turn_id) {
-            return Err(crate::PluginError::Session(format!(
-                "session turn `{turn_id}` requires an effect turn scope with the same id"
-            )));
-        }
-        if scoped_effect_controller.effect_scope().session_id() != Some(session_id) {
-            return Err(crate::PluginError::Session(format!(
-                "session turn `{turn_id}` requires an effect scope for session `{session_id}`"
-            )));
-        }
-        if let Some(input_turn_id) = input.trace_turn_id.as_deref() {
-            if input_turn_id != turn_id {
-                return Err(crate::PluginError::Session(format!(
-                    "input trace_turn_id `{input_turn_id}` does not match turn id `{turn_id}`"
-                )));
-            }
-        }
-        input.trace_turn_id = Some(turn_id.to_string());
+        let (
+            crate::SessionTurnInput {
+                session_id,
+                turn_id,
+                input,
+            },
+            scoped_effect_controller,
+        ) = request.into_parts();
         let runtime = {
             let registry = self.registry.lock().await;
-            registry.get(session_id).cloned()
+            registry.get(&session_id).cloned()
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
         let policy = {
@@ -44,7 +26,7 @@ impl ManagedSessionCapability {
         };
         let cancel = CancellationToken::new();
         let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
-        let usage_source = self.child_usage_source(usage, session_id);
+        let usage_source = self.child_usage_source(usage, &session_id);
         let sink = ChannelEventSink {
             tx: event_tx,
             live_usage: Some(LiveChildUsageForwarder {
@@ -60,7 +42,10 @@ impl ManagedSessionCapability {
         let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
         {
             let mut turns = self.turns.lock().await;
-            if turns.values().any(|turn| turn.session_id == session_id) {
+            if turns
+                .values()
+                .any(|turn| turn.session_id == session_id.as_str())
+            {
                 return Err(crate::PluginError::Session(format!(
                     "session `{session_id}` already has a running turn"
                 )));
@@ -99,12 +84,12 @@ impl ManagedSessionCapability {
             runtime.publish_from(&runtime_guard);
             result
         };
-        self.turns.lock().await.remove(turn_id);
+        self.turns.lock().await.remove(&turn_id);
         drop(sink);
         let _ = event_drain.await;
-        let live_reported = self.turn_live_usage(usage, turn_id);
+        let live_reported = self.turn_live_usage(usage, &turn_id);
         if let Ok(turn) = &turn {
-            let source = self.child_usage_source(usage, session_id);
+            let source = self.child_usage_source(usage, &session_id);
             if let Some(remainder) = subtract_usage(&live_reported, &turn.token_usage) {
                 usage.record_token_usage(&source, &turn.state.policy.model.id, &remainder);
             }
@@ -136,10 +121,44 @@ impl ManagedSessionCapability {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn managed_child_turns_use_caller_supplied_scope_and_turn_id() {
-        let source = include_str!("turns.rs");
-        assert!(source.contains(".with_scoped_effect_controller(scoped_effect_controller)"));
-        let generated_turn_id_call = concat!("uuid::Uuid::", "new_v4");
-        assert!(!source.contains(generated_turn_id_call));
+    fn session_turn_request_requires_matching_scope_and_sets_trace_turn_id() {
+        let controller = crate::InlineRuntimeEffectController;
+        let scoped_effect_controller = crate::ScopedEffectController::borrowed(
+            &controller,
+            crate::EffectScope::turn("child", "child-turn"),
+        )
+        .expect("turn scope");
+        let request = crate::SessionTurnRequest::new(
+            "child",
+            "child-turn",
+            crate::TurnInput::text("run child"),
+            scoped_effect_controller,
+        )
+        .expect("valid child turn request");
+
+        assert_eq!(request.session_id(), "child");
+        assert_eq!(request.turn_id(), "child-turn");
+        assert_eq!(request.input().trace_turn_id.as_deref(), Some("child-turn"));
+    }
+
+    #[test]
+    fn session_turn_request_rejects_mismatched_effect_scope() {
+        let controller = crate::InlineRuntimeEffectController;
+        let scoped_effect_controller = crate::ScopedEffectController::borrowed(
+            &controller,
+            crate::EffectScope::turn("child", "other-turn"),
+        )
+        .expect("turn scope");
+        let err = match crate::SessionTurnRequest::new(
+            "child",
+            "child-turn",
+            crate::TurnInput::text("run child"),
+            scoped_effect_controller,
+        ) {
+            Ok(_) => panic!("mismatched turn scope should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("same id"));
     }
 }

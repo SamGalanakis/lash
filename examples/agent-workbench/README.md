@@ -11,7 +11,7 @@ OPENROUTER_API_KEY=... just agent-workbench
 ```
 
 The entrypoint checks for Restate ingress/admin on the configured ports. If
-they are not already running, it starts `restatedev/restate:latest` in Docker,
+they are not already running, it starts `restatedev/restate:1.6.2` in Docker,
 waits for ingress/admin, starts the workbench and its in-process Restate
 endpoint, registers the endpoint through Restate Admin, then opens the browser.
 
@@ -43,7 +43,7 @@ Configuration is read from `.env` or the process environment:
   Docker Restate container started by the entrypoint.
 - `AGENT_WORKBENCH_OPEN`: set to `0` to skip opening the browser.
 - `AGENT_WORKBENCH_RESTATE_IMAGE`: Restate Docker image for the entrypoint,
-  default `restatedev/restate:latest`.
+  default `restatedev/restate:1.6.2`.
 - `AGENT_WORKBENCH_RESTATE_CONTAINER`: Restate Docker container name for the
   entrypoint, default `lash-agent-workbench-dev-restate`.
 - `AGENT_WORKBENCH_TOKIO_STACK_BYTES`: Tokio worker thread stack for the

@@ -68,7 +68,8 @@ pub use registry::{
 };
 pub use runtime_host::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectCompletion, DirectLlmCompletion,
-    SessionGraphService, SessionLifecycleService, SessionStateService,
+    SessionGraphService, SessionLifecycleService, SessionStateService, SessionTurnInput,
+    SessionTurnRequest,
 };
 pub use runtime_impl::{PluginHost, SessionAuthorityContext};
 pub(crate) use services::NoopSessionManager;

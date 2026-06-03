@@ -992,60 +992,9 @@ impl Compiler {
                     resource.alias.to_string(),
                 )));
             }
-            Expr::ReceiverCall {
-                receiver,
-                operation,
-                args,
-            } => {
-                let instruction = self.compile_receiver_call_expr(receiver, operation, args, false);
-                if let Some(site) =
-                    self.lashlang_execution_site(expr, "resource_operation", operation.as_str())
-                {
-                    self.mark_lashlang_execution_site(instruction, site);
-                }
+            Expr::ReceiverCall { .. } | Expr::Await(_) => {
+                self.compile_awaitable_effect_expr(expr, None);
             }
-            Expr::Await(handle) => match handle.as_ref() {
-                Expr::ReceiverCall {
-                    receiver,
-                    operation,
-                    args,
-                } => {
-                    let instruction =
-                        self.compile_receiver_call_expr(receiver, operation, args, false);
-                    if let Some(site) = self.lashlang_execution_site(
-                        handle,
-                        "resource_operation",
-                        operation.as_str(),
-                    ) {
-                        self.mark_lashlang_execution_site(instruction, site);
-                    }
-                }
-                Expr::ResultUnwrap(inner) => {
-                    if let Expr::ReceiverCall {
-                        receiver,
-                        operation,
-                        args,
-                    } = inner.as_ref()
-                    {
-                        let instruction =
-                            self.compile_receiver_call_expr(receiver, operation, args, true);
-                        if let Some(site) = self.lashlang_execution_site(
-                            inner,
-                            "resource_operation",
-                            operation.as_str(),
-                        ) {
-                            self.mark_lashlang_execution_site(instruction, site);
-                        }
-                    } else {
-                        self.compile_expr(inner);
-                        self.code.push(Instruction::AwaitHandleUnwrap);
-                    }
-                }
-                _ => {
-                    self.compile_expr(handle);
-                    self.code.push(Instruction::AwaitHandle);
-                }
-            },
             Expr::SleepFor(duration) => {
                 self.compile_expr(duration);
                 let instruction = self.code.len();
@@ -1078,48 +1027,18 @@ impl Compiler {
                     self.mark_lashlang_execution_site(instruction, site);
                 }
             }
-            Expr::ResultUnwrap(expr) => {
-                if let Expr::ReceiverCall {
-                    receiver,
-                    operation,
-                    args,
-                } = expr.as_ref()
-                {
-                    let instruction =
-                        self.compile_receiver_call_expr(receiver, operation, args, true);
-                    if let Some(site) =
-                        self.lashlang_execution_site(expr, "resource_operation", operation.as_str())
-                    {
-                        self.mark_lashlang_execution_site(instruction, site);
-                    }
-                } else if let Expr::Await(handle) = expr.as_ref() {
-                    if let Expr::ReceiverCall {
-                        receiver,
-                        operation,
-                        args,
-                    } = handle.as_ref()
-                    {
-                        let instruction =
-                            self.compile_receiver_call_expr(receiver, operation, args, true);
-                        if let Some(site) = self.lashlang_execution_site(
-                            handle,
-                            "resource_operation",
-                            operation.as_str(),
-                        ) {
-                            self.mark_lashlang_execution_site(instruction, site);
-                        }
-                    } else {
-                        self.compile_expr(handle);
-                        self.code.push(Instruction::AwaitHandleUnwrap);
-                    }
-                } else if let Expr::Field { target, field } = expr.as_ref()
+            Expr::ResultUnwrap(inner) => {
+                if self.compile_awaitable_effect_expr(expr, None) {
+                    return;
+                }
+                if let Expr::Field { target, field } = inner.as_ref()
                     && let Expr::Variable(name) = target.as_ref()
                 {
                     let slot = self.push_slot(name);
                     let field = self.push_name(field);
                     self.code.push(Instruction::LoadFieldUnwrap { slot, field });
                 } else {
-                    self.compile_expr(expr);
+                    self.compile_expr(inner);
                     self.code.push(Instruction::ResultUnwrap);
                 }
             }
@@ -1398,13 +1317,44 @@ impl Compiler {
         expr: &Expr,
         site: LashlangExecutionSite,
     ) -> bool {
+        self.compile_awaitable_effect_expr(expr, Some(site))
+    }
+
+    fn compile_awaitable_effect_expr(
+        &mut self,
+        expr: &Expr,
+        forced_site: Option<LashlangExecutionSite>,
+    ) -> bool {
         match expr {
-            Expr::Await(handle) => {
-                self.compile_await_expr_with_forced_effect_site(handle, site, false)
+            Expr::ReceiverCall {
+                receiver,
+                operation,
+                args,
+            } => {
+                let instruction = self.compile_receiver_call_expr(receiver, operation, args, false);
+                self.mark_awaitable_effect_site(instruction, forced_site, expr, operation.as_str());
+                true
             }
+            Expr::Await(handle) => self.compile_await_handle_expr(handle, false, forced_site),
             Expr::ResultUnwrap(inner) => {
                 if let Expr::Await(handle) = inner.as_ref() {
-                    return self.compile_await_expr_with_forced_effect_site(handle, site, true);
+                    return self.compile_await_handle_expr(handle, true, forced_site);
+                }
+                if let Expr::ReceiverCall {
+                    receiver,
+                    operation,
+                    args,
+                } = inner.as_ref()
+                {
+                    let instruction =
+                        self.compile_receiver_call_expr(receiver, operation, args, true);
+                    self.mark_awaitable_effect_site(
+                        instruction,
+                        forced_site,
+                        inner,
+                        operation.as_str(),
+                    );
+                    return true;
                 }
                 false
             }
@@ -1412,11 +1362,11 @@ impl Compiler {
         }
     }
 
-    fn compile_await_expr_with_forced_effect_site(
+    fn compile_await_handle_expr(
         &mut self,
         handle: &Expr,
-        site: LashlangExecutionSite,
         unwrap_result: bool,
+        forced_site: Option<LashlangExecutionSite>,
     ) -> bool {
         match handle {
             Expr::ReceiverCall {
@@ -1426,7 +1376,12 @@ impl Compiler {
             } => {
                 let instruction =
                     self.compile_receiver_call_expr(receiver, operation, args, unwrap_result);
-                self.mark_lashlang_execution_site(instruction, site);
+                self.mark_awaitable_effect_site(
+                    instruction,
+                    forced_site,
+                    handle,
+                    operation.as_str(),
+                );
             }
             Expr::ResultUnwrap(inner) => {
                 if let Expr::ReceiverCall {
@@ -1437,12 +1392,17 @@ impl Compiler {
                 {
                     let instruction =
                         self.compile_receiver_call_expr(receiver, operation, args, true);
-                    self.mark_lashlang_execution_site(instruction, site);
+                    self.mark_awaitable_effect_site(
+                        instruction,
+                        forced_site,
+                        inner,
+                        operation.as_str(),
+                    );
                 } else {
                     self.compile_expr(inner);
                     let instruction = self.code.len();
                     self.code.push(Instruction::AwaitHandleUnwrap);
-                    self.mark_lashlang_execution_site(instruction, site);
+                    self.mark_forced_lashlang_execution_site(instruction, forced_site);
                 }
             }
             _ => {
@@ -1453,10 +1413,32 @@ impl Compiler {
                 } else {
                     Instruction::AwaitHandle
                 });
-                self.mark_lashlang_execution_site(instruction, site);
+                self.mark_forced_lashlang_execution_site(instruction, forced_site);
             }
         }
         true
+    }
+
+    fn mark_awaitable_effect_site(
+        &mut self,
+        instruction: usize,
+        forced_site: Option<LashlangExecutionSite>,
+        site_expr: &Expr,
+        operation: &str,
+    ) {
+        let site = forced_site
+            .or_else(|| self.lashlang_execution_site(site_expr, "resource_operation", operation));
+        self.mark_forced_lashlang_execution_site(instruction, site);
+    }
+
+    fn mark_forced_lashlang_execution_site(
+        &mut self,
+        instruction: usize,
+        site: Option<LashlangExecutionSite>,
+    ) {
+        if let Some(site) = site {
+            self.mark_lashlang_execution_site(instruction, site);
+        }
     }
 
     fn compile_start_process_expr(&mut self, process: &ProcessStartExpr) -> usize {
@@ -1792,8 +1774,12 @@ impl Compiler {
 }
 
 fn expr_supports_forced_effect_site(expr: &Expr) -> bool {
-    matches!(expr, Expr::Await(_))
-        || matches!(expr, Expr::ResultUnwrap(inner) if matches!(inner.as_ref(), Expr::Await(_)))
+    matches!(expr, Expr::ReceiverCall { .. } | Expr::Await(_))
+        || matches!(
+            expr,
+            Expr::ResultUnwrap(inner)
+                if matches!(inner.as_ref(), Expr::ReceiverCall { .. } | Expr::Await(_))
+        )
 }
 
 /// Maps a builtin name to the [`IntrinsicOp`] the VM dispatches on, threading
