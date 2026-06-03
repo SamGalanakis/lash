@@ -6,19 +6,33 @@ impl ManagedSessionCapability {
         current: &CurrentSessionCapability,
         usage: &UsageCapability,
         session_id: &str,
-        input: TurnInput,
+        turn_id: &str,
+        mut input: TurnInput,
+        scoped_effect_controller: crate::ScopedEffectController<'_>,
     ) -> Result<AssembledTurn, crate::PluginError> {
-        if self
-            .turns
-            .lock()
-            .await
-            .values()
-            .any(|turn| turn.session_id == session_id)
-        {
+        if turn_id.trim().is_empty() {
+            return Err(crate::PluginError::Session(
+                "session turns require a non-empty stable turn id".to_string(),
+            ));
+        }
+        if scoped_effect_controller.turn_id() != Some(turn_id) {
             return Err(crate::PluginError::Session(format!(
-                "session `{session_id}` already has a running turn"
+                "session turn `{turn_id}` requires an effect turn scope with the same id"
             )));
         }
+        if scoped_effect_controller.effect_scope().session_id() != Some(session_id) {
+            return Err(crate::PluginError::Session(format!(
+                "session turn `{turn_id}` requires an effect scope for session `{session_id}`"
+            )));
+        }
+        if let Some(input_turn_id) = input.trace_turn_id.as_deref() {
+            if input_turn_id != turn_id {
+                return Err(crate::PluginError::Session(format!(
+                    "input trace_turn_id `{input_turn_id}` does not match turn id `{turn_id}`"
+                )));
+            }
+        }
+        input.trace_turn_id = Some(turn_id.to_string());
         let runtime = {
             let registry = self.registry.lock().await;
             registry.get(session_id).cloned()
@@ -28,16 +42,13 @@ impl ManagedSessionCapability {
             let runtime = runtime.runtime.lock().await;
             runtime.session_policy()
         };
-        let turn_id = uuid::Uuid::new_v4().to_string();
         let cancel = CancellationToken::new();
         let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
         let usage_source = self.child_usage_source(usage, session_id);
-        let runtime_clone = runtime.clone();
-        let cancel_clone = cancel.clone();
         let sink = ChannelEventSink {
             tx: event_tx,
             live_usage: Some(LiveChildUsageForwarder {
-                turn_id: turn_id.clone(),
+                turn_id: turn_id.to_string(),
                 session_id: session_id.to_string(),
                 source: usage_source,
                 model: policy.model.id.clone(),
@@ -47,47 +58,53 @@ impl ManagedSessionCapability {
             }),
         };
         let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-        let task = tokio::spawn(async move {
-            let mut runtime = runtime_clone.runtime.lock().await;
-            runtime
-                .refresh_session_tool_surface()
-                .await
-                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-            let run = runtime
-                .stream_turn_with_agent_frames(
-                    input,
-                    crate::runtime::TurnOptions::new(cancel_clone).with_events(&sink),
-                )
-                .await
-                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-            let turn = run.into_final_turn().ok_or_else(|| {
-                crate::PluginError::Session("agent frame run completed without a turn".to_string())
-            })?;
-            runtime_clone.publish_from(&runtime);
-            Ok(turn)
-        });
-        self.turns.lock().await.insert(
-            turn_id.clone(),
-            ManagedSessionTurn {
-                session_id: session_id.to_string(),
-                task,
-            },
-        );
-        let managed = self
-            .turns
-            .lock()
-            .await
-            .remove(&turn_id)
-            .ok_or_else(|| crate::PluginError::Session(format!("unknown turn `{turn_id}`")))?;
-        let session_id = managed.session_id.clone();
-        let turn = managed
-            .task
-            .await
-            .map_err(|err| crate::PluginError::Session(format!("turn task failed: {err}")))?;
+        {
+            let mut turns = self.turns.lock().await;
+            if turns.values().any(|turn| turn.session_id == session_id) {
+                return Err(crate::PluginError::Session(format!(
+                    "session `{session_id}` already has a running turn"
+                )));
+            }
+            turns.insert(
+                turn_id.to_string(),
+                ManagedSessionTurn {
+                    session_id: session_id.to_string(),
+                },
+            );
+        }
+        let turn = {
+            let mut runtime_guard = runtime.runtime.lock().await;
+            let result = async {
+                runtime_guard
+                    .refresh_session_tool_surface()
+                    .await
+                    .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+                let run = runtime_guard
+                    .stream_turn_with_agent_frames(
+                        input,
+                        crate::runtime::TurnOptions::new(cancel)
+                            .with_events(&sink)
+                            .with_scoped_effect_controller(scoped_effect_controller),
+                    )
+                    .await
+                    .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+                let turn = run.into_final_turn().ok_or_else(|| {
+                    crate::PluginError::Session(
+                        "agent frame run completed without a turn".to_string(),
+                    )
+                })?;
+                Ok(turn)
+            }
+            .await;
+            runtime.publish_from(&runtime_guard);
+            result
+        };
+        self.turns.lock().await.remove(turn_id);
+        drop(sink);
         let _ = event_drain.await;
-        let live_reported = self.turn_live_usage(usage, &turn_id);
+        let live_reported = self.turn_live_usage(usage, turn_id);
         if let Ok(turn) = &turn {
-            let source = self.child_usage_source(usage, &session_id);
+            let source = self.child_usage_source(usage, session_id);
             if let Some(remainder) = subtract_usage(&live_reported, &turn.token_usage) {
                 usage.record_token_usage(&source, &turn.state.policy.model.id, &remainder);
             }
@@ -113,5 +130,16 @@ impl ManagedSessionCapability {
             .expect("child turn live usage lock")
             .remove(turn_id)
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn managed_child_turns_use_caller_supplied_scope_and_turn_id() {
+        let source = include_str!("turns.rs");
+        assert!(source.contains(".with_scoped_effect_controller(scoped_effect_controller)"));
+        let generated_turn_id_call = concat!("uuid::Uuid::", "new_v4");
+        assert!(!source.contains(generated_turn_id_call));
     }
 }

@@ -44,11 +44,11 @@ pub use hooks::{
     AssistantResponseTransform, AssistantStreamHook, AssistantStreamHookContext,
     AssistantStreamTransform, BeforeToolCallHook, BeforeTurnHook, CheckpointHook,
     CheckpointHookContext, PluginFuture, PluginLifecycleEvent, PluginLifecycleEventHook,
-    PluginSessionTask, PromptContributor, PromptHookContext, SessionConfigChangedContext,
-    SessionConfigMutator, SessionStateChangedContext, ToolCallHookContext,
-    ToolDiscoveryContributor, ToolResultHookContext, ToolResultProjectionContext,
-    ToolResultProjector, ToolSurfaceContributor, TurnHookContext, TurnResultHookContext,
-    TurnResultSummary,
+    PluginLifecycleFuture, PluginSessionTask, PromptContributor, PromptHookContext,
+    SessionConfigChangedContext, SessionConfigMutator, SessionStateChangedContext,
+    ToolCallHookContext, ToolDiscoveryContributor, ToolResultHookContext,
+    ToolResultProjectionContext, ToolResultProjector, ToolSurfaceContributor, TurnHookContext,
+    TurnResultHookContext, TurnResultSummary,
 };
 pub use protocol::{
     AssistantProseProjectorPlugin, CodeExecutorPlugin, PluginOptions, ProtocolBeforeLlmCallContext,

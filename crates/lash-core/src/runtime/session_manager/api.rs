@@ -77,7 +77,9 @@ impl crate::plugin::SessionLifecycleService for RuntimeSessionLifecycleService {
     async fn start_turn(
         &self,
         session_id: &str,
+        turn_id: &str,
         input: TurnInput,
+        scoped_effect_controller: crate::ScopedEffectController<'_>,
     ) -> Result<AssembledTurn, crate::PluginError> {
         self.services
             .managed
@@ -85,7 +87,9 @@ impl crate::plugin::SessionLifecycleService for RuntimeSessionLifecycleService {
                 &self.services.current,
                 &self.services.usage,
                 session_id,
+                turn_id,
                 input,
+                scoped_effect_controller,
             )
             .await
     }

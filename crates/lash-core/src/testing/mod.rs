@@ -400,6 +400,7 @@ pub struct MockSessionManager {
     pub process_registry: Arc<crate::TestLocalProcessRegistry>,
     pub created: Mutex<Vec<SessionCreateRequest>>,
     pub closed: Mutex<Vec<String>>,
+    pub turns: Mutex<Vec<(String, String, Option<String>, crate::EffectScope)>>,
 }
 
 impl Default for MockSessionManager {
@@ -412,6 +413,7 @@ impl Default for MockSessionManager {
             process_registry: Arc::new(crate::TestLocalProcessRegistry::default()),
             created: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
+            turns: Mutex::new(Vec::new()),
         }
     }
 }
@@ -512,9 +514,17 @@ impl crate::plugin::SessionLifecycleService for MockSessionManager {
     }
     async fn start_turn(
         &self,
-        _session_id: &str,
-        _input: TurnInput,
+        session_id: &str,
+        turn_id: &str,
+        input: TurnInput,
+        scoped_effect_controller: crate::ScopedEffectController<'_>,
     ) -> Result<AssembledTurn, PluginError> {
+        self.turns.lock().expect("turns lock").push((
+            session_id.to_string(),
+            turn_id.to_string(),
+            input.trace_turn_id.clone(),
+            scoped_effect_controller.effect_scope().clone(),
+        ));
         Ok(self.turn.clone())
     }
 }

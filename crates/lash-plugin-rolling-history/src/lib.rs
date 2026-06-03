@@ -530,12 +530,17 @@ fn referenced_tool_call_ids(messages: &[Message]) -> HashSet<String> {
         .collect()
 }
 
+fn compaction_turn_id(parent_turn_id: &str) -> String {
+    format!("{parent_turn_id}:rolling-history-compaction")
+}
+
 async fn summarize_compaction_prefix(
     session_id: &str,
     state: &SessionSnapshot,
     prefix_messages: Vec<Message>,
     instructions: Option<&str>,
     session_lifecycle: Arc<dyn lash_core::plugin::runtime_host::SessionLifecycleService>,
+    scoped_effect_controller: lash_core::ScopedEffectController<'_>,
 ) -> Result<Option<String>, HistoryError> {
     if prefix_messages.is_empty() {
         return Ok(None);
@@ -592,17 +597,25 @@ async fn summarize_compaction_prefix(
     };
     let prompt_text = with_instructions(&base_prompt, instructions);
 
+    let turn_id = compaction_turn_id(scoped_effect_controller.scope_id());
+    let compaction_effect_controller = lash_core::ScopedEffectController::borrowed(
+        scoped_effect_controller.controller(),
+        lash_core::EffectScope::turn(&handle.session_id, &turn_id),
+    )
+    .map_err(|err| HistoryError::Session(err.to_string()))?;
     let turn = session_lifecycle
         .start_turn(
             &handle.session_id,
+            &turn_id,
             TurnInput {
                 items: vec![InputItem::Text { text: prompt_text }],
                 image_blobs: HashMap::new(),
                 protocol_turn_options: None,
-                trace_turn_id: None,
+                trace_turn_id: Some(turn_id.clone()),
                 protocol_extension: None,
                 turn_context: lash_core::TurnContext::default(),
             },
+            compaction_effect_controller,
         )
         .await;
     let _ = session_lifecycle.close_session(&handle.session_id).await;
@@ -652,6 +665,7 @@ async fn compact_messages_core(
     messages: &[Message],
     instructions: Option<&str>,
     session_lifecycle: Arc<dyn lash_core::plugin::runtime_host::SessionLifecycleService>,
+    scoped_effect_controller: lash_core::ScopedEffectController<'_>,
 ) -> Result<Option<Vec<Message>>, HistoryError> {
     let prefix_len = leading_system_prefix_len(messages);
     let cut_point = find_compaction_cut_point(messages, prefix_len);
@@ -665,6 +679,7 @@ async fn compact_messages_core(
         prefix_messages,
         instructions,
         session_lifecycle,
+        scoped_effect_controller,
     )
     .await?
     else {
@@ -738,7 +753,7 @@ impl TurnContextTransform for RollingTurnTransform {
 
     async fn transform(
         &self,
-        ctx: &TurnTransformContext,
+        ctx: &TurnTransformContext<'_>,
         mut input: PreparedContext,
     ) -> Result<PreparedContext, HistoryError> {
         let state = &ctx.state;
@@ -779,6 +794,7 @@ impl TurnContextTransform for RollingTurnTransform {
             prefix_messages,
             None,
             session_lifecycle,
+            ctx.scoped_effect_controller.clone(),
         )
         .await?
         else {
@@ -808,11 +824,12 @@ impl HistoryRewriter for RollingHistoryRewriter {
 
     async fn rewrite(
         &self,
-        ctx: &RewriteContext,
+        ctx: &RewriteContext<'_>,
         mut input: HistoryState,
     ) -> Result<HistoryState, HistoryError> {
         let session_id = ctx.session_id.clone();
         let session_lifecycle = Arc::clone(&ctx.session_lifecycle);
+        let scoped_effect_controller = ctx.scoped_effect_controller.clone();
 
         match &ctx.trigger {
             RewriteTrigger::Manual { instructions } => {
@@ -822,6 +839,7 @@ impl HistoryRewriter for RollingHistoryRewriter {
                     &input.messages,
                     instructions.as_deref(),
                     session_lifecycle.clone(),
+                    scoped_effect_controller.clone(),
                 )
                 .await?
                 {
@@ -845,6 +863,7 @@ impl HistoryRewriter for RollingHistoryRewriter {
                     &input.messages,
                     None,
                     session_lifecycle,
+                    scoped_effect_controller,
                 )
                 .await?
                 {
@@ -1054,7 +1073,7 @@ mod tests {
         prompt_usage: Option<PromptUsage>,
         max_context_tokens: Option<usize>,
         manager: Arc<MockSessionManager>,
-    ) -> TurnTransformContext {
+    ) -> TurnTransformContext<'static> {
         TurnTransformContext {
             session_id: session_id.to_string(),
             state: state.read_view(),
@@ -1063,6 +1082,11 @@ mod tests {
             sessions: manager.clone(),
             session_lifecycle: manager.clone(),
             session_graph: manager,
+            scoped_effect_controller: lash_core::ScopedEffectController::shared(
+                Arc::new(lash_core::InlineRuntimeEffectController),
+                lash_core::EffectScope::turn(session_id, "rolling-history-test-turn"),
+            )
+            .expect("test scoped effect controller"),
             direct_completions: lash_core::DirectCompletionClient::from_fn(|_, _| {
                 Err(lash_core::PluginError::Session(
                     "direct completions are unavailable in rolling history tests".to_string(),
@@ -1249,5 +1273,22 @@ mod tests {
 
         let created = manager.created_snapshot();
         assert_eq!(created.len(), 1);
+        let turns = manager.turns.lock().expect("turns lock").clone();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].1,
+            "rolling-history-test-turn:rolling-history-compaction"
+        );
+        assert_eq!(
+            turns[0].2.as_deref(),
+            Some("rolling-history-test-turn:rolling-history-compaction")
+        );
+        assert_eq!(
+            turns[0].3,
+            lash_core::EffectScope::turn(
+                "root-compaction",
+                "rolling-history-test-turn:rolling-history-compaction"
+            )
+        );
     }
 }

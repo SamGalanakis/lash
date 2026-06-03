@@ -17,7 +17,7 @@ impl TurnContextTransform for BudgetUsageObserver {
 
     async fn transform(
         &self,
-        ctx: &TurnTransformContext,
+        ctx: &TurnTransformContext<'_>,
         input: PreparedContext,
     ) -> Result<PreparedContext, HistoryError> {
         if let Ok(mut guard) = self.cell.write() {

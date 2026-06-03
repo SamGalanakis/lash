@@ -1093,8 +1093,25 @@ impl Compiler {
                         self.mark_lashlang_execution_site(instruction, site);
                     }
                 } else if let Expr::Await(handle) = expr.as_ref() {
-                    self.compile_expr(handle);
-                    self.code.push(Instruction::AwaitHandleUnwrap);
+                    if let Expr::ReceiverCall {
+                        receiver,
+                        operation,
+                        args,
+                    } = handle.as_ref()
+                    {
+                        let instruction =
+                            self.compile_receiver_call_expr(receiver, operation, args, true);
+                        if let Some(site) = self.lashlang_execution_site(
+                            handle,
+                            "resource_operation",
+                            operation.as_str(),
+                        ) {
+                            self.mark_lashlang_execution_site(instruction, site);
+                        }
+                    } else {
+                        self.compile_expr(handle);
+                        self.code.push(Instruction::AwaitHandleUnwrap);
+                    }
                 } else if let Expr::Field { target, field } = expr.as_ref()
                     && let Expr::Variable(name) = target.as_ref()
                 {
@@ -1285,7 +1302,7 @@ impl Compiler {
         label: &LabelMetadata,
         leave_value: bool,
     ) -> bool {
-        let Some(site) = self.lashlang_execution_site(expr, "step", label.title.as_str()) else {
+        let Some(site) = self.labeled_effect_site(expr, label) else {
             return false;
         };
         match expr {
@@ -1296,6 +1313,46 @@ impl Compiler {
                 site,
             ),
             _ => self.compile_expr_with_forced_effect_site(expr, site),
+        }
+    }
+
+    fn labeled_effect_site(
+        &self,
+        expr: &Expr,
+        label: &LabelMetadata,
+    ) -> Option<LashlangExecutionSite> {
+        if label_attaches_to_concrete_node(expr) {
+            self.concrete_labeled_effect_site(expr)
+        } else {
+            self.lashlang_execution_site(expr, "step", label.title.as_str())
+        }
+    }
+
+    fn concrete_labeled_effect_site(&self, expr: &Expr) -> Option<LashlangExecutionSite> {
+        match expr {
+            Expr::Assign { expr, .. } | Expr::Await(expr) | Expr::ResultUnwrap(expr) => {
+                self.concrete_labeled_effect_site(expr)
+            }
+            Expr::ReceiverCall { operation, .. } => {
+                self.lashlang_execution_site(expr, "resource_operation", operation.as_str())
+            }
+            Expr::StartProcess(start) => self.lashlang_execution_site(
+                expr,
+                "child_process",
+                format!("start {}", start.process),
+            ),
+            Expr::SleepFor(_) => self.lashlang_execution_site(expr, "sleep", "sleep for"),
+            Expr::SleepUntil(_) => self.lashlang_execution_site(expr, "sleep", "sleep until"),
+            Expr::WaitSignal => self.lashlang_execution_site(expr, "wait", "wait signal"),
+            Expr::SignalRun { .. } => self.lashlang_execution_site(expr, "signal", "signal run"),
+            Expr::Submit(_) | Expr::Finish(_) => {
+                self.lashlang_execution_site(expr, "terminal", "result")
+            }
+            Expr::Fail(_) => self.lashlang_execution_site(expr, "terminal", "failure"),
+            Expr::Yield(_) => self.lashlang_execution_site(expr, "process_event", "yield"),
+            Expr::Wake(_) => self.lashlang_execution_site(expr, "process_event", "wake"),
+            Expr::If { .. } => self.branch_execution_site(expr),
+            _ => None,
         }
     }
 
@@ -1343,24 +1400,63 @@ impl Compiler {
     ) -> bool {
         match expr {
             Expr::Await(handle) => {
-                self.compile_expr(handle);
-                let instruction = self.code.len();
-                self.code.push(Instruction::AwaitHandle);
-                self.mark_lashlang_execution_site(instruction, site);
-                true
+                self.compile_await_expr_with_forced_effect_site(handle, site, false)
             }
             Expr::ResultUnwrap(inner) => {
                 if let Expr::Await(handle) = inner.as_ref() {
-                    self.compile_expr(handle);
-                    let instruction = self.code.len();
-                    self.code.push(Instruction::AwaitHandleUnwrap);
-                    self.mark_lashlang_execution_site(instruction, site);
-                    return true;
+                    return self.compile_await_expr_with_forced_effect_site(handle, site, true);
                 }
                 false
             }
             _ => false,
         }
+    }
+
+    fn compile_await_expr_with_forced_effect_site(
+        &mut self,
+        handle: &Expr,
+        site: LashlangExecutionSite,
+        unwrap_result: bool,
+    ) -> bool {
+        match handle {
+            Expr::ReceiverCall {
+                receiver,
+                operation,
+                args,
+            } => {
+                let instruction =
+                    self.compile_receiver_call_expr(receiver, operation, args, unwrap_result);
+                self.mark_lashlang_execution_site(instruction, site);
+            }
+            Expr::ResultUnwrap(inner) => {
+                if let Expr::ReceiverCall {
+                    receiver,
+                    operation,
+                    args,
+                } = inner.as_ref()
+                {
+                    let instruction =
+                        self.compile_receiver_call_expr(receiver, operation, args, true);
+                    self.mark_lashlang_execution_site(instruction, site);
+                } else {
+                    self.compile_expr(inner);
+                    let instruction = self.code.len();
+                    self.code.push(Instruction::AwaitHandleUnwrap);
+                    self.mark_lashlang_execution_site(instruction, site);
+                }
+            }
+            _ => {
+                self.compile_expr(handle);
+                let instruction = self.code.len();
+                self.code.push(if unwrap_result {
+                    Instruction::AwaitHandleUnwrap
+                } else {
+                    Instruction::AwaitHandle
+                });
+                self.mark_lashlang_execution_site(instruction, site);
+            }
+        }
+        true
     }
 
     fn compile_start_process_expr(&mut self, process: &ProcessStartExpr) -> usize {

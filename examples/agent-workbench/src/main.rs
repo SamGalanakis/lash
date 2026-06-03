@@ -681,6 +681,7 @@ async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>
         .map_err(AppError::internal)?;
     state.messages.lock().expect("messages lock").clear();
     state.timeline.lock().expect("timeline lock").clear();
+    state.lashlang_execution.clear();
     Ok(Json(StateSnapshot {
         settings: state.settings(),
         messages: Vec::new(),
@@ -764,7 +765,12 @@ async fn list_work(State(state): State<AppState>) -> Result<Json<Vec<WorkItem>>,
 async fn list_lashlang_graphs(
     State(state): State<AppState>,
 ) -> Result<Json<LashlangGraphIndex>, AppError> {
-    let graphs = state.lashlang_execution.graphs();
+    let graphs = visible_lashlang_graphs(
+        state.process_registry.as_ref(),
+        &state.current_session_id(),
+        state.lashlang_execution.graphs(),
+    )
+    .await?;
     let mut graph_summaries = Vec::with_capacity(graphs.len());
     for graph in &graphs {
         let process = graph_process_summary(state.process_registry.as_ref(), graph).await;
@@ -820,6 +826,17 @@ async fn lashlang_graph(
     AxumPath(graph_key): AxumPath<String>,
     State(state): State<AppState>,
 ) -> Result<Json<TraceLashlangGraph>, AppError> {
+    let visible = visible_lashlang_graphs(
+        state.process_registry.as_ref(),
+        &state.current_session_id(),
+        state.lashlang_execution.graphs(),
+    )
+    .await?;
+    if !visible.iter().any(|graph| graph.graph_key == graph_key) {
+        return Err(AppError::not_found(format!(
+            "no Lashlang graph for `{graph_key}`"
+        )));
+    }
     state
         .lashlang_execution
         .graph(&graph_key)
@@ -995,10 +1012,12 @@ impl AppState {
     }
 
     fn publish(&self, item: StreamItem) {
-        self.timeline
-            .lock()
-            .expect("timeline lock")
-            .push(item.clone());
+        if !matches!(item, StreamItem::Done) {
+            self.timeline
+                .lock()
+                .expect("timeline lock")
+                .push(item.clone());
+        }
         let _ = self.event_tx.send(item);
     }
 
@@ -1063,6 +1082,77 @@ fn trace_work_item(item: &WorkItem) -> Value {
             })
         }).collect::<Vec<_>>(),
     })
+}
+
+async fn visible_lashlang_graphs(
+    process_registry: &dyn lash::persistence::ProcessRegistry,
+    current_session_id: &str,
+    graphs: Vec<TraceLashlangGraph>,
+) -> Result<Vec<TraceLashlangGraph>, AppError> {
+    let owner_scope = lash::advanced::ProcessScope::new(current_session_id);
+    let visible_process_ids = process_registry
+        .list_handle_grants(&owner_scope)
+        .await
+        .map_err(AppError::internal)?
+        .into_iter()
+        .map(|(grant, _)| grant.process_id)
+        .collect::<BTreeSet<_>>();
+
+    let mut visible_keys = BTreeSet::new();
+    for graph in &graphs {
+        if graph.scope.session_id == current_session_id {
+            visible_keys.insert(graph.graph_key.clone());
+        }
+        if let TraceRuntimeSubject::Process { process_id } = &graph.subject
+            && visible_process_ids.contains(process_id)
+        {
+            visible_keys.insert(graph.graph_key.clone());
+        }
+    }
+
+    loop {
+        let mut changed = false;
+        let roots = graphs
+            .iter()
+            .filter(|graph| visible_keys.contains(&graph.graph_key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for graph in roots {
+            for child in graph.children {
+                if graphs
+                    .iter()
+                    .any(|candidate| candidate.graph_key == child.child_graph_key)
+                {
+                    changed |= visible_keys.insert(child.child_graph_key.clone());
+                }
+                let Some(process_id) = process_id_from_graph_key(&child.child_graph_key) else {
+                    continue;
+                };
+                let Some(record) = process_registry.get_process(process_id).await else {
+                    continue;
+                };
+                let lash::advanced::ProcessInput::SessionTurn { create_request, .. } =
+                    record.input.as_ref()
+                else {
+                    continue;
+                };
+                let Some(child_session_id) = create_request.session_id.as_deref() else {
+                    continue;
+                };
+                for child_graph in child_session_effect_graphs(&graphs, child_session_id) {
+                    changed |= visible_keys.insert(child_graph.graph_key.clone());
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    Ok(graphs
+        .into_iter()
+        .filter(|graph| visible_keys.contains(&graph.graph_key))
+        .collect())
 }
 
 async fn graph_process_summary(
@@ -1698,6 +1788,57 @@ mod tests {
             .expect("large-stack test thread");
     }
 
+    fn test_graph(
+        graph_key: &str,
+        session_id: &str,
+        subject: TraceRuntimeSubject,
+        children: Vec<TraceLashlangGraphChildLink>,
+    ) -> TraceLashlangGraph {
+        TraceLashlangGraph {
+            graph_key: graph_key.to_string(),
+            scope: TraceRuntimeScope::new(session_id),
+            subject,
+            module_ref: format!("{graph_key}:module"),
+            entry_kind: "main".to_string(),
+            entry_ref: None,
+            entry_name: "main".to_string(),
+            status: TraceLashlangStatus::Running,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            children,
+        }
+    }
+
+    fn append_started_graph(store: &TraceLashlangGraphStore, graph: &TraceLashlangGraph) {
+        let identity = TraceLashlangExecutionIdentity {
+            scope: graph.scope.clone(),
+            subject: graph.subject.clone(),
+            module_ref: graph.module_ref.clone(),
+            entry_kind: graph.entry_kind.clone(),
+            entry_ref: graph.entry_ref.clone(),
+            entry_name: graph.entry_name.clone(),
+        };
+        store
+            .append(&TraceRecord::new(
+                TraceContext::default().for_session(graph.scope.session_id.clone()),
+                TraceEvent::LashlangExecution {
+                    event: TraceLashlangExecutionEvent::ExecutionStarted {
+                        event_key: format!("{}:start", graph.graph_key),
+                        identity,
+                        execution_map: TraceLashlangMap {
+                            module_ref: graph.module_ref.clone(),
+                            entry_kind: graph.entry_kind.clone(),
+                            entry_ref: graph.entry_ref.clone(),
+                            entry_name: graph.entry_name.clone(),
+                            nodes: Vec::new(),
+                            edges: Vec::new(),
+                        },
+                    },
+                },
+            ))
+            .expect("append test graph");
+    }
+
     #[test]
     fn reset_session_rotation_replaces_workbench_session_id() {
         let ids = WorkbenchSessionIds::fresh();
@@ -1932,6 +2073,122 @@ mod tests {
     }
 
     #[test]
+    fn graph_index_filters_to_current_session_and_reachable_children() {
+        run_async_test_on_large_stack("workbench-graph-index-session-filter", || async {
+            use lash::persistence::ProcessRegistry as _;
+
+            let registry = lash_core::TestLocalProcessRegistry::default();
+            let current_session_id = "current-session";
+            let child_session_id = "child-session";
+            let old_session_id = "old-session";
+            let create_request = lash_core::SessionCreateRequest::child_session(
+                current_session_id,
+                lash_core::SessionStartPoint::Empty,
+                lash_core::PluginOptions::default(),
+            )
+            .with_session_id(child_session_id);
+            registry
+                .register_process(lash::advanced::ProcessRegistration::new(
+                    "subagent-process",
+                    lash::ProcessInput::SessionTurn {
+                        create_request: Box::new(create_request),
+                        turn_input: Box::new(lash::TurnInput::text("run child")),
+                        output_contract: lash::tools::ToolOutputContract::Static,
+                    },
+                ))
+                .await
+                .expect("register subagent process");
+            registry
+                .grant_handle(
+                    &lash::advanced::ProcessScope::new(current_session_id),
+                    "subagent-process",
+                    lash::advanced::ProcessHandleDescriptor::new(
+                        Some("subagent"),
+                        Some("Subagent"),
+                    ),
+                )
+                .await
+                .expect("grant current process handle");
+            registry
+                .register_process(lash::advanced::ProcessRegistration::new(
+                    "old-process",
+                    lash::ProcessInput::External {
+                        metadata: json!({ "old": true }),
+                    },
+                ))
+                .await
+                .expect("register old process");
+            registry
+                .grant_handle(
+                    &lash::advanced::ProcessScope::new(old_session_id),
+                    "old-process",
+                    lash::advanced::ProcessHandleDescriptor::new(Some("old"), Some("Old")),
+                )
+                .await
+                .expect("grant old process handle");
+
+            let parent_graph = test_graph(
+                "effect:current-session:turn-1:exec-1",
+                current_session_id,
+                TraceRuntimeSubject::Effect {
+                    effect_id: "exec-1".to_string(),
+                    kind: "exec_code".to_string(),
+                },
+                vec![TraceLashlangGraphChildLink {
+                    parent_graph_key: "effect:current-session:turn-1:exec-1".to_string(),
+                    parent_node_id: "spawn".to_string(),
+                    child_graph_key: "process:subagent-process".to_string(),
+                    child_module_ref: None,
+                    child_entry_ref: None,
+                    child_entry_name: Some("subagent".to_string()),
+                }],
+            );
+            let process_graph = test_graph(
+                "process:subagent-process",
+                old_session_id,
+                TraceRuntimeSubject::Process {
+                    process_id: "subagent-process".to_string(),
+                },
+                Vec::new(),
+            );
+            let child_graph = test_graph(
+                "effect:child-session:turn-1:exec-1",
+                child_session_id,
+                TraceRuntimeSubject::Effect {
+                    effect_id: "exec-1".to_string(),
+                    kind: "exec_code".to_string(),
+                },
+                Vec::new(),
+            );
+            let old_graph = test_graph(
+                "process:old-process",
+                old_session_id,
+                TraceRuntimeSubject::Process {
+                    process_id: "old-process".to_string(),
+                },
+                Vec::new(),
+            );
+
+            let visible = visible_lashlang_graphs(
+                &registry,
+                current_session_id,
+                vec![parent_graph, process_graph, child_graph, old_graph],
+            )
+            .await
+            .expect("visible graphs");
+            let keys = visible
+                .into_iter()
+                .map(|graph| graph.graph_key)
+                .collect::<BTreeSet<_>>();
+
+            assert!(keys.contains("effect:current-session:turn-1:exec-1"));
+            assert!(keys.contains("process:subagent-process"));
+            assert!(keys.contains("effect:child-session:turn-1:exec-1"));
+            assert!(!keys.contains("process:old-process"));
+        });
+    }
+
+    #[test]
     fn workbench_does_not_define_a_local_lashlang_execution_reducer() {
         let source = include_str!("main.rs");
         let old_reducer_decl = format!("struct {}{}", "LashlangExecution", "Reducer");
@@ -1964,6 +2221,25 @@ mod tests {
     }
 
     #[test]
+    fn workbench_reasoning_deltas_only_extend_current_timeline_head() {
+        let ui_source = include_str!("ui.rs");
+
+        assert!(
+            ui_source.contains("function isCurrentTimelineHead(node)"),
+            "reasoning timeline head guard is missing"
+        );
+        assert!(
+            ui_source
+                .contains("node.parentNode === timeline && timeline.lastElementChild === node"),
+            "reasoning deltas must only append to the current timeline head"
+        );
+        assert!(
+            ui_source.contains("if (!isCurrentTimelineHead(reasoning))"),
+            "appendReasoning must create a new panel when the old reasoning block is stale"
+        );
+    }
+
+    #[test]
     fn empty_model_variant_request_clears_selected_variant() {
         let selected_model = ModelSelection {
             model: "x-ai/grok-build-0.1".to_string(),
@@ -1983,6 +2259,71 @@ mod tests {
             model_variant_for_request(&selected_model, Some("   ")),
             None
         );
+    }
+
+    #[test]
+    fn done_stream_items_are_transient_and_not_snapshotted() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-transient-done-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .expect("open registry"),
+        ) as Arc<dyn lash::persistence::ProcessRegistry>;
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory;
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .complete_error("transient done test should not call the provider")
+            .build()
+            .into_handle();
+        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+            .expect("model spec");
+        let (event_tx, _) = broadcast::channel(16);
+        let mut events = event_tx.subscribe();
+        let state = AppState {
+            core: LashCore::builder()
+                .install_mode(ModePreset::rlm_with_config(
+                    lash::modes::RlmProtocolPluginConfig::default()
+                        .with_lashlang_abilities(workbench_lashlang_abilities()),
+                ))
+                .default_mode(ModeId::rlm())
+                .provider(provider)
+                .model(model)
+                .store_factory(core_store_factory)
+                .in_memory_stores()
+                .advanced()
+                .process_registry(Arc::clone(&process_registry))
+                .build()
+                .expect("build core"),
+            process_registry,
+            session_ids: WorkbenchSessionIds::fresh(),
+            messages: Arc::new(Mutex::new(Vec::new())),
+            timeline: Arc::new(Mutex::new(Vec::new())),
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: None,
+            })),
+            web_configured: false,
+            trace_sink: None,
+            lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
+            event_tx,
+            queued_work_poke: inert_queued_work_poke(),
+            restate_ingress_url: "http://127.0.0.1:8080".to_string(),
+            restate_http: reqwest::Client::new(),
+            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+        };
+
+        state.publish(StreamItem::Done);
+
+        assert!(state.timeline_snapshot().is_empty());
+        assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[test]
@@ -2402,6 +2743,18 @@ mod tests {
                 .len(),
             1
         );
+        append_started_graph(
+            &state.lashlang_execution,
+            &test_graph(
+                "process:old-reset-process",
+                &old_session_id,
+                TraceRuntimeSubject::Process {
+                    process_id: "old-reset-process".to_string(),
+                },
+                Vec::new(),
+            ),
+        );
+        assert_eq!(state.lashlang_execution.graphs().len(), 1);
         drop(session);
 
         let Json(snapshot) = reset_chat(State(state.clone())).await.expect("reset");
@@ -2453,6 +2806,13 @@ mod tests {
                 .await
                 .expect("new work")
                 .is_empty()
+        );
+        let Json(graph_index) = list_lashlang_graphs(State(state.clone()))
+            .await
+            .expect("list graphs after reset");
+        assert!(
+            graph_index.graphs.is_empty(),
+            "new session graph index should be empty after reset: {graph_index:#?}"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }

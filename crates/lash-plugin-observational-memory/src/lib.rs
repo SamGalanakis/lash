@@ -151,7 +151,7 @@ fn observational_memory_event_hook(
 
 async fn maybe_spawn_post_persist_memory_maintenance(
     config: ObservationalMemoryConfig,
-    ctx: SessionStateChangedContext,
+    ctx: SessionStateChangedContext<'_>,
 ) -> Result<(), PluginError> {
     let graph = ctx.state.session_graph();
     if !should_run_async_maintenance(&config, graph) {
@@ -163,7 +163,7 @@ async fn maybe_spawn_post_persist_memory_maintenance(
 async fn run_async_maintenance(
     config: ObservationalMemoryConfig,
     graph: &lash_core::SessionGraph,
-    ctx: &SessionStateChangedContext,
+    ctx: &SessionStateChangedContext<'_>,
 ) -> Result<(), PluginError> {
     let om_host = OmRuntimeHost::new(
         &ctx.session_id,

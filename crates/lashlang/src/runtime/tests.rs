@@ -42,6 +42,20 @@ impl ExecutionHost for Host {
 }
 
 #[derive(Default)]
+struct RejectingAwaitHost;
+
+impl ExecutionHost for RejectingAwaitHost {
+    async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+        match op {
+            AbilityOp::Await(_) => Err(ExecutionHostError::new(
+                "unexpected generic handle await in resource operation test",
+            )),
+            other => Host.perform(other).await,
+        }
+    }
+}
+
+#[derive(Default)]
 struct RecordingProcessHost {
     starts: Mutex<Vec<ProcessStart>>,
     events: Mutex<Vec<ProcessEvent>>,
@@ -110,6 +124,56 @@ fn compile_source(source: &str) -> Result<CompiledProgram, crate::ParseError> {
     } else {
         Ok(compile_program(&program))
     }
+}
+
+fn compile_labeled_source(source: &str) -> CompiledProgram {
+    let program = crate::parse(source).expect("program should parse");
+    let surface = runtime_test_surface().with_language_features(
+        crate::LashlangLanguageFeatures::default().with_label_annotations(),
+    );
+    let linked = crate::LinkedModule::link(program, surface).expect("program should link");
+    crate::compile_linked(&linked)
+}
+
+fn compile_labeled_process_source(source: &str, process_name: &str) -> CompiledProgram {
+    let program = crate::parse(source).expect("program should parse");
+    let surface = runtime_test_surface().with_language_features(
+        crate::LashlangLanguageFeatures::default().with_label_annotations(),
+    );
+    let linked = crate::LinkedModule::link(program, surface).expect("program should link");
+    crate::compile_linked_process(&linked, process_name).expect("process should compile")
+}
+
+fn assert_resource_call_unwrap_without_handle_await(compiled: &CompiledProgram) {
+    let instructions = compiled_instruction_listing(compiled);
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::ResourceCallUnwrap { .. })),
+        "compiled code should use ResourceCallUnwrap:\n{instructions}"
+    );
+    assert!(
+        !compiled.chunk.code.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::AwaitHandle | Instruction::AwaitHandleUnwrap
+        )),
+        "resource operation unwrap should not emit generic handle await instructions:\n{instructions}"
+    );
+}
+
+fn compiled_instruction_listing(compiled: &CompiledProgram) -> String {
+    let mut out = String::new();
+    for (index, instruction) in compiled.chunk.code.iter().copied().enumerate() {
+        writeln!(
+            out,
+            "{index:04}: {}",
+            instruction_snapshot(&compiled.chunk, instruction)
+        )
+        .unwrap();
+    }
+    out
 }
 
 fn compile_program(program: &Program) -> CompiledProgram {
@@ -950,6 +1014,75 @@ fn label_on_await_assignment_attaches_to_await_instruction() {
     );
 }
 
+#[test]
+fn labeled_process_resource_operation_site_matches_static_graph_node() {
+    let program = crate::parse(
+        r#"
+        process search_test() {
+          @label(title: "Spawn subagent with web search")
+          result = await tools.echo({ value: { ok: true } })?
+          wake result
+          finish result
+        }
+        "#,
+    )
+    .expect("program should parse");
+    let surface = runtime_test_surface().with_language_features(
+        crate::LashlangLanguageFeatures::default().with_label_annotations(),
+    );
+    let linked = crate::LinkedModule::link(program, surface).expect("program should link");
+    let compiled =
+        crate::compile_linked_process(&linked, "search_test").expect("process should compile");
+    let resource_call = compiled
+        .chunk
+        .code
+        .iter()
+        .position(|instruction| matches!(instruction, Instruction::ResourceCallUnwrap { .. }))
+        .expect("resource call unwrap instruction");
+    let site = compiled
+        .chunk
+        .lashlang_execution_sites
+        .get(resource_call)
+        .and_then(Option::as_ref)
+        .expect("resource call execution site");
+
+    let process_ref = linked
+        .artifact
+        .process_ref("search_test")
+        .expect("search_test process ref")
+        .clone();
+    let map = crate::map_lashlang_process(
+        &linked.artifact,
+        &process_ref,
+        crate::LashlangMapOptions::default(),
+    )
+    .expect("process graph");
+    let static_node =
+        map.nodes
+            .iter()
+            .find(|node| {
+                node.kind == "resource_operation"
+                    && node.label_metadata.as_ref().is_some_and(|label| {
+                        label.title.as_str() == "Spawn subagent with web search"
+                    })
+            })
+            .unwrap_or_else(|| panic!("missing labeled resource operation node: {:?}", map.nodes));
+
+    assert_eq!(site.node_kind, "resource_operation");
+    assert_eq!(site.node_id, static_node.id);
+    assert!(
+        !compiled
+            .chunk
+            .lashlang_execution_sites
+            .iter()
+            .flatten()
+            .any(|site| {
+                site.node_kind == "step" && site.label == "Spawn subagent with web search"
+            }),
+        "labeled resource operation should not emit a parallel step site"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn generic_iterator_loops_cover_range_list_keys_nested_control_and_mutation() {
     let source = r#"
@@ -1163,16 +1296,107 @@ async fn result_unwrap_extracts_success_and_preserves_manual_handling() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn unparenthesized_await_module_operation_unwrap_skips_handle_await() {
+    let compiled = compile_source("value = await tools.echo({ value: 7 })?\nsubmit value")
+        .expect("program should compile");
+    assert_resource_call_unwrap_without_handle_await(&compiled);
+
+    let mut state = State::new();
+    let outcome = execute_compiled(&compiled, &mut state, &RejectingAwaitHost)
+        .await
+        .expect("program should run");
+    assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(7.0)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn parenthesized_await_module_operation_unwrap_skips_handle_await() {
+    let compiled = compile_source("value = (await tools.echo({ value: 7 }))?\nsubmit value")
+        .expect("program should compile");
+    assert_resource_call_unwrap_without_handle_await(&compiled);
+
+    let mut state = State::new();
+    let outcome = execute_compiled(&compiled, &mut state, &RejectingAwaitHost)
+        .await
+        .expect("program should run");
+    assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(7.0)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn labeled_await_module_operation_unwrap_skips_handle_await() {
+    let compiled = compile_labeled_source(
+        r#"@label(title: "Echo")
+value = await tools.echo({ value: { answer: "ok" } })?
+submit value"#,
+    );
+    assert_resource_call_unwrap_without_handle_await(&compiled);
+
+    let mut state = State::new();
+    let outcome = execute_compiled(&compiled, &mut state, &RejectingAwaitHost)
+        .await
+        .expect("program should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finished outcome");
+    };
+    let record = value
+        .as_record()
+        .expect("finished value should be a record");
+    assert_eq!(record["answer"], Value::String("ok".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn labeled_parenthesized_await_module_operation_unwrap_skips_handle_await() {
+    let compiled = compile_labeled_source(
+        r#"@label(title: "Echo")
+value = (await tools.echo({ value: { answer: "ok" } }))?
+submit value"#,
+    );
+    assert_resource_call_unwrap_without_handle_await(&compiled);
+
+    let mut state = State::new();
+    let outcome = execute_compiled(&compiled, &mut state, &RejectingAwaitHost)
+        .await
+        .expect("program should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finished outcome");
+    };
+    let record = value
+        .as_record()
+        .expect("finished value should be a record");
+    assert_eq!(record["answer"], Value::String("ok".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn labeled_process_await_module_operation_unwrap_skips_handle_await() {
+    let compiled = compile_labeled_process_source(
+        r#"
+process echo_from_process() {
+  @label(title: "Echo")
+  value = await tools.echo({ value: { answer: "ok" } })?
+  finish value
+}
+"#,
+        "echo_from_process",
+    );
+    assert_resource_call_unwrap_without_handle_await(&compiled);
+
+    let mut state = State::new();
+    let outcome = execute_compiled_process(&compiled, &mut state, &RejectingAwaitHost)
+        .await
+        .expect("process should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finished outcome");
+    };
+    let record = value
+        .as_record()
+        .expect("finished value should be a record");
+    assert_eq!(record["answer"], Value::String("ok".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn direct_module_operation_unwrap_skips_observable_wrapper() {
     let compiled =
         compile_source("submit (await tools.echo({ value: 7 })?)").expect("program should compile");
-    assert!(
-        compiled
-            .chunk
-            .code
-            .iter()
-            .any(|instruction| matches!(instruction, Instruction::ResourceCallUnwrap { .. }))
-    );
+    assert_resource_call_unwrap_without_handle_await(&compiled);
     assert!(
         !compiled
             .chunk
@@ -1182,7 +1406,7 @@ async fn direct_module_operation_unwrap_skips_observable_wrapper() {
     );
 
     let mut state = State::new();
-    let outcome = execute_compiled(&compiled, &mut state, &Host)
+    let outcome = execute_compiled(&compiled, &mut state, &RejectingAwaitHost)
         .await
         .expect("program should run");
     assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(7.0)));

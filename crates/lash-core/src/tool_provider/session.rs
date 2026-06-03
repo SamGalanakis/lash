@@ -11,13 +11,14 @@ pub struct ToolSessionModel {
 }
 
 #[derive(Clone)]
-pub struct ToolSessionControl {
+pub struct ToolSessionControl<'run> {
     pub(super) session_id: String,
     pub(super) sessions: Arc<dyn SessionStateService>,
     pub(super) session_lifecycle: Arc<dyn SessionLifecycleService>,
+    pub(super) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
 }
 
-impl ToolSessionControl {
+impl<'run> ToolSessionControl<'run> {
     pub async fn model(&self) -> Result<ToolSessionModel, PluginError> {
         let snapshot = self.snapshot_current().await?;
         Ok(ToolSessionModel {
@@ -51,9 +52,17 @@ impl ToolSessionControl {
     pub async fn start_turn(
         &self,
         session_id: &str,
+        turn_id: &str,
         input: crate::TurnInput,
     ) -> Result<crate::AssembledTurn, PluginError> {
-        self.session_lifecycle.start_turn(session_id, input).await
+        let scoped_effect_controller = crate::ScopedEffectController::borrowed(
+            self.effect_controller.controller(),
+            crate::EffectScope::turn(session_id, turn_id),
+        )
+        .map_err(|err| PluginError::Session(err.to_string()))?;
+        self.session_lifecycle
+            .start_turn(session_id, turn_id, input, scoped_effect_controller)
+            .await
     }
 
     pub async fn tool_catalog(&self) -> Result<Vec<serde_json::Value>, PluginError> {

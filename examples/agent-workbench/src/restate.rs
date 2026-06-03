@@ -577,7 +577,6 @@ async fn run_queued_turn(
         .await
         .map_err(AppError::internal)?
     else {
-        state.publish(crate::StreamItem::Done);
         return Ok(());
     };
     record_turn_output(&state, output, turn_state, "restate_queued_turn.completed");

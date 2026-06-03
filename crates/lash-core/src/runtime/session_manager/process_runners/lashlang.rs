@@ -283,6 +283,7 @@ impl LashlangProcessHost<'_> {
         operation: String,
         receiver: ::lashlang::Value,
         args: Vec<::lashlang::Value>,
+        call_site: Option<::lashlang::LashlangExecutionCallSite>,
     ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
         if !matches!(&receiver, ::lashlang::Value::Resource(_)) {
             return Err(::lashlang::ExecutionHostError::new(format!(
@@ -303,15 +304,34 @@ impl LashlangProcessHost<'_> {
                 "module operation `{operation}` is unavailable in this session"
             ))
         })?;
-        let reply = self
-            .ctx
-            .call_tool(
-                uuid::Uuid::new_v4().to_string(),
-                manifest.name.clone(),
-                self.resource_payload(&receiver, &args)?,
-                0,
-            )
-            .await;
+        let call_site = call_site.and_then(|call_site| {
+            self.lashlang_execution_sink.as_ref().map(|sink| {
+                crate::ToolLashlangExecutionCallSite::new(
+                    Arc::clone(sink),
+                    self.lashlang_execution_context.clone(),
+                    self.execution_identity(),
+                    call_site.site.node_id,
+                    call_site.occurrence,
+                )
+            })
+        });
+        let payload = self.resource_payload(&receiver, &args)?;
+        let call_id = uuid::Uuid::new_v4().to_string();
+        let reply = if let Some(call_site) = call_site {
+            self.ctx
+                .call_tool_with_lashlang_execution_call_site(
+                    call_id,
+                    manifest.name.clone(),
+                    payload,
+                    0,
+                    call_site,
+                )
+                .await
+        } else {
+            self.ctx
+                .call_tool(call_id, manifest.name.clone(), payload, 0)
+                .await
+        };
         protocol_reply_to_lashlang_value(reply)
     }
 
@@ -457,7 +477,12 @@ impl ::lashlang::ExecutionHost for LashlangProcessHost<'_> {
     ) -> Result<::lashlang::AbilityResult, ::lashlang::ExecutionHostError> {
         match op {
             ::lashlang::AbilityOp::ResourceOperation(operation) => self
-                .resource_operation(operation.operation, operation.receiver, operation.args)
+                .resource_operation(
+                    operation.operation,
+                    operation.receiver,
+                    operation.args,
+                    operation.call_site,
+                )
                 .await
                 .map(::lashlang::AbilityResult::Value),
             ::lashlang::AbilityOp::Await(handle) => self

@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use tokio::task::JoinSet;
 
 use super::*;
 
@@ -44,7 +43,7 @@ fn plugin_hook_phase_name(hook_kind: &str, plugin_id: &str) -> String {
     format!("plugin_hook.{hook_kind}.{plugin_id}")
 }
 
-fn lifecycle_event_hook_kind(event: &PluginLifecycleEvent) -> &'static str {
+fn lifecycle_event_hook_kind(event: &PluginLifecycleEvent<'_>) -> &'static str {
     match event {
         PluginLifecycleEvent::TurnFinalized(_) => "turn_finalized",
         PluginLifecycleEvent::TurnPersisted(_) => "turn_persisted",
@@ -240,7 +239,7 @@ impl PluginSession {
     /// into the next in priority order.
     pub async fn prepare_turn_context(
         &self,
-        ctx: &TurnTransformContext,
+        ctx: &TurnTransformContext<'_>,
         input: crate::session_model::context::PreparedContext,
         phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     ) -> Result<crate::session_model::context::PreparedContext, HistoryError> {
@@ -264,7 +263,7 @@ impl PluginSession {
     /// the current trigger via `accepts()`.
     pub async fn rewrite_history(
         &self,
-        ctx: &RewriteContext,
+        ctx: &RewriteContext<'_>,
         input: HistoryState,
     ) -> Result<HistoryState, HistoryError> {
         let mut current = input;
@@ -452,40 +451,29 @@ impl PluginSession {
         (projector.hook)(ctx).await
     }
 
-    pub async fn emit_runtime_event(&self, event: PluginLifecycleEvent) {
+    pub async fn emit_runtime_event(&self, event: PluginLifecycleEvent<'_>) {
         self.emit_runtime_event_with_phase_probe(event, None).await;
     }
 
     pub async fn emit_runtime_event_with_phase_probe(
         &self,
-        event: PluginLifecycleEvent,
+        event: PluginLifecycleEvent<'_>,
         phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
     ) {
-        let mut tasks = JoinSet::new();
         let hook_kind = lifecycle_event_hook_kind(&event);
         for registered in &self.contributions.runtime_event_hooks {
             let hook = Arc::clone(&registered.hook);
-            let plugin_id = registered.plugin_id.clone();
+            let phase_name = plugin_hook_phase_name(hook_kind, registered.plugin_id.as_str());
             let event = event.clone();
-            let phase_probe = phase_probe.clone();
-            tasks.spawn(async move {
-                let phase_name = plugin_hook_phase_name(hook_kind, &plugin_id);
-                if let Some(probe) = phase_probe.as_ref() {
-                    probe.begin_named(&phase_name);
-                }
-                let result = hook(event).await;
-                if let Some(probe) = phase_probe.as_ref() {
-                    probe.end_named(&phase_name);
-                }
-                result
-            });
-        }
-
-        while let Some(result) = tasks.join_next().await {
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => tracing::warn!("plugin runtime event hook failed: {err}"),
-                Err(err) => tracing::warn!("plugin runtime event hook task failed: {err}"),
+            if let Some(probe) = phase_probe.as_ref() {
+                probe.begin_named(&phase_name);
+            }
+            let result = hook(event).await;
+            if let Some(probe) = phase_probe.as_ref() {
+                probe.end_named(&phase_name);
+            }
+            if let Err(err) = result {
+                tracing::warn!("plugin runtime event hook failed: {err}");
             }
         }
     }

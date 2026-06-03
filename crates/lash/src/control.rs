@@ -601,14 +601,30 @@ impl SessionControl {
         lifecycle.create_session(request).await.map_err(Into::into)
     }
 
-    async fn start_child_turn(&self, session_id: &str, input: TurnInput) -> Result<AssembledTurn> {
-        let lifecycle = {
+    async fn start_child_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        input: TurnInput,
+    ) -> Result<AssembledTurn> {
+        let (lifecycle, scoped_effect_controller) = {
             let writer = self.runtime.writer();
             let runtime = writer.lock().await;
-            runtime.session_lifecycle_service()?
+            let lifecycle = runtime.session_lifecycle_service()?;
+            let scoped_effect_controller = runtime
+                .effect_host()
+                .scoped_static(lash_core::EffectScope::turn(session_id, turn_id))
+                .map_err(EmbedError::from)?
+                .ok_or_else(|| {
+                    EmbedError::Session(lash_core::SessionError::Protocol(
+                        "child turn execution requires an effect host with static scoped controllers"
+                            .to_string(),
+                    ))
+                })?;
+            (lifecycle, scoped_effect_controller)
         };
         lifecycle
-            .start_turn(session_id, input)
+            .start_turn(session_id, turn_id, input, scoped_effect_controller)
             .await
             .map_err(Into::into)
     }
@@ -1068,8 +1084,15 @@ impl ChildrenControl {
         self.control.create_child_session(request).await
     }
 
-    pub async fn start_turn(&self, session_id: &str, input: TurnInput) -> Result<AssembledTurn> {
-        self.control.start_child_turn(session_id, input).await
+    pub async fn start_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        input: TurnInput,
+    ) -> Result<AssembledTurn> {
+        self.control
+            .start_child_turn(session_id, turn_id, input)
+            .await
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<()> {

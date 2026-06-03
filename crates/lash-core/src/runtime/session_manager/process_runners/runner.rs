@@ -34,6 +34,7 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
                     registration,
                     *create_request.clone(),
                     *turn_input.clone(),
+                    scoped_effect_controller,
                     cancellation,
                 )
                 .await

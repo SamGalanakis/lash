@@ -144,7 +144,7 @@ impl TurnContextTransform for EnvironmentTailTransform {
 
     async fn transform(
         &self,
-        _ctx: &TurnTransformContext,
+        _ctx: &TurnTransformContext<'_>,
         input: PreparedContext,
     ) -> Result<PreparedContext, HistoryError> {
         let context = build_prompt_environment_context();

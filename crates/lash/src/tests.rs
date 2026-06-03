@@ -1,5 +1,5 @@
 use crate::support::*;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, future::Future};
 
 use lash_core::LlmOutputPart;
 use lash_core::llm::transport::LlmTransportError;
@@ -456,6 +456,26 @@ impl TurnActivitySink for RecordingEvents {
     async fn emit(&self, activity: TurnActivity) {
         self.events.lock().await.push(activity);
     }
+}
+
+fn run_async_test_on_large_stack<F, Fut>(name: &str, test: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(test())
+        })
+        .expect("spawn large-stack test thread")
+        .join()
+        .expect("large-stack test thread")
 }
 
 fn test_activity(correlation_id: &str, event: TurnEvent) -> TurnActivity {
@@ -994,6 +1014,7 @@ fn text_message(role: lash_core::MessageRole, text: &str) -> lash_core::Message 
 
 mod control_admin;
 mod core_session_builder;
+mod lash_e2e;
 mod plugin_stack;
 mod rebuild_conformance;
 mod turn_streaming;

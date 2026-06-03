@@ -94,7 +94,9 @@ pub trait SessionLifecycleService: Send + Sync {
     async fn start_turn(
         &self,
         _session_id: &str,
+        _turn_id: &str,
         _input: TurnInput,
+        _scoped_effect_controller: crate::ScopedEffectController<'_>,
     ) -> Result<AssembledTurn, PluginError> {
         Err(PluginError::Session(
             "session execution is unavailable in this runtime".to_string(),

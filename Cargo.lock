@@ -2747,6 +2747,7 @@ dependencies = [
  "lash-protocol-standard",
  "lash-rlm-types",
  "lash-sqlite-store",
+ "lash-subagents",
  "lash-tool-support",
  "lash-trace",
  "rusqlite",

@@ -5,7 +5,8 @@ impl RuntimeSessionServices {
         &self,
         registration: crate::ProcessRegistration,
         mut create_request: crate::SessionCreateRequest,
-        turn_input: crate::TurnInput,
+        mut turn_input: crate::TurnInput,
+        scoped_effect_controller: crate::ScopedEffectController<'_>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
         // `ProcessInput::SessionTurn` is durable input. Its `create_request`
@@ -29,9 +30,35 @@ impl RuntimeSessionServices {
             }
         };
         let child_session_id = child.session_id.clone();
-        let turn =
-            self.managed
-                .start_turn(&self.current, &self.usage, &child_session_id, turn_input);
+        let child_turn_id = registration.id.clone();
+        let child_scoped_effect_controller = match crate::ScopedEffectController::borrowed(
+            scoped_effect_controller.controller(),
+            crate::EffectScope::turn(&child_session_id, &child_turn_id),
+        ) {
+            Ok(controller) => controller,
+            Err(err) => {
+                let _ = self
+                    .managed
+                    .close_session(&self.current, &self.usage, &child_session_id)
+                    .await;
+                return crate::ProcessAwaitOutput::from_tool_output(
+                    crate::ToolCallOutput::failure(crate::ToolFailure::tool(
+                        crate::ToolFailureClass::Execution,
+                        "process_session_turn_scope_failed",
+                        err.to_string(),
+                    )),
+                );
+            }
+        };
+        turn_input.trace_turn_id = Some(child_turn_id.clone());
+        let turn = self.managed.start_turn(
+            &self.current,
+            &self.usage,
+            &child_session_id,
+            &child_turn_id,
+            turn_input,
+            child_scoped_effect_controller,
+        );
         tokio::pin!(turn);
         let outcome = tokio::select! {
             _ = cancellation.cancelled() => {

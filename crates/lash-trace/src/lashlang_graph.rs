@@ -160,6 +160,13 @@ impl TraceLashlangGraphStore {
             })
             .unwrap_or_default()
     }
+
+    /// Clears all reduced graph projections and replay de-duplication keys.
+    pub fn clear(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            *state = TraceLashlangGraphState::default();
+        }
+    }
 }
 
 impl TraceSink for TraceLashlangGraphStore {

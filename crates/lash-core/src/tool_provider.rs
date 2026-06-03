@@ -285,11 +285,12 @@ impl<'run> ToolContext<'run> {
         &self.agent_frame_id
     }
 
-    pub fn sessions(&self) -> ToolSessionControl {
+    pub fn sessions(&self) -> ToolSessionControl<'run> {
         ToolSessionControl {
             session_id: self.session_id.clone(),
             sessions: Arc::clone(&self.sessions),
             session_lifecycle: Arc::clone(&self.session_lifecycle),
+            effect_controller: self.effect_controller.clone(),
         }
     }
 

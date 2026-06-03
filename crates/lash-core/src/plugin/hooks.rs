@@ -5,8 +5,10 @@ use std::sync::Arc;
 use super::*;
 
 pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send>>;
+pub type PluginLifecycleFuture<'run> =
+    Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'run>>;
 pub type PluginLifecycleEventHook =
-    Arc<dyn Fn(PluginLifecycleEvent) -> PluginFuture<()> + Send + Sync>;
+    Arc<dyn for<'run> Fn(PluginLifecycleEvent<'run>) -> PluginLifecycleFuture<'run> + Send + Sync>;
 pub type PluginSessionTask = PluginFuture<()>;
 pub type SessionConfigMutator = Arc<
     dyn Fn(SessionConfigChangedContext, SessionPolicy) -> PluginFuture<SessionPolicy> + Send + Sync,
@@ -62,22 +64,22 @@ pub struct SessionConfigChangedContext {
 }
 
 #[derive(Clone)]
-pub struct SessionStateChangedContext {
+pub struct SessionStateChangedContext<'run> {
     pub session_id: String,
     pub state: SessionReadView,
     pub sessions: Arc<dyn SessionStateService>,
     pub session_graph: Arc<dyn SessionGraphService>,
-    pub direct_completions: crate::DirectCompletionClient<'static>,
+    pub direct_completions: crate::DirectCompletionClient<'run>,
 }
 
 #[derive(Clone)]
-pub enum PluginLifecycleEvent {
+pub enum PluginLifecycleEvent<'run> {
     TurnFinalized(Arc<AssembledTurn>),
     /// Best-effort observer hook emitted after durable session state advances.
     ///
     /// Hook failures are isolated from the foreground turn: the turn has already
     /// committed, and observers must not affect that commit.
-    TurnPersisted(Box<SessionStateChangedContext>),
+    TurnPersisted(Box<SessionStateChangedContext<'run>>),
     SessionRestored(SessionReadView),
     SessionConfigChanged(Box<SessionConfigChangedContext>),
 }

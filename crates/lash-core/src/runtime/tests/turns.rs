@@ -1147,9 +1147,16 @@ async fn session_manager_can_run_child_session_turn() {
         )
         .await
         .expect("child session");
+    let turn_id = "child-lifecycle-turn";
+    let scoped_effect_controller = crate::ScopedEffectController::shared(
+        Arc::new(crate::InlineRuntimeEffectController),
+        crate::EffectScope::turn(&handle.session_id, turn_id),
+    )
+    .expect("scoped child turn");
     let assembled = lifecycle
         .start_turn(
             &handle.session_id,
+            turn_id,
             TurnInput {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
@@ -1160,6 +1167,7 @@ async fn session_manager_can_run_child_session_turn() {
                 protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
+            scoped_effect_controller,
         )
         .await
         .expect("child turn");
@@ -1348,6 +1356,7 @@ async fn runtime_can_activate_managed_child_session() {
         lifecycle
             .start_turn(
                 "child",
+                "activated-child-turn",
                 TurnInput {
                     items: vec![InputItem::Text {
                         text: "old manager should not own activated child".to_string(),
@@ -1358,6 +1367,11 @@ async fn runtime_can_activate_managed_child_session() {
                     protocol_extension: None,
                     turn_context: crate::TurnContext::default(),
                 },
+                crate::ScopedEffectController::shared(
+                    Arc::new(crate::InlineRuntimeEffectController),
+                    crate::EffectScope::turn("child", "activated-child-turn"),
+                )
+                .expect("scoped activated child turn"),
             )
             .await
             .is_err(),

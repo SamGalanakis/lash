@@ -47,7 +47,6 @@ impl CurrentSnapshot {
 
 pub(super) struct ManagedSessionTurn {
     pub(super) session_id: String,
-    pub(super) task: tokio::task::JoinHandle<Result<AssembledTurn, crate::PluginError>>,
 }
 
 #[derive(Clone)]
