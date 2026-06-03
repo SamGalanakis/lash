@@ -19,7 +19,7 @@ use super::envelope::{
     ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectEnvelope,
     RuntimeEffectKind, RuntimeEffectOutcome,
 };
-use super::journal::llm_call_error_from_transport;
+use super::outcome::llm_call_error_from_transport;
 
 // =============================================================================
 // Effect host + controller trait + scope + error

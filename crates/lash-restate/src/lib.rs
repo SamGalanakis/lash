@@ -47,15 +47,14 @@
 //! }
 //! ```
 //!
-//! Restate's Rust SDK requires journaled closures to be awaited immediately and
+//! Restate's Rust SDK requires `ctx.run` closures to be awaited immediately and
 //! not to call the Restate context from inside the closure. This adapter follows
 //! that rule: every Lash effect is wrapped as one immediately awaited
 //! `ctx.run(...).name(lash:<replay_key>)` call, sleep commands
 //! map to Restate's durable timer, and process commands call Restate workflow
 //! scheduling directly through idempotent registry/workflow operations.
-//! Substrate-native Restate turns do not claim Lash turn leases and do not write
-//! Lash runtime effect-journal rows; Lash only commits final session state
-//! through turn-commit idempotency.
+//! Substrate-native Restate turns do not use store-side in-flight replay rows;
+//! Lash only commits final session state through turn-commit idempotency.
 
 use std::fmt;
 use std::future::Future;
@@ -528,10 +527,10 @@ impl RestateEffectControllerOptions {
         Self::default()
     }
 
-    /// Set a Restate retry policy for journaled `ctx.run` effects.
+    /// Set a Restate retry policy for recorded `ctx.run` effects.
     ///
     /// Lash provider/tool errors are recorded as Lash data, so this policy is
-    /// used only when the journaled closure itself fails before producing a
+    /// used only when the recorded closure itself fails before producing a
     /// serializable effect result.
     pub fn run_retry_policy(mut self, policy: RunRetryPolicy) -> Self {
         self.run_retry_policy = Some(policy);
@@ -735,7 +734,7 @@ where
         ScopedEffectController::borrowed(self, scope)
     }
 
-    async fn journal_effect<'run, T, Fut>(
+    async fn record_effect<'run, T, Fut>(
         &'run self,
         metadata: RuntimeInvocation,
         future: Fut,
@@ -831,12 +830,12 @@ where
             RestateEffectExecution::JournaledRun => {
                 let current_hash = envelope.stable_hash()?;
                 let invocation = envelope.invocation.clone();
-                let journal_hash = current_hash.clone();
+                let recorded_hash = current_hash.clone();
                 let recorded = self
-                    .journal_effect(invocation, async move {
+                    .record_effect(invocation, async move {
                         let outcome = local_executor.execute(envelope).await;
                         RecordedRuntimeEffect {
-                            envelope_hash: journal_hash,
+                            envelope_hash: recorded_hash,
                             outcome,
                         }
                     })

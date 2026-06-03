@@ -2,7 +2,7 @@
 
 SQLite-backed localhost chat example for `lash`, RLM mode, typed session
 plugin activation, app-owned board tools, semantic streaming, and optional
-Restate durable turns.
+Restate-backed turns.
 
 Run it:
 

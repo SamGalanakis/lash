@@ -28,7 +28,7 @@
 <div class="section">
           <div class="section-header">
             <h2>Runtime Shape</h2>
-            <p><code>LashRuntime</code> holds the live session registry, managed child-session state, AgentFrame-following turn execution, process grants, queued work, and a usage ledger. Sans-IO computes protocol effects, <code>RuntimeEffectController</code> handles nondeterministic host work, plugins contribute behavior, providers complete requests, and persistence records completed turns plus in-flight turn checkpoints and effect outcomes.</p>
+            <p><code>LashRuntime</code> holds the live session registry, managed child-session state, AgentFrame-following turn execution, process grants, queued work, and a usage ledger. Sans-IO computes protocol effects, <code>RuntimeEffectController</code> handles nondeterministic host work, plugins contribute behavior, providers complete requests, and persistence records committed session state plus final turn commit idempotency.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Runtime composition</div>

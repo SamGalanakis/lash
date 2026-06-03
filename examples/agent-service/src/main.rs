@@ -149,7 +149,7 @@ async fn main() -> anyhow_like::Result<()> {
             #[cfg(feature = "restate")]
             {
                 // Base host for turns that run outside a Restate workflow
-                // scope; durable turns pass a handler-scoped controller per
+                // scope; Restate-backed turns pass a handler-scoped controller per
                 // turn via `stream_with_effect_scope`. The Restate ingress
                 // runner is the sole executor of out-of-turn/background
                 // processes, so disable the default inline runner and hand the

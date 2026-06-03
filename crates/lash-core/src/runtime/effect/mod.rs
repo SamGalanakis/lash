@@ -1,6 +1,6 @@
 mod envelope;
 mod executor;
-mod journal;
+mod outcome;
 
 pub use envelope::{
     LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
@@ -15,7 +15,7 @@ pub use executor::{
 pub use lash_sansio::CausalRef;
 
 pub(crate) use executor::{ProcessRunner, RuntimeEffectControllerHandle};
-pub(crate) use journal::{
+pub(crate) use outcome::{
     LlmTraceFailure, apply_direct_outcome, emit_llm_trace_completed, emit_llm_trace_failed,
     emit_llm_trace_started, token_usage_from_llm,
 };

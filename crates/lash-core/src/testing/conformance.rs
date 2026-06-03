@@ -244,7 +244,7 @@ async fn effect_host_static_scope_preserves_metadata_when_available(host: Arc<dy
 /// Run the concurrent recorded-effect replay conformance case for a
 /// handler-scoped durable controller.
 ///
-/// The first pass starts two journaled effects concurrently and intentionally
+/// The first pass starts two recorded effects concurrently and intentionally
 /// lets the second finish before the first. After `start_replay`, the same
 /// effects are requested in the opposite order with local executors that fail
 /// if called. A compliant controller returns the recorded outcomes by

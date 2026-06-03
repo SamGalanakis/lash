@@ -108,7 +108,7 @@ pub fn content_id(bytes: &[u8]) -> AttachmentId {
 /// [`AttachmentManifest`] before delegating each `put` to the backing
 /// [`AttachmentStore`]. The intent row durably captures "this session
 /// is about to write these bytes," so if the process dies between
-/// `put` and the next durable turn commit, a later GC sweep can
+/// `put` and the next committed runtime state, a later GC sweep can
 /// reconcile the orphaned bytes by walking
 /// [`AttachmentManifest::list_uncommitted`].
 ///

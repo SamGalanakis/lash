@@ -148,15 +148,15 @@ let core = LashCore::builder()
             </article>
             <article class="panel">
               <h3>Checkpoint blobs</h3>
-              <p>Compressed snapshots of tool, plugin, current-frame execution, and prompt state, content-hashed and deduplicated across resumes.</p>
+              <p>Compressed snapshots of committed tool, plugin, current-frame execution, and prompt state, content-hashed and deduplicated across store reopens.</p>
             </article>
             <article class="panel">
               <h3>Queued work</h3>
-              <p>Lease-claimed batches for queued turn input, process wakes, host events, timers, and resume work. Completed claim ids are cleared atomically with the runtime commit that consumed them.</p>
+              <p>Lease-claimed batches for queued turn input, process wakes, host events, and timers. Completed claim ids are cleared atomically with the runtime commit that consumed them.</p>
             </article>
             <article class="panel">
-              <h3>Turn leases and effect journal</h3>
-              <p>Lease-fenced in-flight turn checkpoints plus journaled runtime effect outcomes. External workflow adapters use these rows to resume a turn without re-running completed effects.</p>
+              <h3>Turn commit stamps</h3>
+              <p>Idempotency rows keyed by session and turn id. Identical final commit retries return the recorded result; changed hashes are rejected.</p>
             </article>
             <article class="panel">
               <h3>Usage deltas</h3>

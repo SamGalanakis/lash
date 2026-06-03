@@ -1748,7 +1748,7 @@ fn checkpoint_config(
         autonomous: false,
         tool_specs: Arc::new(Vec::new()),
         system_prompt: Arc::from(
-            "Synthetic durability profiler prompt. Preserve pending effects across checkpoint restore.",
+            "Synthetic sans-IO checkpoint profiler prompt. Preserve pending effects across checkpoint restore.",
         ),
         session_id: "runtime-perf-turn-checkpoint".to_string(),
         emit_llm_trace: false,
@@ -1789,7 +1789,7 @@ fn checkpoint_messages() -> Vec<Message> {
                 format!("checkpoint-msg-{index}"),
                 role,
                 format!(
-                    "Historical durability profiler message {index}. This payload is intentionally long enough to make TurnCheckpoint serialization include realistic prompt and transcript bytes. The current topic is standard and RLM turn-effect replay across LLM, tool, checkpoint, sleep, and ExecCode boundaries."
+                    "Historical checkpoint profiler message {index}. This payload is intentionally long enough to make TurnCheckpoint serialization include realistic prompt and transcript bytes. The current topic is standard and RLM turn-effect replay across LLM, tool, checkpoint, sleep, and ExecCode boundaries."
                 ),
             )
         })

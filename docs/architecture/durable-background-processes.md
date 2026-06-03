@@ -183,9 +183,9 @@ validates it.
 
 - Not "make every emitter supply a durable turn scope".
 - Not "the host re-implements recovery" (the OpenAI `RunState` model).
-- Not exactly-once side effects inside a process beyond what the existing effect
-  journal/replay provides for turns — the same at-least-once-with-idempotency
-  semantics apply.
+- Not exactly-once side effects inside a process beyond what the active effect
+  host can replay or dedupe — the same at-least-once-with-idempotency semantics
+  apply.
 
 ## Implementation
 

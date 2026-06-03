@@ -37,19 +37,18 @@ impl AgentTurnWorkflow for AgentTurnWorkflowImpl {
 The application owns `run_lash_turn`: open the `LashSession` from stable
 request data and call
 `session.turn(input.with_trace_turn_id(turn_id)).run_with_effect_scope(...)`
-for the durable turn. Restate recovery is handler replay with the same turn id
+for the Restate-backed turn. Restate recovery is handler replay with the same turn id
 and request data, not a Lash-owned in-flight checkpoint reload.
 
-The adapter journals Lash LLM calls, tool calls, direct completions,
+The adapter records Lash LLM calls, tool calls, direct completions,
 checkpoints, execution-surface syncs, and exec effects with Restate
-`ctx.run(...).name(lash:<replay_key>)`, then runs the normal
-Lash local executor inside that journaled block. Runtime sleeps use Restate
-durable timers. Substrate-native Restate turns do not claim Lash turn leases and
-do not write Lash effect-journal rows; Lash only commits final session state
-through its turn-commit idempotency contract. Replaying a handler with the same
-turn id returns Restate-recorded effect outcomes, validates the current Lash
-envelope hash, and retries the final commit without exposing partial session
-state.
+`ctx.run(...).name(lash:<replay_key>)`, then runs the normal Lash local
+executor inside that recorded block. Runtime sleeps use Restate durable timers.
+Substrate-native Restate turns do not use store-side in-flight replay rows; Lash
+only commits final session state through its turn-commit idempotency contract.
+Replaying a handler with the same turn id returns Restate-recorded effect
+outcomes, validates the current Lash envelope hash, and retries the final commit
+without exposing partial session state.
 
 Background tasks are scheduled through the first-party
 `LashProcessWorkflow`. Bind it on your Restate endpoint with `.serve()`:

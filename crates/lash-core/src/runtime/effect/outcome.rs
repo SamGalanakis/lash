@@ -134,7 +134,7 @@ pub(crate) fn llm_call_error_from_transport(err: LlmTransportError) -> LlmCallEr
 // Direct-completion outcome plumbing
 // =============================================================================
 
-/// Applies a journaled direct-effect outcome: records usage/trace against the
+/// Applies a recorded direct-effect outcome: records usage/trace against the
 /// session and yields the raw provider response. Both the text-only
 /// (`DirectCompletion`) and full-output (`DirectLlmCompletion`) client methods
 /// project from this single result.
@@ -176,12 +176,12 @@ async fn apply_direct_llm_result(
             emit_direct_llm_trace_completed(current, llm_call_id.as_deref(), caused_by, &response);
             let usage = token_usage_from_llm(&response.usage);
             // Record into the shared token ledger only. The ledger is the same
-            // `Arc` the turn loop drains at turn-commit time (`turn_loop.rs`),
-            // so this usage is persisted exactly once by the lease-fenced turn
-            // commit pipeline. We deliberately do NOT commit here:
+            // `Arc` the turn loop drains at turn-commit time (`turn_loop.rs`).
+            // This usage is persisted exactly once by the final turn commit.
+            // We deliberately do NOT commit here:
             //   * an out-of-band `commit_runtime_state` mid-turn races the
             //     owning turn's CAS and can bump the head from under it;
-            //   * on journal replay this `apply` runs again with the cached
+            //   * on effect-host replay this `apply` runs again with the cached
             //     outcome, and an incremental persist would double-merge the
             //     usage into the already-persisted state. Recording (without
             //     persisting) is replay-safe: it just rebuilds the in-memory

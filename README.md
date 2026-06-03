@@ -106,7 +106,7 @@ See [`docs/quickstart.html`](https://lash.run/quickstart.html) for the full walk
 
 ## Run the example
 
-`examples/agent-service` is a localhost SQLite-backed chat app that exercises the `lash` facade end-to-end: RLM protocol, typed session plugin activation, app-owned board tools, semantic streaming, per-chat model selection, SQLite runtime persistence, and optional Restate durable turn.
+`examples/agent-service` is a localhost SQLite-backed chat app that exercises the `lash` facade end-to-end: RLM protocol, typed session plugin activation, app-owned board tools, semantic streaming, per-chat model selection, SQLite runtime persistence, and optional Restate-backed turns.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... cargo run -p agent-service
@@ -143,7 +143,7 @@ The CI runtime-performance gate uses the quick synthetic profile:
 python3 scripts/profile_runtime.py --profile quick --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/ci.json
 ```
 
-That default matrix covers standard mode, RLM, RLM tool batches, large tool surfaces, observational-memory prompt and maintenance paths, embed paths, streaming, durable turn scopes, store reopen, and durable turn-checkpoint round trips. The nightly / manual `Performance` workflow runs the full runtime profile:
+That default matrix covers standard mode, RLM, RLM tool batches, large tool surfaces, observational-memory prompt and maintenance paths, embed paths, streaming, scoped effect-controller turns, store reopen, and sans-IO turn-checkpoint round trips. The nightly / manual `Performance` workflow runs the full runtime profile:
 
 ```bash
 python3 scripts/profile_runtime.py --profile full --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/full.json
