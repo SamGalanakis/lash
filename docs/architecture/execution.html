@@ -12,10 +12,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css?v=2">
+<link rel="stylesheet" href="../styles.css?v=9">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js?v=2" defer></script>
+<script src="../docs.js?v=3" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -59,7 +59,7 @@ flowchart TD
             <article class="panel"><small>standard</small><h3>Native provider tool calls</h3><p>The Standard protocol interprets provider output through <code>StandardDriver</code> and emits <code>DriverAction::StartTools</code>. The runtime dispatches registered native tools first, then tools contributed by registered <code>ToolProvider</code>s.</p></article>
             <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p>The RLM protocol extracts closed <code>lashlang</code> fences from the model output and runs them through a persistent VM. Read-only host bindings (e.g., <code>history</code>) are projected into Lashlang scope through <code>RlmProjectedBindings</code>; lazy bindings carry <code>ProjectionRef</code>s that resolve immediately before execution. They read like ordinary names but cannot be reassigned. The prompt renderer uses the effective <code>LashlangSurface</code>, so disabled process and trigger abilities are not advertised and fail during linking if emitted anyway. <code>continue_as</code> is an RLM native control tool, <code>llm_query</code> is supplied by <code>lash-llm-tools</code>, and the <code>stream_mask</code> plugin hides the still-streaming fence from live UI until execution completes. An RLM block ending with <code>continue_as { task, seed }</code> finishes the low-level turn as <code>TurnOutcome::AgentFrameSwitch { frame_id }</code>, appends a fresh AgentFrame inside the same session, and preserves turn index, trace continuity, process-scope decisions, and projected seed refs. App hosts call <code>session.turn(input).stream(&amp;sink)</code> or <code>.run()</code>; the facade follows AgentFrame switches and returns the final <code>TurnResult</code>.</p></article>
           </div>
-          <p>Background work — subagents and async tool calls — is described in <a href="#background-work">Background Work</a> below. Either protocol can spawn handles when a process registry is installed; RLM additionally discovers live handles via <code>list_process_handles</code> and resolves them with <code>await</code>.</p>
+          <p>Background work — subagents and async tool calls — is described in <a href="#background-work">Background Work</a> below. Either protocol can spawn handles when a process registry is installed; RLM additionally discovers visible runs via <code>processes.list</code> and resolves handles with <code>await</code>.</p>
         </div>
 
         <div class="section">
@@ -127,12 +127,12 @@ flowchart LR
   Host --> Manager["runtime session manager"]
   Manager --> Child["start_turn -> stream_turn"]
   Manager --> Registry["process registry"]
-  Registry --> Handles["list_process_handles<br/>tool.*"]
+  Registry --> Handles["processes.list<br/>tool.*"]
   Handles --> Await["await / cancel / submit_error"]
   Child --> Parent["usage relay + final result"]
             </div>
           </div>
-          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. Generic process controls expose <code>list_process_handles</code> and <code>cancel_process</code>, while <code>start &lt;tool&gt;</code> is the single way to run any ordinary tool as a durable process. A child can fail terminally with <code>await tools.submit_error({ reason: reason })?</code> (defined in <code>lash-subagents</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
+          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. Generic process controls expose <code>processes.list</code> and <code>processes.cancel</code>, while <code>start &lt;tool&gt;</code> is the single way to run any ordinary tool as a durable process. A child can fail terminally with <code>await tools.submit_error({ reason: reason })?</code> (defined in <code>lash-subagents</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
         </div>
 
         <div class="section">

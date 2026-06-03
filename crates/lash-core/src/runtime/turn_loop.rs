@@ -453,6 +453,7 @@ impl LashRuntime {
             .input
             .trace_turn_id
             .clone()
+            .or_else(|| opts.durable_turn_scope_id().map(ToOwned::to_owned))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         work.input.trace_turn_id = Some(turn_id.clone());
         let causes = work.turn_causes.clone();

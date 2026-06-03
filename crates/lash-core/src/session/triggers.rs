@@ -17,7 +17,7 @@ pub(crate) fn validate_host_event(
                 "unknown host event `{resource_type}.{alias}.{event}`"
             ))
         })?;
-    validate_payload(payload, &declared.payload_ty).map_err(|message| {
+    validate_payload(payload, declared.payload_type().ty()).map_err(|message| {
         PluginError::Session(format!(
             "invalid payload for host event `{resource_type}.{alias}.{event}`: {message}"
         ))
@@ -96,8 +96,14 @@ impl TriggerActivationService {
                 route.handle
             ))
         })?;
-        let mut args = lashlang::Record::with_capacity(1);
-        args.insert(route.input_name.clone(), lashlang::from_json(event_payload));
+        let mut args = lashlang::Record::default();
+        for (input_name, input) in route.input_template.entries() {
+            let value = match input {
+                lashlang::TriggerInputBinding::Event => event_payload.clone(),
+                lashlang::TriggerInputBinding::Fixed { value } => value.clone(),
+            };
+            args.insert(input_name.to_string(), lashlang::from_json(value));
+        }
         let args = match serde_json::to_value(lashlang::Value::Record(Arc::new(args)))
             .map_err(|err| PluginError::Session(format!("serialize trigger process args: {err}")))?
         {
@@ -147,7 +153,8 @@ fn validate_payload(value: &serde_json::Value, ty: &lashlang::TypeExpr) -> Resul
 
 fn json_matches_type(value: &serde_json::Value, ty: &lashlang::TypeExpr) -> bool {
     match ty {
-        lashlang::TypeExpr::Any | lashlang::TypeExpr::Ref(_) => true,
+        lashlang::TypeExpr::Any => true,
+        lashlang::TypeExpr::Ref(_) => false,
         lashlang::TypeExpr::Str => value.is_string(),
         lashlang::TypeExpr::Int => value.as_i64().is_some() || value.as_u64().is_some(),
         lashlang::TypeExpr::Float => value.is_number(),

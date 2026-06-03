@@ -75,6 +75,8 @@ pub struct ProcessDecl {
     pub params: Vec<ProcessParam>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_ty: Option<TypeExpr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<LabelMetadata>,
     pub body: Expr,
 }
 
@@ -82,6 +84,13 @@ pub struct ProcessDecl {
 pub struct ProcessParam {
     pub name: AstString,
     pub ty: TypeExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelMetadata {
+    pub title: AstString,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<AstString>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -113,6 +122,10 @@ pub enum AssignPathStep {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     Block(Vec<Expr>),
+    LabelAnnotated {
+        label: LabelMetadata,
+        expr: Box<Expr>,
+    },
     Null,
     Bool(bool),
     Number(f64),
@@ -225,6 +238,7 @@ impl Expr {
             Expr::Block(expressions) | Expr::List(expressions) => {
                 buffer.extend(expressions.iter());
             }
+            Expr::LabelAnnotated { expr, .. } => buffer.push(expr),
             Expr::Record(entries) => buffer.extend(entries.iter().map(|(_, value)| value)),
             Expr::Assign { target, expr } => {
                 for step in &target.steps {
@@ -353,6 +367,10 @@ where
                 .map(|expr| folder.fold_expr(expr))
                 .collect(),
         ),
+        Expr::LabelAnnotated { label, expr } => Expr::LabelAnnotated {
+            label,
+            expr: Box::new(folder.fold_expr(*expr)),
+        },
         Expr::List(items) => Expr::List(
             items
                 .into_iter()

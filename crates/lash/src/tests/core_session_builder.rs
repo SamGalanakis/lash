@@ -277,7 +277,9 @@ async fn rlm_mode_config_lashlang_abilities_drive_prompt_surface() -> Result<()>
 
     let prompts = seen.lock().expect("seen prompts");
     assert!(prompts[0].contains("Trigger registry"));
-    assert!(prompts[0].contains("constructor from the Host Surface"));
+    assert!(prompts[0].contains("trigger registration connects"));
+    assert!(prompts[0].contains("process definition"));
+    assert!(prompts[0].contains("triggers.list({})"));
     assert!(!prompts[0].contains("TRIGGER."));
     Ok(())
 }

@@ -72,6 +72,10 @@ impl RlmSubagentToolsProvider {
             .start(request)
             .await
             .map_err(|err| format!("failed to start subagent process: {err}"))?;
+        context.emit_lashlang_child_process_started(
+            prepared.process_id.clone(),
+            Some("subagent".to_string()),
+        );
         let output = context
             .processes()
             .await_process(&prepared.process_id)
@@ -232,6 +236,11 @@ pub fn spawn_agent_tool_definition(capability_names: &[String]) -> ToolDefinitio
             format!(
                 r#"typed = await agents.spawn({{ task: "Find the longest line in src/main.rs"{capability_arg}, output: {{ line: "str", length: "int" }} }})?"#
             ),
+            // Record shorthand uses string descriptors for every field,
+            // including list fields.
+            format!(
+                r#"queries = await agents.spawn({{ task: "Generate two focused web search queries"{capability_arg}, output: {{ queries: "list[str]" }} }})?"#
+            ),
             // Reusable Type literal for richer shapes.
             r#"Shape = Type { name: str, tags: list[str], status: enum["ok", "err"] }"#.into(),
             format!(
@@ -255,6 +264,7 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
     let capability_detail = capability_detail_for_tool_description(capability_names);
     let description = format!(
         "Run a subagent through the `agents.spawn` module operation and return its final result. For process-level fan-out, declare a named process that accepts `agents: Agents`, call `await agents.spawn({{ ... }})?` inside it, then `start` that named process once per branch with `agents: agents`. {capability_detail} `output` defines the typed return shape. Available capabilities: {cap_list}. \
+        In record shorthand, each `output` field value is a string type descriptor such as `\"str\"`, `\"int\"`, or `\"list[str]\"`; pass a Lashlang `Type {{ ... }}` literal for nested shapes. \
         \n\nThe child starts with **no** inherited state — globals, projected bindings, message history are all blank. Hand it specific data via `seed: {{ name: value, ... }}`. Each entry's kind is preserved automatically: if `value`'s lashlang source root is a host-projected binding (e.g. `seed: {{ problem: input.prompt }}`) the child receives `problem` as a read-only projected binding, identical to how it appeared on the parent. Otherwise it lands as a regular RLM global. Computed expressions default to global. Projected seed entries require an RLM child; passing one to a non-RLM capability is an error.\
         \n\nA child can fail terminally with `await tools.submit_error({{ reason: \"...\" }})?`; this tool returns an error with that reason."
     );

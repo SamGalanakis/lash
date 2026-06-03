@@ -160,11 +160,13 @@ pub trait ProcessService: Send + Sync {
     ) -> Result<ProcessHandleSummary, PluginError> {
         let (registration, options, descriptor) = request.into_registration_and_options();
         let record = self.start(session_id, registration, options, scope).await?;
+        let definition = super::model::ProcessDefinitionSummary::from_input(record.input.as_ref());
         Ok(ProcessHandleSummary::new(
             record.id,
             descriptor,
             ProcessLifecycleStatus::from(record.status),
         ))
+        .map(|summary| summary.with_definition(definition))
     }
 
     async fn start(

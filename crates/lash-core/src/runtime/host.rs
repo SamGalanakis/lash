@@ -52,7 +52,7 @@ pub struct RuntimeControlConfig {
 #[derive(Clone)]
 pub struct RuntimeTracingConfig {
     pub trace_sink: Option<Arc<dyn TraceSink>>,
-    pub process_tracking_sink: Option<Arc<dyn TraceSink>>,
+    pub lashlang_execution_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
 }
@@ -93,7 +93,7 @@ impl RuntimeHostConfig {
             },
             tracing: RuntimeTracingConfig {
                 trace_sink: None,
-                process_tracking_sink: None,
+                lashlang_execution_sink: None,
                 trace_level: TraceLevel::Standard,
                 trace_context: TraceContext::default(),
             },

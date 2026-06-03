@@ -70,15 +70,14 @@ source = clock.Alarm({ at: "08:00" })
 handle = await triggers.register({
   source: source,
   target: remember,
+  inputs: { tick: trigger.event },
   name: "remembered"
 })?
 submit "registered"
 "#;
 
     const HOST_EVENT_TRIGGER_SOURCE: &str = r#"
-type ButtonPressed = { button: str, message: str, pressed_at: str }
-
-process remember_button(event: ButtonPressed) {
+process remember_button(event: ui.button.Pressed) {
   wake { button: event.button, message: event.message }
   finish { button: event.button, ok: true }
 }
@@ -87,6 +86,7 @@ source = ui.button.pressed({})
 handle = await triggers.register({
   source: source,
   target: remember_button,
+  inputs: { event: trigger.event },
   name: "button remembered"
 })?
 submit "registered"
@@ -94,24 +94,47 @@ submit "registered"
 
     const SESSION_ID: &str = "rebuild-conformance";
 
-    fn button_pressed_event_type() -> crate::modes::TypeExpr {
-        crate::modes::TypeExpr::Object(vec![
-            crate::modes::TypeField {
-                name: "button".into(),
-                ty: crate::modes::TypeExpr::Str,
-                optional: false,
-            },
-            crate::modes::TypeField {
-                name: "message".into(),
-                ty: crate::modes::TypeExpr::Str,
-                optional: false,
-            },
-            crate::modes::TypeField {
-                name: "pressed_at".into(),
-                ty: crate::modes::TypeExpr::Str,
-                optional: false,
-            },
-        ])
+    fn clock_tick_event_type() -> crate::modes::NamedDataType {
+        crate::modes::NamedDataType::object(
+            "clock.Tick",
+            vec![
+                crate::modes::TypeField {
+                    name: "id".into(),
+                    ty: crate::modes::TypeExpr::Str,
+                    optional: false,
+                },
+                crate::modes::TypeField {
+                    name: "scheduled_at".into(),
+                    ty: crate::modes::TypeExpr::Str,
+                    optional: false,
+                },
+            ],
+        )
+        .expect("valid clock tick type")
+    }
+
+    fn button_pressed_event_type() -> crate::modes::NamedDataType {
+        crate::modes::NamedDataType::object(
+            "ui.button.Pressed",
+            vec![
+                crate::modes::TypeField {
+                    name: "button".into(),
+                    ty: crate::modes::TypeExpr::Str,
+                    optional: false,
+                },
+                crate::modes::TypeField {
+                    name: "message".into(),
+                    ty: crate::modes::TypeExpr::Str,
+                    optional: false,
+                },
+                crate::modes::TypeField {
+                    name: "pressed_at".into(),
+                    ty: crate::modes::TypeExpr::Str,
+                    optional: false,
+                },
+            ],
+        )
+        .expect("valid button event type")
     }
 
     fn rebuild_abilities() -> crate::modes::LashlangAbilities {
@@ -136,20 +159,24 @@ submit "registered"
 
         fn lashlang_resources(&self) -> crate::modes::ResourceCatalog {
             let mut resources = crate::modes::ResourceCatalog::new();
-            resources.add_trigger_source_constructor(
-                ["clock", "Alarm"],
-                crate::modes::TypeExpr::Object(vec![crate::modes::TypeField {
-                    name: "at".into(),
-                    ty: crate::modes::TypeExpr::Str,
-                    optional: false,
-                }]),
-                crate::modes::TypeExpr::Ref("clock.Tick".into()),
-            );
-            resources.add_trigger_source_constructor(
-                ["ui", "button", "pressed"],
-                crate::modes::TypeExpr::Object(Vec::new()),
-                button_pressed_event_type(),
-            );
+            resources
+                .add_trigger_source_constructor(
+                    ["clock", "Alarm"],
+                    crate::modes::TypeExpr::Object(vec![crate::modes::TypeField {
+                        name: "at".into(),
+                        ty: crate::modes::TypeExpr::Str,
+                        optional: false,
+                    }]),
+                    clock_tick_event_type(),
+                )
+                .expect("valid clock trigger source");
+            resources
+                .add_trigger_source_constructor(
+                    ["ui", "button", "pressed"],
+                    crate::modes::TypeExpr::Object(Vec::new()),
+                    button_pressed_event_type(),
+                )
+                .expect("valid button trigger source");
             resources
         }
 
@@ -169,10 +196,12 @@ submit "registered"
         }
 
         fn register(&self, reg: &mut PluginRegistrar) -> std::result::Result<(), PluginError> {
-            reg.host_events().declare(
-                crate::HostEvent::new("Button", "ui.button", "pressed")
-                    .payload(button_pressed_event_type()),
-            )?;
+            reg.host_events().declare(crate::HostEvent::new(
+                "Button",
+                "ui.button",
+                "pressed",
+                button_pressed_event_type(),
+            ))?;
             Ok(())
         }
     }

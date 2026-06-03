@@ -28,7 +28,8 @@ mod value;
 mod vm;
 
 pub use cache::{
-    CompiledProcessCache, CompiledProcessCacheKey, CompiledProgramCache, CompiledProgramCacheStats,
+    CompiledLinkedProgram, CompiledProcessCache, CompiledProcessCacheKey, CompiledProgramCache,
+    CompiledProgramCacheStats, LinkedProgramCache, LinkedProgramCacheError,
 };
 #[allow(unused_imports)]
 pub(crate) use compiler::*;

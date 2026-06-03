@@ -449,11 +449,16 @@ impl AppDb {
         code: Option<String>,
     ) -> AppResult<ChatMessage> {
         let (payload, tool_call_ids) = match event {
-            TurnEvent::CodeBlockStarted { language, code } => (
+            TurnEvent::CodeBlockStarted {
+                language,
+                code,
+                graph_key,
+            } => (
                 json!({
                     "phase": "started",
                     "language": language,
                     "code": code,
+                    "graph_key": graph_key,
                 }),
                 Vec::new(),
             ),
@@ -464,6 +469,7 @@ impl AppDb {
                 success,
                 duration_ms,
                 tool_call_ids,
+                graph_key,
             } => (
                 json!({
                     "phase": "completed",
@@ -474,6 +480,7 @@ impl AppDb {
                     "duration_ms": duration_ms,
                     "tool_call_ids": tool_call_ids,
                     "code": code,
+                    "graph_key": graph_key,
                 }),
                 tool_call_ids,
             ),
@@ -517,6 +524,7 @@ impl AppDb {
                 success,
                 duration_ms,
                 tool_call_ids,
+                graph_key,
             } => (
                 json!({
                     "phase": "completed",
@@ -527,6 +535,7 @@ impl AppDb {
                     "duration_ms": duration_ms,
                     "tool_call_ids": tool_call_ids,
                     "code": code,
+                    "graph_key": graph_key,
                 }),
                 tool_call_ids,
             ),

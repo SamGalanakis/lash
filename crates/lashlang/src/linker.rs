@@ -4,23 +4,27 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::artifact::{ModuleArtifact, surface_requirements_for_program_with_catalog};
+use crate::artifact::{
+    ModuleArtifact, SurfaceRequirements, surface_requirements_for_program_with_catalog,
+};
 use crate::ast::{
-    AssignPathStep, AstString, Declaration, Expr, ProcessDecl, Program, ResourceRefExpr, TypeExpr,
-    TypeField, format_type_expr,
+    AssignPathStep, AstString, Declaration, Expr, ProcessDecl, ProcessParam, Program,
+    ResourceRefExpr, TypeExpr, TypeField, format_type_expr,
 };
 use crate::lexer::Span;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceCatalog {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub module_instances: BTreeMap<String, ModuleInstanceCatalog>,
+    module_instances: BTreeMap<String, ModuleInstanceCatalog>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub resource_types: BTreeMap<String, ResourceTypeCatalog>,
+    resource_types: BTreeMap<String, ResourceTypeCatalog>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub value_constructors: BTreeMap<String, ValueConstructorBinding>,
+    named_data_types: BTreeMap<String, NamedDataType>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub trigger_sources: BTreeMap<String, TriggerSourceBinding>,
+    value_constructors: BTreeMap<String, ValueConstructorBinding>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    trigger_sources: BTreeMap<String, TriggerSourceBinding>,
 }
 
 impl ResourceCatalog {
@@ -110,32 +114,65 @@ impl ResourceCatalog {
         );
     }
 
+    pub fn add_named_data_type(
+        &mut self,
+        data_type: NamedDataType,
+    ) -> Result<(), ResourceCatalogError> {
+        self.merge_named_data_type(data_type)
+    }
+
     pub fn add_trigger_source_constructor(
         &mut self,
         path: impl IntoIterator<Item = impl Into<String>>,
         input_ty: TypeExpr,
-        event_ty: TypeExpr,
-    ) {
+        event_ty: NamedDataType,
+    ) -> Result<(), ResourceCatalogError> {
         let path = path.into_iter().map(Into::into).collect::<Vec<_>>();
         assert!(!path.is_empty(), "constructor path must not be empty");
         let source_type = module_path_key(&path);
+        self.check_named_data_type(&event_ty)?;
+        if let Some(existing) = self.trigger_sources.get(source_type.as_str())
+            && existing.event_type() != &event_ty
+        {
+            return Err(ResourceCatalogError::ConflictingTriggerSource {
+                source_type,
+                existing: existing.event_type().name().to_string(),
+                incoming: event_ty.name().to_string(),
+            });
+        }
         self.add_value_constructor(path, input_ty, TypeExpr::Ref(source_type.clone().into()));
-        self.add_trigger_source_type(source_type, event_ty);
+        self.add_trigger_source_type(source_type, event_ty)?;
+        Ok(())
     }
 
-    pub fn add_trigger_source_type(&mut self, source_ty: impl Into<String>, event_ty: TypeExpr) {
+    pub(crate) fn add_trigger_source_type(
+        &mut self,
+        source_ty: impl Into<String>,
+        event_ty: NamedDataType,
+    ) -> Result<(), ResourceCatalogError> {
+        self.merge_named_data_type(event_ty.clone())?;
         self.trigger_sources
-            .insert(source_ty.into(), TriggerSourceBinding { event_ty });
+            .insert(source_ty.into(), TriggerSourceBinding::new(event_ty));
+        Ok(())
     }
 
     pub fn extend(&mut self, other: Self) {
+        self.try_extend(other)
+            .expect("conflicting named host data type definitions");
+    }
+
+    pub fn try_extend(&mut self, other: Self) -> Result<(), ResourceCatalogError> {
         for (resource_type, incoming) in other.resource_types {
             let entry = self.resource_types.entry(resource_type).or_default();
             entry.operations.extend(incoming.operations);
         }
         self.module_instances.extend(other.module_instances);
+        for data_type in other.named_data_types.into_values() {
+            self.merge_named_data_type(data_type)?;
+        }
         self.value_constructors.extend(other.value_constructors);
         self.trigger_sources.extend(other.trigger_sources);
+        Ok(())
     }
 
     pub fn union(mut self, other: Self) -> Self {
@@ -143,8 +180,91 @@ impl ResourceCatalog {
         self
     }
 
+    pub fn satisfies(&self, required: &Self) -> bool {
+        for (path, required_module) in &required.module_instances {
+            if self.module_instances.get(path) != Some(required_module) {
+                return false;
+            }
+        }
+        for (resource_type, required_catalog) in &required.resource_types {
+            let Some(catalog) = self.resource_types.get(resource_type) else {
+                return false;
+            };
+            for (operation, required_binding) in &required_catalog.operations {
+                if catalog.operations.get(operation) != Some(required_binding) {
+                    return false;
+                }
+            }
+        }
+        for (path, required_constructor) in &required.value_constructors {
+            if self.value_constructors.get(path) != Some(required_constructor) {
+                return false;
+            }
+        }
+        for (name, required_data_type) in &required.named_data_types {
+            if self.named_data_types.get(name) != Some(required_data_type) {
+                return false;
+            }
+        }
+        for (source_type, required_binding) in &required.trigger_sources {
+            if self.trigger_sources.get(source_type) != Some(required_binding) {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn has_resource_type(&self, resource_type: &str) -> bool {
         self.resource_types.contains_key(resource_type)
+    }
+
+    pub fn has_named_data_type(&self, name: &str) -> bool {
+        self.named_data_types.contains_key(name)
+    }
+
+    pub fn is_known_opaque_value_type(&self, name: &str) -> bool {
+        self.trigger_sources.contains_key(name)
+            || self.value_constructors.values().any(|constructor| {
+                matches!(&constructor.output_ty, TypeExpr::Ref(type_name) if type_name == name)
+            })
+    }
+
+    pub fn module_instances(&self) -> impl Iterator<Item = (&str, &ModuleInstanceCatalog)> {
+        self.module_instances
+            .iter()
+            .map(|(path, module)| (path.as_str(), module))
+    }
+
+    pub fn resource_types(&self) -> impl Iterator<Item = (&str, &ResourceTypeCatalog)> {
+        self.resource_types
+            .iter()
+            .map(|(resource_type, catalog)| (resource_type.as_str(), catalog))
+    }
+
+    pub fn named_data_types(&self) -> impl Iterator<Item = (&str, &NamedDataType)> {
+        self.named_data_types
+            .iter()
+            .map(|(name, data_type)| (name.as_str(), data_type))
+    }
+
+    pub fn value_constructors(&self) -> impl Iterator<Item = (&str, &ValueConstructorBinding)> {
+        self.value_constructors
+            .iter()
+            .map(|(path, constructor)| (path.as_str(), constructor))
+    }
+
+    pub fn trigger_sources(&self) -> impl Iterator<Item = (&str, &TriggerSourceBinding)> {
+        self.trigger_sources
+            .iter()
+            .map(|(source_type, binding)| (source_type.as_str(), binding))
+    }
+
+    pub fn resolve_named_data_type(&self, name: &str) -> Option<&NamedDataType> {
+        self.named_data_types.get(name)
+    }
+
+    pub fn resolve_trigger_source(&self, source_ty: &str) -> Option<&TriggerSourceBinding> {
+        self.trigger_sources.get(source_ty)
     }
 
     pub fn resolve_module_path(&self, path: &[impl AsRef<str>]) -> Option<ResourceRefExpr> {
@@ -207,13 +327,13 @@ impl ResourceCatalog {
         self.value_constructors.get(&module_path_key(path))
     }
 
-    pub fn trigger_source_event(&self, source_ty: &TypeExpr) -> Option<&TypeExpr> {
+    pub fn trigger_source_event(&self, source_ty: &TypeExpr) -> Option<TypeExpr> {
         let TypeExpr::Ref(name) = source_ty else {
             return None;
         };
         self.trigger_sources
             .get(name.as_str())
-            .map(|binding| &binding.event_ty)
+            .map(|binding| binding.event_type().to_ref_ty())
     }
 
     pub fn operation_suggestions_for_host(&self, host_operation: &str) -> Vec<String> {
@@ -255,6 +375,165 @@ impl ResourceCatalog {
         suggestions.dedup();
         suggestions
     }
+
+    fn check_named_data_type(&self, data_type: &NamedDataType) -> Result<(), ResourceCatalogError> {
+        if let Some(existing) = self.named_data_types.get(data_type.name())
+            && existing != data_type
+        {
+            return Err(ResourceCatalogError::ConflictingNamedDataType {
+                name: data_type.name().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn merge_named_data_type(
+        &mut self,
+        data_type: NamedDataType,
+    ) -> Result<(), ResourceCatalogError> {
+        self.check_named_data_type(&data_type)?;
+        self.named_data_types
+            .entry(data_type.name().to_string())
+            .or_insert(data_type);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedDataType {
+    name: String,
+    ty: TypeExpr,
+}
+
+impl NamedDataType {
+    pub fn new(name: impl Into<String>, ty: TypeExpr) -> Result<Self, NamedDataTypeError> {
+        let name = name.into();
+        if !is_qualified_type_name(&name) {
+            return Err(NamedDataTypeError::InvalidName { name });
+        }
+        if !matches!(ty, TypeExpr::Object(_)) {
+            return Err(NamedDataTypeError::ExpectedObject { name });
+        }
+        validate_named_data_shape(&ty)?;
+        Ok(Self { name, ty })
+    }
+
+    pub fn object(
+        name: impl Into<String>,
+        fields: Vec<TypeField>,
+    ) -> Result<Self, NamedDataTypeError> {
+        Self::new(name, TypeExpr::Object(fields))
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn ty(&self) -> &TypeExpr {
+        &self.ty
+    }
+
+    pub fn to_ref_ty(&self) -> TypeExpr {
+        TypeExpr::Ref(self.name.clone().into())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum NamedDataTypeError {
+    #[error("host data type name `{name}` must be qualified")]
+    InvalidName { name: String },
+    #[error("host data type `{name}` must be an object type")]
+    ExpectedObject { name: String },
+    #[error("host data type object has duplicate field `{field}`")]
+    DuplicateField { field: String },
+    #[error("host data type enum has duplicate value `{value}`")]
+    DuplicateEnumValue { value: String },
+    #[error("host data type shape cannot contain nested type ref `{name}`")]
+    NestedRef { name: String },
+    #[error("host data type shape cannot contain {ty}")]
+    UnsupportedType { ty: &'static str },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ResourceCatalogError {
+    #[error("conflicting host data type definition `{name}`")]
+    ConflictingNamedDataType { name: String },
+    #[error(
+        "trigger source `{source_type}` already emits `{existing}`, cannot change it to `{incoming}`"
+    )]
+    ConflictingTriggerSource {
+        source_type: String,
+        existing: String,
+        incoming: String,
+    },
+}
+
+fn is_qualified_type_name(name: &str) -> bool {
+    let mut segments = name.split('.');
+    let mut count = 0usize;
+    for segment in segments.by_ref() {
+        count += 1;
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return false;
+        }
+        if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+            return false;
+        }
+    }
+    count >= 2
+}
+
+fn validate_named_data_shape(ty: &TypeExpr) -> Result<(), NamedDataTypeError> {
+    match ty {
+        TypeExpr::Any
+        | TypeExpr::Str
+        | TypeExpr::Int
+        | TypeExpr::Float
+        | TypeExpr::Bool
+        | TypeExpr::Dict
+        | TypeExpr::Null => Ok(()),
+        TypeExpr::Enum(values) => {
+            let mut seen = BTreeSet::new();
+            for value in values {
+                if !seen.insert(value.to_string()) {
+                    return Err(NamedDataTypeError::DuplicateEnumValue {
+                        value: value.to_string(),
+                    });
+                }
+            }
+            Ok(())
+        }
+        TypeExpr::List(item) => validate_named_data_shape(item),
+        TypeExpr::Object(fields) => {
+            let mut seen = BTreeSet::new();
+            for field in fields {
+                if !seen.insert(field.name.to_string()) {
+                    return Err(NamedDataTypeError::DuplicateField {
+                        field: field.name.to_string(),
+                    });
+                }
+                validate_named_data_shape(&field.ty)?;
+            }
+            Ok(())
+        }
+        TypeExpr::Union(items) => {
+            for item in items {
+                validate_named_data_shape(item)?;
+            }
+            Ok(())
+        }
+        TypeExpr::Ref(name) => Err(NamedDataTypeError::NestedRef {
+            name: name.to_string(),
+        }),
+        TypeExpr::Process { .. } => Err(NamedDataTypeError::UnsupportedType { ty: "process" }),
+        TypeExpr::TriggerHandle(_) => Err(NamedDataTypeError::UnsupportedType {
+            ty: "trigger handle",
+        }),
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,7 +566,25 @@ pub struct ValueConstructorBinding {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerSourceBinding {
-    pub event_ty: TypeExpr,
+    event_type: NamedDataType,
+}
+
+impl TriggerSourceBinding {
+    fn new(event_type: NamedDataType) -> Self {
+        Self { event_type }
+    }
+
+    pub fn event_type(&self) -> &NamedDataType {
+        &self.event_type
+    }
+
+    pub fn event_ty(&self) -> &TypeExpr {
+        self.event_type.ty()
+    }
+
+    pub fn event_type_name(&self) -> &str {
+        self.event_type.name()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +593,8 @@ pub struct LashlangSurface {
     pub resources: ResourceCatalog,
     #[serde(default)]
     pub abilities: LashlangAbilities,
+    #[serde(default)]
+    pub language_features: LashlangLanguageFeatures,
 }
 
 impl LashlangSurface {
@@ -303,7 +602,44 @@ impl LashlangSurface {
         Self {
             resources,
             abilities,
+            language_features: LashlangLanguageFeatures::default(),
         }
+    }
+
+    pub fn with_language_features(mut self, language_features: LashlangLanguageFeatures) -> Self {
+        self.language_features = language_features;
+        self
+    }
+
+    pub fn satisfies(&self, requirements: &SurfaceRequirements) -> bool {
+        self.abilities.satisfies(requirements.abilities)
+            && self
+                .language_features
+                .satisfies(requirements.language_features)
+            && self.resources.satisfies(&requirements.resources)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LashlangLanguageFeatures {
+    pub label_annotations: bool,
+}
+
+impl LashlangLanguageFeatures {
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            label_annotations: self.label_annotations || other.label_annotations,
+        }
+    }
+
+    pub fn satisfies(self, required: Self) -> bool {
+        !required.label_annotations || self.label_annotations
+    }
+
+    pub fn with_label_annotations(mut self) -> Self {
+        self.label_annotations = true;
+        self
     }
 }
 
@@ -324,6 +660,13 @@ impl LashlangAbilities {
             process_signals: self.process_signals || other.process_signals,
             triggers: self.triggers || other.triggers,
         }
+    }
+
+    pub fn satisfies(self, required: Self) -> bool {
+        (!required.processes || self.processes)
+            && (!required.sleep || self.sleep)
+            && (!required.process_signals || self.process_signals)
+            && (!required.triggers || self.triggers)
     }
 
     pub fn with_processes(mut self) -> Self {
@@ -430,6 +773,8 @@ pub enum LinkError {
     UnknownBuiltin { name: String, span: Option<Span> },
     #[error("unknown module `{path}`")]
     UnknownResource { path: String, span: Option<Span> },
+    #[error("unknown type `{name}`")]
+    UnknownType { name: String, span: Option<Span> },
     #[error("constructor `{path}` expects {expected}, got {actual}")]
     IncompatibleConstructorInput {
         path: String,
@@ -451,8 +796,32 @@ pub enum LinkError {
         actual: String,
         span: Option<Span>,
     },
-    #[error("trigger registration requires {{ source, target, name? }}")]
+    #[error("trigger registration requires {{ source, target, inputs, name? }}")]
     InvalidTriggerRegistration { span: Option<Span> },
+    #[error("trigger registration `inputs` must be a literal record")]
+    InvalidTriggerInputs { span: Option<Span> },
+    #[error("trigger registration input `{input}` is duplicated")]
+    DuplicateTriggerInput { input: String, span: Option<Span> },
+    #[error("trigger target `{process}` input `{input}` is not mapped")]
+    MissingTriggerInput {
+        process: String,
+        input: String,
+        span: Option<Span>,
+    },
+    #[error("trigger target `{process}` has no input `{input}`")]
+    UnknownTriggerInput {
+        process: String,
+        input: String,
+        span: Option<Span>,
+    },
+    #[error("trigger registration `inputs` must map at least one param to `trigger.event`")]
+    MissingTriggerEventInput { span: Option<Span> },
+    #[error("`trigger.event` is only valid as a direct value inside `triggers.register` inputs")]
+    TriggerEventOutsideInputs { span: Option<Span> },
+    #[error(
+        "`trigger.event` represents the whole event; projections such as `trigger.event.field` are not supported"
+    )]
+    TriggerEventProjection { span: Option<Span> },
     #[error("trigger listing requires {{ target }}")]
     InvalidTriggerList { span: Option<Span> },
     #[error("trigger cancellation requires {{ handle }}")]
@@ -462,11 +831,12 @@ pub enum LinkError {
         source_ty: String,
         span: Option<Span>,
     },
-    #[error("trigger target must be a single-input process, got {actual}")]
+    #[error("trigger target must be a process value, got {actual}")]
     InvalidTriggerTarget { actual: String, span: Option<Span> },
-    #[error("trigger source emits {event}, but target expects {input}")]
+    #[error("trigger source emits {event}, but target input `{input_name}` expects {input}")]
     TriggerEventMismatch {
         event: String,
+        input_name: String,
         input: String,
         span: Option<Span>,
     },
@@ -514,6 +884,12 @@ pub enum LinkError {
         keyword: &'static str,
         span: Option<Span>,
     },
+    #[error("cannot access `{access}` on opaque host value `{type_name}`")]
+    OpaqueHostValueAccess {
+        type_name: String,
+        access: String,
+        span: Option<Span>,
+    },
     #[error("failed to hash linked module: {message}")]
     ModuleHash { message: String },
 }
@@ -530,10 +906,18 @@ impl LinkError {
             | Self::UnknownName { span, .. }
             | Self::UnknownBuiltin { span, .. }
             | Self::UnknownResource { span, .. }
+            | Self::UnknownType { span, .. }
             | Self::IncompatibleConstructorInput { span, .. }
             | Self::IncompatibleOperationInput { span, .. }
             | Self::IncompatibleProcessReturn { span, .. }
             | Self::InvalidTriggerRegistration { span }
+            | Self::InvalidTriggerInputs { span }
+            | Self::DuplicateTriggerInput { span, .. }
+            | Self::MissingTriggerInput { span, .. }
+            | Self::UnknownTriggerInput { span, .. }
+            | Self::MissingTriggerEventInput { span }
+            | Self::TriggerEventOutsideInputs { span }
+            | Self::TriggerEventProjection { span }
             | Self::InvalidTriggerList { span }
             | Self::InvalidTriggerCancel { span }
             | Self::UnknownTriggerSourceType { span, .. }
@@ -545,7 +929,8 @@ impl LinkError {
             | Self::BareToolCall { span, .. }
             | Self::IncompatibleProcessArgument { span, .. }
             | Self::FeatureDisabled { span, .. }
-            | Self::ProcessLifecycleOutsideProcess { span, .. } => *span,
+            | Self::ProcessLifecycleOutsideProcess { span, .. }
+            | Self::OpaqueHostValueAccess { span, .. } => *span,
             Self::ModuleHash { .. } => None,
         }
     }
@@ -605,6 +990,7 @@ impl<'module> Linker<'module> {
     }
 
     fn collect_declarations(&mut self) -> Result<(), LinkError> {
+        self.ensure_label_annotations_enabled_for_program()?;
         let mut names = BTreeSet::new();
         for (index, declaration) in self.program.declarations.iter().enumerate() {
             let span = self.program.declaration_spans.get(index).copied();
@@ -635,6 +1021,19 @@ impl<'module> Linker<'module> {
             }
             if let Declaration::Process(decl) = declaration {
                 self.process_names.insert(decl.name.to_string());
+            }
+        }
+        for declaration in &self.program.declarations {
+            match declaration {
+                Declaration::Type(type_decl) => self.validate_type_refs(&type_decl.ty, None)?,
+                Declaration::Process(process) => {
+                    for param in &process.params {
+                        self.validate_type_refs(&param.ty, None)?;
+                    }
+                    if let Some(return_ty) = &process.return_ty {
+                        self.validate_type_refs(return_ty, None)?;
+                    }
+                }
             }
         }
         for declaration in &self.program.declarations {
@@ -669,6 +1068,30 @@ impl<'module> Linker<'module> {
         Ok(())
     }
 
+    fn ensure_label_annotations_enabled_for_program(&self) -> Result<(), LinkError> {
+        if self.surface.language_features.label_annotations {
+            return Ok(());
+        }
+        for (index, declaration) in self.program.declarations.iter().enumerate() {
+            let span = self.program.declaration_spans.get(index).copied();
+            if let Declaration::Process(process) = declaration {
+                if process.label.is_some() || expr_has_label_annotation(&process.body) {
+                    return Err(LinkError::FeatureDisabled {
+                        feature: "label annotations",
+                        span,
+                    });
+                }
+            }
+        }
+        if expr_has_label_annotation(&self.program.main) {
+            return Err(LinkError::FeatureDisabled {
+                feature: "label annotations",
+                span: self.program.expression_spans.first().copied(),
+            });
+        }
+        Ok(())
+    }
+
     fn binding_for_type(&self, ty: &TypeExpr) -> Binding {
         match self.resource_type_for_type(ty) {
             Some(resource_type) => Binding::Resource { resource_type },
@@ -695,11 +1118,17 @@ impl<'module> Linker<'module> {
                 if !seen.insert(name.to_string()) {
                     return ty.clone();
                 }
-                let resolved = self
-                    .type_defs
-                    .get(name.as_str())
-                    .map(|ty| self.resolve_type_aliases_inner(ty, seen))
-                    .unwrap_or_else(|| ty.clone());
+                let resolved = if let Some(ty) = self.type_defs.get(name.as_str()) {
+                    self.resolve_type_aliases_inner(ty, seen)
+                } else if let Some(data_type) = self
+                    .surface
+                    .resources
+                    .resolve_named_data_type(name.as_str())
+                {
+                    data_type.ty().clone()
+                } else {
+                    ty.clone()
+                };
                 seen.remove(name.as_str());
                 resolved
             }
@@ -751,6 +1180,73 @@ impl<'module> Linker<'module> {
         crate::trigger::is_resolved_type_assignable(&source, &target)
     }
 
+    fn validate_type_refs(&self, ty: &TypeExpr, span: Option<Span>) -> Result<(), LinkError> {
+        match ty {
+            TypeExpr::Ref(name) => {
+                if self.type_defs.contains_key(name.as_str())
+                    || self.surface.resources.has_resource_type(name.as_str())
+                    || self.surface.resources.has_named_data_type(name.as_str())
+                    || self
+                        .surface
+                        .resources
+                        .is_known_opaque_value_type(name.as_str())
+                {
+                    Ok(())
+                } else {
+                    Err(LinkError::UnknownType {
+                        name: name.to_string(),
+                        span,
+                    })
+                }
+            }
+            TypeExpr::List(item) => self.validate_type_refs(item, span),
+            TypeExpr::Object(fields) => {
+                for field in fields {
+                    self.validate_type_refs(&field.ty, span)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Union(items) => {
+                for item in items {
+                    self.validate_type_refs(item, span)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Process { input, output, .. } => {
+                self.validate_type_refs(input, span)?;
+                self.validate_type_refs(output, span)
+            }
+            TypeExpr::TriggerHandle(event) => self.validate_type_refs(event, span),
+            TypeExpr::Any
+            | TypeExpr::Str
+            | TypeExpr::Int
+            | TypeExpr::Float
+            | TypeExpr::Bool
+            | TypeExpr::Dict
+            | TypeExpr::Null
+            | TypeExpr::Enum(_) => Ok(()),
+        }
+    }
+
+    fn field_type(
+        &self,
+        target: &TypeExpr,
+        field: &str,
+        span: Option<Span>,
+    ) -> Result<TypeExpr, LinkError> {
+        let target = self.resolve_type_aliases(target);
+        field_type(&target, field, span, |name| {
+            self.surface.resources.is_known_opaque_value_type(name)
+        })
+    }
+
+    fn index_type(&self, target: &TypeExpr, span: Option<Span>) -> Result<TypeExpr, LinkError> {
+        let target = self.resolve_type_aliases(target);
+        index_type(&target, span, |name| {
+            self.surface.resources.is_known_opaque_value_type(name)
+        })
+    }
+
     fn ensure_feature(
         &self,
         enabled: bool,
@@ -798,6 +1294,13 @@ impl<'module> Linker<'module> {
             Declaration::Type(type_decl) => Declaration::Type(type_decl.clone()),
             Declaration::Process(process) => {
                 self.ensure_feature(self.surface.abilities.processes, "processes", span)?;
+                if process.label.is_some() {
+                    self.ensure_feature(
+                        self.surface.language_features.label_annotations,
+                        "label annotations",
+                        span,
+                    )?;
+                }
                 let mut scope = Scope::new(false, true, span);
                 let mut seen = BTreeSet::new();
                 for param in &process.params {
@@ -816,6 +1319,7 @@ impl<'module> Linker<'module> {
                     name: process.name.clone(),
                     params: process.params.clone(),
                     return_ty: process.return_ty.clone(),
+                    label: process.label.clone(),
                     body,
                 })
             }
@@ -827,6 +1331,7 @@ impl<'module> Linker<'module> {
         expr: &Expr,
         scope: &mut Scope,
     ) -> Result<(Expr, Option<Binding>), LinkError> {
+        self.reject_trigger_event_special_form(expr, scope.span)?;
         if matches!(expr, Expr::Variable(_) | Expr::Field { .. })
             && let Some(resource) = self.resolve_module_expr(expr, scope)
         {
@@ -847,6 +1352,21 @@ impl<'module> Linker<'module> {
                     last = binding;
                 }
                 (Expr::Block(lowered), last)
+            }
+            Expr::LabelAnnotated { label, expr } => {
+                self.ensure_feature(
+                    self.surface.language_features.label_annotations,
+                    "label annotations",
+                    scope.span,
+                )?;
+                let (expr, binding) = self.lower_expr(expr, scope)?;
+                (
+                    Expr::LabelAnnotated {
+                        label: label.clone(),
+                        expr: Box::new(expr),
+                    },
+                    binding,
+                )
             }
             Expr::Variable(name) => {
                 if let Some(binding) = scope.get(name) {
@@ -1159,8 +1679,18 @@ impl<'module> Linker<'module> {
                 let trigger_operation = crate::TriggerHostOperation::from_host_operation(
                     operation_binding.host_operation.as_str(),
                 );
-                if trigger_operation.is_some() {
+                if let Some(operation) = trigger_operation {
                     self.ensure_feature(self.surface.abilities.triggers, "triggers", scope.span)?;
+                    let (lowered_args, output_ty) =
+                        self.lower_trigger_operation_args(operation, args, scope)?;
+                    return Ok((
+                        Expr::ReceiverCall {
+                            receiver: Box::new(lowered_receiver),
+                            operation: operation_binding.host_operation.into(),
+                            args: lowered_args,
+                        },
+                        Some(Binding::Value(output_ty)),
+                    ));
                 }
                 let mut lowered_args = Vec::with_capacity(args.len());
                 let mut arg_types = Vec::with_capacity(args.len());
@@ -1170,28 +1700,23 @@ impl<'module> Linker<'module> {
                     arg_types.push(binding_type(binding.as_ref()));
                 }
                 let actual_input = call_input_type(arg_types);
-                let output_ty = if let Some(operation) = trigger_operation {
-                    self.validate_trigger_operation_args(operation, args, scope)?
-                } else {
-                    if !self.is_type_assignable(&actual_input, &operation_binding.input_ty) {
-                        return Err(LinkError::IncompatibleOperationInput {
-                            operation: operation_binding.host_operation.clone(),
-                            expected: format_type_expr(
-                                &self.resolve_type_aliases(&operation_binding.input_ty),
-                            ),
-                            actual: format_type_expr(&self.resolve_type_aliases(&actual_input)),
-                            span: scope.span,
-                        });
-                    }
-                    operation_binding.output_ty.clone()
-                };
+                if !self.is_type_assignable(&actual_input, &operation_binding.input_ty) {
+                    return Err(LinkError::IncompatibleOperationInput {
+                        operation: operation_binding.host_operation.clone(),
+                        expected: format_type_expr(
+                            &self.resolve_type_aliases(&operation_binding.input_ty),
+                        ),
+                        actual: format_type_expr(&self.resolve_type_aliases(&actual_input)),
+                        span: scope.span,
+                    });
+                }
                 (
                     Expr::ReceiverCall {
                         receiver: Box::new(lowered_receiver),
                         operation: operation_binding.host_operation.into(),
                         args: lowered_args,
                     },
-                    Some(Binding::Value(output_ty)),
+                    Some(Binding::Value(operation_binding.output_ty.clone())),
                 )
             }
             Expr::Await(inner) => {
@@ -1327,7 +1852,8 @@ impl<'module> Linker<'module> {
             }
             Expr::Field { target, field } => {
                 let (target, binding) = self.lower_expr(target, scope)?;
-                let ty = field_type(&binding_type(binding.as_ref()), field.as_str());
+                let ty =
+                    self.field_type(&binding_type(binding.as_ref()), field.as_str(), scope.span)?;
                 (
                     Expr::Field {
                         target: Box::new(target),
@@ -1344,9 +1870,10 @@ impl<'module> Linker<'module> {
                         target: Box::new(target),
                         index: Box::new(index),
                     },
-                    Some(Binding::Value(index_type(&binding_type(
-                        target_binding.as_ref(),
-                    )))),
+                    Some(Binding::Value(self.index_type(
+                        &binding_type(target_binding.as_ref()),
+                        scope.span,
+                    )?)),
                 )
             }
             Expr::Unary { op, expr } => (
@@ -1371,9 +1898,6 @@ impl<'module> Linker<'module> {
     }
 
     fn resolve_module_expr(&self, expr: &Expr, scope: &Scope) -> Option<ResourceRefExpr> {
-        if scope.process_body {
-            return None;
-        }
         let path = module_path_for_expr(expr)?;
         if path
             .first()
@@ -1383,6 +1907,20 @@ impl<'module> Linker<'module> {
             return None;
         }
         self.surface.resources.resolve_module_path(&path)
+    }
+
+    fn reject_trigger_event_special_form(
+        &self,
+        expr: &Expr,
+        span: Option<Span>,
+    ) -> Result<(), LinkError> {
+        if is_trigger_event_projection_expr(expr) {
+            return Err(LinkError::TriggerEventProjection { span });
+        }
+        if is_trigger_event_expr(expr) {
+            return Err(LinkError::TriggerEventOutsideInputs { span });
+        }
+        Ok(())
     }
 
     fn validate_process_arg_binding(
@@ -1434,45 +1972,60 @@ impl<'module> Linker<'module> {
                     .surface
                     .resources
                     .trigger_source_event(&source_ty)
-                    .cloned()
                     .ok_or_else(|| LinkError::UnknownTriggerSourceType {
                         source_ty: format_type_expr(&source_ty),
                         span: scope.span,
                     })?;
                 let target_ty = self.infer_expr_type(call.target, &mut scope.clone())?;
-                let TypeExpr::Process {
-                    input, input_count, ..
-                } = &target_ty
-                else {
-                    return Err(LinkError::InvalidTriggerTarget {
-                        actual: format_type_expr(&target_ty),
-                        span: scope.span,
-                    });
-                };
-                if *input_count != 1 {
-                    return Err(LinkError::InvalidTriggerTarget {
-                        actual: format_type_expr(&target_ty),
-                        span: scope.span,
-                    });
-                }
-                if !self.is_type_assignable(&event_ty, input) {
-                    return Err(LinkError::TriggerEventMismatch {
-                        event: format_type_expr(&self.resolve_type_aliases(&event_ty)),
-                        input: format_type_expr(&self.resolve_type_aliases(input)),
-                        span: scope.span,
-                    });
-                }
+                let params = self.trigger_target_params(call.target, &target_ty, scope.span)?;
+                let mut validation_scope = scope.clone();
+                self.lower_trigger_input_record(
+                    trigger_target_process_label(call.target).as_str(),
+                    &params,
+                    &event_ty,
+                    call.inputs,
+                    &mut validation_scope,
+                )?;
                 Ok(TypeExpr::TriggerHandle(Box::new(event_ty)))
             }
             crate::TriggerHostOperation::List => {
                 let call = crate::list_call_args(args)
                     .map_err(|_| LinkError::InvalidTriggerList { span: scope.span })?;
-                let target_ty = self.infer_expr_type(call.target, &mut scope.clone())?;
-                if !matches!(target_ty, TypeExpr::Process { .. }) {
-                    return Err(LinkError::InvalidTriggerTarget {
-                        actual: format_type_expr(&target_ty),
-                        span: scope.span,
-                    });
+                for (name, expr) in call.entries {
+                    match name.as_str() {
+                        "target" => {
+                            let target_ty = self.infer_expr_type(expr, &mut scope.clone())?;
+                            if !matches!(target_ty, TypeExpr::Process { .. }) {
+                                return Err(LinkError::InvalidTriggerTarget {
+                                    actual: format_type_expr(&target_ty),
+                                    span: scope.span,
+                                });
+                            }
+                        }
+                        "name" | "source_type" => {
+                            let filter_ty = self.infer_expr_type(expr, &mut scope.clone())?;
+                            if !self.is_type_assignable(&filter_ty, &TypeExpr::Str) {
+                                return Err(LinkError::IncompatibleOperationInput {
+                                    operation: operation.host_operation().to_string(),
+                                    expected: format_type_expr(&TypeExpr::Str),
+                                    actual: format_type_expr(&filter_ty),
+                                    span: scope.span,
+                                });
+                            }
+                        }
+                        "enabled" => {
+                            let filter_ty = self.infer_expr_type(expr, &mut scope.clone())?;
+                            if !self.is_type_assignable(&filter_ty, &TypeExpr::Bool) {
+                                return Err(LinkError::IncompatibleOperationInput {
+                                    operation: operation.host_operation().to_string(),
+                                    expected: format_type_expr(&TypeExpr::Bool),
+                                    actual: format_type_expr(&filter_ty),
+                                    span: scope.span,
+                                });
+                            }
+                        }
+                        _ => unreachable!("list_call_args rejects unknown trigger filters"),
+                    }
                 }
                 Ok(operation.output_ty())
             }
@@ -1481,6 +2034,221 @@ impl<'module> Linker<'module> {
                     .map_err(|_| LinkError::InvalidTriggerCancel { span: scope.span })?;
                 Ok(operation.output_ty())
             }
+        }
+    }
+
+    fn lower_trigger_operation_args(
+        &self,
+        operation: crate::TriggerHostOperation,
+        args: &[Expr],
+        scope: &mut Scope,
+    ) -> Result<(Vec<Expr>, TypeExpr), LinkError> {
+        match operation {
+            crate::TriggerHostOperation::Register => {
+                self.lower_trigger_registration_args(args, scope)
+            }
+            crate::TriggerHostOperation::List => {
+                let call = crate::list_call_args(args)
+                    .map_err(|_| LinkError::InvalidTriggerList { span: scope.span })?;
+                let mut entries = Vec::with_capacity(call.entries.len());
+                for (name, expr) in call.entries {
+                    match name.as_str() {
+                        "target" => {
+                            let target_ty = self.infer_expr_type(expr, &mut scope.clone())?;
+                            if !matches!(target_ty, TypeExpr::Process { .. }) {
+                                return Err(LinkError::InvalidTriggerTarget {
+                                    actual: format_type_expr(&target_ty),
+                                    span: scope.span,
+                                });
+                            }
+                        }
+                        "name" | "source_type" => {
+                            let filter_ty = self.infer_expr_type(expr, &mut scope.clone())?;
+                            if !self.is_type_assignable(&filter_ty, &TypeExpr::Str) {
+                                return Err(LinkError::IncompatibleOperationInput {
+                                    operation: operation.host_operation().to_string(),
+                                    expected: format_type_expr(&TypeExpr::Str),
+                                    actual: format_type_expr(&filter_ty),
+                                    span: scope.span,
+                                });
+                            }
+                        }
+                        "enabled" => {
+                            let filter_ty = self.infer_expr_type(expr, &mut scope.clone())?;
+                            if !self.is_type_assignable(&filter_ty, &TypeExpr::Bool) {
+                                return Err(LinkError::IncompatibleOperationInput {
+                                    operation: operation.host_operation().to_string(),
+                                    expected: format_type_expr(&TypeExpr::Bool),
+                                    actual: format_type_expr(&filter_ty),
+                                    span: scope.span,
+                                });
+                            }
+                        }
+                        _ => unreachable!("list_call_args rejects unknown trigger filters"),
+                    }
+                    entries.push((name.clone(), self.lower_expr(expr, scope)?.0));
+                }
+                Ok((vec![Expr::Record(entries)], operation.output_ty()))
+            }
+            crate::TriggerHostOperation::Cancel => {
+                let call = crate::cancel_call_args(args)
+                    .map_err(|_| LinkError::InvalidTriggerCancel { span: scope.span })?;
+                Ok((
+                    vec![Expr::Record(vec![(
+                        "handle".into(),
+                        self.lower_expr(call.handle, scope)?.0,
+                    )])],
+                    operation.output_ty(),
+                ))
+            }
+        }
+    }
+
+    fn lower_trigger_registration_args(
+        &self,
+        args: &[Expr],
+        scope: &mut Scope,
+    ) -> Result<(Vec<Expr>, TypeExpr), LinkError> {
+        let call = crate::register_call_args(args)
+            .map_err(|_| LinkError::InvalidTriggerRegistration { span: scope.span })?;
+        let source_ty = self.infer_expr_type(call.source, &mut scope.clone())?;
+        let event_ty = self
+            .surface
+            .resources
+            .trigger_source_event(&source_ty)
+            .ok_or_else(|| LinkError::UnknownTriggerSourceType {
+                source_ty: format_type_expr(&source_ty),
+                span: scope.span,
+            })?;
+        let target_ty = self.infer_expr_type(call.target, &mut scope.clone())?;
+        let params = self.trigger_target_params(call.target, &target_ty, scope.span)?;
+        let process = trigger_target_process_label(call.target);
+
+        let source = self.lower_expr(call.source, scope)?.0;
+        let target = self.lower_expr(call.target, scope)?.0;
+        let inputs = self.lower_trigger_input_record(
+            process.as_str(),
+            &params,
+            &event_ty,
+            call.inputs,
+            scope,
+        )?;
+        let mut entries = vec![
+            ("source".into(), source),
+            ("target".into(), target),
+            ("inputs".into(), inputs),
+        ];
+        if let Some(name) = call.name {
+            entries.push(("name".into(), self.lower_expr(name, scope)?.0));
+        }
+        Ok((
+            vec![Expr::Record(entries)],
+            TypeExpr::TriggerHandle(Box::new(event_ty)),
+        ))
+    }
+
+    fn lower_trigger_input_record(
+        &self,
+        process: &str,
+        params: &[ProcessParam],
+        event_ty: &TypeExpr,
+        inputs: &Expr,
+        scope: &mut Scope,
+    ) -> Result<Expr, LinkError> {
+        let Expr::Record(entries) = inputs else {
+            return Err(LinkError::InvalidTriggerInputs { span: scope.span });
+        };
+        let mut seen = BTreeSet::new();
+        let mut saw_event = false;
+        let mut lowered = Vec::with_capacity(entries.len());
+        for (name, value) in entries {
+            if !seen.insert(name.to_string()) {
+                return Err(LinkError::DuplicateTriggerInput {
+                    input: name.to_string(),
+                    span: scope.span,
+                });
+            }
+            let Some(param) = params.iter().find(|param| param.name == *name) else {
+                return Err(LinkError::UnknownTriggerInput {
+                    process: process.to_string(),
+                    input: name.to_string(),
+                    span: scope.span,
+                });
+            };
+            if is_trigger_event_projection_expr(value) {
+                return Err(LinkError::TriggerEventProjection { span: scope.span });
+            }
+            if is_trigger_event_expr(value) {
+                saw_event = true;
+                if !self.is_type_assignable(event_ty, &param.ty) {
+                    return Err(LinkError::TriggerEventMismatch {
+                        event: format_type_expr(&self.resolve_type_aliases(event_ty)),
+                        input_name: name.to_string(),
+                        input: format_type_expr(&self.resolve_type_aliases(&param.ty)),
+                        span: scope.span,
+                    });
+                }
+                lowered.push((name.clone(), crate::trigger_event_placeholder_expr()));
+                continue;
+            }
+            let (lowered_value, binding) = self.lower_expr(value, scope)?;
+            self.validate_process_arg_binding(
+                process,
+                name.as_str(),
+                &param.ty,
+                binding.as_ref(),
+                scope.span,
+            )?;
+            lowered.push((name.clone(), lowered_value));
+        }
+        for param in params {
+            if !seen.contains(param.name.as_str()) {
+                return Err(LinkError::MissingTriggerInput {
+                    process: process.to_string(),
+                    input: param.name.to_string(),
+                    span: scope.span,
+                });
+            }
+        }
+        if !saw_event {
+            return Err(LinkError::MissingTriggerEventInput { span: scope.span });
+        }
+        Ok(Expr::Record(lowered))
+    }
+
+    fn trigger_target_params(
+        &self,
+        target: &Expr,
+        target_ty: &TypeExpr,
+        span: Option<Span>,
+    ) -> Result<Vec<ProcessParam>, LinkError> {
+        if let Some(process_name) = trigger_target_process_name(target)
+            && let Some(process) = self.program.process(process_name.as_str())
+        {
+            return Ok(process.params.clone());
+        }
+        let TypeExpr::Process {
+            input, input_count, ..
+        } = target_ty
+        else {
+            return Err(LinkError::InvalidTriggerTarget {
+                actual: format_type_expr(target_ty),
+                span,
+            });
+        };
+        match (input_count, input.as_ref()) {
+            (0, _) => Ok(Vec::new()),
+            (count, TypeExpr::Object(fields)) if *count > 1 => Ok(fields
+                .iter()
+                .map(|field| ProcessParam {
+                    name: field.name.clone(),
+                    ty: field.ty.clone(),
+                })
+                .collect()),
+            _ => Err(LinkError::InvalidTriggerTarget {
+                actual: format_type_expr(target_ty),
+                span,
+            }),
         }
     }
 
@@ -1505,6 +2273,7 @@ impl<'module> Linker<'module> {
 
     fn infer_completion(&self, expr: &Expr, scope: &mut Scope) -> Result<Completion, LinkError> {
         match expr {
+            Expr::LabelAnnotated { expr, .. } => self.infer_completion(expr, scope),
             Expr::Finish(Some(value)) => Ok(Completion {
                 finishes: vec![self.infer_expr_type(value, scope)?],
                 can_fallthrough: false,
@@ -1584,7 +2353,14 @@ impl<'module> Linker<'module> {
     }
 
     fn infer_expr_type(&self, expr: &Expr, scope: &mut Scope) -> Result<TypeExpr, LinkError> {
+        self.reject_trigger_event_special_form(expr, scope.span)?;
+        if matches!(expr, Expr::Variable(_) | Expr::Field { .. })
+            && let Some(resource) = self.resolve_module_expr(expr, scope)
+        {
+            return Ok(TypeExpr::Ref(resource.resource_type));
+        }
         Ok(match expr {
+            Expr::LabelAnnotated { expr, .. } => self.infer_expr_type(expr, scope)?,
             Expr::Block(expressions) => {
                 let mut last = TypeExpr::Null;
                 for expression in expressions {
@@ -1692,13 +2468,18 @@ impl<'module> Linker<'module> {
                         return Ok(constructor.output_ty.clone());
                     }
                 }
-                let receiver_ty = self.infer_expr_type(receiver, scope)?;
-                let resource_type = self.resource_type_for_type(&receiver_ty).ok_or_else(|| {
-                    LinkError::UnresolvedReceiver {
-                        operation: operation.to_string(),
-                        span: scope.span,
-                    }
-                })?;
+                let resource_type =
+                    if let Some(resource) = self.resolve_module_expr(receiver, scope) {
+                        resource.resource_type.to_string()
+                    } else {
+                        let receiver_ty = self.infer_expr_type(receiver, scope)?;
+                        self.resource_type_for_type(&receiver_ty).ok_or_else(|| {
+                            LinkError::UnresolvedReceiver {
+                                operation: operation.to_string(),
+                                span: scope.span,
+                            }
+                        })?
+                    };
                 let binding = self
                     .surface
                     .resources
@@ -1731,9 +2512,11 @@ impl<'module> Linker<'module> {
             Expr::Finish(None) => TypeExpr::Null,
             Expr::BuiltinCall { name, .. } => builtin_return_type(name.as_str()),
             Expr::Field { target, field } => {
-                field_type(&self.infer_expr_type(target, scope)?, field)
+                self.field_type(&self.infer_expr_type(target, scope)?, field, scope.span)?
             }
-            Expr::Index { target, .. } => index_type(&self.infer_expr_type(target, scope)?),
+            Expr::Index { target, .. } => {
+                self.index_type(&self.infer_expr_type(target, scope)?, scope.span)?
+            }
             Expr::Unary { op, .. } => match op {
                 crate::ast::UnaryOp::Not => TypeExpr::Bool,
                 crate::ast::UnaryOp::Negate => TypeExpr::Float,
@@ -1825,6 +2608,7 @@ fn literal_type(expr: &Expr) -> TypeExpr {
         Expr::String(_) => TypeExpr::Str,
         Expr::TypeLiteral(_) => TypeExpr::Any,
         Expr::Break | Expr::Continue => TypeExpr::Null,
+        Expr::LabelAnnotated { expr, .. } => literal_type(expr),
         _ => TypeExpr::Any,
     }
 }
@@ -1858,26 +2642,57 @@ fn call_input_type(arg_types: Vec<TypeExpr>) -> TypeExpr {
     }
 }
 
-fn field_type(target: &TypeExpr, field: &str) -> TypeExpr {
+fn field_type(
+    target: &TypeExpr,
+    field: &str,
+    span: Option<Span>,
+    is_opaque: impl Fn(&str) -> bool + Copy,
+) -> Result<TypeExpr, LinkError> {
     match target {
-        TypeExpr::Any | TypeExpr::Dict | TypeExpr::Ref(_) => TypeExpr::Any,
-        TypeExpr::Object(fields) => fields
+        TypeExpr::Any | TypeExpr::Dict => Ok(TypeExpr::Any),
+        TypeExpr::Ref(name) if is_opaque(name.as_str()) => Err(LinkError::OpaqueHostValueAccess {
+            type_name: name.to_string(),
+            access: format!(".{field}"),
+            span,
+        }),
+        TypeExpr::Ref(_) => Ok(TypeExpr::Any),
+        TypeExpr::Object(fields) => Ok(fields
             .iter()
             .find(|candidate| candidate.name.as_str() == field)
             .map(|field| field.ty.clone())
-            .unwrap_or(TypeExpr::Any),
+            .unwrap_or(TypeExpr::Any)),
         TypeExpr::Union(items) => {
-            union_type(items.iter().map(|item| field_type(item, field)).collect())
+            let fields = items
+                .iter()
+                .map(|item| field_type(item, field, span, is_opaque))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(union_type(fields))
         }
-        _ => TypeExpr::Any,
+        _ => Ok(TypeExpr::Any),
     }
 }
 
-fn index_type(target: &TypeExpr) -> TypeExpr {
+fn index_type(
+    target: &TypeExpr,
+    span: Option<Span>,
+    is_opaque: impl Fn(&str) -> bool + Copy,
+) -> Result<TypeExpr, LinkError> {
     match target {
-        TypeExpr::List(item) => *item.clone(),
-        TypeExpr::Union(items) => union_type(items.iter().map(index_type).collect()),
-        _ => TypeExpr::Any,
+        TypeExpr::List(item) => Ok(*item.clone()),
+        TypeExpr::Ref(name) if is_opaque(name.as_str()) => Err(LinkError::OpaqueHostValueAccess {
+            type_name: name.to_string(),
+            access: "[]".to_string(),
+            span,
+        }),
+        TypeExpr::Ref(_) => Ok(TypeExpr::Any),
+        TypeExpr::Union(items) => {
+            let items = items
+                .iter()
+                .map(|item| index_type(item, span, is_opaque))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(union_type(items))
+        }
+        _ => Ok(TypeExpr::Any),
     }
 }
 
@@ -1945,6 +2760,7 @@ fn process_type_for_decl(process: &ProcessDecl, output: TypeExpr) -> TypeExpr {
 
 fn module_path_for_expr(expr: &Expr) -> Option<Vec<AstString>> {
     match expr {
+        Expr::LabelAnnotated { expr, .. } => module_path_for_expr(expr),
         Expr::Variable(name) => Some(vec![name.clone()]),
         Expr::Field { target, field } => {
             let mut path = module_path_for_expr(target)?;
@@ -1953,6 +2769,38 @@ fn module_path_for_expr(expr: &Expr) -> Option<Vec<AstString>> {
         }
         Expr::ResourceRef(resource) => Some(resource.path.clone()),
         _ => None,
+    }
+}
+
+fn is_trigger_event_expr(expr: &Expr) -> bool {
+    matches!(
+        module_path_for_expr(expr).as_deref(),
+        Some([trigger, event]) if trigger.as_str() == "trigger" && event.as_str() == "event"
+    )
+}
+
+fn is_trigger_event_projection_expr(expr: &Expr) -> bool {
+    module_path_for_expr(expr).is_some_and(|path| {
+        path.len() > 2 && path[0].as_str() == "trigger" && path[1].as_str() == "event"
+    })
+}
+
+fn trigger_target_process_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::LabelAnnotated { expr, .. } => trigger_target_process_name(expr),
+        Expr::Variable(name) | Expr::ProcessRef { process: name } => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+fn trigger_target_process_label(expr: &Expr) -> String {
+    trigger_target_process_name(expr).unwrap_or_else(|| "target".to_string())
+}
+
+fn expr_has_label_annotation(expr: &Expr) -> bool {
+    match expr {
+        Expr::LabelAnnotated { .. } => true,
+        other => other.children().any(expr_has_label_annotation),
     }
 }
 
@@ -1976,27 +2824,143 @@ mod tests {
         );
         catalog.add_operation("Tools", "echo", "echo", TypeExpr::Any, TypeExpr::Any);
         crate::add_trigger_resource_operations(&mut catalog);
-        catalog.add_trigger_source_constructor(
-            ["timer", "Schedule"],
-            TypeExpr::Object(vec![
-                TypeField {
-                    name: "expr".into(),
-                    ty: TypeExpr::Str,
-                    optional: false,
-                },
-                TypeField {
-                    name: "tz".into(),
-                    ty: TypeExpr::Str,
-                    optional: true,
-                },
-            ]),
-            TypeExpr::Ref("timer.Tick".into()),
-        );
+        catalog
+            .add_trigger_source_constructor(
+                ["timer", "Schedule"],
+                TypeExpr::Object(vec![
+                    TypeField {
+                        name: "expr".into(),
+                        ty: TypeExpr::Str,
+                        optional: false,
+                    },
+                    TypeField {
+                        name: "tz".into(),
+                        ty: TypeExpr::Str,
+                        optional: true,
+                    },
+                ]),
+                NamedDataType::object(
+                    "timer.Tick",
+                    vec![TypeField {
+                        name: "fired_at".into(),
+                        ty: TypeExpr::Str,
+                        optional: false,
+                    }],
+                )
+                .expect("valid timer tick type"),
+            )
+            .expect("valid timer trigger source");
         catalog
     }
 
     fn full_surface() -> LashlangSurface {
         LashlangSurface::new(resources(), LashlangAbilities::all())
+    }
+
+    fn full_label_surface() -> LashlangSurface {
+        full_surface()
+            .with_language_features(LashlangLanguageFeatures::default().with_label_annotations())
+    }
+
+    fn timer_tick_type_with_field(field: &'static str) -> NamedDataType {
+        NamedDataType::object(
+            "timer.Tick",
+            vec![TypeField {
+                name: field.into(),
+                ty: TypeExpr::Str,
+                optional: false,
+            }],
+        )
+        .expect("valid timer tick type")
+    }
+
+    fn resources_with_timer_event(event_type: NamedDataType) -> ResourceCatalog {
+        let mut catalog = ResourceCatalog::new();
+        crate::add_trigger_resource_operations(&mut catalog);
+        catalog
+            .add_trigger_source_constructor(
+                ["timer", "Schedule"],
+                TypeExpr::Object(vec![TypeField {
+                    name: "expr".into(),
+                    ty: TypeExpr::Str,
+                    optional: false,
+                }]),
+                event_type,
+            )
+            .expect("valid timer trigger source");
+        catalog
+    }
+
+    #[test]
+    fn named_host_data_type_validation_rejects_invalid_shapes() {
+        let duplicate_field = NamedDataType::object(
+            "timer.Tick",
+            vec![
+                TypeField {
+                    name: "fired_at".into(),
+                    ty: TypeExpr::Str,
+                    optional: false,
+                },
+                TypeField {
+                    name: "fired_at".into(),
+                    ty: TypeExpr::Str,
+                    optional: false,
+                },
+            ],
+        )
+        .expect_err("duplicate fields should be rejected");
+        assert!(matches!(
+            duplicate_field,
+            NamedDataTypeError::DuplicateField { .. }
+        ));
+
+        let nested_ref = NamedDataType::object(
+            "timer.Tick",
+            vec![TypeField {
+                name: "nested".into(),
+                ty: TypeExpr::Ref("Other.Type".into()),
+                optional: false,
+            }],
+        )
+        .expect_err("nested refs should be rejected");
+        assert!(matches!(nested_ref, NamedDataTypeError::NestedRef { .. }));
+
+        let duplicate_enum = NamedDataType::object(
+            "timer.Tick",
+            vec![TypeField {
+                name: "kind".into(),
+                ty: TypeExpr::Enum(vec!["Red".into(), "Red".into()]),
+                optional: false,
+            }],
+        )
+        .expect_err("duplicate enum values should be rejected");
+        assert!(matches!(
+            duplicate_enum,
+            NamedDataTypeError::DuplicateEnumValue { .. }
+        ));
+
+        let simple_name = NamedDataType::object("Tick", vec![])
+            .expect_err("host data type names must be qualified");
+        assert!(matches!(
+            simple_name,
+            NamedDataTypeError::InvalidName { .. }
+        ));
+    }
+
+    #[test]
+    fn resource_catalog_rejects_conflicting_named_host_data_type_definitions() {
+        let mut catalog = ResourceCatalog::new();
+        catalog
+            .add_named_data_type(timer_tick_type_with_field("fired_at"))
+            .expect("first definition");
+        let err = catalog
+            .add_named_data_type(timer_tick_type_with_field("delivered_at"))
+            .expect_err("same host type name with different shape should be rejected");
+
+        assert!(matches!(
+            err,
+            ResourceCatalogError::ConflictingNamedDataType { .. }
+        ));
     }
 
     #[test]
@@ -2015,12 +2979,13 @@ mod tests {
               finish signal
             }
             process from_tick(tick: timer.Tick) {
-              finish true
+              finish tick.fired_at
             }
             source = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
             handle = await triggers.register({
               source: source,
               target: from_tick,
+              inputs: { tick: trigger.event },
               name: "changed"
             })?
             submit handle
@@ -2046,13 +3011,114 @@ mod tests {
               finish true
             }
             source = timer.Schedule({ expr: "0 8 * * *" })
-            await triggers.register({ source: source, target: changed, name: "changed" })?
+            await triggers.register({
+              source: source,
+              target: changed,
+              inputs: { tick: trigger.event },
+              name: "changed"
+            })?
             "#,
         )
         .expect("parse module");
 
         LinkedModule::link(program, full_surface())
             .expect("trigger registration names and process names occupy different namespaces");
+    }
+
+    #[test]
+    fn linked_module_resolves_host_named_data_refs_for_fields_and_structural_assignability() {
+        let direct_ref = crate::parse(
+            r#"
+            process from_tick(tick: timer.Tick) {
+              finish tick.fired_at
+            }
+            submit true
+            "#,
+        )
+        .expect("parse direct host data ref");
+        LinkedModule::link(direct_ref, full_surface()).expect("host data ref fields should link");
+
+        let structural_input = crate::parse(
+            r#"
+            process from_tick(tick: { fired_at: str }) {
+              finish tick.fired_at
+            }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: source,
+              target: from_tick,
+              inputs: { tick: trigger.event }
+            })?
+            "#,
+        )
+        .expect("parse structural target input");
+        LinkedModule::link(structural_input, full_surface())
+            .expect("host data shape should be structurally assignable");
+    }
+
+    #[test]
+    fn linked_module_rejects_unknown_host_data_refs_and_opaque_source_field_access() {
+        let unknown = crate::parse(
+            r#"
+            process from_tick(tick: foo.Tick) {
+              finish true
+            }
+            submit true
+            "#,
+        )
+        .expect("parse unknown host type");
+        assert!(matches!(
+            LinkedModule::link(unknown, full_surface()),
+            Err(LinkError::UnknownType { name, .. }) if name == "foo.Tick"
+        ));
+
+        let opaque = crate::parse(
+            r#"
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            submit source.expr
+            "#,
+        )
+        .expect("parse opaque source access");
+        assert!(matches!(
+            LinkedModule::link(opaque, full_surface()),
+            Err(LinkError::OpaqueHostValueAccess { type_name, .. }) if type_name == "timer.Schedule"
+        ));
+    }
+
+    #[test]
+    fn required_surface_ref_tracks_host_named_data_type_shape_changes() {
+        let program = crate::parse(
+            r#"
+            process from_tick(tick: any) {
+              finish true
+            }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: source,
+              target: from_tick,
+              inputs: { tick: trigger.event }
+            })?
+            "#,
+        )
+        .expect("parse trigger registration");
+        let first = LinkedModule::link(
+            program.clone(),
+            LashlangSurface::new(
+                resources_with_timer_event(timer_tick_type_with_field("fired_at")),
+                LashlangAbilities::all(),
+            ),
+        )
+        .expect("link first host event shape");
+        let second = LinkedModule::link(
+            program,
+            LashlangSurface::new(
+                resources_with_timer_event(timer_tick_type_with_field("delivered_at")),
+                LashlangAbilities::all(),
+            ),
+        )
+        .expect("link changed host event shape");
+
+        assert_ne!(first.required_surface_ref, second.required_surface_ref);
     }
 
     #[test]
@@ -2165,7 +3231,11 @@ mod tests {
             r#"
             process worker(tick: timer.Tick) { finish true }
             source = timer.Schedule({ expr: "0 8 * * *" })
-            await triggers.register({ source: source, target: worker })?
+            await triggers.register({
+              source: source,
+              target: worker,
+              inputs: { tick: trigger.event }
+            })?
             "#,
         )
         .expect("parse disabled trigger");
@@ -2189,7 +3259,12 @@ mod tests {
               finish true
             }
             source = timer.Schedule({ expr: "0 8 * * *", tz: "UTC" })
-            handle = await triggers.register({ source: source, target: scan, name: "scan" })?
+            handle = await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { tick: trigger.event },
+              name: "scan"
+            })?
             registrations = await triggers.list({ target: scan })?
             cancelled = await triggers.cancel({ handle: handle })?
             submit { handle: handle, registrations: registrations, cancelled: cancelled }
@@ -2200,37 +3275,136 @@ mod tests {
     }
 
     #[test]
-    fn linked_module_accepts_button_trigger_source_constructor() {
-        let mut resources = resources();
-        resources.add_trigger_source_constructor(
-            ["ui", "button", "pressed"],
-            TypeExpr::Object(vec![]),
-            TypeExpr::Object(vec![
-                TypeField {
-                    name: "button".into(),
-                    ty: TypeExpr::Union(vec![
-                        TypeExpr::Enum(vec!["Red".into()]),
-                        TypeExpr::Enum(vec!["Blue".into()]),
-                    ]),
-                    optional: false,
-                },
-                TypeField {
-                    name: "message".into(),
-                    ty: TypeExpr::Str,
-                    optional: false,
-                },
-                TypeField {
-                    name: "pressed_at".into(),
-                    ty: TypeExpr::Str,
-                    optional: false,
-                },
-            ]),
-        );
+    fn linked_module_accepts_explicit_trigger_input_mappings() {
+        let repeated_event = crate::parse(
+            r#"
+            process scan(a: timer.Tick, b: { fired_at: str }) {
+              finish { a: a.fired_at, b: b.fired_at }
+            }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { a: trigger.event, b: trigger.event }
+            })?
+            "#,
+        )
+        .expect("parse repeated event mapping");
+        LinkedModule::link(repeated_event, full_surface())
+            .expect("event payload should map to multiple assignable params");
+
+        let fixed_authority = crate::parse(
+            r#"
+            process scan(tick: timer.Tick, tool: Tools) {
+              text = await tool.read_file({ path: tick.fired_at })?
+              finish text
+            }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { tick: trigger.event, tool: tools }
+            })?
+            "#,
+        )
+        .expect("parse fixed authority mapping");
+        LinkedModule::link(fixed_authority, full_surface())
+            .expect("fixed resource inputs should satisfy process authority params");
+    }
+
+    #[test]
+    fn linked_module_captures_concrete_process_body_resources_statically() {
         let program = crate::parse(
             r#"
-            type ButtonPressed = { button: "Red" | "Blue", message: str, pressed_at: str }
+            process scan(tick: timer.Tick) {
+              text = await tools.read_file({ path: tick.fired_at })?
+              finish text
+            }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { tick: trigger.event }
+            })?
+            "#,
+        )
+        .expect("parse captured authority process");
+        let linked = LinkedModule::link(program, full_surface())
+            .expect("process body should capture concrete host resources");
+        let process = linked
+            .artifact
+            .canonical_ir
+            .process("scan")
+            .expect("scan process");
+        fn contains_resource_ref(expr: &Expr, path: &str) -> bool {
+            matches!(expr, Expr::ResourceRef(resource) if resource.path_string() == path)
+                || expr
+                    .children()
+                    .any(|child| contains_resource_ref(child, path))
+        }
+        assert!(
+            contains_resource_ref(&process.body, "tools"),
+            "linked process body should contain a persisted tools resource ref"
+        );
 
-            process on_button(event: ButtonPressed) {
+        let shadowed = crate::parse(
+            r#"
+            tool = tools
+            process scan(tick: timer.Tick) {
+              text = await tool.read_file({ path: tick.fired_at })?
+              finish text
+            }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { tick: trigger.event }
+            })?
+            "#,
+        )
+        .expect("parse foreground variable capture");
+        assert!(matches!(
+            LinkedModule::link(shadowed, full_surface()),
+            Err(LinkError::UnknownName { name, .. }) if name == "tool"
+        ));
+    }
+
+    #[test]
+    fn linked_module_accepts_button_trigger_source_constructor() {
+        let mut resources = resources();
+        resources
+            .add_trigger_source_constructor(
+                ["ui", "button", "pressed"],
+                TypeExpr::Object(vec![]),
+                NamedDataType::object(
+                    "ui.button.Pressed",
+                    vec![
+                        TypeField {
+                            name: "button".into(),
+                            ty: TypeExpr::Union(vec![
+                                TypeExpr::Enum(vec!["Red".into()]),
+                                TypeExpr::Enum(vec!["Blue".into()]),
+                            ]),
+                            optional: false,
+                        },
+                        TypeField {
+                            name: "message".into(),
+                            ty: TypeExpr::Str,
+                            optional: false,
+                        },
+                        TypeField {
+                            name: "pressed_at".into(),
+                            ty: TypeExpr::Str,
+                            optional: false,
+                        },
+                    ],
+                )
+                .expect("valid button event type"),
+            )
+            .expect("valid button trigger source");
+        let program = crate::parse(
+            r#"
+            process on_button(event: ui.button.Pressed) {
               wake { kind: "button_pressed", button: event.button, message: event.message }
               finish true
             }
@@ -2238,6 +3412,7 @@ mod tests {
             handle = await triggers.register({
               source: ui.button.pressed({}),
               target: on_button,
+              inputs: { event: trigger.event },
               name: "button watcher"
             })?
             submit handle
@@ -2267,10 +3442,27 @@ mod tests {
             Err(LinkError::InvalidTriggerRegistration { .. })
         ));
 
+        let missing_inputs = crate::parse(
+            r#"
+            process scan(tick: timer.Tick) { finish true }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({ source: source, target: scan })?
+            "#,
+        )
+        .expect("parse missing inputs");
+        assert!(matches!(
+            LinkedModule::link(missing_inputs, full_surface()),
+            Err(LinkError::InvalidTriggerRegistration { .. })
+        ));
+
         let wrong_source = crate::parse(
             r#"
             process scan(tick: timer.Tick) { finish true }
-            await triggers.register({ source: { expr: "0 8 * * *" }, target: scan })?
+            await triggers.register({
+              source: { expr: "0 8 * * *" },
+              target: scan,
+              inputs: { tick: trigger.event }
+            })?
             "#,
         )
         .expect("parse wrong source");
@@ -2283,7 +3475,11 @@ mod tests {
             r#"
             process scan(tick: str) { finish tick }
             source = timer.Schedule({ expr: "0 8 * * *" })
-            await triggers.register({ source: source, target: scan })?
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { tick: trigger.event }
+            })?
             "#,
         )
         .expect("parse payload mismatch");
@@ -2292,24 +3488,112 @@ mod tests {
             Err(LinkError::TriggerEventMismatch { .. })
         ));
 
+        let unknown_input = crate::parse(
+            r#"
+            process scan(tick: timer.Tick) { finish true }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { tick: trigger.event, extra: "nope" }
+            })?
+            "#,
+        )
+        .expect("parse unknown input");
+        assert!(matches!(
+            LinkedModule::link(unknown_input, full_surface()),
+            Err(LinkError::UnknownTriggerInput { input, .. }) if input == "extra"
+        ));
+
+        let duplicate_input = crate::parse(
+            r#"
+            process scan(tick: timer.Tick) { finish true }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { tick: trigger.event, tick: trigger.event }
+            })?
+            "#,
+        )
+        .expect("parse duplicate input");
+        assert!(matches!(
+            LinkedModule::link(duplicate_input, full_surface()),
+            Err(LinkError::DuplicateTriggerInput { input, .. }) if input == "tick"
+        ));
+
+        let no_event_input = crate::parse(
+            r#"
+            process scan(tick: timer.Tick, label: str) { finish label }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { tick: { fired_at: "static" }, label: "static" }
+            })?
+            "#,
+        )
+        .expect("parse no event input");
+        assert!(matches!(
+            LinkedModule::link(no_event_input, full_surface()),
+            Err(LinkError::MissingTriggerEventInput { .. })
+        ));
+
+        let event_projection = crate::parse(
+            r#"
+            process scan(fired_at: str) { finish fired_at }
+            source = timer.Schedule({ expr: "0 8 * * *" })
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { fired_at: trigger.event.fired_at }
+            })?
+            "#,
+        )
+        .expect("parse event projection");
+        assert!(matches!(
+            LinkedModule::link(event_projection, full_surface()),
+            Err(LinkError::TriggerEventProjection { .. })
+        ));
+
+        let event_outside_inputs = crate::parse(
+            r#"
+            process scan(tick: timer.Tick) { finish true }
+            submit trigger.event
+            "#,
+        )
+        .expect("parse event outside inputs");
+        assert!(matches!(
+            LinkedModule::link(event_outside_inputs, full_surface()),
+            Err(LinkError::TriggerEventOutsideInputs { .. })
+        ));
+
         let multi_input = crate::parse(
             r#"
             process scan(tick: timer.Tick, extra: str) { finish extra }
             source = timer.Schedule({ expr: "0 8 * * *" })
-            await triggers.register({ source: source, target: scan })?
+            await triggers.register({
+              source: source,
+              target: scan,
+              inputs: { tick: trigger.event }
+            })?
             "#,
         )
         .expect("parse multi-input target");
         assert!(matches!(
             LinkedModule::link(multi_input, full_surface()),
-            Err(LinkError::InvalidTriggerTarget { .. })
+            Err(LinkError::MissingTriggerInput { input, .. }) if input == "extra"
         ));
 
         let target_is_not_process = crate::parse(
             r#"
             process scan(tick: timer.Tick) { finish true }
             source = timer.Schedule({ expr: "0 8 * * *" })
-            await triggers.register({ source: source, target: source })?
+            await triggers.register({
+              source: source,
+              target: source,
+              inputs: { tick: trigger.event }
+            })?
             "#,
         )
         .expect("parse non-process target");
@@ -2318,14 +3602,28 @@ mod tests {
             Err(LinkError::InvalidTriggerTarget { .. })
         ));
 
-        let list_missing_target = crate::parse(
+        let list_without_filters = crate::parse(
             r#"
             process scan(tick: timer.Tick) { finish true }
             await triggers.list({})?
             "#,
         )
-        .expect("parse trigger list missing target");
-        assert!(LinkedModule::link(list_missing_target, full_surface()).is_err());
+        .expect("parse trigger list without filters");
+        assert!(LinkedModule::link(list_without_filters, full_surface()).is_ok());
+
+        let list_with_filters = crate::parse(
+            r#"
+            process scan(tick: timer.Tick) { finish true }
+            await triggers.list({
+              target: scan,
+              name: "daily",
+              source_type: "timer.Schedule",
+              enabled: true
+            })?
+            "#,
+        )
+        .expect("parse trigger list filters");
+        assert!(LinkedModule::link(list_with_filters, full_surface()).is_ok());
 
         let list_target_is_not_process = crate::parse(
             r#"
@@ -2373,7 +3671,11 @@ mod tests {
               finish true
             }
             source = timer.Schedule({ expr: "0 8 * * *" })
-            await triggers.register({ source: source, target: done })?
+            await triggers.register({
+              source: source,
+              target: done,
+              inputs: { tick: trigger.event }
+            })?
             "#,
         )
         .expect("parse inferred output");
@@ -2412,6 +3714,112 @@ mod tests {
 
         assert_eq!(minimal.module_ref, processes.module_ref);
         assert_eq!(minimal.required_surface_ref, processes.required_surface_ref);
+    }
+
+    #[test]
+    fn label_annotations_require_enabled_language_feature() {
+        let program = crate::parse(
+            r#"
+            @label(title: "Scan files")
+            process scan(tool: Tools) {
+              @label(title: "Read file")
+              text = await tool.read_file({ path: "." })?
+              finish text
+            }
+            "#,
+        )
+        .expect("parse annotated process");
+
+        let err = LinkedModule::link(program.clone(), full_surface())
+            .expect_err("default surface should reject label annotations");
+        assert!(matches!(
+            err,
+            LinkError::FeatureDisabled {
+                feature: "label annotations",
+                ..
+            }
+        ));
+
+        let linked =
+            LinkedModule::link(program, full_label_surface()).expect("enabled surface should link");
+        assert!(
+            linked
+                .artifact
+                .required_surface
+                .language_features
+                .label_annotations
+        );
+        let process = linked.program().process("scan").expect("linked process");
+        assert_eq!(
+            process.label.as_ref().map(|label| label.title.as_str()),
+            Some("Scan files")
+        );
+    }
+
+    #[test]
+    fn label_annotation_text_inside_strings_does_not_require_feature() {
+        let linked = LinkedModule::link(
+            crate::parse(r####"submit r'''@label(title: "Plain text")'''"####)
+                .expect("parse string"),
+            full_surface(),
+        )
+        .expect("disabled label annotations should not reject string text");
+
+        assert!(
+            !linked
+                .artifact
+                .required_surface
+                .language_features
+                .label_annotations
+        );
+    }
+
+    #[test]
+    fn label_metadata_round_trips_and_changes_artifact_identity() {
+        let first = LinkedModule::link(
+            crate::parse(
+                r#"
+                @label(title: "Scan files")
+                process scan(tool: Tools) {
+                  @label(title: "Read file", description: "Load source text")
+                  text = await tool.read_file({ path: "." })?
+                  @label(title: "Finish")
+                  finish text
+                }
+                "#,
+            )
+            .expect("parse first"),
+            full_label_surface(),
+        )
+        .expect("link first");
+        let changed = LinkedModule::link(
+            crate::parse(
+                r#"
+                @label(title: "Scan files")
+                process scan(tool: Tools) {
+                  @label(title: "Read source", description: "Load source text")
+                  text = await tool.read_file({ path: "." })?
+                  @label(title: "Finish")
+                  finish text
+                }
+                "#,
+            )
+            .expect("parse changed"),
+            full_label_surface(),
+        )
+        .expect("link changed");
+
+        let bytes = first
+            .artifact
+            .to_store_bytes()
+            .expect("encode annotated artifact");
+        let decoded = ModuleArtifact::from_store_bytes(&bytes).expect("decode annotated artifact");
+        assert_eq!(decoded, first.artifact);
+        assert_ne!(first.module_ref, changed.module_ref);
+        assert_ne!(
+            first.artifact.process_ref("scan"),
+            changed.artifact.process_ref("scan")
+        );
     }
 
     #[test]

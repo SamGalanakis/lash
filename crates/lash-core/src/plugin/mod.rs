@@ -208,15 +208,25 @@ mod tests {
 
         fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
             let mut resources = lashlang::ResourceCatalog::new();
-            resources.add_trigger_source_constructor(
-                ["clock", "Alarm"],
-                lashlang::TypeExpr::Object(vec![lashlang::TypeField {
-                    name: "at".into(),
-                    ty: lashlang::TypeExpr::Str,
-                    optional: false,
-                }]),
-                lashlang::TypeExpr::Ref("clock.Tick".into()),
-            );
+            resources
+                .add_trigger_source_constructor(
+                    ["clock", "Alarm"],
+                    lashlang::TypeExpr::Object(vec![lashlang::TypeField {
+                        name: "at".into(),
+                        ty: lashlang::TypeExpr::Str,
+                        optional: false,
+                    }]),
+                    lashlang::NamedDataType::object(
+                        "clock.Tick",
+                        vec![lashlang::TypeField {
+                            name: "fired_at".into(),
+                            ty: lashlang::TypeExpr::Str,
+                            optional: false,
+                        }],
+                    )
+                    .expect("valid clock tick type"),
+                )
+                .expect("valid clock trigger source");
             resources
         }
 
@@ -349,20 +359,29 @@ mod tests {
             }
 
             fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-                reg.host_events().declare(
-                    crate::HostEvent::new("Button", "ui.button", "pressed")
-                        .payload(lashlang::TypeExpr::Str),
-                )
+                reg.host_events().declare(crate::HostEvent::new(
+                    "Button",
+                    "ui.button",
+                    "pressed",
+                    lashlang::NamedDataType::object(
+                        "ui.button.Pressed",
+                        vec![lashlang::TypeField {
+                            name: "button".into(),
+                            ty: lashlang::TypeExpr::Str,
+                            optional: false,
+                        }],
+                    )
+                    .expect("valid button payload type"),
+                ))
             }
         }
 
         let host = PluginHost::new(vec![Arc::new(HostEventOnlyFactory)]);
 
         assert!(
-            !host
-                .lashlang_resources()
-                .trigger_sources
-                .contains_key("ui.button.pressed")
+            host.lashlang_resources()
+                .resolve_trigger_source("ui.button.pressed")
+                .is_none()
         );
         let session = host.build_session("root", None).expect("session");
         assert!(
@@ -372,10 +391,10 @@ mod tests {
                 .is_some()
         );
         assert!(
-            !session
+            session
                 .lashlang_resources()
-                .trigger_sources
-                .contains_key("ui.button.pressed")
+                .resolve_trigger_source("ui.button.pressed")
+                .is_none()
         );
     }
 

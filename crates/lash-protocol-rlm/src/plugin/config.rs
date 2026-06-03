@@ -8,6 +8,8 @@ pub struct RlmProtocolPluginConfig {
     pub prompt_features: crate::protocol::RlmPromptFeatures,
     #[serde(default)]
     pub lashlang_abilities: lashlang::LashlangAbilities,
+    #[serde(default)]
+    pub lashlang_language_features: lashlang::LashlangLanguageFeatures,
     #[serde(default = "default_max_output_chars")]
     pub max_output_chars: usize,
     #[serde(default = "default_continue_as_soft_warn_tokens")]
@@ -28,6 +30,7 @@ impl Default for RlmProtocolPluginConfig {
             observe_projection: ToolOutputBudgetConfig::default(),
             prompt_features: crate::protocol::RlmPromptFeatures::default(),
             lashlang_abilities: lashlang::LashlangAbilities::default(),
+            lashlang_language_features: lashlang::LashlangLanguageFeatures::default(),
             max_output_chars: default_max_output_chars(),
             continue_as_soft_warn_tokens: default_continue_as_soft_warn_tokens(),
         }
@@ -37,6 +40,14 @@ impl Default for RlmProtocolPluginConfig {
 impl RlmProtocolPluginConfig {
     pub fn with_lashlang_abilities(mut self, abilities: lashlang::LashlangAbilities) -> Self {
         self.lashlang_abilities = abilities;
+        self
+    }
+
+    pub fn with_lashlang_language_features(
+        mut self,
+        language_features: lashlang::LashlangLanguageFeatures,
+    ) -> Self {
+        self.lashlang_language_features = language_features;
         self
     }
 }

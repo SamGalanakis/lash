@@ -18,10 +18,11 @@ use smallvec::SmallVec;
 
 use crate::artifact::CompiledModuleContext;
 use crate::ast::{
-    AssignPathStep, AssignTarget, BinaryOp, Expr, ProcessStartExpr, Program, TypeExpr, UnaryOp,
+    AssignPathStep, AssignTarget, BinaryOp, Expr, LabelMetadata, ProcessStartExpr, Program,
+    TypeExpr, UnaryOp,
 };
 use crate::lexer::Span;
-use crate::tracking::{ProcessAstPath, ProcessTrackingContext, ProcessTrackingSite};
+use crate::tracking::{LashlangAstPath, LashlangExecutionContext, LashlangExecutionSite};
 
 use super::record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, symbol_name};
 use super::schema::{ValidationPlan, compile_schema_value};
@@ -36,7 +37,7 @@ use super::{
 
 pub(crate) struct Compiler {
     module_context: Option<CompiledModuleContext>,
-    process_tracking: Option<ProcessTrackingCompileContext>,
+    lashlang_execution: Option<LashlangExecutionCompileContext>,
     code: Vec<Instruction>,
     spans: Vec<Option<Span>>,
     constants: Vec<Value>,
@@ -52,10 +53,10 @@ pub(crate) struct Compiler {
     loop_contexts: Vec<LoopContext>,
 }
 
-struct ProcessTrackingCompileContext {
-    context: ProcessTrackingContext,
-    paths: FxHashMap<usize, ProcessAstPath>,
-    sites: Vec<Option<ProcessTrackingSite>>,
+struct LashlangExecutionCompileContext {
+    context: LashlangExecutionContext,
+    paths: FxHashMap<usize, LashlangAstPath>,
+    sites: Vec<Option<LashlangExecutionSite>>,
 }
 
 struct LoopContext {
@@ -86,6 +87,7 @@ impl Compiler {
     pub(crate) fn compile_linked_program(
         program: &Program,
         module_context: CompiledModuleContext,
+        lashlang_execution_context: LashlangExecutionContext,
     ) -> (Chunk, CompileStats) {
         let stats = Rc::new(RefCell::new(CompileStats::default()));
         let mut compiler = Self::with_slots_and_stats(
@@ -93,6 +95,11 @@ impl Compiler {
             Rc::new(RefCell::new(SlotTable::default())),
             stats.clone(),
         );
+        compiler.lashlang_execution = Some(LashlangExecutionCompileContext {
+            context: lashlang_execution_context,
+            paths: lashlang_execution_paths(program),
+            sites: Vec::new(),
+        });
         compiler.compile_program_block(program);
         let chunk = compiler.finish();
         let compile_stats = *stats.borrow();
@@ -102,7 +109,7 @@ impl Compiler {
     pub(crate) fn compile_linked_process_program(
         program: &Program,
         module_context: CompiledModuleContext,
-        process_tracking_context: ProcessTrackingContext,
+        lashlang_execution_context: LashlangExecutionContext,
     ) -> (Chunk, CompileStats) {
         let stats = Rc::new(RefCell::new(CompileStats::default()));
         let mut compiler = Self::with_slots_and_stats(
@@ -110,9 +117,9 @@ impl Compiler {
             Rc::new(RefCell::new(SlotTable::default())),
             stats.clone(),
         );
-        compiler.process_tracking = Some(ProcessTrackingCompileContext {
-            context: process_tracking_context,
-            paths: process_tracking_paths(program),
+        compiler.lashlang_execution = Some(LashlangExecutionCompileContext {
+            context: lashlang_execution_context,
+            paths: lashlang_execution_paths(program),
             sites: Vec::new(),
         });
         compiler.compile_program_block(program);
@@ -128,7 +135,7 @@ impl Compiler {
     ) -> Self {
         Self {
             module_context,
-            process_tracking: None,
+            lashlang_execution: None,
             code: Vec::new(),
             spans: Vec::new(),
             constants: Vec::new(),
@@ -149,16 +156,16 @@ impl Compiler {
         let slot_names = self.slots.borrow().names.clone();
         let mut spans = self.spans;
         spans.resize(self.code.len(), None);
-        let mut process_tracking_sites = self
-            .process_tracking
+        let mut lashlang_execution_sites = self
+            .lashlang_execution
             .map(|tracking| tracking.sites)
             .unwrap_or_default();
-        process_tracking_sites.resize(self.code.len(), None);
+        lashlang_execution_sites.resize(self.code.len(), None);
         Chunk {
             module_context: self.module_context,
             code: self.code,
             spans,
-            process_tracking_sites,
+            lashlang_execution_sites,
             constants: self.constants,
             names: self.names,
             slot_names,
@@ -370,6 +377,12 @@ impl Compiler {
 
     fn compile_expr_discarding_value(&mut self, expression: &Expr) {
         match expression {
+            Expr::LabelAnnotated { label, expr } => {
+                if !label_attaches_to_concrete_node(expr) {
+                    self.emit_lashlang_execution_step(expression, label);
+                }
+                self.compile_expr_discarding_value(expr);
+            }
             Expr::Block(expressions) => {
                 for expression in expressions {
                     self.compile_expr_discarding_value(expression);
@@ -401,8 +414,8 @@ impl Compiler {
         }
     }
 
-    fn mark_process_tracking_site(&mut self, instruction: usize, site: ProcessTrackingSite) {
-        let Some(tracking) = self.process_tracking.as_mut() else {
+    fn mark_lashlang_execution_site(&mut self, instruction: usize, site: LashlangExecutionSite) {
+        let Some(tracking) = self.lashlang_execution.as_mut() else {
             return;
         };
         if tracking.sites.len() <= instruction {
@@ -411,19 +424,27 @@ impl Compiler {
         tracking.sites[instruction] = Some(site);
     }
 
-    fn process_tracking_site(
+    fn lashlang_execution_site(
         &self,
         expression: &Expr,
         kind: &str,
         label: impl Into<String>,
-    ) -> Option<ProcessTrackingSite> {
-        let tracking = self.process_tracking.as_ref()?;
+    ) -> Option<LashlangExecutionSite> {
+        let tracking = self.lashlang_execution.as_ref()?;
         let path = tracking.paths.get(&expr_key(expression))?;
         Some(tracking.context.builder().node_site(path, kind, label))
     }
 
-    fn branch_tracking_site(&self, expression: &Expr) -> Option<ProcessTrackingSite> {
-        let tracking = self.process_tracking.as_ref()?;
+    fn emit_lashlang_execution_step(&mut self, expression: &Expr, label: &LabelMetadata) {
+        let instruction = self.code.len();
+        self.code.push(Instruction::ObserveStep);
+        if let Some(site) = self.lashlang_execution_site(expression, "step", label.title.as_str()) {
+            self.mark_lashlang_execution_site(instruction, site);
+        }
+    }
+
+    fn branch_execution_site(&self, expression: &Expr) -> Option<LashlangExecutionSite> {
+        let tracking = self.lashlang_execution.as_ref()?;
         let path = tracking.paths.get(&expr_key(expression))?;
         Some(tracking.context.builder().branch_site(path))
     }
@@ -645,6 +666,7 @@ impl Compiler {
 
     fn fold_compile_time_expr(&self, expr: &Expr) -> Option<Value> {
         match expr {
+            Expr::LabelAnnotated { expr, .. } => self.fold_compile_time_expr(expr),
             Expr::Null => Some(Value::Null),
             Expr::Bool(value) => Some(Value::Bool(*value)),
             Expr::Number(value) => Some(Value::Number(*value)),
@@ -876,6 +898,12 @@ impl Compiler {
         }
 
         match expr {
+            Expr::LabelAnnotated { label, expr } => {
+                if !label_attaches_to_concrete_node(expr) {
+                    self.emit_lashlang_execution_step(expr, label);
+                }
+                self.compile_expr(expr);
+            }
             Expr::Block(expressions) => self.compile_block_value(expressions),
             Expr::Assign { target, expr } => self.compile_assignment_expr(target, expr, true),
             Expr::For {
@@ -938,12 +966,12 @@ impl Compiler {
             }
             Expr::StartProcess(process) => {
                 let instruction = self.compile_start_process_expr(process);
-                if let Some(site) = self.process_tracking_site(
+                if let Some(site) = self.lashlang_execution_site(
                     expr,
                     "child_process",
                     format!("start {}", process.process),
                 ) {
-                    self.mark_process_tracking_site(instruction, site);
+                    self.mark_lashlang_execution_site(instruction, site);
                 }
             }
             Expr::ProcessRef { process } => self.compile_process_ref_expr(process),
@@ -965,9 +993,9 @@ impl Compiler {
             } => {
                 let instruction = self.compile_receiver_call_expr(receiver, operation, args, false);
                 if let Some(site) =
-                    self.process_tracking_site(expr, "resource_operation", operation.as_str())
+                    self.lashlang_execution_site(expr, "resource_operation", operation.as_str())
                 {
-                    self.mark_process_tracking_site(instruction, site);
+                    self.mark_lashlang_execution_site(instruction, site);
                 }
             }
             Expr::Await(handle) => match handle.as_ref() {
@@ -978,10 +1006,12 @@ impl Compiler {
                 } => {
                     let instruction =
                         self.compile_receiver_call_expr(receiver, operation, args, false);
-                    if let Some(site) =
-                        self.process_tracking_site(handle, "resource_operation", operation.as_str())
-                    {
-                        self.mark_process_tracking_site(instruction, site);
+                    if let Some(site) = self.lashlang_execution_site(
+                        handle,
+                        "resource_operation",
+                        operation.as_str(),
+                    ) {
+                        self.mark_lashlang_execution_site(instruction, site);
                     }
                 }
                 Expr::ResultUnwrap(inner) => {
@@ -993,12 +1023,12 @@ impl Compiler {
                     {
                         let instruction =
                             self.compile_receiver_call_expr(receiver, operation, args, true);
-                        if let Some(site) = self.process_tracking_site(
+                        if let Some(site) = self.lashlang_execution_site(
                             inner,
                             "resource_operation",
                             operation.as_str(),
                         ) {
-                            self.mark_process_tracking_site(instruction, site);
+                            self.mark_lashlang_execution_site(instruction, site);
                         }
                     } else {
                         self.compile_expr(inner);
@@ -1014,23 +1044,23 @@ impl Compiler {
                 self.compile_expr(duration);
                 let instruction = self.code.len();
                 self.code.push(Instruction::SleepFor);
-                if let Some(site) = self.process_tracking_site(expr, "sleep", "sleep for") {
-                    self.mark_process_tracking_site(instruction, site);
+                if let Some(site) = self.lashlang_execution_site(expr, "sleep", "sleep for") {
+                    self.mark_lashlang_execution_site(instruction, site);
                 }
             }
             Expr::SleepUntil(deadline) => {
                 self.compile_expr(deadline);
                 let instruction = self.code.len();
                 self.code.push(Instruction::SleepUntil);
-                if let Some(site) = self.process_tracking_site(expr, "sleep", "sleep until") {
-                    self.mark_process_tracking_site(instruction, site);
+                if let Some(site) = self.lashlang_execution_site(expr, "sleep", "sleep until") {
+                    self.mark_lashlang_execution_site(instruction, site);
                 }
             }
             Expr::WaitSignal => {
                 let instruction = self.code.len();
                 self.code.push(Instruction::ProcessWaitSignal);
-                if let Some(site) = self.process_tracking_site(expr, "wait", "wait signal") {
-                    self.mark_process_tracking_site(instruction, site);
+                if let Some(site) = self.lashlang_execution_site(expr, "wait", "wait signal") {
+                    self.mark_lashlang_execution_site(instruction, site);
                 }
             }
             Expr::SignalRun { run, payload } => {
@@ -1038,8 +1068,8 @@ impl Compiler {
                 self.compile_expr(payload);
                 let instruction = self.code.len();
                 self.code.push(Instruction::ProcessSignalRun);
-                if let Some(site) = self.process_tracking_site(expr, "signal", "signal run") {
-                    self.mark_process_tracking_site(instruction, site);
+                if let Some(site) = self.lashlang_execution_site(expr, "signal", "signal run") {
+                    self.mark_lashlang_execution_site(instruction, site);
                 }
             }
             Expr::ResultUnwrap(expr) => {
@@ -1052,9 +1082,9 @@ impl Compiler {
                     let instruction =
                         self.compile_receiver_call_expr(receiver, operation, args, true);
                     if let Some(site) =
-                        self.process_tracking_site(expr, "resource_operation", operation.as_str())
+                        self.lashlang_execution_site(expr, "resource_operation", operation.as_str())
                     {
-                        self.mark_process_tracking_site(instruction, site);
+                        self.mark_lashlang_execution_site(instruction, site);
                     }
                 } else if let Expr::Await(handle) = expr.as_ref() {
                     self.compile_expr(handle);
@@ -1099,8 +1129,8 @@ impl Compiler {
                 else_block,
             } => {
                 let jump_to_else = self.compile_condition_jump_if_false(condition);
-                if let Some(site) = self.branch_tracking_site(expr) {
-                    self.mark_process_tracking_site(jump_to_else, site);
+                if let Some(site) = self.branch_execution_site(expr) {
+                    self.mark_lashlang_execution_site(jump_to_else, site);
                 }
                 let const_slots_before_branches = self.const_slots.clone();
                 self.compile_expr(then_block);
@@ -1131,16 +1161,16 @@ impl Compiler {
                 self.compile_expr(value);
                 let instruction = self.code.len();
                 self.code.push(Instruction::ProcessYield);
-                if let Some(site) = self.process_tracking_site(expr, "process_event", "yield") {
-                    self.mark_process_tracking_site(instruction, site);
+                if let Some(site) = self.lashlang_execution_site(expr, "process_event", "yield") {
+                    self.mark_lashlang_execution_site(instruction, site);
                 }
             }
             Expr::Wake(value) => {
                 self.compile_expr(value);
                 let instruction = self.code.len();
                 self.code.push(Instruction::ProcessWake);
-                if let Some(site) = self.process_tracking_site(expr, "process_event", "wake") {
-                    self.mark_process_tracking_site(instruction, site);
+                if let Some(site) = self.lashlang_execution_site(expr, "process_event", "wake") {
+                    self.mark_lashlang_execution_site(instruction, site);
                 }
             }
             Expr::Finish(value) => {
@@ -1151,16 +1181,16 @@ impl Compiler {
                 }
                 let instruction = self.code.len();
                 self.code.push(Instruction::ProcessFinish);
-                if let Some(site) = self.process_tracking_site(expr, "terminal", "result") {
-                    self.mark_process_tracking_site(instruction, site);
+                if let Some(site) = self.lashlang_execution_site(expr, "terminal", "result") {
+                    self.mark_lashlang_execution_site(instruction, site);
                 }
             }
             Expr::Fail(value) => {
                 self.compile_expr(value);
                 let instruction = self.code.len();
                 self.code.push(Instruction::ProcessFail);
-                if let Some(site) = self.process_tracking_site(expr, "terminal", "failure") {
-                    self.mark_process_tracking_site(instruction, site);
+                if let Some(site) = self.lashlang_execution_site(expr, "terminal", "failure") {
+                    self.mark_lashlang_execution_site(instruction, site);
                 }
             }
             Expr::TypeLiteral(ty) => self.compile_type_literal(ty),
@@ -1613,25 +1643,92 @@ fn expr_key(expr: &Expr) -> usize {
     expr as *const Expr as usize
 }
 
-fn process_tracking_paths(program: &Program) -> FxHashMap<usize, ProcessAstPath> {
+fn lashlang_execution_paths(program: &Program) -> FxHashMap<usize, LashlangAstPath> {
     let mut paths = FxHashMap::default();
-    collect_process_tracking_paths(&program.main, ProcessAstPath::root(), &mut paths);
+    collect_lashlang_execution_paths(&program.main, LashlangAstPath::root(), &mut paths);
     paths
 }
 
-fn collect_process_tracking_paths(
+fn collect_lashlang_execution_paths(
     expr: &Expr,
-    path: ProcessAstPath,
-    paths: &mut FxHashMap<usize, ProcessAstPath>,
+    path: LashlangAstPath,
+    paths: &mut FxHashMap<usize, LashlangAstPath>,
 ) {
     paths.insert(expr_key(expr), path.clone());
+    if let Expr::LabelAnnotated { expr, .. } = expr {
+        collect_lashlang_execution_paths(expr, path, paths);
+        return;
+    }
     for (index, child) in expr.children().enumerate() {
-        collect_process_tracking_paths(child, path.child(index), paths);
+        collect_lashlang_execution_paths(child, path.child(index), paths);
+    }
+}
+
+fn label_attaches_to_concrete_node(expr: &Expr) -> bool {
+    match expr {
+        Expr::LabelAnnotated { .. } => false,
+        Expr::Assign { expr, .. } => label_attaches_to_assignment_value(expr),
+        Expr::Await(expr) | Expr::ResultUnwrap(expr) => label_attaches_to_concrete_node(expr),
+        Expr::ReceiverCall { .. }
+        | Expr::StartProcess(_)
+        | Expr::SleepFor(_)
+        | Expr::SleepUntil(_)
+        | Expr::WaitSignal
+        | Expr::SignalRun { .. }
+        | Expr::Submit(_)
+        | Expr::Yield(_)
+        | Expr::Wake(_)
+        | Expr::Finish(_)
+        | Expr::Fail(_)
+        | Expr::If { .. } => true,
+        Expr::Block(_)
+        | Expr::Null
+        | Expr::Bool(_)
+        | Expr::Number(_)
+        | Expr::String(_)
+        | Expr::Variable(_)
+        | Expr::List(_)
+        | Expr::Record(_)
+        | Expr::For { .. }
+        | Expr::While { .. }
+        | Expr::Break
+        | Expr::Continue
+        | Expr::ProcessRef { .. }
+        | Expr::HostValueConstructor { .. }
+        | Expr::ResourceRef(_)
+        | Expr::Cancel(_)
+        | Expr::Print(_)
+        | Expr::BuiltinCall { .. }
+        | Expr::Field { .. }
+        | Expr::Index { .. }
+        | Expr::Unary { .. }
+        | Expr::Binary { .. }
+        | Expr::TypeLiteral(_) => false,
+    }
+}
+
+fn label_attaches_to_assignment_value(expr: &Expr) -> bool {
+    match expr {
+        Expr::Await(expr) | Expr::ResultUnwrap(expr) => label_attaches_to_assignment_value(expr),
+        Expr::ReceiverCall { .. }
+        | Expr::StartProcess(_)
+        | Expr::SleepFor(_)
+        | Expr::SleepUntil(_)
+        | Expr::WaitSignal
+        | Expr::SignalRun { .. }
+        | Expr::Submit(_)
+        | Expr::Yield(_)
+        | Expr::Wake(_)
+        | Expr::Finish(_)
+        | Expr::Fail(_)
+        | Expr::If { .. } => true,
+        _ => false,
     }
 }
 
 pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
     match expr {
+        Expr::LabelAnnotated { expr, .. } => is_pure_expr(expr),
         Expr::Null
         | Expr::Bool(_)
         | Expr::Number(_)
@@ -1774,6 +1871,7 @@ fn wrap_type_schema_value(schema: Value) -> Value {
 
 fn is_terminal_expr(expr: &Expr) -> bool {
     match expr {
+        Expr::LabelAnnotated { expr, .. } => is_terminal_expr(expr),
         Expr::Submit(_) | Expr::Finish(_) | Expr::Fail(_) => true,
         Expr::Block(expressions) => expressions.last().is_some_and(is_terminal_expr),
         Expr::If {

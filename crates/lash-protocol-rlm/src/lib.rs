@@ -16,7 +16,8 @@ mod stream_mask;
 pub use control_tools::continue_as_tool_definition;
 pub use driver::{RlmProjectorConfig, build_rlm_preamble};
 pub use lashlang::{
-    LashlangAbilities, LashlangSurface, ResourceCatalog, TypeExpr, TypeField, format_type_expr,
+    LashlangAbilities, LashlangLanguageFeatures, LashlangSurface, NamedDataType, ResourceCatalog,
+    TypeExpr, TypeField, format_type_expr,
 };
 pub use plugin::{RLM_PROTOCOL_PLUGIN_ID, RlmProtocolPluginConfig, RlmProtocolPluginFactory};
 pub use projection::{

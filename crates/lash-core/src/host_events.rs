@@ -7,7 +7,7 @@ pub struct HostEvent {
     pub resource_type: String,
     pub alias: String,
     pub event: String,
-    pub payload_ty: lashlang::TypeExpr,
+    pub payload_ty: lashlang::NamedDataType,
 }
 
 impl HostEvent {
@@ -15,18 +15,18 @@ impl HostEvent {
         resource_type: impl Into<String>,
         alias: impl Into<String>,
         event: impl Into<String>,
+        payload_ty: lashlang::NamedDataType,
     ) -> Self {
         Self {
             resource_type: resource_type.into(),
             alias: alias.into(),
             event: event.into(),
-            payload_ty: lashlang::TypeExpr::Any,
+            payload_ty,
         }
     }
 
-    pub fn payload(mut self, payload_ty: lashlang::TypeExpr) -> Self {
-        self.payload_ty = payload_ty;
-        self
+    pub fn payload_type(&self) -> &lashlang::NamedDataType {
+        &self.payload_ty
     }
 
     pub fn key(&self) -> HostEventKey {
@@ -146,15 +146,37 @@ impl HostEventEmitReport {
 mod tests {
     use super::*;
 
+    fn button_payload_type() -> lashlang::NamedDataType {
+        lashlang::NamedDataType::object(
+            "ui.button.Pressed",
+            vec![lashlang::TypeField {
+                name: "button".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            }],
+        )
+        .expect("valid host event payload")
+    }
+
     #[test]
     fn host_event_catalog_rejects_duplicate_trigger_source_identity() {
         let mut catalog = HostEventCatalog::new();
         catalog
-            .declare(HostEvent::new("Button", "ui.button", "pressed"))
+            .declare(HostEvent::new(
+                "Button",
+                "ui.button",
+                "pressed",
+                button_payload_type(),
+            ))
             .expect("first host event");
 
         let err = catalog
-            .declare(HostEvent::new("AlternateButton", "ui.button", "pressed"))
+            .declare(HostEvent::new(
+                "AlternateButton",
+                "ui.button",
+                "pressed",
+                button_payload_type(),
+            ))
             .expect_err("duplicate public source identity should be rejected");
 
         assert!(err.contains("duplicate host event source `ui.button.pressed`"));

@@ -8,6 +8,7 @@ fn background_subagent_status_is_transient_and_freezes_duration() {
         id: "subagent:smoke".to_string(),
         process_id: "subagent:smoke".to_string(),
         descriptor: lash_core::ProcessHandleDescriptor::new(Some("subagent"), Some("smoke")),
+        definition: None,
         status: lash_core::ProcessLifecycleStatus::Running,
     };
     app.update_processes(vec![running]);
@@ -20,6 +21,7 @@ fn background_subagent_status_is_transient_and_freezes_duration() {
         id: "subagent:smoke".to_string(),
         process_id: "subagent:smoke".to_string(),
         descriptor: lash_core::ProcessHandleDescriptor::new(Some("subagent"), Some("smoke")),
+        definition: None,
         status: lash_core::ProcessLifecycleStatus::Completed,
     };
     app.update_processes(vec![completed]);

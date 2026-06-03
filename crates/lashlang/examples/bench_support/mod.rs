@@ -654,24 +654,24 @@ submit {
         }
         Scenario::TriggerRegistrySurface => {
             r#"
-type ButtonPressed = { button: "Red" | "Blue", message: str, pressed_at: str }
-
 process daily_digest(tick: cron.Tick) {
-  finish { kind: "daily_digest", id: tick.id }
+  finish { kind: "daily_digest", fired_at: tick.fired_at }
 }
 
-process on_button(event: ButtonPressed) {
+process on_button(event: ui.button.Pressed) {
   finish { kind: "button", button: event.button }
 }
 
 daily_handle = await triggers.register({
   source: cron.Schedule({ expr: "0 8 * * *", tz: "UTC" }),
   target: daily_digest,
+  inputs: { tick: trigger.event },
   name: "daily_digest"
 })?
 button_handle = await triggers.register({
   source: ui.button.pressed({}),
   target: on_button,
+  inputs: { event: trigger.event },
   name: "button watcher"
 })?
 registrations = await triggers.list({ target: daily_digest })?
@@ -809,46 +809,62 @@ pub fn benchmark_surface() -> &'static LashlangSurface {
 fn build_benchmark_surface() -> LashlangSurface {
     let mut resources = ResourceCatalog::tool_default(["echo", "boom", "missing_tool"]);
     lashlang::add_trigger_resource_operations(&mut resources);
-    resources.add_trigger_source_constructor(
-        ["cron", "Schedule"],
-        TypeExpr::Object(vec![
-            TypeField {
-                name: "expr".into(),
-                ty: TypeExpr::Str,
-                optional: false,
-            },
-            TypeField {
-                name: "tz".into(),
-                ty: TypeExpr::Str,
-                optional: true,
-            },
-        ]),
-        TypeExpr::Ref("cron.Tick".into()),
-    );
-    resources.add_trigger_source_constructor(
-        ["ui", "button", "pressed"],
-        TypeExpr::Object(Vec::new()),
-        TypeExpr::Object(vec![
-            TypeField {
-                name: "button".into(),
-                ty: TypeExpr::Union(vec![
-                    TypeExpr::Enum(vec!["Red".into()]),
-                    TypeExpr::Enum(vec!["Blue".into()]),
-                ]),
-                optional: false,
-            },
-            TypeField {
-                name: "message".into(),
-                ty: TypeExpr::Str,
-                optional: false,
-            },
-            TypeField {
-                name: "pressed_at".into(),
-                ty: TypeExpr::Str,
-                optional: false,
-            },
-        ]),
-    );
+    resources
+        .add_trigger_source_constructor(
+            ["cron", "Schedule"],
+            TypeExpr::Object(vec![
+                TypeField {
+                    name: "expr".into(),
+                    ty: TypeExpr::Str,
+                    optional: false,
+                },
+                TypeField {
+                    name: "tz".into(),
+                    ty: TypeExpr::Str,
+                    optional: true,
+                },
+            ]),
+            lashlang::NamedDataType::object(
+                "cron.Tick",
+                vec![TypeField {
+                    name: "fired_at".into(),
+                    ty: TypeExpr::Str,
+                    optional: false,
+                }],
+            )
+            .expect("valid cron tick type"),
+        )
+        .expect("valid cron trigger source");
+    resources
+        .add_trigger_source_constructor(
+            ["ui", "button", "pressed"],
+            TypeExpr::Object(Vec::new()),
+            lashlang::NamedDataType::object(
+                "ui.button.Pressed",
+                vec![
+                    TypeField {
+                        name: "button".into(),
+                        ty: TypeExpr::Union(vec![
+                            TypeExpr::Enum(vec!["Red".into()]),
+                            TypeExpr::Enum(vec!["Blue".into()]),
+                        ]),
+                        optional: false,
+                    },
+                    TypeField {
+                        name: "message".into(),
+                        ty: TypeExpr::Str,
+                        optional: false,
+                    },
+                    TypeField {
+                        name: "pressed_at".into(),
+                        ty: TypeExpr::Str,
+                        optional: false,
+                    },
+                ],
+            )
+            .expect("valid button event type"),
+        )
+        .expect("valid button trigger source");
     resources.add_module_instance(["shell"], "Shell");
     resources.add_operation(
         "Shell",
@@ -1503,7 +1519,7 @@ fn trigger_list_value(args: &Record) -> Value {
         "process_name".to_string(),
         Value::String(process_name.to_string().into()),
     );
-    target.insert("input_name".to_string(), Value::String("event".into()));
+    target.insert("inputs".to_string(), trigger_inputs_value("event"));
 
     let mut route = Record::default();
     route.insert(
@@ -1518,6 +1534,14 @@ fn trigger_list_value(args: &Record) -> Value {
     route.insert("target".to_string(), Value::Record(Arc::new(target)));
     route.insert("enabled".to_string(), Value::Bool(true));
     Value::List(vec![Value::Record(Arc::new(route))].into())
+}
+
+fn trigger_inputs_value(input_name: &str) -> Value {
+    let mut event = Record::default();
+    event.insert("kind".to_string(), Value::String("event".into()));
+    let mut inputs = Record::default();
+    inputs.insert(input_name.to_string(), Value::Record(Arc::new(event)));
+    Value::Record(Arc::new(inputs))
 }
 
 fn trigger_source_value(source_type: &str) -> Value {

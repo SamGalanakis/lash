@@ -12,9 +12,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css?v=2">
+<link rel="stylesheet" href="../styles.css?v=9">
 <script src="../theme.js"></script>
-<script src="../docs.js?v=2" defer></script>
+<script src="../docs.js?v=3" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -125,7 +125,7 @@
           </div>
           <div class="def-list-grid">
             <article class="panel"><h3>State</h3><p>Per-handle config: API key, base URL, default model, options like <code>thinking</code> exposure.</p></article>
-            <article class="panel"><h3>Auth</h3><p>Bearer header, OAuth refresh, device-code flow — whatever the vendor requires. Auth state is opaque to the runtime.</p></article>
+            <article class="panel"><h3>Auth</h3><p>Bearer header, OAuth refresh, device-code flow — whatever the vendor requires. Auth state is opaque to the runtime. OAuth backends (Codex, Google) share token storage and refresh primitives from <code>lash-provider-auth</code>; vendor-specific endpoints, device-code, and PKCE helpers live in each crate's <code>oauth.rs</code>.</p></article>
             <article class="panel"><h3>Readiness</h3><p>Optional pre-flight check (token refresh, capability probe) that runs once per session.</p></article>
             <article class="panel"><h3>Transport</h3><p>The actual HTTP call. Translates <code>LlmRequest</code> to the wire format, streams the response, normalizes back to <code>LlmResponse</code> chunks.</p></article>
             <article class="panel"><h3>Model policy</h3><p>Maps user-facing model + variant names to model-native ids, declares structured-output / tool-call / thinking capabilities per model.</p></article>

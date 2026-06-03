@@ -267,9 +267,6 @@ impl RestateProcessIngressRunner {
         let response = self
             .http
             .post(url)
-            // Idempotency key matches the in-handler submit so a re-submit (from
-            // a poll racing the original poke, or another runner) coalesces.
-            .header("idempotency-key", format!("lash-process:{process_id}:run"))
             .json(&RestateProcessWorkflowInput {
                 registration,
                 execution_context,
@@ -283,9 +280,10 @@ impl RestateProcessIngressRunner {
                 .into_plugin_error()
             })?;
         if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
             return Err(RestateEffectError::BackgroundScheduler(format!(
-                "ingress submit for process `{process_id}` returned status {}",
-                response.status()
+                "ingress submit for process `{process_id}` returned status {status}: {body}"
             ))
             .into_plugin_error());
         }
@@ -557,8 +555,7 @@ macro_rules! impl_restate_controller_context {
                             registration,
                             execution_context,
                         }),
-                    )
-                    .idempotency_key(format!("lash-process:{workflow_key}:run"));
+                    );
                     let handle = request.send();
                     Box::pin(async move { handle.invocation_id().await })
                 }
@@ -583,8 +580,7 @@ macro_rules! impl_restate_controller_context {
                             "cancel",
                         ),
                         Json(request),
-                    )
-                    .idempotency_key(format!("lash-process:{workflow_key}:cancel"));
+                    );
                     let call = request.call();
                     Box::pin(async move {
                         let Json(()) = call.await?;

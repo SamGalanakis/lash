@@ -12,10 +12,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css?v=2">
+<link rel="stylesheet" href="../styles.css?v=9">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js?v=2" defer></script>
+<script src="../docs.js?v=3" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -46,7 +46,7 @@ flowchart TD
   CLI --> FileIndex["lash-file-index<br/>ignore + notify + nucleo"]
   Runtime["LashRuntime"] --> StoreContract["RuntimePersistence<br/>lash-core"]
   StoreContract --> Store["lash-sqlite-store<br/>session graph + blobs + usage"]
-  Runtime --> Trace["lash-trace schema v2<br/>JSONL + process tracking + OTel"]
+  Runtime --> Trace["lash-trace schema v2<br/>JSONL + Lashlang graphs + OTel"]
   Runtime --> Export["lash-export<br/>DB + provider trace"]
   MCP --> Dynamic["McpToolProvider"]
   DefaultTools["lash-standard-plugins"] --> Tavily
@@ -73,7 +73,7 @@ flowchart TD
             <article class="panel"><h3>MCP</h3><p><code>lash-plugin-mcp</code> wraps the official <code>rmcp</code> SDK and registers an <code>McpPluginFactory</code> with the lash plugin system. The factory keeps a shared per-<code>LashCore</code> connection pool, so stdio servers spawn once and every session built from the same core reuses the same client. <code>McpServerConfig</code> supports three transports: <code>stdio</code> (child process), <code>streamable_http</code>, and <code>sse</code>. Tools are surfaced under <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> names, preserving input and output schemas.</p></article>
             <article class="panel"><h3>Tavily</h3><p>Web search and URL extraction register only when <code>LashConfig.auxiliary_secrets.tavily_api_key</code> is present.</p></article>
             <article class="panel"><h3>models.dev</h3><p><code>lash-cli</code> owns models.dev parsing, refresh, and file caching, then passes a resolved <code>ModelSpec</code> into core.</p></article>
-            <article class="panel"><h3>Tracing</h3><p><code>lash-trace</code> defines schema version 2 JSONL records. Standard records cover turns, LLM starts/completions, tools, and summaries; extended records preserve provider/stream details. Lashlang process tracking is an opt-in record stream for process maps, node activity, branches, and child links. The optional <code>otel</code> cargo feature pulls in <code>opentelemetry 0.31</code> and maps runtime trace events to spans. <code>lash-trace-viewer</code> is a standalone binary crate that consumes <code>lash-trace</code> JSONL directly, independent of <code>lash-export</code>.</p></article>
+            <article class="panel"><h3>Tracing</h3><p><code>lash-trace</code> defines schema version 2 JSONL records. Standard records cover turns, LLM starts/completions, tools, and summaries; extended records preserve provider/stream details. Lashlang execution graphs are an opt-in record stream for foreground blocks, durable process runs, node activity, branches, and child links. The optional <code>otel</code> cargo feature pulls in <code>opentelemetry 0.31</code> and maps runtime trace events to spans. <code>lash-trace-viewer</code> is a standalone binary crate that consumes <code>lash-trace</code> JSONL directly, independent of <code>lash-export</code>.</p></article>
             <article class="panel"><h3>File index</h3><p><code>lash-file-index</code> combines <code>ignore</code> walking, <code>notify</code> watching, and <code>nucleo</code> matching for async <code>@</code> completion.</p></article>
             <article class="panel"><h3>Store</h3><p><code>lash-core</code> defines the runtime persistence contract. <code>lash-sqlite-store</code> is the local implementation for session heads, graph nodes, checkpoint blobs, usage deltas, tombstones, and garbage-collection metadata.</p></article>
             <article class="panel"><h3>Export</h3><p><code>lash-export</code> renders the SQLite session plus provider trace JSONL when present, so transcript views can include prompt snapshots, context percentage, cached-token percentage, and exact token counts.</p></article>

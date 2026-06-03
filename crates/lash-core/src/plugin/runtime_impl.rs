@@ -8,6 +8,7 @@ use super::*;
 pub struct PluginHost {
     factories: Arc<Vec<Arc<dyn PluginFactory>>>,
     lashlang_abilities: lashlang::LashlangAbilities,
+    lashlang_language_features: lashlang::LashlangLanguageFeatures,
     lashlang_resources: lashlang::ResourceCatalog,
     sessions: Arc<StdMutex<BTreeMap<String, Weak<PluginSession>>>>,
 }
@@ -44,6 +45,10 @@ impl PluginHost {
             lashlang::LashlangAbilities::default(),
             |abilities, factory| abilities.union(factory.lashlang_abilities()),
         );
+        let lashlang_language_features = all_factories.iter().fold(
+            lashlang::LashlangLanguageFeatures::default(),
+            |features, factory| features.union(factory.lashlang_language_features()),
+        );
         let lashlang_resources = all_factories.iter().fold(
             lashlang::ResourceCatalog::new(),
             |mut resources, factory| {
@@ -54,6 +59,7 @@ impl PluginHost {
         Self {
             factories: Arc::new(all_factories),
             lashlang_abilities,
+            lashlang_language_features,
             lashlang_resources,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
@@ -61,6 +67,14 @@ impl PluginHost {
 
     pub fn with_lashlang_abilities(mut self, abilities: lashlang::LashlangAbilities) -> Self {
         self.lashlang_abilities = abilities;
+        self
+    }
+
+    pub fn with_lashlang_language_features(
+        mut self,
+        language_features: lashlang::LashlangLanguageFeatures,
+    ) -> Self {
+        self.lashlang_language_features = language_features;
         self
     }
 
@@ -73,6 +87,7 @@ impl PluginHost {
         Self {
             factories: Arc::clone(&self.factories),
             lashlang_abilities: self.lashlang_abilities,
+            lashlang_language_features: self.lashlang_language_features,
             lashlang_resources: self.lashlang_resources.clone(),
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
@@ -80,6 +95,10 @@ impl PluginHost {
 
     pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
         self.lashlang_abilities
+    }
+
+    pub fn lashlang_language_features(&self) -> lashlang::LashlangLanguageFeatures {
+        self.lashlang_language_features
     }
 
     pub fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
@@ -178,6 +197,7 @@ impl PluginHost {
             tool_access: authority.tool_access.clone(),
             subagent: authority.subagent.clone(),
             lashlang_abilities: self.lashlang_abilities,
+            lashlang_language_features: self.lashlang_language_features,
             parent_session_id,
         };
         let session_id = ctx.session_id.clone();
@@ -252,6 +272,7 @@ impl PluginHost {
             tool_access: authority.tool_access,
             subagent: authority.subagent,
             lashlang_abilities: self.lashlang_abilities,
+            lashlang_language_features: self.lashlang_language_features,
             lashlang_resources,
             host_events,
             trigger_registry,

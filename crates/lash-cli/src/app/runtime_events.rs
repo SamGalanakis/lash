@@ -471,6 +471,7 @@ fn test_session_event_to_turn_activity(event: SessionEvent) -> Option<TurnActivi
             TurnEvent::CodeBlockStarted {
                 language: "lashlang".to_string(),
                 code: text,
+                graph_key: None,
             }
         }
         SessionEvent::TokenUsage {

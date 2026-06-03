@@ -90,6 +90,7 @@ pub struct PluginSession {
     pub(super) tool_access: SessionToolAccess,
     pub(super) subagent: Option<SubagentSessionContext>,
     pub(super) lashlang_abilities: lashlang::LashlangAbilities,
+    pub(super) lashlang_language_features: lashlang::LashlangLanguageFeatures,
     pub(super) lashlang_resources: lashlang::ResourceCatalog,
     pub(super) host_events: crate::HostEventCatalog,
     pub(super) trigger_registry: Arc<SessionTriggerRegistry>,
@@ -110,6 +111,10 @@ impl PluginSession {
 
     pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
         self.lashlang_abilities
+    }
+
+    pub fn lashlang_language_features(&self) -> lashlang::LashlangLanguageFeatures {
+        self.lashlang_language_features
     }
 
     pub fn lashlang_resources(&self) -> lashlang::ResourceCatalog {

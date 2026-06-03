@@ -319,6 +319,10 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       background: var(--form-deep);
     }
 
+    .main.explorer-open {
+      grid-template-rows: auto minmax(120px, 0.78fr) minmax(360px, 1.22fr) auto;
+    }
+
     .topbar {
       min-width: 0;
       min-height: 64px;
@@ -677,7 +681,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       border-left: 1px solid var(--line);
       background: var(--form);
       display: grid;
-      grid-template-rows: auto minmax(160px, 0.85fr) minmax(220px, 1.15fr);
+      grid-template-rows: auto minmax(0, 1fr);
       min-height: 0;
     }
 
@@ -711,12 +715,17 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       gap: var(--space-2xs);
       padding: var(--space-md) 0;
       border-bottom: 1px solid var(--line);
-      cursor: pointer;
     }
 
     .work-card.selected { background: rgba(209, 169, 74, 0.08); }
 
-    .work-top { display: flex; align-items: center; gap: var(--space-xs); min-width: 0; }
+    .work-top {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
+      align-items: center;
+      gap: var(--space-xs);
+      min-width: 0;
+    }
 
     .work-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ash-mid); flex: none; }
     .work-card.running .work-dot { background: var(--sodium); animation: pulse 1.6s ease-in-out infinite; }
@@ -745,6 +754,60 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       white-space: nowrap;
     }
 
+    .work-diagram-button {
+      width: 2rem;
+      height: 2rem;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.018);
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      padding: 0;
+      flex: none;
+      transition: border-color 140ms ease-out, background 140ms ease-out, transform 120ms ease-out;
+    }
+
+    .work-diagram-button:hover {
+      border-color: var(--line-strong);
+      background: var(--sodium-tint);
+      transform: translateY(-1px);
+    }
+
+    .work-diagram-button:active { transform: translateY(0); }
+
+    .diagram-button-icon {
+      position: relative;
+      width: 1.125rem;
+      height: 0.875rem;
+      display: block;
+    }
+
+    .diagram-button-icon::before,
+    .diagram-button-icon::after {
+      content: "";
+      position: absolute;
+      left: 0.25rem;
+      right: 0.25rem;
+      border-top: 1px solid var(--ash-text);
+    }
+
+    .diagram-button-icon::before { top: 0.25rem; }
+    .diagram-button-icon::after { bottom: 0.25rem; }
+
+    .diagram-button-icon span {
+      position: absolute;
+      width: 0.375rem;
+      height: 0.375rem;
+      border: 1px solid var(--sodium);
+      border-radius: 2px;
+      background: var(--form);
+    }
+
+    .diagram-button-icon span:nth-child(1) { left: 0; top: 0; }
+    .diagram-button-icon span:nth-child(2) { right: 0; top: 0.4375rem; }
+    .diagram-button-icon span:nth-child(3) { left: 0; bottom: 0; }
+
     .work-meta,
     .work-events {
       font-family: var(--font-ui);
@@ -754,35 +817,64 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       overflow-wrap: anywhere;
     }
 
-    .process-graph-panel {
+    .execution-explorer[hidden] { display: none; }
+
+    .execution-explorer {
       min-width: 0;
       min-height: 0;
-      border-top: 1px solid var(--line);
+      border-top: 1px solid var(--line-strong);
+      background: var(--form);
       display: grid;
-      grid-template-rows: auto 1fr;
+      grid-template-rows: auto minmax(0, 1fr);
+      overflow: hidden;
     }
 
-    .graph-head {
+    .shell.execution-fullscreen .execution-explorer {
+      position: fixed;
+      inset: var(--space-md);
+      z-index: 35;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 0.46);
+    }
+
+    .execution-head {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--space-md);
+      align-items: start;
+      padding: var(--space-md) var(--space-lg);
+      border-bottom: 1px solid var(--line);
+      background: var(--form-raised);
+    }
+
+    .execution-heading {
+      min-width: 0;
+      display: grid;
+      gap: var(--space-xs);
+    }
+
+    .execution-title-row {
       min-width: 0;
       display: flex;
       align-items: center;
-      justify-content: space-between;
       gap: var(--space-sm);
-      padding: var(--space-sm) var(--space-lg);
-      border-bottom: 1px solid var(--line);
     }
 
-    .graph-title {
+    .execution-title {
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
       color: var(--chalk);
-      font-size: 0.86rem;
-      font-weight: 650;
+      font-family: var(--font-display);
+      font-size: 1.45rem;
+      font-weight: 700;
+      line-height: 1;
     }
 
-    .graph-status {
+    .execution-status {
       font-family: var(--font-ui);
       font-size: 0.68rem;
       letter-spacing: 0.08em;
@@ -791,63 +883,291 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       white-space: nowrap;
     }
 
-    .process-graph {
+    .execution-meta {
       min-width: 0;
-      min-height: 0;
-      overflow: auto;
-      padding: var(--space-md) var(--space-lg);
-      display: grid;
-      gap: var(--space-sm);
-      align-content: start;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--ash-text);
+      font-family: var(--font-ui);
+      font-size: 0.72rem;
     }
 
-    .graph-section {
-      display: grid;
-      gap: var(--space-2xs);
+    .execution-lineage {
       min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: var(--space-xs);
+      overflow-x: auto;
+      padding-bottom: 1px;
+      scrollbar-width: thin;
     }
 
-    .graph-section-title {
+    .lineage-item,
+    .lineage-bridge {
+      flex: none;
+      min-height: 1.7rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.018);
+      color: var(--ash-text);
       font-family: var(--font-ui);
       font-size: 0.68rem;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--ash-text);
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2xs);
+      padding: 0 var(--space-xs);
+      white-space: nowrap;
     }
 
-    .graph-node,
-    .graph-edge,
-    .graph-child {
-      min-width: 0;
+    .lineage-item {
+      cursor: pointer;
+    }
+
+    .lineage-item.current {
+      color: var(--chalk);
+      border-color: var(--line-strong);
+      background: var(--sodium-tint);
+    }
+
+    .lineage-bridge {
+      border-style: dashed;
+    }
+
+    .lineage-separator {
+      flex: none;
+      color: var(--ash-mid);
+      font-family: var(--font-ui);
+      font-size: 0.7rem;
+    }
+
+    .execution-actions {
+      display: flex;
+      align-items: center;
+      gap: var(--space-xs);
+      flex: none;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .execution-action {
+      height: 2rem;
+      min-width: 2rem;
       border: 1px solid var(--line);
       border-radius: 4px;
-      padding: var(--space-xs);
       background: rgba(255, 255, 255, 0.018);
+      color: var(--chalk);
+      cursor: pointer;
       display: grid;
-      gap: 2px;
+      place-items: center;
+      padding: 0 var(--space-xs);
+      font-family: var(--font-ui);
+      font-size: 0.68rem;
+      letter-spacing: 0.08em;
+      line-height: 1;
+      text-transform: uppercase;
     }
 
-    .graph-node.unobserved { opacity: 0.44; }
-    .graph-node.running { border-color: var(--sodium); }
-    .graph-node.completed { border-color: rgba(139, 179, 120, 0.72); }
-    .graph-node.failed { border-color: var(--error); }
-    .graph-edge.dimmed { opacity: 0.34; }
-    .graph-edge.selected { border-color: var(--sodium); }
+    .execution-action:hover {
+      border-color: var(--line-strong);
+      background: var(--sodium-tint);
+    }
 
-    .graph-primary {
+    .execution-action:disabled {
+      cursor: not-allowed;
+      opacity: 0.42;
+    }
+
+    .execution-body {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
+      overflow: hidden;
+    }
+
+    .diagram-canvas {
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      position: relative;
+      background-color: var(--form-deep);
+      background-image:
+        linear-gradient(oklch(0.94 0.018 90 / 0.055) 1px, transparent 1px),
+        linear-gradient(90deg, oklch(0.94 0.018 90 / 0.055) 1px, transparent 1px);
+      background-size: 1.5rem 1.5rem;
+    }
+
+    .diagram-stage {
+      position: absolute;
+      left: 0;
+      top: 0;
+      transform-origin: 0 0;
+      will-change: transform;
+    }
+
+    .diagram-svg {
+      position: absolute;
+      inset: 0;
+      overflow: visible;
+      pointer-events: none;
+    }
+
+    .diagram-edge {
+      fill: none;
+      stroke: var(--ash-mid);
+      stroke-width: 2;
+    }
+
+    .diagram-edge.selected {
+      stroke: var(--sodium);
+      stroke-width: 3;
+    }
+
+    .diagram-edge.dimmed {
+      opacity: 0.28;
+      stroke-dasharray: 7 7;
+    }
+
+    .diagram-edge-label {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      max-width: 9rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--form);
+      color: var(--ash-text);
+      font-family: var(--font-ui);
+      font-size: 0.64rem;
+      line-height: 1;
+      padding: 0.25rem 0.45rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    .diagram-edge-label.selected {
+      border-color: var(--line-strong);
+      color: var(--sodium-soft);
+    }
+
+    .diagram-edge-label.dimmed { opacity: 0.42; }
+
+    .diagram-node {
+      position: absolute;
+      width: 17.5rem;
+      height: 7rem;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--form-raised);
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      gap: var(--space-2xs);
+      padding: var(--space-sm);
+      box-shadow: 0 0.75rem 1.8rem rgb(0 0 0 / 0.28);
+      overflow: hidden;
+      cursor: pointer;
+    }
+
+    .diagram-node.selected {
+      border-color: var(--sodium);
+      box-shadow: 0 0 0 1px var(--sodium), 0 0.75rem 1.8rem rgb(0 0 0 / 0.28);
+    }
+
+    .diagram-node.child-execution { border-style: dashed; }
+    .diagram-node.subagent-bridge { background: var(--form); }
+
+    .diagram-node.unobserved {
+      opacity: 0.68;
+      background: var(--form);
+    }
+
+    .diagram-node.running { border-color: var(--sodium); }
+    .diagram-node.completed,
+    .diagram-node.succeeded,
+    .diagram-node.done,
+    .diagram-node.observed { border-color: rgba(139, 179, 120, 0.76); }
+    .diagram-node.failed { border-color: var(--error); }
+    .diagram-node.cancelled,
+    .diagram-node.canceled { border-color: var(--line-danger); }
+
+    .diagram-port {
+      position: absolute;
+      top: calc(50% - 0.25rem);
+      width: 0.5rem;
+      height: 0.5rem;
+      border: 1px solid var(--ash-text);
+      border-radius: 50%;
+      background: var(--form-deep);
+    }
+
+    .diagram-port.in { left: -0.25rem; }
+    .diagram-port.out { right: -0.25rem; }
+
+    .diagram-node.completed .diagram-port,
+    .diagram-node.succeeded .diagram-port,
+    .diagram-node.done .diagram-port,
+    .diagram-node.observed .diagram-port { border-color: var(--lichen); }
+    .diagram-node.running .diagram-port { border-color: var(--sodium); }
+    .diagram-node.failed .diagram-port { border-color: var(--error); }
+
+    .diagram-node-kind {
+      font-family: var(--font-ui);
+      font-size: 0.64rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ash-text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .diagram-node-title {
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
       color: var(--chalk);
-      font-size: 0.78rem;
+      font-size: 1.08rem;
+      font-weight: 600;
+      line-height: 1.15;
     }
 
-    .graph-secondary {
+    .diagram-node-description {
+      min-width: 0;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      white-space: normal;
+      color: var(--chalk-dim);
+      font-size: 0.74rem;
+      line-height: 1.25;
+    }
+
+    .diagram-node-meta {
       color: var(--ash-text);
       font-family: var(--font-ui);
       font-size: 0.68rem;
-      overflow-wrap: anywhere;
+      line-height: 1.35;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .diagram-empty {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: var(--ash-text);
+      font-family: var(--font-ui);
+      font-size: 0.78rem;
+      text-align: center;
+      padding: var(--space-lg);
     }
 
     .empty {
@@ -862,6 +1182,92 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       font-size: 0.78rem;
       line-height: 1.6;
       overflow-wrap: anywhere;
+    }
+
+    .node-inspector {
+      min-width: 0;
+      min-height: 0;
+      overflow: auto;
+      border-left: 1px solid var(--line);
+      background: var(--form);
+      padding: var(--space-md);
+      display: grid;
+      align-content: start;
+      gap: var(--space-sm);
+    }
+
+    .inspector-empty {
+      color: var(--ash-text);
+      font-family: var(--font-ui);
+      font-size: 0.75rem;
+      line-height: 1.5;
+    }
+
+    .inspector-title {
+      margin: 0;
+      color: var(--chalk);
+      font-family: var(--font-display);
+      font-size: 1.15rem;
+      line-height: 1.05;
+      overflow-wrap: anywhere;
+    }
+
+    .inspector-description {
+      margin: 0;
+      color: var(--chalk-dim);
+      font-size: 0.82rem;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .inspector-grid {
+      display: grid;
+      gap: var(--space-xs);
+      font-family: var(--font-ui);
+      font-size: 0.72rem;
+      line-height: 1.45;
+    }
+
+    .inspector-row {
+      display: grid;
+      grid-template-columns: 5rem minmax(0, 1fr);
+      gap: var(--space-xs);
+      padding-top: var(--space-xs);
+      border-top: 1px solid var(--line);
+    }
+
+    .inspector-row span:first-child {
+      color: var(--ash-text);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .inspector-row span:last-child {
+      color: var(--chalk-dim);
+      overflow-wrap: anywhere;
+    }
+
+    .inspector-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-xs);
+    }
+
+    .inspector-link {
+      min-height: 1.8rem;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.018);
+      color: var(--sodium-soft);
+      font-family: var(--font-ui);
+      font-size: 0.7rem;
+      padding: 0 var(--space-xs);
+      cursor: pointer;
+    }
+
+    .inspector-link:hover {
+      border-color: var(--line-strong);
+      background: var(--sodium-tint);
     }
 
     @media (max-width: 1180px) {
@@ -889,6 +1295,17 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       }
       .work-list {
         overflow: visible;
+      }
+      .main.explorer-open {
+        grid-template-rows: auto minmax(180px, auto) minmax(420px, 62dvh) auto;
+      }
+      .execution-body {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr) minmax(180px, auto);
+      }
+      .node-inspector {
+        border-left: 0;
+        border-top: 1px solid var(--line);
       }
     }
 
@@ -929,6 +1346,24 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         width: 100%;
         min-height: 48px;
       }
+      .shell.execution-fullscreen .execution-explorer {
+        inset: var(--space-xs);
+      }
+      .execution-head {
+        padding: var(--space-sm);
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .execution-title-row {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: var(--space-2xs);
+      }
+      .execution-actions {
+        justify-content: flex-start;
+      }
+      .inspector-row {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -963,7 +1398,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         <section class="schedule-card" aria-label="Cron schedule example">
           <div class="schedule-card-label">try scheduling</div>
           <div class="schedule-card-code">cron.Schedule(...)</div>
-          <p>Ask the agent to schedule something; it can register a trigger for a host-owned timer.</p>
+          <p>Ask the agent to schedule something; Restate runs the registered cron trigger.</p>
         </section>
       </div>
 
@@ -989,7 +1424,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       </div>
     </aside>
 
-    <main class="main">
+    <main id="mainPanel" class="main">
       <header class="topbar">
         <div class="title-block">
           <h1 class="title">chat</h1>
@@ -1026,6 +1461,37 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         </div>
       </section>
 
+      <section id="executionExplorer" class="execution-explorer" aria-label="Lashlang execution explorer" hidden>
+        <header class="execution-head">
+          <div class="execution-heading">
+            <div class="execution-title-row">
+              <div id="executionTitle" class="execution-title">Execution Explorer</div>
+              <div id="executionStatus" class="execution-status">idle</div>
+            </div>
+            <div id="executionMeta" class="execution-meta"></div>
+            <nav id="executionLineage" class="execution-lineage" aria-label="Execution lineage"></nav>
+          </div>
+          <div class="execution-actions" role="group" aria-label="Execution graph actions">
+            <button id="executionZoomOut" class="execution-action" type="button" title="Zoom out" aria-label="Zoom out">−</button>
+            <button id="executionZoomIn" class="execution-action" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+            <button id="executionFit" class="execution-action" type="button" title="Fit graph to panel" aria-label="Fit graph to panel">fit</button>
+            <button id="executionResetView" class="execution-action" type="button" title="Reset pan and zoom" aria-label="Reset pan and zoom">1:1</button>
+            <button id="executionExportPng" class="execution-action" type="button" title="Export full graph as a high resolution PNG" aria-label="Export execution graph as PNG" disabled>png</button>
+            <button id="executionExportSvg" class="execution-action" type="button" title="Export full graph as SVG" aria-label="Export execution graph as SVG" disabled>svg</button>
+            <button id="executionFullscreen" class="execution-action" type="button" title="Toggle fullscreen explorer" aria-label="Toggle fullscreen explorer">full</button>
+            <button id="executionClose" class="execution-action" type="button" title="Close explorer" aria-label="Close execution explorer">×</button>
+          </div>
+        </header>
+        <div class="execution-body">
+          <div id="executionCanvas" class="diagram-canvas">
+            <div class="diagram-empty">select an execution</div>
+          </div>
+          <aside id="nodeInspector" class="node-inspector" aria-label="Node inspector">
+            <div class="inspector-empty">select a graph node</div>
+          </aside>
+        </div>
+      </section>
+
       <form id="composer" class="composer">
         <textarea id="prompt" rows="2" placeholder="ask the agent — enter to send, shift + enter for a newline"></textarea>
         <button id="send" class="send" type="submit">send</button>
@@ -1035,27 +1501,34 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     <aside class="right">
       <div class="rail-head">
         <div class="rail-title">work</div>
-        <div id="workCount" class="rail-count">0 processes</div>
+        <div id="workCount" class="rail-count">0 executions</div>
       </div>
       <div id="workList" class="work-list"></div>
-      <section class="process-graph-panel">
-        <div class="graph-head">
-          <div id="graphTitle" class="graph-title">process graph</div>
-          <div id="graphStatus" class="graph-status">idle</div>
-        </div>
-        <div id="processGraph" class="process-graph empty">select a process</div>
-      </section>
     </aside>
   </div>
 
   <script>
+    const shell = document.querySelector(".shell");
+    const mainPanel = document.getElementById("mainPanel");
     const timeline = document.getElementById("timeline");
     const timelineEmpty = document.getElementById("timelineEmpty");
     const workList = document.getElementById("workList");
     const workCount = document.getElementById("workCount");
-    const graphTitle = document.getElementById("graphTitle");
-    const graphStatus = document.getElementById("graphStatus");
-    const processGraph = document.getElementById("processGraph");
+    const executionExplorer = document.getElementById("executionExplorer");
+    const executionTitle = document.getElementById("executionTitle");
+    const executionStatus = document.getElementById("executionStatus");
+    const executionMeta = document.getElementById("executionMeta");
+    const executionLineage = document.getElementById("executionLineage");
+    const executionCanvas = document.getElementById("executionCanvas");
+    const nodeInspector = document.getElementById("nodeInspector");
+    const executionClose = document.getElementById("executionClose");
+    const executionZoomOut = document.getElementById("executionZoomOut");
+    const executionZoomIn = document.getElementById("executionZoomIn");
+    const executionFit = document.getElementById("executionFit");
+    const executionResetView = document.getElementById("executionResetView");
+    const executionFullscreen = document.getElementById("executionFullscreen");
+    const executionExportPng = document.getElementById("executionExportPng");
+    const executionExportSvg = document.getElementById("executionExportSvg");
     const composer = document.getElementById("composer");
     const promptInput = document.getElementById("prompt");
     const sendButton = document.getElementById("send");
@@ -1079,7 +1552,25 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     let controller = null;
     let lastRequest = null;
     let workStale = false;
-    let selectedProcessId = null;
+    let selectedWorkKey = null;
+    let activeExecutionGraphKey = null;
+    let currentExecutionExport = null;
+    let graphIndex = { graphs: [], lineage_edges: [] };
+    let graphIndexByKey = new Map();
+    let executionView = {
+      graph: null,
+      nodes: [],
+      edges: [],
+      layout: null,
+      stage: null,
+      selectedNodeId: null,
+      scale: 1,
+      panX: 0,
+      panY: 0,
+      dragging: false,
+      dragX: 0,
+      dragY: 0
+    };
     let turnTimer = 0;
     let turnStart = 0;
 
@@ -1217,6 +1708,8 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       running: "running",
       pending: "queued",
       queued: "queued",
+      observed: "seen",
+      unobserved: "not reached",
       succeeded: "done",
       completed: "done",
       done: "done",
@@ -1251,11 +1744,18 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     }
 
     function statusLabel(terminal) {
-      return STATUS_LABELS[terminal] || humanize(terminal) || "unknown";
+      const key = String(terminal || "").toLowerCase();
+      return STATUS_LABELS[key] || humanize(key) || "unknown";
     }
 
     function kindLabel(kind) {
       if (kind === "subagent") return "sub-agent";
+      if (kind === "process") return "process";
+      if (kind === "process_event") return "step";
+      if (kind === "terminal") return "result";
+      if (kind === "branch") return "decision";
+      if (kind === "branch_arm") return "path";
+      if (kind === "child_process") return "child process";
       return humanize(kind);
     }
 
@@ -1351,7 +1851,22 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       el.innerHTML = "<summary></summary><pre></pre>";
       const toolCount = linkedTools.length || (event.tool_call_ids || []).length;
       const toolLabel = toolCount ? ` · ${toolCount} tool${toolCount === 1 ? "" : "s"}` : "";
-      el.querySelector("summary").textContent = `${event.language || "code"} ${event.success ? "completed" : "failed"} in ${event.duration_ms || 0}ms${toolLabel}`;
+      const summary = el.querySelector("summary");
+      summary.textContent = `${event.language || "code"} ${event.success ? "completed" : "failed"} in ${event.duration_ms || 0}ms${toolLabel}`;
+      if (event.graph_key) {
+        const graphButton = document.createElement("button");
+        graphButton.className = "work-diagram-button";
+        graphButton.type = "button";
+        graphButton.title = "open execution graph";
+        graphButton.setAttribute("aria-label", "Open execution graph for this code block");
+        graphButton.innerHTML = `<span class="diagram-button-icon" aria-hidden="true"><span></span><span></span><span></span></span>`;
+        graphButton.addEventListener("click", click => {
+          click.preventDefault();
+          click.stopPropagation();
+          openExecutionGraph(event.graph_key);
+        });
+        summary.append(" ", graphButton);
+      }
       el.querySelector("pre").textContent = event.code || "";
       for (const tool of linkedTools) appendTool(tool, el);
       timeline.appendChild(el);
@@ -1442,6 +1957,15 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       if (event.type === "submitted_value") appendAssistantText(renderTerminalValue(event.value));
       if (event.type === "tool_value") appendAssistantText(renderTerminalValue(event.value));
       if (event.type === "error") renderError(event.message, { retry: true });
+    }
+
+    function replaySnapshotTimeline(items) {
+      pendingCodeBlock = null;
+      pendingTools = [];
+      for (const item of items || []) {
+        handleStreamItem(item);
+      }
+      finishTransientRows();
     }
 
     async function postCommand(url, payload) {
@@ -1563,6 +2087,8 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         if (!response.ok) throw new Error("reset failed (" + response.status + ")");
         const state = await response.json();
         clearTranscript();
+        selectedWorkKey = null;
+        closeExecutionExplorer();
         lastRequest = null;
         sessionId.textContent = state.settings.session_id || "—";
         renderWork([]);
@@ -1598,9 +2124,18 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     document.addEventListener("click", event => {
       if (!helpPanel.hidden && !helpPanel.contains(event.target) && event.target !== helpBtn) setHelp(false);
     });
+    executionClose.addEventListener("click", closeExecutionExplorer);
+    executionExportPng.addEventListener("click", () => exportExecutionGraph("png"));
+    executionExportSvg.addEventListener("click", () => exportExecutionGraph("svg"));
+    executionZoomOut.addEventListener("click", () => zoomExecution(0.82));
+    executionZoomIn.addEventListener("click", () => zoomExecution(1.18));
+    executionFit.addEventListener("click", fitExecutionGraph);
+    executionResetView.addEventListener("click", resetExecutionView);
+    executionFullscreen.addEventListener("click", toggleExecutionFullscreen);
 
     window.addEventListener("keydown", event => {
       if (event.key !== "Escape") return;
+      if (!executionExplorer.hidden) { event.preventDefault(); closeExecutionExplorer(); return; }
       if (!helpPanel.hidden) { setHelp(false); helpBtn.focus(); return; }
       if (busy) { event.preventDefault(); stopTurn(); }
     });
@@ -1691,7 +2226,11 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       variantSelect.addEventListener("change", validateModel);
       webState.textContent = state.settings.web_configured ? "ready" : "not configured";
       sessionId.textContent = state.settings.session_id;
-      for (const message of state.messages) renderMessage(message);
+      if (Array.isArray(state.timeline) && state.timeline.length) {
+        replaySnapshotTimeline(state.timeline);
+      } else {
+        for (const message of state.messages) renderMessage(message);
+      }
     }
 
     function formatTime(ms) {
@@ -1699,27 +2238,34 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     }
 
+    function shortId(value) {
+      const text = String(value || "").replace(/^process:/, "");
+      return text.length > 12 ? text.slice(0, 8) + "..." : text;
+    }
+
     function renderWork(items) {
+      const rows = executionRows(items, graphIndex.graphs || []);
       workList.innerHTML = "";
       workStale = false;
       workCount.classList.remove("stale");
       workCount.title = "";
-      workCount.textContent = items.length + (items.length === 1 ? " process" : " processes");
-      if (!items.length) {
+      workCount.textContent = rows.length + (rows.length === 1 ? " execution" : " executions");
+      if (!rows.length) {
+        selectedWorkKey = null;
         const empty = document.createElement("div");
         empty.className = "empty";
-        empty.textContent = "no visible processes";
+        empty.textContent = "no visible executions";
         workList.appendChild(empty);
         return;
       }
-      for (const item of items) {
+      for (const row of rows) {
         const card = document.createElement("article");
-        card.className = "work-card " + item.terminal + (item.process_id === selectedProcessId ? " selected" : "");
-        card.title = "process " + item.process_id;
+        card.className = "work-card " + statusClass(row.status) + (row.key === selectedWorkKey ? " selected" : "");
+        card.title = row.graph_key ? "execution " + row.graph_key : row.title;
         card.addEventListener("click", () => {
-          selectedProcessId = item.process_id;
+          selectedWorkKey = row.key;
+          if (row.graph_key) openExecutionGraph(row.graph_key);
           renderWork(items);
-          refreshProcessGraph(item.process_id);
         });
 
         const top = document.createElement("div");
@@ -1728,128 +2274,877 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         dot.className = "work-dot";
         const label = document.createElement("div");
         label.className = "work-label";
-        label.title = item.label;
-        label.textContent = item.label;
+        label.title = row.title;
+        label.textContent = row.title;
         const state = document.createElement("div");
         state.className = "work-state";
-        state.textContent = statusLabel(item.terminal);
-        top.append(dot, label, state);
+        state.textContent = statusLabel(row.status);
+        const graphButton = document.createElement("button");
+        graphButton.className = "work-diagram-button";
+        graphButton.type = "button";
+        graphButton.disabled = !row.graph_key;
+        graphButton.title = row.graph_key ? "open execution graph" : "graph not observed yet";
+        graphButton.setAttribute("aria-label", "Open execution graph for " + row.title);
+        graphButton.innerHTML = `<span class="diagram-button-icon" aria-hidden="true"><span></span><span></span><span></span></span>`;
+        graphButton.addEventListener("click", event => {
+          event.stopPropagation();
+          selectedWorkKey = row.key;
+          renderWork(items);
+          if (row.graph_key) openExecutionGraph(row.graph_key);
+        });
+        top.append(dot, label, state, graphButton);
 
         const meta = document.createElement("div");
         meta.className = "work-meta";
-        meta.textContent = [kindLabel(item.kind), formatTime(item.updated_at_ms)]
-          .filter(Boolean).join(" · ");
+        meta.textContent = row.meta;
 
         const events = document.createElement("div");
         events.className = "work-events";
-        const recent = item.events.slice(-3).map(event => eventLabel(event.event_type));
-        events.textContent = recent.length ? "latest: " + recent.join(" → ") : "no events yet";
+        events.textContent = row.detail;
 
         card.append(top, meta, events);
         workList.appendChild(card);
       }
-      if (!selectedProcessId && items[0]) {
-        selectedProcessId = items[0].process_id;
-        refreshProcessGraph(selectedProcessId);
+      if (!selectedWorkKey && rows[0]) selectedWorkKey = rows[0].key;
+    }
+
+    function executionRows(workItems, graphSummaries) {
+      const rows = [];
+      const processKeys = new Set((workItems || []).map(item => item.graph_key || ("process:" + item.process_id)));
+      for (const graph of graphSummaries || []) {
+        if (graph.kind === "process" && processKeys.has(graph.graph_key)) continue;
+        rows.push({
+          key: graph.graph_key,
+          graph_key: graph.graph_key,
+          title: graph.title || graph.entry_name || shortId(graph.graph_key),
+          status: graph.status || "observed",
+          meta: [
+            kindLabel(graph.kind),
+            graph.node_count + (graph.node_count === 1 ? " node" : " nodes"),
+            graph.child_count ? graph.child_count + " children" : "",
+            graph.scope?.session_id ? "session " + shortId(graph.scope.session_id) : ""
+          ].filter(Boolean).join(" · "),
+          detail: "graph " + shortId(graph.graph_key)
+        });
+      }
+      for (const item of workItems || []) {
+        const graphKey = item.graph_key || ("process:" + item.process_id);
+        const graph = graphIndexByKey.get(graphKey);
+        const recent = item.events.slice(-3).map(event => eventLabel(event.event_type));
+        rows.push({
+          key: graphKey,
+          graph_key: graphKey,
+          title: item.label || shortId(item.process_id),
+          status: item.terminal,
+          meta: [
+            kindLabel(item.kind),
+            graph ? graph.node_count + (graph.node_count === 1 ? " node" : " nodes") : "pending graph",
+            formatTime(item.updated_at_ms)
+          ].filter(Boolean).join(" · "),
+          detail: recent.length ? "latest: " + recent.join(" -> ") : "no events yet"
+        });
+      }
+      rows.sort((left, right) => {
+        const leftForeground = left.graph_key && left.graph_key.startsWith("effect:") ? 0 : 1;
+        const rightForeground = right.graph_key && right.graph_key.startsWith("effect:") ? 0 : 1;
+        return leftForeground - rightForeground || left.title.localeCompare(right.title);
+      });
+      return rows;
+    }
+
+    function openExecutionGraph(graphKey, opts = {}) {
+      if (!graphKey) return;
+      activeExecutionGraphKey = graphKey;
+      selectedWorkKey = graphKey;
+      executionExplorer.hidden = false;
+      mainPanel.classList.add("explorer-open");
+      executionTitle.textContent = "Execution Explorer";
+      executionStatus.textContent = "loading";
+      executionMeta.textContent = "id " + shortId(graphKey);
+      renderLineage(graphKey);
+      renderDiagramEmpty("loading");
+      if (!opts.keepFocus) executionClose.focus();
+      refreshExecutionGraph(graphKey);
+    }
+
+    function closeExecutionExplorer() {
+      executionExplorer.hidden = true;
+      mainPanel.classList.remove("explorer-open");
+      shell.classList.remove("execution-fullscreen");
+      activeExecutionGraphKey = null;
+      executionView.graph = null;
+      executionView.stage = null;
+    }
+
+    function renderDiagramEmpty(text) {
+      currentExecutionExport = null;
+      setGraphExportAvailable(false);
+      executionCanvas.innerHTML = "";
+      const empty = document.createElement("div");
+      empty.className = "diagram-empty";
+      empty.textContent = text;
+      executionCanvas.appendChild(empty);
+      renderNodeInspector(null);
+    }
+
+    function renderExecutionGraph(graph) {
+      const nodes = normalizedDiagramNodes(graph);
+      const edges = normalizedDiagramEdges(graph, nodes);
+      executionTitle.textContent = executionTitleForGraph(graph);
+      executionStatus.textContent = statusLabel(graph.status || "observed");
+      executionMeta.textContent = [
+        kindLabel(graphKind(graph)),
+        nodes.length + (nodes.length === 1 ? " node" : " nodes"),
+        edges.length + (edges.length === 1 ? " edge" : " edges"),
+        (graph.children || []).length ? (graph.children || []).length + " child links" : "",
+        graph.graph_key ? shortId(graph.graph_key) : ""
+      ].filter(Boolean).join(" · ");
+      renderLineage(graph.graph_key);
+
+      if (!nodes.length) {
+        renderDiagramEmpty("no diagram data yet");
+        return;
+      }
+
+      const layout = layoutDiagram(nodes, edges);
+      currentExecutionExport = {
+        graph,
+        nodes,
+        edges,
+        layout,
+        title: executionTitle.textContent,
+        status: executionStatus.textContent,
+        meta: executionMeta.textContent,
+      };
+      setGraphExportAvailable(true);
+      executionCanvas.innerHTML = "";
+      const stage = document.createElement("div");
+      stage.className = "diagram-stage";
+      stage.style.width = layout.width + "px";
+      stage.style.height = layout.height + "px";
+
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.classList.add("diagram-svg");
+      svg.setAttribute("width", String(layout.width));
+      svg.setAttribute("height", String(layout.height));
+      svg.setAttribute("viewBox", "0 0 " + layout.width + " " + layout.height);
+      stage.appendChild(svg);
+
+      for (const edge of edges) renderDiagramEdge(stage, svg, edge, layout.positions);
+      for (const node of nodes) stage.appendChild(renderDiagramNode(node, layout.positions.get(node.id)));
+      executionCanvas.appendChild(stage);
+
+      executionView = {
+        ...executionView,
+        graph,
+        nodes,
+        edges,
+        layout,
+        stage,
+        selectedNodeId: nodes[0]?.id || null,
+        scale: 1,
+        panX: 0,
+        panY: 0
+      };
+      selectDiagramNode(executionView.selectedNodeId);
+      requestAnimationFrame(fitExecutionGraph);
+    }
+
+    function graphKind(graph) {
+      const subject = graph.subject || {};
+      if (subject.type === "effect" && subject.kind === "exec_code") return "foreground";
+      if (subject.type === "process") return "process";
+      return subject.kind || subject.type || graph.entry_kind || "execution";
+    }
+
+    function executionTitleForGraph(graph) {
+      const summary = graphIndexByKey.get(graph.graph_key);
+      if (summary?.title) return summary.title;
+      if (graph.entry_name && graph.entry_name !== "main") return graph.entry_name;
+      return graph.graph_key ? "Lashlang " + shortId(graph.graph_key) : "Execution Explorer";
+    }
+
+    function normalizedDiagramNodes(graph) {
+      const graphStatus = graph.status || "observed";
+      const nodes = (graph.nodes || []).map(node => {
+        const normalized = { ...node };
+        if (normalized.kind === "process" && isUnobservedStatus(normalized.status)) {
+          normalized.status = graphStatus;
+        }
+        return normalized;
+      });
+      for (const edge of lineageEdgesFromGraph(graph.graph_key)) {
+        const childSummary = edge.child_graph_key ? graphIndexByKey.get(edge.child_graph_key) : null;
+        nodes.push({
+          id: "lineage:" + edge.bridge_graph_key + ":" + (edge.child_graph_key || "pending"),
+          kind: edge.child_graph_key ? "child_execution" : "subagent_bridge",
+          label: childSummary?.title || edge.bridge_title || edge.bridge_graph_key,
+          status: edge.pending ? "pending" : (childSummary?.status || edge.bridge_status || "observed"),
+          occurrence: null,
+          latest_error: edge.error || null,
+          target_graph_key: edge.child_graph_key,
+          bridge_graph_key: edge.bridge_graph_key,
+          child_session_id: edge.child_session_id,
+        });
+      }
+      return nodes;
+    }
+
+    function isUnobservedStatus(status) {
+      return !status || String(status).toLowerCase() === "unobserved";
+    }
+
+    function normalizedDiagramEdges(graph, nodes) {
+      const ids = new Set(nodes.map(node => node.id));
+      const edges = (graph.edges || [])
+        .filter(edge => ids.has(edge.from) && ids.has(edge.to))
+        .map(edge => ({ ...edge }));
+      for (const edge of lineageEdgesFromGraph(graph.graph_key)) {
+        const childId = "lineage:" + edge.bridge_graph_key + ":" + (edge.child_graph_key || "pending");
+        if (ids.has(edge.parent_node_id) && ids.has(childId)) {
+          edges.push({
+            id: "child-edge:" + edge.bridge_graph_key + ":" + (edge.child_graph_key || "pending"),
+            from: edge.parent_node_id,
+            to: childId,
+            label: edge.child_graph_key ? "opens" : "pending",
+            selected: !edge.pending,
+          });
+        }
+      }
+      return edges;
+    }
+
+    function lineageEdgesFromGraph(graphKey) {
+      return (graphIndex.lineage_edges || []).filter(edge => edge.parent_graph_key === graphKey);
+    }
+
+    function layoutDiagram(nodes, edges) {
+      const nodeWidth = 280;
+      const nodeHeight = 112;
+      const columnGap = 128;
+      const rowGap = 40;
+      const padX = 56;
+      const padY = 56;
+      const byId = new Map(nodes.map(node => [node.id, node]));
+      const incoming = new Map(nodes.map(node => [node.id, []]));
+      const outgoing = new Map(nodes.map(node => [node.id, []]));
+      for (const edge of edges) {
+        if (!byId.has(edge.from) || !byId.has(edge.to)) continue;
+        outgoing.get(edge.from).push(edge);
+        incoming.get(edge.to).push(edge);
+      }
+
+      let roots = nodes.filter(node => node.kind === "process");
+      if (!roots.length) roots = nodes.filter(node => incoming.get(node.id).length === 0);
+      if (!roots.length && nodes[0]) roots = [nodes[0]];
+
+      const depth = new Map();
+      const queue = [];
+      for (const root of roots) {
+        depth.set(root.id, 0);
+        queue.push(root.id);
+      }
+      let traversalBudget = Math.max(1, nodes.length * Math.max(1, edges.length) + nodes.length);
+      while (queue.length && traversalBudget-- > 0) {
+        const id = queue.shift();
+        const nextDepth = (depth.get(id) || 0) + 1;
+        for (const edge of outgoing.get(id) || []) {
+          if ((depth.get(edge.to) ?? -1) < nextDepth) {
+            depth.set(edge.to, nextDepth);
+            queue.push(edge.to);
+          }
+        }
+      }
+      for (const node of nodes) if (!depth.has(node.id)) depth.set(node.id, 0);
+
+      const columns = new Map();
+      for (const node of nodes) {
+        const column = depth.get(node.id) || 0;
+        if (!columns.has(column)) columns.set(column, []);
+        columns.get(column).push(node);
+      }
+      for (const columnNodes of columns.values()) columnNodes.sort(compareDiagramNodes);
+
+      const orderedColumns = Array.from(columns.keys()).sort((a, b) => a - b);
+      const maxRows = Math.max(1, ...orderedColumns.map(column => columns.get(column).length));
+      const maxColumnHeight = maxRows * nodeHeight + (maxRows - 1) * rowGap;
+      const positions = new Map();
+
+      for (const column of orderedColumns) {
+        const columnNodes = columns.get(column);
+        const columnHeight = columnNodes.length * nodeHeight + Math.max(0, columnNodes.length - 1) * rowGap;
+        const yStart = padY + Math.max(0, (maxColumnHeight - columnHeight) / 2);
+        columnNodes.forEach((node, index) => {
+          positions.set(node.id, {
+            x: padX + column * (nodeWidth + columnGap),
+            y: yStart + index * (nodeHeight + rowGap),
+            width: nodeWidth,
+            height: nodeHeight,
+          });
+        });
+      }
+
+      const columnCount = Math.max(1, orderedColumns.length);
+      return {
+        positions,
+        width: Math.max(720, padX * 2 + columnCount * nodeWidth + (columnCount - 1) * columnGap),
+        height: Math.max(420, padY * 2 + maxColumnHeight),
+      };
+    }
+
+    function compareDiagramNodes(a, b) {
+      const order = { process: 0, branch: 1, branch_arm: 2, process_event: 3, terminal: 4, child_process: 5 };
+      return (order[a.kind] ?? 20) - (order[b.kind] ?? 20)
+        || String(a.label || a.id).localeCompare(String(b.label || b.id));
+    }
+
+    function renderDiagramEdge(stage, svg, edge, positions) {
+      const from = positions.get(edge.from);
+      const to = positions.get(edge.to);
+      if (!from || !to) return;
+      const x1 = from.x + from.width;
+      const y1 = from.y + from.height / 2;
+      const x2 = to.x;
+      const y2 = to.y + to.height / 2;
+      const curve = Math.max(48, Math.abs(x2 - x1) * 0.45);
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.classList.add("diagram-edge");
+      const edgeClass = diagramEdgeClass(edge);
+      if (edgeClass) path.classList.add(edgeClass);
+      path.setAttribute("d", `M ${x1} ${y1} C ${x1 + curve} ${y1}, ${x2 - curve} ${y2}, ${x2} ${y2}`);
+      svg.appendChild(path);
+
+      if (edge.label) {
+        const label = document.createElement("div");
+        label.className = "diagram-edge-label" + (edgeClass ? " " + edgeClass : "");
+        label.textContent = edge.label;
+        label.style.left = ((x1 + x2) / 2) + "px";
+        label.style.top = ((y1 + y2) / 2) + "px";
+        stage.appendChild(label);
       }
     }
 
-    function escapeHtml(value) {
-      return String(value ?? "")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
+    function diagramEdgeClass(edge) {
+      if (edge.selected === true || edge.selection === "selected") return "selected";
+      if (edge.selected === false || edge.selection === "rejected") return "dimmed";
+      return "";
     }
 
-    function renderProcessGraph(graph) {
-      graphTitle.textContent = graph.process_name || graph.process_id;
-      graphStatus.textContent = graph.status || "observed";
-      processGraph.classList.remove("empty");
-      processGraph.innerHTML = "";
-      processGraph.appendChild(graphSection("nodes", graph.nodes || [], renderGraphNode));
-      processGraph.appendChild(graphSection("edges", graph.edges || [], renderGraphEdge));
-      if ((graph.children || []).length) {
-        processGraph.appendChild(graphSection("children", graph.children, renderGraphChild));
+    function renderDiagramNode(node, position) {
+      const el = document.createElement("div");
+      const status = statusClass(node.status || "unobserved");
+      el.className = "diagram-node " + status;
+      if (node.kind === "child_execution") el.classList.add("child-execution");
+      if (node.kind === "subagent_bridge") el.classList.add("subagent-bridge");
+      if (node.id === executionView.selectedNodeId) el.classList.add("selected");
+      el.dataset.nodeId = node.id;
+      el.style.left = position.x + "px";
+      el.style.top = position.y + "px";
+      el.style.width = position.width + "px";
+      el.style.height = position.height + "px";
+      el.addEventListener("click", event => {
+        event.stopPropagation();
+        selectDiagramNode(node.id);
+        if (node.target_graph_key) openExecutionGraph(node.target_graph_key, { keepFocus: true });
+      });
+
+      const inPort = document.createElement("span");
+      inPort.className = "diagram-port in";
+      const outPort = document.createElement("span");
+      outPort.className = "diagram-port out";
+      const kind = document.createElement("div");
+      kind.className = "diagram-node-kind";
+      kind.textContent = kindLabel(node.kind);
+      const title = document.createElement("div");
+      title.className = "diagram-node-title";
+      const labelTitle = node.label_metadata && node.label_metadata.title ? node.label_metadata.title : "";
+      const labelDescription = node.label_metadata && node.label_metadata.description ? node.label_metadata.description : "";
+      const nodeTitle = labelTitle || node.label || node.id;
+      title.title = labelDescription ? nodeTitle + "\n" + labelDescription : nodeTitle;
+      title.textContent = nodeTitle;
+      const description = document.createElement("div");
+      description.className = "diagram-node-description";
+      description.title = labelDescription;
+      description.textContent = labelDescription;
+      const meta = document.createElement("div");
+      meta.className = "diagram-node-meta";
+      meta.textContent = diagramNodeMeta(node);
+      el.append(inPort, outPort, kind, title, description, meta);
+      return el;
+    }
+
+    function selectDiagramNode(nodeId) {
+      executionView.selectedNodeId = nodeId;
+      if (executionView.stage) {
+        for (const node of executionView.stage.querySelectorAll(".diagram-node")) {
+          node.classList.toggle("selected", node.dataset.nodeId === nodeId);
+        }
       }
+      const node = executionView.nodes.find(candidate => candidate.id === nodeId) || null;
+      renderNodeInspector(node);
     }
 
-    function graphSection(title, items, renderItem) {
-      const section = document.createElement("section");
-      section.className = "graph-section";
-      const heading = document.createElement("div");
-      heading.className = "graph-section-title";
-      heading.textContent = title + " " + items.length;
-      section.appendChild(heading);
-      if (!items.length) {
+    function renderNodeInspector(node) {
+      nodeInspector.innerHTML = "";
+      if (!node) {
         const empty = document.createElement("div");
-        empty.className = "graph-secondary";
-        empty.textContent = "none";
-        section.appendChild(empty);
-        return section;
+        empty.className = "inspector-empty";
+        empty.textContent = "select a graph node";
+        nodeInspector.appendChild(empty);
+        return;
       }
-      for (const item of items) section.appendChild(renderItem(item));
-      return section;
+      const title = document.createElement("h3");
+      title.className = "inspector-title";
+      title.textContent = (node.label_metadata && node.label_metadata.title) || node.label || node.id;
+      const descriptionText = (node.label_metadata && node.label_metadata.description) || "";
+      const description = document.createElement("p");
+      description.className = "inspector-description";
+      description.textContent = descriptionText || kindLabel(node.kind);
+      const grid = document.createElement("div");
+      grid.className = "inspector-grid";
+      const rows = [
+        ["status", statusLabel(node.status)],
+        ["kind", kindLabel(node.kind)],
+        ["duration", node.duration_ms !== null && node.duration_ms !== undefined ? node.duration_ms + "ms" : "—"],
+        ["occurrence", node.occurrence || "—"],
+        ["node id", node.id],
+        ["bridge", node.bridge_graph_key || "—"],
+        ["session", node.child_session_id || executionView.graph?.scope?.session_id || "—"],
+        ["error", node.latest_error || "—"],
+      ];
+      for (const [key, value] of rows) {
+        const row = document.createElement("div");
+        row.className = "inspector-row";
+        const k = document.createElement("span");
+        k.textContent = key;
+        const v = document.createElement("span");
+        v.textContent = String(value);
+        row.append(k, v);
+        grid.appendChild(row);
+      }
+      nodeInspector.append(title, description, grid);
+      const links = inspectorGraphLinks(node);
+      if (links.length) {
+        const linkWrap = document.createElement("div");
+        linkWrap.className = "inspector-links";
+        for (const link of links) {
+          const button = document.createElement("button");
+          button.className = "inspector-link";
+          button.type = "button";
+          button.textContent = link.label;
+          button.addEventListener("click", () => openExecutionGraph(link.graphKey, { keepFocus: true }));
+          linkWrap.appendChild(button);
+        }
+        nodeInspector.appendChild(linkWrap);
+      }
     }
 
-    function renderGraphNode(node) {
-      const el = document.createElement("div");
-      el.className = "graph-node " + (node.status || "unobserved");
-      el.innerHTML = `<div class="graph-primary">${escapeHtml(node.label || node.id)}</div>
-        <div class="graph-secondary">${escapeHtml([node.kind, node.status, node.occurrence ? "x" + node.occurrence : ""].filter(Boolean).join(" · "))}</div>
-        ${node.latest_error ? `<div class="graph-secondary">${escapeHtml(node.latest_error)}</div>` : ""}`;
-      return el;
+    function inspectorGraphLinks(node) {
+      const links = [];
+      if (node.target_graph_key) {
+        links.push({ label: "open child", graphKey: node.target_graph_key });
+      }
+      for (const edge of lineageEdgesFromGraph(executionView.graph?.graph_key || "")) {
+        if (edge.parent_node_id === node.id && edge.child_graph_key) {
+          links.push({ label: graphIndexByKey.get(edge.child_graph_key)?.title || "open child", graphKey: edge.child_graph_key });
+        }
+      }
+      return links;
     }
 
-    function renderGraphEdge(edge) {
-      const el = document.createElement("div");
-      const selectedClass = edge.selection === "selected" ? " selected" : edge.selection === "rejected" ? " dimmed" : "";
-      el.className = "graph-edge" + selectedClass;
-      el.innerHTML = `<div class="graph-primary">${escapeHtml(edge.label || "edge")}</div>
-        <div class="graph-secondary">${escapeHtml(edge.from)} → ${escapeHtml(edge.to)}</div>`;
-      return el;
+    function applyExecutionTransform() {
+      if (!executionView.stage) return;
+      executionView.stage.style.transform = `translate(${executionView.panX}px, ${executionView.panY}px) scale(${executionView.scale})`;
     }
 
-    function renderGraphChild(child) {
-      const el = document.createElement("div");
-      el.className = "graph-child";
-      el.innerHTML = `<div class="graph-primary">${escapeHtml(child.child_process_name || child.child_process_id)}</div>
-        <div class="graph-secondary">${escapeHtml(child.parent_node_id)} → ${escapeHtml(child.child_process_id)}</div>`;
-      return el;
+    function zoomExecution(factor, origin) {
+      if (!executionView.stage) return;
+      const rect = executionCanvas.getBoundingClientRect();
+      const point = origin || { x: rect.width / 2, y: rect.height / 2 };
+      const oldScale = executionView.scale;
+      const nextScale = Math.max(0.25, Math.min(2.5, oldScale * factor));
+      const worldX = (point.x - executionView.panX) / oldScale;
+      const worldY = (point.y - executionView.panY) / oldScale;
+      executionView.scale = nextScale;
+      executionView.panX = point.x - worldX * nextScale;
+      executionView.panY = point.y - worldY * nextScale;
+      applyExecutionTransform();
     }
 
-    async function refreshProcessGraph(processId) {
-      if (!processId) return;
-      graphTitle.textContent = "process graph";
-      graphStatus.textContent = "loading";
+    function fitExecutionGraph() {
+      if (!executionView.layout || !executionView.stage) return;
+      const rect = executionCanvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const scale = Math.max(0.25, Math.min(1.15, Math.min(
+        (rect.width - 48) / executionView.layout.width,
+        (rect.height - 48) / executionView.layout.height
+      )));
+      executionView.scale = scale;
+      executionView.panX = Math.max(24, (rect.width - executionView.layout.width * scale) / 2);
+      executionView.panY = Math.max(24, (rect.height - executionView.layout.height * scale) / 2);
+      applyExecutionTransform();
+    }
+
+    function resetExecutionView() {
+      executionView.scale = 1;
+      executionView.panX = 0;
+      executionView.panY = 0;
+      applyExecutionTransform();
+    }
+
+    function toggleExecutionFullscreen() {
+      shell.classList.toggle("execution-fullscreen");
+      requestAnimationFrame(fitExecutionGraph);
+    }
+
+    function setGraphExportAvailable(available) {
+      executionExportPng.disabled = !available;
+      executionExportSvg.disabled = !available;
+    }
+
+    function exportExecutionGraph(format) {
+      if (!currentExecutionExport) return;
+      const svg = buildExecutionExportSvg(currentExecutionExport);
+      const base = executionExportFilename(currentExecutionExport);
+      if (format === "svg") {
+        downloadBlob(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }), base + ".svg");
+      } else {
+        exportExecutionGraphPng(svg, currentExecutionExport, base + ".png");
+      }
+    }
+
+    function executionExportFilename(state) {
+      const parts = [
+        state.title || "execution-graph",
+        state.graph.graph_key ? graphExportIdPart(state.graph.graph_key) : "",
+      ].filter(Boolean);
+      return sanitizeFilename(parts.join("-")) || "execution-graph";
+    }
+
+    function graphExportIdPart(processId) {
+      return String(processId || "").replace(/^process:/, "").slice(0, 8);
+    }
+
+    function sanitizeFilename(value) {
+      return String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 96);
+    }
+
+    function downloadBlob(blob, filename) {
+      const link = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 500);
+    }
+
+    function exportExecutionGraphPng(svg, state, filename) {
+      const dimensions = graphExportDimensions(state);
+      const imageBlob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(imageBlob);
+      const image = new Image();
+      image.decoding = "async";
+      image.onload = () => {
+        const maxEdge = Math.max(dimensions.width, dimensions.height);
+        const scale = Math.max(1, Math.min(3, Math.floor(8192 / maxEdge) || 1));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(dimensions.width * scale);
+        canvas.height = Math.round(dimensions.height * scale);
+        const ctx = canvas.getContext("2d");
+        ctx.scale(scale, scale);
+        ctx.drawImage(image, 0, 0);
+        canvas.toBlob(blob => {
+          URL.revokeObjectURL(url);
+          if (blob) downloadBlob(blob, filename);
+        }, "image/png");
+      };
+      image.onerror = () => URL.revokeObjectURL(url);
+      image.src = url;
+    }
+
+    function graphExportDimensions(state) {
+      const pad = 32;
+      const headerHeight = 88;
+      const width = Math.max(960, state.layout.width + pad * 2);
+      const height = Math.max(560, state.layout.height + headerHeight + pad);
+      return { width, height, pad, headerHeight };
+    }
+
+    function buildExecutionExportSvg(state) {
+      const dimensions = graphExportDimensions(state);
+      const diagramY = dimensions.headerHeight;
+      const colors = {
+        deep: "#0f0f0d",
+        form: "#1b1a17",
+        raised: "#25231f",
+        line: "rgba(239, 226, 194, 0.18)",
+        lineStrong: "rgba(213, 169, 74, 0.45)",
+        ash: "#696258",
+        ashText: "#9c968b",
+        chalk: "#f2eee0",
+        chalkDim: "#bdb7a8",
+        sodium: "#d5a949",
+        sodiumSoft: "#e3bf68",
+        lichen: "#8bb378",
+        error: "#c74b38",
+      };
+      const out = [];
+      out.push(`<?xml version="1.0" encoding="UTF-8"?>`);
+      out.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${dimensions.width}" height="${dimensions.height}" viewBox="0 0 ${dimensions.width} ${dimensions.height}" role="img" aria-label="${escapeXml(state.title || "Lashlang graph")}">`);
+      out.push(`<defs><pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M 24 0 L 0 0 0 24" fill="none" stroke="rgba(239, 226, 194, 0.06)" stroke-width="1"/></pattern></defs>`);
+      out.push(`<rect width="${dimensions.width}" height="${dimensions.height}" fill="${colors.deep}"/>`);
+      out.push(`<rect y="${diagramY}" width="${dimensions.width}" height="${dimensions.height - diagramY}" fill="url(#grid)"/>`);
+      out.push(`<rect width="${dimensions.width}" height="${diagramY}" fill="${colors.form}"/>`);
+      out.push(`<line x1="0" y1="${diagramY}" x2="${dimensions.width}" y2="${diagramY}" stroke="${colors.line}" stroke-width="1"/>`);
+      out.push(`<text x="${dimensions.pad}" y="38" fill="${colors.chalk}" font-family="Big Shoulders Display, Helvetica Neue, Arial, sans-serif" font-size="28" font-weight="700">${escapeXml(state.title || "Lashlang graph")}</text>`);
+      out.push(`<text x="${dimensions.pad}" y="64" fill="${colors.ashText}" font-family="Chivo Mono, ui-monospace, monospace" font-size="12">${escapeXml(state.meta || state.status || "")}</text>`);
+      out.push(`<text x="${dimensions.width - dimensions.pad}" y="42" text-anchor="end" fill="${colors.ashText}" font-family="Chivo Mono, ui-monospace, monospace" font-size="12" letter-spacing="1">${escapeXml(state.status || "")}</text>`);
+      out.push(`<g transform="translate(${dimensions.pad}, ${diagramY})">`);
+      for (const edge of state.edges) out.push(exportEdgeSvg(edge, state.layout.positions, colors));
+      for (const node of state.nodes) out.push(exportNodeSvg(node, state.layout.positions.get(node.id), colors));
+      out.push(`</g></svg>`);
+      return out.join("");
+    }
+
+    function exportEdgeSvg(edge, positions, colors) {
+      const from = positions.get(edge.from);
+      const to = positions.get(edge.to);
+      if (!from || !to) return "";
+      const x1 = from.x + from.width;
+      const y1 = from.y + from.height / 2;
+      const x2 = to.x;
+      const y2 = to.y + to.height / 2;
+      const curve = Math.max(48, Math.abs(x2 - x1) * 0.45);
+      const edgeClass = diagramEdgeClass(edge);
+      const selected = edgeClass === "selected";
+      const dimmed = edgeClass === "dimmed";
+      const stroke = selected ? colors.sodium : colors.ash;
+      const strokeWidth = selected ? 3 : 2;
+      const dash = dimmed ? ` stroke-dasharray="7 7"` : "";
+      const opacity = dimmed ? ` opacity="0.35"` : "";
+      const parts = [`<path d="M ${x1} ${y1} C ${x1 + curve} ${y1}, ${x2 - curve} ${y2}, ${x2} ${y2}" fill="none" stroke="${stroke}" stroke-width="${strokeWidth}"${dash}${opacity}/>`];
+      if (edge.label) {
+        const label = String(edge.label);
+        const width = Math.min(132, Math.max(42, label.length * 7 + 22));
+        const cx = (x1 + x2) / 2;
+        const cy = (y1 + y2) / 2;
+        parts.push(`<rect x="${cx - width / 2}" y="${cy - 13}" width="${width}" height="26" rx="13" fill="${colors.form}" stroke="${selected ? colors.lineStrong : colors.line}"${opacity}/>`);
+        parts.push(`<text x="${cx}" y="${cy + 4}" text-anchor="middle" fill="${selected ? colors.sodiumSoft : colors.ashText}" font-family="Chivo Mono, ui-monospace, monospace" font-size="11"${opacity}>${escapeXml(label)}</text>`);
+      }
+      return parts.join("");
+    }
+
+    function exportNodeSvg(node, position, colors) {
+      if (!position) return "";
+      const status = statusClass(node.status || "unobserved");
+      const unobserved = isUnobservedStatus(node.status);
+      const border = nodeBorderColor(status, colors);
+      const title = (node.label_metadata && node.label_metadata.title) || node.label || node.id;
+      const description = (node.label_metadata && node.label_metadata.description) || "";
+      const titleLines = wrapExportText(title, 26, 1);
+      const descriptionLines = wrapExportText(description, 44, 2);
+      const meta = truncateExportText(diagramNodeMeta(node), 42);
+      const opacity = unobserved ? ` opacity="0.68"` : "";
+      const out = [];
+      out.push(`<g${opacity}>`);
+      out.push(`<rect x="${position.x}" y="${position.y}" width="${position.width}" height="${position.height}" rx="6" fill="${unobserved ? colors.form : colors.raised}" stroke="${border}" stroke-width="1"/>`);
+      out.push(`<circle cx="${position.x}" cy="${position.y + position.height / 2}" r="4" fill="${colors.deep}" stroke="${border}" stroke-width="1"/>`);
+      out.push(`<circle cx="${position.x + position.width}" cy="${position.y + position.height / 2}" r="4" fill="${colors.deep}" stroke="${border}" stroke-width="1"/>`);
+      out.push(`<text x="${position.x + 16}" y="${position.y + 28}" fill="${colors.ashText}" font-family="Chivo Mono, ui-monospace, monospace" font-size="11" letter-spacing="2">${escapeXml(kindLabel(node.kind).toUpperCase())}</text>`);
+      out.push(exportTextLines(titleLines, position.x + 16, position.y + 52, colors.chalk, "Spectral, Georgia, serif", 19, 20, "600"));
+      if (descriptionLines.length) {
+        out.push(exportTextLines(descriptionLines, position.x + 16, position.y + 73, colors.chalkDim, "Spectral, Georgia, serif", 12, 15, "400"));
+      }
+      out.push(`<text x="${position.x + 16}" y="${position.y + position.height - 14}" fill="${colors.ashText}" font-family="Chivo Mono, ui-monospace, monospace" font-size="11">${escapeXml(meta)}</text>`);
+      out.push(`</g>`);
+      return out.join("");
+    }
+
+    function nodeBorderColor(status, colors) {
+      if (status === "running") return colors.sodium;
+      if (status === "completed" || status === "succeeded" || status === "done" || status === "observed") return colors.lichen;
+      if (status === "failed") return colors.error;
+      if (status === "cancelled" || status === "canceled") return colors.error;
+      return colors.line;
+    }
+
+    function exportTextLines(lines, x, y, fill, family, size, lineHeight, weight) {
+      if (!lines.length) return "";
+      const tspans = lines.map((line, index) =>
+        `<tspan x="${x}" dy="${index === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`
+      ).join("");
+      return `<text x="${x}" y="${y}" fill="${fill}" font-family="${family}" font-size="${size}" font-weight="${weight}">${tspans}</text>`;
+    }
+
+    function wrapExportText(value, maxChars, maxLines) {
+      const words = String(value || "").trim().split(/\s+/).filter(Boolean);
+      const lines = [];
+      let line = "";
+      for (const word of words) {
+        const next = line ? line + " " + word : word;
+        if (next.length <= maxChars) {
+          line = next;
+          continue;
+        }
+        if (line) lines.push(line);
+        line = word;
+        if (lines.length >= maxLines) break;
+      }
+      if (line && lines.length < maxLines) lines.push(line);
+      if (lines.length === maxLines && words.join(" ").length > lines.join(" ").length) {
+        lines[lines.length - 1] = truncateExportText(lines[lines.length - 1], maxChars);
+      }
+      return lines;
+    }
+
+    function truncateExportText(value, maxChars) {
+      const text = String(value || "");
+      if (text.length <= maxChars) return text;
+      return text.slice(0, Math.max(0, maxChars - 1)) + "...";
+    }
+
+    function escapeXml(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function statusClass(status) {
+      return String(status || "unobserved").toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+    }
+
+    function diagramNodeMeta(node) {
+      return [
+        statusLabel(node.status),
+        node.occurrence ? "x" + node.occurrence : "",
+        node.duration_ms !== null && node.duration_ms !== undefined ? node.duration_ms + "ms" : "",
+        node.latest_error || "",
+      ].filter(Boolean).join(" · ");
+    }
+
+    function renderLineage(graphKey) {
+      executionLineage.innerHTML = "";
+      const path = lineagePath(graphKey);
+      if (!path.length) {
+        const item = document.createElement("button");
+        item.className = "lineage-item current";
+        item.type = "button";
+        item.textContent = shortId(graphKey);
+        executionLineage.appendChild(item);
+        return;
+      }
+      path.forEach((entry, index) => {
+        if (index) {
+          const sep = document.createElement("span");
+          sep.className = "lineage-separator";
+          sep.textContent = ">";
+          executionLineage.appendChild(sep);
+        }
+        if (entry.type === "bridge") {
+          const bridge = document.createElement("span");
+          bridge.className = "lineage-bridge";
+          bridge.textContent = entry.label;
+          executionLineage.appendChild(bridge);
+        } else {
+          const button = document.createElement("button");
+          button.className = "lineage-item" + (entry.graphKey === graphKey ? " current" : "");
+          button.type = "button";
+          button.textContent = entry.label;
+          button.addEventListener("click", () => openExecutionGraph(entry.graphKey, { keepFocus: true }));
+          executionLineage.appendChild(button);
+        }
+      });
+    }
+
+    function lineagePath(graphKey) {
+      const parentEdge = (graphIndex.lineage_edges || []).find(edge => edge.child_graph_key === graphKey);
+      const summary = graphIndexByKey.get(graphKey);
+      if (!parentEdge) {
+        return [{ type: "graph", graphKey, label: summary?.title || shortId(graphKey) }];
+      }
+      return [
+        ...lineagePath(parentEdge.parent_graph_key),
+        { type: "bridge", label: parentEdge.bridge_title || shortId(parentEdge.bridge_graph_key) },
+        { type: "graph", graphKey, label: summary?.title || shortId(graphKey) }
+      ];
+    }
+
+    async function refreshExecutionGraph(graphKey) {
+      if (!graphKey || executionExplorer.hidden) return;
       try {
-        const response = await fetch("/api/process-graph/" + encodeURIComponent(processId));
+        const response = await fetch("/api/lashlang-graph/" + encodeURIComponent(graphKey));
         if (!response.ok) throw new Error("graph unavailable");
-        renderProcessGraph(await response.json());
+        renderExecutionGraph(await response.json());
       } catch (_) {
-        graphStatus.textContent = "unobserved";
-        processGraph.classList.add("empty");
-        processGraph.textContent = "no graph observed";
+        executionStatus.textContent = "unavailable";
+        executionMeta.textContent = "id " + shortId(graphKey);
+        renderDiagramEmpty("no diagram data yet");
       }
     }
 
     async function refreshWork() {
       try {
-        const response = await fetch("/api/work");
-        if (!response.ok) throw new Error("work request failed");
-        const items = await response.json();
+        const [workResponse, graphResponse] = await Promise.all([
+          fetch("/api/work"),
+          fetch("/api/lashlang-graphs")
+        ]);
+        if (!workResponse.ok) throw new Error("work request failed");
+        if (!graphResponse.ok) throw new Error("graph index request failed");
+        const items = await workResponse.json();
+        graphIndex = await graphResponse.json();
+        graphIndexByKey = new Map((graphIndex.graphs || []).map(graph => [graph.graph_key, graph]));
         renderWork(items);
-        if (selectedProcessId) refreshProcessGraph(selectedProcessId);
+        if (activeExecutionGraphKey) {
+          renderLineage(activeExecutionGraphKey);
+          refreshExecutionGraph(activeExecutionGraphKey);
+        }
       } catch (_) {
         if (!workStale) {
           workStale = true;
           workCount.textContent = "updates paused — retry";
-          workCount.title = "couldn't reach the process registry. polling continues; click to retry now.";
+          workCount.title = "couldn't reach the execution index. polling continues; click to retry now.";
           workCount.classList.add("stale");
         }
       }
     }
+
+    executionCanvas.addEventListener("pointerdown", event => {
+      if (event.target.closest(".diagram-node")) return;
+      executionView.dragging = true;
+      executionView.dragX = event.clientX - executionView.panX;
+      executionView.dragY = event.clientY - executionView.panY;
+      executionCanvas.setPointerCapture(event.pointerId);
+    });
+    executionCanvas.addEventListener("pointermove", event => {
+      if (!executionView.dragging) return;
+      executionView.panX = event.clientX - executionView.dragX;
+      executionView.panY = event.clientY - executionView.dragY;
+      applyExecutionTransform();
+    });
+    executionCanvas.addEventListener("pointerup", event => {
+      executionView.dragging = false;
+      if (executionCanvas.hasPointerCapture(event.pointerId)) {
+        executionCanvas.releasePointerCapture(event.pointerId);
+      }
+    });
+    executionCanvas.addEventListener("wheel", event => {
+      if (!executionView.stage) return;
+      event.preventDefault();
+      const rect = executionCanvas.getBoundingClientRect();
+      zoomExecution(event.deltaY > 0 ? 0.9 : 1.1, {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top
+      });
+    }, { passive: false });
 
     workCount.addEventListener("click", () => { if (workStale) refreshWork(); });
 

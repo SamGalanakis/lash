@@ -63,7 +63,7 @@ pub struct TriggerRegistration {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerTargetSummary {
     pub process_name: String,
-    pub input_name: String,
+    pub inputs: lashlang::TriggerInputTemplate,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -78,7 +78,7 @@ pub(crate) struct SessionTriggerRoute {
     pub required_surface_ref: lashlang::RequiredSurfaceRef,
     pub process_ref: lashlang::ProcessRef,
     pub process_name: String,
-    pub input_name: String,
+    pub input_template: lashlang::TriggerInputTemplate,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
@@ -92,7 +92,7 @@ impl From<&SessionTriggerRoute> for TriggerRegistration {
             source: route.source.clone(),
             target: TriggerTargetSummary {
                 process_name: route.process_name.clone(),
-                input_name: route.input_name.clone(),
+                inputs: route.input_template.clone(),
             },
             enabled: route.enabled,
         }
@@ -129,10 +129,11 @@ impl SessionTriggerRegistry {
             .map_err(|err| PluginError::Session(err.to_string()))?;
         let source_type = request.source.source_type.clone();
         let source = request.source.to_host_value();
-        let event_ty = lashlang::event_type_for_source(resources, &source_type)
+        let event_type = lashlang::event_type_for_source(resources, &source_type)
             .map_err(|err| PluginError::Session(err.to_string()))?;
         let target = request.target;
-        let input_name = validate_target_process(&target, &event_ty, artifact_store)?;
+        let validation =
+            validate_target_process(&target, &event_type, &request.inputs, artifact_store)?;
 
         let mut state = self
             .state
@@ -145,12 +146,12 @@ impl SessionTriggerRegistry {
             name: request.name,
             source_type,
             source,
-            event_ty,
+            event_ty: validation.event_ty,
             module_ref: target.module_ref,
             required_surface_ref: target.required_surface_ref,
             process_ref: target.process_ref,
             process_name: target.process_name,
-            input_name,
+            input_template: validation.inputs,
             enabled: true,
         };
         state.routes.insert(handle, route.clone());
@@ -172,12 +173,24 @@ impl SessionTriggerRegistry {
             .routes
             .values()
             .filter(|route| {
-                request.target.matches(
-                    &route.module_ref,
-                    &route.required_surface_ref,
-                    &route.process_ref,
-                    &route.process_name,
-                )
+                request.target.as_ref().is_none_or(|target| {
+                    target.matches(
+                        &route.module_ref,
+                        &route.required_surface_ref,
+                        &route.process_ref,
+                        &route.process_name,
+                    )
+                }) && request
+                    .name
+                    .as_deref()
+                    .is_none_or(|name| route.name.as_deref() == Some(name))
+                    && request
+                        .source_type
+                        .as_deref()
+                        .is_none_or(|source_type| route.source_type == source_type)
+                    && request
+                        .enabled
+                        .is_none_or(|enabled| route.enabled == enabled)
             })
             .map(TriggerRegistration::from)
             .collect())
@@ -358,9 +371,10 @@ pub(super) fn trigger_handle_json(handle: &str) -> serde_json::Value {
 
 fn validate_target_process(
     target: &lashlang::TriggerTargetIdentity,
-    event_ty: &lashlang::TypeExpr,
+    event_ty: &lashlang::NamedDataType,
+    inputs: &lashlang::TriggerInputTemplate,
     artifact_store: &dyn lashlang::LashlangArtifactStore,
-) -> Result<String, PluginError> {
+) -> Result<lashlang::TriggerTargetValidation, PluginError> {
     let artifact = artifact_store
         .get_module_artifact(&target.module_ref)
         .map_err(|err| PluginError::Session(format!("load trigger target artifact: {err}")))?
@@ -370,7 +384,7 @@ fn validate_target_process(
                 target.module_ref
             ))
         })?;
-    let validation = lashlang::validate_trigger_target(target, event_ty, &artifact)
+    let validation = lashlang::validate_trigger_target(target, event_ty, inputs, &artifact)
         .map_err(|err| PluginError::Session(err.to_string()))?;
-    Ok(validation.input_name)
+    Ok(validation)
 }

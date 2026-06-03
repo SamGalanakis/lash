@@ -421,8 +421,40 @@ impl QueuedTurnBuilder {
         }))
     }
 
+    pub async fn run_with_durable_turn(
+        self,
+        durable_turn_scope: DurableTurnScope<'_>,
+    ) -> Result<Option<TurnOutput>> {
+        let collector = RunActivityCollector::default();
+        let Some(result) = self
+            .stream_with_durable_turn(&collector, durable_turn_scope)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(TurnOutput {
+            result,
+            activities: collector.into_activities(),
+        }))
+    }
+
     pub async fn stream(self, events: &dyn TurnActivitySink) -> Result<Option<TurnResult>> {
-        stream_next_queued_prepared_turn(&self.runtime, TurnSinks::turn(events), self.cancel).await
+        stream_next_queued_prepared_turn(&self.runtime, TurnSinks::turn(events), None, self.cancel)
+            .await
+    }
+
+    pub async fn stream_with_durable_turn(
+        self,
+        events: &dyn TurnActivitySink,
+        durable_turn_scope: DurableTurnScope<'_>,
+    ) -> Result<Option<TurnResult>> {
+        stream_next_queued_prepared_turn(
+            &self.runtime,
+            TurnSinks::turn(events),
+            Some(durable_turn_scope),
+            self.cancel,
+        )
+        .await
     }
 }
 
@@ -445,10 +477,14 @@ pub(crate) async fn resume_prepared_assembled(
 pub(crate) async fn stream_next_queued_prepared_turn(
     runtime: &RuntimeHandle,
     sinks: TurnSinks<'_>,
+    durable_turn_scope: Option<DurableTurnScope<'_>>,
     cancel: CancellationToken,
 ) -> Result<Option<TurnResult>> {
     let turn = Box::pin(stream_next_queued_prepared_assembled(
-        runtime, sinks, cancel,
+        runtime,
+        sinks,
+        durable_turn_scope,
+        cancel,
     ))
     .await?;
     Ok(turn.map(TurnResult::from_assembled))
@@ -457,12 +493,13 @@ pub(crate) async fn stream_next_queued_prepared_turn(
 pub(crate) async fn stream_next_queued_prepared_assembled(
     runtime: &RuntimeHandle,
     sinks: TurnSinks<'_>,
+    durable_turn_scope: Option<DurableTurnScope<'_>>,
     cancel: CancellationToken,
 ) -> Result<Option<AssembledTurn>> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
     let turn = writer
-        .stream_next_queued_work(turn_options(sinks, None, cancel))
+        .stream_next_queued_work(turn_options(sinks, durable_turn_scope, cancel))
         .await?;
     runtime.publish_from(&writer);
     Ok(turn)

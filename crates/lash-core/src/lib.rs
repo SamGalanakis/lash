@@ -165,12 +165,14 @@ pub type TurnMachineConfig = lash_sansio::TurnMachineConfig<HostTurnProtocol>;
 pub use lash_trace::otel::{OtelTraceOptions, OtelTraceSink};
 pub use lash_trace::{
     JsonlTraceSink, TraceAttachment, TraceBranchSelection, TraceContentBlock, TraceContext,
-    TraceError, TraceEvent, TraceLevel, TraceLlmMessage, TraceLlmRequest, TraceLlmResponse,
-    TraceProcessEdgeSelection, TraceProcessGraph, TraceProcessGraphChildLink,
-    TraceProcessGraphEdge, TraceProcessGraphNode, TraceProcessGraphStore, TraceProcessMap,
-    TraceProcessMapEdge, TraceProcessMapNode, TraceProcessNodeStatus, TraceProcessStatus,
-    TraceProcessTrackingEvent, TracePromptComponent, TraceProviderStreamEvent, TraceRecord,
-    TraceRuntimeStreamEvent, TraceSink, TraceSinkError, TraceTokenUsage, TraceToolSpec,
+    TraceError, TraceEvent, TraceLabelMetadata, TraceLashlangChildExecution,
+    TraceLashlangEdgeSelection, TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity,
+    TraceLashlangGraph, TraceLashlangGraphChildLink, TraceLashlangGraphEdge,
+    TraceLashlangGraphNode, TraceLashlangGraphStore, TraceLashlangMap, TraceLashlangMapEdge,
+    TraceLashlangMapNode, TraceLashlangNodeStatus, TraceLashlangStatus, TraceLevel,
+    TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TracePromptComponent,
+    TraceProviderStreamEvent, TraceRecord, TraceRuntimeScope, TraceRuntimeStreamEvent,
+    TraceRuntimeSubject, TraceSink, TraceSinkError, TraceTokenUsage, TraceToolSpec,
 };
 pub use llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 pub use model::{ModelLimits, ModelSpec};
@@ -215,13 +217,14 @@ pub use runtime::{
     InlineProcessRunHandle, InlineRuntimeEffectController, InputItem, LashRuntime, MergeKey,
     NoopEventSink, NoopTurnActivitySink, OutputState, PROCESS_LEASE_SCHEMA_VERSION, ParkedSession,
     ProcessAwaitOutput, ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest,
-    ProcessCancelSource, ProcessCancelSummary, ProcessEvent, ProcessEventAppendRequest,
-    ProcessEventAppendResult, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
-    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary, ProcessId, ProcessInput,
-    ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListMode, ProcessOpScope,
-    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle,
-    ProcessRuntimeHost, ProcessScope, ProcessScopeId, ProcessService, ProcessSessionDeleteReport,
-    ProcessStartGrant, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
+    ProcessCancelSource, ProcessCancelSummary, ProcessDefinitionSelector, ProcessDefinitionSummary,
+    ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventType,
+    ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessHandleSummary, ProcessId, ProcessInput, ProcessLease, ProcessLeaseCompletion,
+    ProcessLifecycleStatus, ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessProvenance,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRunHandle, ProcessRuntimeHost,
+    ProcessScope, ProcessScopeId, ProcessService, ProcessSessionDeleteReport, ProcessStartGrant,
+    ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
     ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
     ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkPoke,
     ProcessWorkRunner, PromptUsage, ProtocolSessionExtension, ProtocolSessionExtensionHandle,
@@ -289,8 +292,9 @@ pub use store::{
     runtime_turn_checkpoint_hash,
 };
 pub use tool_provider::{
-    PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolPrepareCall,
-    ToolPrepareContext, ToolProvider, ToolSessionControl, ToolSessionModel,
+    PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext,
+    ToolLashlangExecutionCallSite, ToolPrepareCall, ToolPrepareContext, ToolProvider,
+    ToolSessionControl, ToolSessionModel,
 };
 
 #[cfg(test)]

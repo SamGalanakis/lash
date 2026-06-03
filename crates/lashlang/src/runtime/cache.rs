@@ -1,16 +1,21 @@
 use crate::{
-    LASHLANG_COMPILER_VERSION, LASHLANG_VM_ABI_VERSION, ModuleArtifact, ProcessRef,
-    RequiredSurfaceRef,
+    LASHLANG_COMPILER_VERSION, LASHLANG_VM_ABI_VERSION, LashlangSurface, LinkError, LinkedModule,
+    ModuleArtifact, ProcessRef, RequiredSurfaceRef,
 };
 
-use super::entry_points::{compile_module_artifact_process, compile_program_internal};
+use super::entry_points::{
+    compile_linked, compile_module_artifact_process, compile_program_internal,
+};
 use super::{CompiledProgram, prewarm};
 use rustc_hash::FxHasher;
+use std::borrow::Borrow;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use thiserror::Error;
 
 const DEFAULT_COMPILED_PROGRAM_CACHE_CAPACITY: usize = 64;
+const DEFAULT_LINKED_PROGRAM_CACHE_CAPACITY: usize = 64;
 const SOURCE_CACHE_VERSION: &str = "lashlang-source-v1";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -136,6 +141,133 @@ impl Default for CompiledProcessCache {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum LinkedProgramCacheError {
+    #[error(transparent)]
+    Parse(#[from] crate::parser::ParseError),
+    #[error(transparent)]
+    Link(#[from] LinkError),
+}
+
+#[derive(Debug)]
+pub struct CompiledLinkedProgram {
+    linked: LinkedModule,
+    compiled: Arc<CompiledProgram>,
+}
+
+impl CompiledLinkedProgram {
+    pub fn linked_module(&self) -> &LinkedModule {
+        &self.linked
+    }
+
+    pub fn compiled_program(&self) -> &CompiledProgram {
+        self.compiled.as_ref()
+    }
+}
+
+pub struct LinkedProgramCache {
+    entries: VecDeque<CachedLinkedProgram>,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    capacity: usize,
+}
+
+struct CachedLinkedProgram {
+    source_hash: u64,
+    source: Arc<str>,
+    program: Arc<CompiledLinkedProgram>,
+}
+
+impl LinkedProgramCache {
+    pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_LINKED_PROGRAM_CACHE_CAPACITY)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        prewarm();
+        Self {
+            entries: VecDeque::with_capacity(capacity),
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            capacity,
+        }
+    }
+
+    pub fn get_or_compile(
+        &mut self,
+        source: &str,
+        surface: impl Borrow<LashlangSurface>,
+    ) -> Result<Arc<CompiledLinkedProgram>, LinkedProgramCacheError> {
+        let source_hash = program_source_hash(source);
+        let surface = surface.borrow();
+        if let Some(entry) = self.entries.back()
+            && linked_program_matches(entry, source_hash, source, surface)
+        {
+            self.hits += 1;
+            return Ok(entry.program.clone());
+        }
+
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| linked_program_matches(entry, source_hash, source, surface))
+        {
+            self.hits += 1;
+            let entry = self
+                .entries
+                .remove(index)
+                .expect("cache index came from existing entry");
+            let program = entry.program.clone();
+            self.entries.push_back(entry);
+            return Ok(program);
+        }
+
+        self.misses += 1;
+        let program = crate::parse(source)?;
+        let linked = LinkedModule::link(program, surface)?;
+        let compiled = Arc::new(compile_linked(&linked));
+        let program = Arc::new(CompiledLinkedProgram { linked, compiled });
+        if self.capacity == 0 {
+            return Ok(program);
+        }
+        if self.entries.len() == self.capacity {
+            self.entries.pop_front();
+            self.evictions += 1;
+        }
+        self.entries.push_back(CachedLinkedProgram {
+            source_hash,
+            source: Arc::<str>::from(source),
+            program: program.clone(),
+        });
+        Ok(program)
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.hits = 0;
+        self.misses = 0;
+        self.evictions = 0;
+    }
+
+    pub fn stats(&self) -> CompiledProgramCacheStats {
+        CompiledProgramCacheStats {
+            hits: self.hits,
+            misses: self.misses,
+            evictions: self.evictions,
+            entries: self.entries.len(),
+            capacity: self.capacity,
+        }
+    }
+}
+
+impl Default for LinkedProgramCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct CompiledProgramCache {
     entries: VecDeque<CachedCompiledProgram>,
     hits: u64,
@@ -236,7 +368,30 @@ impl Default for CompiledProgramCache {
 }
 
 fn program_source_matches(entry: &CachedCompiledProgram, source_hash: u64, source: &str) -> bool {
-    entry.source_hash == source_hash && entry.source.as_ref() == source
+    source_matches(
+        entry.source_hash,
+        entry.source.as_ref(),
+        source_hash,
+        source,
+    )
+}
+
+fn linked_program_matches(
+    entry: &CachedLinkedProgram,
+    source_hash: u64,
+    source: &str,
+    surface: &LashlangSurface,
+) -> bool {
+    source_matches(
+        entry.source_hash,
+        entry.source.as_ref(),
+        source_hash,
+        source,
+    ) && surface.satisfies(&entry.program.linked.artifact.required_surface)
+}
+
+fn source_matches(cached_hash: u64, cached_source: &str, source_hash: u64, source: &str) -> bool {
+    cached_hash == source_hash && cached_source == source
 }
 
 fn program_source_hash(source: &str) -> u64 {

@@ -8,13 +8,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+mod lashlang_graph;
 #[cfg(feature = "otel")]
 pub mod otel;
-mod process_graph;
 
-pub use process_graph::{
-    TraceProcessEdgeSelection, TraceProcessGraph, TraceProcessGraphChildLink,
-    TraceProcessGraphEdge, TraceProcessGraphNode, TraceProcessGraphStore, TraceProcessNodeStatus,
+pub use lashlang_graph::{
+    TraceLashlangEdgeSelection, TraceLashlangGraph, TraceLashlangGraphChildLink,
+    TraceLashlangGraphEdge, TraceLashlangGraphNode, TraceLashlangGraphStore,
+    TraceLashlangNodeStatus,
 };
 
 pub const TRACE_SCHEMA_VERSION: u32 = 2;
@@ -126,6 +127,10 @@ impl TraceRecord {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "TraceEvent is a public DTO; keeping event payloads inline preserves ergonomic pattern matching"
+)]
 pub enum TraceEvent {
     SessionStarted {
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -185,8 +190,8 @@ pub enum TraceEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cumulative: Option<TraceTokenUsage>,
     },
-    ProcessTracking {
-        event: TraceProcessTrackingEvent,
+    LashlangExecution {
+        event: TraceLashlangExecutionEvent,
     },
     TurnCompleted {
         status: String,
@@ -394,35 +399,83 @@ pub struct TraceAgentFrameSwitch {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceRuntimeScope {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_iteration: Option<usize>,
+}
+
+impl TraceRuntimeScope {
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            turn_id: None,
+            turn_index: None,
+            protocol_iteration: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TraceRuntimeSubject {
+    Effect { effect_id: String, kind: String },
+    Process { process_id: String },
+}
+
+impl TraceRuntimeSubject {
+    pub fn graph_key(&self, scope: &TraceRuntimeScope) -> String {
+        match self {
+            Self::Effect { effect_id, .. } => match scope.turn_id.as_deref() {
+                Some(turn_id) if !turn_id.is_empty() => {
+                    format!("effect:{}:{turn_id}:{effect_id}", scope.session_id)
+                }
+                _ => format!("effect:{}:{effect_id}", scope.session_id),
+            },
+            Self::Process { process_id } => format!("process:{process_id}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceLashlangExecutionIdentity {
+    pub scope: TraceRuntimeScope,
+    pub subject: TraceRuntimeSubject,
+    pub module_ref: String,
+    pub entry_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_ref: Option<String>,
+    pub entry_name: String,
+}
+
+impl TraceLashlangExecutionIdentity {
+    pub fn graph_key(&self) -> String {
+        self.subject.graph_key(&self.scope)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TraceProcessTrackingEvent {
-    ProcessStarted {
+pub enum TraceLashlangExecutionEvent {
+    ExecutionStarted {
         event_key: String,
-        process_id: String,
-        session_id: String,
-        module_ref: String,
-        process_ref: String,
-        process_name: String,
-        process_map: TraceProcessMap,
+        identity: TraceLashlangExecutionIdentity,
+        execution_map: TraceLashlangMap,
     },
-    ProcessFinished {
+    ExecutionFinished {
         event_key: String,
-        process_id: String,
-        session_id: String,
-        module_ref: String,
-        process_ref: String,
-        process_name: String,
-        status: TraceProcessStatus,
+        identity: TraceLashlangExecutionIdentity,
+        status: TraceLashlangStatus,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
     NodeStarted {
         event_key: String,
-        process_id: String,
-        session_id: String,
-        module_ref: String,
-        process_ref: String,
-        process_name: String,
+        identity: TraceLashlangExecutionIdentity,
         node_id: String,
         node_kind: String,
         label: String,
@@ -430,11 +483,7 @@ pub enum TraceProcessTrackingEvent {
     },
     NodeCompleted {
         event_key: String,
-        process_id: String,
-        session_id: String,
-        module_ref: String,
-        process_ref: String,
-        process_name: String,
+        identity: TraceLashlangExecutionIdentity,
         node_id: String,
         node_kind: String,
         label: String,
@@ -442,11 +491,7 @@ pub enum TraceProcessTrackingEvent {
     },
     NodeFailed {
         event_key: String,
-        process_id: String,
-        session_id: String,
-        module_ref: String,
-        process_ref: String,
-        process_name: String,
+        identity: TraceLashlangExecutionIdentity,
         node_id: String,
         node_kind: String,
         label: String,
@@ -455,11 +500,7 @@ pub enum TraceProcessTrackingEvent {
     },
     BranchSelected {
         event_key: String,
-        process_id: String,
-        session_id: String,
-        module_ref: String,
-        process_ref: String,
-        process_name: String,
+        identity: TraceLashlangExecutionIdentity,
         node_id: String,
         occurrence: u64,
         edge_id: String,
@@ -467,24 +508,34 @@ pub enum TraceProcessTrackingEvent {
     },
     ChildStarted {
         event_key: String,
-        process_id: String,
-        session_id: String,
-        module_ref: String,
-        process_ref: String,
-        process_name: String,
-        parent_process_id: String,
+        identity: TraceLashlangExecutionIdentity,
         parent_node_id: String,
         occurrence: u64,
-        child_process_id: String,
-        child_module_ref: String,
-        child_process_ref: String,
-        child_process_name: String,
+        child: TraceLashlangChildExecution,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceLashlangChildExecution {
+    pub scope: TraceRuntimeScope,
+    pub subject: TraceRuntimeSubject,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_name: Option<String>,
+}
+
+impl TraceLashlangChildExecution {
+    pub fn graph_key(&self) -> String {
+        self.subject.graph_key(&self.scope)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TraceProcessStatus {
+pub enum TraceLashlangStatus {
     Running,
     Completed,
     Failed,
@@ -499,25 +550,36 @@ pub enum TraceBranchSelection {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TraceProcessMap {
+pub struct TraceLashlangMap {
     pub module_ref: String,
-    pub process_ref: String,
-    pub process_name: String,
+    pub entry_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_ref: Option<String>,
+    pub entry_name: String,
     #[serde(default)]
-    pub nodes: Vec<TraceProcessMapNode>,
+    pub nodes: Vec<TraceLashlangMapNode>,
     #[serde(default)]
-    pub edges: Vec<TraceProcessMapEdge>,
+    pub edges: Vec<TraceLashlangMapEdge>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TraceProcessMapNode {
+pub struct TraceLashlangMapNode {
     pub id: String,
     pub kind: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_metadata: Option<TraceLabelMetadata>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TraceProcessMapEdge {
+pub struct TraceLabelMetadata {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceLashlangMapEdge {
     pub id: String,
     pub from: String,
     pub to: String,
@@ -702,14 +764,20 @@ mod tests {
     }
 
     #[test]
-    fn process_tracking_records_are_jsonl_shaped() {
-        let event = TraceProcessTrackingEvent::NodeStarted {
-            event_key: "process:p1:node:n1:1:started".to_string(),
-            process_id: "p1".to_string(),
-            session_id: "s1".to_string(),
+    fn lashlang_execution_records_are_jsonl_shaped() {
+        let identity = TraceLashlangExecutionIdentity {
+            scope: TraceRuntimeScope::new("s1"),
+            subject: TraceRuntimeSubject::Process {
+                process_id: "p1".to_string(),
+            },
             module_ref: "module".to_string(),
-            process_ref: "component:0".to_string(),
-            process_name: "main".to_string(),
+            entry_kind: "process".to_string(),
+            entry_ref: Some("component:0".to_string()),
+            entry_name: "main".to_string(),
+        };
+        let event = TraceLashlangExecutionEvent::NodeStarted {
+            event_key: "process:p1:node:n1:1:started".to_string(),
+            identity,
             node_id: "n1".to_string(),
             node_kind: "resource_operation".to_string(),
             label: "read_file".to_string(),
@@ -717,20 +785,20 @@ mod tests {
         };
         let record = TraceRecord::new(
             TraceContext::default().for_session("s1"),
-            TraceEvent::ProcessTracking { event },
+            TraceEvent::LashlangExecution { event },
         );
 
-        let json = serde_json::to_value(&record).expect("serialize process tracking");
-        assert_eq!(json["type"], "process_tracking");
+        let json = serde_json::to_value(&record).expect("serialize lashlang execution");
+        assert_eq!(json["type"], "lashlang_execution");
         assert_eq!(json["event"]["kind"], "node_started");
         assert_eq!(json["event"]["event_key"], "process:p1:node:n1:1:started");
 
         let round_trip =
-            serde_json::from_value::<TraceRecord>(json).expect("deserialize process tracking");
+            serde_json::from_value::<TraceRecord>(json).expect("deserialize lashlang execution");
         assert!(matches!(
             round_trip.event,
-            TraceEvent::ProcessTracking {
-                event: TraceProcessTrackingEvent::NodeStarted { .. }
+            TraceEvent::LashlangExecution {
+                event: TraceLashlangExecutionEvent::NodeStarted { .. }
             }
         ));
     }

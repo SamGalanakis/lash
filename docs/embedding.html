@@ -12,9 +12,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=2">
+<link rel="stylesheet" href="./styles.css?v=9">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=2" defer></script>
+<script src="./docs.js?v=3" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -43,7 +43,7 @@
             <dt>Semantic event stream</dt>
             <dd>Identity-bearing <code>TurnActivity</code> items: assistant prose deltas, reasoning deltas, tool start/complete pairs with correlation ids, code-block start/complete, terminal <code>SubmittedValue</code>/<code>ToolValue</code>, per-call and rolling usage. Assistant prose deltas are live previews; the settled transcript comes from <code>TurnResult</code> / <code>SessionReadView</code> after the runtime commit.</dd>
             <dt>Tracing as a first-class sink</dt>
-            <dd>Attach <code>TraceSink</code> implementations for structured runtime records. JSONL tracing and the HTML viewer cover turns, tools, LLMs, prompts, stream deltas, and usage; OpenTelemetry export is optional. Lashlang process tracking uses a separate opt-in sink so process-map observability does not mutate process-registry state. Use <code>ProcessControl</code> for host commands and <code>TraceProcessGraphStore</code> for optional trace-derived graph snapshots.</dd>
+            <dd>Attach <code>TraceSink</code> implementations for structured runtime records. JSONL tracing and the HTML viewer cover turns, tools, LLMs, prompts, stream deltas, and usage; OpenTelemetry export is optional. Lashlang execution graphs use a separate opt-in sink so foreground blocks, durable process runs, and subagent child work can be observed without mutating process-registry state. Use <code>ProcessControl</code> for host commands and <code>TraceLashlangGraphStore</code> for optional trace-derived graph snapshots.</dd>
             <dt>Snapshot and restore seams</dt>
             <dd>Plugins, tool state, and the current AgentFrame's Lashlang VM each persist through versioned snapshot writers so a parked session resumes intact across process restarts.</dd>
           </dl>

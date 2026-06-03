@@ -202,6 +202,7 @@ mod tests {
                     name: "main".into(),
                     params: Vec::new(),
                     return_ty: None,
+                    label: None,
                     body: program.main,
                 })],
                 main: ::lashlang::Expr::Block(Vec::new()),
@@ -1121,7 +1122,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lashlang_process_tracking_uses_dedicated_sink_only() {
+    async fn lashlang_execution_uses_dedicated_sink_only() {
         let registry = Arc::new(crate::TestLocalProcessRegistry::default());
         let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
         let normal_trace = Arc::new(RecordingTraceSink::default());
@@ -1134,7 +1135,7 @@ mod tests {
                 config.profile.host_profile_id = "worker-profile".to_string();
                 config.tracing.trace_sink =
                     Some(Arc::clone(&normal_trace) as Arc<dyn lash_trace::TraceSink>);
-                config.tracing.process_tracking_sink =
+                config.tracing.lashlang_execution_sink =
                     Some(Arc::clone(&process_trace) as Arc<dyn lash_trace::TraceSink>);
                 config
             },
@@ -1184,32 +1185,35 @@ mod tests {
         ));
         assert!(
             normal_trace.records().iter().all(|record| {
-                !matches!(record.event, lash_trace::TraceEvent::ProcessTracking { .. })
+                !matches!(
+                    record.event,
+                    lash_trace::TraceEvent::LashlangExecution { .. }
+                )
             }),
-            "normal trace sink must not receive process tracking"
+            "normal trace sink must not receive Lashlang execution events"
         );
 
         let records = process_trace.records();
         let events = records
             .iter()
             .filter_map(|record| match &record.event {
-                lash_trace::TraceEvent::ProcessTracking { event } => Some(event),
+                lash_trace::TraceEvent::LashlangExecution { event } => Some(event),
                 _ => None,
             })
             .collect::<Vec<_>>();
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                lash_trace::TraceProcessTrackingEvent::ProcessStarted { process_map, .. }
-                    if process_map.nodes.iter().any(|node| node.kind == "branch")
-                        && process_map.edges.iter().any(|edge| edge.label == "then")
+                lash_trace::TraceLashlangExecutionEvent::ExecutionStarted { execution_map, .. }
+                    if execution_map.nodes.iter().any(|node| node.kind == "branch")
+                        && execution_map.edges.iter().any(|edge| edge.label == "then")
             )),
-            "started event should carry the static process map: {events:?}"
+            "started event should carry the static Lashlang map: {events:?}"
         );
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                lash_trace::TraceProcessTrackingEvent::BranchSelected {
+                lash_trace::TraceLashlangExecutionEvent::BranchSelected {
                     selected: lash_trace::TraceBranchSelection::Then,
                     ..
                 }
@@ -1218,25 +1222,28 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                lash_trace::TraceProcessTrackingEvent::ChildStarted {
-                    parent_process_id,
-                    child_process_name,
+                lash_trace::TraceLashlangExecutionEvent::ChildStarted {
+                    child,
                     ..
-                } if parent_process_id == "tracking-parent" && child_process_name == "child"
+                } if matches!(
+                    &child.subject,
+                    lash_trace::TraceRuntimeSubject::Process { process_id }
+                        if process_id != "tracking-parent"
+                ) && child.entry_name.as_deref() == Some("child")
             )
         }));
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                lash_trace::TraceProcessTrackingEvent::NodeCompleted { label, .. }
+                lash_trace::TraceLashlangExecutionEvent::NodeCompleted { label, .. }
                     if label == "result"
             )
         }));
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                lash_trace::TraceProcessTrackingEvent::ProcessFinished {
-                    status: lash_trace::TraceProcessStatus::Completed,
+                lash_trace::TraceLashlangExecutionEvent::ExecutionFinished {
+                    status: lash_trace::TraceLashlangStatus::Completed,
                     ..
                 }
             )

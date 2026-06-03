@@ -12,9 +12,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=2">
+<link rel="stylesheet" href="./styles.css?v=9">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=2" defer></script>
+<script src="./docs.js?v=3" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -108,7 +108,7 @@ submit({ "move": move_idx, "tenant": tenant_id })
           </ul>
           <p>Lazy bindings no longer accept a raw <code>Arc&lt;dyn ProjectedHostValue&gt;</code> through the public RLM API. Keep the object behind a resolver so snapshots, AgentFrame switches, and child seeds carry an opaque <code>ProjectionRef</code> instead of accidentally materializing the large value.</p>
           <pre><code>use std::sync::Arc;
-use lash::{LashCore, ModeId, ModePreset, PluginStack, TurnInput};
+use lash::{plugins::runtime_plugin_stack, LashCore, ModeId, ModePreset, TurnInput};
 use lash_protocol_rlm::{
     ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt,
 };
@@ -117,7 +117,7 @@ let registry = Arc::new(ProjectionRegistry::new());
 let core = LashCore::builder()
     .install_mode(ModePreset::rlm_with_projection_resolver(registry.clone()))
     .default_mode(ModeId::rlm())
-    .plugins(PluginStack::runtime())
+    .plugins(runtime_plugin_stack())
     .build()?;
 
 // `my_docs_projection` implements `lashlang::ProjectedHostValue`.
@@ -202,7 +202,7 @@ let result = session
             <pre><code>#[derive(Clone, Debug)]
 struct ToneConfig;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct ToneTurnInput {
     tone: String,
 }
@@ -233,7 +233,7 @@ impl lash::plugins::SessionPlugin for ToneSessionPlugin {
                 let Some(input) = ctx.turn_context.plugin_input::&lt;ToneTurnInput&gt;(TonePlugin::ID) else {
                     return Ok(Vec::new());
                 };
-                Ok(vec![lash::PromptContribution::environment(
+                Ok(vec![lash::prompt::PromptContribution::environment(
                     "Tone",
                     format!("Use this response tone: {}", input.tone),
                 )])
@@ -259,14 +259,36 @@ impl lash::tools::ToolProvider for ToneTools {
             .map(|definition| Arc::new(definition.contract()))
     }
 
-    async fn execute(&amp;self, call: lash::tools::ToolCall&lt;'_&gt;) -&gt; lash::tools::ToolResult {
+    // Typed turn input is read at prepare time, where ToolPrepareContext
+    // exposes plugin_input, then threaded into execute as the prepared payload.
+    async fn prepare_tool_call(
+        &amp;self,
+        call: lash::tools::ToolPrepareCall&lt;'_&gt;,
+    ) -&gt; Result&lt;lash::tools::PreparedToolCall, lash::tools::ToolResult&gt; {
         let Some(input) = call.context.plugin_input::&lt;ToneTurnInput&gt;(TonePlugin::ID) else {
-            return lash::tools::ToolResult::err_fmt("missing tone input");
+            return Err(lash::tools::ToolResult::err_fmt("missing tone input"));
+        };
+        let prepared_payload = serde_json::to_value(input)
+            .map_err(|err| lash::tools::ToolResult::err_fmt(format!("invalid tone input: {err}")))?;
+        Ok(lash::tools::PreparedToolCall::from_parts(
+            call.pending.call_id,
+            call.pending.tool_name,
+            call.pending.args,
+            call.pending.replay,
+            prepared_payload,
+        ))
+    }
+
+    async fn execute(&amp;self, call: lash::tools::ToolCall&lt;'_&gt;) -&gt; lash::tools::ToolResult {
+        let input = match call.context.decode_prepared_payload::&lt;ToneTurnInput&gt;() {
+            Ok(input) =&gt; input,
+            Err(err) =&gt; return lash::tools::ToolResult::err_fmt(format!("missing tone input: {err}")),
         };
         run_tone_tool(call.name, call.args, &amp;input.tone)
     }
 }</code></pre>
           </div>
+          <p>Each surface reads typed input where it is available — the prompt hook from its <code>TurnContext</code>, the tool in <code>prepare_tool_call</code> through <code>ToolPrepareContext::plugin_input</code>, then carried into <code>execute</code> as the prepared payload. The execute-time <code>ToolContext</code> has no <code>plugin_input</code> accessor by design.</p>
           <p>Human input follows the same rule: a host-supplied tool that waits inside its implementation and returns a normal tool result. No separate runtime prompt event.</p>
           <p>Per-turn plugin input is live host state. It is useful for local, synchronous turns, but durable workflow integrations that may resume a turn later should keep canonical app state in a store and have prompt hooks or tools reload it by session id. The <a href="./example-agent-service.html">agent-service example</a> uses that store-backed pattern for its board state.</p>
           <p>Plugin crates should export a domain extension trait wrapping the generic input primitive:</p>

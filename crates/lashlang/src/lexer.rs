@@ -27,6 +27,7 @@ pub enum TokenKind {
     RBracket,
     Comma,
     Colon,
+    At,
     Question,
     Dot,
     Bang,
@@ -124,6 +125,7 @@ impl<'a> Lexer<'a> {
                 ']' => self.single(TokenKind::RBracket),
                 ',' => self.single(TokenKind::Comma),
                 ':' => self.single(TokenKind::Colon),
+                '@' => self.single(TokenKind::At),
                 '?' => self.single(TokenKind::Question),
                 '.' => self.single(TokenKind::Dot),
                 '+' => self.single(TokenKind::Plus),
@@ -432,7 +434,7 @@ mod tests {
             # comment
             // comment
             if else for in await cancel submit print call and or not true false null start
-            name _x a1 "hi\n\t\"\\\r\q" 12 3.5 { } ( ) [ ] , : ? . ! = == != && || | < <= > >= + - * / %
+            name _x a1 "hi\n\t\"\\\r\q" 12 3.5 { } ( ) [ ] , : @ ? . ! = == != && || | < <= > >= + - * / %
             "#)
         .expect("lexing should succeed");
 
@@ -470,6 +472,7 @@ mod tests {
                 TokenKind::RBracket,
                 TokenKind::Comma,
                 TokenKind::Colon,
+                TokenKind::At,
                 TokenKind::Question,
                 TokenKind::Dot,
                 TokenKind::Bang,
@@ -495,8 +498,8 @@ mod tests {
 
     #[test]
     fn rejects_unexpected_characters() {
-        let err = lex("@").expect_err("lexing should fail");
-        assert_eq!(err, LexError::UnexpectedChar { ch: '@', offset: 0 });
+        let err = lex("`").expect_err("lexing should fail");
+        assert_eq!(err, LexError::UnexpectedChar { ch: '`', offset: 0 });
     }
 
     #[test]
@@ -549,6 +552,42 @@ PY'''
             vec![CompactString::from(
                 "python3 - <<'PY'\nprint(\"\"\"double quotes are preserved\"\"\")\n\\n { braces stay raw }\nPY"
             )]
+        );
+    }
+
+    #[test]
+    fn lexes_label_annotation_text_inside_strings_as_strings() {
+        let tokens = lex(r####"
+            regular = "@label(title: \"plain\")"
+            multiline = """@label(title: "plain")
+finish null"""
+            raw = r'''@label(title: "plain")
+@label(title: "still plain") finish null'''
+            "####)
+        .expect("lexing should succeed");
+
+        assert!(
+            tokens
+                .iter()
+                .all(|token| !matches!(token.kind, TokenKind::At)),
+            "`@` inside strings must not lex as annotation syntax"
+        );
+        let strings: Vec<_> = tokens
+            .into_iter()
+            .filter_map(|token| match token.kind {
+                TokenKind::String(value) => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            strings,
+            vec![
+                CompactString::from("@label(title: \"plain\")"),
+                CompactString::from("@label(title: \"plain\")\nfinish null"),
+                CompactString::from(
+                    "@label(title: \"plain\")\n@label(title: \"still plain\") finish null"
+                ),
+            ]
         );
     }
 

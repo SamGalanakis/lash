@@ -10,12 +10,17 @@ pub use state::RlmExecutionState;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lash_core::{ExecRequest, ExecResponse, RuntimeExecutionContext, SessionError};
+use lash_core::{
+    ExecRequest, ExecResponse, RuntimeEffectKind, RuntimeExecutionContext, SessionError,
+    TraceLabelMetadata, TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity,
+    TraceLashlangMap, TraceLashlangMapEdge, TraceLashlangMapNode, TraceLashlangStatus,
+    TraceRuntimeScope, TraceRuntimeSubject,
+};
 #[cfg(test)]
 use lash_plugin_tool_output_budget::ToolOutputBudgetConfig;
 use lashlang::{ExecutionOutcome, State as FlowState};
 
-use self::host_bridge::HostBridge;
+use self::host_bridge::{HostBridge, LashlangExecutionTrace};
 use crate::projection::{
     ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
     flow_to_json_value, json_to_flow_value, projected_bindings, prune_projected_binding_names,
@@ -66,9 +71,12 @@ async fn execute_code_inner(
     projection_resolver: Arc<dyn ProjectionResolver>,
 ) -> ExecResponse {
     state.dirty = true;
-    let program = match lashlang::parse(code) {
+    let cached_program = match state
+        .linked_programs
+        .get_or_compile(code, ctx.lashlang_surface())
+    {
         Ok(program) => program,
-        Err(err) => {
+        Err(lashlang::LinkedProgramCacheError::Parse(err)) => {
             return ExecResponse {
                 observations: Vec::new(),
                 observation_truncation: Vec::new(),
@@ -80,10 +88,7 @@ async fn execute_code_inner(
                 terminal_finish: None,
             };
         }
-    };
-    let linked = match lashlang::LinkedModule::link(program, ctx.lashlang_surface()) {
-        Ok(linked) => linked,
-        Err(err) => {
+        Err(lashlang::LinkedProgramCacheError::Link(err)) => {
             return ExecResponse {
                 observations: Vec::new(),
                 observation_truncation: Vec::new(),
@@ -96,19 +101,29 @@ async fn execute_code_inner(
             };
         }
     };
-    if let Err(err) = ctx.put_lashlang_module_artifact(&linked.artifact) {
-        return ExecResponse {
-            observations: Vec::new(),
-            observation_truncation: Vec::new(),
-            tool_calls: Vec::new(),
-            images: Vec::new(),
-            printed_images: Vec::new(),
-            error: Some(format!("failed to store lashlang module artifact: {err}")),
-            duration_ms: start.elapsed().as_millis() as u64,
-            terminal_finish: None,
-        };
+    let linked_module = cached_program.linked_module();
+    if !linked_module.artifact.exports.processes.is_empty()
+        && !state
+            .stored_lashlang_modules
+            .contains(&linked_module.module_ref)
+    {
+        if let Err(err) = ctx.put_lashlang_module_artifact(&linked_module.artifact) {
+            return ExecResponse {
+                observations: Vec::new(),
+                observation_truncation: Vec::new(),
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                printed_images: Vec::new(),
+                error: Some(format!("failed to store lashlang module artifact: {err}")),
+                duration_ms: start.elapsed().as_millis() as u64,
+                terminal_finish: None,
+            };
+        }
+        state
+            .stored_lashlang_modules
+            .insert(linked_module.module_ref.clone());
     }
-    let compiled = Arc::new(lashlang::compile_linked(&linked));
+    let compiled = cached_program.compiled_program();
 
     if let Err(err) =
         rehydrate_projected_globals(&mut state.rlm, Arc::clone(&projection_resolver)).await
@@ -144,18 +159,27 @@ async fn execute_code_inner(
     let projected_names = projected.names().collect::<Vec<_>>();
     prune_projected_binding_names(&mut state.rlm, projected_names.iter().map(String::as_str));
     let tool_result_projectors = tool_result_projectors(&ctx);
+    let lashlang_execution_trace =
+        foreground_lashlang_execution_trace(&ctx, &linked_module.artifact);
+    if let Some(trace) = &lashlang_execution_trace {
+        emit_foreground_execution_started(trace, &linked_module.artifact);
+    }
     let host = HostBridge::new(
         ctx,
         state.observe_projection.clone(),
         tool_result_projectors,
+        lashlang_execution_trace.clone(),
     );
     let env = lashlang::ExecutionEnvironment::new(&host)
         .traced()
         .with_scratch(std::mem::take(&mut state.scratch))
         .with_projected_bindings(projected);
-    let result = Box::pin(lashlang::execute(compiled.as_ref(), &mut state.rlm, &env)).await;
+    let result = Box::pin(lashlang::execute(compiled, &mut state.rlm, &env)).await;
     state.scratch = env.take_recycled_scratch().unwrap_or_default();
     let runtime_failure = env.take_runtime_failure();
+    if let Some(trace) = &lashlang_execution_trace {
+        emit_foreground_execution_finished(trace, &result, runtime_failure.as_ref());
+    }
     drop(env);
     let terminal_finish = match result {
         Ok(ExecutionOutcome::Finished(value)) => Some(flow_to_json_value(&value).await),
@@ -210,6 +234,117 @@ fn tool_result_projectors(ctx: &RuntimeExecutionContext<'_>) -> Vec<crate::RlmTo
         .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
         .map(|extension| extension.tool_result_projectors.clone())
         .unwrap_or_default()
+}
+
+fn foreground_lashlang_execution_trace(
+    ctx: &RuntimeExecutionContext<'_>,
+    artifact: &lashlang::ModuleArtifact,
+) -> Option<LashlangExecutionTrace> {
+    let sink = ctx.lashlang_execution_sink()?;
+    let invocation = ctx.parent_invocation()?;
+    if invocation.effect_kind() != Some(RuntimeEffectKind::ExecCode) {
+        return None;
+    }
+    let effect_id = invocation.effect_id()?;
+    let kind = invocation.effect_kind()?;
+    Some(LashlangExecutionTrace::new(
+        sink,
+        ctx.lashlang_execution_context().clone(),
+        TraceLashlangExecutionIdentity {
+            scope: TraceRuntimeScope {
+                session_id: invocation.scope.session_id.clone(),
+                turn_id: invocation.scope.turn_id.clone(),
+                turn_index: invocation.scope.turn_index,
+                protocol_iteration: invocation.scope.protocol_iteration,
+            },
+            subject: TraceRuntimeSubject::Effect {
+                effect_id: effect_id.to_string(),
+                kind: kind.as_str().to_string(),
+            },
+            module_ref: artifact.module_ref.to_string(),
+            entry_kind: "main".to_string(),
+            entry_ref: None,
+            entry_name: "main".to_string(),
+        },
+    ))
+}
+
+fn emit_foreground_execution_started(
+    trace: &LashlangExecutionTrace,
+    artifact: &lashlang::ModuleArtifact,
+) {
+    trace.emit(TraceLashlangExecutionEvent::ExecutionStarted {
+        event_key: trace.event_key("started"),
+        identity: trace.identity().clone(),
+        execution_map: trace_main_map(artifact),
+    });
+}
+
+fn emit_foreground_execution_finished(
+    trace: &LashlangExecutionTrace,
+    result: &Result<ExecutionOutcome, lashlang::RuntimeError>,
+    runtime_failure: Option<&lashlang::RuntimeFailure>,
+) {
+    let (status, error) = match result {
+        Ok(ExecutionOutcome::Finished(_)) | Ok(ExecutionOutcome::Continued) => {
+            (TraceLashlangStatus::Completed, None)
+        }
+        Ok(ExecutionOutcome::Failed(value)) => {
+            (TraceLashlangStatus::Failed, Some(value.to_string()))
+        }
+        Err(error) => (
+            TraceLashlangStatus::Failed,
+            Some(
+                runtime_failure
+                    .map(|failure| failure.error.to_string())
+                    .unwrap_or_else(|| error.to_string()),
+            ),
+        ),
+    };
+    trace.emit(TraceLashlangExecutionEvent::ExecutionFinished {
+        event_key: trace.event_key("finished"),
+        identity: trace.identity().clone(),
+        status,
+        error,
+    });
+}
+
+fn trace_main_map(artifact: &lashlang::ModuleArtifact) -> TraceLashlangMap {
+    let map = lashlang::map_lashlang_main(
+        artifact,
+        lashlang::LashlangMapOptions {
+            include_reachable_processes: true,
+        },
+    );
+    TraceLashlangMap {
+        module_ref: map.module_ref.to_string(),
+        entry_kind: map.entry_kind,
+        entry_ref: map.entry_ref.as_ref().map(lashlang::process_ref_key),
+        entry_name: map.entry_name,
+        nodes: map
+            .nodes
+            .into_iter()
+            .map(|node| TraceLashlangMapNode {
+                id: node.id,
+                kind: node.kind,
+                label: node.label,
+                label_metadata: node.label_metadata.map(|label| TraceLabelMetadata {
+                    title: label.title.to_string(),
+                    description: label.description.map(|description| description.to_string()),
+                }),
+            })
+            .collect(),
+        edges: map
+            .edges
+            .into_iter()
+            .map(|edge| TraceLashlangMapEdge {
+                id: edge.id,
+                from: edge.from,
+                to: edge.to,
+                label: edge.label,
+            })
+            .collect(),
+    }
 }
 
 fn apply_global_defaults(
@@ -399,24 +534,129 @@ mod tests {
         response
     }
 
+    #[test]
+    fn execute_code_reuses_linked_program_cache_for_repeat_source() {
+        block_on(async {
+            let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let request = || ExecRequest {
+                code: "submit 1".to_string(),
+                accept_finish: true,
+            };
+            let resolver = || Arc::new(ProjectionRegistry::new());
+
+            let (state, first) = execute_code(
+                state,
+                lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
+                    lashlang::LashlangAbilities::default(),
+                    lashlang::ResourceCatalog::new(),
+                ),
+                request(),
+                RlmProjectedBindings::default(),
+                resolver(),
+            )
+            .await
+            .expect("first execution should succeed");
+            assert!(first.error.is_none(), "{:?}", first.error);
+            assert_eq!(first.terminal_finish, Some(serde_json::json!(1)));
+            let first_stats = state.linked_programs.stats();
+            assert_eq!(first_stats.hits, 0);
+            assert_eq!(first_stats.misses, 1);
+
+            let (state, second) = execute_code(
+                state,
+                lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
+                    lashlang::LashlangAbilities::default(),
+                    lashlang::ResourceCatalog::new(),
+                ),
+                request(),
+                RlmProjectedBindings::default(),
+                resolver(),
+            )
+            .await
+            .expect("second execution should succeed");
+            assert!(second.error.is_none(), "{:?}", second.error);
+            assert_eq!(second.terminal_finish, Some(serde_json::json!(1)));
+            let second_stats = state.linked_programs.stats();
+            assert_eq!(second_stats.hits, 1);
+            assert_eq!(second_stats.misses, 1);
+            assert_eq!(second_stats.entries, 1);
+            assert!(state.stored_lashlang_modules.is_empty());
+        });
+    }
+
+    #[test]
+    fn execute_code_stores_process_module_artifact_once() {
+        block_on(async {
+            let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let request = || ExecRequest {
+                code: "process later() { finish 1 }\nsubmit 1".to_string(),
+                accept_finish: true,
+            };
+            let resolver = || Arc::new(ProjectionRegistry::new());
+            let context = || {
+                lash_core::testing::code_execution_context_with_lashlang_abilities_and_resources(
+                    lashlang::LashlangAbilities::default().with_processes(),
+                    lashlang::ResourceCatalog::new(),
+                )
+            };
+
+            let (state, first) = execute_code(
+                state,
+                context(),
+                request(),
+                RlmProjectedBindings::default(),
+                resolver(),
+            )
+            .await
+            .expect("first process module execution should succeed");
+            assert!(first.error.is_none(), "{:?}", first.error);
+            assert_eq!(state.stored_lashlang_modules.len(), 1);
+
+            let (state, second) = execute_code(
+                state,
+                context(),
+                request(),
+                RlmProjectedBindings::default(),
+                resolver(),
+            )
+            .await
+            .expect("second process module execution should succeed");
+            assert!(second.error.is_none(), "{:?}", second.error);
+            assert_eq!(state.stored_lashlang_modules.len(), 1);
+            let stats = state.linked_programs.stats();
+            assert_eq!(stats.hits, 1);
+            assert_eq!(stats.misses, 1);
+        });
+    }
+
     fn timer_trigger_resources() -> lashlang::ResourceCatalog {
         let mut resources = lashlang::ResourceCatalog::new();
-        resources.add_trigger_source_constructor(
-            ["timer", "Schedule"],
-            lashlang::TypeExpr::Object(vec![
-                lashlang::TypeField {
-                    name: "expr".into(),
-                    ty: lashlang::TypeExpr::Str,
-                    optional: false,
-                },
-                lashlang::TypeField {
-                    name: "tz".into(),
-                    ty: lashlang::TypeExpr::Str,
-                    optional: true,
-                },
-            ]),
-            lashlang::TypeExpr::Ref("timer.Tick".into()),
-        );
+        resources
+            .add_trigger_source_constructor(
+                ["timer", "Schedule"],
+                lashlang::TypeExpr::Object(vec![
+                    lashlang::TypeField {
+                        name: "expr".into(),
+                        ty: lashlang::TypeExpr::Str,
+                        optional: false,
+                    },
+                    lashlang::TypeField {
+                        name: "tz".into(),
+                        ty: lashlang::TypeExpr::Str,
+                        optional: true,
+                    },
+                ]),
+                lashlang::NamedDataType::object(
+                    "timer.Tick",
+                    vec![lashlang::TypeField {
+                        name: "fired_at".into(),
+                        ty: lashlang::TypeExpr::Str,
+                        optional: false,
+                    }],
+                )
+                .expect("valid timer tick type"),
+            )
+            .expect("valid timer trigger source");
         resources
     }
 
@@ -444,6 +684,7 @@ mod tests {
                 handle = await triggers.register({
                   source: source,
                   target: remember,
+                  inputs: { tick: trigger.event },
                   name: "remembered"
                 })?
                 registrations = await triggers.list({ target: remember })?
@@ -478,7 +719,12 @@ mod tests {
                 }
 
                 source = timer.Schedule({ expr: "0 8 * * *" })
-                handle = await triggers.register({ source: source, target: remember, name: "remembered" })?
+                handle = await triggers.register({
+                  source: source,
+                  target: remember,
+                  inputs: { tick: trigger.event },
+                  name: "remembered"
+                })?
                 cancelled = await triggers.cancel({ handle: handle })?
                 registrations = await triggers.list({ target: remember })?
                 submit { cancelled: cancelled, enabled: registrations[0].enabled }
@@ -504,7 +750,11 @@ mod tests {
                 }
 
                 source = timer.Schedule({ expr: "0 8 * * *" })
-                await triggers.register({ source: source, target: remember })?
+                await triggers.register({
+                  source: source,
+                  target: remember,
+                  inputs: { tick: trigger.event }
+                })?
 
                 submit "should not run"
                 "#,
@@ -589,7 +839,11 @@ mod tests {
                 code: r#"
                     process worker(tick: timer.Tick) { finish true }
                     source = timer.Schedule({ expr: "0 8 * * *" })
-                    await triggers.register({ source: source, target: worker })?
+                    await triggers.register({
+                      source: source,
+                      target: worker,
+                      inputs: { tick: trigger.event }
+                    })?
                 "#,
                 abilities: lashlang::LashlangAbilities::default().with_processes(),
                 resources: timer_trigger_resources,

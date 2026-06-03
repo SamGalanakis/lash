@@ -352,6 +352,7 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         session_id,
         dispatch,
         abilities,
+        Default::default(),
         Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
         attachment_store,
         Arc::new(crate::ChronologicalProjection::default()),

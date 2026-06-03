@@ -12,9 +12,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=2">
+<link rel="stylesheet" href="./styles.css?v=9">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=2" defer></script>
+<script src="./docs.js?v=3" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -32,11 +32,11 @@
           <pre><code>pub struct ToolCall&lt;'a&gt; {
     pub name: &amp;'a str,                           // Advertised tool name the model called
     pub args: &amp;'a serde_json::Value,             // Deserialized JSON args
-    pub context: &amp;'a ToolContext,                // Explicit session/tool capabilities
+    pub context: &amp;'a ToolContext&lt;'a&gt;,            // Explicit session/tool capabilities
     pub progress: Option&lt;&amp;'a ProgressSender&gt;,    // For streaming progress updates
 }</code></pre>
           <p>Tools receive plain JSON arguments. In RLM mode, host-projected Lashlang values are normalized through each tool's <code>ToolArgumentProjectionPolicy</code> before schema validation and before <code>execute()</code>; ordinary tools use the default materializing policy and should not know about the internal projection marker. Projection-aware RLM control tools declare <code>PreserveProjectedRefsInField { field: "seed" }</code>, so only root <code>seed</code> entries keep projected wrappers and ref-backed entries keep <code>{"__projection_ref__": ...}</code> for child or AgentFrames.</p>
-          <p><code>context.plugin_input::&lt;MyPlugin&gt;("plugin_id")</code> reads typed per-turn input passed via <code>TurnBuilder::with_plugin_input</code> (see the <a href="./embedding-prompts.html#typed-plugin-input">Lash API · prompts</a> guide's "Typed Plugin Input" section for the matching <code>PluginBinding</code> pattern).</p>
+          <p>Typed per-turn input passed via <code>TurnBuilder::with_plugin_input</code> is read off the turn context, not the execute-time <code>ToolContext</code>: a tool's <code>prepare_tool_call</code> sees it through <code>ctx.plugin_input::&lt;MyInput&gt;("plugin_id")</code> on the <code>ToolPrepareContext</code>, and hooks read the same value from their <code>TurnContext</code>. See the <a href="./embedding-prompts.html#typed-plugin-input">Lash API · prompts</a> guide's "Typed Plugin Input" section for the matching <code>PluginBinding</code> pattern.</p>
         </div>
 
         <div class="section" id="tool-capabilities">
@@ -128,7 +128,7 @@ let config = ToolOutputBudgetConfig {
 let plugins = runtime_plugin_stack().configure(|plugins| {
     plugins.replace(Arc::new(ToolOutputBudgetPluginFactory::new(config)));
 });</code></pre>
-          <p>Defaults are <strong>16 KiB and 400 lines per tool output</strong>. Outputs under both caps pass through untouched; outputs over either cap are truncated with a "<code>...N bytes truncated...</code>" marker.</p>
+          <p>Defaults are <strong>16 KiB and 400 lines per tool output</strong> (the size cap is bytes by default; <code>ToolOutputBudgetMode::Tokens</code> switches it to an approximate token count). Outputs under both caps pass through untouched; outputs over either cap keep a preview window wrapped in a "<code>...N bytes truncated...</code>" marker — the unit reads <code>bytes</code> (or <code>tokens</code>) when the size cap binds, <code>lines</code> when the line cap binds.</p>
           <p>The plugin registers a tool-result projector that applies at three points:</p>
           <ul class="bullets">
             <li><strong>Dispatch projection</strong> — what the runtime returns to the calling code as the tool's immediate result.</li>

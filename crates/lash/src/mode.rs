@@ -47,14 +47,18 @@ impl ModePreset {
     pub fn rlm() -> Self {
         Self {
             mode_id: ModeId::rlm(),
-            factory: Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::default()),
+            factory: Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::new(
+                rlm_preset_config(lash_protocol_rlm::RlmProtocolPluginConfig::default()),
+            )),
         }
     }
 
     pub fn rlm_with_config(config: lash_protocol_rlm::RlmProtocolPluginConfig) -> Self {
         Self {
             mode_id: ModeId::rlm(),
-            factory: Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::new(config)),
+            factory: Arc::new(lash_protocol_rlm::RlmProtocolPluginFactory::new(
+                rlm_preset_config(config),
+            )),
         }
     }
 
@@ -74,7 +78,7 @@ impl ModePreset {
         Self {
             mode_id: ModeId::rlm(),
             factory: Arc::new(
-                lash_protocol_rlm::RlmProtocolPluginFactory::new(config)
+                lash_protocol_rlm::RlmProtocolPluginFactory::new(rlm_preset_config(config))
                     .with_projection_resolver(projection_resolver),
             ),
         }
@@ -83,4 +87,11 @@ impl ModePreset {
     pub fn mode_id(&self) -> &ModeId {
         &self.mode_id
     }
+}
+
+fn rlm_preset_config(
+    config: lash_protocol_rlm::RlmProtocolPluginConfig,
+) -> lash_protocol_rlm::RlmProtocolPluginConfig {
+    let language_features = config.lashlang_language_features.with_label_annotations();
+    config.with_lashlang_language_features(language_features)
 }

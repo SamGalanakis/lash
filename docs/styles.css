@@ -1288,6 +1288,43 @@ button.toc__group-title:focus-visible {
   background: color-mix(in oklch, var(--sodium) 14%, transparent);
 }
 
+/* per-page outline — the active page's sections + subsections, nested
+   under its sidebar entry. Quieter than the page list; scroll-spy
+   marks the section being read. */
+.toc__outline,
+.toc__outline ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.toc__outline {
+  margin: 2px 0 var(--space-xs);
+  padding-left: var(--space-sm);
+}
+.toc__outline a {
+  display: block;
+  padding: 0.14rem var(--space-sm);
+  margin: 1px 0;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+  color: var(--ink-faint);
+  text-decoration: none;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+  transition: color 140ms ease, background 140ms ease;
+}
+.toc__outline-sec > a { color: var(--ink-dim); }
+.toc__outline-subs a { padding-left: calc(var(--space-sm) + 0.85rem); font-size: 0.73rem; }
+.toc__outline a:hover { color: var(--ink-mid); background: color-mix(in oklch, var(--ink) 5%, transparent); }
+.toc__outline a.is-current { color: var(--ink); background: color-mix(in oklch, var(--sodium) 12%, transparent); }
+.toc__outline-sec > a.is-current { color: var(--sodium); }
+
+/* anchored headings clear the top edge when jumped to */
+body.docs-page .body > .section[id],
+body.docs-page .body h3[id] { scroll-margin-top: var(--space-lg); }
+
 
 /* ── compact opener for docs pages ──────────────────── */
 body.docs-page .opener {
@@ -1602,7 +1639,12 @@ body.docs-page .cover__top     { display: none; }
 /* ── responsive — collapse TOC into a top toggle on small viewports ── */
 @media (max-width: 980px) {
   .docs-layout {
-    grid-template-columns: 1fr;
+    /* minmax(0, 1fr), not 1fr: a bare 1fr track keeps an implicit
+       min-width:auto, so a wide table / <pre> / diagram forces the
+       whole column past the viewport (page-wide horizontal scroll,
+       clipped content). minmax(0,…) lets that content's own
+       overflow-x:auto engage instead. */
+    grid-template-columns: minmax(0, 1fr);
     padding: 0 var(--space-md);
   }
   .toc {

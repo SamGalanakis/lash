@@ -12,10 +12,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css?v=2">
+<link rel="stylesheet" href="../styles.css?v=9">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js?v=2" defer></script>
+<script src="../docs.js?v=3" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -28,7 +28,7 @@
 <div class="section" id="language-reference">
           <div class="section-header">
             <h2>Language Reference</h2>
-            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code> / <code>while cond</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The parser accepts the full module grammar, but the linked host surface decides which abilities exist: receiver operations, reusable background <code>process</code> work, trigger registry operations, process sleep, and process signals are enabled explicitly by the host and hidden from prompts when disabled. Declarative <code>trigger</code> syntax has been removed; programs construct host-provided trigger-source values and call <code>triggers.register</code>, <code>triggers.list</code>, or <code>triggers.cancel</code>. Timers and recurring jobs are host-owned source policies, not Lashlang syntax. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are foreground effect expressions.</p>
+            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code> / <code>while cond</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The parser accepts the full module grammar, but the linked host surface decides which abilities and language features exist: receiver operations, reusable background <code>process</code> work, trigger registry operations, process sleep, process signals, and optional static process-map labels are enabled explicitly by the host and hidden from prompts when disabled. Declarative <code>trigger</code> syntax has been removed; programs construct host-provided trigger-source values and call <code>triggers.register</code>, <code>triggers.list</code>, or <code>triggers.cancel</code>. Timers and recurring jobs are host-owned source policies, not Lashlang syntax. Fail-fast unwrap uses Rust-style <code>?</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are foreground effect expressions.</p>
           </div>
           <dl class="def-list">
             <dt>Values</dt>
@@ -45,7 +45,7 @@
         <div class="section" id="host-surface">
           <div class="section-header">
             <h2>Host Surface</h2>
-            <p>The authored language is stable, but the available modules are host-provided. Each turn links against a <code>LashlangSurface</code>: a <code>ResourceCatalog</code> plus <code>LashlangAbilities</code>. Core derives callable tool operations from the current <code>ToolSurface</code>, then merges plugin-provided Lashlang resources such as value constructors and trigger source metadata. The prompt renderer uses that same effective surface, so the model sees only operations, constructors, and lifecycle forms that will link.</p>
+            <p>The authored language is stable, but the available modules and optional syntax are host-provided. Each turn links against a <code>LashlangSurface</code>: a <code>ResourceCatalog</code>, <code>LashlangAbilities</code>, and <code>LashlangLanguageFeatures</code>. Core derives callable tool operations from the current <code>ToolSurface</code>, then merges plugin-provided Lashlang resources such as value constructors and trigger source metadata. The prompt renderer uses that same effective surface, so the model sees only operations, constructors, lifecycle forms, and annotations that will link.</p>
           </div>
           <dl class="def-list">
             <dt>Tool operations</dt>
@@ -53,9 +53,11 @@
             <dt>Module authorities</dt>
             <dd>A module path resolves to a typed authority value such as <code>Board</code>, <code>Web</code>, or <code>Agents</code>. Named processes receive those authorities explicitly: <code>process notify(mail: Gmail) { await mail.send({ body: body })? finish true }</code>, then <code>start notify(mail: gmail.work)</code>. This keeps process authority visible in the process signature instead of hidden in globals.</dd>
             <dt>Value constructors</dt>
-            <dd>Plugins can add pure constructors with <code>ResourceCatalog::add_value_constructor</code> or <code>add_trigger_source_constructor</code>. Constructors are ordinary expressions, not awaited effects: <code>source = cron.Schedule({ expr: "0 8 * * *", tz: "UTC" })</code>.</dd>
+            <dd>Plugins can add pure constructors with <code>ResourceCatalog::add_value_constructor</code> or <code>add_trigger_source_constructor</code>. Trigger-source constructors require a validated named object payload type such as <code>cron.Tick</code>, while the constructed source value such as <code>cron.Schedule</code> remains opaque. Constructors are ordinary expressions, not awaited effects: <code>source = cron.Schedule({ expr: "0 8 * * *", tz: "UTC" })</code>.</dd>
             <dt>Ability gates</dt>
             <dd><code>LashlangAbilities</code> gates processes, sleep, process signals, and triggers. Disabled features are not shown to the model and fail during linking before an <code>ExecutionHost</code> operation can run.</dd>
+            <dt>Language features</dt>
+            <dd><code>LashlangLanguageFeatures</code> gates optional static syntax. <code>label_annotations</code> enables <code>@label(title: "...")</code> and <code>@label(title: "...", description: "...")</code> for Lashlang execution graphs; it is disabled by default and enabled by RLM/workbench presets.</dd>
           </dl>
           <pre><code>// Host/tool declaration.
 ToolDefinition::raw("tool:play_move", "play_move", "...", input, output)
@@ -97,6 +99,26 @@ await control.continue_as({
   seed: { problem: input.prompt, findings: findings }
 })?
 ```</code></pre>
+        </div>
+
+        <div class="section" id="label-annotations">
+          <div class="section-header">
+            <h2>Label Annotations</h2>
+            <p><code>@label</code> is optional static metadata for Lashlang execution graph visualization. It does not change execution semantics, resource dispatch, trigger routing, or process registry state. When <code>label_annotations</code> is disabled, annotated modules fail during linking with a clear disabled-feature diagnostic.</p>
+          </div>
+          <dl class="def-list">
+            <dt>Syntax</dt>
+            <dd><code>@label(title: "Create inbox card")</code> or <code>@label(title: "Create inbox card", description: "Stores the button message")</code>. <code>title</code> is required, <code>description</code> is optional, and both values must be string literals. Variables, interpolation, icons, colors, layout hints, and unknown keys are rejected.</dd>
+            <dt>Targets</dt>
+            <dd>At top level and inside process bodies, labels can annotate ordinary statements, awaited host/resource operations, assigned operation calls, <code>start</code>, <code>sleep</code>, <code>wait signal</code>, <code>signal run</code>, <code>wake</code>, <code>yield</code>, <code>finish</code>, <code>fail</code>, loops, and <code>if</code> branch nodes. Before a <code>process</code> declaration, the label still describes the process definition. Labels on declarations other than <code>process</code> and stacked labels are rejected.</dd>
+            <dt>Storage</dt>
+            <dd>Label metadata is part of the <code>ModuleArtifact</code> identity. Changing a label changes the module ref. Hosts see it through Lashlang execution graphs as execution-map node <code>label_metadata</code>; lifecycle node events continue to reference stable <code>node_id</code> values.</dd>
+          </dl>
+          <pre><code>process on_button(inbox: Inbox, event: ui.button.Pressed) {
+  @label(title: "Create inbox card", description: "Stores the button message")
+  result = await inbox.cards.create({ title: event.button })?
+  finish result
+}</code></pre>
         </div>
 
         <div class="section" id="syntax-and-values">

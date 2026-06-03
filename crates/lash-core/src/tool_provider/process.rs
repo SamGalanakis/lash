@@ -73,6 +73,20 @@ impl ToolProcessControl<'_> {
             .collect())
     }
 
+    pub async fn list_handles_filtered(
+        &self,
+        filter: &crate::ProcessListFilter,
+    ) -> Result<Vec<crate::ProcessHandleSummary>, PluginError> {
+        Ok(self
+            .processes
+            .list_visible(&self.session_id, filter.list_mode(), self.process_scope())
+            .await?
+            .into_iter()
+            .filter(|entry| filter.matches_entry(entry))
+            .map(crate::ProcessHandleSummary::from)
+            .collect())
+    }
+
     pub async fn validate_handles(&self, handle_ids: &[String]) -> Result<(), PluginError> {
         self.processes
             .validate_visible(&self.session_id, handle_ids, self.process_scope())

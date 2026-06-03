@@ -216,6 +216,7 @@ pub struct PluginSessionContext {
     pub tool_access: SessionToolAccess,
     pub subagent: Option<SubagentSessionContext>,
     pub lashlang_abilities: lashlang::LashlangAbilities,
+    pub lashlang_language_features: lashlang::LashlangLanguageFeatures,
     /// Session id of the caller that created this one. `None` identifies
     /// a root session; any subagent / compaction / forked-child session
     /// carries the parent here so plugin factories can gate themselves
@@ -329,6 +330,10 @@ pub trait PluginFactory: Send + Sync {
 
     fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
         lashlang::LashlangAbilities::default()
+    }
+
+    fn lashlang_language_features(&self) -> lashlang::LashlangLanguageFeatures {
+        lashlang::LashlangLanguageFeatures::default()
     }
 
     /// Host-owned Lashlang catalog entries that code may link against.

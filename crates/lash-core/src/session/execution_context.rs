@@ -9,11 +9,12 @@ use crate::{TurnActivity, TurnActivityId, TurnEvent};
 pub(crate) fn lashlang_surface_from_tool_surface(
     surface: &crate::ToolSurface,
     abilities: lashlang::LashlangAbilities,
+    language_features: lashlang::LashlangLanguageFeatures,
     host_resources: lashlang::ResourceCatalog,
 ) -> lashlang::LashlangSurface {
     let mut resources = lashlang_resources_from_tool_surface(surface);
     resources.extend(host_resources);
-    lashlang::LashlangSurface::new(resources, abilities)
+    lashlang::LashlangSurface::new(resources, abilities).with_language_features(language_features)
 }
 
 pub(crate) fn lashlang_resources_from_tool_surface(
@@ -47,6 +48,7 @@ pub struct RuntimeExecutionContext<'run> {
     pub(super) session_id: String,
     pub(super) dispatch: Arc<ToolDispatchContext<'run>>,
     lashlang_abilities: lashlang::LashlangAbilities,
+    lashlang_language_features: lashlang::LashlangLanguageFeatures,
     lashlang_surface: lashlang::LashlangSurface,
     lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     attachment_store: Arc<dyn crate::AttachmentStore>,
@@ -54,6 +56,8 @@ pub struct RuntimeExecutionContext<'run> {
     protocol_extension: Option<crate::ProtocolTurnExtensionHandle>,
     turn_context: crate::TurnContext,
     pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
+    lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
+    lashlang_execution_context: lash_trace::TraceContext,
     pub(super) turn_lease: Option<crate::RuntimeTurnLease>,
     pub(super) turn_event_tx: Option<Sender<TurnActivity>>,
     pub(super) cancellation_token: Option<CancellationToken>,
@@ -79,6 +83,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         session_id: String,
         dispatch: Arc<ToolDispatchContext<'run>>,
         lashlang_abilities: lashlang::LashlangAbilities,
+        lashlang_language_features: lashlang::LashlangLanguageFeatures,
         lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
         attachment_store: Arc<dyn crate::AttachmentStore>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
@@ -88,12 +93,14 @@ impl<'run> RuntimeExecutionContext<'run> {
         let lashlang_surface = lashlang_surface_from_tool_surface(
             &dispatch.surface,
             lashlang_abilities,
+            lashlang_language_features,
             dispatch.plugins.lashlang_resources(),
         );
         Self {
             session_id,
             dispatch,
             lashlang_abilities,
+            lashlang_language_features,
             lashlang_surface,
             lashlang_artifact_store,
             attachment_store,
@@ -101,6 +108,8 @@ impl<'run> RuntimeExecutionContext<'run> {
             protocol_extension,
             turn_context,
             parent_invocation: None,
+            lashlang_execution_sink: None,
+            lashlang_execution_context: lash_trace::TraceContext::default(),
             turn_lease: None,
             turn_event_tx: None,
             cancellation_token: None,
@@ -160,6 +169,28 @@ impl<'run> RuntimeExecutionContext<'run> {
     pub(crate) fn with_parent_invocation(mut self, metadata: crate::RuntimeInvocation) -> Self {
         self.parent_invocation = Some(metadata);
         self
+    }
+
+    pub(crate) fn with_lashlang_execution_trace(
+        mut self,
+        sink: Option<Arc<dyn lash_trace::TraceSink>>,
+        context: lash_trace::TraceContext,
+    ) -> Self {
+        self.lashlang_execution_sink = sink;
+        self.lashlang_execution_context = context;
+        self
+    }
+
+    pub fn parent_invocation(&self) -> Option<&crate::RuntimeInvocation> {
+        self.parent_invocation.as_ref()
+    }
+
+    pub fn lashlang_execution_sink(&self) -> Option<Arc<dyn lash_trace::TraceSink>> {
+        self.lashlang_execution_sink.clone()
+    }
+
+    pub fn lashlang_execution_context(&self) -> &lash_trace::TraceContext {
+        &self.lashlang_execution_context
     }
 
     pub(crate) fn with_turn_lease(mut self, turn_lease: Option<crate::RuntimeTurnLease>) -> Self {
@@ -238,6 +269,10 @@ impl<'run> RuntimeExecutionContext<'run> {
 
     pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
         self.lashlang_abilities
+    }
+
+    pub fn lashlang_language_features(&self) -> lashlang::LashlangLanguageFeatures {
+        self.lashlang_language_features
     }
 
     pub fn link_lashlang_module(
@@ -409,6 +444,7 @@ mod tests {
             "session".to_string(),
             dispatch,
             Default::default(),
+            Default::default(),
             Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
@@ -469,6 +505,7 @@ mod tests {
             "session".to_string(),
             dispatch,
             lashlang::LashlangAbilities::default().with_processes(),
+            Default::default(),
             Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
@@ -562,6 +599,7 @@ mod tests {
                 .with_sleep()
                 .with_processes()
                 .with_process_signals(),
+            Default::default(),
             Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
@@ -587,15 +625,25 @@ mod tests {
     #[test]
     fn lashlang_surface_reflects_host_resource_contributions() {
         let mut resources = lashlang::ResourceCatalog::new();
-        resources.add_trigger_source_constructor(
-            ["clock", "Alarm"],
-            lashlang::TypeExpr::Object(vec![lashlang::TypeField {
-                name: "at".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: false,
-            }]),
-            lashlang::TypeExpr::Ref("clock.Tick".into()),
-        );
+        resources
+            .add_trigger_source_constructor(
+                ["clock", "Alarm"],
+                lashlang::TypeExpr::Object(vec![lashlang::TypeField {
+                    name: "at".into(),
+                    ty: lashlang::TypeExpr::Str,
+                    optional: false,
+                }]),
+                lashlang::NamedDataType::object(
+                    "clock.Tick",
+                    vec![lashlang::TypeField {
+                        name: "fired_at".into(),
+                        ty: lashlang::TypeExpr::Str,
+                        optional: false,
+                    }],
+                )
+                .expect("valid clock tick type"),
+            )
+            .expect("valid clock trigger source");
         let plugin_host = crate::plugin::PluginHost::empty();
         let mut merged_resources = plugin_host.lashlang_resources();
         merged_resources.extend(resources);
@@ -636,6 +684,7 @@ mod tests {
             lashlang::LashlangAbilities::default()
                 .with_processes()
                 .with_triggers(),
+            Default::default(),
             Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
@@ -654,8 +703,8 @@ mod tests {
         assert!(
             surface
                 .resources
-                .trigger_sources
-                .contains_key("clock.Alarm")
+                .resolve_trigger_source("clock.Alarm")
+                .is_some()
         );
         lashlang::LinkedModule::link(
             lashlang::parse(
@@ -665,7 +714,11 @@ mod tests {
                 }
 
                 source = clock.Alarm({ at: "08:00" })
-                await triggers.register({ source: source, target: remember })?
+                await triggers.register({
+                  source: source,
+                  target: remember,
+                  inputs: { tick: trigger.event }
+                })?
                 "#,
             )
             .expect("parse trigger registry module"),

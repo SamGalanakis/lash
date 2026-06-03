@@ -209,15 +209,21 @@ impl LashCore {
         let Some(store_factory) = self.store_factory.as_ref() else {
             return Err(EmbedError::MissingProcessWorkerStoreFactory);
         };
-        let mut factories = self.plugin_factories.as_ref().clone();
-        factories.extend(extra_plugin_factories);
-        Ok(DurableProcessWorkerConfig::from_plugin_factories(
-            factories,
+        let plugin_host = build_plugin_host_for_mode(
+            &self.modes,
+            &self.default_mode,
+            self.plugin_factories.as_ref(),
+            extra_plugin_factories.into_iter().collect(),
+            true,
+        )?;
+        Ok(DurableProcessWorkerConfig::new(
+            Arc::new(plugin_host),
             self.env.core.clone(),
             Arc::clone(store_factory),
             process_registry,
         )
-        .with_session_policy(self.policy.clone()))
+        .with_session_policy(self.policy.clone())
+        .with_residency(self.env.residency))
     }
 }
 
@@ -244,7 +250,7 @@ pub struct LashCoreBuilder {
     // Benign core overrides applied on top of the resolved core.
     prompt: Option<PromptLayer>,
     trace_sink: Option<Arc<dyn lash_trace::TraceSink>>,
-    process_tracking_sink: Option<Arc<dyn lash_trace::TraceSink>>,
+    lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     trace_level: Option<lash_trace::TraceLevel>,
     trace_context: Option<lash_trace::TraceContext>,
     termination: Option<TerminationPolicy>,
@@ -404,16 +410,16 @@ impl LashCoreBuilder {
         self
     }
 
-    pub fn process_tracking_sink(
+    pub fn lashlang_execution_sink(
         mut self,
-        process_tracking_sink: Option<Arc<dyn lash_trace::TraceSink>>,
+        lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     ) -> Self {
-        self.process_tracking_sink = process_tracking_sink;
+        self.lashlang_execution_sink = lashlang_execution_sink;
         self
     }
 
-    pub fn process_tracking_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.process_tracking_sink = path.map(|path| {
+    pub fn lashlang_execution_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.lashlang_execution_sink = path.map(|path| {
             Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
         });
         self
@@ -473,8 +479,8 @@ impl LashCoreBuilder {
         if let Some(trace_sink) = self.trace_sink.take() {
             core.tracing.trace_sink = Some(trace_sink);
         }
-        if let Some(process_tracking_sink) = self.process_tracking_sink.take() {
-            core.tracing.process_tracking_sink = Some(process_tracking_sink);
+        if let Some(lashlang_execution_sink) = self.lashlang_execution_sink.take() {
+            core.tracing.lashlang_execution_sink = Some(lashlang_execution_sink);
         }
         if let Some(trace_level) = self.trace_level.take() {
             core.tracing.trace_level = trace_level;
@@ -820,16 +826,16 @@ impl AdvancedLashCoreBuilder {
         self
     }
 
-    pub fn process_tracking_sink(
+    pub fn lashlang_execution_sink(
         mut self,
-        process_tracking_sink: Option<Arc<dyn lash_trace::TraceSink>>,
+        lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     ) -> Self {
-        self.builder.process_tracking_sink = process_tracking_sink;
+        self.builder.lashlang_execution_sink = lashlang_execution_sink;
         self
     }
 
-    pub fn process_tracking_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.builder.process_tracking_sink = path.map(|path| {
+    pub fn lashlang_execution_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.builder.lashlang_execution_sink = path.map(|path| {
             Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
         });
         self

@@ -115,13 +115,19 @@
   }
 
   function currentPath() {
-    // strip leading slash + protocol + host; just keep the doc-relative bit
+    // Return the path relative to the docs root (tocBase), so it lines
+    // up with the TOC's doc-relative hrefs at ANY deploy root — "/",
+    // "/docs/", or a channel prefix like "/main/". Falls back to a
+    // /docs/ scan, then a bare leading-slash strip, for legacy setups.
     let p = location.pathname;
-    // find /docs/ in the path (works on GitHub Pages subpaths too) — fall
-    // back to filename + parent dir
-    const idx = p.indexOf("/docs/");
-    if (idx >= 0) p = p.slice(idx + 6);
-    else p = p.replace(/^\//, "");
+    const base = tocBase();
+    if (base && base !== "/" && p.startsWith(base)) {
+      p = p.slice(base.length);
+    } else {
+      const idx = p.indexOf("/docs/");
+      if (idx >= 0) p = p.slice(idx + 6);
+      else p = p.replace(/^\//, "");
+    }
     if (p === "" || p.endsWith("/")) p += "index.html";
     return p;
   }
@@ -437,11 +443,15 @@
   //    the URL via pushState. The sticky TOC keeps its scroll and
   //    spine state; only the content area refreshes.
   function refreshTOCActive() {
-    const cur = currentPath();
+    // Compare resolved pathnames directly so active-state works at any
+    // deploy root (/, /docs/, /main/, …) rather than only under /docs/.
+    const norm = (p) => p.replace(/\/$/, "/index.html");
+    const curPath = norm(location.pathname);
     document.querySelectorAll(".toc__items a").forEach((a) => {
-      const href = a.getAttribute("href") || "";
-      const tail = href.replace(/^.*\/docs\//, "");
-      const match = tail === cur;
+      let linkPath = curPath;
+      try { linkPath = norm(new URL(a.getAttribute("href"), location.href).pathname); }
+      catch (e) { linkPath = ""; }
+      const match = linkPath === curPath;
       a.classList.toggle("is-active", match);
       if (match) a.setAttribute("aria-current", "page");
       else a.removeAttribute("aria-current");
@@ -449,11 +459,131 @@
     document.querySelectorAll(".toc__group").forEach((g) => {
       const title = g.querySelector(".toc__group-title");
       if (!title) return;
-      const any = !!g.querySelector(".toc__items a.is-active") ||
-        (title.querySelector("a") &&
-          (title.querySelector("a").getAttribute("href") || "").replace(/^.*\/docs\//, "") === cur);
-      title.classList.toggle("is-active", any);
+      const hasActive = !!g.querySelector(".toc__items a.is-active");
+      title.classList.toggle("is-active", hasActive);
+      // auto-open the group holding the active page after an SPA nav,
+      // mirroring buildTOC's initial-load behaviour — otherwise the
+      // active page + its outline stay hidden in a collapsed group.
+      if (hasActive && g.classList.contains("is-collapsed")) {
+        g.classList.remove("is-collapsed");
+        const btn = g.querySelector("button.toc__group-title");
+        if (btn) btn.setAttribute("aria-expanded", "true");
+      }
     });
+  }
+
+  // ── per-page outline ────────────────────────────────────
+  //    The active page's sections + subsections, injected under its
+  //    sidebar entry so subsections are reachable from the left rail
+  //    (not only via ⌘K). Built from the live .body each navigation.
+  function slugify(text) {
+    return (String(text).toLowerCase().replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "").slice(0, 48)) || "section";
+  }
+
+  // Give every section + subsection heading a stable id so it can be a
+  // deep-link / outline target. Top-level sections usually already have
+  // one; h3 subsections frequently don't.
+  function ensureHeadingIds() {
+    const body = document.querySelector(".body");
+    if (!body) return;
+    const used = new Set();
+    body.querySelectorAll("[id]").forEach((el) => used.add(el.id));
+    const unique = (base) => {
+      let id = base, n = 2;
+      while (used.has(id)) id = base + "-" + n++;
+      used.add(id);
+      return id;
+    };
+    body.querySelectorAll(":scope > .section, :scope > section, :scope > .stanza").forEach((sec) => {
+      if (sec.id) return;
+      const h2 = sec.querySelector("h2");
+      if (h2) sec.id = unique(slugify(h2.textContent));
+    });
+    body.querySelectorAll("h3").forEach((h) => {
+      if (!h.id) h.id = unique(slugify(h.textContent));
+    });
+  }
+
+  // Read the current page's outline: each top-level section (h2) plus
+  // its nested h3 subsections.
+  function pageOutline() {
+    const body = document.querySelector(".body");
+    if (!body) return [];
+    const out = [];
+    body.querySelectorAll(":scope > .section, :scope > section, :scope > .stanza").forEach((sec) => {
+      const h2 = sec.querySelector("h2");
+      if (!h2 || !sec.id) return;
+      const subs = [];
+      sec.querySelectorAll("h3[id]").forEach((h3) => {
+        subs.push({ id: h3.id, title: h3.textContent.trim() });
+      });
+      out.push({ id: sec.id, title: h2.textContent.trim(), subs });
+    });
+    return out;
+  }
+
+  function buildOutlineHtml(outline) {
+    const lines = ['<ol class="toc__outline">'];
+    for (const s of outline) {
+      lines.push('<li class="toc__outline-sec">');
+      lines.push(`<a href="#${escapeHtml(s.id)}" data-outline="${escapeHtml(s.id)}">${escapeHtml(s.title.toLowerCase())}</a>`);
+      if (s.subs.length) {
+        lines.push('<ol class="toc__outline-subs">');
+        for (const sub of s.subs) {
+          lines.push(`<li><a href="#${escapeHtml(sub.id)}" data-outline="${escapeHtml(sub.id)}">${escapeHtml(sub.title.toLowerCase())}</a></li>`);
+        }
+        lines.push("</ol>");
+      }
+      lines.push("</li>");
+    }
+    lines.push("</ol>");
+    return lines.join("");
+  }
+
+  let outlineSpyCleanup = null;
+  function injectPageOutline() {
+    document.querySelectorAll(".toc__outline").forEach((n) => n.remove());
+    if (outlineSpyCleanup) { outlineSpyCleanup(); outlineSpyCleanup = null; }
+    if (!document.body.classList.contains("docs-page")) return;
+    ensureHeadingIds();
+    const active = document.querySelector(".toc__items a.is-active");
+    if (!active) return;
+    const outline = pageOutline();
+    if (outline.length < 2) return; // a single section isn't worth an outline
+    active.insertAdjacentHTML("afterend", buildOutlineHtml(outline));
+    wireOutlineSpy();
+  }
+
+  // Highlight the section/subsection currently at the top of the
+  // reading area as the page scrolls.
+  function wireOutlineSpy() {
+    const links = Array.prototype.slice.call(
+      document.querySelectorAll(".toc__outline a[data-outline]"));
+    if (!links.length) return;
+    const targets = links
+      .map((a) => ({ link: a, el: document.getElementById(a.getAttribute("data-outline")) }))
+      .filter((t) => t.el);
+    let raf = 0;
+    function update() {
+      raf = 0;
+      let current = null;
+      const probe = 140; // px below the viewport top = the reading line
+      for (const t of targets) {
+        if (t.el.getBoundingClientRect().top - probe <= 0) current = t;
+        else break;
+      }
+      if (!current && targets.length) current = targets[0];
+      links.forEach((a) => a.classList.toggle("is-current", !!current && a === current.link));
+    }
+    function onScroll() { if (!raf) raf = requestAnimationFrame(update); }
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll, { passive: true });
+    update();
+    outlineSpyCleanup = function () {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+    };
   }
 
   // mermaid.js owns its own theme + re-render lifecycle. After an SPA
@@ -527,8 +657,10 @@
       const scene = extractSceneConfig(html);
       if (scene) window.__LASH_SCENE = scene;
 
-      // post-swap re-init — TOC active state, spine, mermaid, scene
+      // post-swap re-init — TOC active state, per-page outline, spine,
+      // mermaid, scene
       refreshTOCActive();
+      injectPageOutline();
       drawSpineSnake();
       loadMermaidIfNeeded();
       runMermaidIfReady();
@@ -1061,6 +1193,7 @@
     buildTOC();
     buildPager();
     autoKnot();
+    injectPageOutline();
     drawSpineSnake();
     mountTocJump();
     loadMermaidIfNeeded();

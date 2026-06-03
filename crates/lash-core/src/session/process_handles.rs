@@ -342,6 +342,7 @@ mod tests {
             "session".to_string(),
             dispatch,
             Default::default(),
+            Default::default(),
             Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
@@ -442,6 +443,7 @@ mod tests {
             "session".to_string(),
             dispatch,
             Default::default(),
+            Default::default(),
             Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
@@ -519,6 +521,7 @@ mod tests {
         let context = RuntimeExecutionContext::new(
             "session".to_string(),
             dispatch,
+            Default::default(),
             Default::default(),
             Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
             Arc::new(crate::InMemoryAttachmentStore::new()),

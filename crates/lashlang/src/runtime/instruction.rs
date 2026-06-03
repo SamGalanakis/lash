@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 use crate::artifact::CompiledModuleContext;
 use crate::ast::{BinaryOp, UnaryOp};
 use crate::lexer::Span;
-use crate::tracking::ProcessTrackingSite;
+use crate::tracking::LashlangExecutionSite;
 
 use super::record::{Symbol, intern_symbol, symbol_name};
 use super::schema::ValidationPlan;
@@ -23,7 +23,7 @@ pub(crate) struct Chunk {
     pub(crate) module_context: Option<CompiledModuleContext>,
     pub(crate) code: Vec<Instruction>,
     pub(crate) spans: Vec<Option<Span>>,
-    pub(crate) process_tracking_sites: Vec<Option<ProcessTrackingSite>>,
+    pub(crate) lashlang_execution_sites: Vec<Option<LashlangExecutionSite>>,
     pub(crate) constants: Vec<Value>,
     pub(crate) names: Vec<Name>,
     pub(crate) slot_names: Vec<Name>,
@@ -215,6 +215,7 @@ pub(crate) enum Instruction {
     ProcessWake,
     ProcessFinish,
     ProcessFail,
+    ObserveStep,
     Pop,
     BeginIter(usize),
     BeginRangeIter {
@@ -335,6 +336,7 @@ impl Instruction {
             | Instruction::ProcessWake
             | Instruction::ProcessFinish
             | Instruction::ProcessFail => InstructionProfileTag::ProcessControl,
+            Instruction::ObserveStep => InstructionProfileTag::ObserveStep,
             Instruction::Pop => InstructionProfileTag::Pop,
             Instruction::BeginIter(_) | Instruction::BeginRangeIter { .. } => {
                 InstructionProfileTag::BeginIter
@@ -448,6 +450,7 @@ pub(crate) enum InstructionProfileTag {
     Submit,
     Sleep,
     ProcessControl,
+    ObserveStep,
     Pop,
     BeginIter,
     IterNext,
@@ -551,6 +554,7 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "submit",
     "sleep",
     "process_control",
+    "observe_step",
     "pop",
     "begin_iter",
     "iter_next",

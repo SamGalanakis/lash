@@ -21,6 +21,7 @@ struct ToolSurfaceCacheKey {
     context_surface_revision: u64,
     tool_generation: u64,
     plugin_revision: u64,
+    lashlang_language_features: lashlang::LashlangLanguageFeatures,
 }
 
 #[derive(Debug, Default)]
@@ -220,6 +221,7 @@ impl Session {
             context_surface_revision: self.context_surface_revision,
             tool_generation: self.tool_registry.generation(),
             plugin_revision: self.plugins().snapshot_revision_fingerprint(),
+            lashlang_language_features: self.plugins().lashlang_language_features(),
         }
     }
 
@@ -247,6 +249,7 @@ impl Session {
             lashlang_surface: execution_context::lashlang_surface_from_tool_surface(
                 &surface,
                 self.plugins().lashlang_abilities(),
+                self.plugins().lashlang_language_features(),
                 self.plugins().lashlang_resources(),
             ),
             extra_prompt_contributions: self.protocol_extra_prompt_contributions(),
@@ -349,6 +352,7 @@ impl Session {
             session_id.to_string(),
             dispatch,
             self.plugins().lashlang_abilities(),
+            self.plugins().lashlang_language_features(),
             Arc::clone(&self.services.lashlang_artifact_store),
             Arc::clone(&self.services.attachment_store),
             chronological_projection,

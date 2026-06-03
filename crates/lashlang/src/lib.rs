@@ -18,42 +18,44 @@ pub use artifact::{
 };
 pub use ast::{
     AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ExprFolder, ExprVisitor,
-    ProcessDecl, ProcessParam, ProcessStartExpr, Program, ResourceRefExpr, TypeDecl, TypeExpr,
-    TypeField, UnaryOp, fold_expr_children, format_type_expr, walk_expr,
+    LabelMetadata, ProcessDecl, ProcessParam, ProcessStartExpr, Program, ResourceRefExpr, TypeDecl,
+    TypeExpr, TypeField, UnaryOp, fold_expr_children, format_type_expr, walk_expr,
 };
 pub use graph::{
-    ProcessMap, ProcessMapEdge, ProcessMapNode, ProcessMapOptions, linked_static_graph_json,
-    map_process, static_graph_json,
+    LashlangMap, LashlangMapEdge, LashlangMapNode, LashlangMapOptions, linked_static_graph_json,
+    map_lashlang_main, map_lashlang_process, static_graph_json,
 };
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{
-    LashlangAbilities, LashlangSurface, LinkError, LinkedModule, ResourceCatalog,
+    LashlangAbilities, LashlangLanguageFeatures, LashlangSurface, LinkError, LinkedModule,
+    NamedDataType, NamedDataTypeError, ResourceCatalog, ResourceCatalogError,
     ResourceOperationBinding, ResourceTypeCatalog, TriggerSourceBinding, ValueConstructorBinding,
 };
 pub use parser::{ParseError, parse};
 pub use runtime::{
-    AbilityOp, AbilityResult, CompileStats, CompiledProcessCache, CompiledProcessCacheKey,
-    CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats, ExecutableProgram,
-    ExecutionEnvironment, ExecutionHost, ExecutionHostError, ExecutionMode, ExecutionOutcome,
-    ExecutionScratch, ImageValue, LASH_HOST_VALUE_KEY, LASH_HOST_VALUE_TYPE_KEY,
+    AbilityOp, AbilityResult, CompileStats, CompiledLinkedProgram, CompiledProcessCache,
+    CompiledProcessCacheKey, CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats,
+    ExecutableProgram, ExecutionEnvironment, ExecutionHost, ExecutionHostError, ExecutionMode,
+    ExecutionOutcome, ExecutionScratch, ImageValue, LASH_HOST_VALUE_KEY, LASH_HOST_VALUE_TYPE_KEY,
     LASH_MODULE_REF_KEY, LASH_PROCESS_NAME_KEY, LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY,
-    LASH_REQUIRED_SURFACE_REF_KEY, LASH_TYPE_KEY, ListValue, ProcessEvent, ProcessEventKind,
-    ProcessSignal, ProcessStart, ProfileReport, ProfileStat, ProjectedBindingError,
-    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
-    ProjectedReadResponse, ProjectedValue, Record, ResourceHandle, ResourceOperation, RuntimeError,
-    RuntimeFailure, Sleep, SleepKind, Snapshot, State, Value, compile, compile_linked,
-    compile_linked_process, compile_module_artifact_process, compile_process, execute, from_json,
-    prewarm, unwrap_type_value,
+    LASH_REQUIRED_SURFACE_REF_KEY, LASH_TYPE_KEY, LinkedProgramCache, LinkedProgramCacheError,
+    ListValue, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessStart, ProfileReport,
+    ProfileStat, ProjectedBindingError, ProjectedBindings, ProjectedFuture, ProjectedHostValue,
+    ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record, ResourceHandle,
+    ResourceOperation, RuntimeError, RuntimeFailure, Sleep, SleepKind, Snapshot, State, Value,
+    compile, compile_linked, compile_linked_process, compile_module_artifact_process,
+    compile_process, execute, from_json, prewarm, unwrap_type_value,
 };
 pub use tracking::{
-    ProcessBranchSelection, ProcessBranchSite, ProcessTrackingChild, ProcessTrackingObservation,
-    ProcessTrackingSite, process_ref_key,
+    LashlangBranchSite, LashlangExecutionCallSite, LashlangExecutionChild,
+    LashlangExecutionObservation, LashlangExecutionSite, ProcessBranchSelection, process_ref_key,
 };
 pub use trigger::{
-    TriggerCancelRequest, TriggerHostOperation, TriggerListRequest, TriggerRegistrationRequest,
-    TriggerSourceValue, TriggerTargetIdentity, TriggerTargetValidation,
-    TriggerTargetValidationError, add_trigger_resource_operations, cancel_call_args,
-    event_type_for_source, list_call_args, register_call_args, validate_trigger_target,
+    LASH_TRIGGER_EVENT_KEY, TriggerCancelRequest, TriggerHostOperation, TriggerInputBinding,
+    TriggerInputTemplate, TriggerListRequest, TriggerRegistrationRequest, TriggerSourceValue,
+    TriggerTargetIdentity, TriggerTargetValidation, TriggerTargetValidationError,
+    add_trigger_resource_operations, cancel_call_args, event_type_for_source, list_call_args,
+    register_call_args, trigger_event_placeholder_expr, validate_trigger_target,
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {
@@ -264,6 +266,100 @@ mod tests {
         assert_eq!(stats.evictions, 2);
         assert_eq!(stats.entries, 2);
         assert_eq!(stats.capacity, 2);
+    }
+
+    #[test]
+    fn linked_program_cache_reuses_source_when_surface_satisfies_requirements() {
+        let source = r#"submit (await tools.read_file({ path: "." }))?"#;
+        let base_surface = LashlangSurface::new(
+            ResourceCatalog::tool_default(["read_file"]),
+            LashlangAbilities::default(),
+        );
+        let extra_surface = LashlangSurface::new(
+            ResourceCatalog::tool_default(["read_file", "unrelated"]),
+            LashlangAbilities::default(),
+        );
+        let mut cache = LinkedProgramCache::with_capacity(2);
+
+        let first = cache
+            .get_or_compile(source, &base_surface)
+            .expect("compile first linked program");
+        let second = cache
+            .get_or_compile(source, &base_surface)
+            .expect("reuse same surface");
+        let extra = cache
+            .get_or_compile(source, &extra_surface)
+            .expect("reuse when unrelated tools are added");
+
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert!(std::sync::Arc::ptr_eq(&first, &extra));
+        assert_eq!(
+            first.linked_module().required_surface_ref,
+            extra.linked_module().required_surface_ref
+        );
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 2);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.evictions, 0);
+        assert_eq!(stats.entries, 1);
+    }
+
+    #[test]
+    fn linked_program_cache_keeps_source_and_surface_requirements_distinct() {
+        let source = r#"submit (await tools.read_file({ path: "." }))?"#;
+        let base_surface = LashlangSurface::new(
+            ResourceCatalog::tool_default(["read_file"]),
+            LashlangAbilities::default(),
+        );
+        let mut changed_resources = ResourceCatalog::new();
+        changed_resources.add_module_instance(["tools"], "Tools");
+        changed_resources.add_operation(
+            "Tools",
+            "read_file",
+            "read_file_v2",
+            TypeExpr::Any,
+            TypeExpr::Any,
+        );
+        let changed_surface = LashlangSurface::new(changed_resources, LashlangAbilities::default());
+        let missing_surface = LashlangSurface::new(
+            ResourceCatalog::tool_default(["echo"]),
+            LashlangAbilities::default(),
+        );
+        let mut cache = LinkedProgramCache::with_capacity(4);
+
+        let first = cache
+            .get_or_compile(source, &base_surface)
+            .expect("compile first linked program");
+        let newline = cache
+            .get_or_compile(&format!("{source}\n"), &base_surface)
+            .expect("compile source-distinct linked program");
+        let changed = cache
+            .get_or_compile(source, &changed_surface)
+            .expect("compile changed surface requirement");
+        let missing = cache
+            .get_or_compile(source, &missing_surface)
+            .expect_err("missing resource operation should not reuse cached program");
+
+        assert!(!std::sync::Arc::ptr_eq(&first, &newline));
+        assert!(!std::sync::Arc::ptr_eq(&first, &changed));
+        assert_ne!(
+            first.linked_module().required_surface_ref,
+            changed.linked_module().required_surface_ref
+        );
+        assert!(matches!(
+            missing,
+            LinkedProgramCacheError::Link(LinkError::UnknownResourceOperation {
+                operation,
+                ..
+            }) if operation == "read_file"
+        ));
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 4);
+        assert_eq!(stats.evictions, 0);
+        assert_eq!(stats.entries, 3);
     }
 
     #[tokio::test(flavor = "current_thread")]

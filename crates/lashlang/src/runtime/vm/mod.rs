@@ -16,7 +16,8 @@ use rustc_hash::FxHashMap;
 
 use crate::ast::UnaryOp;
 use crate::{
-    ProcessBranchSelection, ProcessTrackingChild, ProcessTrackingObservation, ProcessTrackingSite,
+    LashlangExecutionChild, LashlangExecutionObservation, LashlangExecutionSite,
+    ProcessBranchSelection,
 };
 
 mod control;
@@ -216,14 +217,14 @@ pub(crate) struct Vm<'a, H> {
     host: &'a H,
     mode: VmMode,
     iter_stack: Vec<IterState>,
-    process_tracking_occurrences: FxHashMap<String, u64>,
+    lashlang_execution_occurrences: FxHashMap<String, u64>,
     profile: Option<ProfileAccumulator>,
     validation_plans: FxHashMap<usize, (Arc<Record>, ValidationPlan)>,
 }
 
 #[derive(Clone)]
-pub(super) struct ActiveProcessTrackingNode {
-    pub(super) site: ProcessTrackingSite,
+pub(super) struct ActiveLashlangExecutionNode {
+    pub(super) site: LashlangExecutionSite,
     pub(super) occurrence: u64,
 }
 
@@ -250,7 +251,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             host,
             mode: VmMode::from(mode),
             iter_stack: Vec::new(),
-            process_tracking_occurrences: FxHashMap::default(),
+            lashlang_execution_occurrences: FxHashMap::default(),
             profile: None,
             validation_plans: FxHashMap::default(),
         }
@@ -272,7 +273,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             host,
             mode: VmMode::from(mode),
             iter_stack: std::mem::take(&mut scratch.iter_stack),
-            process_tracking_occurrences: FxHashMap::default(),
+            lashlang_execution_occurrences: FxHashMap::default(),
             profile: None,
             validation_plans: FxHashMap::default(),
         }
@@ -282,50 +283,47 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
         self.profile = Some(ProfileAccumulator::default());
     }
 
-    fn process_tracking_site_at(&self, instruction_ip: usize) -> Option<&ProcessTrackingSite> {
-        if self.mode != VmMode::Process {
-            return None;
-        }
+    fn lashlang_execution_site_at(&self, instruction_ip: usize) -> Option<&LashlangExecutionSite> {
         self.chunk
-            .process_tracking_sites
+            .lashlang_execution_sites
             .get(instruction_ip)
             .and_then(Option::as_ref)
     }
 
-    fn begin_process_tracking(
+    fn begin_lashlang_execution(
         &mut self,
         instruction_ip: usize,
-    ) -> Option<ActiveProcessTrackingNode> {
-        let site = self.process_tracking_site_at(instruction_ip)?.clone();
+    ) -> Option<ActiveLashlangExecutionNode> {
+        let site = self.lashlang_execution_site_at(instruction_ip)?.clone();
         let occurrence = self
-            .process_tracking_occurrences
+            .lashlang_execution_occurrences
             .entry(site.node_id.clone())
             .and_modify(|value| *value += 1)
             .or_insert(1);
         let occurrence = *occurrence;
         self.host
-            .observe_process_tracking(ProcessTrackingObservation::NodeStarted {
+            .observe_lashlang_execution(LashlangExecutionObservation::NodeStarted {
                 site: site.clone(),
                 occurrence,
             });
-        Some(ActiveProcessTrackingNode { site, occurrence })
+        Some(ActiveLashlangExecutionNode { site, occurrence })
     }
 
-    pub(super) fn complete_process_tracking(&self, active: &ActiveProcessTrackingNode) {
+    pub(super) fn complete_lashlang_execution(&self, active: &ActiveLashlangExecutionNode) {
         self.host
-            .observe_process_tracking(ProcessTrackingObservation::NodeCompleted {
+            .observe_lashlang_execution(LashlangExecutionObservation::NodeCompleted {
                 site: active.site.clone(),
                 occurrence: active.occurrence,
             });
     }
 
-    pub(super) fn fail_process_tracking(
+    pub(super) fn fail_lashlang_execution(
         &self,
-        active: &ActiveProcessTrackingNode,
+        active: &ActiveLashlangExecutionNode,
         error: impl Into<String>,
     ) {
         self.host
-            .observe_process_tracking(ProcessTrackingObservation::NodeFailed {
+            .observe_lashlang_execution(LashlangExecutionObservation::NodeFailed {
                 site: active.site.clone(),
                 occurrence: active.occurrence,
                 error: error.into(),
@@ -334,11 +332,11 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
 
     pub(super) fn observe_child_started(
         &self,
-        active: &ActiveProcessTrackingNode,
-        child: ProcessTrackingChild,
+        active: &ActiveLashlangExecutionNode,
+        child: LashlangExecutionChild,
     ) {
         self.host
-            .observe_process_tracking(ProcessTrackingObservation::ChildStarted {
+            .observe_lashlang_execution(LashlangExecutionObservation::ChildStarted {
                 site: active.site.clone(),
                 occurrence: active.occurrence,
                 child,
@@ -350,14 +348,14 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
         instruction_ip: usize,
         selected: ProcessBranchSelection,
     ) {
-        let Some(site) = self.process_tracking_site_at(instruction_ip).cloned() else {
+        let Some(site) = self.lashlang_execution_site_at(instruction_ip).cloned() else {
             return;
         };
         let Some(branch) = site.branch.as_ref() else {
             return;
         };
         let occurrence = self
-            .process_tracking_occurrences
+            .lashlang_execution_occurrences
             .entry(site.node_id.clone())
             .and_modify(|value| *value += 1)
             .or_insert(1);
@@ -366,7 +364,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             ProcessBranchSelection::Else => branch.else_edge_id.clone(),
         };
         self.host
-            .observe_process_tracking(ProcessTrackingObservation::BranchSelected {
+            .observe_lashlang_execution(LashlangExecutionObservation::BranchSelected {
                 site,
                 occurrence: *occurrence,
                 edge_id,
@@ -764,6 +762,11 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "fail" });
                 }
                 return Ok(Some(VmStep::Effect(VmEffect::Fail)));
+            }
+            Instruction::ObserveStep => {
+                if let Some(active) = self.begin_lashlang_execution(self.current_instruction_ip()) {
+                    self.complete_lashlang_execution(&active);
+                }
             }
             Instruction::Pop => {
                 self.last_value = Some(self.pop_stack()?);
@@ -1254,6 +1257,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             | Instruction::ProcessWake
             | Instruction::ProcessFinish
             | Instruction::ProcessFail
+            | Instruction::ObserveStep
             | Instruction::Pop
             | Instruction::Jump(_)
             | Instruction::IterNext { .. }

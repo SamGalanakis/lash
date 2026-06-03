@@ -4,34 +4,60 @@ use sha2::{Digest, Sha256};
 use crate::{ModuleRef, ProcessRef};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProcessTrackingContext {
+pub(crate) struct LashlangExecutionContext {
     pub(crate) module_ref: ModuleRef,
-    pub(crate) process_ref: ProcessRef,
-    pub(crate) process_name: String,
+    pub(crate) entry: LashlangExecutionEntry,
 }
 
-impl ProcessTrackingContext {
-    pub(crate) fn new(
+impl LashlangExecutionContext {
+    pub(crate) fn main(module_ref: ModuleRef) -> Self {
+        Self {
+            module_ref,
+            entry: LashlangExecutionEntry::Main,
+        }
+    }
+
+    pub(crate) fn process(
         module_ref: ModuleRef,
         process_ref: ProcessRef,
         process_name: impl Into<String>,
     ) -> Self {
         Self {
             module_ref,
-            process_ref,
-            process_name: process_name.into(),
+            entry: LashlangExecutionEntry::Process {
+                process_ref,
+                process_name: process_name.into(),
+            },
         }
     }
 
-    pub(crate) fn builder(&self) -> ProcessTrackingSiteBuilder<'_> {
-        ProcessTrackingSiteBuilder { context: self }
+    pub(crate) fn builder(&self) -> LashlangExecutionSiteBuilder<'_> {
+        LashlangExecutionSiteBuilder { context: self }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LashlangExecutionEntry {
+    Main,
+    Process {
+        process_ref: ProcessRef,
+        process_name: String,
+    },
+}
+
+impl LashlangExecutionEntry {
+    fn stable_key(&self) -> String {
+        match self {
+            Self::Main => "main".to_string(),
+            Self::Process { process_ref, .. } => process_ref_key(process_ref),
+        }
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct ProcessAstPath(Vec<u32>);
+pub(crate) struct LashlangAstPath(Vec<u32>);
 
-impl ProcessAstPath {
+impl LashlangAstPath {
     pub(crate) fn root() -> Self {
         Self(Vec::new())
     }
@@ -55,23 +81,27 @@ impl ProcessAstPath {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ProcessTrackingSiteBuilder<'context> {
-    context: &'context ProcessTrackingContext,
+pub(crate) struct LashlangExecutionSiteBuilder<'context> {
+    context: &'context LashlangExecutionContext,
 }
 
-impl ProcessTrackingSiteBuilder<'_> {
+impl LashlangExecutionSiteBuilder<'_> {
     pub(crate) fn process_node_id(&self) -> String {
-        self.node_id(&ProcessAstPath::root(), "process")
+        self.node_id(&LashlangAstPath::root(), "process")
+    }
+
+    pub(crate) fn main_node_id(&self) -> String {
+        self.node_id(&LashlangAstPath::root(), "main")
     }
 
     pub(crate) fn node_site(
         &self,
-        path: &ProcessAstPath,
+        path: &LashlangAstPath,
         kind: impl Into<String>,
         label: impl Into<String>,
-    ) -> ProcessTrackingSite {
+    ) -> LashlangExecutionSite {
         let kind = kind.into();
-        ProcessTrackingSite {
+        LashlangExecutionSite {
             node_id: self.node_id(path, &kind),
             node_kind: kind,
             label: label.into(),
@@ -79,12 +109,12 @@ impl ProcessTrackingSiteBuilder<'_> {
         }
     }
 
-    pub(crate) fn branch_site(&self, path: &ProcessAstPath) -> ProcessTrackingSite {
-        ProcessTrackingSite {
+    pub(crate) fn branch_site(&self, path: &LashlangAstPath) -> LashlangExecutionSite {
+        LashlangExecutionSite {
             node_id: self.node_id(path, "branch"),
             node_kind: "branch".to_string(),
             label: "if".to_string(),
-            branch: Some(ProcessBranchSite {
+            branch: Some(LashlangBranchSite {
                 then_edge_id: self.branch_edge_id(path, ProcessBranchSelection::Then),
                 else_edge_id: self.branch_edge_id(path, ProcessBranchSelection::Else),
             }),
@@ -93,7 +123,7 @@ impl ProcessTrackingSiteBuilder<'_> {
 
     pub(crate) fn branch_arm_node_id(
         &self,
-        path: &ProcessAstPath,
+        path: &LashlangAstPath,
         selection: ProcessBranchSelection,
     ) -> String {
         let kind = match selection {
@@ -105,7 +135,7 @@ impl ProcessTrackingSiteBuilder<'_> {
 
     pub(crate) fn edge_id(
         &self,
-        path: &ProcessAstPath,
+        path: &LashlangAstPath,
         from: &str,
         to: &str,
         label: &str,
@@ -114,7 +144,7 @@ impl ProcessTrackingSiteBuilder<'_> {
             "edge",
             &[
                 self.context.module_ref.to_string(),
-                process_ref_key(&self.context.process_ref),
+                self.context.entry.stable_key(),
                 path.stable_text(),
                 from.to_string(),
                 to.to_string(),
@@ -125,7 +155,7 @@ impl ProcessTrackingSiteBuilder<'_> {
 
     pub(crate) fn branch_edge_id(
         &self,
-        path: &ProcessAstPath,
+        path: &LashlangAstPath,
         selection: ProcessBranchSelection,
     ) -> String {
         let label = match selection {
@@ -136,7 +166,7 @@ impl ProcessTrackingSiteBuilder<'_> {
             "edge",
             &[
                 self.context.module_ref.to_string(),
-                process_ref_key(&self.context.process_ref),
+                self.context.entry.stable_key(),
                 path.stable_text(),
                 "branch".to_string(),
                 label.to_string(),
@@ -144,12 +174,12 @@ impl ProcessTrackingSiteBuilder<'_> {
         )
     }
 
-    fn node_id(&self, path: &ProcessAstPath, kind: impl AsRef<str>) -> String {
+    fn node_id(&self, path: &LashlangAstPath, kind: impl AsRef<str>) -> String {
         stable_id(
             kind.as_ref(),
             &[
                 self.context.module_ref.to_string(),
-                process_ref_key(&self.context.process_ref),
+                self.context.entry.stable_key(),
                 path.stable_text(),
                 kind.as_ref().to_string(),
             ],
@@ -172,16 +202,22 @@ pub fn process_ref_key(process_ref: &ProcessRef) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessTrackingSite {
+pub struct LashlangExecutionSite {
     pub node_id: String,
     pub node_kind: String,
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<ProcessBranchSite>,
+    pub branch: Option<LashlangBranchSite>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LashlangExecutionCallSite {
+    pub site: LashlangExecutionSite,
+    pub occurrence: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessBranchSite {
+pub struct LashlangBranchSite {
     pub then_edge_id: String,
     pub else_edge_id: String,
 }
@@ -194,7 +230,7 @@ pub enum ProcessBranchSelection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProcessTrackingChild {
+pub struct LashlangExecutionChild {
     pub process_id: String,
     pub module_ref: ModuleRef,
     pub process_ref: ProcessRef,
@@ -202,29 +238,29 @@ pub struct ProcessTrackingChild {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProcessTrackingObservation {
+pub enum LashlangExecutionObservation {
     NodeStarted {
-        site: ProcessTrackingSite,
+        site: LashlangExecutionSite,
         occurrence: u64,
     },
     NodeCompleted {
-        site: ProcessTrackingSite,
+        site: LashlangExecutionSite,
         occurrence: u64,
     },
     NodeFailed {
-        site: ProcessTrackingSite,
+        site: LashlangExecutionSite,
         occurrence: u64,
         error: String,
     },
     BranchSelected {
-        site: ProcessTrackingSite,
+        site: LashlangExecutionSite,
         occurrence: u64,
         edge_id: String,
         selected: ProcessBranchSelection,
     },
     ChildStarted {
-        site: ProcessTrackingSite,
+        site: LashlangExecutionSite,
         occurrence: u64,
-        child: ProcessTrackingChild,
+        child: LashlangExecutionChild,
     },
 }

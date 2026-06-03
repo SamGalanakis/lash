@@ -88,14 +88,18 @@ pub fn process_list_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "tool:list_process_handles",
         "list_process_handles",
-        "List live process handles granted to this session, including `shell.start` handles, with process id, descriptor, and lifecycle status. Pass history: \"all\" only when completed historical handles are explicitly needed.",
+        "List process runs visible to this session, including `shell.start` runs, with process id, descriptor, optional definition name, and lifecycle status. Filters are optional; the default returns running runs.",
         serde_json::json!({
             "type": "object",
             "properties": {
-                "history": {
+                "status": {
                     "type": "string",
-                    "enum": ["live", "all"],
-                    "description": "`live` lists running handles only. `all` includes completed historical handles."
+                    "enum": ["running", "completed", "failed", "cancelled", "any"],
+                    "description": "Lifecycle status to list. The default is `running`; `any` includes historical runs."
+                },
+                "definition": {
+                    "type": "object",
+                    "description": "A Lashlang process definition value, for example `on_button`."
                 }
             },
             "additionalProperties": false
@@ -104,7 +108,8 @@ pub fn process_list_tool_definition() -> ToolDefinition {
     )
     .with_examples(vec![
         "await processes.list({})?".into(),
-        r#"await processes.list({ history: "all" })?"#.into(),
+        r#"await processes.list({ status: "any" })?"#.into(),
+        "await processes.list({ definition: on_button })?".into(),
     ])
     .with_agent_surface(ToolAgentSurface::new(["processes"], "list"))
     .with_availability(ToolAvailabilityConfig::callable())
@@ -161,17 +166,12 @@ pub async fn execute_process_list_tool_call(
     context: &lash_core::ToolContext<'_>,
     args: &Value,
 ) -> ToolResult {
-    let mode = match lash_core::ProcessListMode::from_history_arg(
-        args.get("history").and_then(Value::as_str),
-    ) {
-        Ok(mode) => mode,
+    let filter = match lash_core::ProcessListFilter::decode(args) {
+        Ok(filter) => filter,
         Err(err) => return ToolResult::err_fmt(err),
     };
     let processes = context.processes();
-    let result = match mode {
-        lash_core::ProcessListMode::Live => processes.list_handles().await,
-        lash_core::ProcessListMode::All => processes.list_all_handles().await,
-    };
+    let result = processes.list_handles_filtered(&filter).await;
     match result {
         Ok(entries) => ToolResult::ok(serde_json::json!(entries)),
         Err(err) => ToolResult::err_fmt(err.to_string()),
@@ -203,6 +203,14 @@ fn process_list_output_schema() -> Value {
                         "kind": { "type": "string" },
                         "label": { "type": "string" }
                     },
+                    "additionalProperties": false
+                },
+                "definition": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    },
+                    "required": ["name"],
                     "additionalProperties": false
                 },
                 "status": {
@@ -321,7 +329,11 @@ mod tests {
         assert!(rendered.contains("-> list[record{"), "{rendered}");
         assert!(rendered.contains("__handle__"), "{rendered}");
         assert!(rendered.contains("process_id"), "{rendered}");
+        assert!(rendered.contains("definition"), "{rendered}");
         assert!(rendered.contains("status: enum["), "{rendered}");
+        assert!(rendered.contains("status?: enum["), "{rendered}");
+        assert!(rendered.contains("definition?: record"), "{rendered}");
+        assert!(!rendered.contains("history"), "{rendered}");
         assert!(!rendered.contains("terminal:"), "{rendered}");
     }
 

@@ -269,8 +269,8 @@ where
                 self.emit_instant(record, "lash.protocol_step", None)
             }
             TraceEvent::TokenUsage { .. } => self.emit_instant(record, "lash.token_usage", None),
-            TraceEvent::ProcessTracking { .. } => {
-                self.emit_instant(record, "lash.process_tracking", None)
+            TraceEvent::LashlangExecution { .. } => {
+                self.emit_instant(record, "lash.lashlang_execution", None)
             }
             TraceEvent::Custom { .. } => self.emit_instant(record, "lash.custom", None),
         }
@@ -554,12 +554,12 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
                 usage_attributes(&mut attrs, "lash.usage.cumulative", cumulative);
             }
         }
-        TraceEvent::ProcessTracking { event } => {
-            process_tracking_attributes(&mut attrs, event);
+        TraceEvent::LashlangExecution { event } => {
+            lashlang_execution_attributes(&mut attrs, event);
             push_payload_json(
                 &mut attrs,
                 options,
-                "lash.process_tracking.event_json",
+                "lash.lashlang_execution.event_json",
                 event,
             );
         }
@@ -585,111 +585,120 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
     attrs
 }
 
-fn process_tracking_attributes(
+fn lashlang_execution_attributes(
     attrs: &mut Vec<KeyValue>,
-    event: &crate::TraceProcessTrackingEvent,
+    event: &crate::TraceLashlangExecutionEvent,
 ) {
-    use crate::TraceProcessTrackingEvent as Event;
+    use crate::TraceLashlangExecutionEvent as Event;
 
     let kind = match event {
-        Event::ProcessStarted { .. } => "process_started",
-        Event::ProcessFinished { .. } => "process_finished",
+        Event::ExecutionStarted { .. } => "execution_started",
+        Event::ExecutionFinished { .. } => "execution_finished",
         Event::NodeStarted { .. } => "node_started",
         Event::NodeCompleted { .. } => "node_completed",
         Event::NodeFailed { .. } => "node_failed",
         Event::BranchSelected { .. } => "branch_selected",
         Event::ChildStarted { .. } => "child_started",
     };
-    attrs.push(KeyValue::new("lash.process_tracking.kind", kind));
+    attrs.push(KeyValue::new("lash.lashlang_execution.kind", kind));
 
     match event {
-        Event::ProcessStarted {
+        Event::ExecutionStarted {
             event_key,
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
+            identity,
             ..
         }
-        | Event::ProcessFinished {
+        | Event::ExecutionFinished {
             event_key,
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
+            identity,
             ..
         }
         | Event::NodeStarted {
             event_key,
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
+            identity,
             ..
         }
         | Event::NodeCompleted {
             event_key,
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
+            identity,
             ..
         }
         | Event::NodeFailed {
             event_key,
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
+            identity,
             ..
         }
         | Event::BranchSelected {
             event_key,
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
+            identity,
             ..
         }
         | Event::ChildStarted {
             event_key,
-            process_id,
-            session_id,
-            module_ref,
-            process_ref,
-            process_name,
+            identity,
             ..
         } => {
             attrs.push(KeyValue::new(
-                "lash.process_tracking.event_key",
+                "lash.lashlang_execution.event_key",
                 event_key.clone(),
             ));
             attrs.push(KeyValue::new(
-                "lash.process_tracking.process_id",
-                process_id.clone(),
+                "lash.lashlang_execution.graph_key",
+                identity.graph_key(),
             ));
             attrs.push(KeyValue::new(
-                "lash.process_tracking.session_id",
-                session_id.clone(),
+                "lash.lashlang_execution.session_id",
+                identity.scope.session_id.clone(),
+            ));
+            if let Some(turn_id) = &identity.scope.turn_id {
+                attrs.push(KeyValue::new(
+                    "lash.lashlang_execution.turn_id",
+                    turn_id.clone(),
+                ));
+            }
+            attrs.push(KeyValue::new(
+                "lash.lashlang_execution.module_ref",
+                identity.module_ref.clone(),
             ));
             attrs.push(KeyValue::new(
-                "lash.process_tracking.module_ref",
-                module_ref.clone(),
+                "lash.lashlang_execution.entry_kind",
+                identity.entry_kind.clone(),
             ));
+            push_opt(
+                attrs,
+                "lash.lashlang_execution.entry_ref",
+                &identity.entry_ref,
+            );
             attrs.push(KeyValue::new(
-                "lash.process_tracking.process_ref",
-                process_ref.clone(),
+                "lash.lashlang_execution.entry_name",
+                identity.entry_name.clone(),
             ));
-            attrs.push(KeyValue::new(
-                "lash.process_tracking.process_name",
-                process_name.clone(),
-            ));
+            match &identity.subject {
+                crate::TraceRuntimeSubject::Effect { effect_id, kind } => {
+                    attrs.push(KeyValue::new(
+                        "lash.lashlang_execution.subject_type",
+                        "effect",
+                    ));
+                    attrs.push(KeyValue::new(
+                        "lash.lashlang_execution.effect_id",
+                        effect_id.clone(),
+                    ));
+                    attrs.push(KeyValue::new(
+                        "lash.lashlang_execution.effect_kind",
+                        kind.clone(),
+                    ));
+                }
+                crate::TraceRuntimeSubject::Process { process_id } => {
+                    attrs.push(KeyValue::new(
+                        "lash.lashlang_execution.subject_type",
+                        "process",
+                    ));
+                    attrs.push(KeyValue::new(
+                        "lash.lashlang_execution.process_id",
+                        process_id.clone(),
+                    ));
+                }
+            }
         }
     }
 
@@ -713,15 +722,15 @@ fn process_tracking_attributes(
             ..
         } => {
             attrs.push(KeyValue::new(
-                "lash.process_tracking.node_id",
+                "lash.lashlang_execution.node_id",
                 node_id.clone(),
             ));
             attrs.push(KeyValue::new(
-                "lash.process_tracking.node_kind",
+                "lash.lashlang_execution.node_kind",
                 node_kind.clone(),
             ));
             attrs.push(KeyValue::new(
-                "lash.process_tracking.occurrence",
+                "lash.lashlang_execution.occurrence",
                 *occurrence as i64,
             ));
         }
@@ -733,56 +742,77 @@ fn process_tracking_attributes(
             ..
         } => {
             attrs.push(KeyValue::new(
-                "lash.process_tracking.node_id",
+                "lash.lashlang_execution.node_id",
                 node_id.clone(),
             ));
             attrs.push(KeyValue::new(
-                "lash.process_tracking.edge_id",
+                "lash.lashlang_execution.edge_id",
                 edge_id.clone(),
             ));
             attrs.push(KeyValue::new(
-                "lash.process_tracking.branch",
+                "lash.lashlang_execution.branch",
                 format!("{selected:?}").to_ascii_lowercase(),
             ));
             attrs.push(KeyValue::new(
-                "lash.process_tracking.occurrence",
+                "lash.lashlang_execution.occurrence",
                 *occurrence as i64,
             ));
         }
         Event::ChildStarted {
-            parent_process_id,
             parent_node_id,
-            child_process_id,
+            child,
             ..
         } => {
             attrs.push(KeyValue::new(
-                "lash.process_tracking.parent_process_id",
-                parent_process_id.clone(),
-            ));
-            attrs.push(KeyValue::new(
-                "lash.process_tracking.parent_node_id",
+                "lash.lashlang_execution.parent_node_id",
                 parent_node_id.clone(),
             ));
             attrs.push(KeyValue::new(
-                "lash.process_tracking.child_process_id",
-                child_process_id.clone(),
+                "lash.lashlang_execution.child_graph_key",
+                child.graph_key(),
             ));
+            match &child.subject {
+                crate::TraceRuntimeSubject::Effect { effect_id, kind } => {
+                    attrs.push(KeyValue::new(
+                        "lash.lashlang_execution.child_subject_type",
+                        "effect",
+                    ));
+                    attrs.push(KeyValue::new(
+                        "lash.lashlang_execution.child_effect_id",
+                        effect_id.clone(),
+                    ));
+                    attrs.push(KeyValue::new(
+                        "lash.lashlang_execution.child_effect_kind",
+                        kind.clone(),
+                    ));
+                }
+                crate::TraceRuntimeSubject::Process { process_id } => {
+                    attrs.push(KeyValue::new(
+                        "lash.lashlang_execution.child_subject_type",
+                        "process",
+                    ));
+                    attrs.push(KeyValue::new(
+                        "lash.lashlang_execution.child_process_id",
+                        process_id.clone(),
+                    ));
+                }
+            }
         }
-        Event::ProcessFinished { status, error, .. } => {
+        Event::ExecutionFinished { status, error, .. } => {
             attrs.push(KeyValue::new(
-                "lash.process_tracking.status",
+                "lash.lashlang_execution.status",
                 format!("{status:?}").to_ascii_lowercase(),
             ));
-            push_opt(attrs, "lash.process_tracking.error", error);
+            push_opt(attrs, "lash.lashlang_execution.error", error);
         }
-        Event::ProcessStarted { process_map, .. } => {
+        Event::ExecutionStarted { execution_map, .. } => {
             attrs.push(KeyValue::new(
-                "lash.process_tracking.node_count",
-                process_map.nodes.len() as i64,
+                "lash.lashlang_execution.node_count",
+                execution_map.nodes.len() as i64,
             ));
             attrs.push(KeyValue::new(
-                "lash.process_tracking.edge_count",
-                process_map.edges.len() as i64,
+                "lash.lashlang_execution.edge_count",
+                execution_map.edges.len() as i64,
             ));
         }
     }
@@ -906,6 +936,7 @@ fn event_type(event: &TraceEvent) -> &'static str {
         TraceEvent::LlmCallFailed { .. } => "llm_call_failed",
         TraceEvent::ProviderStreamEvent { .. } => "provider_stream_event",
         TraceEvent::RuntimeStreamEvent { .. } => "runtime_stream_event",
+        TraceEvent::LashlangExecution { .. } => "lashlang_execution",
         TraceEvent::ToolCallStarted { .. } => "tool_call_started",
         TraceEvent::ToolCallCompleted { .. } => "tool_call_completed",
         TraceEvent::ProtocolStep { .. } => "protocol_step",

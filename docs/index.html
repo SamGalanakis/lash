@@ -21,7 +21,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=8">
+<link rel="stylesheet" href="./styles.css?v=9">
 <script src="./theme.js"></script>
 <script>
   // Hero scene config. The cover fills the first viewport behind the
@@ -40,7 +40,7 @@
 </script>
 <script src="./scene.js?v=5" defer data-scene></script>
 <script src="./diagram.js?v=3" defer></script>
-<script src="./docs.js?v=2" defer></script>
+<script src="./docs.js?v=3" defer></script>
 <script src="./syntax.js" defer></script>
 <script src="./channel.js" defer></script>
 </head>
@@ -269,7 +269,7 @@
         <h2 class="stanza__title">compose the runtime</h2>
         <p class="stanza__lede">The runtime is assembled from plugins. Tools, prompts, planning, memory, history transforms, UI activity, and tool-output budgeting hang off about eighteen typed hooks; a host composes only what it embeds.</p>
         <p>The execution mode is a plugin too. <code>standard</code> and <code>rlm</code> ship as separate protocol crates and install like anything else, so the loop's protocol is swappable.</p>
-        <p>Providers (Anthropic, OpenAI, Gemini, any OpenAI-compatible endpoint, and MCP servers) and observability sinks (JSONL traces, process tracking, OpenTelemetry) attach the same way.</p>
+        <p>Providers (Anthropic, OpenAI, Gemini, any OpenAI-compatible endpoint, and MCP servers) and observability sinks (JSONL traces, Lashlang execution graphs, OpenTelemetry) attach the same way.</p>
       </div>
     </section>
 
@@ -342,8 +342,8 @@ start notify(mail: gmail.work)</code></pre>
 
         <p>The facade ships on crates.io as <code>lash-runtime</code> and is imported as <code>use lash::…</code>. During the alpha series the versions carry an <code>-alpha.N</code> suffix, so the dep needs the explicit pre-release tag.</p>
 <pre data-lang="cargo.toml"><code>[dependencies]
-lash-runtime         = "=0.1.0-alpha.17"
-lash-provider-openai = "=0.1.0-alpha.17"
+lash-runtime         = "=0.1.0-alpha.19"
+lash-provider-openai = "=0.1.0-alpha.19"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }</code></pre>
 
@@ -397,7 +397,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
         <p class="stanza__lede">lash is usable today, but still in the alpha series. Embed it when you want the runtime boundary now; pin versions or commits while the API settles.</p>
         <dl class="defs">
           <dt>works today</dt>
-          <dd>Standard turns, RLM turns, plugin composition, SQLite persistence, durable turn scopes, background processes, provider crates, MCP wiring, JSONL traces, process tracking, OpenTelemetry export, and the example apps.</dd>
+          <dd>Standard turns, RLM turns, plugin composition, SQLite persistence, durable turn scopes, background processes, provider crates, MCP wiring, JSONL traces, Lashlang execution graphs, OpenTelemetry export, and the example apps.</dd>
           <dt>still moving</dt>
           <dd>Facade details, docs, and some advanced host seams are still changing quickly. The runtime contracts are being hardened in public rather than hidden behind compatibility shims.</dd>
         </dl>

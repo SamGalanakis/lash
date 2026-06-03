@@ -4,6 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lash_core::{
     AttachmentRef, ExecImage, RuntimeExecutionContext, TextProjectionMetadata, ToolInvocationReply,
+    ToolLashlangExecutionCallSite, TraceBranchSelection, TraceContext, TraceEvent,
+    TraceLashlangChildExecution, TraceLashlangExecutionEvent, TraceLashlangExecutionIdentity,
+    TraceRecord, TraceRuntimeSubject, TraceSink,
 };
 use lash_plugin_tool_output_budget::{ToolOutputBudgetConfig, project_observation_text};
 use lashlang::{
@@ -25,6 +28,7 @@ pub(super) struct HostBridge<'run> {
     tool_images: Mutex<Vec<ExecImage>>,
     next_tool_index: Mutex<usize>,
     sleep_sequence: AtomicU64,
+    lashlang_execution_trace: Option<LashlangExecutionTrace>,
 }
 
 impl<'run> HostBridge<'run> {
@@ -32,6 +36,7 @@ impl<'run> HostBridge<'run> {
         ctx: RuntimeExecutionContext<'run>,
         observe_projection: ToolOutputBudgetConfig,
         tool_result_projectors: Vec<crate::RlmToolResultProjector>,
+        lashlang_execution_trace: Option<LashlangExecutionTrace>,
     ) -> Self {
         Self {
             ctx,
@@ -44,6 +49,7 @@ impl<'run> HostBridge<'run> {
             tool_images: Mutex::new(Vec::new()),
             next_tool_index: Mutex::new(0),
             sleep_sequence: AtomicU64::new(0),
+            lashlang_execution_trace,
         }
     }
 
@@ -98,12 +104,70 @@ impl<'run> HostBridge<'run> {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct LashlangExecutionTrace {
+    sink: std::sync::Arc<dyn TraceSink>,
+    base_context: TraceContext,
+    identity: TraceLashlangExecutionIdentity,
+}
+
+impl LashlangExecutionTrace {
+    pub(super) fn new(
+        sink: std::sync::Arc<dyn TraceSink>,
+        base_context: TraceContext,
+        identity: TraceLashlangExecutionIdentity,
+    ) -> Self {
+        Self {
+            sink,
+            base_context,
+            identity,
+        }
+    }
+
+    pub(super) fn identity(&self) -> &TraceLashlangExecutionIdentity {
+        &self.identity
+    }
+
+    pub(super) fn event_key(&self, suffix: impl std::fmt::Display) -> String {
+        format!("lashlang_execution:{}:{suffix}", self.identity.graph_key())
+    }
+
+    pub(super) fn tool_call_site(
+        &self,
+        call_site: lashlang::LashlangExecutionCallSite,
+    ) -> ToolLashlangExecutionCallSite {
+        ToolLashlangExecutionCallSite::new(
+            std::sync::Arc::clone(&self.sink),
+            self.base_context.clone(),
+            self.identity.clone(),
+            call_site.site.node_id,
+            call_site.occurrence,
+        )
+    }
+
+    pub(super) fn emit(&self, event: TraceLashlangExecutionEvent) {
+        let mut context = self.base_context.clone();
+        context.session_id = Some(self.identity.scope.session_id.clone());
+        context.turn_id = self.identity.scope.turn_id.clone();
+        context.turn_index = self.identity.scope.turn_index;
+        context.protocol_iteration = self.identity.scope.protocol_iteration;
+        if let TraceRuntimeSubject::Effect { effect_id, .. } = &self.identity.subject {
+            context.effect_id = Some(effect_id.clone());
+        }
+        let _ = self.sink.append(&TraceRecord::new(
+            context,
+            TraceEvent::LashlangExecution { event },
+        ));
+    }
+}
+
 impl HostBridge<'_> {
     async fn resource_operation(
         &self,
         operation: String,
         receiver: FlowValue,
         args: Vec<FlowValue>,
+        call_site: Option<lashlang::LashlangExecutionCallSite>,
     ) -> Result<FlowValue, ExecutionHostError> {
         if !matches!(&receiver, FlowValue::Resource(_)) {
             return Err(ExecutionHostError::new(format!(
@@ -129,15 +193,27 @@ impl HostBridge<'_> {
             return Ok(lashlang::from_json(value));
         }
         let index = self.next_index();
-        let reply = self
-            .ctx
-            .call_tool(
-                uuid::Uuid::new_v4().to_string(),
-                operation.clone(),
-                payload,
-                index,
-            )
-            .await;
+        let call_id = uuid::Uuid::new_v4().to_string();
+        let call_site = call_site.and_then(|call_site| {
+            self.lashlang_execution_trace
+                .as_ref()
+                .map(|trace| trace.tool_call_site(call_site))
+        });
+        let reply = if let Some(call_site) = call_site {
+            self.ctx
+                .call_tool_with_lashlang_execution_call_site(
+                    call_id,
+                    operation.clone(),
+                    payload,
+                    index,
+                    call_site,
+                )
+                .await
+        } else {
+            self.ctx
+                .call_tool(call_id, operation.clone(), payload, index)
+                .await
+        };
         self.consume_reply(&operation, reply)
     }
 
@@ -209,10 +285,17 @@ impl HostBridge<'_> {
 impl ExecutionHost for HostBridge<'_> {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
-            AbilityOp::ResourceOperation(operation) => self
-                .resource_operation(operation.operation, operation.receiver, operation.args)
-                .await
-                .map(AbilityResult::Value),
+            AbilityOp::ResourceOperation(operation) => {
+                let lashlang::ResourceOperation {
+                    operation,
+                    receiver,
+                    args,
+                    call_site,
+                } = operation;
+                self.resource_operation(operation, receiver, args, call_site)
+                    .await
+                    .map(AbilityResult::Value)
+            }
             AbilityOp::StartProcess(start) => {
                 self.start_process(*start).await.map(AbilityResult::Value)
             }
@@ -237,6 +320,90 @@ impl ExecutionHost for HostBridge<'_> {
 
     async fn yield_now(&self) {
         tokio::task::yield_now().await;
+    }
+
+    fn observe_lashlang_execution(&self, observation: lashlang::LashlangExecutionObservation) {
+        let Some(trace) = &self.lashlang_execution_trace else {
+            return;
+        };
+        let identity = trace.identity().clone();
+        let event = match observation {
+            lashlang::LashlangExecutionObservation::NodeStarted { site, occurrence } => {
+                TraceLashlangExecutionEvent::NodeStarted {
+                    event_key: trace
+                        .event_key(format!("node:{}:{occurrence}:started", site.node_id)),
+                    identity,
+                    node_id: site.node_id,
+                    node_kind: site.node_kind,
+                    label: site.label,
+                    occurrence,
+                }
+            }
+            lashlang::LashlangExecutionObservation::NodeCompleted { site, occurrence } => {
+                TraceLashlangExecutionEvent::NodeCompleted {
+                    event_key: trace
+                        .event_key(format!("node:{}:{occurrence}:completed", site.node_id)),
+                    identity,
+                    node_id: site.node_id,
+                    node_kind: site.node_kind,
+                    label: site.label,
+                    occurrence,
+                }
+            }
+            lashlang::LashlangExecutionObservation::NodeFailed {
+                site,
+                occurrence,
+                error,
+            } => TraceLashlangExecutionEvent::NodeFailed {
+                event_key: trace.event_key(format!("node:{}:{occurrence}:failed", site.node_id)),
+                identity,
+                node_id: site.node_id,
+                node_kind: site.node_kind,
+                label: site.label,
+                occurrence,
+                error,
+            },
+            lashlang::LashlangExecutionObservation::BranchSelected {
+                site,
+                occurrence,
+                edge_id,
+                selected,
+            } => TraceLashlangExecutionEvent::BranchSelected {
+                event_key: trace
+                    .event_key(format!("branch:{}:{occurrence}:{edge_id}", site.node_id)),
+                identity,
+                node_id: site.node_id,
+                occurrence,
+                edge_id,
+                selected: match selected {
+                    lashlang::ProcessBranchSelection::Then => TraceBranchSelection::Then,
+                    lashlang::ProcessBranchSelection::Else => TraceBranchSelection::Else,
+                },
+            },
+            lashlang::LashlangExecutionObservation::ChildStarted {
+                site,
+                occurrence,
+                child,
+            } => TraceLashlangExecutionEvent::ChildStarted {
+                event_key: trace.event_key(format!(
+                    "child:{}:{occurrence}:{}",
+                    site.node_id, child.process_id
+                )),
+                identity,
+                parent_node_id: site.node_id,
+                occurrence,
+                child: TraceLashlangChildExecution {
+                    scope: trace.identity().scope.clone(),
+                    subject: TraceRuntimeSubject::Process {
+                        process_id: child.process_id,
+                    },
+                    module_ref: Some(child.module_ref.to_string()),
+                    entry_ref: Some(lashlang::process_ref_key(&child.process_ref)),
+                    entry_name: Some(child.process_name),
+                },
+            },
+        };
+        trace.emit(event);
     }
 }
 

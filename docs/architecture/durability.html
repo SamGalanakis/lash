@@ -12,10 +12,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css?v=2">
+<link rel="stylesheet" href="../styles.css?v=9">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js?v=2" defer></script>
+<script src="../docs.js?v=3" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -47,7 +47,7 @@
                 <tr><td><code>DirectCompletion</code></td><td>Ref-only direct helper request, normalized request, selected model, and usage source</td><td><code>DirectCompletion</code> result for plugin/helper LLM use</td></tr>
                 <tr><td><code>DirectLlmCompletion</code></td><td>Ref-only core <code>LlmRequestSpec</code> and usage source</td><td><code>DirectLlmCompletion</code> result for direct LLM clients</td></tr>
                 <tr><td><code>ToolCall</code></td><td>One <code>PendingToolCall</code> from a sans-IO tool-call batch</td><td>One <code>CompletedToolCall</code>; the runtime reassembles <code>ToolResults</code> for <code>TurnMachine</code></td></tr>
-                <tr><td><code>Process</code></td><td><code>ProcessCommand::{Start,List,Transfer,Await,Cancel}</code> against the explicit process control plane</td><td><code>ProcessEffectOutcome</code> with process records, visible handle grants, transfer completion, await output, or cancellation records</td></tr>
+                <tr><td><code>Process</code></td><td><code>ProcessCommand::{Start,List,Transfer,DeleteSession,Await,Cancel,Signal}</code> against the explicit process control plane</td><td><code>ProcessEffectOutcome</code> with process records, visible handle grants, transfer completion, session-delete report, await output, cancellation records, or appended signal events</td></tr>
                 <tr><td><code>ExecCode</code></td><td><code>code: String</code></td><td><code>ExecResult</code> with <code>Result&lt;ExecResponse, String&gt;</code></td></tr>
                 <tr><td><code>Checkpoint</code></td><td><code>checkpoint: CheckpointKind</code></td><td><code>Checkpoint</code> with plugin-injected messages</td></tr>
                 <tr><td><code>Sleep</code></td><td><code>duration_ms: u64</code></td><td><code>Sleep</code></td></tr>
@@ -164,7 +164,7 @@ impl RuntimeEffectController for WorkflowEffectController {
     }
 }</code></pre>
           <p>The shape matches Temporal's <em>workflow + activity</em> split and Restate's <em>handler + side-effect</em> split. Each typed runtime effect can become one durable activity: the invocation carries typed scope, subject, causal parent, replay key, and checkpoint digest, and <code>replay.key</code> joins the activity result back to the logical turn effect. Lash renews the active <code>RuntimeTurnLease</code> before saving the pre-effect checkpoint, while the controller is pending, and again before saving the journaled outcome, keeping the same lease token as the fencing identity. A resumed turn can replay a completed effect without invoking the controller again. Restate uses <code>ctx.run(...)</code> around the normal local executor for non-sleep effects and Restate timers for sleeps.</p>
-          <p>Process effects cross the same controller boundary for start/list/transfer/await/cancel, but durable execution of a background process is owned by the process registry and worker, not by the turn that happened to start it. The process section below covers the durable intent record, handle grants, worker rebuild inputs, Restate workflow metadata, and event-sourced terminal state.</p>
+          <p>Process effects cross the same controller boundary for start/list/transfer/delete-session/await/cancel/signal, but durable execution of a background process is owned by the process registry and worker, not by the turn that happened to start it. The process section below covers the durable intent record, handle grants, worker rebuild inputs, Restate workflow metadata, and event-sourced terminal state.</p>
           <p>Embedded non-commit exits release ownership with <code>EmbeddedDurableTurnStore::abandon_runtime_turn_lease(&amp;RuntimeTurnLease)</code> on a best-effort basis while leaving <code>RuntimeTurnCheckpoint</code> and <code>RuntimeEffectJournalRecord</code> rows in place for resume. The release is token/owner/fencing guarded, so an old worker cannot clear a newer worker's claim. Successful completion uses <code>RuntimeCommit.completed_turn</code>, which must match an active unexpired lease before any graph, checkpoint, usage, or cleanup write occurs; stale final commits fail with <code>RuntimeTurnLeaseExpired</code> and preserve resume state.</p>
         </div>
 
@@ -240,7 +240,7 @@ flowchart LR
           <div class="two-col">
             <article class="panel">
               <h3>Inside the seam</h3>
-              <p>Turn LLM calls, native tool calls, RLM exec, plugin checkpoints, execution-surface sync, retry sleeps, direct completions, direct LLM completions, and controller-mediated process start/list/transfer/await/cancel. Turn effects include <code>EffectId</code>, checkpoint hash, and replay key; direct effects include typed causal parents when present and stable direct replay keys.</p>
+              <p>Turn LLM calls, native tool calls, RLM exec, plugin checkpoints, execution-surface sync, retry sleeps, direct completions, direct LLM completions, and controller-mediated process start/list/transfer/delete-session/await/cancel/signal. Turn effects include <code>EffectId</code>, checkpoint hash, and replay key; direct effects include typed causal parents when present and stable direct replay keys.</p>
             </article>
             <article class="panel">
               <h3>Outside the seam</h3>

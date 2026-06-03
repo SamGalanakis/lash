@@ -77,22 +77,39 @@ impl crate::SessionPlugin for TriggerRouteTestPlugin {
 
 fn trigger_test_resources() -> lashlang::ResourceCatalog {
     let mut resources = lashlang::ResourceCatalog::new();
-    resources.add_trigger_source_constructor(
-        ["test", "Schedule"],
-        lashlang::TypeExpr::Object(vec![
-            lashlang::TypeField {
-                name: "expr".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: false,
-            },
-            lashlang::TypeField {
-                name: "tz".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: true,
-            },
-        ]),
-        lashlang::TypeExpr::Ref("test.Tick".into()),
-    );
+    resources
+        .add_trigger_source_constructor(
+            ["test", "Schedule"],
+            lashlang::TypeExpr::Object(vec![
+                lashlang::TypeField {
+                    name: "expr".into(),
+                    ty: lashlang::TypeExpr::Str,
+                    optional: false,
+                },
+                lashlang::TypeField {
+                    name: "tz".into(),
+                    ty: lashlang::TypeExpr::Str,
+                    optional: true,
+                },
+            ]),
+            lashlang::NamedDataType::object(
+                "test.Tick",
+                vec![
+                    lashlang::TypeField {
+                        name: "id".into(),
+                        ty: lashlang::TypeExpr::Str,
+                        optional: false,
+                    },
+                    lashlang::TypeField {
+                        name: "scheduled_at".into(),
+                        ty: lashlang::TypeExpr::Str,
+                        optional: false,
+                    },
+                ],
+            )
+            .expect("valid test tick type"),
+        )
+        .expect("valid test trigger source");
     resources
 }
 
@@ -111,15 +128,32 @@ impl crate::PluginFactory for ClockTriggerFactory {
 
     fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
         let mut resources = lashlang::ResourceCatalog::new();
-        resources.add_trigger_source_constructor(
-            ["clock", "Alarm"],
-            lashlang::TypeExpr::Object(vec![lashlang::TypeField {
-                name: "at".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: false,
-            }]),
-            lashlang::TypeExpr::Ref("clock.Tick".into()),
-        );
+        resources
+            .add_trigger_source_constructor(
+                ["clock", "Alarm"],
+                lashlang::TypeExpr::Object(vec![lashlang::TypeField {
+                    name: "at".into(),
+                    ty: lashlang::TypeExpr::Str,
+                    optional: false,
+                }]),
+                lashlang::NamedDataType::object(
+                    "clock.Tick",
+                    vec![
+                        lashlang::TypeField {
+                            name: "id".into(),
+                            ty: lashlang::TypeExpr::Str,
+                            optional: false,
+                        },
+                        lashlang::TypeField {
+                            name: "scheduled_at".into(),
+                            ty: lashlang::TypeExpr::Str,
+                            optional: false,
+                        },
+                    ],
+                )
+                .expect("valid clock tick type"),
+            )
+            .expect("valid clock trigger source");
         resources
     }
 
@@ -159,11 +193,13 @@ impl crate::PluginFactory for ButtonTriggerFactory {
 
     fn lashlang_resources(&self) -> lashlang::ResourceCatalog {
         let mut resources = lashlang::ResourceCatalog::new();
-        resources.add_trigger_source_constructor(
-            ["ui", "button", "pressed"],
-            lashlang::TypeExpr::Object(vec![]),
-            button_pressed_event_type(),
-        );
+        resources
+            .add_trigger_source_constructor(
+                ["ui", "button", "pressed"],
+                lashlang::TypeExpr::Object(vec![]),
+                button_pressed_event_type(),
+            )
+            .expect("valid button trigger source");
         resources
     }
 
@@ -183,34 +219,40 @@ impl crate::SessionPlugin for ButtonTriggerPlugin {
     }
 
     fn register(&self, reg: &mut crate::PluginRegistrar) -> Result<(), crate::PluginError> {
-        reg.host_events().declare(
-            crate::HostEvent::new("Button", "ui.button", "pressed")
-                .payload(button_pressed_event_type()),
-        )
+        reg.host_events().declare(crate::HostEvent::new(
+            "Button",
+            "ui.button",
+            "pressed",
+            button_pressed_event_type(),
+        ))
     }
 }
 
-fn button_pressed_event_type() -> lashlang::TypeExpr {
-    lashlang::TypeExpr::Object(vec![
-        lashlang::TypeField {
-            name: "button".into(),
-            ty: lashlang::TypeExpr::Union(vec![
-                lashlang::TypeExpr::Enum(vec!["Red".into()]),
-                lashlang::TypeExpr::Enum(vec!["Blue".into()]),
-            ]),
-            optional: false,
-        },
-        lashlang::TypeField {
-            name: "message".into(),
-            ty: lashlang::TypeExpr::Str,
-            optional: false,
-        },
-        lashlang::TypeField {
-            name: "pressed_at".into(),
-            ty: lashlang::TypeExpr::Str,
-            optional: false,
-        },
-    ])
+fn button_pressed_event_type() -> lashlang::NamedDataType {
+    lashlang::NamedDataType::object(
+        "ui.button.Pressed",
+        vec![
+            lashlang::TypeField {
+                name: "button".into(),
+                ty: lashlang::TypeExpr::Union(vec![
+                    lashlang::TypeExpr::Enum(vec!["Red".into()]),
+                    lashlang::TypeExpr::Enum(vec!["Blue".into()]),
+                ]),
+                optional: false,
+            },
+            lashlang::TypeField {
+                name: "message".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            },
+            lashlang::TypeField {
+                name: "pressed_at".into(),
+                ty: lashlang::TypeExpr::Str,
+                optional: false,
+            },
+        ],
+    )
+    .expect("valid button payload type")
 }
 
 fn schedule_trigger_test_source() -> &'static str {
@@ -227,20 +269,46 @@ fn schedule_trigger_test_source() -> &'static str {
     handle = await triggers.register({
       source: source,
       target: daily_digest,
+      inputs: { event: trigger.event },
       name: "daily_digest"
     })?
     submit {
       handle: handle,
-      registrations: await triggers.list({ target: daily_digest })?
+      registrations: await triggers.list({})?,
+      target_registrations: await triggers.list({ target: daily_digest })?,
+      named_registrations: await triggers.list({ name: "daily_digest" })?,
+      source_registrations: await triggers.list({ source_type: "test.Schedule", enabled: true })?
     }
+    "#
+}
+
+fn multi_input_trigger_test_source() -> &'static str {
+    r#"
+    process fanout(first: test.Tick, second: test.Tick, label: str) {
+      finish { first: first.id, second: second.id, label: label }
+    }
+
+    source = test.Schedule({
+      expr: "0 8 * * *",
+      tz: "UTC"
+    })
+    handle = await triggers.register({
+      source: source,
+      target: fanout,
+      inputs: {
+        first: trigger.event,
+        second: trigger.event,
+        label: "fixed-label"
+      },
+      name: "fanout"
+    })?
+    submit handle
     "#
 }
 
 fn button_trigger_test_source() -> &'static str {
     r#"
-    type ButtonPressed = { button: "Red" | "Blue", message: str, pressed_at: str }
-
-    process on_button(event: ButtonPressed) {
+    process on_button(event: ui.button.Pressed) {
       wake { kind: "button_pressed", button: event.button, message: event.message }
       finish true
     }
@@ -248,6 +316,7 @@ fn button_trigger_test_source() -> &'static str {
     handle = await triggers.register({
       source: ui.button.pressed({}),
       target: on_button,
+      inputs: { event: trigger.event },
       name: "button watcher"
     })?
     submit handle
@@ -268,6 +337,7 @@ fn clock_trigger_test_source() -> &'static str {
     first_handle = await triggers.register({
       source: first_source,
       target: first,
+      inputs: { event: trigger.event },
       name: "first_alarm"
     })?
 
@@ -275,14 +345,17 @@ fn clock_trigger_test_source() -> &'static str {
     second_handle = await triggers.register({
       source: second_source,
       target: second,
+      inputs: { event: trigger.event },
       name: "second_alarm"
     })?
 
     submit {
       first: first_handle,
       second: second_handle,
+      all_registrations: await triggers.list({})?,
       first_registrations: await triggers.list({ target: first })?,
-      second_registrations: await triggers.list({ target: second })?
+      second_registrations: await triggers.list({ target: second })?,
+      named_second_registrations: await triggers.list({ name: "second_alarm" })?
     }
     "#
 }
@@ -528,6 +601,71 @@ async fn host_event_emission_activates_matching_button_trigger_routes() {
 }
 
 #[tokio::test]
+async fn trigger_activation_materializes_event_and_fixed_input_templates() {
+    let mut runtime = runtime_with_plugins_and_tools(
+        vec![Arc::new(TriggerRouteTestFactory)],
+        Arc::new(EmptyTools),
+        mock_provider(Vec::new()),
+    )
+    .await;
+    let registry = runtime
+        .host
+        .process_registry
+        .as_ref()
+        .expect("process registry")
+        .clone();
+
+    let finish =
+        execute_trigger_registration(&mut runtime, multi_input_trigger_test_source()).await;
+    let finish_json = crate::lashlang_bridge::lashlang_value_to_json(&finish).expect("finish json");
+    let handle = finish_json["id"].as_str().expect("trigger handle");
+    let registrations = runtime
+        .session
+        .as_ref()
+        .expect("session")
+        .plugins()
+        .list_all_lashlang_triggers()
+        .expect("list trigger registrations");
+    let registration = serde_json::to_value(&registrations[0]).expect("registration json");
+    assert_eq!(
+        registration["target"]["inputs"]["first"]["kind"],
+        json!("event")
+    );
+    assert_eq!(
+        registration["target"]["inputs"]["second"]["kind"],
+        json!("event")
+    );
+    assert_eq!(
+        registration["target"]["inputs"]["label"],
+        json!({ "kind": "fixed", "value": "fixed-label" })
+    );
+
+    let payload = json!({
+        "id": "daily-2026-06-01",
+        "scheduled_at": "2026-06-01T08:00:00Z"
+    });
+    let report = runtime
+        .activate_lashlang_trigger(handle, payload.clone())
+        .await
+        .expect("activate multi-input trigger");
+    assert_eq!(report.started_process_ids.len(), 1);
+    let record = registry
+        .get_process(&report.started_process_ids[0])
+        .await
+        .expect("triggered process record");
+    let crate::ProcessInput::LashlangProcess {
+        args, process_name, ..
+    } = record.input.as_ref()
+    else {
+        panic!("trigger should start a lashlang process");
+    };
+    assert_eq!(process_name, "fanout");
+    assert_eq!(args.get("first"), Some(&payload));
+    assert_eq!(args.get("second"), Some(&payload));
+    assert_eq!(args.get("label"), Some(&json!("fixed-label")));
+}
+
+#[tokio::test]
 async fn host_event_trigger_activation_handles_no_routes_disabled_routes_and_invalid_payloads() {
     let mut runtime = runtime_with_plugins_and_tools(
         vec![Arc::new(ButtonTriggerFactory)],
@@ -630,9 +768,21 @@ async fn registering_schedule_source_persists_route_and_activation_reuses_artifa
         finish_json["registrations"][0]["name"],
         json!("daily_digest")
     );
+    assert_eq!(
+        finish_json["target_registrations"][0]["name"],
+        json!("daily_digest")
+    );
+    assert_eq!(
+        finish_json["named_registrations"][0]["target"]["process_name"],
+        json!("daily_digest")
+    );
+    assert_eq!(
+        finish_json["source_registrations"][0]["source_type"],
+        json!("test.Schedule")
+    );
     assert_eq!(finish_json["registrations"][0]["enabled"], json!(true));
     assert_eq!(
-        finish_json["registrations"][0]["target"]["input_name"],
+        finish_json["registrations"][0]["target"]["inputs"]["event"]["kind"],
         json!("event")
     );
     assert!(finish_json["registrations"][0].get("event_type").is_none());
@@ -657,7 +807,10 @@ async fn registering_schedule_source_persists_route_and_activation_reuses_artifa
         registration["target"]["process_name"],
         json!("daily_digest")
     );
-    assert_eq!(registration["target"]["input_name"], json!("event"));
+    assert_eq!(
+        registration["target"]["inputs"]["event"]["kind"],
+        json!("event")
+    );
     assert_eq!(registration["source_type"], json!("test.Schedule"));
     assert_eq!(registration["source"]["value"]["expr"], json!("0 8 * * *"));
     assert!(registration.get("event_type").is_none());
@@ -677,6 +830,17 @@ async fn registering_schedule_source_persists_route_and_activation_reuses_artifa
     assert!(!snapshot_json.contains("daily_digest_due"));
 
     let handle = finish_json["handle"]["id"].as_str().expect("handle id");
+    let invalid = runtime
+        .activate_lashlang_trigger(
+            handle,
+            json!({
+                "id": "daily-2026-06-01"
+            }),
+        )
+        .await
+        .expect_err("missing scheduled_at should reject trigger payload");
+    assert!(invalid.to_string().contains("invalid payload for trigger"));
+
     let report = runtime
         .activate_lashlang_trigger(
             handle,
@@ -777,11 +941,19 @@ async fn source_owner_lists_source_routes_and_activates_exact_handles_without_cr
         1
     );
     assert_eq!(
+        finish_json["all_registrations"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
         finish_json["first_registrations"][0]["target"]["process_name"],
         json!("first")
     );
     assert_eq!(
         finish_json["second_registrations"][0]["target"]["process_name"],
+        json!("second")
+    );
+    assert_eq!(
+        finish_json["named_second_registrations"][0]["target"]["process_name"],
         json!("second")
     );
 

@@ -12,10 +12,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css?v=2">
+<link rel="stylesheet" href="../styles.css?v=9">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js?v=2" defer></script>
+<script src="../docs.js?v=3" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -30,21 +30,34 @@
             <h2>Projected Host Bindings</h2>
             <p>The host can inject named, read-only values into Lashlang scope without copying them into VM <code>State</code>. They behave like ordinary variables for read access but rejecting reassignment keeps the host-managed values authoritative.</p>
           </div>
+          <h3 id="binding-api">Binding API</h3>
           <dl class="def-list">
             <dt><code>ProjectedBindings</code></dt>
             <dd>Low-level map of names to <code>ProjectedValue</code>s the Lashlang executor receives at the start of each fenced block. RLM builds it from public <code>RlmProjectedBindings</code>, restored projection refs, and the live <code>history</code> projection.</dd>
             <dt><code>RlmProjectedBindings</code></dt>
             <dd>RLM's public binding API. <code>bind_json</code> and <code>bind_value</code> store inline values; <code>bind_lazy</code> accepts a stable <code>ProjectionRef</code>, not a raw host object. Duplicate names are errors.</dd>
+          </dl>
+
+          <h3 id="lazy-projected-values">Lazy projected values</h3>
+          <dl class="def-list">
             <dt><code>ProjectionRef</code>, <code>ProjectionResolver</code>, <code>ProjectionRegistry</code></dt>
             <dd>Stable lookup path for lazy host values. A resolver turns a ref into an <code>Arc&lt;dyn ProjectedHostValue&gt;</code> immediately before execution. The default registry supports memory refs via <code>register_memory</code>; those refs are only valid while the registry instance lives, and missing refs fail clearly.</dd>
             <dt><code>ProjectedValue</code></dt>
             <dd>Either a scalar <code>FlowValue</code> or a custom <code>Arc&lt;dyn ProjectedHostValue&gt;</code> for non-trivial shapes (lazy field access, length, indexing). Custom values may carry opaque projection-ref metadata so snapshots and seeds can rehydrate them without materializing the content.</dd>
             <dt><code>ProjectedHostValue</code></dt>
             <dd>Trait that lets the host serve <code>read_one</code>/<code>read_many</code> queries on demand: each is a <code>ProjectedReadRequest</code> (such as <code>Field</code>, <code>Index</code>, <code>Len</code>, <code>Render</code>, or <code>Materialize</code>) answered with a <code>ProjectedReadResponse</code>, so large host-side structures need not be cloned into Lashlang values.</dd>
-            <dt>Snapshots</dt>
-            <dd>Lashlang snapshot JSON records projected globals as markers, optionally including <code>projection_ref</code>. Restore creates unresolved projected placeholders; RLM resolves ref-backed placeholders through its resolver before the next fenced block runs.</dd>
+          </dl>
+
+          <h3 id="reserved-projections">Reserved names</h3>
+          <dl class="def-list">
             <dt>Reserved names</dt>
             <dd><code>history</code> and any host-projected globals are reserved. Attempting <code>name = ...</code> over a projected name raises <code>`name` is a read-only projected binding</code>. The host-side seed channel (<code>continue_as</code> / <code>spawn_agent</code> <code>seed:</code>) can land projected entries that lashlang code then sees as read-only.</dd>
+          </dl>
+
+          <h3 id="projection-serialization">Snapshots &amp; serialization</h3>
+          <dl class="def-list">
+            <dt>Snapshots</dt>
+            <dd>Lashlang snapshot JSON records projected globals as markers, optionally including <code>projection_ref</code>. Restore creates unresolved projected placeholders; RLM resolves ref-backed placeholders through its resolver before the next fenced block runs.</dd>
             <dt>Operation arguments</dt>
             <dd>RLM serializes projected values with an internal <code>{"__projected__": ...}</code> marker, then normalizes operation arguments through the tool manifest's <code>ToolArgumentProjectionPolicy</code>. Tool implementations should parse the normalized arguments as plain JSON. The default policy materializes projected values. <code>continue_as</code> and <code>spawn_agent</code> declare a seed-preserving policy, so only root <code>seed:</code> entries remain projected; ref-backed values carry <code>{"__projection_ref__": ...}</code> so AgentFrames and child sessions re-resolve the same lazy source, while value-backed projections serialize as JSON.</dd>
           </dl>
@@ -59,11 +72,13 @@
             <dt><code>ToolAgentSurface</code></dt>
             <dd>Tool manifests choose the authored call path. <code>ToolAgentSurface::new(["board"], "play")</code> maps the tool to <code>board.play</code>; leaving it empty falls back to <code>tools.&lt;tool_name&gt;</code>. Module path segments must be lowercase ASCII identifiers, and duplicate callable paths are rejected when the tool surface is built.</dd>
             <dt><code>ResourceCatalog</code></dt>
-            <dd>The catalog records module instances, resource authority types, receiver operations, pure constructors, and trigger-source event metadata. A receiver operation carries the host operation name used for dispatch, plus input/output type text for prompt rendering and linker diagnostics.</dd>
+            <dd>The catalog records module instances, resource authority types, receiver operations, pure constructors, named host data types, and trigger-source event metadata. Trigger and host-event payloads are validated named object types such as <code>cron.Tick</code>; source values such as <code>cron.Schedule</code> remain opaque host identities.</dd>
             <dt><code>PluginFactory::lashlang_resources</code></dt>
             <dd>Plugins use this hook for language resources that are not ordinary tools: trigger registry operations, <code>cron.Schedule(...)</code>, <code>ui.button.pressed(...)</code>, or any other typed host value constructor. Session plugins can still register normal tools through <code>reg.tools()</code>; those tools become module operations through their manifest metadata.</dd>
             <dt><code>LashlangAbilities</code></dt>
             <dd>The host enables process starts, sleep, process signals, and trigger registry operations explicitly. A configured process registry derives process/lifecycle availability for sessions; plugins such as the built-in session-trigger plugin contribute trigger operations and resources.</dd>
+            <dt><code>LashlangLanguageFeatures</code></dt>
+            <dd>The host enables optional static language features separately from executable abilities. <code>label_annotations</code> allows <code>@label(...)</code> process-map metadata; it is not an execution effect and does not grant any resource, process, trigger, or provider capability.</dd>
           </dl>
           <pre><code>fn read_board_tool() -&gt; ToolDefinition {
   ToolDefinition::raw("tool:read_board", "read_board", "...", input, output)
@@ -75,8 +90,11 @@ fn lashlang_resources(&self) -&gt; lashlang::ResourceCatalog {
   resources.add_trigger_source_constructor(
     ["cron", "Schedule"],
     schedule_config_type(),
-    lashlang::TypeExpr::Ref("cron.Tick".into()),
-  );
+    lashlang::NamedDataType::object(
+      "cron.Tick",
+      vec![lashlang::TypeField { name: "fired_at".into(), ty: lashlang::TypeExpr::Str, optional: false }],
+    ).expect("valid cron tick type"),
+  ).expect("valid cron trigger source");
   resources
 }</code></pre>
         </div>
@@ -86,17 +104,10 @@ fn lashlang_resources(&self) -&gt; lashlang::ResourceCatalog {
             <h2>Resource Operations And Process Handles</h2>
             <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, and trigger registry operations are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. In RLM, <code>HostBridge</code> dispatches ordinary module operations to the callable tool surface, trigger operations to the session trigger registry, process starts to the process service, and sleep through the runtime effect controller. Timers and recurring jobs are host-owned source policies, not Lashlang syntax.</p>
           </div>
+          <h3 id="resource-operations">Resource operations</h3>
           <dl class="def-list">
             <dt><code>await RESOURCE.alias.operation({ ... })</code></dt>
             <dd>When the host exposes resource operations, receiver calls return <code>{ ok: true, value: ... }</code> or <code>{ ok: false, error: "..." }</code>. Use <code>?</code> for ordinary happy-path operations and keep the wrapper for retries or expected failures.</dd>
-            <dt><code>start name(...)</code></dt>
-            <dd>When process support is enabled, named process starts return a handle directly. Multi-step background work is declared as a <code>process</code>; process signatures are the authority boundary for the resource handles they may use.</dd>
-            <dt><code>await</code></dt>
-            <dd><code>await handle</code> resolves one handle. <code>await [h1, h2]</code> resolves a list and returns wrapper records in order; <code>await { a: h1, b: h2 }</code> resolves a record of handles and returns a record of wrappers. <code>(await handle)?</code> unwraps the resolved result.</dd>
-            <dt><code>cancel</code></dt>
-            <dd><code>cancel handle</code> asks the host to stop background work. Cancellation is best-effort and uses the same handle identity exposed by <code>list_process_handles</code>.</dd>
-            <dt>Ability gates</dt>
-            <dd>Disabled Lashlang abilities are syntax-valid but link-invalid. The linker returns <code>lashlang feature `...` is disabled by this host</code> before execution, so a disabled <code>process</code>, <code>start</code>, <code>sleep</code>, <code>wait signal</code>, <code>signal run</code>, or <code>trigger</code> cannot produce tool calls or observations.</dd>
           </dl>
           <p>Use <code>?</code> for the happy path and inspect the wrapper when failures are expected. Mixing both styles in one block keeps fatal errors fail-fast while letting probes branch on outcome. The examples in this section assume the host linked a <code>workspace.default</code> resource and enabled process support.</p>
           <pre><code>// Fail-fast: the block aborts if the file can't be read.
@@ -117,7 +128,26 @@ for path in await workspace.default.glob({ pattern: "src/**/*.rs" })? {
   items = push(items, { path: path, chars: len(hit.value) })
 }
 submit { line_count: len(lines), notes: notes, items: items }</code></pre>
-          <p>When process support is enabled, background work uses named processes; results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to receiver operations. Linking writes a content-addressed <code>ModuleArtifact</code> to the host/profile artifact store; the durable process input stores only <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, display name, and JSON args. Nested <code>start</code> calls compile from the same artifact while the runner still checks that the current host surface satisfies the recorded requirements.</p>
+
+          <h3 id="processes">Processes</h3>
+          <dl class="def-list">
+            <dt><code>start name(...)</code></dt>
+            <dd>When process support is enabled, <code>process name(...)</code> declares a process definition and <code>start name(...)</code> creates one process run. The returned handle addresses that run.</dd>
+            <dt><code>processes.list</code></dt>
+            <dd><code>await processes.list({})?</code> returns visible running runs. Optional filters include <code>definition</code> and <code>status</code>, for example <code>await processes.list({ definition: daily_digest })?</code> or <code>await processes.list({ status: "completed" })?</code>.</dd>
+            <dt><code>cancel</code></dt>
+            <dd><code>cancel handle</code> asks the host to stop a live process run. Cancellation is best-effort and uses the run handle identity.</dd>
+          </dl>
+          <p>Process definitions describe reusable background work; process runs are concrete invocations created by <code>start</code> or by trigger activation. Results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to receiver operations. If <code>label_annotations</code> is enabled, <code>@label</code> titles and descriptions can appear in trace process maps without affecting execution.</p>
+
+          <h3 id="await-handles">Awaiting handles</h3>
+          <dl class="def-list">
+            <dt><code>await</code></dt>
+            <dd><code>await handle</code> resolves one handle. <code>await [h1, h2]</code> resolves a list and returns wrapper records in order; <code>await { a: h1, b: h2 }</code> resolves a record of handles and returns a record of wrappers. <code>(await handle)?</code> unwraps the resolved result.</dd>
+          </dl>
+
+          <h3 id="subagents">Subagents</h3>
+          <p>A process can spawn a typed subagent with <code>agent.spawn</code> and <code>finish</code> its result; wrap that in a <code>process</code> and <code>start</code> several to fan work out in the background, then <code>await</code> a record of handles to join the results as wrappers.</p>
           <pre><code>process audit(agent: Agents, task: str) {
   result = await agent.spawn({
     task: task,
@@ -139,12 +169,18 @@ submit {
   a: results.a.value,
   b: results.b.ok ? results.b.value : null
 }</code></pre>
+
+          <h3 id="ability-gates">Ability gates</h3>
+          <dl class="def-list">
+            <dt>Ability gates</dt>
+            <dd>Disabled Lashlang abilities and language features are syntax-valid but link-invalid. The linker returns <code>lashlang feature `...` is disabled by this host</code> before execution, so a disabled <code>process</code>, <code>start</code>, <code>sleep</code>, <code>wait signal</code>, <code>signal run</code>, <code>trigger</code>, or <code>@label</code> annotation cannot produce tool calls or observations.</dd>
+          </dl>
         </div>
 
         <div class="section" id="triggers">
           <div class="section-header">
             <h2>Triggers</h2>
-          <p>Lashlang owns the canonical trigger registry contract. A host exposes pure source constructors such as <code>cron.Schedule(...)</code> or <code>ui.button.pressed(...)</code> and declares protocol metadata saying the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Code then passes that source value and a single-input process value to awaited registry operations such as <code>triggers.register</code>, process-scoped <code>triggers.list</code>, and <code>triggers.cancel</code>. The linker and runtime use the same operation names, field shapes, source decoding, target identity, alias resolution, and event-to-input assignability rules. Core owns durable route storage and exact-handle/source-type activation; concrete sources belong to plugins or host applications.</p>
+          <p>Lashlang owns the canonical trigger registry contract. A host exposes pure source constructors such as <code>cron.Schedule(...)</code> or <code>ui.button.pressed(...)</code> and declares protocol metadata saying the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Code then passes that source value, a process definition, and explicit <code>inputs</code> to awaited registry operations such as <code>triggers.register</code>, <code>triggers.list</code>, and <code>triggers.cancel</code>. Every process param is mapped exactly once; <code>trigger.event</code> is the direct whole-event placeholder inside <code>inputs</code>. A trigger registration is a durable rule; each activation creates a process run.</p>
           </div>
           <pre><code>process daily_digest(tick: cron.Tick) {
   wake { kind: "daily_digest_due", tick: tick }
@@ -159,15 +195,15 @@ source = cron.Schedule({
 handle = await triggers.register({
   source: source,
   target: daily_digest,
+  inputs: { tick: trigger.event },
   name: "daily_digest"
 })?
 registrations = await triggers.list({ target: daily_digest })?
+broad_registrations = await triggers.list({})?
 
 submit handle</code></pre>
           <p>A host event source uses the same registry. The workbench registers a typed UI button event whose source config is empty; the selected button arrives in the activation payload:</p>
-          <pre><code>type ButtonPressed = { button: "Red" | "Blue", message: str, pressed_at: str }
-
-process on_button(event: ButtonPressed) {
+          <pre><code>process on_button(event: ui.button.Pressed) {
   wake { kind: "button_pressed", button: event.button, message: event.message }
   finish true
 }
@@ -175,23 +211,42 @@ process on_button(event: ButtonPressed) {
 handle = await triggers.register({
   source: ui.button.pressed({}),
   target: on_button,
+  inputs: { event: trigger.event },
   name: "button watcher"
 })?
 submit handle</code></pre>
           <p>The matching host contract exposes constructors, trigger-source relations, and optionally typed host events. Source owners can list source registrations, activate exact handles, activate every enabled route for a source type, or emit a declared host event that validates the payload and fans out to matching routes:</p>
-          <pre><code>resources.add_trigger_source_constructor(
+          <pre><code>let cron_tick = NamedDataType::object(
+    "cron.Tick",
+    vec![TypeField { name: "fired_at".into(), ty: TypeExpr::Str, optional: false }],
+)?;
+let button_pressed = NamedDataType::object(
+    "ui.button.Pressed",
+    vec![
+        TypeField { name: "button".into(), ty: TypeExpr::Union(vec![TypeExpr::Enum(vec!["Red".into()]), TypeExpr::Enum(vec!["Blue".into()])]), optional: false },
+        TypeField { name: "message".into(), ty: TypeExpr::Str, optional: false },
+        TypeField { name: "pressed_at".into(), ty: TypeExpr::Str, optional: false },
+    ],
+)?;
+
+resources.add_trigger_source_constructor(
     ["cron", "Schedule"],
     schedule_config_type(),
-    TypeExpr::Ref("cron.Tick".into()),
-);
+    cron_tick,
+)?;
+resources.add_trigger_source_constructor(
+    ["ui", "button", "pressed"],
+    TypeExpr::Object(vec![]),
+    button_pressed.clone(),
+)?;
 
 reg.host_events().declare(
-    HostEvent::new("Button", "ui.button", "pressed").payload(button_event_type()),
+    HostEvent::new("Button", "ui.button", "pressed", button_pressed),
 )?;
 
 session.activate_lashlang_trigger(handle, tick_payload).await?;
 session.activate_lashlang_trigger_source_type("cron.Schedule", tick_payload).await?;
-session.host_events().emit("Button", "ui.button", "pressed", button_payload).await?;</code></pre>
+session.emit_host_event("Button", "ui.button", "pressed", button_payload).await?;</code></pre>
         </div>
 
         <div class="section" id="terminator-effects">

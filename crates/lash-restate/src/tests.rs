@@ -1538,8 +1538,8 @@ async fn ingress_runner_submits_non_terminal_process_under_fenced_lease() {
         "submits the keyed workflow run: {request}"
     );
     assert!(
-        request.contains("idempotency-key: lash-process:task-1:run"),
-        "carries the idempotent submit key so a re-submit coalesces: {request}"
+        !request.contains("idempotency-key:"),
+        "workflow sends must not carry an idempotency header; Restate coalesces by workflow key: {request}"
     );
 
     // The durable backend reference is recorded so the process is observably

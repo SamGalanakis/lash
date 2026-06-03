@@ -96,6 +96,10 @@ impl RuntimeExecutionContext<'_> {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "tool execution carries explicit runtime call metadata"
+    )]
     pub(crate) async fn execute_tool_call(
         &self,
         call_id: String,
@@ -104,6 +108,7 @@ impl RuntimeExecutionContext<'_> {
         index: usize,
         replay: Option<crate::llm::types::ProviderReplayMeta>,
         parent_invocation: Option<crate::RuntimeInvocation>,
+        lashlang_execution_call_site: Option<crate::ToolLashlangExecutionCallSite>,
     ) -> CompletedProtocolToolCall {
         let _ = self
             .dispatch
@@ -143,6 +148,7 @@ impl RuntimeExecutionContext<'_> {
                             .prepared_call(&prepared)
                             .cancellation_token(self.cancellation_token.clone())
                             .parent_invocation(parent_invocation.clone())
+                            .lashlang_execution_call_site(lashlang_execution_call_site.clone())
                             .build();
                     dispatch_prepared_tool_call_with_execution_context(
                         dispatch_context.as_ref(),
@@ -337,7 +343,22 @@ impl RuntimeExecutionContext<'_> {
         index: usize,
     ) -> ToolInvocationReply {
         let executed = self
-            .execute_tool_call(call_id, name, args, index, None, None)
+            .execute_tool_call(call_id, name, args, index, None, None, None)
+            .await;
+        let reply = ToolInvocationReply::from_output(executed.completed.output);
+        reply.with_record(executed.record)
+    }
+
+    pub async fn call_tool_with_lashlang_execution_call_site(
+        &self,
+        call_id: String,
+        name: String,
+        args: serde_json::Value,
+        index: usize,
+        call_site: crate::ToolLashlangExecutionCallSite,
+    ) -> ToolInvocationReply {
+        let executed = self
+            .execute_tool_call(call_id, name, args, index, None, None, Some(call_site))
             .await;
         let reply = ToolInvocationReply::from_output(executed.completed.output);
         reply.with_record(executed.record)

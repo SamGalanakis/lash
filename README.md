@@ -16,7 +16,7 @@ Every completed turn lands as one semantic `RuntimeCommit` against a `SessionGra
 
 ### Sans-IO state machine for workflow integration
 
-`lash-core::RuntimeEffectController` is the boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process control, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with a typed `RuntimeInvocation`: scoped session/turn coordinates, a subject, optional causal parent, `replay.key`, checkpoint digest, and ref-only attachment specs. The default inline controller runs in process; workflow adapters pass a `DurableTurnScope` with a stable turn id. Embedded recovery uses `LashRuntime::resume_turn(...)` / `LashSession::resume_turn(...)` to reload a saved Lash checkpoint and replay embedded effect-journal outcomes. Substrate-native recovery reruns the provider handler with the same turn id and lets provider history replay effects before Lash retries the final idempotent commit. Process handles are explicit runtime support: install a deployment-level `ProcessRegistry` such as `lash-sqlite-store::SqliteProcessRegistry` when the host wants background process control; otherwise process start/list/await/cancel/transfer/cleanup fail loudly. Host-facing process commands stay on `ProcessControl`; optional process observation attaches through trace sinks such as `TraceProcessGraphStore`.
+`lash-core::RuntimeEffectController` is the boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process control, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with a typed `RuntimeInvocation`: scoped session/turn coordinates, a subject, optional causal parent, `replay.key`, checkpoint digest, and ref-only attachment specs. The default inline controller runs in process; workflow adapters pass a `DurableTurnScope` with a stable turn id. Embedded recovery uses `LashRuntime::resume_turn(...)` / `LashSession::resume_turn(...)` to reload a saved Lash checkpoint and replay embedded effect-journal outcomes. Substrate-native recovery reruns the provider handler with the same turn id and lets provider history replay effects before Lash retries the final idempotent commit. Process handles are explicit runtime support: install a deployment-level `ProcessRegistry` such as `lash-sqlite-store::SqliteProcessRegistry` when the host wants background process control; otherwise process start/list/await/cancel/transfer/cleanup fail loudly. Host-facing process commands stay on `ProcessControl`; optional process observation attaches through trace sinks such as `TraceLashlangGraphStore`.
 
 ### Two execution modes, one commit unit
 
@@ -24,7 +24,7 @@ Every completed turn lands as one semantic `RuntimeCommit` against a `SessionGra
 
 ### Lashlang
 
-A small typed DSL the model can emit and the runtime can execute deterministically. Host capabilities are exposed as lowercase module operations such as `web.search(...)`, `files.read(...)`, and `agents.spawn(...)`; named background `process` declarations receive typed module authorities explicitly. Unavailable abilities still parse, but fail during linking and are omitted from the RLM prompt. Linked modules are content-addressed as `ModuleRef`/`RequiredSurfaceRef` artifacts; durable Lashlang process rows store only module/process refs plus JSON args, and workers reload the artifact from the host/profile artifact store for nested starts. Trigger registration installs activation routes from host-provided source values to named process starts; source owners activate exact handles or source types, and the started process runs from artifact refs. Timers and recurring jobs are host/plugin concerns, not core syntax or built-in sources.
+A small typed DSL the model can emit and the runtime can execute deterministically. Host capabilities are exposed as lowercase module operations such as `web.search(...)`, `files.read(...)`, and `agents.spawn(...)`; named `process` declarations define reusable background work. `start name(...)` and trigger activations create process runs from those definitions. Unavailable abilities still parse, but fail during linking and are omitted from the RLM prompt. Trigger registration installs durable rules from host-provided source values to process definitions plus explicit input mappings; source owners activate exact handles or source types. Timers and recurring jobs are host/plugin concerns, not core syntax or built-in sources.
 
 ### Plugin architecture
 
@@ -36,7 +36,7 @@ First-party crates for Anthropic, OpenAI Responses, any OpenAI-compatible Chat C
 
 ### Tracing as a first-class sink
 
-Attach a `TraceSink` for structured turn, tool, LLM, prompt, stream, and usage records. The bundled JSONL sink pairs with a self-contained HTML viewer; OpenTelemetry export is feature-gated. Lashlang process tracking is a separate opt-in sink for process maps and node/branch/child events, so host observability can be richer without changing process registry state. `TraceProcessGraphStore` reduces those records into host-safe graph snapshots for UIs, dashboards, tests, and debugging; the snapshots are trace-derived projections, not canonical process state. Process wake provenance is typed runtime metadata for hosts to inspect, while labels, colors, icons, and other presentation stay host-owned.
+Attach a `TraceSink` for structured turn, tool, LLM, prompt, stream, and usage records. The bundled JSONL sink pairs with a self-contained HTML viewer; OpenTelemetry export is feature-gated. Lashlang execution graphs are a separate opt-in sink for foreground Lashlang blocks, durable processes, node/branch observations, and child execution links, so host observability can be richer without changing process registry state. `TraceLashlangGraphStore` reduces those records into host-safe graph snapshots for UIs, dashboards, tests, and debugging; the snapshots are trace-derived projections, not canonical process state. Process wake provenance is typed runtime metadata for hosts to inspect, while labels, colors, icons, and other presentation stay host-owned.
 
 ## Workspace layout
 
@@ -57,8 +57,8 @@ the explicit pre-release tag:
 
 ```toml
 [dependencies]
-lash-runtime         = "=0.1.0-alpha.17"
-lash-provider-openai = "=0.1.0-alpha.17"
+lash-runtime         = "=0.1.0-alpha.19"
+lash-provider-openai = "=0.1.0-alpha.19"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }
 ```

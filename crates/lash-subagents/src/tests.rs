@@ -9,7 +9,7 @@ use lash_core::llm::types::{LlmContentBlock, LlmOutputPart, LlmRequest, LlmRespo
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::{
     LashRuntime, PluginFactory, PluginHost, ProcessRuntimeHost, RuntimeHostConfig, RuntimeServices,
-    SessionPolicy, TestLocalProcessRegistry,
+    SessionPolicy, TestLocalProcessRegistry, TraceLashlangGraphStore, TraceRuntimeSubject,
 };
 use lash_core::{ToolArgumentProjectionPolicy, ToolDefinition, ToolOutputContract, TurnInput};
 use lash_protocol_rlm::RlmTurnInputExt;
@@ -146,6 +146,21 @@ fn rlm_definitions_expose_spawn_without_mini_api() {
     );
     assert!(rlm_spawn.description().contains("module operation"));
     assert!(rlm_spawn.description().contains("agents: Agents"));
+    assert!(rlm_spawn.description().contains("list[str]"));
+    assert!(
+        rlm_spawn
+            .contract
+            .examples
+            .iter()
+            .any(|example| example.contains(r#"queries: "list[str]""#))
+    );
+    assert!(
+        rlm_spawn
+            .contract
+            .examples
+            .iter()
+            .all(|example| !example.contains(r#"["str"]"#))
+    );
     assert!(!rlm_spawn.description().contains("use `start spawn_agent"));
 }
 
@@ -160,6 +175,14 @@ fn spawn_schema_is_strict_and_nameless() {
         .get("properties")
         .and_then(serde_json::Value::as_object)
         .expect("spawn schema properties");
+    assert!(
+        properties
+            .get("output")
+            .and_then(|value| value.get("description"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|description| description.contains("list[str]")),
+        "output schema description should document list field descriptors"
+    );
     assert!(
         !properties.contains_key(&retired_key),
         "retired model-authored identity field leaked into spawn schema"
@@ -409,6 +432,59 @@ submit result
 }
 
 #[tokio::test]
+async fn rlm_spawn_links_subagent_process_from_lashlang_graph() {
+    let graph_store = Arc::new(TraceLashlangGraphStore::default());
+    let (outcome, _) = run_seed_probe_with_graph_store(
+        r#"```lashlang
+result = await agents.spawn({
+  capability: "default",
+  task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+  seed: { chunk: ["a", "b"] },
+  output: Type { len: int }
+})?
+submit result
+```"#,
+        TurnInput::text("spawn a child and link its graph"),
+        Some(Arc::clone(&graph_store)),
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+            value: json!({ "len": 2 })
+        })
+    );
+    let graphs = graph_store.graphs();
+    let parent = graphs
+        .iter()
+        .find(|graph| {
+            graph.scope.session_id == "root"
+                && matches!(
+                    &graph.subject,
+                    TraceRuntimeSubject::Effect { kind, .. } if kind == "exec_code"
+                )
+                && graph
+                    .children
+                    .iter()
+                    .any(|child| child.child_entry_name.as_deref() == Some("subagent"))
+        })
+        .unwrap_or_else(|| panic!("missing parent graph with subagent child link: {graphs:?}"));
+    let child = parent
+        .children
+        .iter()
+        .find(|child| child.child_entry_name.as_deref() == Some("subagent"))
+        .expect("subagent child link");
+    assert!(
+        child
+            .child_graph_key
+            .starts_with("process:process:subagent:"),
+        "unexpected child graph key: {}",
+        child.child_graph_key
+    );
+}
+
+#[tokio::test]
 async fn rlm_spawn_defaults_single_capability_when_omitted() {
     let (outcome, prompt) = run_seed_probe(
         r#"```lashlang
@@ -530,9 +606,39 @@ async fn run_seed_probe(
     parent_response: &'static str,
     input: TurnInput,
 ) -> (lash_core::TurnOutcome, String) {
+    run_seed_probe_with_graph_store(parent_response, input, None).await
+}
+
+async fn run_seed_probe_with_graph_store(
+    parent_response: &'static str,
+    input: TurnInput,
+    graph_store: Option<Arc<TraceLashlangGraphStore>>,
+) -> (lash_core::TurnOutcome, String) {
+    let parent_response = parent_response.to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("subagent-seed-probe".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(run_seed_probe_inner(parent_response, input, graph_store));
+            let _ = tx.send(result);
+        })
+        .expect("spawn seed-probe thread");
+    rx.await.expect("seed-probe thread result")
+}
+
+async fn run_seed_probe_inner(
+    parent_response: String,
+    input: TurnInput,
+    graph_store: Option<Arc<TraceLashlangGraphStore>>,
+) -> (lash_core::TurnOutcome, String) {
     let captured_child_prompt: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let state = Arc::new(SeedProbeState {
-        parent_response: parent_response.to_string(),
+        parent_response,
         captured_child_prompt: Arc::clone(&captured_child_prompt),
     });
     let provider = seed_probe_provider(Arc::clone(&state)).into_handle();
@@ -562,6 +668,10 @@ async fn run_seed_probe(
             let mut config = RuntimeHostConfig::in_memory();
             config.providers.provider_resolver =
                 Arc::new(lash_core::SingleProviderResolver::new(provider.clone()));
+            if let Some(graph_store) = &graph_store {
+                config.tracing.lashlang_execution_sink =
+                    Some(Arc::clone(graph_store) as Arc<dyn lash_core::TraceSink>);
+            }
             config
         }),
         Arc::clone(&registry) as Arc<dyn lash_core::ProcessRegistry>,
@@ -586,6 +696,10 @@ async fn run_seed_probe(
                 let mut config = RuntimeHostConfig::in_memory();
                 config.providers.provider_resolver =
                     Arc::new(lash_core::SingleProviderResolver::new(provider.clone()));
+                if let Some(graph_store) = &graph_store {
+                    config.tracing.lashlang_execution_sink =
+                        Some(Arc::clone(graph_store) as Arc<dyn lash_core::TraceSink>);
+                }
                 config
             },
             Arc::new(lash_core::InMemorySessionStoreFactory::new()),
@@ -652,6 +766,7 @@ async fn subagents_plugin_builds_without_mode_context() {
         tool_access: lash_core::SessionToolAccess::default(),
         subagent: None,
         lashlang_abilities: Default::default(),
+        lashlang_language_features: Default::default(),
         parent_session_id: None,
     };
     let plugin = factory.build(&ctx).expect("plugin");
@@ -666,6 +781,7 @@ async fn rlm_provider_does_not_require_process_support() {
         tool_access: lash_core::SessionToolAccess::default(),
         subagent: None,
         lashlang_abilities: Default::default(),
+        lashlang_language_features: Default::default(),
         parent_session_id: None,
     };
 

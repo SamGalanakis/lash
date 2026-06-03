@@ -1,7 +1,7 @@
 use crate::{ModuleRef, ProcessRef, RequiredSurfaceRef};
 
 use super::{ExecutionScratch, ProfileReport, ProjectedBindings, Record, RuntimeFailure, Value};
-use crate::ProcessTrackingObservation;
+use crate::LashlangExecutionObservation;
 use std::future::Future;
 use std::sync::Mutex;
 use thiserror::Error;
@@ -51,6 +51,7 @@ pub struct ResourceOperation {
     pub receiver: Value,
     pub operation: String,
     pub args: Vec<Value>,
+    pub call_site: Option<crate::LashlangExecutionCallSite>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,7 +127,7 @@ pub trait ExecutionHost: Sync {
 
     fn observe_profile(&self, _profile: ProfileReport) {}
 
-    fn observe_process_tracking(&self, _observation: ProcessTrackingObservation) {}
+    fn observe_lashlang_execution(&self, _observation: LashlangExecutionObservation) {}
 }
 
 pub struct ExecutionEnvironment<'host, H: ExecutionHost> {
@@ -249,8 +250,8 @@ impl<H: ExecutionHost> ExecutionHost for ExecutionEnvironment<'_, H> {
         }
     }
 
-    fn observe_process_tracking(&self, observation: ProcessTrackingObservation) {
-        self.host.observe_process_tracking(observation);
+    fn observe_lashlang_execution(&self, observation: LashlangExecutionObservation) {
+        self.host.observe_lashlang_execution(observation);
     }
 }
 

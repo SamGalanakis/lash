@@ -1,6 +1,6 @@
 use crate::ast::{
-    AssignPathStep, AssignTarget, AstString, BinaryOp, Declaration, Expr, ProcessDecl,
-    ProcessParam, ProcessStartExpr, Program, TypeDecl, TypeExpr, TypeField, UnaryOp,
+    AssignPathStep, AssignTarget, AstString, BinaryOp, Declaration, Expr, LabelMetadata,
+    ProcessDecl, ProcessParam, ProcessStartExpr, Program, TypeDecl, TypeExpr, TypeField, UnaryOp,
 };
 use crate::lexer::{LexError, Span, Token, TokenKind, lex};
 use thiserror::Error;
@@ -27,6 +27,12 @@ pub enum ParseError {
         "declarative trigger syntax has been removed; construct a source value and call the trigger registry register operation"
     )]
     DeclarativeTriggerRemoved { span: Span },
+    #[error("invalid @label annotation: {message}")]
+    InvalidLabelAnnotation { message: String, span: Span },
+    #[error(
+        "@label can annotate statements or process declarations, but not other declarations or another @label"
+    )]
+    InvalidLabelTarget { span: Span },
     #[error("expression nesting too deep (limit {limit}); flatten the program")]
     NestingTooDeep { limit: usize, span: Span },
 }
@@ -41,6 +47,8 @@ impl ParseError {
             | Self::ProcessControlOutsideBlock { span, .. }
             | Self::ForegroundControlInsideProcess { span, .. }
             | Self::DeclarativeTriggerRemoved { span }
+            | Self::InvalidLabelAnnotation { span, .. }
+            | Self::InvalidLabelTarget { span }
             | Self::NestingTooDeep { span, .. } => span.start,
         }
     }
@@ -93,6 +101,35 @@ impl Parser {
         let mut expressions = Vec::with_capacity(capacity);
         let mut expression_spans = Vec::with_capacity(capacity);
         while !self.at_eof() {
+            if matches!(self.peek_kind(), TokenKind::At) {
+                let start = self.peek().span.start;
+                let label = self.parse_label_annotation()?;
+                if self.peek_contextual("process") && !self.peek_assignment_target() {
+                    declarations.push(Declaration::Process(self.parse_process_decl(Some(label))?));
+                    declaration_spans.push(self.span_from(start));
+                    continue;
+                }
+                if self.peek_contextual("type")
+                    || self.peek_contextual("trigger")
+                    || matches!(self.peek_kind(), TokenKind::At)
+                {
+                    return Err(ParseError::InvalidLabelTarget {
+                        span: self.peek().span,
+                    });
+                }
+                let expr = self.parse_statement_expr()?;
+                expressions.push(Expr::LabelAnnotated {
+                    label,
+                    expr: Box::new(expr),
+                });
+                let end = self
+                    .tokens
+                    .get(self.index.saturating_sub(1))
+                    .map(|token| token.span.end)
+                    .unwrap_or(start);
+                expression_spans.push(Span { start, end });
+                continue;
+            }
             if self.peek_contextual("type") && !self.peek_assignment_target() {
                 let start = self.peek().span.start;
                 declarations.push(Declaration::Type(self.parse_type_decl()?));
@@ -101,7 +138,7 @@ impl Parser {
             }
             if self.peek_contextual("process") && !self.peek_assignment_target() {
                 let start = self.peek().span.start;
-                declarations.push(Declaration::Process(self.parse_process_decl()?));
+                declarations.push(Declaration::Process(self.parse_process_decl(None)?));
                 declaration_spans.push(self.span_from(start));
                 continue;
             }
@@ -148,7 +185,10 @@ impl Parser {
         Ok(TypeDecl { name, ty })
     }
 
-    fn parse_process_decl(&mut self) -> Result<ProcessDecl, ParseError> {
+    fn parse_process_decl(
+        &mut self,
+        label: Option<LabelMetadata>,
+    ) -> Result<ProcessDecl, ParseError> {
         self.expect_contextual("process")?;
         let name = self.expect_ident()?;
         self.expect_exact(TokenKind::LParen, "`(`")?;
@@ -187,6 +227,7 @@ impl Parser {
             name,
             params,
             return_ty,
+            label,
             body,
         })
     }
@@ -419,10 +460,88 @@ impl Parser {
         self.expect_exact(TokenKind::LBrace, "`{`")?;
         let mut expressions = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-            expressions.push(self.parse_statement_expr()?);
+            if matches!(self.peek_kind(), TokenKind::At) {
+                expressions.push(self.parse_annotated_statement()?);
+            } else {
+                expressions.push(self.parse_statement_expr()?);
+            }
         }
         self.expect_exact(TokenKind::RBrace, "`}`")?;
         Ok(Expr::Block(expressions))
+    }
+
+    fn parse_annotated_statement(&mut self) -> Result<Expr, ParseError> {
+        let label = self.parse_label_annotation()?;
+        if matches!(self.peek_kind(), TokenKind::At)
+            || self.peek_contextual("type")
+            || self.peek_contextual("process")
+            || self.peek_contextual("trigger")
+        {
+            return Err(ParseError::InvalidLabelTarget {
+                span: self.peek().span,
+            });
+        }
+        let expr = self.parse_statement_expr()?;
+        Ok(Expr::LabelAnnotated {
+            label,
+            expr: Box::new(expr),
+        })
+    }
+
+    fn parse_label_annotation(&mut self) -> Result<LabelMetadata, ParseError> {
+        let span = self.peek().span;
+        self.expect_exact(TokenKind::At, "`@`")?;
+        self.expect_contextual("label")?;
+        self.expect_exact(TokenKind::LParen, "`(`")?;
+
+        let mut title = None;
+        let mut description = None;
+        while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+            let key_span = self.peek().span;
+            let key = self.expect_ident()?;
+            self.expect_exact(TokenKind::Colon, "`:`")?;
+            let value = self.expect_string_literal()?;
+            match key.as_str() {
+                "title" => {
+                    if title.replace(value).is_some() {
+                        return Err(ParseError::InvalidLabelAnnotation {
+                            message: "duplicate `title` field".to_string(),
+                            span: key_span,
+                        });
+                    }
+                }
+                "description" => {
+                    if description.replace(value).is_some() {
+                        return Err(ParseError::InvalidLabelAnnotation {
+                            message: "duplicate `description` field".to_string(),
+                            span: key_span,
+                        });
+                    }
+                }
+                _ => {
+                    return Err(ParseError::InvalidLabelAnnotation {
+                        message: format!("unknown field `{key}`"),
+                        span: key_span,
+                    });
+                }
+            }
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.bump();
+                if matches!(self.peek_kind(), TokenKind::RParen) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.expect_exact(TokenKind::RParen, "`)`")?;
+        let Some(title) = title else {
+            return Err(ParseError::InvalidLabelAnnotation {
+                message: "`title` is required".to_string(),
+                span,
+            });
+        };
+        Ok(LabelMetadata { title, description })
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
@@ -1263,6 +1382,7 @@ fn render_kind(kind: &TokenKind) -> String {
         TokenKind::RBracket => "`]`".to_string(),
         TokenKind::Comma => "`,`".to_string(),
         TokenKind::Colon => "`:`".to_string(),
+        TokenKind::At => "`@`".to_string(),
         TokenKind::Question => "`?`".to_string(),
         TokenKind::Dot => "`.`".to_string(),
         TokenKind::Bang => "`!`".to_string(),
@@ -1427,6 +1547,7 @@ mod tests {
             handle = await triggers.register({
               source: source,
               target: digest,
+              inputs: { tick: trigger.event },
               name: "daily_digest"
             })?
             submit handle
@@ -1442,6 +1563,135 @@ mod tests {
         assert!(matches!(expressions[0], Expr::Assign { .. }));
         assert!(matches!(expressions[1], Expr::Assign { .. }));
         assert!(matches!(expressions[2], Expr::Submit(Some(_))));
+    }
+
+    #[test]
+    fn label_annotations_parse_on_processes_and_visual_process_statements() {
+        let program = parse(
+            r#"
+            @label(title: "Scan", description: "Reads one file")
+            process scan(tool: Tools) {
+              @label(title: "Read file", description: "Host operation")
+              text = await tool.read_file({ path: "." })?
+              @label(title: "Branch")
+              if text {
+                @label(title: "Wake agent")
+                wake text
+              } else {
+                @label(title: "Finish empty")
+                finish null
+              }
+            }
+            "#,
+        )
+        .expect("annotations should parse");
+        let Declaration::Process(process) = &program.declarations[0] else {
+            panic!("expected process");
+        };
+        assert_eq!(
+            process.label.as_ref().map(|label| label.title.as_str()),
+            Some("Scan")
+        );
+        let Expr::Block(expressions) = &process.body else {
+            panic!("expected process block");
+        };
+        let Expr::LabelAnnotated { expr, .. } = &expressions[0] else {
+            panic!("expected annotated assignment");
+        };
+        assert!(matches!(expr.as_ref(), Expr::Assign { .. }));
+        let Expr::LabelAnnotated { expr, .. } = &expressions[1] else {
+            panic!("expected annotated branch");
+        };
+        assert!(matches!(expr.as_ref(), Expr::If { .. }));
+    }
+
+    #[test]
+    fn label_annotations_parse_on_top_level_statements() {
+        let program = parse(
+            r#"
+            @label(title: "Setup")
+            value = 1
+            @label(title: "Submit", description: "Return the value")
+            submit value
+            "#,
+        )
+        .expect("top-level labels should parse");
+        let Expr::Block(expressions) = &program.main else {
+            panic!("expected top-level block");
+        };
+        assert_eq!(expressions.len(), 2);
+        let Expr::LabelAnnotated { label, expr } = &expressions[0] else {
+            panic!("expected annotated setup");
+        };
+        assert_eq!(label.title.as_str(), "Setup");
+        assert!(matches!(expr.as_ref(), Expr::Assign { .. }));
+        let Expr::LabelAnnotated { label, expr } = &expressions[1] else {
+            panic!("expected annotated submit");
+        };
+        assert_eq!(label.title.as_str(), "Submit");
+        assert_eq!(
+            label
+                .description
+                .as_ref()
+                .map(|description| description.as_str()),
+            Some("Return the value")
+        );
+        assert!(matches!(expr.as_ref(), Expr::Submit { .. }));
+    }
+
+    #[test]
+    fn label_annotations_reject_invalid_syntax_and_targets() {
+        let cases = [
+            r#"process p() { @label(description: "missing") finish null }"#,
+            r#"process p() { @label(title: value) finish null }"#,
+            r#"process p() { @label(title: "x", color: "red") finish null }"#,
+            r#"process p() { @label(title: "x", title: "y") finish null }"#,
+            r#"process p() { @label(title: "x") @label(title: "y") finish null }"#,
+            r#"@label(title: "Shape") type Shape { value: str }"#,
+        ];
+        for source in cases {
+            let err = parse(source).expect_err(source);
+            assert!(
+                matches!(
+                    err,
+                    ParseError::InvalidLabelAnnotation { .. }
+                        | ParseError::InvalidLabelTarget { .. }
+                        | ParseError::Expected { .. }
+                ),
+                "unexpected error for {source}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn label_annotation_target_error_rejects_non_process_declarations() {
+        let err = parse(r#"@label(title: "Shape") type Shape { value: str }"#)
+            .expect_err("type declarations are not label targets");
+        let message = err.to_string();
+        assert!(message.contains("statements or process declarations"));
+        assert!(message.contains("other declarations"));
+        assert!(!message.contains("process-map"));
+    }
+
+    #[test]
+    fn label_annotation_text_inside_strings_is_plain_text() {
+        let program = parse(
+            r####"
+            submit r'''@label(title: "Plain text")
+@label(title: "Still text") finish null'''
+            "####,
+        )
+        .expect("label-like text inside strings should parse as text");
+        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
+            panic!("expected submit");
+        };
+        let Expr::String(value) = expr.as_ref() else {
+            panic!("expected string");
+        };
+        assert_eq!(
+            value.as_str(),
+            "@label(title: \"Plain text\")\n@label(title: \"Still text\") finish null"
+        );
     }
 
     #[test]
@@ -1474,6 +1724,7 @@ mod tests {
             handle = await triggers.register({
               source: source,
               target: triage,
+              inputs: { input: trigger.event, gmail: gmail.work },
               name: "daily_digest"
             })?
             submit handle

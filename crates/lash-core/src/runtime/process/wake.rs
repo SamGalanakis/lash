@@ -38,16 +38,31 @@ pub fn process_wake_turn_cause(wake: &ProcessWakeDelivery) -> crate::TurnCause {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct ProcessWakeDeliveryRequest {
+    pub target_scope: ProcessScope,
+    pub process_id: ProcessId,
+    pub sequence: u64,
+    pub event_type: String,
+    pub event_invocation: crate::RuntimeInvocation,
+    pub process_caused_by: Option<crate::CausalRef>,
+    pub wake: ProcessWake,
+    pub occurred_at: SystemTime,
+}
+
 pub fn process_wake_delivery(
-    target_scope: ProcessScope,
-    process_id: ProcessId,
-    sequence: u64,
-    event_type: String,
-    event_invocation: crate::RuntimeInvocation,
-    process_caused_by: Option<crate::CausalRef>,
-    wake: ProcessWake,
-    occurred_at: SystemTime,
+    request: ProcessWakeDeliveryRequest,
 ) -> Result<ProcessWakeDelivery, PluginError> {
+    let ProcessWakeDeliveryRequest {
+        target_scope,
+        process_id,
+        sequence,
+        event_type,
+        event_invocation,
+        process_caused_by,
+        wake,
+        occurred_at,
+    } = request;
     let target_scope_id = target_scope.id();
     let wake_id = crate::stable_hash::stable_json_sha256_hex(&(
         target_scope_id.as_str(),

@@ -34,6 +34,14 @@ fn prompt_surface(
     lashlang::LashlangSurface::new(resources, abilities)
 }
 
+fn prompt_surface_with_features(
+    resources: lashlang::ResourceCatalog,
+    abilities: lashlang::LashlangAbilities,
+    language_features: lashlang::LashlangLanguageFeatures,
+) -> lashlang::LashlangSurface {
+    lashlang::LashlangSurface::new(resources, abilities).with_language_features(language_features)
+}
+
 fn tool_resources() -> lashlang::ResourceCatalog {
     let mut resources = lashlang::ResourceCatalog::new();
     resources.add_module_instance(["web"], "Web");
@@ -76,6 +84,34 @@ fn execution_section_hides_processes_when_disabled() {
     assert!(!section.contains("sleep for"));
     assert!(!section.contains("wait signal"));
     assert!(!section.contains("signal run"));
+}
+
+#[test]
+fn execution_section_hides_label_annotations_when_disabled() {
+    let section =
+        rlm_execution_section_for_surface(RlmPromptFeatures::default(), &full_prompt_surface());
+
+    assert!(!section.contains("@label"));
+}
+
+#[test]
+fn execution_section_documents_static_label_annotations_when_enabled() {
+    let surface = prompt_surface_with_features(
+        tool_resources(),
+        lashlang::LashlangAbilities::all(),
+        lashlang::LashlangLanguageFeatures::default().with_label_annotations(),
+    );
+    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+
+    assert!(section.contains("@label(title: \"Label\")"));
+    assert!(section.contains("@label(title: \"Label\", description: \"Details\")"));
+    assert!(section.contains("Execution labels"));
+    assert!(section.contains("important Lashlang phases"));
+    assert!(section.contains("At top level, label meaningful setup"));
+    assert!(section.contains("string literals"));
+    assert!(!section.contains("process-map"));
+    assert!(!section.contains("visual process statement"));
+    assert!(!section.contains("color:"));
 }
 
 #[test]
@@ -133,41 +169,33 @@ fn execution_section_hides_trigger_registry_language_without_processes() {
 #[test]
 fn execution_section_lists_typed_operations_constructors_and_trigger_sources() {
     let mut resources = lashlang::ResourceCatalog::new();
-    resources.add_module_instance(["triggers"], "Triggers");
-    resources.add_operation(
-        "Triggers",
-        "register",
-        "triggers.register",
-        lashlang::TypeExpr::Object(vec![
-            lashlang::TypeField {
-                name: "source".into(),
-                ty: lashlang::TypeExpr::Any,
-                optional: false,
-            },
-            lashlang::TypeField {
-                name: "target".into(),
-                ty: lashlang::TypeExpr::Any,
-                optional: false,
-            },
-        ]),
-        lashlang::TypeExpr::TriggerHandle(Box::new(lashlang::TypeExpr::Any)),
-    );
-    resources.add_trigger_source_constructor(
-        ["timer", "Schedule"],
-        lashlang::TypeExpr::Object(vec![
-            lashlang::TypeField {
-                name: "expr".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: false,
-            },
-            lashlang::TypeField {
-                name: "tz".into(),
-                ty: lashlang::TypeExpr::Str,
-                optional: true,
-            },
-        ]),
-        lashlang::TypeExpr::Ref("timer.Tick".into()),
-    );
+    lashlang::add_trigger_resource_operations(&mut resources);
+    resources
+        .add_trigger_source_constructor(
+            ["timer", "Schedule"],
+            lashlang::TypeExpr::Object(vec![
+                lashlang::TypeField {
+                    name: "expr".into(),
+                    ty: lashlang::TypeExpr::Str,
+                    optional: false,
+                },
+                lashlang::TypeField {
+                    name: "tz".into(),
+                    ty: lashlang::TypeExpr::Str,
+                    optional: true,
+                },
+            ]),
+            lashlang::NamedDataType::object(
+                "timer.Tick",
+                vec![lashlang::TypeField {
+                    name: "fired_at".into(),
+                    ty: lashlang::TypeExpr::Str,
+                    optional: false,
+                }],
+            )
+            .expect("valid timer tick type"),
+        )
+        .expect("valid timer trigger source");
     let surface = prompt_surface(
         resources,
         lashlang::LashlangAbilities::default()
@@ -178,10 +206,13 @@ fn execution_section_lists_typed_operations_constructors_and_trigger_sources() {
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 
     assert!(section.contains("### Host Surface"));
-    assert!(section.contains(
-        "`await triggers.register({ source: any, target: any })? -> TriggerHandle<any>`"
-    ));
-    assert!(section.contains("`timer.Schedule({ expr: str, tz: str? }) -> timer.Schedule`"));
+    assert!(section.contains("`await triggers.register("));
+    assert!(section.contains("inputs: any"));
+    assert!(section.contains("name: str?"));
+    assert!(section.contains("`type timer.Tick = { fired_at: str }`"));
+    assert!(
+        section.contains("`timer.Schedule({ expr: str, tz: str? }) -> TriggerSource<timer.Tick>`")
+    );
     assert!(
         section.contains(
             "`timer.Schedule` can be passed to `triggers.register` and emits `timer.Tick`"

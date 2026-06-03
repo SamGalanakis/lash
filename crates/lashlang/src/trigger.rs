@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::artifact::{ModuleArtifact, ModuleRef, ProcessRef, RequiredSurfaceRef};
 use crate::ast::{AstString, Expr, TypeExpr, TypeField, format_type_expr};
-use crate::linker::ResourceCatalog;
+use crate::linker::{NamedDataType, ResourceCatalog};
 use crate::runtime::{
     LASH_HOST_VALUE_KEY, LASH_HOST_VALUE_TYPE_KEY, LASH_MODULE_REF_KEY, LASH_PROCESS_NAME_KEY,
     LASH_PROCESS_REF_KEY, LASH_PROCESS_VALUE_KEY, LASH_REQUIRED_SURFACE_REF_KEY,
@@ -14,6 +14,7 @@ use crate::runtime::{
 const TRIGGERS_RESOURCE_TYPE: &str = "Triggers";
 const TRIGGERS_ALIAS: &str = "triggers";
 const TRIGGER_REGISTRATION_TYPE: &str = "TriggerRegistration";
+pub const LASH_TRIGGER_EVENT_KEY: &str = "$lash.trigger.event";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TriggerHostOperation {
@@ -50,9 +51,15 @@ impl TriggerHostOperation {
             Self::Register => TypeExpr::Object(vec![
                 required_field("source", TypeExpr::Any),
                 required_field("target", TypeExpr::Any),
+                required_field("inputs", TypeExpr::Any),
                 optional_field("name", TypeExpr::Str),
             ]),
-            Self::List => TypeExpr::Object(vec![required_field("target", TypeExpr::Any)]),
+            Self::List => TypeExpr::Object(vec![
+                optional_field("target", TypeExpr::Any),
+                optional_field("name", TypeExpr::Str),
+                optional_field("source_type", TypeExpr::Str),
+                optional_field("enabled", TypeExpr::Bool),
+            ]),
             Self::Cancel => TypeExpr::Object(vec![required_field("handle", TypeExpr::Any)]),
         }
     }
@@ -102,11 +109,12 @@ fn optional_field(name: &'static str, ty: TypeExpr) -> TypeField {
 pub struct TriggerRegistrationCall<'expr> {
     pub source: &'expr Expr,
     pub target: &'expr Expr,
+    pub inputs: &'expr Expr,
     pub name: Option<&'expr Expr>,
 }
 
 pub struct TriggerListCall<'expr> {
-    pub target: &'expr Expr,
+    pub entries: &'expr [(AstString, Expr)],
 }
 
 pub struct TriggerCancelCall<'expr> {
@@ -120,15 +128,20 @@ pub fn register_call_args(
     Ok(TriggerRegistrationCall {
         source: required_entry(entries, "source").ok_or(TriggerCallShapeError::Registration)?,
         target: required_entry(entries, "target").ok_or(TriggerCallShapeError::Registration)?,
+        inputs: required_entry(entries, "inputs").ok_or(TriggerCallShapeError::Registration)?,
         name: required_entry(entries, "name"),
     })
 }
 
 pub fn list_call_args(args: &[Expr]) -> Result<TriggerListCall<'_>, TriggerCallShapeError> {
     let entries = record_entries(args).ok_or(TriggerCallShapeError::List)?;
-    Ok(TriggerListCall {
-        target: required_entry(entries, "target").ok_or(TriggerCallShapeError::List)?,
-    })
+    for (name, _) in entries {
+        match name.as_str() {
+            "target" | "name" | "source_type" | "enabled" => {}
+            _ => return Err(TriggerCallShapeError::List),
+        }
+    }
+    Ok(TriggerListCall { entries })
 }
 
 pub fn cancel_call_args(args: &[Expr]) -> Result<TriggerCancelCall<'_>, TriggerCallShapeError> {
@@ -162,6 +175,7 @@ pub enum TriggerCallShapeError {
 pub struct TriggerRegistrationRequest {
     pub source: TriggerSourceValue,
     pub target: TriggerTargetIdentity,
+    pub inputs: TriggerInputTemplate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
@@ -175,6 +189,9 @@ impl TriggerRegistrationRequest {
                 required_json_field(request, "target", operation)?,
                 "trigger target",
             )?,
+            inputs: TriggerInputTemplate::decode(required_json_field(
+                request, "inputs", operation,
+            )?)?,
             name: request
                 .get("name")
                 .and_then(serde_json::Value::as_str)
@@ -183,20 +200,172 @@ impl TriggerRegistrationRequest {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TriggerInputTemplate {
+    entries: BTreeMap<String, TriggerInputBinding>,
+}
+
+impl TriggerInputTemplate {
+    pub fn new(entries: BTreeMap<String, TriggerInputBinding>) -> Self {
+        Self { entries }
+    }
+
+    pub fn decode(value: &serde_json::Value) -> Result<Self, TriggerRequestDecodeError> {
+        let map = value
+            .as_object()
+            .ok_or_else(|| TriggerRequestDecodeError::InvalidField {
+                operation: TriggerHostOperation::Register.host_operation(),
+                field: "inputs",
+                message: "expected an object mapping process params to values".to_string(),
+            })?;
+        let mut entries = BTreeMap::new();
+        for (name, value) in map {
+            let binding = if is_trigger_event_placeholder_value(value) {
+                TriggerInputBinding::Event
+            } else {
+                TriggerInputBinding::Fixed {
+                    value: value.clone(),
+                }
+            };
+            entries.insert(name.clone(), binding);
+        }
+        Ok(Self { entries })
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &TriggerInputBinding)> {
+        self.entries
+            .iter()
+            .map(|(name, binding)| (name.as_str(), binding))
+    }
+
+    pub fn get(&self, name: &str) -> Option<&TriggerInputBinding> {
+        self.entries.get(name)
+    }
+
+    pub fn contains_event(&self) -> bool {
+        self.entries
+            .values()
+            .any(|binding| matches!(binding, TriggerInputBinding::Event))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TriggerInputBinding {
+    Event,
+    Fixed { value: serde_json::Value },
+}
+
+impl TriggerInputBinding {
+    pub fn as_fixed(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Fixed { value } => Some(value),
+            Self::Event => None,
+        }
+    }
+}
+
+pub fn trigger_event_placeholder_expr() -> Expr {
+    Expr::Record(vec![(LASH_TRIGGER_EVENT_KEY.into(), Expr::Bool(true))])
+}
+
+fn is_trigger_event_placeholder_value(value: &serde_json::Value) -> bool {
+    let Some(map) = value.as_object() else {
+        return false;
+    };
+    map.len() == 1
+        && map
+            .get(LASH_TRIGGER_EVENT_KEY)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerListRequest {
-    pub target: TriggerTargetIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<TriggerTargetIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 impl TriggerListRequest {
     pub fn decode(request: &serde_json::Value) -> Result<Self, TriggerRequestDecodeError> {
+        let map = request
+            .as_object()
+            .ok_or_else(|| TriggerRequestDecodeError::InvalidField {
+                operation: TriggerHostOperation::List.host_operation(),
+                field: "filters",
+                message: "expected a record of trigger filters".to_string(),
+            })?;
+        for key in map.keys() {
+            match key.as_str() {
+                "target" | "name" | "source_type" | "enabled" => {}
+                _ => {
+                    return Err(TriggerRequestDecodeError::InvalidField {
+                        operation: TriggerHostOperation::List.host_operation(),
+                        field: "filters",
+                        message: format!("unknown filter `{key}`"),
+                    });
+                }
+            }
+        }
         Ok(Self {
-            target: TriggerTargetIdentity::decode(
-                required_json_field(request, "target", TriggerHostOperation::List)?,
-                "triggers.list target",
+            target: request
+                .get("target")
+                .map(|value| TriggerTargetIdentity::decode(value, "triggers.list target"))
+                .transpose()?,
+            name: optional_string_filter(request, "name", TriggerHostOperation::List)?,
+            source_type: optional_string_filter(
+                request,
+                "source_type",
+                TriggerHostOperation::List,
             )?,
+            enabled: optional_bool_filter(request, "enabled", TriggerHostOperation::List)?,
         })
     }
+}
+
+fn optional_string_filter(
+    request: &serde_json::Value,
+    field: &'static str,
+    operation: TriggerHostOperation,
+) -> Result<Option<String>, TriggerRequestDecodeError> {
+    request
+        .get(field)
+        .map(|value| {
+            value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                TriggerRequestDecodeError::InvalidField {
+                    operation: operation.host_operation(),
+                    field,
+                    message: "expected a string".to_string(),
+                }
+            })
+        })
+        .transpose()
+}
+
+fn optional_bool_filter(
+    request: &serde_json::Value,
+    field: &'static str,
+    operation: TriggerHostOperation,
+) -> Result<Option<bool>, TriggerRequestDecodeError> {
+    request
+        .get(field)
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| TriggerRequestDecodeError::InvalidField {
+                    operation: operation.host_operation(),
+                    field,
+                    message: "expected a boolean".to_string(),
+                })
+        })
+        .transpose()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,11 +477,10 @@ impl TriggerTargetIdentity {
 pub fn event_type_for_source(
     resources: &ResourceCatalog,
     source_type: &str,
-) -> Result<TypeExpr, TriggerRequestDecodeError> {
+) -> Result<NamedDataType, TriggerRequestDecodeError> {
     resources
-        .trigger_sources
-        .get(source_type)
-        .map(|binding| binding.event_ty.clone())
+        .resolve_trigger_source(source_type)
+        .map(|binding| binding.event_type().clone())
         .ok_or_else(|| TriggerRequestDecodeError::UnknownSourceType {
             source_type: source_type.to_string(),
         })
@@ -372,16 +540,16 @@ fn decode_json_field<T: serde::de::DeserializeOwned>(
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TriggerTargetValidation {
-    pub input_name: String,
+    pub inputs: TriggerInputTemplate,
     pub event_ty: TypeExpr,
-    pub input_ty: TypeExpr,
 }
 
 pub fn validate_trigger_target(
     target: &TriggerTargetIdentity,
-    event_ty: &TypeExpr,
+    event_ty: &NamedDataType,
+    inputs: &TriggerInputTemplate,
     artifact: &ModuleArtifact,
 ) -> Result<TriggerTargetValidation, TriggerTargetValidationError> {
     if artifact.required_surface_ref != target.required_surface_ref {
@@ -412,26 +580,93 @@ pub fn validate_trigger_target(
             module_ref: target.module_ref.to_string(),
             process_name: target.process_name.clone(),
         })?;
-    let [param] = process.params.as_slice() else {
-        return Err(TriggerTargetValidationError::InvalidTargetInputCount {
+    for (input_name, _) in inputs.entries() {
+        if !process
+            .params
+            .iter()
+            .any(|param| param.name.as_str() == input_name)
+        {
+            return Err(TriggerTargetValidationError::UnknownInput {
+                process_name: target.process_name.clone(),
+                input: input_name.to_string(),
+            });
+        }
+    }
+    if !inputs.contains_event() {
+        return Err(TriggerTargetValidationError::MissingEventInput {
             process_name: target.process_name.clone(),
-        });
-    };
-    let aliases = type_aliases(artifact);
-    let event_ty = resolve_type_aliases(event_ty, &aliases);
-    let input_ty = resolve_type_aliases(&param.ty, &aliases);
-    if !is_resolved_type_assignable(&event_ty, &input_ty) {
-        return Err(TriggerTargetValidationError::EventMismatch {
-            event: format_type_expr(&event_ty),
-            process_name: target.process_name.clone(),
-            input: format_type_expr(&input_ty),
         });
     }
+    let aliases = type_aliases(artifact);
+    let event_ty = resolve_type_refs(
+        &event_ty.to_ref_ty(),
+        &aliases,
+        &artifact.required_surface.resources,
+    );
+    for param in &process.params {
+        let Some(input) = inputs.get(param.name.as_str()) else {
+            return Err(TriggerTargetValidationError::MissingInput {
+                process_name: target.process_name.clone(),
+                input: param.name.to_string(),
+            });
+        };
+        let input_ty = resolve_type_refs(&param.ty, &aliases, &artifact.required_surface.resources);
+        match input {
+            TriggerInputBinding::Event => {
+                if !is_resolved_type_assignable(&event_ty, &input_ty) {
+                    return Err(TriggerTargetValidationError::EventMismatch {
+                        event: format_type_expr(&event_ty),
+                        process_name: target.process_name.clone(),
+                        input_name: param.name.to_string(),
+                        input: format_type_expr(&input_ty),
+                    });
+                }
+            }
+            TriggerInputBinding::Fixed { value } => {
+                validate_fixed_input_value(
+                    value,
+                    &input_ty,
+                    &artifact.required_surface.resources,
+                    target.process_name.as_str(),
+                    param.name.as_str(),
+                )?;
+            }
+        }
+    }
     Ok(TriggerTargetValidation {
-        input_name: param.name.to_string(),
+        inputs: inputs.clone(),
         event_ty,
-        input_ty,
     })
+}
+
+fn validate_fixed_input_value(
+    value: &serde_json::Value,
+    input_ty: &TypeExpr,
+    resources: &ResourceCatalog,
+    process_name: &str,
+    input_name: &str,
+) -> Result<(), TriggerTargetValidationError> {
+    let TypeExpr::Ref(resource_type) = input_ty else {
+        return Ok(());
+    };
+    if !resources.has_resource_type(resource_type.as_str()) {
+        return Ok(());
+    }
+    match crate::runtime::from_json(value.clone()) {
+        crate::Value::Resource(handle) if handle.resource_type == *resource_type => Ok(()),
+        crate::Value::Resource(handle) => Err(TriggerTargetValidationError::FixedInputMismatch {
+            process_name: process_name.to_string(),
+            input: input_name.to_string(),
+            expected: resource_type.to_string(),
+            actual: handle.resource_type,
+        }),
+        _ => Err(TriggerTargetValidationError::FixedInputMismatch {
+            process_name: process_name.to_string(),
+            input: input_name.to_string(),
+            expected: resource_type.to_string(),
+            actual: "value".to_string(),
+        }),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -457,43 +692,69 @@ pub enum TriggerTargetValidationError {
         module_ref: String,
         process_name: String,
     },
-    #[error("trigger target `{process_name}` must have exactly one input")]
-    InvalidTargetInputCount { process_name: String },
-    #[error("trigger source emits {event}, but target `{process_name}` expects {input}")]
+    #[error("trigger target `{process_name}` input `{input}` is not mapped")]
+    MissingInput { process_name: String, input: String },
+    #[error("trigger target `{process_name}` has no input `{input}`")]
+    UnknownInput { process_name: String, input: String },
+    #[error("trigger target `{process_name}` inputs must map at least one param to trigger.event")]
+    MissingEventInput { process_name: String },
+    #[error(
+        "trigger source emits {event}, but target `{process_name}` input `{input_name}` expects {input}"
+    )]
     EventMismatch {
         event: String,
         process_name: String,
+        input_name: String,
         input: String,
+    },
+    #[error(
+        "trigger target `{process_name}` input `{input}` has incompatible fixed authority type: expected {expected}, got {actual}"
+    )]
+    FixedInputMismatch {
+        process_name: String,
+        input: String,
+        expected: String,
+        actual: String,
     },
 }
 
-pub fn resolve_type_aliases(ty: &TypeExpr, aliases: &BTreeMap<String, TypeExpr>) -> TypeExpr {
-    resolve_type_aliases_inner(ty, aliases, &mut BTreeSet::new())
-}
-
-fn resolve_type_aliases_inner(
+fn resolve_type_refs(
     ty: &TypeExpr,
     aliases: &BTreeMap<String, TypeExpr>,
+    resources: &ResourceCatalog,
+) -> TypeExpr {
+    resolve_type_refs_inner(ty, aliases, Some(resources), &mut BTreeSet::new())
+}
+
+fn resolve_type_refs_inner(
+    ty: &TypeExpr,
+    aliases: &BTreeMap<String, TypeExpr>,
+    resources: Option<&ResourceCatalog>,
     seen: &mut BTreeSet<String>,
 ) -> TypeExpr {
     match ty {
         TypeExpr::Ref(name) if seen.insert(name.to_string()) => {
-            let resolved = aliases
-                .get(name.as_str())
-                .map(|ty| resolve_type_aliases_inner(ty, aliases, seen))
-                .unwrap_or_else(|| ty.clone());
+            let resolved = if let Some(ty) = aliases.get(name.as_str()) {
+                resolve_type_refs_inner(ty, aliases, resources, seen)
+            } else if let Some(data_type) =
+                resources.and_then(|resources| resources.resolve_named_data_type(name.as_str()))
+            {
+                data_type.ty().clone()
+            } else {
+                ty.clone()
+            };
             seen.remove(name.as_str());
             resolved
         }
-        TypeExpr::List(item) => {
-            TypeExpr::List(Box::new(resolve_type_aliases_inner(item, aliases, seen)))
-        }
+        TypeExpr::List(item) => TypeExpr::List(Box::new(resolve_type_refs_inner(
+            item, aliases, resources, seen,
+        ))),
         TypeExpr::Object(fields) => TypeExpr::Object(
             fields
                 .iter()
                 .map(|field| TypeField {
                     name: field.name.clone(),
-                    ty: resolve_type_aliases_inner(&field.ty, aliases, seen),
+                    ty: resolve_type_refs_inner(&field.ty, aliases, resources, seen),
                     optional: field.optional,
                 })
                 .collect(),
@@ -501,7 +762,7 @@ fn resolve_type_aliases_inner(
         TypeExpr::Union(items) => TypeExpr::Union(
             items
                 .iter()
-                .map(|item| resolve_type_aliases_inner(item, aliases, seen))
+                .map(|item| resolve_type_refs_inner(item, aliases, resources, seen))
                 .collect(),
         ),
         TypeExpr::Process {
@@ -509,13 +770,13 @@ fn resolve_type_aliases_inner(
             output,
             input_count,
         } => TypeExpr::Process {
-            input: Box::new(resolve_type_aliases_inner(input, aliases, seen)),
-            output: Box::new(resolve_type_aliases_inner(output, aliases, seen)),
+            input: Box::new(resolve_type_refs_inner(input, aliases, resources, seen)),
+            output: Box::new(resolve_type_refs_inner(output, aliases, resources, seen)),
             input_count: *input_count,
         },
-        TypeExpr::TriggerHandle(event) => {
-            TypeExpr::TriggerHandle(Box::new(resolve_type_aliases_inner(event, aliases, seen)))
-        }
+        TypeExpr::TriggerHandle(event) => TypeExpr::TriggerHandle(Box::new(
+            resolve_type_refs_inner(event, aliases, resources, seen),
+        )),
         _ => ty.clone(),
     }
 }

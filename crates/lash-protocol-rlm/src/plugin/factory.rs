@@ -46,6 +46,10 @@ impl PluginFactory for RlmProtocolPluginFactory {
         self.config.lashlang_abilities
     }
 
+    fn lashlang_language_features(&self) -> lashlang::LashlangLanguageFeatures {
+        self.config.lashlang_language_features
+    }
+
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(RlmProtocolPlugin {
             config: self.config.clone(),

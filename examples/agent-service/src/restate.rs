@@ -309,6 +309,7 @@ fn is_runtime_turn_checkpoint_missing(err: &lash::EmbedError) -> bool {
         err,
         lash::EmbedError::Runtime(runtime)
             if runtime.is_code(RuntimeErrorCode::RuntimeTurnCheckpointMissing)
+                || runtime.is_code(RuntimeErrorCode::RuntimeTurnResumeStoreRequired)
     )
 }
 
@@ -342,6 +343,27 @@ mod restate_tests {
         let output = route_restate_resume_or_start_fresh(
             Err(runtime_error(
                 RuntimeErrorCode::RuntimeTurnCheckpointMissing,
+            )),
+            move || async move {
+                fresh_calls_for_closure.fetch_add(1, Ordering::SeqCst);
+                Ok("fresh")
+            },
+        )
+        .await
+        .expect("fresh fallback");
+
+        assert_eq!(output, "fresh");
+        assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn substrate_native_resume_store_required_starts_fresh_scoped_turn() {
+        let fresh_calls = Arc::new(AtomicUsize::new(0));
+        let fresh_calls_for_closure = Arc::clone(&fresh_calls);
+
+        let output = route_restate_resume_or_start_fresh(
+            Err(runtime_error(
+                RuntimeErrorCode::RuntimeTurnResumeStoreRequired,
             )),
             move || async move {
                 fresh_calls_for_closure.fetch_add(1, Ordering::SeqCst);
@@ -411,7 +433,7 @@ mod restate_tests {
             .unwrap_or_else(|_| format!("http://{bind_addr}"));
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let harness = live_restate_test_state(temp.path());
+        let harness = live_restate_test_state(temp.path(), ingress_url.clone());
         let state = harness.state.clone();
         let listener = tokio::net::TcpListener::bind(bind_addr)
             .await
@@ -435,16 +457,6 @@ mod restate_tests {
                 .serve(),
             )
             .build();
-        // Wake-driven runner over a Restate ingress-client run handle, the same
-        // way a production deployment does: its first tick folds in the former
-        // startup-only recovery sweep, then it drives the registry's
-        // non-terminal rows on every poke and poll tick.
-        let process_work_runner = lash::advanced::ProcessWorkRunner::new(Arc::new(
-            lash_restate::RestateProcessIngressRunner::new(
-                ingress_url.clone(),
-                Arc::clone(&harness.process_registry),
-            ),
-        ));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
             restate_sdk::http_server::HttpServer::new(endpoint)
@@ -453,7 +465,7 @@ mod restate_tests {
                 })
                 .await;
         });
-        process_work_runner.spawn();
+        harness.process_work_runner.spawn();
 
         wait_for_endpoint_socket(local_probe_addr).await;
         register_restate_deployment(&admin_url, &endpoint_url).await;
@@ -531,9 +543,10 @@ mod restate_tests {
         state: AppStateData,
         process_registry: Arc<dyn lash_core::ProcessRegistry>,
         process_worker: lash_core::DurableProcessWorker,
+        process_work_runner: lash::advanced::ProcessWorkRunner,
     }
 
-    fn live_restate_test_state(data_dir: &Path) -> LiveRestateTestHarness {
+    fn live_restate_test_state(data_dir: &Path, ingress_url: String) -> LiveRestateTestHarness {
         let app_db = Arc::new(Mutex::new(
             AppDb::open(&data_dir.join("app.db")).expect("open app db"),
         ));
@@ -568,6 +581,17 @@ submit "done via Restate E2E"
         let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
+        let artifact_store = Arc::new(
+            lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
+                .expect("open artifact store"),
+        ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
+        let process_work_runner = lash::advanced::ProcessWorkRunner::new(Arc::new(
+            lash_restate::RestateProcessIngressRunner::new(
+                ingress_url,
+                Arc::clone(&process_registry),
+            ),
+        ));
+        let process_work_poke = process_work_runner.poke_handle();
         let core = LashCore::builder()
             .install_mode(ModePreset::rlm())
             .default_mode(ModeId::rlm())
@@ -580,8 +604,12 @@ submit "done via Restate E2E"
             .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
                 data_dir.join("attachments"),
             )))
+            .lashlang_artifact_store(artifact_store)
             .advanced()
+            .effect_controller(Arc::new(lash::advanced::InlineRuntimeEffectController))
             .process_registry(Arc::clone(&process_registry))
+            .disable_default_process_work_runner()
+            .with_process_work_runner(process_work_poke)
             .build()
             .expect("build test core");
         let demo_factory = DemoPlugin::factory(&DemoPluginConfig {
@@ -606,6 +634,7 @@ submit "done via Restate E2E"
             state,
             process_registry,
             process_worker,
+            process_work_runner,
         }
     }
 

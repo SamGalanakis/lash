@@ -12,9 +12,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=2">
+<link rel="stylesheet" href="./styles.css?v=9">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=2" defer></script>
+<script src="./docs.js?v=3" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash-cli</code>.">
@@ -56,7 +56,7 @@
                 <tr><td><code>/info</code></td><td>—</td><td><code>/info</code></td><td>Show current session/runtime info</td></tr>
                 <tr><td><code>/model</code></td><td>—</td><td><code>/model [name]</code></td><td>Show or switch the LLM model</td></tr>
                 <tr><td><code>/variant</code></td><td>—</td><td><code>/variant [name]</code></td><td>Show or switch the model variant (e.g. <code>high</code>, <code>max</code>)</td></tr>
-                <tr><td><code>/mode</code></td><td>—</td><td><code>/mode [name]</code></td><td>Show or switch execution mode (<code>standard</code> / <code>rlm</code>)</td></tr>
+                <tr><td><code>/mode</code></td><td>—</td><td><code>/mode [name]</code></td><td>Show the session's execution mode (<code>standard</code> / <code>rlm</code>); it is locked for the session, so changing it requires a new session started with <code>--execution-mode</code></td></tr>
                 <tr><td><code>/provider</code></td><td><code>/login</code></td><td><code>/provider</code></td><td>Switch, add, or re-authenticate providers</td></tr>
                 <tr><td><code>/logout</code></td><td>—</td><td><code>/logout</code></td><td>Remove stored credentials for active provider</td></tr>
                 <tr><td><code>/retry</code></td><td>—</td><td><code>/retry</code></td><td>Replay the previous turn payload</td></tr>

@@ -368,7 +368,12 @@ def summarize_lashlang(report: dict[str, Any]) -> str:
                 f"allocs={row.get('allocations_per_iter', 0):>8}  "
                 f"bytes={fmt_bytes(row.get('allocated_bytes_per_iter', 0)):>10s}"
             )
-            if "process_cache_hits" in row or "program_cache_hits" in row or "artifact_bytes" in row:
+            if (
+                "process_cache_hits" in row
+                or "program_cache_hits" in row
+                or "linked_cache_hits" in row
+                or "artifact_bytes" in row
+            ):
                 extras = []
                 if "artifact_bytes" in row:
                     extras.append(f"artifact={fmt_bytes(row.get('artifact_bytes', 0))}")
@@ -385,6 +390,13 @@ def summarize_lashlang(report: dict[str, Any]) -> str:
                         f"{row.get('program_cache_hits', 0)}h/"
                         f"{row.get('program_cache_misses', 0)}m/"
                         f"{row.get('program_cache_evictions', 0)}e"
+                    )
+                if "linked_cache_hits" in row:
+                    extras.append(
+                        "linked_cache="
+                        f"{row.get('linked_cache_hits', 0)}h/"
+                        f"{row.get('linked_cache_misses', 0)}m/"
+                        f"{row.get('linked_cache_evictions', 0)}e"
                     )
                 lines.append(f"    {' '.join(extras)}")
         lines.append("")

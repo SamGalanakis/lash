@@ -1,4 +1,25 @@
 use super::*;
+use std::future::Future;
+
+fn run_async_test_on_large_stack<F, Fut>(name: &str, test: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(test())
+        })
+        .expect("spawn large-stack test thread")
+        .join()
+        .expect("large-stack test thread")
+}
 
 struct BlockingAppTools {
     entered_tx: StdMutex<Option<oneshot::Sender<()>>>,
@@ -284,6 +305,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
             TurnEvent::CodeBlockStarted {
                 language: "lashlang".to_string(),
                 code: "x = await tools.app_lookup({})?".to_string(),
+                graph_key: None,
             },
         ))
         .await;
@@ -309,6 +331,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
                 success: true,
                 duration_ms: 4,
                 tool_call_ids: vec!["call-1".to_string()],
+                graph_key: None,
             },
         ))
         .await;
@@ -317,7 +340,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
     assert_eq!(activities.len(), 3);
     assert!(matches!(
         &activities[0].event,
-        TurnEvent::CodeBlockStarted { language, code }
+        TurnEvent::CodeBlockStarted { language, code, .. }
             if language == "lashlang" && code == "x = await tools.app_lookup({})?"
     ));
     assert!(matches!(
@@ -457,8 +480,14 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
     Ok(())
 }
 
-#[tokio::test]
-async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
+#[test]
+fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
+    run_async_test_on_large_stack("rlm-live-exec-boundary-test", || {
+        rlm_tool_calls_stream_from_live_exec_boundary_inner()
+    })
+}
+
+async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
     let core = LashCore::rlm()
         .provider(queued_text_provider(vec![
             "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit \"done\"\n```",
@@ -520,11 +549,25 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
         output.value_for_projection(),
         serde_json::json!({ "ok": true })
     );
+    let TurnEvent::CodeBlockStarted {
+        graph_key: started_graph_key,
+        ..
+    } = &events[code_started].event
+    else {
+        unreachable!();
+    };
+    assert!(
+        started_graph_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("effect:rlm-live-tool-events:")),
+        "missing foreground graph key on CodeBlockStarted: {started_graph_key:?}"
+    );
     let TurnEvent::CodeBlockCompleted {
         language,
         success,
         error,
         tool_call_ids,
+        graph_key: completed_graph_key,
         ..
     } = &events[code_completed].event
     else {
@@ -535,6 +578,7 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
     assert!(error.is_none());
     assert_eq!(call_id.as_ref(), tool_call_ids.first());
     assert_eq!(tool_call_ids.len(), 1);
+    assert_eq!(completed_graph_key, started_graph_key);
     let read_view = result.state.read_view();
     let active_matches = read_view
         .tool_calls()
@@ -565,8 +609,14 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn process_control_lists_started_lashlang_process_until_awaited() -> Result<()> {
+#[test]
+fn process_control_lists_started_lashlang_process_until_awaited() -> Result<()> {
+    run_async_test_on_large_stack("process-control-lashlang-process-test", || {
+        process_control_lists_started_lashlang_process_until_awaited_inner()
+    })
+}
+
+async fn process_control_lists_started_lashlang_process_until_awaited_inner() -> Result<()> {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let core = LashCore::rlm()
@@ -622,11 +672,30 @@ submit value
     Ok(())
 }
 
-#[tokio::test]
-async fn process_tracking_graph_store_observes_lashlang_process_from_facade() -> Result<()> {
+#[test]
+fn lashlang_execution_graph_store_observes_lashlang_process_from_facade() -> Result<()> {
+    std::thread::Builder::new()
+        .name("lashlang-graph-store-facade-test".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(
+                    lashlang_execution_graph_store_observes_lashlang_process_from_facade_inner(),
+                )
+        })
+        .expect("spawn graph-store facade test thread")
+        .join()
+        .expect("graph-store facade test thread")
+}
+
+async fn lashlang_execution_graph_store_observes_lashlang_process_from_facade_inner() -> Result<()>
+{
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
-    let graph_store = Arc::new(crate::tracing::TraceProcessGraphStore::default());
+    let graph_store = Arc::new(crate::tracing::TraceLashlangGraphStore::default());
     let core = LashCore::rlm()
         .provider(queued_text_provider(vec![
             r#"```lashlang
@@ -643,11 +712,11 @@ submit value
         .tools(Arc::new(BlockingAppTools::new(entered_tx, release_rx)))
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
-        .process_tracking_sink(Some(
+        .lashlang_execution_sink(Some(
             Arc::clone(&graph_store) as Arc<dyn crate::tracing::TraceSink>
         ))
         .build()?;
-    let session = core.session("rlm-process-graph-store").open().await?;
+    let session = core.session("rlm-lashlang-graph-store").open().await?;
     let turn_session = session.clone();
     let turn =
         tokio::spawn(async move { turn_session.turn(TurnInput::text("start tool")).run().await });
@@ -663,17 +732,18 @@ submit value
         .find(|process| process.descriptor.label.as_deref() == Some("lookup"))
         .expect("running lookup process");
     let graph = graph_store
-        .graph(&running.process_id)
-        .expect("process graph snapshot");
-    assert_eq!(graph.process_id, running.process_id);
-    assert_eq!(graph.process_name, "lookup");
-    assert_eq!(graph.status, lash_core::TraceProcessStatus::Running);
+        .graph(&format!("process:{}", running.process_id))
+        .expect("Lashlang graph snapshot");
+    assert_eq!(graph.graph_key, format!("process:{}", running.process_id));
+    assert_eq!(graph.entry_kind, "process");
+    assert_eq!(graph.entry_name, "lookup");
+    assert_eq!(graph.status, lash_core::TraceLashlangStatus::Running);
     assert!(!graph.nodes.is_empty());
     assert!(
         graph_store
             .graphs()
             .iter()
-            .any(|graph| graph.process_name == "lookup")
+            .any(|graph| graph.entry_name == "lookup")
     );
 
     release_tx.send(()).expect("release tool provider");

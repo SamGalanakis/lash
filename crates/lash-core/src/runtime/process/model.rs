@@ -659,6 +659,8 @@ pub struct ProcessHandleSummary {
     pub id: ProcessId,
     pub process_id: ProcessId,
     pub descriptor: ProcessHandleDescriptor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<ProcessDefinitionSummary>,
     pub status: ProcessLifecycleStatus,
 }
 
@@ -674,16 +676,24 @@ impl ProcessHandleSummary {
             id: process_id.clone(),
             process_id,
             descriptor,
+            definition: None,
             status,
         }
     }
 
+    pub fn with_definition(mut self, definition: Option<ProcessDefinitionSummary>) -> Self {
+        self.definition = definition;
+        self
+    }
+
     pub fn from_grant_record(grant: ProcessHandleGrant, record: ProcessRecord) -> Self {
+        let definition = ProcessDefinitionSummary::from_input(record.input.as_ref());
         Self::new(
             record.id,
             grant.descriptor,
             ProcessLifecycleStatus::from(record.status),
         )
+        .with_definition(definition)
     }
 }
 
@@ -708,6 +718,183 @@ impl ProcessCancelSummary {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessDefinitionSummary {
+    pub name: String,
+}
+
+impl ProcessDefinitionSummary {
+    pub fn from_input(input: &ProcessInput) -> Option<Self> {
+        match input {
+            ProcessInput::LashlangProcess { process_name, .. } => Some(Self {
+                name: process_name.clone(),
+            }),
+            ProcessInput::ToolCall { .. }
+            | ProcessInput::SessionTurn { .. }
+            | ProcessInput::External { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessDefinitionSelector {
+    module_ref: lashlang::ModuleRef,
+    required_surface_ref: lashlang::RequiredSurfaceRef,
+    process_ref: lashlang::ProcessRef,
+    process_name: String,
+}
+
+impl ProcessDefinitionSelector {
+    pub fn decode(value: &serde_json::Value) -> Result<Self, String> {
+        if value
+            .get(lashlang::LASH_PROCESS_VALUE_KEY)
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            return Err("definition must be a process definition value".to_string());
+        }
+        Ok(Self {
+            module_ref: decode_process_definition_field(
+                value,
+                lashlang::LASH_MODULE_REF_KEY,
+                "definition",
+            )?,
+            required_surface_ref: decode_process_definition_field(
+                value,
+                lashlang::LASH_REQUIRED_SURFACE_REF_KEY,
+                "definition",
+            )?,
+            process_ref: decode_process_definition_field(
+                value,
+                lashlang::LASH_PROCESS_REF_KEY,
+                "definition",
+            )?,
+            process_name: value
+                .get(lashlang::LASH_PROCESS_NAME_KEY)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "definition is missing its process name".to_string())?
+                .to_string(),
+        })
+    }
+
+    pub fn matches_input(&self, input: &ProcessInput) -> bool {
+        match input {
+            ProcessInput::LashlangProcess {
+                module_ref,
+                process_ref,
+                required_surface_ref,
+                process_name,
+                ..
+            } => {
+                self.module_ref == *module_ref
+                    && self.required_surface_ref == *required_surface_ref
+                    && self.process_ref == *process_ref
+                    && self.process_name == *process_name
+            }
+            ProcessInput::ToolCall { .. }
+            | ProcessInput::SessionTurn { .. }
+            | ProcessInput::External { .. } => false,
+        }
+    }
+}
+
+fn decode_process_definition_field<T: serde::de::DeserializeOwned>(
+    value: &serde_json::Value,
+    field: &'static str,
+    label: &'static str,
+) -> Result<T, String> {
+    serde_json::from_value(
+        value
+            .get(field)
+            .cloned()
+            .ok_or_else(|| format!("{label} is missing {field}"))?,
+    )
+    .map_err(|err| format!("{label} has invalid {field}: {err}"))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProcessStatusFilter {
+    #[default]
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Any,
+}
+
+impl ProcessStatusFilter {
+    pub fn decode(value: Option<&str>) -> Result<Self, String> {
+        match value.unwrap_or("running") {
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "any" => Ok(Self::Any),
+            other => Err(format!(
+                "processes.list status must be `running`, `completed`, `failed`, `cancelled`, or `any`, got `{other}`"
+            )),
+        }
+    }
+
+    pub fn list_mode(self) -> ProcessListMode {
+        match self {
+            Self::Running => ProcessListMode::Live,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Any => ProcessListMode::All,
+        }
+    }
+
+    pub fn matches(self, status: ProcessLifecycleStatus) -> bool {
+        match self {
+            Self::Running => status == ProcessLifecycleStatus::Running,
+            Self::Completed => status == ProcessLifecycleStatus::Completed,
+            Self::Failed => status == ProcessLifecycleStatus::Failed,
+            Self::Cancelled => status == ProcessLifecycleStatus::Cancelled,
+            Self::Any => true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessListFilter {
+    pub definition: Option<ProcessDefinitionSelector>,
+    pub status: ProcessStatusFilter,
+}
+
+impl ProcessListFilter {
+    pub fn decode(args: &serde_json::Value) -> Result<Self, String> {
+        let map = args
+            .as_object()
+            .ok_or_else(|| "processes.list expects a record of process filters".to_string())?;
+        for key in map.keys() {
+            match key.as_str() {
+                "definition" | "status" => {}
+                _ => return Err(format!("processes.list unknown filter `{key}`")),
+            }
+        }
+        let definition = args
+            .get("definition")
+            .map(ProcessDefinitionSelector::decode)
+            .transpose()?;
+        let status =
+            ProcessStatusFilter::decode(args.get("status").and_then(serde_json::Value::as_str))?;
+        Ok(Self { definition, status })
+    }
+
+    pub fn list_mode(&self) -> ProcessListMode {
+        self.status.list_mode()
+    }
+
+    pub fn matches_entry(&self, entry: &ProcessHandleGrantEntry) -> bool {
+        let (_grant, record) = entry;
+        let status = ProcessLifecycleStatus::from(&record.status);
+        self.status.matches(status)
+            && self
+                .definition
+                .as_ref()
+                .is_none_or(|definition| definition.matches_input(record.input.as_ref()))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessListMode {
@@ -721,16 +908,6 @@ impl ProcessListMode {
         match self {
             Self::Live => "live",
             Self::All => "all",
-        }
-    }
-
-    pub fn from_history_arg(value: Option<&str>) -> Result<Self, String> {
-        match value.unwrap_or("live") {
-            "live" => Ok(Self::Live),
-            "all" => Ok(Self::All),
-            other => Err(format!(
-                "processes.list history must be `live` or `all`, got `{other}`"
-            )),
         }
     }
 }
@@ -748,4 +925,110 @@ pub struct ProcessSessionDeleteReport {
     pub deleted_wake_count: usize,
     pub cancel_process_ids: Vec<String>,
     pub preserved_process_ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn process_ref(component: &str, pos: usize) -> lashlang::ProcessRef {
+        lashlang::ProcessRef {
+            component: lashlang::ContentHash::new(component),
+            pos: pos as u32,
+        }
+    }
+
+    fn process_value(
+        module_ref: &lashlang::ModuleRef,
+        surface_ref: &lashlang::RequiredSurfaceRef,
+        process_ref: &lashlang::ProcessRef,
+        name: &str,
+    ) -> serde_json::Value {
+        let mut value = serde_json::Map::new();
+        value.insert(lashlang::LASH_PROCESS_VALUE_KEY.to_string(), json!(true));
+        value.insert(lashlang::LASH_MODULE_REF_KEY.to_string(), json!(module_ref));
+        value.insert(
+            lashlang::LASH_REQUIRED_SURFACE_REF_KEY.to_string(),
+            json!(surface_ref),
+        );
+        value.insert(
+            lashlang::LASH_PROCESS_REF_KEY.to_string(),
+            json!(process_ref),
+        );
+        value.insert(lashlang::LASH_PROCESS_NAME_KEY.to_string(), json!(name));
+        serde_json::Value::Object(value)
+    }
+
+    fn lashlang_entry(
+        process_id: &str,
+        module_ref: lashlang::ModuleRef,
+        surface_ref: lashlang::RequiredSurfaceRef,
+        process_ref: lashlang::ProcessRef,
+        process_name: &str,
+        status: ProcessStatus,
+    ) -> ProcessHandleGrantEntry {
+        let mut record = ProcessRecord::from_registration(ProcessRegistration::new(
+            process_id,
+            ProcessInput::LashlangProcess {
+                module_ref,
+                process_ref,
+                required_surface_ref: surface_ref,
+                process_name: process_name.to_string(),
+                args: serde_json::Map::new(),
+            },
+        ));
+        record.status = status;
+        (
+            ProcessHandleGrant {
+                session_id: "session".to_string(),
+                process_id: process_id.to_string(),
+                descriptor: ProcessHandleDescriptor::new(Some("lashlang"), Some(process_name)),
+            },
+            record,
+        )
+    }
+
+    #[test]
+    fn process_list_filter_matches_definition_and_status() {
+        let module_ref = lashlang::ModuleRef::new(&lashlang::ContentHash::new("module"));
+        let surface_ref = lashlang::RequiredSurfaceRef::new(&lashlang::ContentHash::new("surface"));
+        let target_ref = process_ref("target", 0);
+        let other_ref = process_ref("other", 1);
+        let filter = ProcessListFilter::decode(&json!({
+            "definition": process_value(&module_ref, &surface_ref, &target_ref, "target"),
+            "status": "completed"
+        }))
+        .expect("decode filter");
+
+        let matching = lashlang_entry(
+            "matching",
+            module_ref.clone(),
+            surface_ref.clone(),
+            target_ref,
+            "target",
+            ProcessStatus::Completed {
+                await_output: ProcessAwaitOutput::from_tool_output(crate::ToolCallOutput::success(
+                    json!(true),
+                )),
+            },
+        );
+        let wrong_definition = lashlang_entry(
+            "wrong-definition",
+            module_ref,
+            surface_ref,
+            other_ref,
+            "other",
+            ProcessStatus::Completed {
+                await_output: ProcessAwaitOutput::from_tool_output(crate::ToolCallOutput::success(
+                    json!(true),
+                )),
+            },
+        );
+
+        assert_eq!(filter.list_mode(), ProcessListMode::All);
+        assert!(filter.matches_entry(&matching));
+        assert!(!filter.matches_entry(&wrong_definition));
+    }
 }

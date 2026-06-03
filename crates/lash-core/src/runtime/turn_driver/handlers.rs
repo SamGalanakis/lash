@@ -186,18 +186,53 @@ impl RuntimeTurnDriver<'_> {
                 }),
             );
         }
+        let invocation = match self.turn_effect_invocation(machine, id, RuntimeEffectKind::ExecCode)
+        {
+            Ok(invocation) => invocation,
+            Err(err) => {
+                let message = err.to_string();
+                send_turn_activity(
+                    event_tx,
+                    code_correlation_id.clone(),
+                    TurnEvent::CodeBlockStarted {
+                        language: "lashlang".to_string(),
+                        code: code.clone(),
+                        graph_key: None,
+                    },
+                )
+                .await;
+                send_turn_activity(
+                    event_tx,
+                    code_correlation_id.clone(),
+                    TurnEvent::CodeBlockCompleted {
+                        language: "lashlang".to_string(),
+                        output: String::new(),
+                        error: Some(message),
+                        success: false,
+                        duration_ms: 0,
+                        tool_call_ids: Vec::new(),
+                        graph_key: None,
+                    },
+                )
+                .await;
+                self.fail_or_abort_runtime_effect_controller(machine, err)?;
+                return Ok(());
+            }
+        };
+        let graph_key = foreground_exec_graph_key(&invocation);
         send_turn_activity(
             event_tx,
             code_correlation_id.clone(),
             TurnEvent::CodeBlockStarted {
                 language: "lashlang".to_string(),
                 code: code.clone(),
+                graph_key: graph_key.clone(),
             },
         )
         .await;
         let exec_created_at = std::time::Instant::now();
         let result = match self
-            .invoke_turn_exec_effect(machine, id, code.clone(), event_tx, cancel)
+            .invoke_turn_exec_effect(machine, invocation, code.clone(), event_tx, cancel)
             .await
         {
             Ok(result) => result,
@@ -213,6 +248,7 @@ impl RuntimeTurnDriver<'_> {
                         success: false,
                         duration_ms: exec_created_at.elapsed().as_millis() as u64,
                         tool_call_ids: Vec::new(),
+                        graph_key: graph_key.clone(),
                     },
                 )
                 .await;
@@ -236,6 +272,7 @@ impl RuntimeTurnDriver<'_> {
                             .iter()
                             .filter_map(|record| record.call_id.clone())
                             .collect(),
+                        graph_key: graph_key.clone(),
                     },
                 )
                 .await;
@@ -251,6 +288,7 @@ impl RuntimeTurnDriver<'_> {
                         success: false,
                         duration_ms: exec_created_at.elapsed().as_millis() as u64,
                         tool_call_ids: Vec::new(),
+                        graph_key: graph_key.clone(),
                     },
                 )
                 .await;
@@ -306,5 +344,44 @@ impl RuntimeTurnDriver<'_> {
             },
         });
         Ok(())
+    }
+}
+
+fn foreground_exec_graph_key(invocation: &RuntimeInvocation) -> Option<String> {
+    let RuntimeSubject::Effect { effect_id, kind } = &invocation.subject else {
+        return None;
+    };
+    if *kind != RuntimeEffectKind::ExecCode {
+        return None;
+    }
+    Some(match invocation.scope.turn_id.as_deref() {
+        Some(turn_id) if !turn_id.is_empty() => {
+            format!(
+                "effect:{}:{turn_id}:{effect_id}",
+                invocation.scope.session_id
+            )
+        }
+        _ => format!("effect:{}:{effect_id}", invocation.scope.session_id),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreground_exec_graph_key_uses_runtime_invocation_identity() {
+        let invocation = RuntimeInvocation::effect(
+            RuntimeScope::for_turn("session-1", "turn-1", 2, 3),
+            "effect-7",
+            RuntimeEffectKind::ExecCode,
+            "replay-key",
+            Some("0".repeat(64)),
+        );
+
+        assert_eq!(
+            foreground_exec_graph_key(&invocation).as_deref(),
+            Some("effect:session-1:turn-1:effect-7")
+        );
     }
 }

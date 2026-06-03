@@ -6,10 +6,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::ast::{
-    AssignPathStep, BinaryOp, Declaration, Expr, ProcessDecl, Program, ResourceRefExpr, TypeExpr,
-    UnaryOp,
+    AssignPathStep, BinaryOp, Declaration, Expr, LabelMetadata, ProcessDecl, Program,
+    ResourceRefExpr, TypeExpr, UnaryOp,
 };
-use crate::linker::{LashlangAbilities, ResourceCatalog};
+use crate::linker::{LashlangAbilities, LashlangLanguageFeatures, ResourceCatalog};
 
 pub const LASHLANG_SEMANTIC_HASH_VERSION: &str = "lashlang-semantic-v2";
 pub const LASHLANG_COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -114,6 +114,8 @@ pub struct SurfaceRequirements {
     pub resources: ResourceCatalog,
     #[serde(default)]
     pub abilities: LashlangAbilities,
+    #[serde(default)]
+    pub language_features: LashlangLanguageFeatures,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,16 +403,20 @@ fn write_surface_requirements(writer: &mut HashWriter, requirements: &SurfaceReq
     writer.bool(requirements.abilities.sleep);
     writer.bool(requirements.abilities.process_signals);
     writer.bool(requirements.abilities.triggers);
+    if requirements.language_features.label_annotations {
+        writer.atom("language-features");
+        writer.atom("label-annotations");
+    }
     writer.atom("resources");
     writer.atom("modules");
-    writer.usize(requirements.resources.module_instances.len());
-    for (module_path, module) in &requirements.resources.module_instances {
+    writer.usize(requirements.resources.module_instances().count());
+    for (module_path, module) in requirements.resources.module_instances() {
         writer.atom(module_path);
         writer.atom(&module.resource_type);
         writer.atom(&module.alias);
     }
-    writer.usize(requirements.resources.resource_types.len());
-    for (resource_type, catalog) in &requirements.resources.resource_types {
+    writer.usize(requirements.resources.resource_types().count());
+    for (resource_type, catalog) in requirements.resources.resource_types() {
         writer.atom(resource_type);
         writer.atom("operations");
         writer.usize(catalog.operations.len());
@@ -421,19 +427,25 @@ fn write_surface_requirements(writer: &mut HashWriter, requirements: &SurfaceReq
             write_type(writer, &binding.output_ty);
         }
     }
+    writer.atom("named-data-types");
+    writer.usize(requirements.resources.named_data_types().count());
+    for (name, data_type) in requirements.resources.named_data_types() {
+        writer.atom(name);
+        write_type(writer, data_type.ty());
+    }
     writer.atom("constructors");
-    writer.usize(requirements.resources.value_constructors.len());
-    for (path, constructor) in &requirements.resources.value_constructors {
+    writer.usize(requirements.resources.value_constructors().count());
+    for (path, constructor) in requirements.resources.value_constructors() {
         writer.atom(path);
         writer.atom(&constructor.type_name);
         write_type(writer, &constructor.input_ty);
         write_type(writer, &constructor.output_ty);
     }
     writer.atom("trigger-sources");
-    writer.usize(requirements.resources.trigger_sources.len());
-    for (source_ty, binding) in &requirements.resources.trigger_sources {
+    writer.usize(requirements.resources.trigger_sources().count());
+    for (source_ty, binding) in requirements.resources.trigger_sources() {
         writer.atom(source_ty);
-        write_type(writer, &binding.event_ty);
+        writer.atom(binding.event_type_name());
     }
 }
 
@@ -473,6 +485,9 @@ fn write_process(writer: &mut HashWriter, process: &ProcessDecl) {
             write_type(writer, ty);
         }
         None => writer.atom("no-return"),
+    }
+    if let Some(label) = &process.label {
+        write_label_metadata(writer, label);
     }
     let mut normalizer = NameNormalizer::default();
     for param in &process.params {
@@ -549,6 +564,11 @@ fn write_expr(writer: &mut HashWriter, expr: &Expr, normalizer: &NameNormalizer)
             for expression in expressions {
                 write_expr(writer, expression, normalizer);
             }
+        }
+        Expr::LabelAnnotated { label, expr } => {
+            writer.atom("label-annotated");
+            write_label_metadata(writer, label);
+            write_expr(writer, expr, normalizer);
         }
         Expr::Null => writer.atom("null"),
         Expr::Bool(value) => {
@@ -712,6 +732,18 @@ fn write_expr(writer: &mut HashWriter, expr: &Expr, normalizer: &NameNormalizer)
             writer.atom("type-literal");
             write_type(writer, ty);
         }
+    }
+}
+
+fn write_label_metadata(writer: &mut HashWriter, label: &LabelMetadata) {
+    writer.atom("label");
+    writer.atom(label.title.as_str());
+    match &label.description {
+        Some(description) => {
+            writer.atom("description");
+            writer.atom(description.as_str());
+        }
+        None => writer.atom("no-description"),
     }
 }
 
@@ -931,6 +963,9 @@ impl<'program> RequirementsCollector<'program> {
                 Declaration::Type(type_decl) => self.collect_type(&type_decl.ty),
                 Declaration::Process(process) => {
                     self.requirements.abilities.processes = true;
+                    if process.label.is_some() {
+                        self.requirements.language_features.label_annotations = true;
+                    }
                     let mut scope = BTreeMap::new();
                     for param in &process.params {
                         self.collect_type(&param.ty);
@@ -984,6 +1019,20 @@ impl<'program> RequirementsCollector<'program> {
             }
             TypeExpr::TriggerHandle(event) => self.collect_type(event),
             TypeExpr::Ref(name)
+                if !self.type_names.contains(name.as_str())
+                    && self.is_host_data_type_name(name) =>
+            {
+                let data_type = self
+                    .resource_catalog
+                    .and_then(|catalog| catalog.resolve_named_data_type(name.as_str()))
+                    .expect("checked host data type presence")
+                    .clone();
+                self.requirements
+                    .resources
+                    .add_named_data_type(data_type)
+                    .expect("host data type requirement came from host catalog");
+            }
+            TypeExpr::Ref(name)
                 if !self.type_names.contains(name.as_str()) && self.is_resource_type_name(name) =>
             {
                 self.requirements
@@ -1000,6 +1049,12 @@ impl<'program> RequirementsCollector<'program> {
             | TypeExpr::Enum(_)
             | TypeExpr::Ref(_) => {}
         }
+    }
+
+    fn is_host_data_type_name(&self, name: &str) -> bool {
+        self.resource_catalog
+            .map(|catalog| catalog.has_named_data_type(name))
+            .unwrap_or(false)
     }
 
     fn is_resource_type_name(&self, name: &str) -> bool {
@@ -1020,6 +1075,10 @@ impl<'program> RequirementsCollector<'program> {
                     last = self.collect_expr(expression, scope);
                 }
                 last
+            }
+            Expr::LabelAnnotated { expr, .. } => {
+                self.requirements.language_features.label_annotations = true;
+                self.collect_expr(expr, scope)
             }
             Expr::Variable(name) => scope.get(name.as_str()).cloned(),
             Expr::List(items) => {
@@ -1097,8 +1156,8 @@ impl<'program> RequirementsCollector<'program> {
             Expr::HostValueConstructor { type_name, input } => {
                 if let Some(catalog) = self.resource_catalog
                     && let Some(constructor) = catalog
-                        .value_constructors
-                        .values()
+                        .value_constructors()
+                        .map(|(_, constructor)| constructor)
                         .find(|constructor| constructor.type_name == type_name.as_str())
                 {
                     self.requirements.resources.add_value_constructor(
@@ -1108,11 +1167,15 @@ impl<'program> RequirementsCollector<'program> {
                     );
                 }
                 if let Some(catalog) = self.resource_catalog
-                    && let Some(binding) = catalog.trigger_sources.get(type_name.as_str())
+                    && let Some(binding) = catalog.resolve_trigger_source(type_name.as_str())
                 {
                     self.requirements
                         .resources
-                        .add_trigger_source_type(type_name.to_string(), binding.event_ty.clone());
+                        .add_trigger_source_type(
+                            type_name.to_string(),
+                            binding.event_type().clone(),
+                        )
+                        .expect("trigger source requirement came from host catalog");
                 }
                 self.collect_expr(input, scope);
                 Some(RequirementBinding::Value)

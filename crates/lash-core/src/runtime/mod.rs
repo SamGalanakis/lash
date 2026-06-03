@@ -106,21 +106,21 @@ pub use process::TestLocalProcessRegistry;
 pub use process::{
     DefaultProcessCancelAbility, PROCESS_LEASE_SCHEMA_VERSION, PreparedProcessEventAppend,
     ProcessAwaitOutput, ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest,
-    ProcessCancelSource, ProcessCancelSummary, ProcessEvent, ProcessEventAppendRequest,
-    ProcessEventAppendResult, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
-    ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-    ProcessHandleGrantEntry, ProcessHandleSummary, ProcessId, ProcessInput, ProcessLease,
-    ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListMode, ProcessOpScope,
-    ProcessProvenance, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessScope,
-    ProcessScopeId, ProcessService, ProcessSessionDeleteReport, ProcessStartGrant,
-    ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessTerminalSemantics,
-    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
-    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, UnavailableProcessService,
-    current_epoch_ms, epoch_ms_from_system_time, lashlang_process_event_types,
-    materialize_process_event_semantics, prepare_process_event_append,
-    prepare_process_registration, process_event_payload_hash, process_wake_delivery,
-    process_wake_input_from_event_payload, process_wake_turn_cause, process_wake_turn_text,
-    require_event_replay, system_time_from_epoch_ms,
+    ProcessCancelSource, ProcessCancelSummary, ProcessDefinitionSelector, ProcessDefinitionSummary,
+    ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSemantics,
+    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary,
+    ProcessId, ProcessInput, ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus,
+    ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessProvenance, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessScope, ProcessScopeId, ProcessService,
+    ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions, ProcessStartRequest,
+    ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics, ProcessTerminalSpec,
+    ProcessTerminalState, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
+    ProcessWakeDelivery, ProcessWakeSpec, UnavailableProcessService, current_epoch_ms,
+    epoch_ms_from_system_time, lashlang_process_event_types, materialize_process_event_semantics,
+    prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
+    process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
+    process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
 };
 pub use process_work_runner::{
     InlineProcessRunHandle, ProcessRunHandle, ProcessWorkPoke, ProcessWorkRunner,
@@ -673,6 +673,8 @@ pub enum TurnEvent {
     CodeBlockStarted {
         language: String,
         code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_key: Option<String>,
     },
     CodeBlockCompleted {
         language: String,
@@ -681,6 +683,8 @@ pub enum TurnEvent {
         success: bool,
         duration_ms: u64,
         tool_call_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graph_key: Option<String>,
     },
     ToolCallStarted {
         call_id: Option<String>,
@@ -805,6 +809,12 @@ impl<'a> TurnOptions<'a> {
 
     pub(crate) fn turn_events_or_noop(&self) -> &'a dyn TurnActivitySink {
         self.turn_events.unwrap_or(&NOOP_TURN_ACTIVITY_SINK)
+    }
+
+    pub(crate) fn durable_turn_scope_id(&self) -> Option<&str> {
+        self.durable_turn_scope
+            .as_ref()
+            .map(DurableTurnScope::turn_id)
     }
 
     /// Return the caller-supplied durable turn scope, or build a fresh inline scope

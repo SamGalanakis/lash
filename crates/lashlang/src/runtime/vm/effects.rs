@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::ProcessTrackingChild;
+use crate::{LashlangExecutionCallSite, LashlangExecutionChild};
 
 use super::super::host::{
     AbilityOp, AbilityResult, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessStart,
@@ -11,7 +11,7 @@ use super::super::{
     record_with_capacity, success, unwrap_tool_result,
 };
 use super::control::VmOutcome;
-use super::{ActiveProcessTrackingNode, Vm};
+use super::{ActiveLashlangExecutionNode, Vm};
 
 #[derive(Clone, Copy)]
 pub(super) enum VmEffect {
@@ -37,17 +37,17 @@ impl<H: ExecutionHost> Vm<'_, H> {
         effect: VmEffect,
         instruction_ip: usize,
     ) -> Result<Option<VmOutcome>, RuntimeError> {
-        let active = self.begin_process_tracking(instruction_ip);
+        let active = self.begin_lashlang_execution(instruction_ip);
         let result = self.resolve_effect_inner(effect, active.as_ref()).await;
         match (&result, active.as_ref()) {
             (Ok(Some(VmOutcome::ProcessFailed(value))), Some(active)) => {
-                self.fail_process_tracking(active, value.to_string());
+                self.fail_lashlang_execution(active, value.to_string());
             }
             (Ok(_), Some(active)) => {
-                self.complete_process_tracking(active);
+                self.complete_lashlang_execution(active);
             }
             (Err(error), Some(active)) => {
-                self.fail_process_tracking(active, error.to_string());
+                self.fail_lashlang_execution(active, error.to_string());
             }
             _ => {}
         }
@@ -57,7 +57,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
     async fn resolve_effect_inner(
         &mut self,
         effect: VmEffect,
-        active: Option<&ActiveProcessTrackingNode>,
+        active: Option<&ActiveLashlangExecutionNode>,
     ) -> Result<Option<VmOutcome>, RuntimeError> {
         match effect {
             VmEffect::ResourceCall { operation, argc } => {
@@ -68,6 +68,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
                         receiver,
                         operation: self.chunk.names[operation].text.to_string(),
                         args,
+                        call_site: active.map(lashlang_execution_call_site),
                     }))
                     .await
                 {
@@ -87,6 +88,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
                         receiver,
                         operation: self.chunk.names[operation].text.to_string(),
                         args,
+                        call_site: active.map(lashlang_execution_call_site),
                     }))
                     .await
                     .and_then(|result| result.into_value("module operation"))
@@ -137,7 +139,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 {
                     self.observe_child_started(
                         active,
-                        ProcessTrackingChild {
+                        LashlangExecutionChild {
                             process_id,
                             module_ref: child_module_ref,
                             process_ref,
@@ -341,6 +343,13 @@ impl<H: ExecutionHost> Vm<'_, H> {
                     message: format!("`?` unwrapped failed tool result: {error}"),
                 }),
         }
+    }
+}
+
+fn lashlang_execution_call_site(active: &ActiveLashlangExecutionNode) -> LashlangExecutionCallSite {
+    LashlangExecutionCallSite {
+        site: active.site.clone(),
+        occurrence: active.occurrence,
     }
 }
 

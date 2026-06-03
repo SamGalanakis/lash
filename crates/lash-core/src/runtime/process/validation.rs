@@ -9,7 +9,7 @@ use super::events::{
 use super::materialization::materialize_process_event_semantics;
 use super::model::{ProcessRecord, ProcessRegistration, ProcessStatus};
 use super::time::system_time_from_epoch_ms;
-use super::wake::process_wake_delivery;
+use super::wake::{ProcessWakeDeliveryRequest, process_wake_delivery};
 
 #[derive(Clone, Debug)]
 pub struct PreparedProcessEventAppend {
@@ -40,16 +40,16 @@ pub fn prepare_process_event_append(
                 .clone()
                 .zip(request.wake_target_scope.clone())
                 .map(|(wake, target_scope)| {
-                    process_wake_delivery(
+                    process_wake_delivery(ProcessWakeDeliveryRequest {
                         target_scope,
-                        process_id.to_string(),
-                        existing.sequence,
-                        existing.event_type.clone(),
-                        existing.invocation.clone(),
-                        record.provenance.caused_by.clone(),
+                        process_id: process_id.to_string(),
+                        sequence: existing.sequence,
+                        event_type: existing.event_type.clone(),
+                        event_invocation: existing.invocation.clone(),
+                        process_caused_by: record.provenance.caused_by.clone(),
                         wake,
-                        existing.occurred_at,
-                    )
+                        occurred_at: existing.occurred_at,
+                    })
                 })
                 .transpose()?;
             return Ok(PreparedProcessEventAppend {
@@ -115,16 +115,16 @@ pub fn prepare_process_event_append(
         .clone()
         .zip(wake_target_scope)
         .map(|(wake, target_scope)| {
-            process_wake_delivery(
+            process_wake_delivery(ProcessWakeDeliveryRequest {
                 target_scope,
-                process_id.to_string(),
-                event.sequence,
-                event.event_type.clone(),
-                event.invocation.clone(),
-                record.provenance.caused_by.clone(),
+                process_id: process_id.to_string(),
+                sequence: event.sequence,
+                event_type: event.event_type.clone(),
+                event_invocation: event.invocation.clone(),
+                process_caused_by: record.provenance.caused_by.clone(),
                 wake,
-                event.occurred_at,
-            )
+                occurred_at: event.occurred_at,
+            })
         })
         .transpose()?;
     Ok(PreparedProcessEventAppend {

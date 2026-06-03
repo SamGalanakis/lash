@@ -224,13 +224,13 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    pub fn with_process_tracking_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
-        self.env.core.tracing.process_tracking_sink = sink;
+    pub fn with_lashlang_execution_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
+        self.env.core.tracing.lashlang_execution_sink = sink;
         self
     }
 
-    pub fn with_process_tracking_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.env.core.tracing.process_tracking_sink =
+    pub fn with_lashlang_execution_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.env.core.tracing.lashlang_execution_sink =
             path.map(|path| Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn TraceSink>);
         self
     }

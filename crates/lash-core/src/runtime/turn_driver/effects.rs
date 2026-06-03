@@ -55,12 +55,11 @@ impl RuntimeTurnDriver<'_> {
     pub(super) async fn invoke_turn_exec_effect(
         &mut self,
         machine: &mut TurnMachine,
-        id: crate::sansio::EffectId,
+        invocation: crate::RuntimeInvocation,
         code: String,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<Result<crate::ExecResponse, String>, RuntimeEffectControllerError> {
-        let invocation = self.turn_effect_invocation(machine, id, RuntimeEffectKind::ExecCode)?;
         self.execute_typed_turn_effect(
             machine,
             event_tx,
@@ -246,7 +245,11 @@ impl RuntimeTurnDriver<'_> {
         let context = self
             .execution_context(session_event_tx.clone(), chronological_projection)
             .map_err(|err| err.to_string())?
-            .with_turn_event_sender(turn_event_tx.clone());
+            .with_turn_event_sender(turn_event_tx.clone())
+            .with_lashlang_execution_trace(
+                self.host.core.tracing.lashlang_execution_sink.clone(),
+                self.host.core.tracing.trace_context.clone(),
+            );
         let context = context.with_parent_invocation(invocation);
         let context = context.with_turn_lease(self.turn_lease.clone());
         let result = match code_executor {

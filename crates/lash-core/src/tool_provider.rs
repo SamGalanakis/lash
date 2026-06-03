@@ -57,6 +57,34 @@ pub struct ToolContext<'run> {
     pub(crate) max_attempts: u32,
     pub(crate) replay_key: Option<String>,
     pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
+    pub(crate) lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
+}
+
+#[derive(Clone)]
+pub struct ToolLashlangExecutionCallSite {
+    sink: Arc<dyn lash_trace::TraceSink>,
+    base_context: lash_trace::TraceContext,
+    identity: lash_trace::TraceLashlangExecutionIdentity,
+    parent_node_id: String,
+    occurrence: u64,
+}
+
+impl ToolLashlangExecutionCallSite {
+    pub fn new(
+        sink: Arc<dyn lash_trace::TraceSink>,
+        base_context: lash_trace::TraceContext,
+        identity: lash_trace::TraceLashlangExecutionIdentity,
+        parent_node_id: impl Into<String>,
+        occurrence: u64,
+    ) -> Self {
+        Self {
+            sink,
+            base_context,
+            identity,
+            parent_node_id: parent_node_id.into(),
+            occurrence,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -86,6 +114,7 @@ pub(crate) struct ToolContextBuilder<'run> {
     prepared_payload: serde_json::Value,
     tool_call_id: Option<String>,
     parent_invocation: Option<crate::RuntimeInvocation>,
+    lashlang_execution_call_site: Option<ToolLashlangExecutionCallSite>,
 }
 
 impl<'run> ToolContextBuilder<'run> {
@@ -110,6 +139,7 @@ impl<'run> ToolContextBuilder<'run> {
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
             parent_invocation: dispatch.parent_invocation.clone(),
+            lashlang_execution_call_site: None,
         }
     }
 
@@ -165,6 +195,14 @@ impl<'run> ToolContextBuilder<'run> {
         self
     }
 
+    pub(crate) fn lashlang_execution_call_site(
+        mut self,
+        call_site: Option<ToolLashlangExecutionCallSite>,
+    ) -> Self {
+        self.lashlang_execution_call_site = call_site;
+        self
+    }
+
     pub(crate) fn build(self) -> ToolContext<'run> {
         ToolContext {
             session_id: self.session_id,
@@ -186,6 +224,7 @@ impl<'run> ToolContextBuilder<'run> {
             max_attempts: 1,
             replay_key: None,
             parent_invocation: self.parent_invocation,
+            lashlang_execution_call_site: self.lashlang_execution_call_site,
         }
     }
 }
@@ -225,6 +264,7 @@ impl<'run> ToolContext<'run> {
             prepared_payload: serde_json::Value::Null,
             tool_call_id: None,
             parent_invocation: None,
+            lashlang_execution_call_site: None,
         }
     }
 
@@ -266,6 +306,61 @@ impl<'run> ToolContext<'run> {
             parent_invocation: self.parent_invocation.clone(),
             tool_call_id: self.tool_call_id.clone(),
         }
+    }
+
+    pub fn emit_lashlang_child_process_started(
+        &self,
+        process_id: impl Into<String>,
+        child_entry_name: Option<String>,
+    ) {
+        let Some(call_site) = &self.lashlang_execution_call_site else {
+            return;
+        };
+        let child = lash_trace::TraceLashlangChildExecution {
+            scope: call_site.identity.scope.clone(),
+            subject: lash_trace::TraceRuntimeSubject::Process {
+                process_id: process_id.into(),
+            },
+            module_ref: None,
+            entry_ref: None,
+            entry_name: child_entry_name,
+        };
+        let child_graph_key = child.graph_key();
+        let event = lash_trace::TraceLashlangExecutionEvent::ChildStarted {
+            event_key: format!(
+                "lashlang_execution:{}:child:{}:{}:{}",
+                call_site.identity.graph_key(),
+                call_site.parent_node_id,
+                call_site.occurrence,
+                child_graph_key
+            ),
+            identity: call_site.identity.clone(),
+            parent_node_id: call_site.parent_node_id.clone(),
+            occurrence: call_site.occurrence,
+            child,
+        };
+        let mut context = lash_trace::TraceContext::default()
+            .for_session(call_site.identity.scope.session_id.clone());
+        if let Some(turn_id) = &call_site.identity.scope.turn_id {
+            context = context.for_turn(turn_id.clone());
+        }
+        if let Some(turn_index) = call_site.identity.scope.turn_index {
+            context = context.for_turn_index(turn_index);
+        }
+        if let Some(protocol_iteration) = call_site.identity.scope.protocol_iteration {
+            context = context.for_protocol_iteration(protocol_iteration);
+        }
+        if let lash_trace::TraceRuntimeSubject::Effect { effect_id, .. } =
+            &call_site.identity.subject
+        {
+            context.effect_id = Some(effect_id.clone());
+        }
+        crate::trace::emit_trace(
+            &Some(Arc::clone(&call_site.sink)),
+            &call_site.base_context,
+            context,
+            lash_trace::TraceEvent::LashlangExecution { event },
+        );
     }
 
     pub fn direct_completions(&self) -> ToolDirectCompletionControl<'run> {

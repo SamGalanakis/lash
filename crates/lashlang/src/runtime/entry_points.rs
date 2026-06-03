@@ -1,7 +1,7 @@
 //! Public compile/execute entry points for lashlang programs.
 
 use crate::ast::Program;
-use crate::tracking::ProcessTrackingContext;
+use crate::tracking::LashlangExecutionContext;
 use crate::{LinkedModule, ModuleArtifact, ProcessRef};
 
 use super::record::intern_symbol;
@@ -40,8 +40,11 @@ pub(crate) fn compile_program_internal(program: &Program) -> CompiledProgram {
 }
 
 pub fn compile_linked(linked: &LinkedModule) -> CompiledProgram {
-    let (chunk, compile_stats) =
-        Compiler::compile_linked_program(linked.program(), (&linked.artifact).into());
+    let (chunk, compile_stats) = Compiler::compile_linked_program(
+        linked.program(),
+        (&linked.artifact).into(),
+        LashlangExecutionContext::main(linked.artifact.module_ref.clone()),
+    );
     CompiledProgram {
         chunk,
         compile_stats,
@@ -92,7 +95,7 @@ pub fn compile_linked_process(
     let (chunk, compile_stats) = Compiler::compile_linked_process_program(
         &process_program,
         (&linked.artifact).into(),
-        ProcessTrackingContext::new(
+        LashlangExecutionContext::process(
             linked.artifact.module_ref.clone(),
             process_ref,
             process_name,
@@ -136,7 +139,7 @@ pub fn compile_module_artifact_process(
     let (chunk, compile_stats) = Compiler::compile_linked_process_program(
         &process_program,
         artifact.into(),
-        ProcessTrackingContext::new(
+        LashlangExecutionContext::process(
             artifact.module_ref.clone(),
             process_ref.clone(),
             process_name,

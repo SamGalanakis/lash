@@ -12,10 +12,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css?v=2">
+<link rel="stylesheet" href="../styles.css?v=9">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js?v=2" defer></script>
+<script src="../docs.js?v=3" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>Cargo.toml</code>, <code>crates/lash-core</code>, <code>crates/lash</code>, <code>crates/lash-sansio</code>.">
@@ -96,8 +96,8 @@ flowchart TD
           </div>
           <div class="stats">
             <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">45</span><span class="stat-note">Runtime core, facade, CLI/TUI, providers, plugins (including MCP), language, export, tracing, file-index, harness optimizer, and examples.</span></article>
-            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~231k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
-            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">~555</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, examples, and trace/export utilities.</span></article>
+            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~246k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
+            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">~560</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, examples, and trace/export utilities.</span></article>
             <article class="stat"><div class="micro-label">Execution modes</div><span class="stat-value">2 active</span><span class="stat-note"><code>standard</code> uses native tool calls; <code>rlm</code> drives work through Lashlang and can switch to a fresh AgentFrame via <code>continue_as</code>.</span></article>
           </div>
         </div>

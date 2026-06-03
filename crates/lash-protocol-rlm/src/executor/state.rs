@@ -14,6 +14,8 @@ use super::snapshot::{RLM_SNAPSHOT_VERSION, restore_runtime, snapshot_runtime};
 pub struct RlmExecutionState {
     pub(super) rlm: FlowState,
     pub(super) scratch: ExecutionScratch,
+    pub(super) linked_programs: lashlang::LinkedProgramCache,
+    pub(super) stored_lashlang_modules: BTreeSet<lashlang::ModuleRef>,
     pub(super) scratch_dir: tempfile::TempDir,
     pub(super) observe_projection: ToolOutputBudgetConfig,
     pub(super) dirty: bool,
@@ -24,6 +26,8 @@ impl RlmExecutionState {
         Ok(Self {
             rlm: FlowState::new(),
             scratch: ExecutionScratch::new(),
+            linked_programs: lashlang::LinkedProgramCache::new(),
+            stored_lashlang_modules: BTreeSet::new(),
             scratch_dir: tempfile::TempDir::new()?,
             observe_projection: config,
             dirty: true,

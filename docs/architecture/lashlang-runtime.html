@@ -12,10 +12,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css?v=2">
+<link rel="stylesheet" href="../styles.css?v=9">
 <script src="../theme.js"></script>
 <script src="../mermaid.js" defer></script>
-<script src="../docs.js?v=2" defer></script>
+<script src="../docs.js?v=3" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -114,13 +114,13 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
               <tbody>
                 <tr><td><code>await board.play({ ... })?</code></td><td><code>ToolAgentSurface</code> maps <code>board.play</code> to a host tool name such as <code>play_move</code>; <code>HostBridge</code> calls <code>RuntimeExecutionContext::call_tool</code> through the active <code>ToolDispatchContext</code>.</td></tr>
                 <tr><td><code>cron.Schedule({ ... })</code></td><td>A plugin-provided <code>ResourceCatalog</code> entry lowers this to a host value with type metadata. It is pure VM data until code passes it to <code>triggers.register</code>.</td></tr>
-                <tr><td><code>await triggers.register({ source, target })?</code></td><td>The trigger host operation is routed to <code>PluginSession</code>'s session trigger registry. The registry validates the source event type against the target process input and stores a route containing module/process refs, not source code text.</td></tr>
-                <tr><td><code>start name(...)</code></td><td>The compiled effect carries <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, process name, and args. Runtime process start writes a <code>ProcessInput::LashlangProcess</code> row and returns a process handle.</td></tr>
+                <tr><td><code>await triggers.register({ source, target, inputs })?</code></td><td>The trigger host operation is routed to <code>PluginSession</code>'s session trigger registry. The registry validates the source event type against every <code>trigger.event</code> input and stores a registration from source value to process definition plus a fixed/event input template.</td></tr>
+                <tr><td><code>start name(...)</code></td><td>The compiled effect creates one process run from the named process definition and returns a run handle.</td></tr>
                 <tr><td><code>sleep for "5s"</code></td><td><code>HostBridge</code> converts the duration and runs a typed sleep effect through the runtime effect controller, so durable controllers can replay or schedule it.</td></tr>
               </tbody>
             </table>
           </div>
-          <p>The linked artifact is the durable identity boundary. The process worker reloads <code>ModuleArtifact</code> by <code>module_ref</code>, verifies the recorded <code>required_surface_ref</code>, then compiles the selected <code>process_ref</code> through the process cache. Live callable tool dispatch still uses the current tool surface, so the artifact captures the language contract while the host remains responsible for active tools and resources.</p>
+          <p>The linked artifact is the durable identity boundary. The process worker reloads <code>ModuleArtifact</code> by <code>module_ref</code>, verifies the recorded <code>required_surface_ref</code>, then compiles the selected <code>process_ref</code> through the process cache. Live callable tool dispatch still uses the current tool surface, so the artifact captures the language contract while the host remains responsible for active tools and resources. Static <code>@label</code> process-map metadata is part of the artifact hash and recorded surface requirements; changing a title or description changes the module ref but not the compiled execution behavior.</p>
         </div>
 
         <div class="section" id="images-and-attachments">
@@ -144,25 +144,31 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
           <ol class="principle-list">
             <li>
               <div>
-                <h3>Parser</h3>
-                <p>The lexer tokenizes strings (including <code>r"""..."""</code> / <code>r'''...'''</code> raws), <code>//</code> comments, operators, and keywords. The parser builds a module AST rooted at <code>Program</code>, with declarations, assignment targets, receiver operations, named process starts, blocks, control flow, and type expressions. Host ability checks happen later in the linker, not in the grammar.</p>
+                <h3 id="parser">Parser</h3>
+                <p>The lexer tokenizes strings (including <code>r"""..."""</code> / <code>r'''...'''</code> raws), <code>//</code> comments, operators, annotation sigils, and keywords. The parser builds a module AST rooted at <code>Program</code>, with declarations, assignment targets, receiver operations, named process starts, blocks, control flow, type expressions, and optional <code>@label</code> metadata on process declarations or process-map node statements. Host ability and language-feature checks happen later in the linker, not in the grammar.</p>
               </div>
             </li>
             <li>
               <div>
-                <h3>Compiler</h3>
-                <p>The compiler lowers linked canonical IR into a <code>Chunk</code> of <code>Instruction</code>s, folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Intrinsic</code> ops like <code>IntrinsicOp::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and explicit resource/process effects that the linked <code>LashlangSurface</code> allowed. Chunks no longer carry the full AST or <code>LinkedModule</code>; process-start effects carry <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, display name, and args. The process runner loads the <code>ModuleArtifact</code> from the artifact store and uses a compiled-process cache keyed by <code>(process_ref, required_surface_ref, compiler_version, vm_abi_version)</code>; live resource operation dispatch still uses the current callable tool surface.</p>
+                <h3 id="compiler">Compiler</h3>
+                <p>The compiler lowers linked canonical IR into a <code>Chunk</code> of <code>Instruction</code>s, folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Intrinsic</code> ops like <code>IntrinsicOp::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and explicit resource/process effects that the linked <code>LashlangSurface</code> allowed. <code>LabelAnnotated</code> nodes are transparent to bytecode generation and preserved only for artifact identity and static process mapping. Chunks no longer carry the full AST or <code>LinkedModule</code>; process-start effects carry <code>module_ref</code>, <code>process_ref</code>, <code>required_surface_ref</code>, display name, and args. The process runner loads the <code>ModuleArtifact</code> from the artifact store and uses a compiled-process cache keyed by <code>(process_ref, required_surface_ref, compiler_version, vm_abi_version)</code>; live resource operation dispatch still uses the current callable tool surface.</p>
               </div>
             </li>
             <li>
               <div>
-                <h3>VM</h3>
+                <h3 id="compilation-caching">Compilation caching</h3>
+                <p>Compilation is cached on two seams so repeated source and repeated processes skip the parse/link/lower pipeline. The foreground RLM executor holds a <code>LinkedProgramCache</code> on its <code>RlmExecutionState</code>; each fenced block calls <code>get_or_compile(code, surface)</code>, which returns a cached <code>CompiledLinkedProgram</code> (the <code>LinkedModule</code> plus its <code>Arc&lt;CompiledProgram&gt;</code>) when the source hash matches and the current <code>LashlangSurface</code> still satisfies the cached artifact's <code>required_surface</code>; a miss parses, links, and compiles once, then stores it. A surface change that no longer satisfies the recorded requirement misses and recompiles, so cache reuse never weakens linker gating. The cache is a pure accelerator outside the snapshot, so it is rebuilt per session and never serialized. The durable side uses <code>CompiledProcessCache</code>, keyed by <code>(process_ref, required_surface_ref, compiler_version, vm_abi_version)</code> so a process artifact compiles once per worker. Both caches are bounded LRU rings and report <code>CompiledProgramCacheStats</code> (hits, misses, evictions, entries, capacity).</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3 id="vm">VM</h3>
                 <p>The VM walks the compiled <code>Chunk</code>, stores globals in <code>State</code>, dispatches host effects through <code>ExecutionHost</code>, recursively awaits records/lists of handles, and consults the <code>ProjectedBindings</code> for any name not present in <code>State</code>. It is split into instruction dispatch, the <code>VmEffect</code> seam that calls into <code>ExecutionHost::perform</code>, the run loop with mode entry points and the <code>VmStep</code> / <code>VmOutcome</code> step machinery, and the optimizer's loop IR. Every enabled effectful op — resource operation, start, await, cancel, print, process start, process event, and the program terminators <code>submit</code> / <code>finish</code> / <code>fail</code> — goes through <code>perform</code>; handlers may transform the value but the VM enforces divergence for the terminator ops. Separate modules own value coercions and builtin bodies, field/index reads and path assignment, the <code>format(...)</code> and <code>json_parse</code>/serialization helpers, and the public <code>compile</code> / <code>execute</code> surface re-exported from the crate root.</p>
               </div>
             </li>
             <li>
               <div>
-                <h3>Profiling</h3>
+                <h3 id="profiling">Profiling</h3>
                 <p>The profiling examples and <code>Scenario::ALL</code> cover whole-language performance sweeps, including compiler and builtin hot paths. <code>ProfileReport</code> aggregates per-instruction and per-builtin counts/times.</p>
               </div>
             </li>

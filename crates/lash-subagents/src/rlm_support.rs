@@ -190,7 +190,11 @@ pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
         "properties": {
             "task": { "type": "string" },
             "capability": { "type": "string", "enum": enum_values },
-            "output": { "type": "object", "additionalProperties": true },
+            "output": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Optional typed result shape. Use string descriptors for record fields, e.g. `{ queries: \"list[str]\" }`, or pass a Lashlang `Type { ... }` literal for nested shapes."
+            },
             "seed": {
                 "type": "object",
                 "additionalProperties": true,

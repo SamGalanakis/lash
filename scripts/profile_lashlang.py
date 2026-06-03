@@ -21,6 +21,7 @@ PERF_MODES = [
     "artifact_roundtrip",
     "compiled_process_cache",
     "compiled_program_cache",
+    "linked_program_cache",
 ]
 
 DEFAULT_PERF_MODES = [
@@ -32,6 +33,7 @@ DEFAULT_PERF_MODES = [
     "artifact_roundtrip",
     "compiled_process_cache",
     "compiled_program_cache",
+    "linked_program_cache",
 ]
 
 

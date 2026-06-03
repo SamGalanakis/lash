@@ -66,7 +66,7 @@ pub enum QueuedWorkPayload {
         input: Box<TurnInput>,
     },
     ProcessWake {
-        wake: ProcessWakeDelivery,
+        wake: Box<ProcessWakeDelivery>,
     },
     HostEvent {
         name: String,
@@ -91,7 +91,9 @@ impl QueuedWorkPayload {
     }
 
     pub fn process_wake(wake: ProcessWakeDelivery) -> Self {
-        Self::ProcessWake { wake }
+        Self::ProcessWake {
+            wake: Box::new(wake),
+        }
     }
 }
 

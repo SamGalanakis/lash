@@ -130,6 +130,7 @@ pub fn rlm_execution_section_for_surface(
         features.images,
         has_operations,
         &surface.abilities,
+        &surface.language_features,
     ));
     if let Some(section) = render_host_surface_section(surface) {
         sections.push(section);
@@ -156,8 +157,20 @@ pub fn rlm_execution_section_for_surface(
 
 fn render_host_surface_section(surface: &lashlang::LashlangSurface) -> Option<String> {
     let mut operation_lines = Vec::new();
-    for module in surface.resources.module_instances.values() {
-        if let Some(resource_type) = surface.resources.resource_types.get(&module.resource_type) {
+    for (_, module) in surface.resources.module_instances() {
+        if let Some(resource_type) =
+            surface
+                .resources
+                .resolve_alias(&lashlang::ResourceRefExpr::resolved(
+                    module
+                        .path
+                        .iter()
+                        .map(|segment| segment.as_str().into())
+                        .collect(),
+                    module.resource_type.clone(),
+                    module.alias.clone(),
+                ))
+        {
             for (operation, binding) in &resource_type.operations {
                 operation_lines.push(format!(
                     "- `await {}.{}({})? -> {}`",
@@ -169,32 +182,56 @@ fn render_host_surface_section(surface: &lashlang::LashlangSurface) -> Option<St
             }
         }
     }
+    let mut data_type_lines = Vec::new();
+    for (_, data_type) in surface.resources.named_data_types() {
+        data_type_lines.push(format!(
+            "- `type {} = {}`",
+            data_type.name(),
+            lashlang::format_type_expr(data_type.ty())
+        ));
+    }
     let mut constructor_lines = Vec::new();
-    for constructor in surface.resources.value_constructors.values() {
+    for (_, constructor) in surface.resources.value_constructors() {
+        let output_ty = match &constructor.output_ty {
+            lashlang::TypeExpr::Ref(name) => surface
+                .resources
+                .resolve_trigger_source(name.as_str())
+                .map(|binding| format!("TriggerSource<{}>", binding.event_type_name()))
+                .unwrap_or_else(|| lashlang::format_type_expr(&constructor.output_ty)),
+            _ => lashlang::format_type_expr(&constructor.output_ty),
+        };
         constructor_lines.push(format!(
             "- `{}({}) -> {}`",
             constructor.path.join("."),
             lashlang::format_type_expr(&constructor.input_ty),
-            lashlang::format_type_expr(&constructor.output_ty)
+            output_ty
         ));
     }
     let mut protocol_lines = Vec::new();
     let trigger_register = lashlang::TriggerHostOperation::Register.host_operation();
-    for (source_ty, binding) in &surface.resources.trigger_sources {
+    for (source_ty, binding) in surface.resources.trigger_sources() {
         protocol_lines.push(format!(
             "- `{}` can be passed to `{}` and emits `{}`",
             source_ty,
             trigger_register,
-            lashlang::format_type_expr(&binding.event_ty)
+            binding.event_type_name()
         ));
     }
-    if operation_lines.is_empty() && constructor_lines.is_empty() && protocol_lines.is_empty() {
+    if operation_lines.is_empty()
+        && data_type_lines.is_empty()
+        && constructor_lines.is_empty()
+        && protocol_lines.is_empty()
+    {
         return None;
     }
     let mut section = String::from("### Host Surface");
     if !operation_lines.is_empty() {
         section.push_str("\n\nAwaited runtime operations:\n\n");
         section.push_str(&operation_lines.join("\n"));
+    }
+    if !data_type_lines.is_empty() {
+        section.push_str("\n\nNamed host data types:\n\n");
+        section.push_str(&data_type_lines.join("\n"));
     }
     if !constructor_lines.is_empty() {
         section.push_str("\n\nPure value constructors. Do not `await` these; use them wherever expressions are allowed:\n\n");
@@ -277,6 +314,7 @@ fn render_language_section(
     images: bool,
     has_operations: bool,
     abilities: &lashlang::LashlangAbilities,
+    language_features: &lashlang::LashlangLanguageFeatures,
 ) -> String {
     let mut bullets = Vec::new();
     if images {
@@ -305,15 +343,18 @@ fn render_language_section(
             forms.push("`signal run handle with payload`");
         }
         bullets.push(format!(
-            "- Background processes: declare reusable work with `process name(param: TYPE) {{ ... }}` and start it with `handle = start name(param: value)`. Pass typed module authorities explicitly, e.g. `process notify(mail: Gmail) {{ await mail.send({{ body: body }})? finish true }}` and `start notify(mail: gmail.work)`. Process bodies use only passed authority handles, input values, locals, and builtins. Inside a process use {}. `wake value` emits a `process.wake` event that notifies the agent/session with `value`; use it when process progress, trigger output, or other background work should re-enter the model as context. `finish value` completes the process and stores `value` as the terminal result returned by `await handle`. `fail value` completes it as failed; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside processes. Resolve a handle with `await handle` or `(await handle)?`; cancel with `cancel handle` (best-effort).",
+            "- Background processes: `process name(param: TYPE) {{ ... }}` declares a reusable process definition. `handle = start name(param: value)` creates one process run from that definition and returns its run handle; trigger activations also create process runs. For account-parametric work, pass typed module authorities explicitly, e.g. `process notify(mail: Gmail) {{ await mail.send({{ body: body }})? finish true }}` and `start notify(mail: gmail.work)`. For one-off concrete automations, a process body may reference concrete host paths such as `agents`, `web`, or `gmail.work` directly; params and locals shadow those captures. Inside a process use {}. `wake value` emits a `process.wake` event that notifies the agent/session with `value`; use it when process progress, trigger output, or other background work should re-enter the model as context. `finish value` completes the run and stores `value` as the terminal result returned by `await handle`. `fail value` completes it as failed; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside processes. Resolve a handle with `await handle` or `(await handle)?`; cancel a live run with `cancel handle` (best-effort). If the Host Surface includes `processes.list`, use `await processes.list({{}})?` for running runs, `await processes.list({{ definition: name }})?` for runs of a definition, and `await processes.list({{ status: \"any\" }})?` for visible run history.",
             join_words(&forms)
         ));
+    }
+    if language_features.label_annotations {
+        bullets.push("- Execution labels: use `@label(title: \"Label\")` or `@label(title: \"Label\", description: \"Details\")` to name important Lashlang phases and graph steps. At top level, label meaningful setup, resource calls, submissions, branches, loops, or process declarations. Inside a `process` body, label durable steps such as awaited module calls, `start`, `sleep`, `wait signal`, `signal run`, `wake`, `yield`, `finish`, `fail`, `if`, loops, and setup statements that explain the process. Titles/descriptions must be string literals; do not use variables, interpolation, icons, colors, layout hints, or extra keys.".to_string());
     }
     if abilities.triggers && abilities.processes {
         let trigger_register = lashlang::TriggerHostOperation::Register.host_operation();
         let trigger_list = lashlang::TriggerHostOperation::List.host_operation();
         let trigger_cancel = lashlang::TriggerHostOperation::Cancel.host_operation();
-        bullets.push(format!("- Trigger registry: build a typed source value with a documented constructor from the Host Surface, then register it with `handle = await {trigger_register}({{ source: source, target: daily_digest, name: \"daily_digest\" }})?`. Constructors only build source values; the host/plugin that owns the source decides when to activate the returned handle. The target is the process value itself, not a call. The target process must have exactly one input whose type matches the source event type. Use `await {trigger_list}({{ target: daily_digest }})?` to inspect registrations for that concrete process and `await {trigger_cancel}({{ handle: handle }})?` to disable future activations."));
+        bullets.push(format!("- Trigger registry: a trigger registration connects a typed source value to a process definition plus explicit inputs. Register with `handle = await {trigger_register}({{ source: source, target: daily_digest, inputs: {{ tick: trigger.event }}, name: \"daily_digest\" }})?`. Constructors build source values; the host/plugin that owns the source decides when to activate the returned handle. `target` is a process definition value. `inputs` is required and maps every process param exactly once. `trigger.event` is the direct whole-event value inside `inputs`; fixed inputs can pass concrete authorities like `gmail.work` or `agents` for account-parametric processes. Use `await {trigger_list}({{}})?` to discover visible registrations, or filter with `{{ target: daily_digest }}`, `{{ name: \"daily_digest\" }}`, `{{ source_type: \"cron.Schedule\" }}`, and `{{ enabled: true }}`. Use `await {trigger_cancel}({{ handle: handle }})?` to disable future activations for that registration."));
     }
     if has_operations {
         let tail = if abilities.processes {
