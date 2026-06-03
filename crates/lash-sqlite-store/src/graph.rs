@@ -153,10 +153,7 @@ impl Store {
     ///
     /// The session head's current `checkpoint_ref` is the live checkpoint; its
     /// manifest blob (and, transitively, the tool/plugin/execution snapshot
-    /// blobs it references) is reachable and must be kept. Runtime turn
-    /// checkpoints are stored inline as JSON in `runtime_turn_checkpoints`, not
-    /// as content-addressed blobs, so they hold no blob references and need no
-    /// rooting here.
+    /// blobs it references) is reachable and must be kept.
     fn live_checkpoint_roots(tx: &Transaction<'_>) -> Result<Vec<RetainedArtifactRef>, StoreError> {
         let mut roots = Vec::new();
         if let Some(checkpoint_ref) = load_session_head_meta_from_conn(tx)

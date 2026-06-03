@@ -90,7 +90,7 @@ impl LashCore {
     }
 
     /// Quickstart preset for `standard` mode. Defaults to the named in-memory
-    /// effect controller and stores ([`LashCoreBuilder::in_memory_stores`]);
+    /// effect host and stores ([`LashCoreBuilder::in_memory_stores`]);
     /// for durable deployments build from [`LashCore::builder`] and name the
     /// stores explicitly, or override them with the builder setters.
     pub fn standard() -> LashCoreBuilder {
@@ -102,7 +102,7 @@ impl LashCore {
     }
 
     /// Quickstart preset for `rlm` mode. Defaults to the named in-memory
-    /// effect controller and stores ([`LashCoreBuilder::in_memory_stores`]);
+    /// effect host and stores ([`LashCoreBuilder::in_memory_stores`]);
     /// for durable deployments build from [`LashCore::builder`] and name the
     /// stores explicitly, or override them with the builder setters.
     pub fn rlm() -> LashCoreBuilder {
@@ -129,6 +129,20 @@ impl LashCore {
 
     pub async fn delete_session(&self, session_id: impl AsRef<str>) -> Result<SessionDeleteReport> {
         let session_id = session_id.as_ref().to_string();
+        let effect_host = Arc::clone(&self.env.core.control.effect_host);
+        let scoped_effect_controller = effect_host
+            .scoped(lash_core::EffectScope::session_delete(&session_id))
+            .map_err(EmbedError::from)?;
+        self.delete_session_with_effect_scope(session_id, scoped_effect_controller)
+            .await
+    }
+
+    pub async fn delete_session_with_effect_scope(
+        &self,
+        session_id: impl AsRef<str>,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<SessionDeleteReport> {
+        let session_id = session_id.as_ref().to_string();
         let Some(store_factory) = self.store_factory.as_ref() else {
             return Err(EmbedError::MissingSessionStoreFactory);
         };
@@ -138,13 +152,9 @@ impl LashCore {
                 format!("process:delete-session:{session_id}"),
                 RuntimeEffectKind::Process,
                 format!("{session_id}:delete-session"),
-                None,
             );
-            let outcome = self
-                .env
-                .core
-                .control
-                .effect_controller
+            let outcome = scoped_effect_controller
+                .controller()
                 .execute_effect(
                     RuntimeEffectEnvelope::new(
                         invocation,
@@ -243,7 +253,7 @@ pub struct LashCoreBuilder {
     // dependencies must be named. They are collected here and resolved in
     // `build()`, which errors if any is unset — unless `in_memory_stores()`
     // opted into the named in-memory versions.
-    effect_controller: Option<Arc<dyn RuntimeEffectController>>,
+    effect_host: Option<Arc<dyn EffectHost>>,
     attachment_store: Option<Arc<dyn AttachmentStore>>,
     lashlang_artifact_store: Option<Arc<dyn lash_core::LashlangArtifactStore>>,
     in_memory_stores: bool,
@@ -267,6 +277,7 @@ pub struct LashCoreBuilder {
     // unless `disable_default_process_work_runner` opted out (the loud guard
     // then rejects a registry with no runner).
     process_work_poke: Option<ProcessWorkPoke>,
+    queued_work_poke: Option<QueuedWorkPoke>,
     disable_default_process_work_runner: bool,
 }
 
@@ -352,24 +363,20 @@ impl LashCoreBuilder {
         self
     }
 
-    /// Set the runtime effect controller — the durability boundary every turn
+    /// Set the deployment effect host — the durability boundary every operation
     /// crosses. Required unless [`in_memory_stores`](Self::in_memory_stores) is
-    /// used. Pass [`InlineRuntimeEffectController`](crate::advanced::InlineRuntimeEffectController)
-    /// for in-process execution, or a workflow-backed controller for durable
-    /// turn execution.
-    pub fn effect_controller(
-        mut self,
-        effect_controller: Arc<dyn RuntimeEffectController>,
-    ) -> Self {
-        self.effect_controller = Some(effect_controller);
+    /// used. Pass [`InlineEffectHost`](crate::advanced::InlineEffectHost) for
+    /// in-process execution, or a workflow-backed host for durable execution.
+    pub fn effect_host(mut self, effect_host: Arc<dyn EffectHost>) -> Self {
+        self.effect_host = Some(effect_host);
         self
     }
 
-    /// Opt into the named in-memory effect controller, Lashlang artifact
+    /// Opt into the named in-memory effect host, Lashlang artifact
     /// store, and attachment store.
     ///
     /// Convenient for quickstarts, tests, and local experiments; not durable.
-    /// Explicit calls to [`effect_controller`](Self::effect_controller),
+    /// Explicit calls to [`effect_host`](Self::effect_host),
     /// [`lashlang_artifact_store`](Self::lashlang_artifact_store), or
     /// [`attachment_store`](Self::attachment_store) still override the
     /// corresponding in-memory default.
@@ -445,10 +452,10 @@ impl LashCoreBuilder {
         if self.in_memory_stores {
             return Ok(self.apply_core_overrides(RuntimeHostConfig::in_memory()));
         }
-        let effect_controller = self
-            .effect_controller
+        let effect_host = self
+            .effect_host
             .take()
-            .ok_or(EmbedError::MissingEffectController)?;
+            .ok_or(EmbedError::MissingEffectHost)?;
         let lashlang_artifact_store = self
             .lashlang_artifact_store
             .take()
@@ -457,15 +464,14 @@ impl LashCoreBuilder {
             .attachment_store
             .take()
             .ok_or(EmbedError::MissingAttachmentStore)?;
-        let core =
-            RuntimeHostConfig::new(effect_controller, lashlang_artifact_store, attachment_store);
+        let core = RuntimeHostConfig::new(effect_host, lashlang_artifact_store, attachment_store);
         Ok(self.apply_core_overrides(core))
     }
 
     /// Apply benign + still-set dependency overrides on top of a base core.
     fn apply_core_overrides(&mut self, mut core: RuntimeHostConfig) -> RuntimeHostConfig {
-        if let Some(effect_controller) = self.effect_controller.take() {
-            core.control.effect_controller = effect_controller;
+        if let Some(effect_host) = self.effect_host.take() {
+            core.control.effect_host = effect_host;
         }
         if let Some(attachment_store) = self.attachment_store.take() {
             core.durability.attachment_store = attachment_store;
@@ -652,6 +658,9 @@ impl LashCoreBuilder {
         {
             env_builder = env_builder.with_session_store_factory(Arc::clone(child_store_factory));
         }
+        if let Some(queued_work_poke) = self.queued_work_poke.clone() {
+            env_builder = env_builder.with_queued_work_poke(queued_work_poke);
+        }
 
         Ok(LashCore {
             env: env_builder.build(),
@@ -745,6 +754,11 @@ impl LashCoreBuilder {
         self
     }
 
+    pub fn with_queued_work_runner(mut self, poke: QueuedWorkPoke) -> Self {
+        self.queued_work_poke = Some(poke);
+        self
+    }
+
     /// Disable the default inline process work runner. With a process registry
     /// configured and no explicit runner supplied via
     /// [`with_process_work_runner`](Self::with_process_work_runner), `build()`
@@ -813,11 +827,8 @@ impl AdvancedLashCoreBuilder {
         self
     }
 
-    pub fn effect_controller(
-        mut self,
-        effect_controller: Arc<dyn RuntimeEffectController>,
-    ) -> Self {
-        self.builder.effect_controller = Some(effect_controller);
+    pub fn effect_host(mut self, effect_host: Arc<dyn EffectHost>) -> Self {
+        self.builder.effect_host = Some(effect_host);
         self
     }
 
@@ -845,6 +856,11 @@ impl AdvancedLashCoreBuilder {
     /// See [`LashCoreBuilder::with_process_work_runner`].
     pub fn with_process_work_runner(mut self, poke: ProcessWorkPoke) -> Self {
         self.builder.process_work_poke = Some(poke);
+        self
+    }
+
+    pub fn with_queued_work_runner(mut self, poke: QueuedWorkPoke) -> Self {
+        self.builder.queued_work_poke = Some(poke);
         self
     }
 

@@ -103,12 +103,6 @@ pub(crate) fn trace_context_from_invocation(invocation: &crate::RuntimeInvocatio
             .metadata
             .insert("replay_key".to_string(), serde_json::json!(replay.key));
     }
-    if let Some(checkpoint_hash) = invocation.checkpoint_hash.as_ref() {
-        context.metadata.insert(
-            "checkpoint_hash".to_string(),
-            serde_json::json!(checkpoint_hash),
-        );
-    }
     if let Some(caused_by) = invocation.caused_by.as_ref() {
         context = trace_context_with_causal_ref(context, caused_by);
     }

@@ -94,6 +94,7 @@ pub(crate) struct ToolProcessEventContext {
     wake_target_scope: Option<crate::ProcessScope>,
     store: Option<Arc<dyn crate::RuntimePersistence>>,
     session_graph: Arc<dyn SessionGraphService>,
+    queued_work_poke: Option<crate::QueuedWorkPoke>,
 }
 
 pub(crate) struct ToolContextBuilder<'run> {
@@ -179,6 +180,7 @@ impl<'run> ToolContextBuilder<'run> {
         registry: Arc<dyn crate::ProcessRegistry>,
         wake_target_scope: Option<crate::ProcessScope>,
         store: Option<Arc<dyn crate::RuntimePersistence>>,
+        queued_work_poke: Option<crate::QueuedWorkPoke>,
     ) -> Self {
         self.process_events = Some(ToolProcessEventContext {
             process_id: process_id.into(),
@@ -186,6 +188,7 @@ impl<'run> ToolContextBuilder<'run> {
             wake_target_scope,
             store,
             session_graph: Arc::clone(&self.session_graph),
+            queued_work_poke,
         });
         self
     }
@@ -441,6 +444,7 @@ impl<'run> ToolContext<'run> {
             wake_target_scope: None,
             store: None,
             session_graph: Arc::new(crate::plugin::NoopSessionManager),
+            queued_work_poke: None,
         });
         self
     }

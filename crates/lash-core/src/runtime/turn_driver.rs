@@ -22,9 +22,7 @@ pub(super) struct RuntimeTurnDriver<'a> {
     pub(super) session: Session,
     pub(super) policy: RuntimeSessionPolicy,
     pub(super) host: RuntimeHost,
-    pub(super) durable_turn_scope: DurableTurnScope<'a>,
-    pub(super) durable_turn: &'a dyn DurableTurnProvider,
-    pub(super) durable_turn_run: DurableTurnRun,
+    pub(super) scoped_effect_controller: ScopedEffectController<'a>,
     pub(super) session_id: String,
     pub(super) turn_id: String,
     pub(super) turn_index: usize,
@@ -38,7 +36,5 @@ pub(super) struct RuntimeTurnDriver<'a> {
     pub(super) turn_causes: Vec<crate::TurnCause>,
     pub(super) pending_queue_claims: Vec<crate::QueuedWorkClaim>,
     pub(super) checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer,
-    pub(super) turn_lease: Option<crate::RuntimeTurnLease>,
-    pub(super) machine_config_snapshot: Option<crate::RuntimeTurnMachineConfigSnapshot>,
     pub(super) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
 }

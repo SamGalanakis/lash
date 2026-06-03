@@ -6,7 +6,9 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result as AnyhowResult, anyhow};
 use async_trait::async_trait;
@@ -41,14 +43,27 @@ use tokio_stream::wrappers::ReceiverStream;
 
 const SESSION_ID_PREFIX: &str = "workbench";
 const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 200_000;
-const BUTTON_TRIGGER_RESOURCE: &str = "Button";
-const BUTTON_TRIGGER_ALIAS: &str = "ui.button";
-const BUTTON_TRIGGER_EVENT: &str = "pressed";
-const BUTTON_TRIGGER_SOURCE_TYPE: &str = "ui.button.pressed";
-const CRON_SCHEDULE_SOURCE_TYPE: &str = "cron.Schedule";
+pub(crate) const BUTTON_TRIGGER_RESOURCE: &str = "Button";
+pub(crate) const BUTTON_TRIGGER_ALIAS: &str = "ui.button";
+pub(crate) const BUTTON_TRIGGER_EVENT: &str = "pressed";
+pub(crate) const BUTTON_TRIGGER_SOURCE_TYPE: &str = "ui.button.pressed";
+pub(crate) const CRON_SCHEDULE_SOURCE_TYPE: &str = "cron.Schedule";
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 
-#[tokio::main]
-async fn main() -> AnyhowResult<()> {
+fn main() -> AnyhowResult<()> {
+    let stack_bytes = std::env::var("AGENT_WORKBENCH_TOKIO_STACK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOKIO_THREAD_STACK_BYTES);
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(stack_bytes)
+        .build()
+        .context("build agent-workbench tokio runtime")?
+        .block_on(async_main())
+}
+
+async fn async_main() -> AnyhowResult<()> {
     let _ = dotenvy::dotenv();
 
     let addr: SocketAddr = std::env::var("AGENT_WORKBENCH_ADDR")
@@ -124,7 +139,7 @@ async fn main() -> AnyhowResult<()> {
     let process_registry = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
             .context("open process registry")?,
-    ) as Arc<dyn lash::advanced::ProcessRegistry>;
+    ) as Arc<dyn lash::persistence::ProcessRegistry>;
     // Deployment-level Lashlang artifact store (compiled trigger/process
     // modules), shared across the session tree. SQLite keeps installed triggers
     // durable across restarts.
@@ -134,8 +149,8 @@ async fn main() -> AnyhowResult<()> {
     ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
     let subagent_registry = Arc::new(lash_subagents::default_registry(&BTreeMap::new()));
     let session_ids = WorkbenchSessionIds::fresh();
-    let (queue_runner, runner_rx) = SessionQueueRunner::channel();
     let (event_tx, _) = broadcast::channel(1024);
+    let restate_http = reqwest::Client::new();
     let process_work_runner = lash::advanced::ProcessWorkRunner::new(Arc::new(
         lash_restate::RestateProcessIngressRunner::new(
             restate_ingress_url.clone(),
@@ -143,6 +158,14 @@ async fn main() -> AnyhowResult<()> {
         ),
     ));
     let process_work_poke = process_work_runner.poke_handle();
+    let queued_work_runner =
+        lash::advanced::QueuedWorkRunner::new(Arc::new(WorkbenchQueuedWorkSubmitter {
+            session_ids: session_ids.clone(),
+            store_factory: Arc::clone(&core_store_factory),
+            restate_ingress_url: restate_ingress_url.clone(),
+            restate_http: restate_http.clone(),
+        }));
+    let queued_work_poke = queued_work_runner.poke_handle();
 
     let core = LashCore::builder()
         .install_mode(ModePreset::rlm_with_config(
@@ -173,10 +196,11 @@ async fn main() -> AnyhowResult<()> {
             ));
         })
         .advanced()
-        .effect_controller(Arc::new(lash::advanced::InlineRuntimeEffectController))
+        .effect_host(Arc::new(lash_restate::RestateEffectHost::new()))
         .process_registry(Arc::clone(&process_registry))
         .disable_default_process_work_runner()
         .with_process_work_runner(process_work_poke)
+        .with_queued_work_runner(queued_work_poke.clone())
         .build()
         .context("build Lash core")?;
     let process_worker = lash::advanced::DurableProcessWorker::new(
@@ -198,11 +222,10 @@ async fn main() -> AnyhowResult<()> {
         trace_sink: Some(Arc::clone(&trace_sink)),
         lashlang_execution,
         event_tx,
-        queue_runner,
+        queued_work_poke,
         restate_ingress_url,
-        restate_http: reqwest::Client::new(),
+        restate_http,
         restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-        queued_turn_inflight: Arc::new(Mutex::new(false)),
     };
     restate::spawn_restate_endpoint(
         restate_endpoint_addr,
@@ -211,7 +234,7 @@ async fn main() -> AnyhowResult<()> {
         process_worker,
     );
     process_work_runner.spawn();
-    spawn_session_queue_runner(state.clone(), runner_rx);
+    queued_work_runner.spawn();
     emit_workbench_trace(
         &state.trace_sink,
         None,
@@ -252,7 +275,7 @@ async fn main() -> AnyhowResult<()> {
 #[derive(Clone)]
 struct AppState {
     core: LashCore,
-    process_registry: Arc<dyn lash::advanced::ProcessRegistry>,
+    process_registry: Arc<dyn lash::persistence::ProcessRegistry>,
     session_ids: WorkbenchSessionIds,
     messages: Arc<Mutex<Vec<ChatMessage>>>,
     timeline: Arc<Mutex<Vec<StreamItem>>>,
@@ -261,11 +284,10 @@ struct AppState {
     trace_sink: Option<Arc<dyn TraceSink>>,
     lashlang_execution: Arc<TraceLashlangGraphStore>,
     event_tx: broadcast::Sender<StreamItem>,
-    queue_runner: SessionQueueRunner,
+    queued_work_poke: lash::advanced::QueuedWorkPoke,
     restate_ingress_url: String,
     restate_http: reqwest::Client,
     restate_cron_job_keys: Arc<Mutex<BTreeSet<String>>>,
-    queued_turn_inflight: Arc<Mutex<bool>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -315,7 +337,7 @@ struct TurnRequest {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-enum ButtonChoice {
+pub(crate) enum ButtonChoice {
     Red,
     Blue,
 }
@@ -366,32 +388,76 @@ struct CommandAccepted {
 }
 
 #[derive(Clone)]
-struct SessionQueueRunner {
-    tx: mpsc::UnboundedSender<QueueRunnerCommand>,
+struct WorkbenchQueuedWorkSubmitter {
+    session_ids: WorkbenchSessionIds,
+    store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
+    restate_ingress_url: String,
+    restate_http: reqwest::Client,
 }
 
-#[derive(Debug)]
-struct QueueRunnerCommand {
-    reason: String,
+#[async_trait]
+impl lash::advanced::QueuedWorkRunHandle for WorkbenchQueuedWorkSubmitter {
+    async fn run_queued_work(
+        &self,
+        request: lash::advanced::QueuedWorkRunRequest,
+    ) -> std::result::Result<lash::advanced::QueuedWorkRunOutcome, PluginError> {
+        let session_id = request
+            .session_id
+            .unwrap_or_else(|| self.session_ids.current());
+        if !self.has_queued_work(&session_id).await? {
+            return Ok(lash::advanced::QueuedWorkRunOutcome::Idle);
+        }
+        let workflow_request = restate::WorkbenchQueuedTurnWorkflowRequest {
+            turn_id: format!("workbench-queued-{}", uuid::Uuid::new_v4()),
+            session_id: session_id.clone(),
+            reason: request.reason,
+        };
+        restate::submit_queued_turn_request(
+            &self.restate_http,
+            &self.restate_ingress_url,
+            &workflow_request,
+        )
+        .await
+        .map_err(|err| PluginError::Session(err.to_string()))?;
+        Ok(lash::advanced::QueuedWorkRunOutcome::Submitted { session_id })
+    }
 }
 
-impl SessionQueueRunner {
-    fn channel() -> (Self, mpsc::UnboundedReceiver<QueueRunnerCommand>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (Self { tx }, rx)
+impl WorkbenchQueuedWorkSubmitter {
+    async fn has_queued_work(&self, session_id: &str) -> std::result::Result<bool, PluginError> {
+        let store = self
+            .store_factory
+            .create_store(&lash::persistence::SessionStoreCreateRequest {
+                session_id: session_id.to_string(),
+                relation: lash::persistence::SessionRelation::default(),
+                policy: lash::advanced::SessionPolicy::default(),
+            })
+            .map_err(PluginError::Session)?;
+        let queued = store
+            .list_queued_work(session_id)
+            .await
+            .map_err(|err| PluginError::Session(err.to_string()))?;
+        Ok(!queued.is_empty())
     }
+}
 
-    #[cfg(test)]
-    fn inert() -> Self {
-        let (runner, _rx) = Self::channel();
-        runner
-    }
+#[cfg(test)]
+struct NoopQueuedWorkRunHandle;
 
-    fn poke(&self, reason: impl Into<String>) {
-        let _ = self.tx.send(QueueRunnerCommand {
-            reason: reason.into(),
-        });
+#[cfg(test)]
+#[async_trait]
+impl lash::advanced::QueuedWorkRunHandle for NoopQueuedWorkRunHandle {
+    async fn run_queued_work(
+        &self,
+        _request: lash::advanced::QueuedWorkRunRequest,
+    ) -> std::result::Result<lash::advanced::QueuedWorkRunOutcome, PluginError> {
+        Ok(lash::advanced::QueuedWorkRunOutcome::Idle)
     }
+}
+
+#[cfg(test)]
+fn inert_queued_work_poke() -> lash::advanced::QueuedWorkPoke {
+    lash::advanced::QueuedWorkRunner::new(Arc::new(NoopQueuedWorkRunHandle)).poke_handle()
 }
 
 #[derive(Debug, Serialize)]
@@ -548,15 +614,8 @@ async fn button_trigger(
         request.model.as_deref(),
         request.model_variant.as_deref(),
     )?;
-    let session = state
-        .core
-        .session(state.current_session_id())
-        .rlm()
-        .open()
-        .await
-        .map_err(AppError::internal)?;
-    apply_model_selection_to_session(&state, &session, turn_model.clone(), "button_trigger")
-        .await?;
+    let model = ModelSelection::from_spec(&turn_model);
+    state.set_selected_model(model.clone());
     state.trace(
         "api.button_trigger.request",
         json!({
@@ -566,43 +625,31 @@ async fn button_trigger(
     );
     let pressed_at = Utc::now().to_rfc3339();
     state.push_message("event", format!("{} button event", request.button.lower()));
-    match emit_button_host_event(&state, &session, request.button, &pressed_at).await {
-        Ok(report) => {
-            state.trace(
-                "button_trigger.host_event_report",
-                json!({
-                    "button": request.button,
-                    "started_process_ids": report.started_process_ids.clone(),
-                }),
-            );
-            state.push_message(
-                "event",
-                started_process_text(report.started_process_ids.len()),
-            );
-            state.queue_runner.poke("host_event");
-            Ok(Json(CommandAccepted { accepted: true }))
-        }
-        Err(err) => {
-            state.trace(
-                "button_trigger.host_event_failed",
-                json!({
-                    "button": request.button,
-                    "error": err.to_string(),
-                }),
-            );
-            Err(AppError::internal(err))
-        }
-    }
+    restate::submit_button_trigger(
+        &state,
+        restate::WorkbenchButtonTriggerWorkflowRequest {
+            operation_id: format!("workbench-button-{}", uuid::Uuid::new_v4()),
+            session_id: state.current_session_id(),
+            button: request.button,
+            model,
+            pressed_at,
+        },
+    )
+    .await?;
+    Ok(Json(CommandAccepted { accepted: true }))
 }
 
 async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>, AppError> {
     let old_session_id = state.current_session_id();
     restate::cancel_known_cron_jobs(&state, "reset").await?;
-    state
-        .core
-        .delete_session(&old_session_id)
-        .await
-        .map_err(AppError::internal)?;
+    restate::submit_session_delete(
+        &state,
+        restate::WorkbenchSessionDeleteWorkflowRequest {
+            operation_id: format!("workbench-delete-{}", uuid::Uuid::new_v4()),
+            session_id: old_session_id.clone(),
+        },
+    )
+    .await?;
     let (rotated_old, _) = state.session_ids.rotate();
     if rotated_old != old_session_id {
         eprintln!(
@@ -780,110 +827,6 @@ async fn lashlang_graph(
         .ok_or_else(|| AppError::not_found(format!("no Lashlang graph for `{graph_key}`")))
 }
 
-fn spawn_session_queue_runner(
-    state: AppState,
-    mut rx: mpsc::UnboundedReceiver<QueueRunnerCommand>,
-) {
-    tokio::spawn(async move {
-        let mut poll = tokio::time::interval(Duration::from_millis(400));
-        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                command = rx.recv() => {
-                    let Some(command) = command else {
-                        break;
-                    };
-                    drain_session_queue(&state, &command.reason, true).await;
-                }
-                _ = poll.tick() => {
-                    drain_session_queue(&state, "poll", false).await;
-                }
-            }
-        }
-    });
-}
-
-async fn drain_session_queue(state: &AppState, reason: &str, trace_idle: bool) {
-    match submit_next_queued_turn(state, reason).await {
-        Ok(true) => {}
-        Ok(false) => {
-            if trace_idle {
-                state.trace(
-                    "queue_runner.idle",
-                    json!({
-                        "reason": reason,
-                        "ran_work": false,
-                    }),
-                );
-                state.publish(StreamItem::Done);
-            }
-        }
-        Err(err) => {
-            state.set_queued_turn_inflight(false);
-            state.trace(
-                "queue_runner.error",
-                json!({
-                    "reason": reason,
-                    "error": err.to_string(),
-                }),
-            );
-            state.publish(StreamItem::Error {
-                message: err.to_string(),
-            });
-            state.publish(StreamItem::Done);
-        }
-    }
-}
-
-async fn submit_next_queued_turn(state: &AppState, reason: &str) -> Result<bool, AppError> {
-    if !state.try_mark_queued_turn_inflight() {
-        state.trace(
-            "queue_runner.restate.inflight",
-            json!({
-                "reason": reason,
-            }),
-        );
-        return Ok(false);
-    }
-    let session = state
-        .core
-        .session(state.current_session_id())
-        .rlm()
-        .open()
-        .await
-        .map_err(AppError::internal)?;
-    let selected_model = model_spec_from_selection(state.selected_model());
-    session
-        .configure(lash::SessionConfigPatch {
-            model: Some(selected_model.clone()),
-            ..lash::SessionConfigPatch::default()
-        })
-        .await
-        .map_err(AppError::internal)?;
-    if session
-        .queued_work()
-        .await
-        .map_err(AppError::internal)?
-        .is_empty()
-    {
-        state.set_queued_turn_inflight(false);
-        return Ok(false);
-    }
-    state.trace(
-        "queue_runner.restate.submit",
-        json!({
-            "reason": reason,
-            "session_id": state.current_session_id(),
-            "model": serde_json::to_value(&selected_model).unwrap_or(Value::Null),
-        }),
-    );
-    if let Err(err) = restate::submit_queued_turn(state, reason).await {
-        state.set_queued_turn_inflight(false);
-        return Err(err);
-    }
-    Ok(true)
-}
-
 fn started_process_text(count: usize) -> String {
     match count {
         0 => "no trigger handled the event".to_string(),
@@ -937,11 +880,12 @@ impl TurnActivitySink for ChannelTurnEvents {
     }
 }
 
-async fn emit_button_host_event(
+pub(crate) async fn emit_button_host_event_with_effect_host(
     state: &AppState,
     session: &lash::LashSession,
     button: ButtonChoice,
     pressed_at: &str,
+    effect_host: &dyn lash::advanced::EffectHost,
 ) -> AnyhowResult<lash::HostEventEmitReport> {
     let payload = json!({
         "pressed_at": pressed_at,
@@ -960,11 +904,12 @@ async fn emit_button_host_event(
     );
     session
         .host_events()
-        .emit(
+        .emit_with_effect_host(
             BUTTON_TRIGGER_RESOURCE,
             BUTTON_TRIGGER_ALIAS,
             BUTTON_TRIGGER_EVENT,
             payload,
+            effect_host,
         )
         .await
         .context("emit button host event")
@@ -1019,25 +964,6 @@ impl AppState {
 
     fn set_selected_model(&self, model: ModelSelection) {
         *self.selected_model.lock().expect("selected model lock") = model;
-    }
-
-    fn try_mark_queued_turn_inflight(&self) -> bool {
-        let mut inflight = self
-            .queued_turn_inflight
-            .lock()
-            .expect("queued turn inflight lock");
-        if *inflight {
-            return false;
-        }
-        *inflight = true;
-        true
-    }
-
-    fn set_queued_turn_inflight(&self, value: bool) {
-        *self
-            .queued_turn_inflight
-            .lock()
-            .expect("queued turn inflight lock") = value;
     }
 
     fn settings(&self) -> Settings {
@@ -1140,7 +1066,7 @@ fn trace_work_item(item: &WorkItem) -> Value {
 }
 
 async fn graph_process_summary(
-    process_registry: &dyn lash::advanced::ProcessRegistry,
+    process_registry: &dyn lash::persistence::ProcessRegistry,
     graph: &TraceLashlangGraph,
 ) -> Option<LashlangGraphProcessSummary> {
     let TraceRuntimeSubject::Process { process_id } = &graph.subject else {
@@ -1168,7 +1094,7 @@ fn process_summary_from_record(
 }
 
 async fn append_lineage_edges(
-    process_registry: &dyn lash::advanced::ProcessRegistry,
+    process_registry: &dyn lash::persistence::ProcessRegistry,
     graphs: &[TraceLashlangGraph],
     child: &lash::tracing::TraceLashlangGraphChildLink,
     out: &mut Vec<LashlangGraphLineageEdge>,
@@ -1715,6 +1641,7 @@ Available host features:
 - Web access is limited to `web.search(...)` and `web.fetch(...)`, both backed by the same Tavily tools the CLI uses.
 - You may call `agents.spawn(...)` for independent investigation.
 - You may use Lashlang process definitions for work that should run independently. A `start` or trigger activation creates a process run; a trigger registration is the durable rule that creates future runs.
+- When you start a process and need its `finish` value, write `result = (await handle)?`. Bare `await handle` waits, but returns the result wrapper, so `result.field` will not read fields from the finished value.
 - The red and blue UI buttons emit `ui.button.pressed`. Register `ui.button.pressed({})`; the selected button arrives in the event payload, not in the source config:
 
 ```lash
@@ -1909,7 +1836,7 @@ mod tests {
     #[test]
     fn graph_index_resolves_subagent_bridge_to_child_session_effect_graph() {
         run_async_test_on_large_stack("workbench-graph-index-subagent-bridge", || async {
-            use lash::advanced::ProcessRegistry as _;
+            use lash::persistence::ProcessRegistry as _;
 
             let registry = lash_core::TestLocalProcessRegistry::default();
             let child_session_id = "child-session";
@@ -2079,7 +2006,7 @@ mod tests {
             session_store_factory.clone();
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&db_path).expect("open registry"),
-        ) as Arc<dyn lash::advanced::ProcessRegistry>;
+        ) as Arc<dyn lash::persistence::ProcessRegistry>;
         let provider = trigger_registration_provider();
         let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
             .expect("model spec");
@@ -2097,7 +2024,7 @@ mod tests {
             .in_memory_stores()
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .advanced()
-            .effect_controller(Arc::new(lash::advanced::InlineRuntimeEffectController))
+            .effect_host(Arc::new(lash::advanced::InlineEffectHost::default()))
             .process_registry(Arc::clone(&process_registry))
             .build()
             .expect("build core");
@@ -2170,11 +2097,10 @@ mod tests {
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
             event_tx: broadcast::channel(1024).0,
-            queue_runner: SessionQueueRunner::inert(),
+            queued_work_poke: inert_queued_work_poke(),
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-            queued_turn_inflight: Arc::new(Mutex::new(false)),
         };
         let target_scope_id = lash::advanced::ProcessScope::new(state.current_session_id()).id();
         let session_store =
@@ -2213,13 +2139,13 @@ mod tests {
     }
 
     #[test]
-    fn button_trigger_activation_wake_is_submitted_to_restate_queue_workflow() {
-        run_async_test_on_large_stack("workbench-trigger-queue-test", || {
-            button_trigger_activation_wake_is_submitted_to_restate_queue_workflow_inner()
+    fn button_trigger_activation_is_submitted_to_restate_workflow() {
+        run_async_test_on_large_stack("workbench-trigger-restate-test", || {
+            button_trigger_activation_is_submitted_to_restate_workflow_inner()
         });
     }
 
-    async fn button_trigger_activation_wake_is_submitted_to_restate_queue_workflow_inner() {
+    async fn button_trigger_activation_is_submitted_to_restate_workflow_inner() {
         let data_dir = std::env::temp_dir().join(format!(
             "agent-workbench-queue-runner-{}",
             uuid::Uuid::new_v4()
@@ -2233,7 +2159,7 @@ mod tests {
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
                 .expect("open registry"),
-        ) as Arc<dyn lash::advanced::ProcessRegistry>;
+        ) as Arc<dyn lash::persistence::ProcessRegistry>;
         let artifact_store = Arc::new(
             lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
                 .expect("open artifact store"),
@@ -2265,8 +2191,8 @@ mod tests {
                 .runtime_host_config({
                     let mut config = lash::advanced::RuntimeHostConfig::in_memory();
                     config.durability.lashlang_artifact_store = artifact_store_for_core;
-                    config.control.effect_controller =
-                        Arc::new(lash::advanced::InlineRuntimeEffectController);
+                    config.control.effect_host =
+                        Arc::new(lash::advanced::InlineEffectHost::default());
                     config
                 })
                 .process_registry(Arc::clone(&process_registry))
@@ -2284,11 +2210,10 @@ mod tests {
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
             event_tx,
-            queue_runner: SessionQueueRunner::inert(),
+            queued_work_poke: inert_queued_work_poke(),
             restate_ingress_url,
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-            queued_turn_inflight: Arc::new(Mutex::new(false)),
         };
         let session = state
             .core
@@ -2317,34 +2242,10 @@ mod tests {
             state
                 .messages_snapshot()
                 .iter()
-                .any(|message| message.role == "event"
-                    && message.text == "started 1 background process"),
-            "button click should publish the started-process event"
+                .any(|message| message.role == "event" && message.text == "blue button event"),
+            "button click should publish the local accepted event"
         );
 
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let session = state
-                    .core
-                    .session(state.current_session_id())
-                    .rlm()
-                    .open()
-                    .await
-                    .expect("open session while waiting for queued work");
-                if !session.queued_work().await.expect("queued work").is_empty() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("button wake should enqueue session work");
-        assert!(
-            submit_next_queued_turn(&state, "host_event")
-                .await
-                .expect("submit queued turn"),
-            "queued wake should be submitted to Restate"
-        );
         let request = tokio::time::timeout(Duration::from_secs(2), restate_requests.recv())
             .await
             .expect("Restate request")
@@ -2354,7 +2255,7 @@ mod tests {
             .and_then(Value::as_str)
             .expect("request path");
         assert!(
-            path.starts_with("WorkbenchQueuedTurnWorkflow/workbench-queued-"),
+            path.starts_with("WorkbenchButtonTriggerWorkflow/workbench-button-"),
             "unexpected Restate path: {path}"
         );
         assert!(
@@ -2366,36 +2267,18 @@ mod tests {
             Some(state.current_session_id().as_str())
         );
         assert_eq!(
-            request.pointer("/body/reason").and_then(Value::as_str),
-            Some("host_event")
+            request.pointer("/body/button").and_then(Value::as_str),
+            Some("Blue")
         );
-        assert!(
-            !state.try_mark_queued_turn_inflight(),
-            "submitted queued work should stay in-flight until the Restate workflow clears it"
+        assert_eq!(
+            request.pointer("/body/model/model").and_then(Value::as_str),
+            Some("button-model")
         );
-        state.set_queued_turn_inflight(false);
-        let queued_session = state
-            .core
-            .session(state.current_session_id())
-            .rlm()
-            .open()
-            .await
-            .expect("open queued session");
-        assert!(
-            !queued_session
-                .queued_work()
-                .await
-                .expect("queued work")
-                .is_empty(),
-            "mock ingress should not consume queued work; Restate workflow owns execution"
-        );
-        assert!(
-            state.timeline_snapshot().iter().any(|item| matches!(
-                item,
-                StreamItem::Message { message }
-                    if message.role == "event" && message.text == "started 1 background process"
-            )),
-            "event messages should be retained for page refresh"
+        assert_eq!(
+            request
+                .pointer("/body/model/model_variant")
+                .and_then(Value::as_str),
+            Some("high")
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -2448,10 +2331,11 @@ mod tests {
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
                 .expect("open registry"),
-        ) as Arc<dyn lash::advanced::ProcessRegistry>;
+        ) as Arc<dyn lash::persistence::ProcessRegistry>;
         let provider = trigger_registration_provider();
         let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
             .expect("model spec");
+        let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
         let core = LashCore::builder()
             .install_mode(ModePreset::rlm_with_config(
                 lash::modes::RlmProtocolPluginConfig::default()
@@ -2464,7 +2348,7 @@ mod tests {
             .in_memory_stores()
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .advanced()
-            .effect_controller(Arc::new(lash::advanced::InlineRuntimeEffectController))
+            .effect_host(Arc::new(lash::advanced::InlineEffectHost::default()))
             .process_registry(Arc::clone(&process_registry))
             .build()
             .expect("build core");
@@ -2493,11 +2377,10 @@ mod tests {
             trace_sink: None,
             lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
             event_tx: broadcast::channel(1024).0,
-            queue_runner: SessionQueueRunner::inert(),
-            restate_ingress_url: "http://127.0.0.1:8080".to_string(),
+            queued_work_poke: inert_queued_work_poke(),
+            restate_ingress_url,
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-            queued_turn_inflight: Arc::new(Mutex::new(false)),
         };
         let old_session_id = state.current_session_id();
         let session = state
@@ -2528,12 +2411,34 @@ mod tests {
         assert!(snapshot.timeline.is_empty());
         assert!(state.messages_snapshot().is_empty());
         assert!(state.timeline_snapshot().is_empty());
+        let request = tokio::time::timeout(Duration::from_secs(2), restate_requests.recv())
+            .await
+            .expect("Restate request")
+            .expect("Restate request payload");
+        let path = request
+            .get("path")
+            .and_then(Value::as_str)
+            .expect("request path");
+        assert!(
+            path.starts_with("WorkbenchSessionDeleteWorkflow/workbench-delete-"),
+            "unexpected Restate path: {path}"
+        );
+        assert!(
+            path.ends_with("/run/send"),
+            "unexpected Restate path: {path}"
+        );
+        assert_eq!(
+            request.pointer("/body/session_id").and_then(Value::as_str),
+            Some(old_session_id.as_str())
+        );
         assert!(
             process_registry
                 .list_handle_grants(&old_process_scope)
                 .await
-                .expect("old grants after reset")
-                .is_empty()
+                .expect("old grants after reset submission")
+                .len()
+                == 1,
+            "mock Restate ingress must not consume deletion work inline"
         );
         assert!(
             state
@@ -2585,7 +2490,7 @@ mod tests {
         wait_for_endpoint_socket(endpoint_bind).await;
         register_restate_deployment(&admin_url, &endpoint_url).await;
         harness.process_work_runner.spawn();
-        spawn_session_queue_runner(harness.state.clone(), harness.queue_rx);
+        harness.queued_work_runner.spawn();
 
         let Json(accepted) = send_turn(
             State(harness.state.clone()),
@@ -2632,10 +2537,10 @@ mod tests {
 
     struct LiveWorkbenchRestateHarness {
         state: AppState,
-        process_registry: Arc<dyn lash::advanced::ProcessRegistry>,
+        process_registry: Arc<dyn lash::persistence::ProcessRegistry>,
         process_worker: lash::advanced::DurableProcessWorker,
         process_work_runner: lash::advanced::ProcessWorkRunner,
-        queue_rx: mpsc::UnboundedReceiver<QueueRunnerCommand>,
+        queued_work_runner: lash::advanced::QueuedWorkRunner,
         trace_path: PathBuf,
     }
 
@@ -2647,11 +2552,11 @@ mod tests {
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
-            session_store_factory;
+            session_store_factory.clone();
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
                 .expect("open process registry"),
-        ) as Arc<dyn lash::advanced::ProcessRegistry>;
+        ) as Arc<dyn lash::persistence::ProcessRegistry>;
         let artifact_store = Arc::new(
             lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
                 .expect("open artifact store"),
@@ -2701,6 +2606,16 @@ mod tests {
             ),
         ));
         let process_work_poke = process_work_runner.poke_handle();
+        let session_ids = WorkbenchSessionIds::fresh();
+        let restate_http = reqwest::Client::new();
+        let queued_work_runner =
+            lash::advanced::QueuedWorkRunner::new(Arc::new(WorkbenchQueuedWorkSubmitter {
+                session_ids: session_ids.clone(),
+                store_factory: Arc::clone(&core_store_factory),
+                restate_ingress_url: restate_ingress_url.clone(),
+                restate_http: restate_http.clone(),
+            }));
+        let queued_work_poke = queued_work_runner.poke_handle();
         let core = LashCore::builder()
             .install_mode(ModePreset::rlm_with_config(
                 lash::modes::RlmProtocolPluginConfig::default()
@@ -2719,22 +2634,22 @@ mod tests {
             .trace_level(TraceLevel::Extended)
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .advanced()
-            .effect_controller(Arc::new(lash::advanced::InlineRuntimeEffectController))
+            .effect_host(Arc::new(lash::advanced::InlineEffectHost::default()))
             .process_registry(Arc::clone(&process_registry))
             .disable_default_process_work_runner()
             .with_process_work_runner(process_work_poke)
+            .with_queued_work_runner(queued_work_poke.clone())
             .build()
             .expect("build core");
         let process_worker = lash::advanced::DurableProcessWorker::new(
             core.durable_process_worker_config(Arc::clone(&process_registry))
                 .expect("build process worker config"),
         );
-        let (queue_runner, queue_rx) = SessionQueueRunner::channel();
         let (event_tx, _) = broadcast::channel(1024);
         let state = AppState {
             core,
             process_registry: Arc::clone(&process_registry),
-            session_ids: WorkbenchSessionIds::fresh(),
+            session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
             selected_model: Arc::new(Mutex::new(ModelSelection {
@@ -2745,18 +2660,17 @@ mod tests {
             trace_sink: Some(trace_sink),
             lashlang_execution,
             event_tx,
-            queue_runner,
+            queued_work_poke,
             restate_ingress_url,
-            restate_http: reqwest::Client::new(),
+            restate_http,
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
-            queued_turn_inflight: Arc::new(Mutex::new(false)),
         };
         LiveWorkbenchRestateHarness {
             state,
             process_registry,
             process_worker,
             process_work_runner,
-            queue_rx,
+            queued_work_runner,
             trace_path,
         }
     }
@@ -2843,7 +2757,7 @@ mod tests {
             let process_registry = Arc::new(
                 lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
                     .expect("open registry"),
-            ) as Arc<dyn lash::advanced::ProcessRegistry>;
+            ) as Arc<dyn lash::persistence::ProcessRegistry>;
             let core = test_workbench_core(
                 session_store_factory.clone(),
                 process_registry,
@@ -2868,7 +2782,7 @@ mod tests {
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
                 .expect("reopen registry"),
-        ) as Arc<dyn lash::advanced::ProcessRegistry>;
+        ) as Arc<dyn lash::persistence::ProcessRegistry>;
         let core = test_workbench_core(
             session_store_factory,
             Arc::clone(&process_registry),
@@ -2892,7 +2806,7 @@ mod tests {
 
     fn test_workbench_core(
         session_store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
-        process_registry: Arc<dyn lash::advanced::ProcessRegistry>,
+        process_registry: Arc<dyn lash::persistence::ProcessRegistry>,
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     ) -> LashCore {
         let provider = trigger_registration_provider();
@@ -2912,8 +2826,7 @@ mod tests {
             .runtime_host_config({
                 let mut config = lash::advanced::RuntimeHostConfig::in_memory();
                 config.durability.lashlang_artifact_store = artifact_store;
-                config.control.effect_controller =
-                    Arc::new(lash::advanced::InlineRuntimeEffectController);
+                config.control.effect_host = Arc::new(lash::advanced::InlineEffectHost::default());
                 config
             })
             .process_registry(process_registry)

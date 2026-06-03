@@ -108,8 +108,8 @@ impl RuntimeTurnDriver<'_> {
                 )
                 .map_err(|err| {
                     RuntimeError::new(
-                        RuntimeErrorCode::DurableSubstrateRequired {
-                            facet: crate::DurableSubstrateFacet::AttachmentStore,
+                        RuntimeErrorCode::DurableStoreRequired {
+                            facet: crate::DurableStoreFacet::AttachmentStore,
                         },
                         err,
                     )
@@ -251,7 +251,6 @@ impl RuntimeTurnDriver<'_> {
                 self.host.core.tracing.trace_context.clone(),
             );
         let context = context.with_parent_invocation(invocation);
-        let context = context.with_turn_lease(self.turn_lease.clone());
         let result = match code_executor {
             Some(code_executor) => code_executor
                 .execute_code(

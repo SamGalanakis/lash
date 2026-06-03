@@ -24,23 +24,25 @@ pub(crate) fn validate_host_event(
     })
 }
 
-#[derive(Clone)]
-pub struct TriggerActivationService {
+pub struct TriggerActivationService<'a> {
     session_id: String,
     registry: Arc<SessionTriggerRegistry>,
     processes: Arc<dyn crate::ProcessService>,
+    effect_host: &'a dyn crate::EffectHost,
 }
 
-impl TriggerActivationService {
+impl<'a> TriggerActivationService<'a> {
     pub(crate) fn new(
         session_id: String,
         registry: Arc<SessionTriggerRegistry>,
         processes: Arc<dyn crate::ProcessService>,
+        effect_host: &'a dyn crate::EffectHost,
     ) -> Self {
         Self {
             session_id,
             registry,
             processes,
+            effect_host,
         }
     }
 
@@ -126,6 +128,13 @@ impl TriggerActivationService {
             },
         )
         .with_extra_event_types(crate::lashlang_process_event_types());
+        let scoped_effect_controller = self
+            .effect_host
+            .scoped(crate::EffectScope::host_event(
+                &self.session_id,
+                format!("trigger:{}:{process_id}", route.handle),
+            ))
+            .map_err(|err| PluginError::Session(err.to_string()))?;
         self.processes
             .start(
                 &self.session_id,
@@ -136,7 +145,8 @@ impl TriggerActivationService {
                         Some(route.process_name.as_str()),
                     ),
                 ),
-                crate::ProcessOpScope::new().with_parent_invocation(parent_invocation),
+                crate::ProcessOpScope::new(scoped_effect_controller)
+                    .with_parent_invocation(parent_invocation),
             )
             .await?;
         Ok(Some(process_id))

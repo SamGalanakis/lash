@@ -34,24 +34,16 @@ pub fn prepare_process_event_append(
         && let Some((existing_hash, existing)) = replay_lookup
     {
         if existing_hash == payload_hash {
-            let wake_delivery = existing
-                .semantics
-                .wake
-                .clone()
-                .zip(request.wake_target_scope.clone())
-                .map(|(wake, target_scope)| {
-                    process_wake_delivery(ProcessWakeDeliveryRequest {
-                        target_scope,
-                        process_id: process_id.to_string(),
-                        sequence: existing.sequence,
-                        event_type: existing.event_type.clone(),
-                        event_invocation: existing.invocation.clone(),
-                        process_caused_by: record.provenance.caused_by.clone(),
-                        wake,
-                        occurred_at: existing.occurred_at,
-                    })
-                })
-                .transpose()?;
+            let wake_delivery = prepare_wake_delivery(
+                process_id,
+                record,
+                existing.sequence,
+                existing.event_type.clone(),
+                existing.invocation.clone(),
+                existing.occurred_at,
+                existing.semantics.wake.clone(),
+                request.wake_target_scope.clone(),
+            )?;
             return Ok(PreparedProcessEventAppend {
                 event: existing,
                 payload_hash,
@@ -94,7 +86,6 @@ pub fn prepare_process_event_append(
         )));
     }
     let occurred_at = system_time_from_epoch_ms(occurred_at_ms);
-    let wake_target_scope = request.wake_target_scope.clone();
     let event = ProcessEvent {
         process_id: process_id.to_string(),
         sequence,
@@ -110,23 +101,16 @@ pub fn prepare_process_event_append(
         semantics: semantics.clone(),
         occurred_at,
     };
-    let wake_delivery = semantics
-        .wake
-        .clone()
-        .zip(wake_target_scope)
-        .map(|(wake, target_scope)| {
-            process_wake_delivery(ProcessWakeDeliveryRequest {
-                target_scope,
-                process_id: process_id.to_string(),
-                sequence: event.sequence,
-                event_type: event.event_type.clone(),
-                event_invocation: event.invocation.clone(),
-                process_caused_by: record.provenance.caused_by.clone(),
-                wake,
-                occurred_at: event.occurred_at,
-            })
-        })
-        .transpose()?;
+    let wake_delivery = prepare_wake_delivery(
+        process_id,
+        record,
+        event.sequence,
+        event.event_type.clone(),
+        event.invocation.clone(),
+        event.occurred_at,
+        semantics.wake.clone(),
+        request.wake_target_scope,
+    )?;
     Ok(PreparedProcessEventAppend {
         event,
         payload_hash,
@@ -135,6 +119,41 @@ pub fn prepare_process_event_append(
         occurred_at_ms,
         replayed: false,
     })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "wake delivery mirrors the persisted event plus its optional materialized wake"
+)]
+fn prepare_wake_delivery(
+    process_id: &str,
+    record: &ProcessRecord,
+    sequence: u64,
+    event_type: String,
+    event_invocation: crate::RuntimeInvocation,
+    occurred_at: std::time::SystemTime,
+    wake: Option<super::events::ProcessWake>,
+    wake_target_scope: Option<super::model::ProcessScope>,
+) -> Result<Option<ProcessWakeDelivery>, PluginError> {
+    let Some(wake) = wake else {
+        return Ok(None);
+    };
+    let Some(target_scope) = wake_target_scope else {
+        return Err(PluginError::Session(format!(
+            "process `{process_id}` emitted wake event `{event_type}` without a wake target scope"
+        )));
+    };
+    process_wake_delivery(ProcessWakeDeliveryRequest {
+        target_scope,
+        process_id: process_id.to_string(),
+        sequence,
+        event_type,
+        event_invocation,
+        process_caused_by: record.provenance.caused_by.clone(),
+        wake,
+        occurred_at,
+    })
+    .map(Some)
 }
 
 pub fn prepare_process_registration(

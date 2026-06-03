@@ -6,7 +6,9 @@ use http_body_util::{BodyExt, Empty, Full};
 use lash_core::{ProcessInput, ProcessRegistration};
 use restate_sdk::prelude::Endpoint;
 use restate_sdk::service::Discoverable;
+use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[test]
 fn restate_effect_name_uses_lash_replay_key() {
@@ -15,7 +17,6 @@ fn restate_effect_name_uses_lash_replay_key() {
         "effect",
         RuntimeEffectKind::ToolCall,
         "session:turn:1:2:tool_call:effect",
-        None,
     );
 
     assert_eq!(
@@ -24,28 +25,51 @@ fn restate_effect_name_uses_lash_replay_key() {
     );
 }
 
+#[tokio::test]
+async fn restate_effect_host_satisfies_scope_factory_conformance() {
+    lash_core::testing::conformance::effect_host(|| Arc::new(RestateEffectHost::new())).await;
+}
+
+#[tokio::test]
+async fn restate_handler_controller_satisfies_concurrent_replay_conformance() {
+    let context = Arc::new(ReplayableRecordingContext::default());
+    let controller = RestateRuntimeEffectController::new(Arc::clone(&context));
+    let replay_context = Arc::clone(&context);
+
+    lash_core::testing::conformance::effect_controller_concurrent_replay_deterministic(
+        &controller,
+        move || replay_context.start_replay(),
+    )
+    .await;
+
+    let runs = context.runs();
+    assert_eq!(runs.len(), 4);
+    assert!(runs.iter().any(|name| name.ends_with(":effect-slow")));
+    assert!(runs.iter().any(|name| name.ends_with(":effect-fast")));
+}
+
 #[test]
-fn journaled_runtime_effect_hash_mismatch_fails_explicitly() {
-    let journaled = JournaledRuntimeEffect {
+fn recorded_runtime_effect_hash_mismatch_fails_explicitly() {
+    let recorded = RecordedRuntimeEffect {
         envelope_hash: "old".to_string(),
         outcome: Ok(RuntimeEffectOutcome::Sleep),
     };
 
-    let err = validate_journaled_effect_hash(journaled, "new").expect_err("hash mismatch");
+    let err = validate_recorded_effect_hash(recorded, "new").expect_err("hash mismatch");
 
     assert_eq!(err.code, "restate_effect_hash_mismatch");
 }
 
 #[test]
-fn journaled_runtime_effect_hash_match_returns_recorded_outcome() {
-    let journaled = JournaledRuntimeEffect {
+fn recorded_runtime_effect_hash_match_returns_replayed_outcome() {
+    let recorded = RecordedRuntimeEffect {
         envelope_hash: "same".to_string(),
         outcome: Ok(RuntimeEffectOutcome::Sleep),
     };
 
-    let outcome = validate_journaled_effect_hash(journaled, "same")
+    let outcome = validate_recorded_effect_hash(recorded, "same")
         .expect("hash match")
-        .expect("recorded outcome");
+        .expect("replayed outcome");
 
     assert!(matches!(outcome, RuntimeEffectOutcome::Sleep));
 }
@@ -85,6 +109,135 @@ fn external_registration(id: &str) -> ProcessRegistration {
 
 fn process_registry() -> Arc<dyn ProcessRegistry> {
     Arc::new(lash_sqlite_store::SqliteProcessRegistry::memory().expect("sqlite registry"))
+}
+
+#[derive(Default)]
+struct DurableMemoryAttachmentStore {
+    inner: lash_core::InMemoryAttachmentStore,
+}
+
+impl lash_core::AttachmentStore for DurableMemoryAttachmentStore {
+    fn persistence(&self) -> lash_core::AttachmentStorePersistence {
+        lash_core::AttachmentStorePersistence::Durable
+    }
+
+    fn put(
+        &self,
+        bytes: Vec<u8>,
+        meta: lash_core::AttachmentCreateMeta,
+    ) -> Result<lash_core::AttachmentRef, lash_core::AttachmentStoreError> {
+        self.inner.put(bytes, meta)
+    }
+
+    fn get(
+        &self,
+        id: &lash_core::AttachmentId,
+    ) -> Result<lash_core::StoredAttachment, lash_core::AttachmentStoreError> {
+        self.inner.get(id)
+    }
+}
+
+struct CommitRetryStore {
+    inner: Arc<dyn lash_core::RuntimePersistence>,
+}
+
+lash_core::impl_noop_attachment_manifest!(CommitRetryStore);
+
+#[async_trait::async_trait]
+impl lash_core::RuntimePersistence for CommitRetryStore {
+    fn durability_tier(&self) -> lash_core::DurabilityTier {
+        lash_core::DurabilityTier::Durable
+    }
+
+    async fn load_session(
+        &self,
+        _scope: lash_core::SessionReadScope,
+    ) -> Result<Option<lash_core::store::PersistedSessionRead>, lash_core::StoreError> {
+        Ok(None)
+    }
+
+    async fn load_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<lash_core::SessionNodeRecord>, lash_core::StoreError> {
+        self.inner.load_node(node_id).await
+    }
+
+    async fn commit_runtime_state(
+        &self,
+        commit: lash_core::store::RuntimeCommit,
+    ) -> Result<lash_core::store::RuntimeCommitResult, lash_core::StoreError> {
+        self.inner.commit_runtime_state(commit).await
+    }
+
+    async fn enqueue_queued_work(
+        &self,
+        batch: lash_core::runtime::QueuedWorkBatchDraft,
+    ) -> Result<lash_core::runtime::QueuedWorkBatch, lash_core::StoreError> {
+        self.inner.enqueue_queued_work(batch).await
+    }
+
+    async fn claim_ready_queued_work(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        boundary: lash_core::runtime::QueuedWorkClaimBoundary,
+        lease_ttl_ms: u64,
+        max_batches: usize,
+    ) -> Result<Option<lash_core::runtime::QueuedWorkClaim>, lash_core::StoreError> {
+        self.inner
+            .claim_ready_queued_work(session_id, owner_id, boundary, lease_ttl_ms, max_batches)
+            .await
+    }
+
+    async fn renew_queued_work_claim(
+        &self,
+        claim: &lash_core::runtime::QueuedWorkClaim,
+        lease_ttl_ms: u64,
+    ) -> Result<lash_core::runtime::QueuedWorkClaim, lash_core::StoreError> {
+        self.inner
+            .renew_queued_work_claim(claim, lease_ttl_ms)
+            .await
+    }
+
+    async fn abandon_queued_work_claim(
+        &self,
+        claim: &lash_core::runtime::QueuedWorkClaim,
+    ) -> Result<(), lash_core::StoreError> {
+        self.inner.abandon_queued_work_claim(claim).await
+    }
+
+    async fn list_queued_work(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<lash_core::runtime::QueuedWorkBatch>, lash_core::StoreError> {
+        self.inner.list_queued_work(session_id).await
+    }
+
+    async fn save_session_meta(
+        &self,
+        meta: lash_core::SessionMeta,
+    ) -> Result<(), lash_core::StoreError> {
+        self.inner.save_session_meta(meta).await
+    }
+
+    async fn load_session_meta(
+        &self,
+    ) -> Result<Option<lash_core::SessionMeta>, lash_core::StoreError> {
+        self.inner.load_session_meta().await
+    }
+
+    async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), lash_core::StoreError> {
+        self.inner.tombstone_nodes(ids).await
+    }
+
+    async fn vacuum(&self) -> Result<lash_core::VacuumReport, lash_core::StoreError> {
+        self.inner.vacuum().await
+    }
+
+    async fn gc_unreachable(&self) -> Result<lash_core::GcReport, lash_core::StoreError> {
+        self.inner.gc_unreachable().await
+    }
 }
 
 const RESTATE_INVOCATION_CONTENT_TYPE: &str = "application/vnd.restate.invocation.v6";
@@ -337,13 +490,113 @@ impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
     }
 }
 
+#[derive(Default)]
+struct ReplayableRecordingContext {
+    sleeps: Mutex<Vec<u64>>,
+    runs: Mutex<Vec<String>>,
+    records: Mutex<HashMap<String, Vec<u8>>>,
+    replaying: AtomicBool,
+}
+
+impl ReplayableRecordingContext {
+    fn start_replay(&self) {
+        self.replaying.store(true, Ordering::SeqCst);
+    }
+
+    fn runs(&self) -> Vec<String> {
+        self.runs.lock().expect("runs lock").clone()
+    }
+}
+
+impl<'ctx> RestateControllerContext<'ctx> for Arc<ReplayableRecordingContext> {
+    fn sleep_send<'run>(
+        &'run self,
+        duration: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        self.sleeps
+            .lock()
+            .expect("sleeps lock")
+            .push(duration.as_millis() as u64);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn run_json_send<'run, T, Fut>(
+        &'run self,
+        effect_name: String,
+        _retry_policy: Option<RunRetryPolicy>,
+        future: Fut,
+    ) -> Pin<Box<dyn Future<Output = Result<Json<T>, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+        T: Serialize + DeserializeOwned + Send + 'static,
+        Fut: Future<Output = T> + Send + 'run,
+    {
+        self.runs
+            .lock()
+            .expect("runs lock")
+            .push(effect_name.clone());
+        let replaying = self.replaying.load(Ordering::SeqCst);
+        if replaying {
+            let recorded = self
+                .records
+                .lock()
+                .expect("records lock")
+                .get(&effect_name)
+                .cloned();
+            return Box::pin(async move {
+                let bytes = recorded.ok_or_else(|| {
+                    TerminalError::new(format!("missing recorded effect `{effect_name}`"))
+                })?;
+                serde_json::from_slice(&bytes)
+                    .map(Json)
+                    .map_err(TerminalError::from_error)
+            });
+        }
+
+        let context = Arc::clone(self);
+        Box::pin(async move {
+            let value = future.await;
+            let bytes = serde_json::to_vec(&value).map_err(TerminalError::from_error)?;
+            context
+                .records
+                .lock()
+                .expect("records lock")
+                .insert(effect_name, bytes);
+            Ok(Json(value))
+        })
+    }
+
+    fn start_process_workflow<'run>(
+        &'run self,
+        _registration: ProcessRegistration,
+        _execution_context: ProcessExecutionContext,
+    ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("process workflow start is unsupported")) })
+    }
+
+    fn request_process_workflow_cancel<'run>(
+        &'run self,
+        _request: RestateProcessCancelRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+    {
+        Box::pin(async { Err(TerminalError::new("process workflow cancel is unsupported")) })
+    }
+}
+
 fn runtime_invocation(kind: RuntimeEffectKind, effect_id: &str) -> RuntimeInvocation {
     RuntimeInvocation::effect(
         lash_core::runtime::RuntimeScope::for_turn("session", "turn", 1, 0),
         effect_id,
         kind,
         format!("session:turn:1:0:{}:{effect_id}", kind.as_str()),
-        Some("0".repeat(64)),
     )
 }
 
@@ -393,6 +646,157 @@ async fn restate_controller_routes_sleep_only_through_timer() {
         &[42]
     );
     assert!(context.runs.lock().expect("runs lock").is_empty());
+}
+
+fn replay_test_policy(session_id: &str) -> lash_core::SessionPolicy {
+    let mut policy = lash_core::testing::mock_session_policy();
+    policy.session_id = Some(session_id.to_string());
+    policy
+}
+
+fn replay_test_state(
+    session_id: &str,
+    policy: &lash_core::SessionPolicy,
+) -> lash_core::RuntimeSessionState {
+    lash_core::RuntimeSessionState {
+        session_id: session_id.to_string(),
+        policy: policy.clone(),
+        ..lash_core::RuntimeSessionState::default()
+    }
+}
+
+fn replay_test_input(turn_id: &str) -> lash_core::TurnInput {
+    let mut input = lash_core::TurnInput::text("finish once");
+    input.trace_turn_id = Some(turn_id.to_string());
+    input
+}
+
+async fn replay_test_runtime(
+    session_id: &str,
+    policy: lash_core::SessionPolicy,
+    initial_state: lash_core::RuntimeSessionState,
+    host: lash_core::RuntimeHostConfig,
+    store: Arc<dyn lash_core::RuntimePersistence>,
+) -> lash_core::LashRuntime {
+    lash_core::LashRuntime::builder()
+        .with_session_id(session_id)
+        .with_policy(policy)
+        .with_initial_state(initial_state)
+        .with_runtime_host(host)
+        .with_plugin_factories(lash_core::testing::test_standard_protocol_factories())
+        .with_store(store)
+        .build()
+        .await
+        .expect("build replay test runtime")
+}
+
+async fn run_restate_replay_turn(
+    runtime: &mut lash_core::LashRuntime,
+    context: Arc<ReplayableRecordingContext>,
+    session_id: &str,
+    turn_id: &str,
+) -> lash_core::AssembledTurn {
+    let controller = RestateRuntimeEffectController::new(context);
+    let scoped_effect_controller = controller
+        .scoped_effect_controller(EffectScope::turn(session_id, turn_id))
+        .expect("scoped restate controller");
+    runtime
+        .stream_turn(
+            replay_test_input(turn_id),
+            lash_core::TurnOptions::new(tokio_util::sync::CancellationToken::new())
+                .with_scoped_effect_controller(scoped_effect_controller),
+        )
+        .await
+        .expect("run replay test turn")
+}
+
+#[tokio::test]
+async fn restate_handler_replay_retries_final_lash_commit_idempotently() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session_id = "restate-final-commit-replay";
+    let turn_id = "restate-turn-1";
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let provider = lash_core::testing::TestProvider::builder()
+        .kind("stub")
+        .complete({
+            let provider_calls = Arc::clone(&provider_calls);
+            move |_request| {
+                let provider_calls = Arc::clone(&provider_calls);
+                async move {
+                    let call_index = provider_calls.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(
+                        call_index, 0,
+                        "Restate replay should return the recorded LLM effect"
+                    );
+                    Ok(lash_core::LlmResponse {
+                        full_text: "committed once".to_string(),
+                        parts: vec![lash_core::LlmOutputPart::Text {
+                            text: "committed once".to_string(),
+                            response_meta: None,
+                        }],
+                        ..lash_core::LlmResponse::default()
+                    })
+                }
+            }
+        })
+        .build()
+        .into_handle();
+    let mut host = lash_core::RuntimeHostConfig::in_memory();
+    host.providers.provider_resolver = Arc::new(lash_core::SingleProviderResolver::new(provider));
+    host.durability.attachment_store = Arc::new(DurableMemoryAttachmentStore::default());
+    host.durability.lashlang_artifact_store = Arc::new(
+        lash_sqlite_store::Store::open(&dir.path().join("artifacts.db"))
+            .expect("open artifact store"),
+    );
+    let store = Arc::new(
+        lash_sqlite_store::Store::open(&dir.path().join("session.db")).expect("open session store"),
+    );
+    let runtime_store: Arc<dyn lash_core::RuntimePersistence> = store.clone();
+    let policy = replay_test_policy(session_id);
+    let initial_state = replay_test_state(session_id, &policy);
+    let context = Arc::new(ReplayableRecordingContext::default());
+
+    let mut first = replay_test_runtime(
+        session_id,
+        policy.clone(),
+        initial_state.clone(),
+        host.clone(),
+        Arc::clone(&runtime_store),
+    )
+    .await;
+    let first_turn =
+        run_restate_replay_turn(&mut first, Arc::clone(&context), session_id, turn_id).await;
+    assert!(matches!(
+        first_turn.outcome,
+        lash_core::TurnOutcome::Finished(_)
+    ));
+    let first_runs = context.runs();
+    assert!(!first_runs.is_empty());
+
+    context.start_replay();
+    let retry_store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(CommitRetryStore {
+        inner: Arc::clone(&runtime_store),
+    });
+    let mut replay =
+        replay_test_runtime(session_id, policy, initial_state, host, retry_store).await;
+    let replay_turn =
+        run_restate_replay_turn(&mut replay, Arc::clone(&context), session_id, turn_id).await;
+    assert!(matches!(
+        replay_turn.outcome,
+        lash_core::TurnOutcome::Finished(_)
+    ));
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+
+    let conn = rusqlite::Connection::open(dir.path().join("session.db"))
+        .expect("open raw session sqlite store");
+    let rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM runtime_turn_commits WHERE session_id = ?1 AND turn_id = ?2",
+            [session_id, turn_id],
+            |row| row.get(0),
+        )
+        .expect("count turn commit stamps");
+    assert_eq!(rows, 1);
 }
 
 #[tokio::test]
@@ -674,6 +1078,91 @@ async fn restate_controller_lists_and_transfers_grants_through_process_effects()
 }
 
 #[tokio::test]
+async fn restate_controller_awaits_and_signals_through_process_effects() {
+    let context = Arc::new(RecordingContext::default());
+    let host = RestateRuntimeEffectController::new(context.clone());
+    let registry = process_registry();
+    registry
+        .register_process(external_registration("task-await-signal"))
+        .await
+        .expect("register");
+    registry
+        .register_process(
+            external_registration("task-signal")
+                .with_extra_event_types(lash_core::lashlang_process_event_types()),
+        )
+        .await
+        .expect("register signal target");
+    registry
+        .complete_process(
+            "task-await-signal",
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!({ "done": true }),
+                control: None,
+            },
+        )
+        .await
+        .expect("complete");
+
+    let outcome = host
+        .execute_effect(
+            RuntimeEffectEnvelope::new(
+                runtime_invocation(RuntimeEffectKind::Process, "process-await"),
+                RuntimeEffectCommand::Process {
+                    command: ProcessCommand::Await {
+                        process_id: "task-await-signal".to_string(),
+                    },
+                },
+            ),
+            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+        )
+        .await
+        .expect("await");
+    let RuntimeEffectOutcome::Process {
+        result: ProcessEffectOutcome::Await { output },
+    } = outcome
+    else {
+        panic!("wrong await outcome");
+    };
+    assert_eq!(
+        output,
+        ProcessAwaitOutput::Success {
+            value: serde_json::json!({ "done": true }),
+            control: None,
+        }
+    );
+
+    let outcome = host
+        .execute_effect(
+            RuntimeEffectEnvelope::new(
+                runtime_invocation(RuntimeEffectKind::Process, "process-signal"),
+                RuntimeEffectCommand::Process {
+                    command: ProcessCommand::Signal {
+                        process_id: "task-signal".to_string(),
+                        signal_id: "notify".to_string(),
+                        request: lash_core::ProcessEventAppendRequest::new(
+                            "process.signal",
+                            serde_json::json!({ "signal": "notify" }),
+                        )
+                        .with_replay_key("signal:notify"),
+                    },
+                },
+            ),
+            RuntimeEffectLocalExecutor::process_control(registry.clone()),
+        )
+        .await
+        .expect("signal");
+    let RuntimeEffectOutcome::Process {
+        result: ProcessEffectOutcome::Signal { event },
+    } = outcome
+    else {
+        panic!("wrong signal outcome");
+    };
+    assert_eq!(event.event_type, "process.signal");
+    assert!(context.started.lock().expect("started lock").is_empty());
+}
+
+#[tokio::test]
 async fn restate_controller_cancel_requests_call_workflow_cancel() {
     let context = Arc::new(RecordingContext::default());
     let host = RestateRuntimeEffectController::new(context.clone());
@@ -721,6 +1210,8 @@ struct RecordedProcessRun {
     process_id: String,
     wake_target_session_id: Option<String>,
     tool_effect_id: Option<String>,
+    effect_scope_id: String,
+    controller_tier: lash_core::DurabilityTier,
 }
 
 #[derive(Default)]
@@ -735,18 +1226,21 @@ impl RestateProcessRunner for RecordingRunner {
         &self,
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
+        scoped_effect_controller: lash_core::ScopedEffectController<'_>,
     ) -> Result<ProcessAwaitOutput, PluginError> {
         self.ran
             .lock()
             .expect("runner ran lock")
             .push(RecordedProcessRun {
-                process_id: registration.id,
+                process_id: registration.id.clone(),
                 wake_target_session_id: execution_context
                     .wake_target_scope
                     .map(|scope| scope.session_id),
                 tool_effect_id: execution_context
                     .causal_invocation
                     .and_then(|invocation| invocation.effect_id().map(str::to_string)),
+                effect_scope_id: scoped_effect_controller.scope_id().to_string(),
+                controller_tier: scoped_effect_controller.controller().durability_tier(),
             });
         Ok(ProcessAwaitOutput::Success {
             value: serde_json::json!({"ok": true}),
@@ -865,6 +1359,8 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
             process_id: "task-smoke".to_string(),
             wake_target_session_id: Some("wake-smoke".to_string()),
             tool_effect_id: Some("tool-smoke".to_string()),
+            effect_scope_id: "task-smoke".to_string(),
+            controller_tier: lash_core::DurabilityTier::Durable,
         }]
     );
 
@@ -1459,7 +1955,15 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
         )));
 
     let output = workflow
-        .run_registration(registration, execution_context)
+        .run_registration(
+            registration,
+            execution_context,
+            lash_core::ScopedEffectController::shared(
+                Arc::new(lash_core::InlineRuntimeEffectController),
+                lash_core::EffectScope::process("task-workflow"),
+            )
+            .expect("inline process scope"),
+        )
         .await
         .expect("workflow run");
     workflow
@@ -1477,6 +1981,8 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
             process_id: "task-workflow".to_string(),
             wake_target_session_id: Some("wake-session".to_string()),
             tool_effect_id: Some("tool-effect".to_string()),
+            effect_scope_id: "task-workflow".to_string(),
+            controller_tier: lash_core::DurabilityTier::Inline,
         }]
     );
     assert_eq!(

@@ -15,9 +15,8 @@ pub struct ToolProcessControl<'run> {
 
 impl ToolProcessControl<'_> {
     fn process_scope(&self) -> crate::ProcessOpScope<'_> {
-        crate::ProcessOpScope::new()
+        crate::ProcessOpScope::new(self.effect_controller.scoped())
             .with_parent_invocation(self.parent_invocation.clone())
-            .with_effect_controller(self.effect_controller.as_controller())
             .with_agent_frame_id(Some(self.agent_frame_id.clone()))
     }
 

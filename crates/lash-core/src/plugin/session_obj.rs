@@ -166,14 +166,16 @@ impl PluginSession {
         Ok(serde_json::json!(changed))
     }
 
-    pub(crate) fn trigger_activation_service(
-        &self,
+    pub(crate) fn trigger_activation_service<'a>(
+        &'a self,
         processes: Arc<dyn crate::ProcessService>,
-    ) -> crate::TriggerActivationService {
+        effect_host: &'a dyn crate::EffectHost,
+    ) -> crate::TriggerActivationService<'a> {
         crate::TriggerActivationService::new(
             self.session_id.clone(),
             Arc::clone(&self.trigger_registry),
             processes,
+            effect_host,
         )
     }
 

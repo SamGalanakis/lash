@@ -2,10 +2,10 @@
 //!
 //! The primary entrypoint is [`RestateRuntimeEffectController`]. Construct it inside
 //! a Restate service, object, or workflow handler, derive a stable
-//! [`DurableTurnScope`](lash_core::DurableTurnScope), and run the Lash
-//! turn through the scoped API with a stable
-//! `TurnInput::with_trace_turn_id(turn_id)`. Restate recovery is handler replay
-//! with the same turn id and request data, not Lash checkpoint reload.
+//! [`ScopedEffectController`](lash_core::ScopedEffectController) from an
+//! [`EffectScope`](lash_core::EffectScope), and run Lash through the scoped API.
+//! Restate recovery is handler replay with the same scope id and request data,
+//! not Lash checkpoint reload.
 //!
 //! ```rust,ignore
 //! use lash_restate::RestateRuntimeEffectController;
@@ -16,7 +16,7 @@
 //! # #[derive(serde::Serialize, serde::Deserialize)]
 //! # struct TurnResponse;
 //! # async fn run_lash_turn(
-//! #     _scope: lash_core::DurableTurnScope<'_>,
+//! #     _scope: lash_core::ScopedEffectController<'_>,
 //! #     _req: TurnRequest,
 //! # ) -> Result<TurnResponse, std::io::Error> {
 //! #     Ok(TurnResponse)
@@ -36,10 +36,10 @@
 //!     ) -> HandlerResult<Json<TurnResponse>> {
 //!         let effect_controller = RestateRuntimeEffectController::new(ctx);
 //!         let turn_id = req.turn_id.clone();
-//!         let durable_turn_scope = effect_controller
-//!             .durable_turn_scope(&turn_id)
+//!         let scoped_effect_controller = effect_controller
+//!             .scoped_effect_controller(lash_core::EffectScope::turn("session", &turn_id))
 //!             .map_err(TerminalError::from_error)?;
-//!         let response = run_lash_turn(durable_turn_scope, req)
+//!         let response = run_lash_turn(scoped_effect_controller, req)
 //!             .await
 //!             .map_err(TerminalError::from_error)?;
 //!         Ok(Json(response))
@@ -65,19 +65,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lash_core::{
-    DurabilityTier, DurableProcessWorker, DurableTurnScope, PluginError, ProcessAwaitOutput,
+    DurabilityTier, DurableProcessWorker, EffectHost, EffectScope, PluginError, ProcessAwaitOutput,
     ProcessCommand, ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef,
     ProcessLease, ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
     ProcessRunHandle, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeError, RuntimeInvocation,
+    RuntimeError, RuntimeInvocation, ScopedEffectController,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
     SharedWorkflowContext, WorkflowContext,
 };
 use restate_sdk::context::{ContextClient, InvocationHandle, RequestTarget};
-use restate_sdk::errors::{HandlerResult, TerminalError};
+use restate_sdk::errors::{HandlerError, HandlerResult, TerminalError};
 use restate_sdk::serde::Json;
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -87,7 +87,7 @@ type RestateHandlerFuture<'a, T> =
     Pin<Box<dyn Future<Output = HandlerResult<Json<T>>> + Send + 'a>>;
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
-struct JournaledRuntimeEffect {
+struct RecordedRuntimeEffect {
     envelope_hash: String,
     outcome: Result<RuntimeEffectOutcome, RuntimeEffectControllerError>,
 }
@@ -123,6 +123,7 @@ pub trait RestateProcessRunner: Send + Sync + 'static {
         &self,
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<ProcessAwaitOutput, PluginError>;
 
     async fn request_process_cancel(
@@ -152,11 +153,13 @@ impl RestateProcessRunner for RestateCoreProcessRunner {
         &self,
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<ProcessAwaitOutput, PluginError> {
         self.worker
-            .run_process(
+            .run_process_with_scoped_effect_controller(
                 registration,
                 execution_context,
+                scoped_effect_controller,
                 tokio_util::sync::CancellationToken::new(),
             )
             .await
@@ -169,6 +172,83 @@ impl RestateProcessRunner for RestateCoreProcessRunner {
         self.worker
             .request_process_cancel(&request.process_id, request.reason)
             .await
+    }
+}
+
+/// Deployment-level Restate effect host for long-lived Lash cores.
+///
+/// Restate's real effect execution requires a handler context, so this host is
+/// intentionally a durable boundary, not an executor. HTTP/API code should
+/// enter a Restate workflow/object first and then pass
+/// [`RestateRuntimeEffectController::scoped_effect_controller`] into Lash. If a
+/// caller tries to execute through this deployment host directly, it fails
+/// loudly instead of falling back to inline execution.
+#[derive(Clone, Default)]
+pub struct RestateEffectHost {
+    controller: Arc<RestateEffectHostController>,
+}
+
+impl RestateEffectHost {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl EffectHost for RestateEffectHost {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
+    fn requires_durable_attachment_store(&self) -> bool {
+        true
+    }
+
+    fn scoped<'run>(
+        &'run self,
+        scope: EffectScope,
+    ) -> Result<ScopedEffectController<'run>, RuntimeError> {
+        ScopedEffectController::shared(self.controller.clone(), scope)
+    }
+
+    fn scoped_static(
+        &self,
+        scope: EffectScope,
+    ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
+        Ok(Some(ScopedEffectController::shared(
+            self.controller.clone(),
+            scope,
+        )?))
+    }
+}
+
+#[derive(Default)]
+struct RestateEffectHostController;
+
+#[async_trait::async_trait]
+impl RuntimeEffectController for RestateEffectHostController {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
+    fn requires_durable_attachment_store(&self) -> bool {
+        true
+    }
+
+    async fn execute_effect(
+        &self,
+        envelope: RuntimeEffectEnvelope,
+        _local_executor: RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        Err(RuntimeEffectControllerError::new(
+            "restate_effect_host_requires_handler_scope",
+            format!(
+                "effect `{}` must enter a Restate handler and use RestateRuntimeEffectController::scoped_effect_controller",
+                envelope
+                    .invocation
+                    .effect_id()
+                    .unwrap_or_else(|| envelope.command.kind().as_str())
+            ),
+        ))
     }
 }
 
@@ -356,11 +436,12 @@ where
         &self,
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<ProcessAwaitOutput, PluginError> {
         let process_id = registration.id.clone();
         let output = self
             .runner
-            .run_process(registration, execution_context)
+            .run_process(registration, execution_context, scoped_effect_controller)
             .await;
         match output {
             Ok(output) => {
@@ -406,13 +487,22 @@ where
 {
     async fn run(
         &self,
-        _ctx: WorkflowContext<'_>,
+        ctx: WorkflowContext<'_>,
         Json(input): Json<RestateProcessWorkflowInput>,
     ) -> HandlerResult<Json<ProcessAwaitOutput>> {
-        self.run_registration(input.registration, input.execution_context)
-            .await
-            .map(Json)
-            .map_err(|err| TerminalError::from_error(err).into())
+        let process_id = input.registration.id.clone();
+        let controller = RestateRuntimeEffectController::new(ctx);
+        let scoped_effect_controller = controller
+            .scoped_effect_controller(EffectScope::process(process_id))
+            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+        self.run_registration(
+            input.registration,
+            input.execution_context,
+            scoped_effect_controller,
+        )
+        .await
+        .map(Json)
+        .map_err(|err| TerminalError::from_error(err).into())
     }
 
     async fn cancel(
@@ -600,11 +690,12 @@ impl_restate_controller_context!(
     WorkflowContext,
 );
 
-/// Lash [`RuntimeEffectController`] backed by a Restate handler context.
+/// Lash [`RuntimeEffectController`] and [`EffectHost`] backed by a Restate handler context.
 ///
 /// This type is intentionally handler-scoped. Create one inside the Restate
-/// handler that owns the Lash turn, then pass [`RestateRuntimeEffectController::durable_turn_scope`]
-/// to Lash's scoped turn API with a stable turn ID.
+/// handler that owns the Lash operation, then pass
+/// [`RestateRuntimeEffectController::scoped_effect_controller`] to Lash's
+/// scoped API with a stable [`EffectScope`].
 pub struct RestateRuntimeEffectController<'ctx, C> {
     context: C,
     options: RestateEffectControllerOptions,
@@ -637,11 +728,11 @@ impl<'ctx, C> RestateRuntimeEffectController<'ctx, C>
 where
     C: RestateControllerContext<'ctx>,
 {
-    pub fn durable_turn_scope<'run>(
+    pub fn scoped_effect_controller<'run>(
         &'run self,
-        turn_id: &'run str,
-    ) -> Result<DurableTurnScope<'run>, RuntimeError> {
-        DurableTurnScope::new(self, turn_id)
+        scope: EffectScope,
+    ) -> Result<ScopedEffectController<'run>, RuntimeError> {
+        ScopedEffectController::borrowed(self, scope)
     }
 
     async fn journal_effect<'run, T, Fut>(
@@ -673,6 +764,26 @@ impl<C> fmt::Debug for RestateRuntimeEffectController<'_, C> {
         f.debug_struct("RestateRuntimeEffectController")
             .field("options", &self.options)
             .finish_non_exhaustive()
+    }
+}
+
+impl<'ctx, C> EffectHost for RestateRuntimeEffectController<'ctx, C>
+where
+    C: RestateControllerContext<'ctx>,
+{
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
+    fn requires_durable_attachment_store(&self) -> bool {
+        true
+    }
+
+    fn scoped<'run>(
+        &'run self,
+        scope: EffectScope,
+    ) -> Result<ScopedEffectController<'run>, RuntimeError> {
+        self.scoped_effect_controller(scope)
     }
 }
 
@@ -721,10 +832,10 @@ where
                 let current_hash = envelope.stable_hash()?;
                 let invocation = envelope.invocation.clone();
                 let journal_hash = current_hash.clone();
-                let journaled = self
+                let recorded = self
                     .journal_effect(invocation, async move {
                         let outcome = local_executor.execute(envelope).await;
-                        JournaledRuntimeEffect {
+                        RecordedRuntimeEffect {
                             envelope_hash: journal_hash,
                             outcome,
                         }
@@ -736,7 +847,7 @@ where
                             err.to_string(),
                         )
                     })?;
-                validate_journaled_effect_hash(journaled, &current_hash)?
+                validate_recorded_effect_hash(recorded, &current_hash)?
             }
         }
     }
@@ -921,21 +1032,21 @@ fn restate_effect_name(invocation: &RuntimeInvocation) -> String {
     }
 }
 
-fn validate_journaled_effect_hash(
-    journaled: JournaledRuntimeEffect,
+fn validate_recorded_effect_hash(
+    recorded: RecordedRuntimeEffect,
     current_hash: &str,
 ) -> Result<Result<RuntimeEffectOutcome, RuntimeEffectControllerError>, RuntimeEffectControllerError>
 {
-    if journaled.envelope_hash != current_hash {
+    if recorded.envelope_hash != current_hash {
         return Err(RuntimeEffectControllerError::new(
             "restate_effect_hash_mismatch",
             format!(
-                "journaled runtime effect hash {} did not match current envelope hash {}",
-                journaled.envelope_hash, current_hash
+                "recorded runtime effect hash {} did not match current envelope hash {}",
+                recorded.envelope_hash, current_hash
             ),
         ));
     }
-    Ok(journaled.outcome)
+    Ok(recorded.outcome)
 }
 
 fn tracing_sleep_error(invocation: &RuntimeInvocation, err: &TerminalError) {

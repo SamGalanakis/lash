@@ -80,9 +80,9 @@ impl RuntimePersistence for Store {
                     attempted_session_id: commit.session_id.clone(),
                 });
             }
-            if let Some(completed) = &commit.completed_turn {
+            if let Some(completed) = &commit.turn_commit {
                 if completed.session_id != commit.session_id {
-                    return Err(StoreError::RuntimeTurnLeaseExpired {
+                    return Err(StoreError::RuntimeTurnCommitConflict {
                         session_id: completed.session_id.clone(),
                         turn_id: completed.turn_id.clone(),
                     });
@@ -121,14 +121,13 @@ impl RuntimePersistence for Store {
                     actual: actual_revision,
                 });
             }
-            if let Some(completed) = &commit.completed_turn {
+            if let Some(completed) = &commit.turn_commit {
                 if completed.session_id != commit.session_id {
-                    return Err(StoreError::RuntimeTurnLeaseExpired {
+                    return Err(StoreError::RuntimeTurnCommitConflict {
                         session_id: completed.session_id.clone(),
                         turn_id: completed.turn_id.clone(),
                     });
                 }
-                ensure_runtime_turn_completion_conn(tx, completed)?;
             }
             for completed in &commit.completed_queue_claims {
                 if completed.session_id != commit.session_id {
@@ -224,26 +223,6 @@ impl RuntimePersistence for Store {
                 ],
             )
             .map_err(sqlite_error)?;
-            if let Some(completed) = &commit.completed_turn
-                && let Some(lease_token) = completed.lease_token.as_deref()
-            {
-                tx.execute(
-                    "DELETE FROM runtime_effect_journal
-                     WHERE session_id = ?1 AND turn_id = ?2
-                       AND EXISTS (
-                         SELECT 1 FROM runtime_turn_checkpoints
-                         WHERE session_id = ?1 AND turn_id = ?2 AND lease_token = ?3
-                       )",
-                    params![completed.session_id, completed.turn_id, lease_token],
-                )
-                .map_err(sqlite_error)?;
-                tx.execute(
-                    "DELETE FROM runtime_turn_checkpoints
-                     WHERE session_id = ?1 AND turn_id = ?2 AND lease_token = ?3",
-                    params![completed.session_id, completed.turn_id, lease_token],
-                )
-                .map_err(sqlite_error)?;
-            }
             for completed in &commit.completed_queue_claims {
                 for batch_id in &completed.batch_ids {
                     tx.execute(
@@ -281,7 +260,7 @@ impl RuntimePersistence for Store {
                 checkpoint_ref: stored_checkpoint.checkpoint_ref,
                 manifest: stored_checkpoint.manifest,
             };
-            if let Some(completed) = &commit.completed_turn {
+            if let Some(completed) = &commit.turn_commit {
                 tx.execute(
                     "INSERT INTO runtime_turn_commits (
                         session_id, turn_id, turn_commit_hash, result_json, committed_at_ms
@@ -301,10 +280,6 @@ impl RuntimePersistence for Store {
         })?;
         self.maybe_auto_gc();
         Ok(result)
-    }
-
-    fn embedded_durable_turn_store(&self) -> Option<&dyn lash_core::EmbeddedDurableTurnStore> {
-        Some(self)
     }
 
     async fn enqueue_queued_work(
@@ -636,286 +611,5 @@ impl RuntimePersistence for Store {
 
     async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
         Ok(Self::gc_unreachable(self))
-    }
-}
-
-#[async_trait::async_trait]
-impl lash_core::EmbeddedDurableTurnStore for Store {
-    async fn claim_runtime_turn_lease(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        owner_id: &str,
-        lease_ttl_ms: u64,
-    ) -> Result<RuntimeTurnLease, StoreError> {
-        self.with_write_tx(|tx| {
-            let now = current_epoch_ms();
-            let current =
-                load_runtime_turn_lease_from_conn(tx, session_id, turn_id).map_err(sqlite_error)?;
-            if let Some(current) = current
-                && current.expires_at_epoch_ms > now
-                && current.owner_id != owner_id
-            {
-                return Err(StoreError::RuntimeTurnLeaseConflict {
-                    session_id: session_id.to_string(),
-                    turn_id: turn_id.to_string(),
-                    owner_id: current.owner_id,
-                    expires_at_epoch_ms: current.expires_at_epoch_ms,
-                });
-            }
-            let fencing_token: u64 = tx
-                .query_row(
-                    "SELECT lease_fencing_token FROM runtime_turn_checkpoints
-                     WHERE session_id = ?1 AND turn_id = ?2",
-                    params![session_id, turn_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-                .map_err(sqlite_error)?
-                .unwrap_or(0) as u64
-                + 1;
-            let lease = RuntimeTurnLease {
-                schema_version: RUNTIME_TURN_LEASE_SCHEMA_VERSION,
-                session_id: session_id.to_string(),
-                turn_id: turn_id.to_string(),
-                owner_id: owner_id.to_string(),
-                lease_token: format!(
-                    "{:x}",
-                    Sha256::digest(
-                        format!("{session_id}:{turn_id}:{owner_id}:{now}:{fencing_token}")
-                            .as_bytes()
-                    )
-                ),
-                fencing_token,
-                claimed_at_epoch_ms: now,
-                expires_at_epoch_ms: now.saturating_add(lease_ttl_ms),
-            };
-            tx.execute(
-                "INSERT INTO runtime_turn_checkpoints (
-                    session_id, turn_id, lease_owner_id, lease_token, lease_fencing_token,
-                    lease_claimed_at_ms, lease_expires_at_ms, updated_at_ms
-                 )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(session_id, turn_id) DO UPDATE SET
-                    lease_owner_id = excluded.lease_owner_id,
-                    lease_token = excluded.lease_token,
-                    lease_fencing_token = excluded.lease_fencing_token,
-                    lease_claimed_at_ms = excluded.lease_claimed_at_ms,
-                    lease_expires_at_ms = excluded.lease_expires_at_ms,
-                    updated_at_ms = excluded.updated_at_ms",
-                params![
-                    lease.session_id,
-                    lease.turn_id,
-                    lease.owner_id,
-                    lease.lease_token,
-                    lease.fencing_token as i64,
-                    lease.claimed_at_epoch_ms as i64,
-                    lease.expires_at_epoch_ms as i64,
-                    now as i64
-                ],
-            )
-            .map_err(sqlite_error)?;
-            Ok(lease)
-        })
-    }
-
-    async fn renew_runtime_turn_lease(
-        &self,
-        lease: &RuntimeTurnLease,
-        lease_ttl_ms: u64,
-    ) -> Result<RuntimeTurnLease, StoreError> {
-        self.with_write_tx(|tx| {
-            ensure_runtime_turn_lease_conn(tx, lease)?;
-            let now = current_epoch_ms();
-            let renewed = RuntimeTurnLease {
-                expires_at_epoch_ms: now.saturating_add(lease_ttl_ms),
-                ..lease.clone()
-            };
-            tx.execute(
-                "UPDATE runtime_turn_checkpoints
-                 SET lease_expires_at_ms = ?3
-                 WHERE session_id = ?1 AND turn_id = ?2 AND lease_token = ?4",
-                params![
-                    renewed.session_id,
-                    renewed.turn_id,
-                    renewed.expires_at_epoch_ms as i64,
-                    renewed.lease_token
-                ],
-            )
-            .map_err(sqlite_error)?;
-            Ok(renewed)
-        })
-    }
-
-    async fn abandon_runtime_turn_lease(&self, lease: &RuntimeTurnLease) -> Result<(), StoreError> {
-        let conn = lock_conn(&self.conn);
-        conn.execute(
-            "UPDATE runtime_turn_checkpoints
-             SET lease_owner_id = NULL,
-                 lease_token = NULL,
-                 lease_claimed_at_ms = 0,
-                 lease_expires_at_ms = 0,
-                 updated_at_ms = ?6
-             WHERE session_id = ?1
-               AND turn_id = ?2
-               AND lease_owner_id = ?3
-               AND lease_token = ?4
-               AND lease_fencing_token = ?5",
-            params![
-                lease.session_id,
-                lease.turn_id,
-                lease.owner_id,
-                lease.lease_token,
-                lease.fencing_token as i64,
-                current_epoch_ms() as i64
-            ],
-        )
-        .map_err(sqlite_error)?;
-        Ok(())
-    }
-
-    async fn save_runtime_turn_checkpoint(
-        &self,
-        lease: &RuntimeTurnLease,
-        checkpoint: RuntimeTurnCheckpoint,
-    ) -> Result<(), StoreError> {
-        if checkpoint.session_id != lease.session_id || checkpoint.turn_id != lease.turn_id {
-            return Err(StoreError::RuntimeTurnLeaseExpired {
-                session_id: checkpoint.session_id,
-                turn_id: checkpoint.turn_id,
-            });
-        }
-        let actual_hash = lash_core::store::runtime_turn_checkpoint_hash(&checkpoint.checkpoint)?;
-        if actual_hash != checkpoint.checkpoint_hash {
-            return Err(StoreError::RuntimeTurnCheckpointHashMismatch {
-                session_id: checkpoint.session_id,
-                turn_id: checkpoint.turn_id,
-            });
-        }
-        let checkpoint_json = encode_json(&checkpoint);
-        self.with_write_tx(|tx| {
-            ensure_runtime_turn_lease_conn(tx, lease)?;
-            tx.execute(
-                "UPDATE runtime_turn_checkpoints
-                 SET checkpoint_json = ?3, checkpoint_hash = ?4, updated_at_ms = ?5
-                 WHERE session_id = ?1 AND turn_id = ?2 AND lease_token = ?6",
-                params![
-                    checkpoint.session_id,
-                    checkpoint.turn_id,
-                    checkpoint_json,
-                    checkpoint.checkpoint_hash,
-                    checkpoint.updated_at_epoch_ms as i64,
-                    lease.lease_token
-                ],
-            )
-            .map_err(sqlite_error)?;
-            Ok(())
-        })
-    }
-
-    async fn load_runtime_turn_checkpoint(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-    ) -> Result<Option<RuntimeTurnCheckpoint>, StoreError> {
-        let checkpoint_json: Option<String> = self.with_read(|conn| {
-            conn.query_row(
-                "SELECT checkpoint_json FROM runtime_turn_checkpoints
-                 WHERE session_id = ?1 AND turn_id = ?2 AND checkpoint_json IS NOT NULL",
-                params![session_id, turn_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sqlite_error)
-        })?;
-        let Some(checkpoint_json) = checkpoint_json else {
-            return Ok(None);
-        };
-        let checkpoint: RuntimeTurnCheckpoint =
-            serde_json::from_str(&checkpoint_json).map_err(|err| {
-                StoreError::Backend(format!("failed to decode runtime turn checkpoint: {err}"))
-            })?;
-        ensure_supported_schema_version(
-            "RuntimeTurnCheckpoint",
-            checkpoint.schema_version,
-            RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
-        )?;
-        let actual_hash = lash_core::store::runtime_turn_checkpoint_hash(&checkpoint.checkpoint)?;
-        if checkpoint.checkpoint_hash != actual_hash {
-            return Err(StoreError::RuntimeTurnCheckpointHashMismatch {
-                session_id: session_id.to_string(),
-                turn_id: turn_id.to_string(),
-            });
-        }
-        Ok(Some(checkpoint))
-    }
-
-    async fn save_runtime_effect_outcome(
-        &self,
-        lease: &RuntimeTurnLease,
-        record: RuntimeEffectJournalRecord,
-    ) -> Result<(), StoreError> {
-        if record.session_id != lease.session_id || record.turn_id != lease.turn_id {
-            return Err(StoreError::RuntimeTurnLeaseExpired {
-                session_id: record.session_id,
-                turn_id: record.turn_id,
-            });
-        }
-        self.with_write_tx(|tx| {
-            ensure_runtime_turn_lease_conn(tx, lease)?;
-            tx.execute(
-                "INSERT INTO runtime_effect_journal (
-                    session_id, turn_id, idempotency_key, envelope_hash, effect_kind,
-                    outcome_json, created_at_ms
-                 )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(session_id, turn_id, idempotency_key) DO UPDATE SET
-                    envelope_hash = excluded.envelope_hash,
-                    effect_kind = excluded.effect_kind,
-                    outcome_json = excluded.outcome_json,
-                    created_at_ms = excluded.created_at_ms",
-                params![
-                    record.session_id,
-                    record.turn_id,
-                    record.replay_key,
-                    record.envelope_hash,
-                    record.effect_kind.as_str(),
-                    encode_json(&record),
-                    record.created_at_epoch_ms as i64
-                ],
-            )
-            .map_err(sqlite_error)?;
-            Ok(())
-        })
-    }
-
-    async fn load_runtime_effect_outcome(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        replay_key: &str,
-    ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError> {
-        let row: Option<String> = self.with_read(|conn| {
-            conn.query_row(
-                "SELECT outcome_json FROM runtime_effect_journal
-                 WHERE session_id = ?1 AND turn_id = ?2 AND idempotency_key = ?3",
-                params![session_id, turn_id, replay_key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sqlite_error)
-        })?;
-        let Some(json) = row else {
-            return Ok(None);
-        };
-        let record: RuntimeEffectJournalRecord = serde_json::from_str(&json).map_err(|err| {
-            StoreError::Backend(format!("failed to decode runtime effect journal: {err}"))
-        })?;
-        ensure_supported_schema_version(
-            "RuntimeEffectJournalRecord",
-            record.schema_version,
-            RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
-        )?;
-        Ok(Some(record))
     }
 }

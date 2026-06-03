@@ -69,10 +69,11 @@ deployment-level `processes.db`, so background process starts from a turn are
 reconstructed from SQLite session stores instead of running in the route
 process. `AgentServiceTurnWorkflowRequest` carries only stable turn, chat, text,
 model, and model-variant data; board state stays in the app database. The
-workflow creates a `RestateRuntimeEffectController`, first attempts
-`session.resume_turn(turn_id).stream_with_durable_turn(...)`, and falls back to
-a fresh `session.turn(...).stream_with_durable_turn(...)` only when Lash has no
-checkpoint for that turn id yet. Turn progress is written to an app-owned
+workflow creates a `RestateRuntimeEffectController` and calls the normal
+`session.turn(...).stream_with_effect_scope(...)` entrypoint with a
+handler-scoped controller. The effect scope uses the stable chat/session id and
+turn id so Restate replay and Lash final commit address the same operation.
+Turn progress is written to an app-owned
 SQLite outbox keyed by `turn_id`, so the NDJSON route can stream progress after
 route restart or while the workflow is running in the Restate handler.
 

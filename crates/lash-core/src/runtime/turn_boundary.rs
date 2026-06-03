@@ -9,8 +9,7 @@ use crate::{
 };
 
 use super::{
-    DurableTurnProvider, DurableTurnRun, RuntimeError, RuntimeErrorCode, RuntimeSessionState,
-    TurnCommitDraft, merge_ledger_entry,
+    RuntimeError, RuntimeErrorCode, RuntimeSessionState, TurnCommitDraft, merge_ledger_entry,
 };
 
 pub(super) struct ProgressBoundaryCommit {
@@ -68,7 +67,7 @@ struct FinalCommitInput<'a> {
     store: Option<&'a (dyn RuntimePersistence + 'a)>,
     usage_deltas: &'a [crate::TokenLedgerEntry],
     outcome: &'a TurnOutcome,
-    durable_turn: Option<(&'a dyn DurableTurnProvider, DurableTurnRun)>,
+    turn_id: Option<&'a str>,
     completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
 }
 
@@ -299,7 +298,7 @@ impl TurnBoundary {
         returned_turn: &mut AssembledTurn,
         session: Option<&mut Session>,
         usage_deltas: &[crate::TokenLedgerEntry],
-        durable_turn: Option<(&dyn DurableTurnProvider, DurableTurnRun)>,
+        turn_id: Option<&str>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     ) -> Result<(), RuntimeError> {
         let (store, plugins, execution_state_snapshot) = match session {
@@ -319,7 +318,7 @@ impl TurnBoundary {
             store: store.as_ref().map(|store| store.as_ref()),
             usage_deltas,
             outcome: &returned_turn.outcome,
-            durable_turn,
+            turn_id,
             completed_queue_claims,
         })
         .await
@@ -395,7 +394,7 @@ impl TurnBoundary {
             store,
             usage_deltas,
             outcome,
-            durable_turn,
+            turn_id,
             completed_queue_claims,
         } = input;
         let state = self.final_state_mut();
@@ -445,14 +444,8 @@ impl TurnBoundary {
                     },
                 }
             };
-            self.apply_commit(
-                store,
-                graph,
-                usage_deltas,
-                durable_turn,
-                completed_queue_claims,
-            )
-            .await
+            self.apply_commit(store, graph, usage_deltas, turn_id, completed_queue_claims)
+                .await
         } else {
             state.discard_runtime_snapshots();
             Ok(())
@@ -464,7 +457,7 @@ impl TurnBoundary {
         store: &(dyn RuntimePersistence + '_),
         graph: GraphCommitDelta,
         usage_deltas: &[crate::TokenLedgerEntry],
-        durable_turn: Option<(&dyn DurableTurnProvider, DurableTurnRun)>,
+        turn_id: Option<&str>,
         completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     ) -> Result<(), StoreError> {
         let state = self.state_mut();
@@ -472,11 +465,15 @@ impl TurnBoundary {
         let mut commit =
             RuntimeCommit::persisted_state_with_graph_commit(state, graph, usage_deltas);
         commit.completed_queue_claims = completed_queue_claims;
-        let result = if let Some((backend, run)) = durable_turn {
-            backend.finalize_turn(run, commit, store).await?
-        } else {
-            store.commit_runtime_state(commit).await?
-        };
+        if let Some(turn_id) = turn_id {
+            let turn_commit_hash = commit.turn_commit_hash()?;
+            commit.turn_commit = Some(crate::RuntimeTurnCommitStamp::new(
+                commit.session_id.clone(),
+                turn_id,
+                turn_commit_hash,
+            ));
+        }
+        let result = store.commit_runtime_state(commit).await?;
         state.apply_persisted_commit_result(result);
         if let TurnCommitStage::Drafting(draft) = &mut self.stage {
             match mark {
@@ -949,7 +946,7 @@ mod tests {
                 usage_deltas: &usage,
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 tool_calls: &[],
-                durable_turn: None,
+                turn_id: None,
                 completed_queue_claims: Vec::new(),
             })
             .await
@@ -988,7 +985,7 @@ mod tests {
                 usage_deltas: &[],
                 outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
                 tool_calls: &[],
-                durable_turn: None,
+                turn_id: None,
                 completed_queue_claims: Vec::new(),
             })
             .await

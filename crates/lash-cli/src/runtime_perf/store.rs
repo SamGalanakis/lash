@@ -11,10 +11,9 @@ use lash_core::store::{
     GraphCommitDelta, PersistedSessionRead, RuntimeCommitResult, SessionCheckpoint, SessionHeadMeta,
 };
 use lash_core::{
-    BlobRef, DeliveryPolicy, EmbeddedDurableTurnStore, GcReport, RuntimeCommit,
-    RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnLease,
-    SessionGraph, SessionNodeRecord, SessionReadScope, SessionStoreCreateRequest,
-    SessionStoreFactory, SlotPolicy, StoreError, VacuumReport, current_epoch_ms,
+    BlobRef, DeliveryPolicy, GcReport, RuntimeCommit, RuntimePersistence, SessionGraph,
+    SessionNodeRecord, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
+    SlotPolicy, StoreError, VacuumReport, current_epoch_ms,
 };
 
 #[derive(Clone)]
@@ -35,9 +34,7 @@ pub(crate) struct RuntimePerfStore {
     session_graph: Mutex<SessionGraph>,
     usage_deltas: Mutex<Vec<TokenLedgerEntry>>,
     session_meta: Mutex<Option<store::SessionMeta>>,
-    runtime_turn_leases: Mutex<HashMap<(String, String), RuntimeTurnLease>>,
-    runtime_turn_checkpoints: Mutex<HashMap<(String, String), RuntimeTurnCheckpoint>>,
-    runtime_effect_journal: Mutex<HashMap<(String, String, String), RuntimeEffectJournalRecord>>,
+    runtime_turn_commits: Mutex<HashMap<(String, String), (String, RuntimeCommitResult)>>,
     queued_work: Mutex<Vec<RuntimePerfQueuedBatch>>,
 }
 
@@ -148,7 +145,7 @@ impl RuntimePersistence for RuntimePerfStore {
             graph: graph_delta,
             checkpoint,
             usage_deltas,
-            completed_turn,
+            turn_commit,
             completed_queue_claims,
             committed_attachment_ids: _,
         } = commit;
@@ -157,6 +154,30 @@ impl RuntimePersistence for RuntimePerfStore {
             .lock()
             .expect("lock perf session head meta");
         let actual = meta_guard.as_ref().map_or(0, |meta| meta.head_revision);
+        if let Some(completed) = &turn_commit {
+            if completed.session_id != session_id {
+                return Err(StoreError::RuntimeTurnCommitConflict {
+                    session_id: completed.session_id.clone(),
+                    turn_id: completed.turn_id.clone(),
+                });
+            }
+            let key = (completed.session_id.clone(), completed.turn_id.clone());
+            if let Some((stored_hash, result)) = self
+                .runtime_turn_commits
+                .lock()
+                .expect("lock perf runtime turn commits")
+                .get(&key)
+                .cloned()
+            {
+                if stored_hash == completed.turn_commit_hash {
+                    return Ok(result);
+                }
+                return Err(StoreError::RuntimeTurnCommitConflict {
+                    session_id: completed.session_id.clone(),
+                    turn_id: completed.turn_id.clone(),
+                });
+            }
+        }
         if expected_head_revision.is_some() && expected_head_revision != Some(actual) {
             return Err(store::StoreError::HeadRevisionConflict {
                 expected: expected_head_revision,
@@ -238,7 +259,7 @@ impl RuntimePersistence for RuntimePerfStore {
         let checkpoint_ref = BlobRef(format!("perf-checkpoint-{id}"));
         let head_revision = actual + 1;
         *meta_guard = Some(SessionHeadMeta {
-            session_id,
+            session_id: session_id.clone(),
             head_revision,
             config,
             agent_frames,
@@ -248,38 +269,21 @@ impl RuntimePersistence for RuntimePerfStore {
             graph_node_count,
             token_ledger: Vec::new(),
         });
-        if let Some(completed) = completed_turn
-            && let Some(lease_token) = completed.lease_token.as_deref()
-        {
-            let key = (completed.session_id.clone(), completed.turn_id.clone());
-            let lease_matches = self
-                .runtime_turn_leases
-                .lock()
-                .expect("lock perf runtime turn leases")
-                .get(&key)
-                .is_some_and(|lease| lease.lease_token == lease_token);
-            if lease_matches {
-                self.runtime_turn_leases
-                    .lock()
-                    .expect("lock perf runtime turn leases")
-                    .remove(&key);
-                self.runtime_turn_checkpoints
-                    .lock()
-                    .expect("lock perf runtime turn checkpoints")
-                    .remove(&key);
-                self.runtime_effect_journal
-                    .lock()
-                    .expect("lock perf runtime effect journal")
-                    .retain(|(session_id, turn_id, _), _| {
-                        session_id != &completed.session_id || turn_id != &completed.turn_id
-                    });
-            }
-        }
-        Ok(RuntimeCommitResult {
+        let result = RuntimeCommitResult {
             head_revision,
             checkpoint_ref,
             manifest,
-        })
+        };
+        if let Some(completed) = &turn_commit {
+            self.runtime_turn_commits
+                .lock()
+                .expect("lock perf runtime turn commits")
+                .insert(
+                    (completed.session_id.clone(), completed.turn_id.clone()),
+                    (completed.turn_commit_hash.clone(), result.clone()),
+                );
+        }
+        Ok(result)
     }
 
     async fn enqueue_queued_work(
@@ -460,10 +464,6 @@ impl RuntimePersistence for RuntimePerfStore {
         Ok(batches)
     }
 
-    fn embedded_durable_turn_store(&self) -> Option<&dyn EmbeddedDurableTurnStore> {
-        Some(self)
-    }
-
     async fn save_session_meta(&self, meta: store::SessionMeta) -> Result<(), store::StoreError> {
         *self.session_meta.lock().expect("lock perf session meta") = Some(meta);
         Ok(())
@@ -487,156 +487,5 @@ impl RuntimePersistence for RuntimePerfStore {
 
     async fn gc_unreachable(&self) -> Result<GcReport, store::StoreError> {
         Ok(GcReport::default())
-    }
-}
-
-#[async_trait::async_trait]
-impl EmbeddedDurableTurnStore for RuntimePerfStore {
-    async fn claim_runtime_turn_lease(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        owner_id: &str,
-        lease_ttl_ms: u64,
-    ) -> Result<RuntimeTurnLease, StoreError> {
-        let token = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
-        let lease = RuntimeTurnLease {
-            schema_version: lash_core::store::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
-            session_id: session_id.to_string(),
-            turn_id: turn_id.to_string(),
-            owner_id: owner_id.to_string(),
-            lease_token: format!("{session_id}:{turn_id}:{owner_id}:{token}"),
-            fencing_token: token,
-            claimed_at_epoch_ms: 0,
-            expires_at_epoch_ms: lease_ttl_ms,
-        };
-        self.runtime_turn_leases
-            .lock()
-            .expect("lock perf runtime turn leases")
-            .insert((session_id.to_string(), turn_id.to_string()), lease.clone());
-        Ok(lease)
-    }
-
-    async fn renew_runtime_turn_lease(
-        &self,
-        lease: &RuntimeTurnLease,
-        lease_ttl_ms: u64,
-    ) -> Result<RuntimeTurnLease, StoreError> {
-        let key = (lease.session_id.clone(), lease.turn_id.clone());
-        let mut leases = self
-            .runtime_turn_leases
-            .lock()
-            .expect("lock perf runtime turn leases");
-        leases
-            .get(&key)
-            .filter(|current| current.lease_token == lease.lease_token)
-            .ok_or_else(|| StoreError::RuntimeTurnLeaseExpired {
-                session_id: lease.session_id.clone(),
-                turn_id: lease.turn_id.clone(),
-            })?;
-        let renewed = RuntimeTurnLease {
-            expires_at_epoch_ms: lease.expires_at_epoch_ms.saturating_add(lease_ttl_ms),
-            ..lease.clone()
-        };
-        leases.insert(key, renewed.clone());
-        Ok(renewed)
-    }
-
-    async fn abandon_runtime_turn_lease(&self, lease: &RuntimeTurnLease) -> Result<(), StoreError> {
-        let key = (lease.session_id.clone(), lease.turn_id.clone());
-        let mut leases = self
-            .runtime_turn_leases
-            .lock()
-            .expect("lock perf runtime turn leases");
-        if leases.get(&key).is_some_and(|current| {
-            current.owner_id == lease.owner_id
-                && current.lease_token == lease.lease_token
-                && current.fencing_token == lease.fencing_token
-        }) {
-            leases.remove(&key);
-        }
-        Ok(())
-    }
-
-    async fn save_runtime_turn_checkpoint(
-        &self,
-        lease: &RuntimeTurnLease,
-        checkpoint: RuntimeTurnCheckpoint,
-    ) -> Result<(), StoreError> {
-        let key = (lease.session_id.clone(), lease.turn_id.clone());
-        self.runtime_turn_leases
-            .lock()
-            .expect("lock perf runtime turn leases")
-            .get(&key)
-            .filter(|current| current.lease_token == lease.lease_token)
-            .ok_or_else(|| StoreError::RuntimeTurnLeaseExpired {
-                session_id: lease.session_id.clone(),
-                turn_id: lease.turn_id.clone(),
-            })?;
-        self.runtime_turn_checkpoints
-            .lock()
-            .expect("lock perf runtime turn checkpoints")
-            .insert(key, checkpoint);
-        Ok(())
-    }
-
-    async fn load_runtime_turn_checkpoint(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-    ) -> Result<Option<RuntimeTurnCheckpoint>, StoreError> {
-        Ok(self
-            .runtime_turn_checkpoints
-            .lock()
-            .expect("lock perf runtime turn checkpoints")
-            .get(&(session_id.to_string(), turn_id.to_string()))
-            .cloned())
-    }
-
-    async fn save_runtime_effect_outcome(
-        &self,
-        lease: &RuntimeTurnLease,
-        record: RuntimeEffectJournalRecord,
-    ) -> Result<(), StoreError> {
-        let key = (lease.session_id.clone(), lease.turn_id.clone());
-        self.runtime_turn_leases
-            .lock()
-            .expect("lock perf runtime turn leases")
-            .get(&key)
-            .filter(|current| current.lease_token == lease.lease_token)
-            .ok_or_else(|| StoreError::RuntimeTurnLeaseExpired {
-                session_id: lease.session_id.clone(),
-                turn_id: lease.turn_id.clone(),
-            })?;
-        self.runtime_effect_journal
-            .lock()
-            .expect("lock perf runtime effect journal")
-            .insert(
-                (
-                    record.session_id.clone(),
-                    record.turn_id.clone(),
-                    record.replay_key.clone(),
-                ),
-                record,
-            );
-        Ok(())
-    }
-
-    async fn load_runtime_effect_outcome(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        replay_key: &str,
-    ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError> {
-        Ok(self
-            .runtime_effect_journal
-            .lock()
-            .expect("lock perf runtime effect journal")
-            .get(&(
-                session_id.to_string(),
-                turn_id.to_string(),
-                replay_key.to_string(),
-            ))
-            .cloned())
     }
 }

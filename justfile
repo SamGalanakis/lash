@@ -9,6 +9,9 @@ dev *args:
   cargo build --manifest-path "{{repo}}/crates/lash-cli/Cargo.toml"
   cd "${LASH_DEV_LAUNCH_CWD:-{{invocation_directory()}}}" && exec "{{repo}}/target/debug/lash" "$@"
 
+agent-workbench:
+  ./scripts/agent-workbench-dev.sh
+
 agent-service-restate-e2e:
   #!/usr/bin/env bash
   set -euo pipefail

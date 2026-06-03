@@ -28,8 +28,10 @@ use std::sync::Arc;
 
 use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
+#[cfg(test)]
+use super::InlineEffectHost;
 use super::process::ProcessRegistry;
-use super::{RuntimeEffectController, RuntimeHostConfig, TerminationPolicy};
+use super::{EffectHost, RuntimeHostConfig, TerminationPolicy};
 
 /// Where session nodes live at runtime.
 ///
@@ -86,6 +88,10 @@ pub struct RuntimeEnvironment {
     // runner is wired, in which case poking is a no-op.
     pub process_work_poke: Option<super::ProcessWorkPoke>,
 
+    // Wakes the host's `QueuedWorkRunner` so queued turn work, including
+    // process wakes, drains promptly through the host-selected queue runner.
+    pub queued_work_poke: Option<super::QueuedWorkPoke>,
+
     pub core: RuntimeHostConfig,
 }
 
@@ -129,6 +135,7 @@ impl Default for RuntimeEnvironmentBuilder {
                 process_registry: None,
                 session_store_factory: None,
                 process_work_poke: None,
+                queued_work_poke: None,
                 core: RuntimeHostConfig::in_memory(),
             },
         }
@@ -173,6 +180,11 @@ impl RuntimeEnvironmentBuilder {
     /// process control seam can make consumption prompt after a start.
     pub fn with_process_work_poke(mut self, poke: super::ProcessWorkPoke) -> Self {
         self.env.process_work_poke = Some(poke);
+        self
+    }
+
+    pub fn with_queued_work_poke(mut self, poke: super::QueuedWorkPoke) -> Self {
+        self.env.queued_work_poke = Some(poke);
         self
     }
 
@@ -250,11 +262,8 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    pub fn with_effect_controller(
-        mut self,
-        effect_controller: Arc<dyn RuntimeEffectController>,
-    ) -> Self {
-        self.env.core.control.effect_controller = effect_controller;
+    pub fn with_effect_host(mut self, effect_host: Arc<dyn EffectHost>) -> Self {
+        self.env.core.control.effect_host = effect_host;
         self
     }
 
@@ -279,8 +288,7 @@ mod tests {
     fn builder_methods_configure_runtime_host() {
         let attachment_store: Arc<dyn crate::AttachmentStore> =
             Arc::new(crate::InMemoryAttachmentStore::new());
-        let effect_controller: Arc<dyn RuntimeEffectController> =
-            Arc::new(crate::runtime::InlineRuntimeEffectController);
+        let effect_host: Arc<dyn EffectHost> = Arc::new(InlineEffectHost::default());
         let trace_context = TraceContext::default().for_session("session-1");
         let termination = TerminationPolicy {
             treat_missing_done_as_failure: false,
@@ -295,7 +303,7 @@ mod tests {
             .with_trace_level(TraceLevel::Extended)
             .with_trace_context(trace_context.clone())
             .with_termination(termination.clone())
-            .with_effect_controller(Arc::clone(&effect_controller))
+            .with_effect_host(Arc::clone(&effect_host))
             .build();
 
         assert!(Arc::ptr_eq(
@@ -310,10 +318,7 @@ mod tests {
             env.core.control.termination.treat_missing_done_as_failure,
             termination.treat_missing_done_as_failure
         );
-        assert!(Arc::ptr_eq(
-            &env.core.control.effect_controller,
-            &effect_controller
-        ));
+        assert!(Arc::ptr_eq(&env.core.control.effect_host, &effect_host));
     }
 
     #[test]
@@ -346,7 +351,7 @@ mod tests {
             ["pub ", "trace_level:"].concat(),
             ["pub ", "trace_context:"].concat(),
             ["pub ", "termination:"].concat(),
-            ["pub ", "effect_controller:"].concat(),
+            ["pub ", "effect_host:"].concat(),
             ["mirror ", "`RuntimeHostConfig`"].concat(),
         ] {
             assert!(

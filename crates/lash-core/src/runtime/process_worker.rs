@@ -100,7 +100,7 @@ enum RecoverFailure {
     /// The losing worker must not write a terminal outcome — the new owner is
     /// now the single writer.
     LeaseLost(PluginError),
-    /// The process could not be run (rebuild/substrate failure). The lease is
+    /// The process could not be run (rebuild/store-facet failure). The lease is
     /// still held, so this worker terminalizes the row.
     Run(PluginError),
 }
@@ -126,9 +126,37 @@ impl DurableProcessWorker {
         execution_context: ProcessExecutionContext,
         cancellation: CancellationToken,
     ) -> Result<ProcessAwaitOutput, PluginError> {
+        let scoped_effect_controller = self
+            .config
+            .runtime_host
+            .control
+            .effect_host
+            .scoped_static(crate::EffectScope::process(registration.id.clone()))
+            .map_err(|err| PluginError::Session(err.to_string()))?
+            .ok_or_else(|| {
+                PluginError::Session(
+                    "process worker effect host must provide a static process scope".to_string(),
+                )
+            })?;
+        self.run_process_with_scoped_effect_controller(
+            registration,
+            execution_context,
+            scoped_effect_controller,
+            cancellation,
+        )
+        .await
+    }
+
+    pub async fn run_process_with_scoped_effect_controller(
+        &self,
+        registration: ProcessRegistration,
+        execution_context: ProcessExecutionContext,
+        scoped_effect_controller: crate::ScopedEffectController<'_>,
+        cancellation: CancellationToken,
+    ) -> Result<ProcessAwaitOutput, PluginError> {
         self.ensure_stable_process_id(&registration)?;
         self.ensure_host_profile_matches(&registration)?;
-        self.ensure_durable_substrate()?;
+        self.ensure_durable_store_facets()?;
         if let ProcessInput::External { metadata } = registration.input.as_ref() {
             return Ok(ProcessAwaitOutput::Success {
                 value: serde_json::json!({ "metadata": metadata.clone() }),
@@ -143,7 +171,7 @@ impl DurableProcessWorker {
             )));
         }
         let runtime = self.rebuild_runtime(session_id).await?;
-        let manager = RuntimeSessionServices::new(&runtime, true, None, None).map_err(|err| {
+        let manager = RuntimeSessionServices::new(&runtime, true, None).map_err(|err| {
             PluginError::Session(format!(
                 "failed to rebuild runtime session `{session_id}` for process `{}`: {err}",
                 registration.id
@@ -154,6 +182,7 @@ impl DurableProcessWorker {
                 registration,
                 execution_context,
                 Arc::clone(&self.config.process_registry),
+                scoped_effect_controller,
                 cancellation,
             )
             .await)
@@ -174,8 +203,7 @@ impl DurableProcessWorker {
     ///    one owner (lease fencing);
     /// 3. runs the claimed process on this worker's wired controller, renewing
     ///    the lease across the long-running execution so a healthy recovery is
-    ///    not swept out from under itself (mirrors the turn-lease renewal in
-    ///    `renew_runtime_turn_lease_for_effect`);
+    ///    not swept out from under itself;
     /// 4. writes the terminal outcome and releases the lease.
     ///
     /// Idempotent by `process_id`: terminal processes are never in the worklist,
@@ -256,7 +284,7 @@ impl DurableProcessWorker {
                     "process recovery lost its lease mid-run; deferring to the new owner",
                 );
             }
-            // The process could not be run at all (rebuild/substrate failure):
+            // The process could not be run at all (rebuild/store-facet failure):
             // terminalize as a recovery failure so the row leaves the worklist.
             Err(RecoverFailure::Run(err)) => {
                 let output = ProcessAwaitOutput::Failure {
@@ -438,26 +466,26 @@ impl DurableProcessWorker {
     }
 
     /// Enforce the durable-first wiring invariant at the worker process-run
-    /// boundary: when the worker was wired with a durable effect controller,
-    /// every store it will execute against must also be durable. A durable
-    /// controller running against any ephemeral store fails loudly here rather
-    /// than silently re-executing a process on a non-durable substrate.
+    /// boundary: when the worker was wired with a durable effect host, every
+    /// store it will execute against must also be durable. A durable host
+    /// running against any ephemeral store fails loudly here rather than
+    /// silently re-executing a process against non-durable state.
     ///
     /// Inline controllers (the default tier) impose no requirement, so
     /// inline/in-memory workers pass unchanged.
-    fn ensure_durable_substrate(&self) -> Result<(), PluginError> {
+    fn ensure_durable_store_facets(&self) -> Result<(), PluginError> {
         if self
             .config
             .runtime_host
             .control
-            .effect_controller
+            .effect_host
             .durability_tier()
             != crate::DurabilityTier::Durable
         {
             return Ok(());
         }
-        let require = |facet: crate::DurableSubstrateFacet| {
-            PluginError::Session(crate::RuntimeError::durable_substrate_required(facet).to_string())
+        let require = |facet: crate::DurableStoreFacet| {
+            PluginError::Session(crate::RuntimeError::durable_store_required(facet).to_string())
         };
         if self
             .config
@@ -468,7 +496,7 @@ impl DurableProcessWorker {
             .durability_tier()
             != crate::DurabilityTier::Durable
         {
-            return Err(require(crate::DurableSubstrateFacet::AttachmentStore));
+            return Err(require(crate::DurableStoreFacet::AttachmentStore));
         }
         if self
             .config
@@ -478,10 +506,13 @@ impl DurableProcessWorker {
             .durability_tier()
             != crate::DurabilityTier::Durable
         {
-            return Err(require(crate::DurableSubstrateFacet::ArtifactStore));
+            return Err(require(crate::DurableStoreFacet::ArtifactStore));
         }
         if self.config.session_store_factory.durability_tier() != crate::DurabilityTier::Durable {
-            return Err(require(crate::DurableSubstrateFacet::SessionStore));
+            return Err(require(crate::DurableStoreFacet::SessionStore));
+        }
+        if self.config.process_registry.durability_tier() != crate::DurabilityTier::Durable {
+            return Err(require(crate::DurableStoreFacet::ProcessRegistry));
         }
         Ok(())
     }
@@ -491,7 +522,7 @@ impl DurableProcessWorker {
     /// `run` re-invocation (keyed `LashProcessWorkflow/{process_id}`) or a
     /// recovery sweep re-running a non-terminal row — must present that stable
     /// id. An empty/fresh id has lost its idempotency anchor and is rejected
-    /// loudly here, mirroring how `DurableTurnScope::new` rejects an
+    /// loudly here, mirroring how `EffectScope` rejects an
     /// empty turn id at the durable-effect boundary.
     fn ensure_stable_process_id(
         &self,
@@ -540,7 +571,7 @@ mod boundary_tests {
     use super::*;
     use crate::{
         AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier,
-        DurableSubstrateFacet, InMemoryAttachmentStore, LashlangArtifactStore, ProcessInput,
+        DurableStoreFacet, InMemoryAttachmentStore, LashlangArtifactStore, ProcessInput,
         ProcessRegistration, RuntimeEffectController, RuntimeError, StoredAttachment,
     };
     use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentRef};
@@ -646,16 +677,32 @@ mod boundary_tests {
         artifact: Arc<dyn LashlangArtifactStore>,
         session_store_tier: DurabilityTier,
     ) -> DurableProcessWorker {
+        worker_with_process_registry_tier(
+            attachment,
+            artifact,
+            session_store_tier,
+            DurabilityTier::Durable,
+        )
+    }
+
+    fn worker_with_process_registry_tier(
+        attachment: Arc<dyn AttachmentStore>,
+        artifact: Arc<dyn LashlangArtifactStore>,
+        session_store_tier: DurabilityTier,
+        process_registry_tier: DurabilityTier,
+    ) -> DurableProcessWorker {
         let mut runtime_host = RuntimeHostConfig::in_memory();
-        runtime_host.control.effect_controller = Arc::new(DurableController);
+        runtime_host.control.effect_host =
+            Arc::new(crate::InlineEffectHost::new(Arc::new(DurableController)));
         runtime_host.durability.attachment_store = attachment;
         runtime_host.durability.lashlang_artifact_store = artifact;
         let plugin_host = Arc::new(crate::PluginHost::new(Vec::new()));
         let factory: Arc<dyn SessionStoreFactory> = Arc::new(TierSessionStoreFactory {
             tier: session_store_tier,
         });
-        let registry: Arc<dyn ProcessRegistry> =
-            Arc::new(crate::TestLocalProcessRegistry::default());
+        let registry: Arc<dyn ProcessRegistry> = Arc::new(
+            crate::TestLocalProcessRegistry::default().with_durability_tier(process_registry_tier),
+        );
         DurableProcessWorker::new(DurableProcessWorkerConfig::new(
             plugin_host,
             runtime_host,
@@ -683,11 +730,11 @@ mod boundary_tests {
             .await
     }
 
-    fn assert_facet(err: PluginError, facet: DurableSubstrateFacet) {
+    fn assert_facet(err: PluginError, facet: DurableStoreFacet) {
         let PluginError::Session(message) = err else {
             panic!("expected PluginError::Session, got {err:?}");
         };
-        let expected = RuntimeError::durable_substrate_required(facet).to_string();
+        let expected = RuntimeError::durable_store_required(facet).to_string();
         assert_eq!(message, expected, "worker must reject the {facet:?} facet");
     }
 
@@ -701,7 +748,7 @@ mod boundary_tests {
         let err = run(&worker)
             .await
             .expect_err("ephemeral attachment store must be rejected at the worker boundary");
-        assert_facet(err, DurableSubstrateFacet::AttachmentStore);
+        assert_facet(err, DurableStoreFacet::AttachmentStore);
     }
 
     #[tokio::test]
@@ -714,7 +761,7 @@ mod boundary_tests {
         let err = run(&worker)
             .await
             .expect_err("ephemeral artifact store must be rejected at the worker boundary");
-        assert_facet(err, DurableSubstrateFacet::ArtifactStore);
+        assert_facet(err, DurableStoreFacet::ArtifactStore);
     }
 
     #[tokio::test]
@@ -727,13 +774,28 @@ mod boundary_tests {
         let err = run(&worker)
             .await
             .expect_err("ephemeral session store factory must be rejected at the worker boundary");
-        assert_facet(err, DurableSubstrateFacet::SessionStore);
+        assert_facet(err, DurableStoreFacet::SessionStore);
     }
 
     #[tokio::test]
-    async fn durable_worker_with_all_durable_stores_passes_substrate_check() {
+    async fn durable_worker_rejects_ephemeral_process_registry() {
+        let worker = worker_with_process_registry_tier(
+            Arc::new(DurableAttachmentStore::default()),
+            Arc::new(DurableArtifactStore::default()),
+            DurabilityTier::Durable,
+            DurabilityTier::Inline,
+        );
+        let err = run(&worker)
+            .await
+            .expect_err("ephemeral process registry must be rejected at the worker boundary");
+        assert_facet(err, DurableStoreFacet::ProcessRegistry);
+    }
+
+    #[tokio::test]
+    async fn durable_worker_with_all_durable_stores_passes_store_facet_check() {
         // Positive control: a durable worker wired against fully durable stores
-        // clears the substrate guard and proceeds to run the (External) process.
+        // clears the store-facet guard and proceeds to run the (External)
+        // process.
         let worker = worker(
             Arc::new(DurableAttachmentStore::default()),
             Arc::new(DurableArtifactStore::default()),
@@ -741,12 +803,12 @@ mod boundary_tests {
         );
         let output = run(&worker)
             .await
-            .expect("all-durable worker should pass the substrate guard");
+            .expect("all-durable worker should pass the store-facet guard");
         assert!(matches!(output, ProcessAwaitOutput::Success { .. }));
     }
 
     #[tokio::test]
-    async fn inline_worker_passes_substrate_check_with_ephemeral_stores() {
+    async fn inline_worker_passes_store_facet_check_with_ephemeral_stores() {
         // Inline controllers impose no requirement, so an in-memory worker runs
         // unchanged — the durable-first guard must not regress inline hosts.
         let runtime_host = RuntimeHostConfig::in_memory();
@@ -764,7 +826,7 @@ mod boundary_tests {
         ));
         let output = run(&worker)
             .await
-            .expect("inline worker should pass the substrate guard");
+            .expect("inline worker should pass the store-facet guard");
         assert!(matches!(output, ProcessAwaitOutput::Success { .. }));
     }
 }

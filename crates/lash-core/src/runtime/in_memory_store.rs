@@ -35,27 +35,9 @@ pub struct InMemorySessionStore {
     pub(crate) checkpoint: Mutex<Option<crate::HydratedSessionCheckpoint>>,
     pub(crate) usage_deltas: Mutex<Vec<crate::TokenLedgerEntry>>,
     pub(crate) runtime_commit_count: Mutex<usize>,
-    runtime_turn_checkpoints:
-        Mutex<std::collections::HashMap<(String, String), crate::RuntimeTurnCheckpoint>>,
-    runtime_turn_leases:
-        Mutex<std::collections::HashMap<(String, String), crate::RuntimeTurnLease>>,
-    runtime_effect_journal: Mutex<
-        std::collections::HashMap<(String, String, String), crate::RuntimeEffectJournalRecord>,
-    >,
     runtime_turn_commits: Mutex<
         std::collections::HashMap<(String, String), (String, crate::store::RuntimeCommitResult)>,
     >,
-    // Save/renew/abandon counters are observed only by lash-core tests; they
-    // exist (and are incremented) solely under `cfg(test)` so the shipped store
-    // carries no dead test-only state.
-    #[cfg(test)]
-    runtime_turn_checkpoint_save_count: Mutex<usize>,
-    #[cfg(test)]
-    runtime_effect_journal_save_count: Mutex<usize>,
-    #[cfg(test)]
-    runtime_turn_lease_renew_count: Mutex<usize>,
-    #[cfg(test)]
-    runtime_turn_lease_abandon_count: Mutex<usize>,
     queued_work: Mutex<Vec<InMemoryQueuedBatch>>,
     queued_work_next_seq: Mutex<u64>,
 }
@@ -147,9 +129,9 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 attempted_session_id: commit.session_id,
             });
         }
-        if let Some(completed) = &commit.completed_turn {
+        if let Some(completed) = &commit.turn_commit {
             if completed.session_id != commit.session_id {
-                return Err(crate::store::StoreError::RuntimeTurnLeaseExpired {
+                return Err(crate::store::StoreError::RuntimeTurnCommitConflict {
                     session_id: completed.session_id.clone(),
                     turn_id: completed.turn_id.clone(),
                 });
@@ -177,26 +159,6 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 expected: commit.expected_head_revision,
                 actual,
             });
-        }
-        if let Some(completed) = &commit.completed_turn {
-            if let Some(lease_token) = completed.lease_token.as_deref() {
-                let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
-                let lease_matches = self
-                    .runtime_turn_leases
-                    .lock()
-                    .expect("lock runtime turn leases")
-                    .get(&lease_key)
-                    .is_some_and(|lease| {
-                        lease.lease_token == lease_token
-                            && lease.expires_at_epoch_ms > current_epoch_ms()
-                    });
-                if !lease_matches {
-                    return Err(crate::store::StoreError::RuntimeTurnLeaseExpired {
-                        session_id: completed.session_id.clone(),
-                        turn_id: completed.turn_id.clone(),
-                    });
-                }
-            }
         }
         for completed in &commit.completed_queue_claims {
             let mut queued = self.queued_work.lock().expect("lock queued work");
@@ -262,33 +224,6 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             execution_state_ref: commit.checkpoint.execution_state_ref.clone(),
         };
         *self.checkpoint.lock().expect("lock checkpoint") = Some(commit.checkpoint);
-        if let Some(completed) = &commit.completed_turn
-            && let Some(lease_token) = completed.lease_token.as_deref()
-        {
-            let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
-            let lease_matches = self
-                .runtime_turn_leases
-                .lock()
-                .expect("lock runtime turn leases")
-                .get(&lease_key)
-                .is_some_and(|lease| lease.lease_token == lease_token);
-            if lease_matches {
-                self.runtime_turn_checkpoints
-                    .lock()
-                    .expect("lock runtime turn checkpoints")
-                    .remove(&lease_key);
-                self.runtime_turn_leases
-                    .lock()
-                    .expect("lock runtime turn leases")
-                    .remove(&lease_key);
-                self.runtime_effect_journal
-                    .lock()
-                    .expect("lock runtime effect journal")
-                    .retain(|(session_id, turn_id, _), _| {
-                        session_id != &completed.session_id || turn_id != &completed.turn_id
-                    });
-            }
-        }
         let head_revision = actual + 1;
         *meta = Some(crate::SessionHeadMeta {
             session_id: commit.session_id,
@@ -310,7 +245,7 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             checkpoint_ref,
             manifest,
         };
-        if let Some(completed) = &commit.completed_turn {
+        if let Some(completed) = &commit.turn_commit {
             self.runtime_turn_commits
                 .lock()
                 .expect("lock runtime turn commits")
@@ -320,10 +255,6 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
                 );
         }
         Ok(result)
-    }
-
-    fn embedded_durable_turn_store(&self) -> Option<&dyn crate::runtime::EmbeddedDurableTurnStore> {
-        Some(self)
     }
 
     async fn enqueue_queued_work(
@@ -569,217 +500,6 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
     }
 }
 
-#[async_trait::async_trait]
-impl crate::runtime::EmbeddedDurableTurnStore for InMemorySessionStore {
-    async fn claim_runtime_turn_lease(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        owner_id: &str,
-        lease_ttl_ms: u64,
-    ) -> Result<crate::RuntimeTurnLease, crate::store::StoreError> {
-        let mut leases = self
-            .runtime_turn_leases
-            .lock()
-            .expect("lock runtime turn leases");
-        let key = (session_id.to_string(), turn_id.to_string());
-        let next_fencing = match leases.get(&key) {
-            Some(active)
-                if active.expires_at_epoch_ms > current_epoch_ms()
-                    && active.owner_id != owner_id =>
-            {
-                return Err(crate::store::StoreError::RuntimeTurnLeaseConflict {
-                    session_id: session_id.to_string(),
-                    turn_id: turn_id.to_string(),
-                    owner_id: active.owner_id.clone(),
-                    expires_at_epoch_ms: active.expires_at_epoch_ms,
-                });
-            }
-            Some(previous) => previous.fencing_token.saturating_add(1),
-            None => 1,
-        };
-        let lease = crate::RuntimeTurnLease {
-            schema_version: crate::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
-            session_id: session_id.to_string(),
-            turn_id: turn_id.to_string(),
-            owner_id: owner_id.to_string(),
-            lease_token: format!("{session_id}:{turn_id}:{owner_id}:{next_fencing}"),
-            fencing_token: next_fencing,
-            claimed_at_epoch_ms: current_epoch_ms(),
-            expires_at_epoch_ms: current_epoch_ms().saturating_add(lease_ttl_ms),
-        };
-        leases.insert(key, lease.clone());
-        Ok(lease)
-    }
-
-    async fn renew_runtime_turn_lease(
-        &self,
-        lease: &crate::RuntimeTurnLease,
-        lease_ttl_ms: u64,
-    ) -> Result<crate::RuntimeTurnLease, crate::store::StoreError> {
-        self.runtime_turn_leases
-            .lock()
-            .expect("lock runtime turn leases")
-            .get(&(lease.session_id.clone(), lease.turn_id.clone()))
-            .filter(|current| {
-                current.lease_token == lease.lease_token
-                    && current.expires_at_epoch_ms > current_epoch_ms()
-            })
-            .ok_or_else(|| crate::store::StoreError::RuntimeTurnLeaseExpired {
-                session_id: lease.session_id.clone(),
-                turn_id: lease.turn_id.clone(),
-            })?;
-        let renewed = crate::RuntimeTurnLease {
-            expires_at_epoch_ms: current_epoch_ms().saturating_add(lease_ttl_ms),
-            ..lease.clone()
-        };
-        self.runtime_turn_leases
-            .lock()
-            .expect("lock runtime turn leases")
-            .insert(
-                (renewed.session_id.clone(), renewed.turn_id.clone()),
-                renewed.clone(),
-            );
-        #[cfg(test)]
-        {
-            *self
-                .runtime_turn_lease_renew_count
-                .lock()
-                .expect("lock runtime turn lease renew count") += 1;
-        }
-        Ok(renewed)
-    }
-
-    async fn abandon_runtime_turn_lease(
-        &self,
-        lease: &crate::RuntimeTurnLease,
-    ) -> Result<(), crate::store::StoreError> {
-        let key = (lease.session_id.clone(), lease.turn_id.clone());
-        let mut leases = self
-            .runtime_turn_leases
-            .lock()
-            .expect("lock runtime turn leases");
-        if leases.get(&key).is_some_and(|current| {
-            current.owner_id == lease.owner_id
-                && current.lease_token == lease.lease_token
-                && current.fencing_token == lease.fencing_token
-        }) {
-            leases.remove(&key);
-        }
-        #[cfg(test)]
-        {
-            *self
-                .runtime_turn_lease_abandon_count
-                .lock()
-                .expect("lock runtime turn lease abandon count") += 1;
-        }
-        Ok(())
-    }
-
-    async fn save_runtime_turn_checkpoint(
-        &self,
-        lease: &crate::RuntimeTurnLease,
-        checkpoint: crate::RuntimeTurnCheckpoint,
-    ) -> Result<(), crate::store::StoreError> {
-        self.runtime_turn_leases
-            .lock()
-            .expect("lock runtime turn leases")
-            .get(&(lease.session_id.clone(), lease.turn_id.clone()))
-            .filter(|current| {
-                current.lease_token == lease.lease_token
-                    && current.expires_at_epoch_ms > current_epoch_ms()
-            })
-            .ok_or_else(|| crate::store::StoreError::RuntimeTurnLeaseExpired {
-                session_id: lease.session_id.clone(),
-                turn_id: lease.turn_id.clone(),
-            })?;
-        self.runtime_turn_checkpoints
-            .lock()
-            .expect("lock runtime turn checkpoints")
-            .insert(
-                (checkpoint.session_id.clone(), checkpoint.turn_id.clone()),
-                checkpoint,
-            );
-        #[cfg(test)]
-        {
-            *self
-                .runtime_turn_checkpoint_save_count
-                .lock()
-                .expect("lock runtime turn checkpoint save count") += 1;
-        }
-        Ok(())
-    }
-
-    async fn load_runtime_turn_checkpoint(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-    ) -> Result<Option<crate::RuntimeTurnCheckpoint>, crate::store::StoreError> {
-        Ok(self
-            .runtime_turn_checkpoints
-            .lock()
-            .expect("lock runtime turn checkpoints")
-            .get(&(session_id.to_string(), turn_id.to_string()))
-            .cloned())
-    }
-
-    async fn save_runtime_effect_outcome(
-        &self,
-        lease: &crate::RuntimeTurnLease,
-        record: crate::RuntimeEffectJournalRecord,
-    ) -> Result<(), crate::store::StoreError> {
-        self.runtime_turn_leases
-            .lock()
-            .expect("lock runtime turn leases")
-            .get(&(lease.session_id.clone(), lease.turn_id.clone()))
-            .filter(|current| {
-                current.lease_token == lease.lease_token
-                    && current.expires_at_epoch_ms > current_epoch_ms()
-            })
-            .ok_or_else(|| crate::store::StoreError::RuntimeTurnLeaseExpired {
-                session_id: lease.session_id.clone(),
-                turn_id: lease.turn_id.clone(),
-            })?;
-        self.runtime_effect_journal
-            .lock()
-            .expect("lock runtime effect journal")
-            .insert(
-                (
-                    record.session_id.clone(),
-                    record.turn_id.clone(),
-                    record.replay_key.clone(),
-                ),
-                record,
-            );
-        #[cfg(test)]
-        {
-            *self
-                .runtime_effect_journal_save_count
-                .lock()
-                .expect("lock runtime effect journal save count") += 1;
-        }
-        Ok(())
-    }
-
-    async fn load_runtime_effect_outcome(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        replay_key: &str,
-    ) -> Result<Option<crate::RuntimeEffectJournalRecord>, crate::store::StoreError> {
-        Ok(self
-            .runtime_effect_journal
-            .lock()
-            .expect("lock runtime effect journal")
-            .get(&(
-                session_id.to_string(),
-                turn_id.to_string(),
-                replay_key.to_string(),
-            ))
-            .cloned())
-    }
-}
-
 fn current_epoch_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -794,48 +514,6 @@ fn current_epoch_ms() -> u64 {
 impl InMemorySessionStore {
     pub(crate) async fn save_session_head_meta(&self, meta: crate::SessionHeadMeta) {
         *self.session_head_meta.lock().expect("lock store") = Some(meta);
-    }
-
-    pub(crate) fn runtime_turn_checkpoint_count(&self) -> usize {
-        self.runtime_turn_checkpoints
-            .lock()
-            .expect("lock runtime turn checkpoints")
-            .len()
-    }
-
-    pub(crate) fn runtime_effect_journal_count(&self) -> usize {
-        self.runtime_effect_journal
-            .lock()
-            .expect("lock runtime effect journal")
-            .len()
-    }
-
-    pub(crate) fn runtime_turn_checkpoint_save_count(&self) -> usize {
-        *self
-            .runtime_turn_checkpoint_save_count
-            .lock()
-            .expect("lock runtime turn checkpoint save count")
-    }
-
-    pub(crate) fn runtime_effect_journal_save_count(&self) -> usize {
-        *self
-            .runtime_effect_journal_save_count
-            .lock()
-            .expect("lock runtime effect journal save count")
-    }
-
-    pub(crate) fn runtime_turn_lease_renew_count(&self) -> usize {
-        *self
-            .runtime_turn_lease_renew_count
-            .lock()
-            .expect("lock runtime turn lease renew count")
-    }
-
-    pub(crate) fn runtime_turn_lease_abandon_count(&self) -> usize {
-        *self
-            .runtime_turn_lease_abandon_count
-            .lock()
-            .expect("lock runtime turn lease abandon count")
     }
 }
 

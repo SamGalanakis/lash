@@ -78,9 +78,6 @@ pub enum QueuedWorkPayload {
         #[serde(default)]
         payload: serde_json::Value,
     },
-    Resume {
-        turn_id: String,
-    },
 }
 
 impl QueuedWorkPayload {
@@ -233,7 +230,6 @@ impl QueuedWorkClaim {
                             matches!(&item.payload, QueuedWorkPayload::Timer { .. }),
                         ));
                     }
-                    QueuedWorkPayload::Resume { .. } => {}
                 }
             }
         }
@@ -274,7 +270,6 @@ impl QueuedWorkClaim {
                             matches!(&item.payload, QueuedWorkPayload::Timer { .. }),
                         ));
                     }
-                    QueuedWorkPayload::Resume { .. } => {}
                 }
             }
         }

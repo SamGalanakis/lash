@@ -4,13 +4,12 @@ pub(crate) use std::sync::{Arc, Mutex as StdMutex};
 
 pub(crate) use async_trait::async_trait;
 pub(crate) use lash_core::plugin::StaticPluginFactory;
-pub(crate) use lash_core::runtime::{
-    DurableTurnScope, RuntimeEffectController, RuntimeSessionState,
-};
+pub(crate) use lash_core::runtime::{EffectHost, RuntimeSessionState, ScopedEffectController};
 pub(crate) use lash_core::{
     DurabilityTier, DurableProcessWorker, DurableProcessWorkerConfig, LashRuntime, MessageRole,
-    PluginHost, PluginSpec, PluginStack, ProcessWorkPoke, ProcessWorkRunner, RuntimeEnvironment,
-    RuntimeHandle, RuntimeHostConfig, RuntimeObservation, SessionPolicy, SessionSpec,
+    PluginHost, PluginSpec, PluginStack, ProcessWorkPoke, ProcessWorkRunner, QueuedWorkPoke,
+    RuntimeEnvironment, RuntimeHandle, RuntimeHostConfig, RuntimeObservation, SessionPolicy,
+    SessionSpec,
 };
 pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;

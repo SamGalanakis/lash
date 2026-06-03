@@ -58,7 +58,6 @@ pub struct RuntimeExecutionContext<'run> {
     pub(super) parent_invocation: Option<crate::RuntimeInvocation>,
     lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     lashlang_execution_context: lash_trace::TraceContext,
-    pub(super) turn_lease: Option<crate::RuntimeTurnLease>,
     pub(super) turn_event_tx: Option<Sender<TurnActivity>>,
     pub(super) cancellation_token: Option<CancellationToken>,
 }
@@ -68,10 +67,8 @@ impl<'run> RuntimeExecutionContext<'run> {
         &self,
         parent_invocation: Option<crate::RuntimeInvocation>,
     ) -> crate::ProcessOpScope<'_> {
-        crate::ProcessOpScope::new()
+        crate::ProcessOpScope::new(self.dispatch.effect_controller.scoped())
             .with_parent_invocation(parent_invocation)
-            .with_effect_controller(self.dispatch.effect_controller.as_controller())
-            .with_turn_lease(self.turn_lease.clone())
             .with_agent_frame_id(Some(self.dispatch.agent_frame_id.clone()))
     }
 
@@ -110,7 +107,6 @@ impl<'run> RuntimeExecutionContext<'run> {
             parent_invocation: None,
             lashlang_execution_sink: None,
             lashlang_execution_context: lash_trace::TraceContext::default(),
-            turn_lease: None,
             turn_event_tx: None,
             cancellation_token: None,
         }
@@ -191,11 +187,6 @@ impl<'run> RuntimeExecutionContext<'run> {
 
     pub fn lashlang_execution_context(&self) -> &lash_trace::TraceContext {
         &self.lashlang_execution_context
-    }
-
-    pub(crate) fn with_turn_lease(mut self, turn_lease: Option<crate::RuntimeTurnLease>) -> Self {
-        self.turn_lease = turn_lease;
-        self
     }
 
     pub(crate) fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
@@ -356,7 +347,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         let outcome = self
             .dispatch
             .effect_controller
-            .as_controller()
+            .controller()
             .execute_effect(
                 crate::RuntimeEffectEnvelope::new(
                     invocation,

@@ -136,8 +136,7 @@ pub trait ProcessRegistry: Send + Sync {
 
     /// Claim the durable single-owner lease over a non-terminal process.
     ///
-    /// Mirrors [`claim_runtime_turn_lease`](crate::EmbeddedDurableTurnStore::claim_runtime_turn_lease):
-    /// an unexpired lease held by a *different* owner fences the claim (returns
+    /// An unexpired lease held by a *different* owner fences the claim (returns
     /// an error); claiming a free, expired, or own lease succeeds and bumps the
     /// `fencing_token`. The returned [`ProcessLease`]'s
     /// `(owner_id, lease_token)` plus `fencing_token` are the contract a worker
@@ -151,8 +150,7 @@ pub trait ProcessRegistry: Send + Sync {
 
     /// Extend the expiry of a live lease the caller still owns.
     ///
-    /// Mirrors [`renew_runtime_turn_lease`](crate::RuntimePersistence::renew_runtime_turn_lease):
-    /// the lease must match the persisted `(owner, lease_token, fencing_token)`
+    /// The lease must match the persisted `(owner, lease_token, fencing_token)`
     /// and be unexpired, else the renewal is rejected (the lease was superseded
     /// or expired). Workers renew across long-running effects so a healthy
     /// process is not swept out from under its live owner.

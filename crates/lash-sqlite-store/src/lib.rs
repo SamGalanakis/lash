@@ -3,44 +3,33 @@
 //! The high-performance local **durable** persistence backend for the lash
 //! agent runtime. One SQLite database per session, opened with WAL journal
 //! mode and a 15-second busy timeout, satisfying the full
-//! [`RuntimePersistence`] + embedded durable turn + [`AttachmentManifest`]
-//! contract from `lash-core`.
+//! [`RuntimePersistence`] + [`AttachmentManifest`] contract from `lash-core`.
 //!
 //! ## Why this is "the durable backend" not just "an option"
 //!
 //! Lash's runtime layer treats persistence as a first-class boundary, not a
 //! debug-only convenience. Every primitive that lets the runtime survive a
-//! crash — head-revision CAS, final turn-commit idempotency, embedded runtime
-//! turn leases with fencing tokens, effect-journal idempotency, attachment
+//! crash — head-revision CAS, final turn-commit idempotency, attachment
 //! write-ahead manifests, blob content-addressing with optional compression —
 //! is implemented in this crate against SQLite for one reason: SQLite is the
 //! simplest backend that gives us *atomic multi-statement transactions on a
 //! single file* with durability guarantees we can reason about. The settled
-//! `RuntimePersistence` contract stays separate from embedded in-flight turn
-//! durability so substrate-native backends can use their own history/timers for
-//! replay without double-journaling into Lash tables.
+//! `RuntimePersistence` contract stays separate from in-flight effect
+//! durability so effect hosts can use their own history/timers for replay.
 //!
-//! In other words: SQLite is the local embedded case. The lease/fencing
-//! machinery, the per-record version stamps, the
-//! `RuntimeCommit::committed_attachment_ids` plumbing, and turn-commit
+//! In other words: SQLite stores committed Lash state. The
+//! `RuntimeCommit::committed_attachment_ids` plumbing and turn-commit
 //! idempotency are the contract that lets final session state stay coherent
-//! even when a substrate-native backend owns in-flight replay.
+//! even when an effect host owns in-flight replay.
 //!
 //! ## Schema cutover, not migrations
 //!
 //! There is exactly one supported schema (see [`SCHEMA`] below). Older
 //! databases must be deleted before opening — we do not carry migration
-//! code. The per-record `schema_version` stamps on
-//! [`RuntimeTurnCheckpoint`], [`RuntimeTurnLease`], and
-//! [`RuntimeEffectJournalRecord`] are the upgrade contract for the
-//! *records that cross durable boundaries* (Restate replay, cross-version
-//! workers). The SQLite schema itself is a snapshot.
+//! code. The SQLite schema itself is a snapshot.
 //!
 //! [`RuntimePersistence`]: lash_core::RuntimePersistence
 //! [`AttachmentManifest`]: lash_core::AttachmentManifest
-//! [`RuntimeTurnCheckpoint`]: lash_core::store::RuntimeTurnCheckpoint
-//! [`RuntimeTurnLease`]: lash_core::store::RuntimeTurnLease
-//! [`RuntimeEffectJournalRecord`]: lash_core::store::RuntimeEffectJournalRecord
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -58,11 +47,8 @@ use lash_core::runtime::{
     prepare_process_registration,
 };
 use lash_core::store::{
-    GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
-    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
-    RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
-    RuntimeEffectJournalRecord, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionCheckpoint,
-    SessionHead, SessionHeadMeta, ensure_supported_schema_version,
+    GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead, RuntimeCommit,
+    RuntimeCommitResult, SessionCheckpoint, SessionHead, SessionHeadMeta,
 };
 use lash_core::{
     AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef,

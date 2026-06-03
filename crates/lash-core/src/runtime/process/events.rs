@@ -311,7 +311,6 @@ fn default_process_wake_event_invocation() -> crate::RuntimeInvocation {
         },
         caused_by: None,
         replay: None,
-        checkpoint_hash: None,
     }
 }
 

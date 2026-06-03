@@ -6,6 +6,7 @@ pub(crate) async fn enqueue_wake_delivery(
     store: Option<&dyn crate::RuntimePersistence>,
     wake_delivery: Option<crate::ProcessWakeDelivery>,
     trace_host: Option<&dyn crate::plugin::SessionGraphService>,
+    queued_work_poke: Option<&crate::QueuedWorkPoke>,
 ) -> Result<(), PluginError> {
     let Some(wake_delivery) = wake_delivery else {
         return Ok(());
@@ -20,6 +21,7 @@ pub(crate) async fn enqueue_wake_delivery(
         .enqueue_queued_work(crate::process_wake_batch_draft(wake_delivery))
         .await
         .map_err(|err| PluginError::Session(err.to_string()))?;
+    let target_session_id = enqueued.session_id.clone();
     if let Some(host) = trace_host
         && let Err(err) = host
             .emit_trace_event(
@@ -38,6 +40,9 @@ pub(crate) async fn enqueue_wake_delivery(
             .await
     {
         tracing::warn!("failed to emit process wake queue trace: {err}");
+    }
+    if let Some(poke) = queued_work_poke {
+        poke.poke_session(target_session_id, "process_wake");
     }
     Ok(())
 }
@@ -93,6 +98,7 @@ impl ToolProcessEventControl {
             process.store.as_deref(),
             result.wake_delivery,
             Some(process.session_graph.as_ref()),
+            process.queued_work_poke.as_ref(),
         )
         .await?;
         Ok(result.event)

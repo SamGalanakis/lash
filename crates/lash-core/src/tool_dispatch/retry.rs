@@ -107,12 +107,11 @@ async fn sleep_before_retry(
             effect_id.clone(),
             crate::RuntimeEffectKind::Sleep,
             effect_id,
-            None,
         )
     };
     let outcome = context
         .effect_controller
-        .as_controller()
+        .controller()
         .execute_effect(
             crate::RuntimeEffectEnvelope::new(
                 invocation,

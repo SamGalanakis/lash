@@ -68,74 +68,12 @@ fn generation_options_from_provider(provider: &crate::ProviderHandle) -> crate::
 }
 
 impl RuntimeTurnDriver<'_> {
-    pub(in crate::runtime) fn restore_turn_machine(
-        &mut self,
-        checkpoint_record: crate::RuntimeTurnCheckpoint,
-    ) -> Result<TurnMachine, RuntimeError> {
-        let checkpoint_hash = crate::runtime_turn_checkpoint_hash(&checkpoint_record.checkpoint)
-            .map_err(|err| {
-                RuntimeError::new(RuntimeErrorCode::RuntimeTurnCheckpointHash, err.to_string())
-            })?;
-        if checkpoint_hash != checkpoint_record.checkpoint_hash {
-            return Err(RuntimeError::new(
-                RuntimeErrorCode::RuntimeTurnCheckpointHashMismatch,
-                format!(
-                    "persisted checkpoint hash `{}` does not match decoded checkpoint hash `{}`",
-                    checkpoint_record.checkpoint_hash, checkpoint_hash
-                ),
-            ));
-        }
-        let turn_driver_preamble = self
-            .session
-            .turn_driver_preamble(&self.session_id)
-            .map_err(|err| {
-                RuntimeError::new(
-                    RuntimeErrorCode::RuntimeTurnRestoreTurnDriverPreamble,
-                    err.to_string(),
-                )
-            })?;
-        self.machine_config_snapshot = Some(checkpoint_record.machine_config.clone());
-        self.protocol_turn_options = checkpoint_record.protocol_turn_options.clone();
-        self.turn_context
-            .set_prompt_layer(checkpoint_record.turn_prompt_layer.clone());
-        let config = crate::TurnMachineConfig {
-            protocol_driver: turn_driver_preamble.config.protocol.clone(),
-            projector: turn_driver_preamble.config.projector.clone(),
-            sync_execution_surface: checkpoint_record.machine_config.sync_execution_surface,
-            model: checkpoint_record.machine_config.model.id.clone(),
-            max_context_tokens: Some(
-                checkpoint_record
-                    .machine_config
-                    .model
-                    .context_window_tokens(),
-            ),
-            max_turns: checkpoint_record.machine_config.max_turns,
-            model_variant: checkpoint_record.machine_config.model.variant.clone(),
-            generation: checkpoint_record.machine_config.generation.clone(),
-            run_session_id: checkpoint_record.machine_config.run_session_id.clone(),
-            autonomous: checkpoint_record.machine_config.autonomous,
-            tool_specs: checkpoint_record.machine_config.tool_specs.clone(),
-            system_prompt: Arc::<str>::from(checkpoint_record.machine_config.system_prompt.clone()),
-            session_id: checkpoint_record.machine_config.session_id.clone(),
-            emit_llm_trace: false,
-            termination: checkpoint_record.machine_config.termination.clone(),
-            turn_limit_final_message: turn_driver_preamble.config.turn_limit_final_message.clone(),
-        };
-        Ok(TurnMachine::restore_from_checkpoint(
-            config,
-            checkpoint_record.checkpoint,
-        ))
-    }
-
     pub(super) async fn prepare_turn_machine(
         &mut self,
         messages: crate::MessageSequence,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         run_offset: usize,
-    ) -> Result<
-        (TurnMachine, crate::RuntimeTurnMachineConfigSnapshot),
-        (crate::MessageSequence, usize),
-    > {
+    ) -> Result<TurnMachine, (crate::MessageSequence, usize)> {
         macro_rules! emit {
             ($event:expr) => {
                 send_session_event(event_tx, $event).await
@@ -174,21 +112,6 @@ impl RuntimeTurnDriver<'_> {
             self.turn_context.prompt_layer(),
             Some(self.session.prompt_cache()),
         );
-        let machine_config_snapshot = crate::RuntimeTurnMachineConfigSnapshot {
-            session_id: self.session_id.clone(),
-            run_session_id: session_policy.session_id.clone(),
-            autonomous: session_policy.autonomous,
-            model: session_policy.model.clone(),
-            generation: generation_options_from_provider(session_policy.provider()),
-            max_turns: session_policy.max_turns,
-            sync_execution_surface: execution_surface
-                .turn_driver_preamble
-                .config
-                .sync_execution_surface,
-            tool_specs: execution_surface.turn_driver_preamble.tool_specs.clone(),
-            system_prompt: prepared_prompt.system_prompt.to_string(),
-            termination: self.protocol_turn_options.clone(),
-        };
         let prepared = crate::build_turn(crate::SansIoTurnInput {
             session_id: self.session_id.clone(),
             run_session_id: session_policy.session_id.clone(),
@@ -229,7 +152,7 @@ impl RuntimeTurnDriver<'_> {
         }
         self.policy = session_policy;
         self.mark_phase_end(RuntimeTurnPhase::PromptBuild);
-        Ok((prepared.machine, machine_config_snapshot))
+        Ok(prepared.machine)
     }
 
     pub(in crate::runtime) async fn refresh_execution_surface(
@@ -309,13 +232,11 @@ impl RuntimeTurnDriver<'_> {
     ) -> Result<Option<crate::ProtocolLlmCallAction>, PluginError> {
         let latest_prompt_usage = self.turn_pipeline.state_mut().last_prompt_usage.clone();
         let effect_controller = crate::runtime::RuntimeEffectControllerHandle::borrowed(
-            self.durable_turn_scope.controller(),
+            self.scoped_effect_controller.clone(),
         );
-        let direct_completions = self.session_services.direct_completion_client(
-            effect_controller.clone_scoped(),
-            Some(self.turn_id.clone()),
-            self.turn_lease.clone(),
-        );
+        let direct_completions = self
+            .session_services
+            .direct_completion_client(effect_controller.clone_scoped(), Some(self.turn_id.clone()));
         let process_parent_invocation = self.turn_effect_invocation(
             machine,
             crate::sansio::EffectId(u64::MAX),

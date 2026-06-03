@@ -10,23 +10,26 @@
 //! `#[tokio::test]`. Embedders with custom backends can run them via
 //! `lash::testing::conformance`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::{
     AgentFrameReason, AgentFrameRecord, AttachmentId, AttachmentIntent, CausalRef, DeliveryPolicy,
-    MergeKey, ModelSpec, PluginSessionSnapshot, ProtocolEvent, ProtocolTurnOptions,
-    QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkPayload,
-    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit, RuntimeEffectJournalRecord,
-    RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence, RuntimeScope, RuntimeSessionState,
-    RuntimeSubject, RuntimeTurnCompletion, SessionMeta, SessionNodePayload, SessionNodeRecord,
-    SessionPolicy, SessionReadScope, SessionRelation, SlotPolicy, StoreError, TokenLedgerEntry,
-    TokenUsage, ToolState, TurnInput,
+    EffectHost, EffectScope, MergeKey, ModelSpec, PluginSessionSnapshot, ProtocolEvent,
+    ProtocolTurnOptions, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaimBoundary,
+    QueuedWorkPayload, RuntimeCommit, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimePersistence,
+    RuntimeScope, RuntimeSessionState, RuntimeSubject, RuntimeTurnCommitStamp,
+    ScopedEffectController, SessionMeta, SessionNodePayload, SessionNodeRecord, SessionPolicy,
+    SessionReadScope, SessionRelation, SlotPolicy, StoreError, TokenLedgerEntry, TokenUsage,
+    ToolState, TurnInput,
 };
 use crate::{
     LashSchema, ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventSemanticsSpec,
     ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessLeaseCompletion,
-    ProcessProvenance, ProcessRegistration, ProcessRegistry, ProcessScope, ProcessTerminalState,
-    ProcessValueSelector, ProcessWakeDedupeKey, ProcessWakeSpec,
+    ProcessProvenance, ProcessRegistration, ProcessRegistry, ProcessScope, ProcessScopeId,
+    ProcessTerminalState, ProcessValueSelector, ProcessWakeDedupeKey, ProcessWakeDelivery,
+    ProcessWakeSpec,
 };
 
 /// A pair of [`ProcessRegistry`] handles opened against the same durable
@@ -57,6 +60,366 @@ pub struct ReopenableLashlangArtifactStore {
     pub reopen: Arc<dyn crate::LashlangArtifactStore>,
 }
 
+/// One scope selected by an [`EffectHost`] and one effect envelope executed
+/// through the scoped controller.
+#[derive(Clone, Debug)]
+pub struct RecordingEffectHostRecord {
+    pub runtime_scope: RuntimeScope,
+    pub effect_scope: EffectScope,
+    pub effect_id: String,
+    pub effect_kind: RuntimeEffectKind,
+    pub replay_key: Option<String>,
+    pub envelope_hash: String,
+}
+
+#[derive(Clone)]
+struct RecordingEffectHostController {
+    effect_scope: EffectScope,
+    records: Arc<Mutex<Vec<RecordingEffectHostRecord>>>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeEffectController for RecordingEffectHostController {
+    async fn execute_effect(
+        &self,
+        envelope: RuntimeEffectEnvelope,
+        _local_executor: RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        let envelope_hash = envelope.stable_hash()?;
+        self.records
+            .lock()
+            .expect("effect host records")
+            .push(RecordingEffectHostRecord {
+                runtime_scope: envelope.invocation.scope.clone(),
+                effect_scope: self.effect_scope.clone(),
+                effect_id: envelope
+                    .invocation
+                    .effect_id()
+                    .expect("effect invocation")
+                    .to_string(),
+                effect_kind: envelope.command.kind(),
+                replay_key: envelope.invocation.replay_key().map(ToOwned::to_owned),
+                envelope_hash,
+            });
+        match envelope.command {
+            RuntimeEffectCommand::Sleep { .. } => Ok(RuntimeEffectOutcome::Sleep),
+            command => Err(RuntimeEffectControllerError::new(
+                "recording_effect_host_unsupported_command",
+                format!(
+                    "recording effect host cannot synthesize {} outcomes",
+                    command.kind().as_str()
+                ),
+            )),
+        }
+    }
+}
+
+/// Test fixture that records every selected [`EffectScope`] and every effect
+/// envelope executed through the returned scoped controller.
+#[derive(Clone, Default)]
+pub struct RecordingEffectHost {
+    selected_scopes: Arc<Mutex<Vec<EffectScope>>>,
+    records: Arc<Mutex<Vec<RecordingEffectHostRecord>>>,
+}
+
+impl RecordingEffectHost {
+    pub fn selected_scopes(&self) -> Vec<EffectScope> {
+        self.selected_scopes
+            .lock()
+            .expect("selected effect scopes")
+            .clone()
+    }
+
+    pub fn records(&self) -> Vec<RecordingEffectHostRecord> {
+        self.records.lock().expect("effect host records").clone()
+    }
+
+    fn scoped_for<'run>(
+        &self,
+        scope: EffectScope,
+    ) -> Result<ScopedEffectController<'run>, crate::RuntimeError> {
+        self.selected_scopes
+            .lock()
+            .expect("selected effect scopes")
+            .push(scope.clone());
+        ScopedEffectController::shared(
+            Arc::new(RecordingEffectHostController {
+                effect_scope: scope.clone(),
+                records: Arc::clone(&self.records),
+            }),
+            scope,
+        )
+    }
+}
+
+impl EffectHost for RecordingEffectHost {
+    fn scoped<'run>(
+        &'run self,
+        scope: EffectScope,
+    ) -> Result<ScopedEffectController<'run>, crate::RuntimeError> {
+        self.scoped_for(scope)
+    }
+
+    fn scoped_static(
+        &self,
+        scope: EffectScope,
+    ) -> Result<Option<ScopedEffectController<'static>>, crate::RuntimeError> {
+        Ok(Some(self.scoped_for(scope)?))
+    }
+}
+
+/// Run the generic [`EffectHost`] scope-factory conformance suite.
+///
+/// This suite checks the deployment-level contract: effect scopes must carry
+/// stable semantic identity, empty ids must fail loudly, and hosts that expose
+/// a static scoped controller must preserve the same scope metadata. It does
+/// not assert durability; that remains a property of each implementation.
+/// Substrate-native hosts such as Restate complete the in-flight contract at
+/// this effect-host/controller boundary; [`RuntimePersistence`] remains the
+/// committed-state store contract, not a workflow-history contract.
+pub async fn effect_host<F>(make: F)
+where
+    F: Fn() -> Arc<dyn EffectHost>,
+{
+    effect_host_preserves_scope_metadata(make()).await;
+    effect_host_rejects_missing_scope_ids(make()).await;
+    effect_host_static_scope_preserves_metadata_when_available(make()).await;
+}
+
+async fn effect_host_preserves_scope_metadata(host: Arc<dyn EffectHost>) {
+    let scope = EffectScope::queue_drain("session-1", "drain-1");
+    let scoped = host.scoped(scope.clone()).expect("queue drain scope");
+    assert_eq!(
+        scoped.effect_scope(),
+        &scope,
+        "scoped controller must retain the selected semantic scope"
+    );
+    assert_eq!(scoped.scope_id(), "drain-1");
+    assert_eq!(scoped.turn_id(), None);
+
+    let turn_scope = EffectScope::turn("session-1", "turn-1");
+    let scoped_turn = host.scoped(turn_scope.clone()).expect("turn scope");
+    assert_eq!(scoped_turn.effect_scope(), &turn_scope);
+    assert_eq!(scoped_turn.scope_id(), "turn-1");
+    assert_eq!(scoped_turn.turn_id(), Some("turn-1"));
+}
+
+async fn effect_host_rejects_missing_scope_ids(host: Arc<dyn EffectHost>) {
+    let invalid_scopes = [
+        EffectScope::turn("", "turn"),
+        EffectScope::turn("session", ""),
+        EffectScope::process(""),
+        EffectScope::host_event("session", ""),
+        EffectScope::queue_drain("session", ""),
+        EffectScope::cron("job", ""),
+        EffectScope::session_delete(""),
+        EffectScope::runtime_operation(""),
+    ];
+
+    for scope in invalid_scopes {
+        let err = match host.scoped(scope) {
+            Ok(_) => panic!("invalid effect scope must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.code,
+            crate::RuntimeErrorCode::MissingEffectScopeId,
+            "invalid scope ids must fail with the stable missing-scope code"
+        );
+    }
+}
+
+async fn effect_host_static_scope_preserves_metadata_when_available(host: Arc<dyn EffectHost>) {
+    let scope = EffectScope::runtime_operation("static-runtime-op");
+    let Some(scoped) = host
+        .scoped_static(scope.clone())
+        .expect("static scope factory")
+    else {
+        return;
+    };
+    assert_eq!(scoped.effect_scope(), &scope);
+    assert_eq!(scoped.scope_id(), "static-runtime-op");
+}
+
+/// Run the concurrent recorded-effect replay conformance case for a
+/// handler-scoped durable controller.
+///
+/// The first pass starts two journaled effects concurrently and intentionally
+/// lets the second finish before the first. After `start_replay`, the same
+/// effects are requested in the opposite order with local executors that fail
+/// if called. A compliant controller returns the recorded outcomes by
+/// `replay.key`, independent of local completion/request ordering.
+#[cfg(any(test, feature = "testing"))]
+pub async fn effect_controller_concurrent_replay_deterministic(
+    controller: &dyn RuntimeEffectController,
+    start_replay: impl FnOnce(),
+) {
+    let slow = replay_conformance_exec_envelope("effect-slow");
+    let fast = replay_conformance_exec_envelope("effect-fast");
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let release_slow = Arc::new(tokio::sync::Notify::new());
+
+    let first_pass = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(
+            controller.execute_effect(
+                slow.clone(),
+                replay_conformance_recording_executor(
+                    "effect-slow",
+                    Arc::clone(&barrier),
+                    Arc::clone(&release_slow),
+                    Arc::clone(&completion_order),
+                ),
+            ),
+            controller.execute_effect(
+                fast.clone(),
+                replay_conformance_recording_executor(
+                    "effect-fast",
+                    Arc::clone(&barrier),
+                    Arc::clone(&release_slow),
+                    Arc::clone(&completion_order),
+                ),
+            ),
+        )
+    })
+    .await
+    .expect("concurrent first-pass effects must both enter their local executors");
+    let slow_first = first_pass.0.expect("slow first pass");
+    let fast_first = first_pass.1.expect("fast first pass");
+    assert_replay_conformance_exec_marker(slow_first, "effect-slow");
+    assert_replay_conformance_exec_marker(fast_first, "effect-fast");
+    assert_eq!(
+        completion_order
+            .lock()
+            .expect("completion order")
+            .as_slice(),
+        &["effect-fast".to_string(), "effect-slow".to_string()],
+        "first pass must prove local completion order can differ from effect request order"
+    );
+
+    start_replay();
+    let replay_local_calls = Arc::new(Mutex::new(Vec::new()));
+    let replay_pass = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(
+            controller.execute_effect(
+                fast,
+                replay_conformance_failing_executor(Arc::clone(&replay_local_calls)),
+            ),
+            controller.execute_effect(
+                slow,
+                replay_conformance_failing_executor(Arc::clone(&replay_local_calls)),
+            ),
+        )
+    })
+    .await
+    .expect("concurrent replay effects must resolve from host history");
+    let fast_replay = replay_pass.0.expect("fast replay");
+    let slow_replay = replay_pass.1.expect("slow replay");
+    assert_replay_conformance_exec_marker(fast_replay, "effect-fast");
+    assert_replay_conformance_exec_marker(slow_replay, "effect-slow");
+    assert!(
+        replay_local_calls
+            .lock()
+            .expect("replay local calls")
+            .is_empty(),
+        "replay must return recorded outcomes without invoking local executors"
+    );
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn replay_conformance_exec_envelope(effect_id: &'static str) -> RuntimeEffectEnvelope {
+    RuntimeEffectEnvelope::new(
+        RuntimeInvocation::effect(
+            RuntimeScope::for_turn(
+                "effect-conformance-session",
+                "effect-conformance-turn",
+                7,
+                0,
+            ),
+            effect_id,
+            RuntimeEffectKind::ExecCode,
+            format!("effect-conformance:effect-conformance-turn:{effect_id}"),
+        ),
+        RuntimeEffectCommand::ExecCode {
+            code: format!("emit {effect_id}"),
+        },
+    )
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn replay_conformance_recording_executor(
+    effect_id: &'static str,
+    barrier: Arc<tokio::sync::Barrier>,
+    release_slow: Arc<tokio::sync::Notify>,
+    completion_order: Arc<Mutex<Vec<String>>>,
+) -> RuntimeEffectLocalExecutor<'static> {
+    RuntimeEffectLocalExecutor::testing(move |envelope| async move {
+        assert_eq!(envelope.invocation.effect_id(), Some(effect_id));
+        barrier.wait().await;
+        if effect_id == "effect-slow" {
+            release_slow.notified().await;
+        } else {
+            completion_order
+                .lock()
+                .expect("completion order")
+                .push(effect_id.to_string());
+            release_slow.notify_one();
+        }
+        if effect_id == "effect-slow" {
+            completion_order
+                .lock()
+                .expect("completion order")
+                .push(effect_id.to_string());
+        }
+        Ok(replay_conformance_exec_outcome(effect_id))
+    })
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn replay_conformance_failing_executor(
+    replay_local_calls: Arc<Mutex<Vec<String>>>,
+) -> RuntimeEffectLocalExecutor<'static> {
+    RuntimeEffectLocalExecutor::testing(move |envelope| async move {
+        replay_local_calls
+            .lock()
+            .expect("replay local calls")
+            .push(envelope.invocation.effect_id().unwrap_or("").to_string());
+        Err(RuntimeEffectControllerError::new(
+            "conformance_replay_local_executor_called",
+            "recorded replay must not invoke local effect execution",
+        ))
+    })
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn replay_conformance_exec_outcome(effect_id: &str) -> RuntimeEffectOutcome {
+    RuntimeEffectOutcome::ExecCode {
+        result: Ok(crate::ExecResponse {
+            observations: Vec::new(),
+            observation_truncation: Vec::new(),
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            printed_images: Vec::new(),
+            error: None,
+            duration_ms: 0,
+            terminal_finish: Some(serde_json::json!(effect_id)),
+        }),
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn assert_replay_conformance_exec_marker(outcome: RuntimeEffectOutcome, expected: &str) {
+    let RuntimeEffectOutcome::ExecCode { result } = outcome else {
+        panic!("expected exec-code effect outcome");
+    };
+    let response = result.expect("exec-code response");
+    assert_eq!(
+        response.terminal_finish,
+        Some(serde_json::json!(expected)),
+        "replayed outcome must come from the matching replay key"
+    );
+}
+
 /// Run the full [`ProcessRegistry`] conformance suite against the backend
 /// produced by `make`. `make` must return a fresh, empty registry on each call.
 pub async fn process_registry<F>(make: F)
@@ -69,6 +432,7 @@ where
     event_streams_filter_order_and_wait_without_leaking_old_events(make()).await;
     wake_semantics_matrix_materializes_declared_wakes(make()).await;
     keyed_events_materialize_idempotent_wakes(make()).await;
+    wake_semantic_events_without_target_fail_without_persisting(make()).await;
     terminal_and_cancel_events_require_keys(make()).await;
     await_reads_terminal_materialized_output(make()).await;
     transfer_handle_grants_moves_addressability(make()).await;
@@ -790,6 +1154,45 @@ async fn keyed_events_materialize_idempotent_wakes(registry: Arc<dyn ProcessRegi
     );
 }
 
+async fn wake_semantic_events_without_target_fail_without_persisting(
+    registry: Arc<dyn ProcessRegistry>,
+) {
+    registry
+        .register_process(
+            registration("proc-missing-wake-target")
+                .with_extra_event_types([wake_event_type("process.wake")]),
+        )
+        .await
+        .expect("register");
+
+    let err = registry
+        .append_event(
+            "proc-missing-wake-target",
+            ProcessEventAppendRequest::new(
+                "process.wake",
+                serde_json::json!({
+                    "message": "target missing",
+                    "wake_input": "Process wake: target missing",
+                }),
+            )
+            .with_replay_key("wake:missing-target"),
+        )
+        .await
+        .expect_err("wake-semantic event without target scope must fail");
+    assert!(
+        err.to_string().contains("without a wake target scope"),
+        "unexpected missing-target error: {err}"
+    );
+    assert!(
+        registry
+            .events_after("proc-missing-wake-target", 0)
+            .await
+            .expect("events after failed append")
+            .is_empty(),
+        "failed wake append must not persist a partial process event"
+    );
+}
+
 async fn terminal_and_cancel_events_require_keys(registry: Arc<dyn ProcessRegistry>) {
     registry
         .register_process(registration("proc-terminal"))
@@ -1308,14 +1711,11 @@ impl Default for RuntimePersistenceConformance {
 /// backend produced by `make`. `make` must return a fresh, empty,
 /// single-session store on each call.
 ///
-/// Covers the durability crown jewels: optimistic head CAS, session binding,
-/// checkpoint/usage hydration, queued work claim fencing, attachment manifest
-/// intent/commit/GC reconciliation, lease fencing (claim/renew/abandon/
-/// supersede/expire), lease-guarded journal writes, replay-key journal
-/// idempotency, and atomic final commit that clears the journal only under a
-/// live lease (else preserves resume state). In-flight
-/// `RuntimeTurnCheckpoint` round-tripping — whose hash validation is
-/// backend-specific — is exercised per backend.
+/// Covers the durability crown jewels owned by the store: optimistic head CAS,
+/// session binding, checkpoint/usage hydration, queued work claim fencing,
+/// attachment manifest intent/commit/GC reconciliation, session metadata,
+/// tombstone/GC behavior, and idempotent final turn commit stamps.
+/// Effect-host workflow history is deliberately outside this suite.
 pub async fn runtime_persistence<F>(make: F)
 where
     F: Fn() -> Arc<dyn RuntimePersistence>,
@@ -1352,33 +1752,15 @@ where
     queued_work_respects_availability_limits_exclusivity_reclaim_and_sessions(make()).await;
     queued_work_join_groups_by_delivery_policy_and_merge_key(make()).await;
     queued_work_completion_is_lease_guarded(make()).await;
-    queue_completion_state_commit_and_journal_clear_are_atomic(make()).await;
+    queued_wake_delivery_is_source_key_idempotent_and_claimed_once(make()).await;
+    queue_completion_and_turn_commit_stamp_are_atomic(make()).await;
     session_metadata_round_trips(make()).await;
     tombstone_vacuum_and_gc_are_minimally_consistent(make()).await;
-    journal_is_idempotent_and_cleared_on_final_commit(make()).await;
-    substrate_native_final_commit_is_idempotent_and_conflicts_on_changed_hash(make()).await;
-    active_lease_fences_competing_claims(make()).await;
-    superseded_lease_cannot_write_or_clear(make()).await;
-    renewed_lease_survives_original_expiry(make()).await;
-    abandon_releases_owner_and_preserves_journal(make()).await;
-    stale_final_commit_rejects_and_preserves_resume(make()).await;
-    expired_final_commit_rejects_and_preserves_resume(make()).await;
+    final_commit_stamp_is_idempotent_and_conflicts_on_changed_hash(make()).await;
 }
 
-fn effect_record(session_id: &str, turn_id: &str, effect: &str) -> RuntimeEffectJournalRecord {
-    RuntimeEffectJournalRecord {
-        schema_version: RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
-        session_id: session_id.to_string(),
-        turn_id: turn_id.to_string(),
-        replay_key: format!("{session_id}:{turn_id}:{effect}"),
-        envelope_hash: format!("hash-{effect}"),
-        effect_kind: RuntimeEffectKind::Sleep,
-        outcome: RuntimeEffectOutcome::Sleep,
-        created_at_epoch_ms: 1,
-    }
-}
-
-fn queued_draft(
+/// Build a queued turn-input draft for backend conformance tests.
+pub fn queued_turn_input_draft(
     session_id: &str,
     text: &str,
     delivery_policy: DeliveryPolicy,
@@ -1392,6 +1774,15 @@ fn queued_draft(
     )
 }
 
+fn queued_draft(
+    session_id: &str,
+    text: &str,
+    delivery_policy: DeliveryPolicy,
+    slot_policy: SlotPolicy,
+) -> QueuedWorkBatchDraft {
+    queued_turn_input_draft(session_id, text, delivery_policy, slot_policy)
+}
+
 fn queued_batch_text(batch: &QueuedWorkBatch) -> Option<&str> {
     let payload = batch.items.first().map(|item| &item.payload)?;
     match payload {
@@ -1401,8 +1792,7 @@ fn queued_batch_text(batch: &QueuedWorkBatch) -> Option<&str> {
         }),
         QueuedWorkPayload::ProcessWake { .. }
         | QueuedWorkPayload::HostEvent { .. }
-        | QueuedWorkPayload::Timer { .. }
-        | QueuedWorkPayload::Resume { .. } => None,
+        | QueuedWorkPayload::Timer { .. } => None,
     }
 }
 
@@ -2109,9 +2499,7 @@ async fn queued_work_completion_is_lease_guarded(store: Arc<dyn RuntimePersisten
     );
 }
 
-async fn queue_completion_state_commit_and_journal_clear_are_atomic(
-    store: Arc<dyn RuntimePersistence>,
-) {
+async fn queue_completion_and_turn_commit_stamp_are_atomic(store: Arc<dyn RuntimePersistence>) {
     let batch = store
         .enqueue_queued_work(queued_draft(
             "root",
@@ -2133,18 +2521,6 @@ async fn queue_completion_state_commit_and_journal_clear_are_atomic(
         .expect("claim queue")
         .expect("queue claim");
     assert_eq!(claim.batches[0].batch_id, batch.batch_id);
-    let turns = store
-        .embedded_durable_turn_store()
-        .expect("embedded durable turn");
-    let lease = turns
-        .claim_runtime_turn_lease("root", "turn-atomic", "turn-owner", 60_000)
-        .await
-        .expect("turn lease");
-    let record = effect_record("root", "turn-atomic", "atomic-effect");
-    turns
-        .save_runtime_effect_outcome(&lease, record.clone())
-        .await
-        .expect("save journal");
     let state = RuntimeSessionState {
         session_id: "root".to_string(),
         turn_index: 41,
@@ -2152,16 +2528,14 @@ async fn queue_completion_state_commit_and_journal_clear_are_atomic(
     };
     let base_commit = RuntimeCommit::persisted_state(&state, &[]);
     let commit_hash = base_commit.turn_commit_hash().expect("turn commit hash");
+    let turn_commit = RuntimeTurnCommitStamp::new("root", "turn-atomic", commit_hash.clone());
     let mut stale_queue_completion = claim.completion();
     stale_queue_completion.lease_token.push_str(":stale");
     let err = store
         .commit_runtime_state(
             base_commit
                 .clone()
-                .clearing_completed_turn(RuntimeTurnCompletion::from_lease(
-                    &lease,
-                    commit_hash.clone(),
-                ))
+                .with_turn_commit(turn_commit.clone())
                 .completing_queue_claim(stale_queue_completion),
         )
         .await
@@ -2184,25 +2558,30 @@ async fn queue_completion_state_commit_and_journal_clear_are_atomic(
         1,
         "rejected queue completion must preserve queued work"
     );
-    assert!(
-        store
-            .embedded_durable_turn_store()
-            .expect("embedded durable turn")
-            .load_runtime_effect_outcome("root", "turn-atomic", &record.replay_key)
-            .await
-            .expect("load journal after rejected atomic commit")
-            .is_some(),
-        "rejected queue completion must preserve turn journal rows"
-    );
 
-    store
+    let first = store
         .commit_runtime_state(
             base_commit
-                .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease, commit_hash))
+                .clone()
+                .with_turn_commit(turn_commit.clone())
                 .completing_queue_claim(claim.completion()),
         )
         .await
-        .expect("valid final commit clears queue and journal atomically");
+        .expect("valid final commit clears queue and records the turn stamp atomically");
+    let retry = store
+        .commit_runtime_state(
+            base_commit
+                .with_turn_commit(RuntimeTurnCommitStamp::new(
+                    "root",
+                    "turn-atomic",
+                    commit_hash,
+                ))
+                .completing_queue_claim(claim.completion()),
+        )
+        .await
+        .expect("same final turn commit stamp retries idempotently");
+    assert_eq!(retry.head_revision, first.head_revision);
+    assert_eq!(retry.checkpoint_ref, first.checkpoint_ref);
     assert!(
         store
             .load_session(SessionReadScope::FullGraph)
@@ -2216,15 +2595,6 @@ async fn queue_completion_state_commit_and_journal_clear_are_atomic(
             .await
             .expect("list after accepted atomic commit")
             .is_empty()
-    );
-    assert!(
-        store
-            .embedded_durable_turn_store()
-            .expect("embedded durable turn")
-            .load_runtime_effect_outcome("root", "turn-atomic", &record.replay_key)
-            .await
-            .expect("load journal after accepted atomic commit")
-            .is_none()
     );
 }
 
@@ -2408,66 +2778,91 @@ async fn runtime_persistence_survives_reopen(factory: ReopenableRuntimePersisten
     );
 }
 
-async fn journal_is_idempotent_and_cleared_on_final_commit(store: Arc<dyn RuntimePersistence>) {
-    let turns = store
-        .embedded_durable_turn_store()
-        .expect("embedded durable turn");
-    let lease = turns
-        .claim_runtime_turn_lease("root", "turn-1", "test-owner", 60_000)
+async fn queued_wake_delivery_is_source_key_idempotent_and_claimed_once(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let wake = ProcessWakeDelivery {
+        wake_id: "wake-1".to_string(),
+        target_session_id: "root".to_string(),
+        target_scope_id: ProcessScopeId::new("session:root"),
+        process_id: "process-1".to_string(),
+        sequence: 7,
+        event_type: "process.wake".to_string(),
+        event_invocation: RuntimeInvocation {
+            scope: RuntimeScope::new("root"),
+            subject: RuntimeSubject::ProcessEvent {
+                process_id: "process-1".to_string(),
+                sequence: 7,
+                event_type: "process.wake".to_string(),
+            },
+            caused_by: None,
+            replay: None,
+        },
+        process_caused_by: None,
+        dedupe_key: "wake-dedupe-1".to_string(),
+        input: "wake payload".to_string(),
+        created_at_ms: 1,
+    };
+    let first = store
+        .enqueue_queued_work(crate::process_wake_batch_draft(wake.clone()))
         .await
-        .expect("lease");
-    let record = effect_record("root", "turn-1", "sleep");
-    turns
-        .save_runtime_effect_outcome(&lease, record.clone())
+        .expect("enqueue wake");
+    let replay = store
+        .enqueue_queued_work(crate::process_wake_batch_draft(wake))
         .await
-        .expect("save journal");
-    let loaded = turns
-        .load_runtime_effect_outcome("root", "turn-1", &record.replay_key)
-        .await
-        .expect("load journal")
-        .expect("journal record");
-    assert_eq!(loaded.envelope_hash, record.envelope_hash);
-    // Replaying the same key is idempotent (overwrites, no duplicate row).
-    turns
-        .save_runtime_effect_outcome(&lease, record.clone())
-        .await
-        .expect("replay save is idempotent");
+        .expect("replay wake enqueue");
+    assert_eq!(
+        first.batch_id, replay.batch_id,
+        "wake source-key replay must return the original queued batch"
+    );
+    assert_eq!(
+        store
+            .list_queued_work("root")
+            .await
+            .expect("list queued wakes")
+            .len(),
+        1,
+        "replayed wake must not create a second queued delivery"
+    );
 
+    let claim = store
+        .claim_ready_queued_work(
+            "root",
+            "wake-owner",
+            QueuedWorkClaimBoundary::Idle,
+            60_000,
+            10,
+        )
+        .await
+        .expect("claim wake")
+        .expect("wake claim");
+    assert_eq!(claim.batches.len(), 1);
+    assert_eq!(claim.batches[0].items.len(), 1);
+    assert!(matches!(
+        claim.batches[0].items[0].payload,
+        QueuedWorkPayload::ProcessWake { .. }
+    ));
     let state = RuntimeSessionState {
         session_id: "root".to_string(),
         ..RuntimeSessionState::default()
     };
-    let commit = RuntimeCommit::persisted_state(&state, &[]);
-    let commit_hash = commit.turn_commit_hash().expect("turn commit hash");
-    let commit =
-        commit.clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease, commit_hash));
     store
-        .commit_runtime_state(commit)
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[]).completing_queue_claim(claim.completion()),
+        )
         .await
-        .expect("final commit clears turn");
-
+        .expect("wake delivery completion commits");
     assert!(
         store
-            .embedded_durable_turn_store()
-            .expect("embedded durable turn")
-            .load_runtime_effect_outcome("root", "turn-1", &record.replay_key)
+            .list_queued_work("root")
             .await
-            .expect("load after clear")
-            .is_none(),
-        "a final commit under a live lease must clear the journal"
-    );
-    assert!(
-        store
-            .embedded_durable_turn_store()
-            .expect("embedded durable turn")
-            .load_runtime_turn_checkpoint("root", "turn-1")
-            .await
-            .expect("load checkpoint")
-            .is_none()
+            .expect("list after wake completion")
+            .is_empty(),
+        "completed wake delivery must be removed exactly once"
     );
 }
 
-async fn substrate_native_final_commit_is_idempotent_and_conflicts_on_changed_hash(
+async fn final_commit_stamp_is_idempotent_and_conflicts_on_changed_hash(
     store: Arc<dyn RuntimePersistence>,
 ) {
     let state = RuntimeSessionState {
@@ -2476,7 +2871,7 @@ async fn substrate_native_final_commit_is_idempotent_and_conflicts_on_changed_ha
     };
     let commit = RuntimeCommit::persisted_state(&state, &[]);
     let turn_commit_hash = commit.turn_commit_hash().expect("turn commit hash");
-    let commit = commit.clearing_completed_turn(RuntimeTurnCompletion::substrate_native(
+    let commit = commit.with_turn_commit(RuntimeTurnCommitStamp::new(
         "root",
         "provider-turn",
         turn_commit_hash.clone(),
@@ -2485,11 +2880,11 @@ async fn substrate_native_final_commit_is_idempotent_and_conflicts_on_changed_ha
     let first = store
         .commit_runtime_state(commit.clone())
         .await
-        .expect("substrate-native final commit does not require a Lash lease");
+        .expect("host-replayed final commit does not require a Lash lease");
     let retry = store
         .commit_runtime_state(commit)
         .await
-        .expect("same substrate-native final commit retries idempotently");
+        .expect("same host-replayed final commit retries idempotently");
     assert_eq!(retry.head_revision, first.head_revision);
     assert_eq!(retry.checkpoint_ref, first.checkpoint_ref);
 
@@ -2511,227 +2906,14 @@ async fn substrate_native_final_commit_is_idempotent_and_conflicts_on_changed_ha
     let changed = RuntimeCommit::persisted_state(&changed_state, &[]);
     let changed_hash = changed.turn_commit_hash().expect("changed commit hash");
     let err = store
-        .commit_runtime_state(changed.clearing_completed_turn(
-            RuntimeTurnCompletion::substrate_native("root", "provider-turn", changed_hash),
-        ))
+        .commit_runtime_state(changed.with_turn_commit(RuntimeTurnCommitStamp::new(
+            "root",
+            "provider-turn",
+            changed_hash,
+        )))
         .await
         .expect_err("same provider turn id with a different commit hash must conflict");
     assert!(matches!(err, StoreError::RuntimeTurnCommitConflict { .. }));
-}
-
-async fn active_lease_fences_competing_claims(store: Arc<dyn RuntimePersistence>) {
-    let turns = store
-        .embedded_durable_turn_store()
-        .expect("embedded durable turn");
-    turns
-        .claim_runtime_turn_lease("root", "turn-active", "owner-a", 60_000)
-        .await
-        .expect("lease");
-    let conflict = turns
-        .claim_runtime_turn_lease("root", "turn-active", "owner-b", 60_000)
-        .await;
-    assert!(
-        matches!(conflict, Err(StoreError::RuntimeTurnLeaseConflict { .. })),
-        "an active lease must fence a competing owner"
-    );
-}
-
-async fn superseded_lease_cannot_write_or_clear(store: Arc<dyn RuntimePersistence>) {
-    let turns = store
-        .embedded_durable_turn_store()
-        .expect("embedded durable turn");
-    let old = turns
-        .claim_runtime_turn_lease("root", "turn-superseded", "owner-a", 0)
-        .await
-        .expect("old lease");
-    let current = turns
-        .claim_runtime_turn_lease("root", "turn-superseded", "owner-b", 60_000)
-        .await
-        .expect("new lease");
-
-    let stale_save = turns
-        .save_runtime_effect_outcome(&old, effect_record("root", "turn-superseded", "stale"))
-        .await;
-    assert!(
-        matches!(stale_save, Err(StoreError::RuntimeTurnLeaseExpired { .. })),
-        "a superseded lease must not write"
-    );
-
-    turns
-        .abandon_runtime_turn_lease(&old)
-        .await
-        .expect("a stale abandon is ignored");
-    let conflict = turns
-        .claim_runtime_turn_lease("root", "turn-superseded", "owner-c", 60_000)
-        .await;
-    assert!(
-        matches!(conflict, Err(StoreError::RuntimeTurnLeaseConflict { .. })),
-        "a stale abandon must not release the live lease"
-    );
-    turns
-        .save_runtime_effect_outcome(
-            &current,
-            effect_record("root", "turn-superseded", "current"),
-        )
-        .await
-        .expect("the current owner can still write");
-}
-
-async fn renewed_lease_survives_original_expiry(store: Arc<dyn RuntimePersistence>) {
-    let turns = store
-        .embedded_durable_turn_store()
-        .expect("embedded durable turn");
-    let lease = turns
-        .claim_runtime_turn_lease("root", "turn-renew", "owner-a", 20)
-        .await
-        .expect("lease");
-    let renewed = turns
-        .renew_runtime_turn_lease(&lease, 60_000)
-        .await
-        .expect("renew lease");
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-
-    turns
-        .save_runtime_effect_outcome(&renewed, effect_record("root", "turn-renew", "renewed"))
-        .await
-        .expect("a renewed lease can write after the original TTL would have expired");
-}
-
-async fn abandon_releases_owner_and_preserves_journal(store: Arc<dyn RuntimePersistence>) {
-    let turns = store
-        .embedded_durable_turn_store()
-        .expect("embedded durable turn");
-    let lease = turns
-        .claim_runtime_turn_lease("root", "turn-abandon", "owner-a", 60_000)
-        .await
-        .expect("lease");
-    let record = effect_record("root", "turn-abandon", "effect-a");
-    turns
-        .save_runtime_effect_outcome(&lease, record.clone())
-        .await
-        .expect("save journal");
-
-    turns
-        .abandon_runtime_turn_lease(&lease)
-        .await
-        .expect("abandon lease");
-
-    assert!(
-        store
-            .embedded_durable_turn_store()
-            .expect("embedded durable turn")
-            .load_runtime_effect_outcome("root", "turn-abandon", &record.replay_key)
-            .await
-            .expect("load journal")
-            .is_some(),
-        "abandon must preserve the journal for a resuming owner"
-    );
-    turns
-        .claim_runtime_turn_lease("root", "turn-abandon", "owner-b", 60_000)
-        .await
-        .expect("a new owner can claim an abandoned turn");
-}
-
-async fn stale_final_commit_rejects_and_preserves_resume(store: Arc<dyn RuntimePersistence>) {
-    let turns = store
-        .embedded_durable_turn_store()
-        .expect("embedded durable turn");
-    let old = turns
-        .claim_runtime_turn_lease("root", "turn-stale", "owner-a", 20)
-        .await
-        .expect("old lease");
-    let record = effect_record("root", "turn-stale", "current");
-    turns
-        .save_runtime_effect_outcome(&old, record.clone())
-        .await
-        .expect("save journal");
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-    let current = turns
-        .claim_runtime_turn_lease("root", "turn-stale", "owner-b", 60_000)
-        .await
-        .expect("new lease");
-
-    let state = RuntimeSessionState {
-        session_id: "root".to_string(),
-        ..RuntimeSessionState::default()
-    };
-    let commit = RuntimeCommit::persisted_state(&state, &[]);
-    let commit_hash = commit.turn_commit_hash().expect("turn commit hash");
-    let err = store
-        .commit_runtime_state(
-            commit.clearing_completed_turn(RuntimeTurnCompletion::from_lease(&old, commit_hash)),
-        )
-        .await
-        .expect_err("a stale final commit must fail");
-    assert!(matches!(err, StoreError::RuntimeTurnLeaseExpired { .. }));
-    assert!(
-        store
-            .embedded_durable_turn_store()
-            .expect("embedded durable turn")
-            .load_runtime_effect_outcome("root", "turn-stale", &record.replay_key)
-            .await
-            .expect("load journal")
-            .is_some(),
-        "a rejected final commit must preserve the journal"
-    );
-    assert!(
-        store
-            .load_session(SessionReadScope::FullGraph)
-            .await
-            .expect("load session")
-            .is_none(),
-        "a rejected commit must not persist session state"
-    );
-    turns
-        .save_runtime_effect_outcome(&current, effect_record("root", "turn-stale", "after"))
-        .await
-        .expect("the current owner can still write");
-}
-
-async fn expired_final_commit_rejects_and_preserves_resume(store: Arc<dyn RuntimePersistence>) {
-    let turns = store
-        .embedded_durable_turn_store()
-        .expect("embedded durable turn");
-    let lease = turns
-        .claim_runtime_turn_lease("root", "turn-expired", "owner-a", 20)
-        .await
-        .expect("lease");
-    let record = effect_record("root", "turn-expired", "effect");
-    turns
-        .save_runtime_effect_outcome(&lease, record.clone())
-        .await
-        .expect("save journal");
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-
-    let state = RuntimeSessionState {
-        session_id: "root".to_string(),
-        ..RuntimeSessionState::default()
-    };
-    let commit = RuntimeCommit::persisted_state(&state, &[]);
-    let commit_hash = commit.turn_commit_hash().expect("turn commit hash");
-    let err = store
-        .commit_runtime_state(
-            commit.clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease, commit_hash)),
-        )
-        .await
-        .expect_err("an expired final commit must fail");
-    assert!(matches!(err, StoreError::RuntimeTurnLeaseExpired { .. }));
-    assert!(
-        store
-            .embedded_durable_turn_store()
-            .expect("embedded durable turn")
-            .load_runtime_effect_outcome("root", "turn-expired", &record.replay_key)
-            .await
-            .expect("load journal")
-            .is_some()
-    );
-    assert!(
-        store
-            .load_session(SessionReadScope::FullGraph)
-            .await
-            .expect("load session")
-            .is_none()
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2960,6 +3142,46 @@ mod tests {
                     as Arc<dyn LashlangArtifactStore>
             },
             DurabilityTier::Inline,
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_effect_host_satisfies_conformance() {
+        effect_host(|| Arc::new(crate::InlineEffectHost::default())).await;
+    }
+
+    #[tokio::test]
+    async fn recording_effect_host_records_selected_scope_and_envelope() {
+        let host = RecordingEffectHost::default();
+        let scope = EffectScope::host_event("session-1", "button-1");
+        let scoped = host.scoped(scope.clone()).expect("scoped controller");
+        let envelope = RuntimeEffectEnvelope::new(
+            crate::RuntimeInvocation::effect(
+                RuntimeScope::new("session-1"),
+                "sleep-effect",
+                RuntimeEffectKind::Sleep,
+                "button-1:sleep-effect",
+            ),
+            RuntimeEffectCommand::Sleep { duration_ms: 0 },
+        );
+
+        let outcome = scoped
+            .controller()
+            .execute_effect(envelope, RuntimeEffectLocalExecutor::unavailable())
+            .await
+            .expect("execute sleep");
+
+        assert!(matches!(outcome, RuntimeEffectOutcome::Sleep));
+        assert_eq!(host.selected_scopes(), vec![scope.clone()]);
+        let records = host.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].effect_scope, scope);
+        assert_eq!(records[0].runtime_scope, RuntimeScope::new("session-1"));
+        assert_eq!(records[0].effect_id, "sleep-effect");
+        assert_eq!(records[0].effect_kind, RuntimeEffectKind::Sleep);
+        assert_eq!(
+            records[0].replay_key.as_deref(),
+            Some("button-1:sleep-effect")
         );
     }
 

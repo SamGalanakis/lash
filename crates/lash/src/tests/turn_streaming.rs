@@ -1,6 +1,55 @@
 use super::*;
 use std::future::Future;
 
+#[derive(Clone, Debug)]
+struct DurableEffectInvocation {
+    kind: lash_core::RuntimeEffectKind,
+    turn_id: Option<String>,
+    replay_key: Option<String>,
+}
+
+#[derive(Default)]
+struct RecordingDurableEffectController {
+    invocations: StdMutex<Vec<DurableEffectInvocation>>,
+}
+
+impl RecordingDurableEffectController {
+    fn invocations(&self) -> Vec<DurableEffectInvocation> {
+        self.invocations
+            .lock()
+            .expect("durable effect invocations")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl lash_core::RuntimeEffectController for RecordingDurableEffectController {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
+    fn requires_durable_attachment_store(&self) -> bool {
+        true
+    }
+
+    async fn execute_effect(
+        &self,
+        envelope: lash_core::RuntimeEffectEnvelope,
+        local_executor: lash_core::RuntimeEffectLocalExecutor<'_>,
+    ) -> std::result::Result<lash_core::RuntimeEffectOutcome, lash_core::RuntimeEffectControllerError>
+    {
+        self.invocations
+            .lock()
+            .expect("durable effect invocations")
+            .push(DurableEffectInvocation {
+                kind: envelope.invocation.effect_kind().expect("effect kind"),
+                turn_id: envelope.invocation.scope.turn_id.clone(),
+                replay_key: envelope.invocation.replay_key().map(ToOwned::to_owned),
+            });
+        local_executor.execute(envelope).await
+    }
+}
+
 fn run_async_test_on_large_stack<F, Fut>(name: &str, test: F) -> Result<()>
 where
     F: FnOnce() -> Fut + Send + 'static,
@@ -606,6 +655,100 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
         unreachable!();
     };
     assert_eq!(value, &serde_json::json!("done"));
+    Ok(())
+}
+
+#[test]
+fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commits() -> Result<()> {
+    run_async_test_on_large_stack("durable-agent-frame-follow-through-test", || {
+        durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commits_inner()
+    })
+}
+
+async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commits_inner()
+-> Result<()> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session_id = "agent-frame-durable";
+    let root_turn_id = "agent-frame-root-turn";
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        dir.path().join("sessions"),
+    ));
+    let artifact_store = Arc::new(
+        lash_sqlite_store::Store::open(&dir.path().join("artifacts.db"))
+            .expect("open artifact store"),
+    );
+    let process_registry = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
+            .expect("open process registry"),
+    );
+    let controller = Arc::new(RecordingDurableEffectController::default());
+    let scoped_effect_controller = ScopedEffectController::borrowed(
+        controller.as_ref(),
+        lash_core::EffectScope::turn(session_id, root_turn_id),
+    )
+    .expect("scoped durable effect controller");
+    let core = LashCore::standard()
+        .provider(agent_frame_switch_provider())
+        .model(mock_model_spec())
+        .tools(Arc::new(AgentFrameSwitchTools))
+        .store_factory(store_factory.clone())
+        .attachment_store(Arc::new(crate::persistence::FileAttachmentStore::new(
+            dir.path().join("attachments"),
+        )))
+        .lashlang_artifact_store(artifact_store)
+        .process_registry(process_registry)
+        .build()?;
+    let session = core.session(session_id).open().await?;
+    let mut input = TurnInput::text("switch frames");
+    input.trace_turn_id = Some(root_turn_id.to_string());
+
+    let output = session
+        .turn(input)
+        .run_with_effect_scope(scoped_effect_controller)
+        .await?;
+
+    assert_eq!(output.assistant_message(), Some("done after frame switch"));
+    let follow_turn_id = format!("{root_turn_id}:agent-frame:1");
+    let mut llm_turn_ids = controller
+        .invocations()
+        .into_iter()
+        .filter(|record| record.kind == lash_core::RuntimeEffectKind::LlmCall)
+        .map(|record| record.turn_id.expect("turn-scoped LLM effect"))
+        .collect::<Vec<_>>();
+    llm_turn_ids.sort();
+    llm_turn_ids.dedup();
+    assert_eq!(
+        llm_turn_ids,
+        vec![root_turn_id.to_string(), follow_turn_id.clone()]
+    );
+    let replay_keys = controller
+        .invocations()
+        .into_iter()
+        .filter_map(|record| record.replay_key)
+        .collect::<Vec<_>>();
+    assert!(
+        replay_keys.iter().any(|key| key.contains(root_turn_id)),
+        "root turn replay keys should include {root_turn_id}: {replay_keys:?}"
+    );
+    assert!(
+        replay_keys.iter().any(|key| key.contains(&follow_turn_id)),
+        "follow turn replay keys should include {follow_turn_id}: {replay_keys:?}"
+    );
+
+    let conn = rusqlite::Connection::open(store_factory.path_for_session(session_id))
+        .expect("open session sqlite store");
+    let mut stmt = conn
+        .prepare("SELECT turn_id FROM runtime_turn_commits ORDER BY turn_id ASC")
+        .expect("prepare turn commit query");
+    let turn_commit_ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query turn commits")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("collect turn commits");
+    assert_eq!(
+        turn_commit_ids,
+        vec![root_turn_id.to_string(), follow_turn_id]
+    );
     Ok(())
 }
 

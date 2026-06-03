@@ -58,7 +58,6 @@ pub(in crate::runtime) struct CurrentSessionCapability {
     pub(in crate::runtime) host: RuntimeHost,
     plugins: Arc<crate::PluginSession>,
     store: Option<Arc<dyn crate::store::RuntimePersistence>>,
-    turn_lease: Option<crate::RuntimeTurnLease>,
 }
 
 #[derive(Clone)]
@@ -156,7 +155,6 @@ impl CurrentSessionCapability {
         runtime: &LashRuntime,
         plugins: Arc<crate::PluginSession>,
         persist_usage_to_store: bool,
-        turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Self {
         Self {
             session_id: runtime.state.session_id.clone(),
@@ -174,7 +172,6 @@ impl CurrentSessionCapability {
             host: runtime.host.clone(),
             plugins,
             store: runtime.services.store.clone(),
-            turn_lease,
         }
     }
 
@@ -259,16 +256,14 @@ impl RuntimeSessionServices {
         self: &Arc<Self>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         turn_id: Option<String>,
-        turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> DirectCompletionClient<'run> {
-        DirectCompletionClient::runtime(Arc::clone(self), effect_controller, turn_id, turn_lease)
+        DirectCompletionClient::runtime(Arc::clone(self), effect_controller, turn_id)
     }
 
     pub(super) fn new(
         runtime: &LashRuntime,
         persist_usage_to_store: bool,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
-        turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Result<Self, PluginActionInvokeError> {
         let Some(session) = runtime.session.as_ref() else {
             return Err(PluginActionInvokeError::Unknown(
@@ -280,7 +275,6 @@ impl RuntimeSessionServices {
                 runtime,
                 Arc::clone(session.plugins()),
                 persist_usage_to_store,
-                turn_lease,
             ),
             managed: ManagedSessionCapability::new(runtime),
             processes: ProcessCapability::new(runtime),

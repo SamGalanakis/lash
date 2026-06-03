@@ -5,7 +5,7 @@ use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
 use super::process::ProcessRegistry;
 use super::{
-    InlineRuntimeEffectController, ProcessWorkPoke, RuntimeEffectController, SessionStoreFactory,
+    EffectHost, InlineEffectHost, ProcessWorkPoke, QueuedWorkPoke, SessionStoreFactory,
     TerminationPolicy,
 };
 
@@ -44,7 +44,7 @@ pub struct RuntimePromptConfig {
 
 #[derive(Clone)]
 pub struct RuntimeControlConfig {
-    pub effect_controller: Arc<dyn RuntimeEffectController>,
+    pub effect_host: Arc<dyn EffectHost>,
     pub process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
     pub termination: TerminationPolicy,
 }
@@ -61,13 +61,13 @@ impl RuntimeHostConfig {
     /// Construct a config with the three host-owned dependencies named
     /// explicitly.
     ///
-    /// There is intentionally no `Default`. The effect controller, Lashlang
+    /// There is intentionally no `Default`. The effect host, Lashlang
     /// artifact store, and attachment store decide a runtime's durability, so
     /// hosts must choose them rather than silently inheriting in-memory
     /// implementations. Use [`RuntimeHostConfig::in_memory`] to opt into the
     /// in-process / in-memory versions by name.
     pub fn new(
-        effect_controller: Arc<dyn RuntimeEffectController>,
+        effect_host: Arc<dyn EffectHost>,
         lashlang_artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
         attachment_store: Arc<dyn crate::AttachmentStore>,
     ) -> Self {
@@ -88,7 +88,7 @@ impl RuntimeHostConfig {
             },
             control: RuntimeControlConfig {
                 termination: TerminationPolicy::default(),
-                effect_controller,
+                effect_host,
                 process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
             },
             tracing: RuntimeTracingConfig {
@@ -101,14 +101,14 @@ impl RuntimeHostConfig {
     }
 
     /// Explicit in-process / in-memory configuration: an
-    /// [`InlineRuntimeEffectController`], the process-global in-memory Lashlang
+    /// [`InlineEffectHost`], the process-global in-memory Lashlang
     /// artifact store, and an in-memory attachment store.
     ///
     /// Convenient for tests and local experiments; not durable. Named so the
     /// choice is never silent.
     pub fn in_memory() -> Self {
         Self::new(
-            Arc::new(InlineRuntimeEffectController),
+            Arc::new(InlineEffectHost::default()),
             lashlang::global_in_memory_lashlang_artifact_store(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
         )
@@ -172,6 +172,9 @@ pub(crate) struct RuntimeHost {
     /// successful process start is consumed promptly. Absent when no work runner
     /// is wired (e.g. a registry-less host); poking is then a no-op.
     pub process_work_poke: Option<ProcessWorkPoke>,
+    /// Wakes the host's [`QueuedWorkRunner`](super::QueuedWorkRunner) so queued
+    /// turn work drains promptly after queue ingress.
+    pub queued_work_poke: Option<QueuedWorkPoke>,
 }
 
 impl RuntimeHost {
@@ -217,6 +220,7 @@ impl From<EmbeddedRuntimeHost> for RuntimeHost {
             session_store_factory: value.session_store_factory,
             process_registry: None,
             process_work_poke: None,
+            queued_work_poke: None,
         }
     }
 }
@@ -228,6 +232,7 @@ impl From<ProcessRuntimeHost> for RuntimeHost {
             session_store_factory: value.embedded.session_store_factory,
             process_registry: Some(value.process_registry),
             process_work_poke: None,
+            queued_work_poke: None,
         }
     }
 }

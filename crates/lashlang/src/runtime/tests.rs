@@ -909,6 +909,47 @@ async fn compiler_keeps_assignment_hot_paths_specialized() {
     );
 }
 
+#[test]
+fn label_on_await_assignment_attaches_to_await_instruction() {
+    let program = crate::parse(
+        r#"
+        @label(title: "Wait for child")
+        result = await handle
+        submit result
+        "#,
+    )
+    .expect("program should parse");
+    let surface = runtime_test_surface().with_language_features(
+        crate::LashlangLanguageFeatures::default().with_label_annotations(),
+    );
+    let linked = crate::LinkedModule::link(program, surface).expect("program should link");
+    let compiled = crate::compile_linked(&linked);
+    let await_instruction = compiled
+        .chunk
+        .code
+        .iter()
+        .position(|instruction| matches!(instruction, Instruction::AwaitHandle))
+        .expect("await handle instruction");
+
+    assert!(
+        compiled
+            .chunk
+            .lashlang_execution_sites
+            .get(await_instruction)
+            .and_then(Option::as_ref)
+            .is_some(),
+        "label should attach to the awaited effect instruction"
+    );
+    assert!(
+        !compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::ObserveStep)),
+        "label on awaited assignment should not emit a standalone observe step"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn generic_iterator_loops_cover_range_list_keys_nested_control_and_mutation() {
     let source = r#"

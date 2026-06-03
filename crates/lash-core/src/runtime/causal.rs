@@ -13,7 +13,6 @@ pub(crate) fn turn_effect_invocation(
     protocol_iteration: usize,
     effect_id: EffectId,
     effect_kind: RuntimeEffectKind,
-    checkpoint_hash: Option<String>,
 ) -> RuntimeInvocation {
     RuntimeInvocation::effect(
         RuntimeScope::for_turn(session_id, turn_id, turn_index, protocol_iteration),
@@ -27,7 +26,6 @@ pub(crate) fn turn_effect_invocation(
             effect_kind,
             effect_id,
         ),
-        checkpoint_hash,
     )
 }
 
@@ -66,7 +64,6 @@ pub(crate) fn child_effect_invocation(
         replay: Some(RuntimeReplay {
             key: format!("{replay_base}:{}", replay_suffix.as_ref()),
         }),
-        checkpoint_hash: parent.checkpoint_hash.clone(),
     }
 }
 
@@ -118,7 +115,6 @@ pub(crate) fn lashlang_sleep_invocation(
         suffix.clone(),
         RuntimeEffectKind::Sleep,
         suffix,
-        None,
     )
 }
 
@@ -149,7 +145,6 @@ pub(crate) fn process_effect_invocation(
             replay: Some(RuntimeReplay {
                 key: format!("{replay_base}:{effect_id}"),
             }),
-            checkpoint_hash: parent.checkpoint_hash,
         };
     }
     RuntimeInvocation::effect(
@@ -157,7 +152,6 @@ pub(crate) fn process_effect_invocation(
         effect_id.to_string(),
         RuntimeEffectKind::Process,
         format!("{session_id}:{effect_id}"),
-        None,
     )
 }
 
@@ -179,7 +173,6 @@ pub fn process_event_invocation(
             process_id: process_id.to_string(),
         }),
         replay,
-        checkpoint_hash: None,
     }
 }
 
@@ -194,7 +187,6 @@ pub(crate) fn session_node_invocation(
         },
         caused_by: None,
         replay: None,
-        checkpoint_hash: None,
     }
 }
 
@@ -221,7 +213,6 @@ pub(crate) fn direct_effect_invocation(
         replay_discriminator,
         RuntimeEffectKind::Direct,
         replay_key,
-        None,
     )
     .with_caused_by(caused_by)
 }

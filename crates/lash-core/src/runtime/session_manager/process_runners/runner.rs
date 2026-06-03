@@ -8,19 +8,21 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
         registration: crate::ProcessRegistration,
         execution_context: crate::ProcessExecutionContext,
         registry: Arc<dyn crate::ProcessRegistry>,
+        scoped_effect_controller: crate::ScopedEffectController<'_>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
         let input = Arc::clone(&registration.input);
         match input.as_ref() {
             crate::ProcessInput::ToolCall { call } => {
-                self.run_process_tool_call(
+                self.run_process_tool_call(ProcessToolCallRun {
                     registration,
-                    Arc::clone(&registry),
-                    call.clone(),
-                    execution_context.causal_invocation,
-                    execution_context.wake_target_scope,
+                    registry: Arc::clone(&registry),
+                    call: call.clone(),
+                    parent_invocation: execution_context.causal_invocation,
+                    wake_target_scope: execution_context.wake_target_scope,
+                    scoped_effect_controller,
                     cancellation,
-                )
+                })
                 .await
             }
             crate::ProcessInput::SessionTurn {
@@ -53,6 +55,7 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionServices {
                     process_name.clone(),
                     args.clone(),
                     execution_context,
+                    scoped_effect_controller,
                     cancellation,
                 )
                 .await

@@ -54,7 +54,6 @@ fn queued_work_payload_type(payload: &crate::QueuedWorkPayload) -> &'static str 
         crate::QueuedWorkPayload::ProcessWake { .. } => "process_wake",
         crate::QueuedWorkPayload::HostEvent { .. } => "host_event",
         crate::QueuedWorkPayload::Timer { .. } => "timer",
-        crate::QueuedWorkPayload::Resume { .. } => "resume",
     }
 }
 
@@ -64,6 +63,21 @@ fn queued_work_batch_ids(claim: &crate::QueuedWorkClaim) -> Vec<String> {
         .iter()
         .map(|batch| batch.batch_id.clone())
         .collect()
+}
+
+fn scoped_runtime_operation_handle(
+    effect_host: &Arc<dyn EffectHost>,
+    operation_id: impl Into<String>,
+) -> Result<RuntimeEffectControllerHandle<'static>, RuntimeError> {
+    let scoped = effect_host
+        .scoped_static(EffectScope::runtime_operation(operation_id))?
+        .ok_or_else(|| {
+            RuntimeError::new(
+                "effect_host_static_scope_unavailable",
+                "this plugin lifecycle hook requires an effect host that can provide a static scoped controller",
+            )
+        })?;
+    Ok(RuntimeEffectControllerHandle::borrowed(scoped))
 }
 
 pub(in crate::runtime) fn queued_work_trace_payload(
@@ -133,25 +147,14 @@ pub(in crate::runtime) async fn send_queued_work_started_event(
     .await;
 }
 
-async fn abandon_turn_best_effort(
-    backend: &dyn DurableTurnProvider,
-    run: DurableTurnRun,
-    context: &str,
-) {
-    backend.abandon_turn(run, context).await;
-}
-
-struct LeasedTurnFinish<'a> {
+struct TurnFinishInput {
     turn_pipeline: TurnBoundary,
     assembler: TurnAssembler,
     new_messages: crate::MessageSequence,
     policy: RuntimeSessionPolicy,
     turn_index: usize,
-    durable_turn: &'a dyn DurableTurnProvider,
-    durable_turn_run: DurableTurnRun,
     queued_work_completions: Vec<crate::QueuedWorkCompletion>,
     trace_turn_id: String,
-    abandon_context: &'static str,
 }
 
 impl LashRuntime {
@@ -175,23 +178,20 @@ impl LashRuntime {
         }
     }
 
-    async fn finish_leased_turn(
+    async fn finish_turn(
         &mut self,
-        finish: LeasedTurnFinish<'_>,
+        finish: TurnFinishInput,
         events: &dyn EventSink,
         cancel_state: &CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
-        let LeasedTurnFinish {
+        let TurnFinishInput {
             mut turn_pipeline,
             assembler,
             new_messages,
             policy,
             turn_index,
-            durable_turn,
-            durable_turn_run,
             queued_work_completions,
             trace_turn_id,
-            abandon_context,
         } = finish;
         self.policy = self.state.effective_policy().clone();
         turn_pipeline.state_mut().policy = self.policy.clone();
@@ -241,11 +241,10 @@ impl LashRuntime {
         let manager = match self.runtime_session_services_for_turn(None) {
             Ok(manager) => manager,
             Err(err) => {
-                let runtime_err =
-                    RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string());
-                let context = format!("{abandon_context}_finalize_manager");
-                abandon_turn_best_effort(durable_turn, durable_turn_run, &context).await;
-                return Err(runtime_err);
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::PluginSessionManager,
+                    err.to_string(),
+                ));
             }
         };
 
@@ -263,11 +262,10 @@ impl LashRuntime {
             Ok(finalized) => finalized,
             Err(err) => {
                 self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
-                let runtime_err =
-                    RuntimeError::new(RuntimeErrorCode::PluginFinalizeTurn, err.to_string());
-                let context = format!("{abandon_context}_finalize_turn");
-                abandon_turn_best_effort(durable_turn, durable_turn_run, &context).await;
-                return Err(runtime_err);
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::PluginFinalizeTurn,
+                    err.to_string(),
+                ));
             }
         };
         self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
@@ -281,7 +279,7 @@ impl LashRuntime {
                 &mut returned_turn,
                 self.session.as_mut(),
                 &turn_usage_delta,
-                Some((durable_turn, durable_turn_run)),
+                Some(&trace_turn_id),
                 queued_work_completions,
             )
             .await
@@ -372,13 +370,13 @@ impl LashRuntime {
         let Ok(manager) = self.runtime_session_services() else {
             return;
         };
-        let direct_completions = manager.direct_completion_client(
-            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
-                &self.host.core.control.effect_controller,
-            )),
-            None,
-            None,
-        );
+        let Ok(effect_controller) = scoped_runtime_operation_handle(
+            &self.host.core.control.effect_host,
+            format!("turn-persisted:{}", returned_turn.state.turn_index),
+        ) else {
+            return;
+        };
+        let direct_completions = manager.direct_completion_client(effect_controller, None);
 
         session
             .plugins()
@@ -408,14 +406,16 @@ impl LashRuntime {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let cancel = opts.cancel.clone();
-        let effect_controller = Arc::clone(&self.host.core.control.effect_controller);
-        let durable_turn_scope =
-            opts.resolve_durable_turn_scope(effect_controller.as_ref(), &turn_id)?;
-        self.stream_turn_with_durable_turn_scope_inner(
+        let effect_host = Arc::clone(&self.host.core.control.effect_host);
+        let scoped_effect_controller = match opts.scoped_effect_controller() {
+            Some(scope) => scope,
+            None => effect_host.scoped(EffectScope::turn(&self.state.session_id, &turn_id))?,
+        };
+        self.stream_turn_with_scoped_effect_controller_inner(
             input,
             opts.events_or_noop(),
             opts.turn_events_or_noop(),
-            durable_turn_scope,
+            scoped_effect_controller,
             cancel,
             None,
         )
@@ -453,7 +453,7 @@ impl LashRuntime {
             .input
             .trace_turn_id
             .clone()
-            .or_else(|| opts.durable_turn_scope_id().map(ToOwned::to_owned))
+            .or_else(|| opts.effect_scope_id().map(ToOwned::to_owned))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         work.input.trace_turn_id = Some(turn_id.clone());
         let causes = work.turn_causes.clone();
@@ -481,14 +481,19 @@ impl LashRuntime {
             },
         );
         let cancel = opts.cancel.clone();
-        let effect_controller = Arc::clone(&self.host.core.control.effect_controller);
-        let durable_turn_scope =
-            opts.resolve_durable_turn_scope(effect_controller.as_ref(), &turn_id)?;
-        self.stream_turn_with_durable_turn_scope_inner(
+        let effect_host = Arc::clone(&self.host.core.control.effect_host);
+        let scoped_effect_controller = match opts.scoped_effect_controller() {
+            Some(scope) => scope,
+            None => effect_host.scoped(EffectScope::queue_drain(
+                &self.state.session_id,
+                &claim.claim_id,
+            ))?,
+        };
+        self.stream_turn_with_scoped_effect_controller_inner(
             work.input,
             opts.events_or_noop(),
             opts.turn_events_or_noop(),
-            durable_turn_scope,
+            scoped_effect_controller,
             cancel,
             Some(claim),
         )
@@ -497,17 +502,18 @@ impl LashRuntime {
     }
 
     /// Enforce the durable-first wiring invariant at a turn-scope boundary: when
-    /// the host wired a durable effect controller, every store reachable from
-    /// this scope must also be durable. A durable controller running against any
-    /// ephemeral store fails loudly here rather than silently degrading.
+    /// the host wired a durable effect host, every store reachable from this
+    /// scope must also be durable. A durable host running against any ephemeral
+    /// store fails loudly here rather than silently degrading.
     ///
     /// Inline controllers (the default tier) impose no requirement, so
     /// inline/in-memory hosts pass unchanged.
-    fn ensure_durable_substrate_for_scope(
+    fn ensure_durable_store_facets_for_scope(
         &self,
-        durable_turn_scope: &DurableTurnScope<'_>,
+        scoped_effect_controller: &ScopedEffectController<'_>,
     ) -> Result<(), RuntimeError> {
-        if durable_turn_scope.controller().durability_tier() != crate::DurabilityTier::Durable {
+        if scoped_effect_controller.controller().durability_tier() != crate::DurabilityTier::Durable
+        {
             return Ok(());
         }
         if self
@@ -519,8 +525,8 @@ impl LashRuntime {
             .durability_tier()
             != crate::DurabilityTier::Durable
         {
-            return Err(RuntimeError::durable_substrate_required(
-                crate::DurableSubstrateFacet::AttachmentStore,
+            return Err(RuntimeError::durable_store_required(
+                crate::DurableStoreFacet::AttachmentStore,
             ));
         }
         if self
@@ -531,8 +537,8 @@ impl LashRuntime {
             .durability_tier()
             != crate::DurabilityTier::Durable
         {
-            return Err(RuntimeError::durable_substrate_required(
-                crate::DurableSubstrateFacet::ArtifactStore,
+            return Err(RuntimeError::durable_store_required(
+                crate::DurableStoreFacet::ArtifactStore,
             ));
         }
         if let Some(store) = self
@@ -541,253 +547,52 @@ impl LashRuntime {
             .and_then(|session| session.history_store())
             && store.durability_tier() != crate::DurabilityTier::Durable
         {
-            return Err(RuntimeError::durable_substrate_required(
-                crate::DurableSubstrateFacet::SessionStore,
+            return Err(RuntimeError::durable_store_required(
+                crate::DurableStoreFacet::SessionStore,
+            ));
+        }
+        if let Some(process_registry) = self.host.process_registry.as_ref()
+            && process_registry.durability_tier() != crate::DurabilityTier::Durable
+        {
+            return Err(RuntimeError::durable_store_required(
+                crate::DurableStoreFacet::ProcessRegistry,
             ));
         }
         Ok(())
     }
 
-    /// Resume an in-flight (durably checkpointed) turn.
-    pub async fn resume_turn(
-        &mut self,
-        turn_id: &str,
-        opts: TurnOptions<'_>,
-    ) -> Result<AssembledTurn, RuntimeError> {
-        let cancel = opts.cancel.clone();
-        let effect_controller = Arc::clone(&self.host.core.control.effect_controller);
-        let durable_turn_scope =
-            opts.resolve_durable_turn_scope(effect_controller.as_ref(), turn_id)?;
-        self.resume_turn_inner(
-            turn_id,
-            opts.events_or_noop(),
-            opts.turn_events_or_noop(),
-            durable_turn_scope,
-            cancel,
-        )
-        .await
-    }
-
-    async fn resume_turn_inner(
-        &mut self,
-        turn_id: &str,
-        events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        durable_turn_scope: DurableTurnScope<'_>,
-        cancel: CancellationToken,
-    ) -> Result<AssembledTurn, RuntimeError> {
-        if turn_id != durable_turn_scope.turn_id() {
-            return Err(RuntimeError::new(
-                RuntimeErrorCode::DurableTurnScopeTurnIdMismatch,
-                format!(
-                    "resume turn_id `{turn_id}` does not match durable turn scope turn_id `{}`",
-                    durable_turn_scope.turn_id()
-                ),
-            ));
-        }
-        self.ensure_durable_substrate_for_scope(&durable_turn_scope)?;
-        self.refresh_session_graph_from_store()
-            .await
-            .map_err(session_head_refresh_error)?;
-        let store = self
-            .session
-            .as_ref()
-            .and_then(|session| session.history_store())
-            .ok_or_else(|| {
-                RuntimeError::new(
-                    RuntimeErrorCode::RuntimeTurnResumeStoreRequired,
-                    "resuming a turn requires a persistent runtime store",
-                )
-            })?;
-        let embedded_durable_turn_store;
-        let substrate_native_durable_turn;
-        let durable_turn: &dyn DurableTurnProvider = if durable_turn_scope
-            .controller()
-            .durability_tier()
-            == crate::DurabilityTier::Durable
-        {
-            substrate_native_durable_turn =
-                SubstrateDurableTurnProvider::new(durable_turn_scope.controller());
-            &substrate_native_durable_turn
-        } else {
-            embedded_durable_turn_store =
-                EmbeddedDurableTurnProvider::new(durable_turn_scope.controller());
-            &embedded_durable_turn_store
-        };
-        let mut durable_turn_run = durable_turn
-            .resume_turn(ResumeDurableTurnRequest {
-                session_id: self.state.session_id.clone(),
-                turn_id: turn_id.to_string(),
-                owner_id: self.runtime_scope_id.to_string(),
-                expected_provider_id: self.policy.recorded_provider_id().to_string(),
-                store: store.clone(),
-            })
-            .await?;
-        let checkpoint_record = durable_turn_run.take_checkpoint().ok_or_else(|| {
-            RuntimeError::new(
-                RuntimeErrorCode::RuntimeTurnCheckpointMissing,
-                format!("no in-flight runtime turn checkpoint found for `{turn_id}`"),
-            )
-        })?;
-        let turn_lease = durable_turn_run.lease().cloned();
-        let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
-        let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
-        let manager = self
-            .runtime_session_services_for_turn_with_lease(
-                Some(child_usage_event_relay.clone()),
-                turn_lease.clone(),
-            )
-            .map_err(|err| {
-                RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
-            })?;
-        let mut turn_policy = self.state.effective_policy().clone();
-        turn_policy.model = checkpoint_record.model.clone();
-        turn_policy.max_turns = checkpoint_record.machine_config.max_turns;
-        let resolved_turn_policy = self
-            .host
-            .resolve_session_policy(&self.state.session_id, turn_policy)
-            .map_err(|err| RuntimeError::new("llm_provider", err.to_string()))?;
-        self.protocol_turn_options = checkpoint_record.protocol_turn_options.clone();
-        let resume_turn_index = checkpoint_record.turn_index;
-        let resume_protocol_iteration = checkpoint_record.protocol_iteration;
-
-        let cancel_state = cancel.clone();
-        let session = self
-            .session
-            .take()
-            .expect("lash runtime session must be available");
-        let mut driver = RuntimeTurnDriver {
-            session,
-            policy: resolved_turn_policy,
-            host: self.host.clone(),
-            durable_turn_scope,
-            durable_turn,
-            durable_turn_run,
-            session_id: self.state.session_id.clone(),
-            turn_id: turn_id.to_string(),
-            turn_index: checkpoint_record.turn_index,
-            turn_pipeline: TurnBoundary::from_state(self.state.clone()),
-            llm_stream_summaries: HashMap::new(),
-            next_llm_ordinal: 0,
-            session_services: manager,
-            protocol_turn_options: checkpoint_record.protocol_turn_options.clone(),
-            protocol_extension: None,
-            turn_context: {
-                let mut context = crate::TurnContext::default();
-                context.set_prompt_layer(checkpoint_record.turn_prompt_layer.clone());
-                context
-            },
-            turn_causes: Vec::new(),
-            pending_queue_claims: Vec::new(),
-            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            turn_lease: turn_lease.clone(),
-            machine_config_snapshot: Some(checkpoint_record.machine_config.clone()),
-            turn_phase_probe: self.turn_phase_probe.clone(),
-        };
-        let restored_machine = match driver.restore_turn_machine(checkpoint_record) {
-            Ok(machine) => machine,
-            Err(err) => {
-                let RuntimeTurnDriver {
-                    session,
-                    durable_turn_run,
-                    ..
-                } = driver;
-                self.session = Some(session);
-                abandon_turn_best_effort(durable_turn, durable_turn_run, "restore_turn_machine")
-                    .await;
-                return Err(err);
-            }
-        };
-        let mut assembler = TurnAssembler::new();
-        self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
-        let run_result = drive_turn_to_completion(
-            driver.run_restored(
-                restored_machine,
-                event_tx,
-                cancel,
-                resume_protocol_iteration,
-            ),
-            &mut event_rx,
-            &mut assembler,
-            &child_usage_event_relay,
-            events,
-            turn_events,
-        )
-        .await;
-        let (new_messages, _new_protocol_iteration) = match run_result {
-            Ok(result) => result,
-            Err(err) => {
-                self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
-                let RuntimeTurnDriver {
-                    session,
-                    durable_turn_run,
-                    ..
-                } = driver;
-                self.session = Some(session);
-                abandon_turn_best_effort(durable_turn, durable_turn_run, "resume_effect_loop")
-                    .await;
-                return Err(err);
-            }
-        };
-        self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
-        let RuntimeTurnDriver {
-            session,
-            policy,
-            turn_pipeline,
-            durable_turn_run,
-            pending_queue_claims,
-            ..
-        } = driver;
-        self.session = Some(session);
-        self.finish_leased_turn(
-            LeasedTurnFinish {
-                turn_pipeline,
-                assembler,
-                new_messages,
-                policy,
-                turn_index: resume_turn_index,
-                durable_turn,
-                durable_turn_run,
-                queued_work_completions: pending_queue_claims
-                    .iter()
-                    .map(crate::QueuedWorkClaim::completion)
-                    .collect(),
-                trace_turn_id: turn_id.to_string(),
-                abandon_context: "resume",
-            },
-            events,
-            &cancel_state,
-        )
-        .await
-    }
-
-    async fn stream_turn_with_durable_turn_scope_inner(
+    async fn stream_turn_with_scoped_effect_controller_inner(
         &mut self,
         mut input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
-        durable_turn_scope: DurableTurnScope<'_>,
+        scoped_effect_controller: ScopedEffectController<'_>,
         cancel: CancellationToken,
         queued_claim: Option<crate::QueuedWorkClaim>,
     ) -> Result<AssembledTurn, RuntimeError> {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
-            && input_turn_id != durable_turn_scope.turn_id()
+            && scoped_effect_controller
+                .effect_scope()
+                .validates_turn_trace_id()
+            && input_turn_id != scoped_effect_controller.scope_id()
         {
             return Err(RuntimeError::new(
-                RuntimeErrorCode::DurableTurnScopeTurnIdMismatch,
+                RuntimeErrorCode::EffectScopeTurnIdMismatch,
                 format!(
-                    "input trace_turn_id `{input_turn_id}` does not match durable turn scope turn_id `{}`",
-                    durable_turn_scope.turn_id()
+                    "input trace_turn_id `{input_turn_id}` does not match effect scope id `{}`",
+                    scoped_effect_controller.scope_id()
                 ),
             ));
         }
-        self.ensure_durable_substrate_for_scope(&durable_turn_scope)?;
-        input.trace_turn_id = Some(durable_turn_scope.turn_id().to_string());
+        self.ensure_durable_store_facets_for_scope(&scoped_effect_controller)?;
+        input
+            .trace_turn_id
+            .get_or_insert_with(|| scoped_effect_controller.scope_id().to_string());
         self.stream_turn_inner(
             input.clone(),
             events,
             turn_events,
-            durable_turn_scope,
+            scoped_effect_controller,
             cancel.clone(),
             queued_claim,
         )
@@ -811,14 +616,19 @@ impl LashRuntime {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let cancel = opts.cancel.clone();
-        let effect_controller = Arc::clone(&self.host.core.control.effect_controller);
-        let durable_turn_scope =
-            opts.resolve_durable_turn_scope(effect_controller.as_ref(), &follow_trace_turn_id)?;
+        let effect_host = Arc::clone(&self.host.core.control.effect_host);
+        let scoped_effect_controller = match opts.scoped_effect_controller() {
+            Some(scope) => scope,
+            None => effect_host.scoped(EffectScope::turn(
+                &self.state.session_id,
+                &follow_trace_turn_id,
+            ))?,
+        };
         self.stream_turn_with_agent_frames_inner(
             input,
             opts.events_or_noop(),
             opts.turn_events_or_noop(),
-            durable_turn_scope,
+            scoped_effect_controller,
             cancel,
         )
         .await
@@ -829,32 +639,50 @@ impl LashRuntime {
         mut input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
-        durable_turn_scope: DurableTurnScope<'_>,
+        scoped_effect_controller: ScopedEffectController<'_>,
         cancel: CancellationToken,
     ) -> Result<AgentFrameRun, RuntimeError> {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
-            && input_turn_id != durable_turn_scope.turn_id()
+            && scoped_effect_controller
+                .effect_scope()
+                .validates_turn_trace_id()
+            && input_turn_id != scoped_effect_controller.scope_id()
         {
             return Err(RuntimeError::new(
-                RuntimeErrorCode::DurableTurnScopeTurnIdMismatch,
+                RuntimeErrorCode::EffectScopeTurnIdMismatch,
                 format!(
-                    "input trace_turn_id `{input_turn_id}` does not match durable turn scope turn_id `{}`",
-                    durable_turn_scope.turn_id()
+                    "input trace_turn_id `{input_turn_id}` does not match effect scope id `{}`",
+                    scoped_effect_controller.scope_id()
                 ),
             ));
         }
         let follow_protocol_turn_options = input.protocol_turn_options.clone();
         let follow_turn_context = input.turn_context.clone();
-        let follow_trace_turn_id = durable_turn_scope.turn_id().to_string();
-        input.trace_turn_id = Some(follow_trace_turn_id.clone());
+        let follow_trace_turn_id = input
+            .trace_turn_id
+            .clone()
+            .unwrap_or_else(|| scoped_effect_controller.scope_id().to_string());
+        input
+            .trace_turn_id
+            .get_or_insert(follow_trace_turn_id.clone());
         let mut turns = Vec::new();
         loop {
+            let turn_trace_turn_id = agent_frame_follow_turn_id(&follow_trace_turn_id, turns.len());
+            input.trace_turn_id = Some(turn_trace_turn_id.clone());
+            let turn_effect_controller = if turns.is_empty() {
+                scoped_effect_controller.clone()
+            } else {
+                ScopedEffectController::borrowed(
+                    scoped_effect_controller.controller(),
+                    EffectScope::turn(&self.state.session_id, &turn_trace_turn_id),
+                )?
+            };
             let turn = self
-                .stream_turn_with_durable_turn_scope_inner(
+                .stream_turn_with_scoped_effect_controller_inner(
                     input,
                     events,
                     turn_events,
-                    durable_turn_scope,
+                    turn_effect_controller,
                     cancel.clone(),
                     None,
                 )
@@ -880,7 +708,6 @@ impl LashRuntime {
             })?;
             input = turn_input_from_text(task);
             input.protocol_turn_options = follow_protocol_turn_options.clone();
-            input.trace_turn_id = Some(follow_trace_turn_id.clone());
             input.turn_context = follow_turn_context.clone();
         }
     }
@@ -890,7 +717,7 @@ impl LashRuntime {
         mut input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
-        durable_turn_scope: DurableTurnScope<'_>,
+        scoped_effect_controller: ScopedEffectController<'_>,
         cancel: CancellationToken,
         queued_claim: Option<crate::QueuedWorkClaim>,
     ) -> Result<AssembledTurn, RuntimeError> {
@@ -916,7 +743,7 @@ impl LashRuntime {
             .and_then(|session| session.history_store())
             .is_some()
         {
-            ensure_durable_turn_input(&input)?;
+            ensure_durable_effect_input(&input)?;
         }
         if let Some(extension) = &input.protocol_extension
             && let Some(session) = self.session.as_ref()
@@ -1092,10 +919,10 @@ impl LashRuntime {
             session_lifecycle: manager.lifecycle_service(),
             session_graph: manager.graph_service(),
             direct_completions: manager.direct_completion_client(
-                crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
-                    &self.host.core.control.effect_controller,
-                )),
-                None,
+                scoped_runtime_operation_handle(
+                    &self.host.core.control.effect_host,
+                    format!("prepare-turn:{}", self.state.turn_index + 1),
+                )?,
                 None,
             ),
         };
@@ -1152,7 +979,7 @@ impl LashRuntime {
             turn_index,
             events,
             turn_events,
-            durable_turn_scope,
+            scoped_effect_controller,
             cancel,
             queued_claim,
         )
@@ -1182,7 +1009,7 @@ impl LashRuntime {
         turn_index: usize,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
-        durable_turn_scope: DurableTurnScope<'_>,
+        scoped_effect_controller: ScopedEffectController<'_>,
         cancel: CancellationToken,
         initial_queue_claim: Option<crate::QueuedWorkClaim>,
     ) -> Result<AssembledTurn, RuntimeError> {
@@ -1327,30 +1154,6 @@ impl LashRuntime {
             .map_err(|err| {
                 RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
             })?;
-        let embedded_durable_turn_store;
-        let substrate_native_durable_turn;
-        let durable_turn: &dyn DurableTurnProvider = if durable_turn_scope
-            .controller()
-            .durability_tier()
-            == crate::DurabilityTier::Durable
-        {
-            substrate_native_durable_turn =
-                SubstrateDurableTurnProvider::new(durable_turn_scope.controller());
-            &substrate_native_durable_turn
-        } else {
-            embedded_durable_turn_store =
-                EmbeddedDurableTurnProvider::new(durable_turn_scope.controller());
-            &embedded_durable_turn_store
-        };
-        let durable_turn_run = durable_turn
-            .begin_turn(BeginDurableTurnRequest {
-                session_id: self.state.session_id.clone(),
-                turn_id: trace_turn_id.clone(),
-                owner_id: self.runtime_scope_id.to_string(),
-                store: store.clone(),
-            })
-            .await?;
-        let turn_lease = durable_turn_run.lease().cloned();
         let resolved_turn_policy = if let Some(provider) = turn_provider_override {
             RuntimeSessionPolicy::from_provider(turn_policy.clone(), provider)
                 .map_err(|err| RuntimeError::new("llm_provider", err.to_string()))?
@@ -1360,10 +1163,7 @@ impl LashRuntime {
                 .map_err(|err| RuntimeError::new("llm_provider", err.to_string()))?
         };
         let manager = self
-            .runtime_session_services_for_turn_with_lease(
-                Some(child_usage_event_relay.clone()),
-                turn_lease.clone(),
-            )
+            .runtime_session_services_for_turn(Some(child_usage_event_relay.clone()))
             .map_err(|err| {
                 RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
             })?;
@@ -1376,11 +1176,9 @@ impl LashRuntime {
             session,
             policy: resolved_turn_policy,
             host: self.host.clone(),
-            durable_turn_scope,
-            durable_turn,
-            durable_turn_run,
+            turn_id: scoped_effect_controller.scope_id().to_string(),
+            scoped_effect_controller,
             session_id: self.state.session_id.clone(),
-            turn_id: durable_turn_scope.turn_id().to_string(),
             turn_index,
             turn_pipeline,
             llm_stream_summaries: HashMap::new(),
@@ -1392,8 +1190,6 @@ impl LashRuntime {
             turn_causes: initial_turn_causes,
             pending_queue_claims: initial_queue_claim.into_iter().collect(),
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
-            turn_lease: turn_lease.clone(),
-            machine_config_snapshot: None,
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let protocol_run_offset = 0;
@@ -1411,13 +1207,8 @@ impl LashRuntime {
             Ok(result) => result,
             Err(err) => {
                 self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
-                let RuntimeTurnDriver {
-                    session,
-                    durable_turn_run,
-                    ..
-                } = driver;
+                let RuntimeTurnDriver { session, .. } = driver;
                 self.session = Some(session);
-                abandon_turn_best_effort(durable_turn, durable_turn_run, "effect_loop").await;
                 return Err(err);
             }
         };
@@ -1432,26 +1223,22 @@ impl LashRuntime {
             session,
             policy,
             turn_pipeline,
-            durable_turn_run,
             pending_queue_claims,
             ..
         } = driver;
         self.session = Some(session);
-        self.finish_leased_turn(
-            LeasedTurnFinish {
+        self.finish_turn(
+            TurnFinishInput {
                 turn_pipeline,
                 assembler,
                 new_messages,
                 policy,
                 turn_index,
-                durable_turn,
-                durable_turn_run,
                 queued_work_completions: pending_queue_claims
                     .iter()
                     .map(crate::QueuedWorkClaim::completion)
                     .collect(),
                 trace_turn_id,
-                abandon_context: "fresh",
             },
             events,
             &cancel_state,
@@ -1495,17 +1282,25 @@ fn turn_input_from_text(text: String) -> TurnInput {
     }
 }
 
-pub fn ensure_durable_turn_input(input: &TurnInput) -> Result<(), RuntimeError> {
+fn agent_frame_follow_turn_id(root_turn_id: &str, completed_turn_count: usize) -> String {
+    if completed_turn_count == 0 {
+        root_turn_id.to_string()
+    } else {
+        format!("{root_turn_id}:agent-frame:{completed_turn_count}")
+    }
+}
+
+pub fn ensure_durable_effect_input(input: &TurnInput) -> Result<(), RuntimeError> {
     if input.protocol_extension.is_some() {
         return Err(RuntimeError::new(
-            RuntimeErrorCode::DurableTurnLiveProtocolExtension,
-            "durable turn resume does not support live protocol_extension inputs; encode resumable data in protocol_turn_options or persisted plugin state",
+            RuntimeErrorCode::DurableEffectLiveProtocolExtension,
+            "durable effect hosts do not support live protocol_extension inputs; encode replayable data in protocol_turn_options or persisted plugin state",
         ));
     }
     input
         .turn_context
         .live_plugin_inputs()
-        .durable_rejection()?;
+        .durable_effect_rejection()?;
     Ok(())
 }
 
@@ -1578,5 +1373,23 @@ async fn emit_runtime_stream_event_to_sinks(
             assembler.push_turn_activity(&activity);
             emit_turn_activity_to_sink(turn_events, activity).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_frame_follow_turn_id;
+
+    #[test]
+    fn agent_frame_follow_turn_ids_are_distinct_and_deterministic() {
+        assert_eq!(agent_frame_follow_turn_id("root-turn", 0), "root-turn");
+        assert_eq!(
+            agent_frame_follow_turn_id("root-turn", 1),
+            "root-turn:agent-frame:1"
+        );
+        assert_eq!(
+            agent_frame_follow_turn_id("root-turn", 2),
+            "root-turn:agent-frame:2"
+        );
     }
 }

@@ -17,6 +17,7 @@ pub struct RuntimeObservation {
     pub tool_catalog_error: Option<String>,
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
     pub queue_store: Option<Arc<dyn crate::RuntimePersistence>>,
+    pub queued_work_poke: Option<super::QueuedWorkPoke>,
 }
 
 impl RuntimeObservation {
@@ -63,6 +64,7 @@ impl RuntimeObservation {
                 .session
                 .as_ref()
                 .and_then(|session| session.history_store()),
+            queued_work_poke: runtime.host.queued_work_poke.clone(),
         }
     }
 
@@ -160,6 +162,30 @@ impl RuntimeHandle {
                 runtime,
                 Some(previous.as_ref()),
             )));
+    }
+
+    pub async fn enqueue_turn_input(
+        &self,
+        input: crate::TurnInput,
+        delivery_policy: crate::DeliveryPolicy,
+        slot_policy: crate::SlotPolicy,
+        source_key: Option<String>,
+    ) -> Result<crate::QueuedWorkBatch, crate::RuntimeError> {
+        let observation = self.observe();
+        let store = observation
+            .queue_store
+            .clone()
+            .ok_or_else(super::session_api::queued_turn_input_store_required)?;
+        super::session_api::enqueue_turn_input_to_store(
+            observation.session_id.as_ref().to_string(),
+            store,
+            observation.queued_work_poke.clone(),
+            input,
+            delivery_policy,
+            slot_policy,
+            source_key,
+        )
+        .await
     }
 
     pub fn try_into_runtime(self) -> Result<LashRuntime, Self> {

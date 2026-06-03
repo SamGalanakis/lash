@@ -14,7 +14,8 @@ impl RuntimeTurnDriver<'_> {
     }
 
     pub(super) fn should_abort_for_runtime_effect_error(&self) -> bool {
-        self.turn_lease.is_some() && self.session.history_store().is_some()
+        self.scoped_effect_controller.controller().durability_tier()
+            == crate::DurabilityTier::Durable
     }
 
     pub(super) fn fail_or_abort_runtime_effect_controller(

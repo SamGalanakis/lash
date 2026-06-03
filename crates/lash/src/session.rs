@@ -1,7 +1,5 @@
 use crate::support::*;
-use lash_core::runtime::{
-    DeliveryPolicy, QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkPayload, SlotPolicy,
-};
+use lash_core::runtime::{DeliveryPolicy, QueuedWorkBatch, SlotPolicy};
 
 pub struct SessionBuilder {
     pub(crate) core: LashCore,
@@ -309,14 +307,6 @@ impl LashSession {
         self.turn(input).run().await
     }
 
-    pub fn resume_turn(&self, turn_id: impl Into<String>) -> ResumeTurnBuilder {
-        ResumeTurnBuilder {
-            runtime: self.runtime.clone(),
-            turn_id: turn_id.into(),
-            cancel: CancellationToken::new(),
-        }
-    }
-
     pub fn turn(&self, input: TurnInput) -> TurnBuilder {
         TurnBuilder {
             runtime: self.runtime.clone(),
@@ -492,31 +482,17 @@ impl<'a> QueueInputBuilder<'a> {
 
     pub async fn send(self) -> Result<()> {
         let source_key = self.id.map(|id| format!("host:{id}"));
-        let observation = self.session.runtime.observe();
-        let store = observation.queue_store.as_ref().ok_or_else(|| {
-            EmbedError::Runtime(lash_core::RuntimeError::new(
-                lash_core::RuntimeErrorCode::StoreCommitFailed,
-                "queued turn input requires a persistent runtime store",
-            ))
-        })?;
-        lash_core::ensure_durable_turn_input(&self.input).map_err(EmbedError::Runtime)?;
-        let mut draft = QueuedWorkBatchDraft::new(
-            observation.session_id().to_string(),
-            self.delivery_policy,
-            self.slot_policy,
-            vec![QueuedWorkPayload::turn_input(self.input)],
-        );
-        draft.source_key = source_key;
-        store
-            .enqueue_queued_work(draft)
+        self.session
+            .runtime
+            .enqueue_turn_input(
+                self.input,
+                self.delivery_policy,
+                self.slot_policy,
+                source_key,
+            )
             .await
             .map(|_| ())
-            .map_err(|err| {
-                EmbedError::Runtime(lash_core::RuntimeError::new(
-                    lash_core::RuntimeErrorCode::StoreCommitFailed,
-                    err.to_string(),
-                ))
-            })
+            .map_err(EmbedError::Runtime)
     }
 }
 

@@ -15,13 +15,14 @@ pub const LASHLANG_SEMANTIC_HASH_VERSION: &str = "lashlang-semantic-v2";
 pub const LASHLANG_COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const LASHLANG_VM_ABI_VERSION: &str = "lashlang-vm-abi-v1";
 
-/// Durability tier of an execution path's wired substrate.
+/// Durability tier of an execution path's wired store or effect host.
 ///
 /// Durability is a property established by what the host wired, not a mode
 /// flag: each runtime trait reports the tier of the concrete implementation
 /// behind it, and the runtime validates that wiring is internally consistent.
-/// `Inline` covers the in-memory / build-time substrate; `Durable` covers a
-/// crash-recoverable substrate (e.g. a SQLite-backed or Restate-backed impl).
+/// `Inline` covers in-memory / build-time wiring; `Durable` covers a
+/// crash-recoverable store or effect host (e.g. SQLite-backed persistence or a
+/// Restate-backed effect host).
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]

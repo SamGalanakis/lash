@@ -6,18 +6,19 @@ mod runner;
 mod session;
 mod tool;
 
-pub(in crate::runtime::session_manager::process_runners) struct ProcessRunContext {
-    dispatch: Arc<crate::tool_dispatch::ToolDispatchContext<'static>>,
+pub(in crate::runtime::session_manager::process_runners) struct ProcessRunContext<'run> {
+    dispatch: Arc<crate::tool_dispatch::ToolDispatchContext<'run>>,
     event_drain: tokio::task::JoinHandle<()>,
 }
 
-impl ProcessRunContext {
+impl<'run> ProcessRunContext<'run> {
     pub(in crate::runtime::session_manager::process_runners) fn builder(
         services: &RuntimeSessionServices,
-    ) -> ProcessRunContextBuilder<'_> {
+    ) -> ProcessRunContextBuilder<'_, 'run> {
         ProcessRunContextBuilder {
             services,
             surface: None,
+            scoped_effect_controller: None,
             causal_invocation: None,
             dispatch_parent_invocation: None,
         }
@@ -25,7 +26,7 @@ impl ProcessRunContext {
 
     pub(in crate::runtime::session_manager::process_runners) fn dispatch(
         &self,
-    ) -> Arc<crate::tool_dispatch::ToolDispatchContext<'static>> {
+    ) -> Arc<crate::tool_dispatch::ToolDispatchContext<'run>> {
         Arc::clone(&self.dispatch)
     }
 
@@ -35,14 +36,25 @@ impl ProcessRunContext {
     }
 }
 
-pub(in crate::runtime::session_manager::process_runners) struct ProcessRunContextBuilder<'a> {
+pub(in crate::runtime::session_manager::process_runners) struct ProcessRunContextBuilder<'a, 'run> {
     services: &'a RuntimeSessionServices,
     surface: Option<Arc<crate::ToolSurface>>,
+    scoped_effect_controller: Option<crate::ScopedEffectController<'run>>,
     causal_invocation: Option<crate::RuntimeInvocation>,
     dispatch_parent_invocation: Option<crate::RuntimeInvocation>,
 }
 
-impl<'a> ProcessRunContextBuilder<'a> {
+pub(in crate::runtime::session_manager::process_runners) struct ProcessToolCallRun<'run> {
+    registration: crate::ProcessRegistration,
+    registry: Arc<dyn crate::ProcessRegistry>,
+    call: crate::PreparedToolCall,
+    parent_invocation: Option<crate::RuntimeInvocation>,
+    wake_target_scope: Option<crate::ProcessScope>,
+    scoped_effect_controller: crate::ScopedEffectController<'run>,
+    cancellation: tokio_util::sync::CancellationToken,
+}
+
+impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
     pub(in crate::runtime::session_manager::process_runners) fn surface(
         mut self,
         surface: Arc<crate::ToolSurface>,
@@ -59,6 +71,14 @@ impl<'a> ProcessRunContextBuilder<'a> {
         self
     }
 
+    pub(in crate::runtime::session_manager::process_runners) fn scoped_effect_controller(
+        mut self,
+        scoped_effect_controller: crate::ScopedEffectController<'run>,
+    ) -> Self {
+        self.scoped_effect_controller = Some(scoped_effect_controller);
+        self
+    }
+
     pub(in crate::runtime::session_manager::process_runners) fn dispatch_parent_invocation(
         mut self,
         invocation: Option<crate::RuntimeInvocation>,
@@ -69,21 +89,25 @@ impl<'a> ProcessRunContextBuilder<'a> {
 
     pub(in crate::runtime::session_manager::process_runners) fn build(
         self,
-    ) -> Result<ProcessRunContext, crate::PluginError> {
+    ) -> Result<ProcessRunContext<'run>, crate::PluginError> {
         let surface = self.surface.ok_or_else(|| {
             crate::PluginError::Session("process run context requires a tool surface".to_string())
         })?;
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionEvent>(64);
         let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
         let services = Arc::new(self.services.clone());
+        let scoped_effect_controller = self.scoped_effect_controller.ok_or_else(|| {
+            crate::PluginError::Session(
+                "process run context requires a scoped effect controller".to_string(),
+            )
+        })?;
+        let effect_controller =
+            crate::runtime::RuntimeEffectControllerHandle::borrowed(scoped_effect_controller);
         let direct_completions = services.direct_completion_client(
-            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
-                &self.services.current.host.core.control.effect_controller,
-            )),
+            effect_controller.clone_scoped(),
             self.causal_invocation
                 .as_ref()
                 .and_then(|invocation| invocation.scope.turn_id.clone()),
-            self.services.current.turn_lease.clone(),
         );
         let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
             plugins: Arc::clone(&self.services.current.plugins),
@@ -94,9 +118,7 @@ impl<'a> ProcessRunContextBuilder<'a> {
             session_graph: services.graph_service(),
             processes: services.process_service(),
             process_cancel_ability: services.process_cancel_ability(),
-            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
-                &self.services.current.host.core.control.effect_controller,
-            )),
+            effect_controller,
             direct_completions,
             parent_invocation: self.dispatch_parent_invocation,
             session_id: self.services.current.session_id.clone(),
@@ -125,6 +147,16 @@ mod tests {
     };
     use ::lashlang::LashlangArtifactStore;
     use std::sync::Arc;
+
+    fn test_process_op_scope(id: &str) -> crate::ProcessOpScope<'static> {
+        crate::ProcessOpScope::new(
+            crate::ScopedEffectController::shared(
+                Arc::new(crate::InlineRuntimeEffectController),
+                crate::EffectScope::runtime_operation(id),
+            )
+            .expect("test effect scope"),
+        )
+    }
 
     async fn runtime_with_processes_and_tools(
         plugins: Vec<Arc<dyn crate::PluginFactory>>,
@@ -535,7 +567,7 @@ mod tests {
         // Process execution identity is the persisted process_id; a retry/
         // recovery that presents an empty (fresh, non-persisted) id has lost its
         // idempotency anchor and must fail loudly, mirroring the empty-turn-id
-        // rejection in `DurableTurnScope::new`.
+        // rejection in `EffectScope`.
         let registry = Arc::new(crate::TestLocalProcessRegistry::default());
         let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
         let factory =
@@ -568,7 +600,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains(crate::RuntimeErrorCode::MissingProcessExecutionId.as_str()),
+                .contains(crate::RuntimeErrorCode::MissingEffectScopeId.as_str()),
             "{err}"
         );
     }
@@ -911,8 +943,8 @@ mod tests {
             crate::RuntimeHostConfig::in_memory(),
         );
         let poke = spawn_inline_process_runners(&worker, 1);
-        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
-            .expect("runtime session manager");
+        let manager =
+            RuntimeSessionServices::new(&runtime, true, None).expect("runtime session manager");
         let mut input = serde_json::Map::new();
         input.insert("root".to_string(), serde_json::json!("seed"));
         input.insert(
@@ -946,14 +978,18 @@ mod tests {
                 crate::ProcessStartOptions::new().with_descriptor(
                     crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("block")),
                 ),
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect("start process");
         poke[0].poke();
         let output = manager
             .processes
-            .await_process(&manager.current, "process-1", crate::ProcessOpScope::new())
+            .await_process(
+                &manager.current,
+                "process-1",
+                test_process_op_scope("host-configured"),
+            )
             .await
             .expect("await process");
 
@@ -1043,8 +1079,8 @@ mod tests {
             crate::RuntimeHostConfig::in_memory(),
         );
         let pokes = spawn_inline_process_runners(&worker, 1);
-        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
-            .expect("runtime session manager");
+        let manager =
+            RuntimeSessionServices::new(&runtime, true, None).expect("runtime session manager");
         assert!(
             !manager.current.plugins.lashlang_abilities().processes,
             "current plugin surface should not provide process linking"
@@ -1099,7 +1135,7 @@ mod tests {
                 crate::ProcessStartOptions::new().with_descriptor(
                     crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("snapshot-parent")),
                 ),
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect("start process");
@@ -1109,7 +1145,7 @@ mod tests {
             .await_process(
                 &manager.current,
                 "snapshot-parent",
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect("await process");
@@ -1254,9 +1290,10 @@ mod tests {
     async fn lashlang_process_lifecycle_wait_signal_signal_run_and_sleep() {
         let mut runtime = runtime_with_processes(Vec::new()).await;
         let controller = RecordingProcessEffectController::default();
-        runtime.host.core.control.effect_controller = Arc::new(controller.clone());
-        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
-            .expect("runtime session manager");
+        runtime.host.core.control.effect_host =
+            Arc::new(crate::InlineEffectHost::new(Arc::new(controller.clone())));
+        let manager =
+            RuntimeSessionServices::new(&runtime, true, None).expect("runtime session manager");
         let registry = runtime
             .host
             .process_registry
@@ -1272,7 +1309,8 @@ mod tests {
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
             {
                 let mut config = crate::RuntimeHostConfig::in_memory();
-                config.control.effect_controller = Arc::new(controller.clone());
+                config.control.effect_host =
+                    Arc::new(crate::InlineEffectHost::new(Arc::new(controller.clone())));
                 config
             },
         );
@@ -1301,7 +1339,7 @@ mod tests {
                 crate::ProcessStartOptions::new().with_descriptor(
                     crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("target")),
                 ),
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect("start target");
@@ -1336,7 +1374,7 @@ mod tests {
                 crate::ProcessStartOptions::new().with_descriptor(
                     crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("signaler")),
                 ),
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect("start signaler");
@@ -1347,7 +1385,7 @@ mod tests {
             .await_process(
                 &manager.current,
                 "signal-sender",
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect("await signaler");
@@ -1361,7 +1399,7 @@ mod tests {
             .await_process(
                 &manager.current,
                 "signal-target",
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect("await target");
@@ -1408,8 +1446,8 @@ mod tests {
             crate::RuntimeHostConfig::in_memory(),
         );
         let pokes = spawn_inline_process_runners(&worker, 1);
-        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
-            .expect("runtime session manager");
+        let manager =
+            RuntimeSessionServices::new(&runtime, true, None).expect("runtime session manager");
         let program = ::lashlang::Program::block(vec![::lashlang::Expr::Fail(Box::new(
             ::lashlang::Expr::Record(vec![(
                 "reason".into(),
@@ -1429,7 +1467,7 @@ mod tests {
                 crate::ProcessStartOptions::new().with_descriptor(
                     crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("fail")),
                 ),
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect("start process");
@@ -1439,7 +1477,7 @@ mod tests {
             .await_process(
                 &manager.current,
                 "process-fail",
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect("await process");
@@ -1506,8 +1544,8 @@ mod tests {
     #[tokio::test]
     async fn cancel_unreferenced_process_handles_revokes_current_grants_and_cancels_only_unowned() {
         let runtime = runtime_with_processes(Vec::new()).await;
-        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
-            .expect("runtime session manager");
+        let manager =
+            RuntimeSessionServices::new(&runtime, true, None).expect("runtime session manager");
         let registry = runtime
             .host
             .process_registry
@@ -1532,7 +1570,7 @@ mod tests {
                 &manager.managed,
                 "root",
                 vec!["keep".to_string()],
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect("cancel unreferenced handles");
@@ -1583,8 +1621,8 @@ mod tests {
     #[tokio::test]
     async fn scoped_transfer_and_cleanup_use_process_effect_controller_metadata() {
         let runtime = runtime_with_processes(Vec::new()).await;
-        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
-            .expect("runtime session manager");
+        let manager =
+            RuntimeSessionServices::new(&runtime, true, None).expect("runtime session manager");
         let registry = runtime
             .host
             .process_registry
@@ -1597,12 +1635,16 @@ mod tests {
             "parent-process-control",
             crate::RuntimeEffectKind::Process,
             "root:turn-process-scope:process-control",
-            Some("0".repeat(64)),
         );
         let scoped_request = || {
-            crate::ProcessOpScope::new()
-                .with_parent_invocation(Some(metadata.clone()))
-                .with_effect_controller(&controller)
+            crate::ProcessOpScope::new(
+                crate::ScopedEffectController::borrowed(
+                    &controller,
+                    crate::EffectScope::runtime_operation("scoped-process-transfer-test"),
+                )
+                .expect("scoped process transfer scope"),
+            )
+            .with_parent_invocation(Some(metadata.clone()))
         };
         let root_scope = crate::ProcessScope::new("root");
         let target_scope = crate::ProcessScope::new("target");
@@ -1660,8 +1702,8 @@ mod tests {
     async fn process_control_fails_loudly_when_process_registry_is_unavailable() {
         let mut runtime = runtime_with_plugins(Vec::new(), mock_provider(Vec::new())).await;
         runtime.host.process_registry = None;
-        let manager = RuntimeSessionServices::new(&runtime, true, None, None)
-            .expect("runtime session manager");
+        let manager =
+            RuntimeSessionServices::new(&runtime, true, None).expect("runtime session manager");
 
         manager
             .processes
@@ -1671,7 +1713,7 @@ mod tests {
                 "root",
                 "target",
                 Vec::<String>::new(),
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect("empty transfer remains a no-op");
@@ -1683,7 +1725,7 @@ mod tests {
                 &manager.managed,
                 "root",
                 &["missing".to_string()],
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect_err("validation should fail");
@@ -1701,7 +1743,7 @@ mod tests {
                 "root",
                 "target",
                 vec!["missing".to_string()],
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect_err("transfer should fail");
@@ -1718,7 +1760,7 @@ mod tests {
                 &manager.managed,
                 "root",
                 Vec::<String>::new(),
-                crate::ProcessOpScope::new(),
+                test_process_op_scope("host-configured"),
             )
             .await
             .expect_err("cleanup should fail");

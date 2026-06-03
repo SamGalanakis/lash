@@ -8,9 +8,8 @@ use lash::direct::{
 };
 use lash::messages::MessageRole;
 use lash::persistence::{
-    EmbeddedDurableTurnStore, GcReport, GraphCommitDelta, PersistedSessionRead,
-    RuntimeCommit, RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence,
-    RuntimeSessionState, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionCheckpoint, SessionMeta,
+    GcReport, GraphCommitDelta, PersistedSessionRead, RuntimeCommit, RuntimeCommitResult,
+    RuntimePersistence, RuntimeSessionState, RuntimeTurnCommitStamp, SessionCheckpoint, SessionMeta,
     SessionNodeRecord, SessionReadScope, StoreError, TokenLedgerEntry, VacuumReport,
     load_persisted_session_state, load_persisted_session_state_active_path,
 };
@@ -67,10 +66,6 @@ impl RuntimePersistence for FacadeStore {
 
     lash::impl_unsupported_queued_work_methods!();
 
-    fn embedded_durable_turn_store(&self) -> Option<&dyn EmbeddedDurableTurnStore> {
-        Some(self)
-    }
-
     async fn save_session_meta(&self, _meta: SessionMeta) -> Result<(), StoreError> {
         Ok(())
     }
@@ -92,79 +87,6 @@ impl RuntimePersistence for FacadeStore {
     }
 }
 
-#[async_trait]
-impl EmbeddedDurableTurnStore for FacadeStore {
-    async fn claim_runtime_turn_lease(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        owner_id: &str,
-        lease_ttl_ms: u64,
-    ) -> Result<RuntimeTurnLease, StoreError> {
-        Ok(RuntimeTurnLease {
-            schema_version: lash::persistence::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
-            session_id: session_id.to_string(),
-            turn_id: turn_id.to_string(),
-            owner_id: owner_id.to_string(),
-            lease_token: format!("{session_id}:{turn_id}:{owner_id}"),
-            fencing_token: 1,
-            claimed_at_epoch_ms: 0,
-            expires_at_epoch_ms: lease_ttl_ms,
-        })
-    }
-
-    async fn renew_runtime_turn_lease(
-        &self,
-        lease: &RuntimeTurnLease,
-        lease_ttl_ms: u64,
-    ) -> Result<RuntimeTurnLease, StoreError> {
-        Ok(RuntimeTurnLease {
-            expires_at_epoch_ms: lease.expires_at_epoch_ms.saturating_add(lease_ttl_ms),
-            ..lease.clone()
-        })
-    }
-
-    async fn abandon_runtime_turn_lease(
-        &self,
-        _lease: &RuntimeTurnLease,
-    ) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    async fn save_runtime_turn_checkpoint(
-        &self,
-        _lease: &RuntimeTurnLease,
-        _checkpoint: RuntimeTurnCheckpoint,
-    ) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    async fn load_runtime_turn_checkpoint(
-        &self,
-        _session_id: &str,
-        _turn_id: &str,
-    ) -> Result<Option<RuntimeTurnCheckpoint>, StoreError> {
-        Ok(None)
-    }
-
-    async fn save_runtime_effect_outcome(
-        &self,
-        _lease: &RuntimeTurnLease,
-        _record: RuntimeEffectJournalRecord,
-    ) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    async fn load_runtime_effect_outcome(
-        &self,
-        _session_id: &str,
-        _turn_id: &str,
-        _replay_key: &str,
-    ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError> {
-        Ok(None)
-    }
-}
-
 fn persistence_types_are_nameable(
     graph: GraphCommitDelta,
     ledger: Vec<TokenLedgerEntry>,
@@ -178,7 +100,11 @@ fn persistence_types_are_nameable(
         graph,
         checkpoint: Default::default(),
         usage_deltas: ledger,
-        completed_turn: None,
+        turn_commit: Some(RuntimeTurnCommitStamp::new(
+            "facade",
+            "turn",
+            "sha256:facade",
+        )),
         completed_queue_claims: Vec::new(),
         committed_attachment_ids: Vec::new(),
     }

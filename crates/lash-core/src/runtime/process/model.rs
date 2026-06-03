@@ -131,18 +131,24 @@ impl ProcessExecutionContext {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ProcessOpScope<'scope> {
-    pub parent_invocation: Option<crate::RuntimeInvocation>,
-    pub effect_controller: Option<&'scope dyn crate::RuntimeEffectController>,
-    pub turn_lease: Option<crate::RuntimeTurnLease>,
-    pub agent_frame_id: Option<crate::AgentFrameId>,
-    pub target_agent_frame_id: Option<crate::AgentFrameId>,
+    pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,
+    pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'scope>,
+    pub(crate) agent_frame_id: Option<crate::AgentFrameId>,
+    pub(crate) target_agent_frame_id: Option<crate::AgentFrameId>,
 }
 
 impl<'scope> ProcessOpScope<'scope> {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(scoped_effect_controller: crate::ScopedEffectController<'scope>) -> Self {
+        Self {
+            parent_invocation: None,
+            effect_controller: crate::runtime::RuntimeEffectControllerHandle::borrowed(
+                scoped_effect_controller,
+            ),
+            agent_frame_id: None,
+            target_agent_frame_id: None,
+        }
     }
 
     pub fn with_parent_invocation(
@@ -150,19 +156,6 @@ impl<'scope> ProcessOpScope<'scope> {
         parent_invocation: Option<crate::RuntimeInvocation>,
     ) -> Self {
         self.parent_invocation = parent_invocation;
-        self
-    }
-
-    pub fn with_effect_controller(
-        mut self,
-        effect_controller: &'scope dyn crate::RuntimeEffectController,
-    ) -> Self {
-        self.effect_controller = Some(effect_controller);
-        self
-    }
-
-    pub fn with_turn_lease(mut self, turn_lease: Option<crate::RuntimeTurnLease>) -> Self {
-        self.turn_lease = turn_lease;
         self
     }
 
@@ -177,6 +170,18 @@ impl<'scope> ProcessOpScope<'scope> {
     ) -> Self {
         self.target_agent_frame_id = agent_frame_id;
         self
+    }
+
+    pub fn agent_frame_id(&self) -> Option<&str> {
+        self.agent_frame_id.as_deref()
+    }
+
+    pub fn target_agent_frame_id(&self) -> Option<&str> {
+        self.target_agent_frame_id.as_deref()
+    }
+
+    pub(crate) fn controller(&self) -> &dyn crate::RuntimeEffectController {
+        self.effect_controller.controller()
     }
 }
 
@@ -520,16 +525,12 @@ impl ProcessRecord {
 /// Wire-format version stamped on every persisted [`ProcessLease`].
 ///
 /// Bump when the on-wire shape of `ProcessLease` changes in a way that older
-/// code cannot safely deserialize. Mirrors
-/// [`RUNTIME_TURN_LEASE_SCHEMA_VERSION`](crate::RUNTIME_TURN_LEASE_SCHEMA_VERSION)
-/// and follows the same upgrade semantics.
+/// code cannot safely deserialize.
 pub const PROCESS_LEASE_SCHEMA_VERSION: u32 = 1;
 
 /// Durable lease over a non-terminal background process.
 ///
-/// This is the process-domain analogue of
-/// [`RuntimeTurnLease`](crate::RuntimeTurnLease): the lease pair
-/// `(owner_id, lease_token)` plus `fencing_token` are how lash guarantees that
+/// The lease pair `(owner_id, lease_token)` plus `fencing_token` are how lash guarantees that
 /// one non-terminal process is re-executed by exactly one worker at a time —
 /// even after a crash, even across two workers that both sweep the same
 /// registry for recoverable work. The durable backend

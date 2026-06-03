@@ -139,7 +139,6 @@ fn wake_delivery(
                 process_id: "process-1".to_string(),
             }),
             replay: None,
-            checkpoint_hash: None,
         },
         process_caused_by,
         dedupe_key: "process-1:7".to_string(),
@@ -245,7 +244,6 @@ async fn delete_session_process_command_requests_cancel_only_for_unshared_active
         "process:delete-session:deleted",
         crate::RuntimeEffectKind::Process,
         "deleted:delete-session",
-        None,
     );
 
     let outcome = crate::RuntimeEffectController::execute_effect(

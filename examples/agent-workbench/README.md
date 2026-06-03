@@ -3,25 +3,17 @@
 A standalone RLM chat demo for background processes, subagents, web tools,
 button host events, and Restate-backed cron triggers.
 
-Restate is required. Run it from the repo root with a local Restate server,
-then register the workbench endpoint:
+Restate is required. Run the example from the repo root with the bundled
+entrypoint:
 
 ```bash
-# Terminal 1: Restate
-docker run --rm \
-  --add-host=host.docker.internal:host-gateway \
-  -p 8080:8080 -p 9070:9070 -p 9071:9071 \
-  restatedev/restate:latest
-
-# Terminal 2: Workbench
-OPENROUTER_API_KEY=... \
-AGENT_WORKBENCH_RESTATE_ADDR=127.0.0.1:9081 \
-RESTATE_INGRESS_URL=http://127.0.0.1:8080 \
-cargo run -p agent-workbench
-
-# Terminal 3, after the workbench endpoint starts
-restate deployments register http://host.docker.internal:9081
+OPENROUTER_API_KEY=... just agent-workbench
 ```
+
+The entrypoint checks for Restate ingress/admin on the configured ports. If
+they are not already running, it starts `restatedev/restate:latest` in Docker,
+waits for ingress/admin, starts the workbench and its in-process Restate
+endpoint, registers the endpoint through Restate Admin, then opens the browser.
 
 Configuration is read from `.env` or the process environment:
 
@@ -30,7 +22,8 @@ Configuration is read from `.env` or the process environment:
   CLI web tools.
 - `AGENT_WORKBENCH_ADDR`: bind address, default `127.0.0.1:3030`.
 - `AGENT_WORKBENCH_RESTATE_ADDR`: Restate endpoint bind address, default
-  `127.0.0.1:9081`.
+  `127.0.0.1:9081`. The `just agent-workbench` entrypoint starts Restate with
+  host networking, so Restate can call this localhost endpoint directly.
 - `RESTATE_INGRESS_URL`: Restate ingress URL, default `http://127.0.0.1:8080`.
 - `AGENT_WORKBENCH_DATA_DIR`: persistence directory, default
   `.agent-workbench`.
@@ -38,6 +31,24 @@ Configuration is read from `.env` or the process environment:
   `.agent-workbench/trace.jsonl`.
 - `AGENT_WORKBENCH_LASHLANG_EXECUTION_TRACE`: JSONL Lashlang execution graph
   trace path, default `.agent-workbench/lashlang-execution.jsonl`.
+- `RESTATE_ADMIN_URL`: Restate Admin URL used by the entrypoint for deployment
+  registration, default `http://127.0.0.1:19070` so the dev runner does not
+  collide with other local Restate/admin listeners.
+- `AGENT_WORKBENCH_RESTATE_ADMIN_PORT`: host port for the Restate Admin
+  container started by the entrypoint, default `19070`.
+- `AGENT_WORKBENCH_RESTATE_NODE_PORT`: host port for the Restate node endpoint
+  started by the entrypoint, default `19071`.
+- `AGENT_WORKBENCH_RESTATE_ENDPOINT_URL`: URL Restate should use to reach the
+  workbench endpoint, default `http://127.0.0.1:9081` for the host-networked
+  Docker Restate container started by the entrypoint.
+- `AGENT_WORKBENCH_OPEN`: set to `0` to skip opening the browser.
+- `AGENT_WORKBENCH_RESTATE_IMAGE`: Restate Docker image for the entrypoint,
+  default `restatedev/restate:latest`.
+- `AGENT_WORKBENCH_RESTATE_CONTAINER`: Restate Docker container name for the
+  entrypoint, default `lash-agent-workbench-dev-restate`.
+- `AGENT_WORKBENCH_TOKIO_STACK_BYTES`: Tokio worker thread stack for the
+  workbench process, default `16777216`. RLM + Restate + Lashlang execution has
+  deep debug-build futures and should not run on Tokio's default worker stack.
 - `OPENROUTER_MODEL`: default `anthropic/claude-sonnet-4.6`.
 - `OPENROUTER_MODEL_VARIANT`: default `high`; choose `provider default` in
   the UI to send no variant for models without configurable thinking.

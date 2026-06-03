@@ -8,25 +8,13 @@ impl RuntimeTurnDriver<'_> {
         cancel: CancellationToken,
         run_offset: usize,
     ) -> Result<(crate::MessageSequence, usize), RuntimeError> {
-        let (machine, machine_config_snapshot) = match self
+        let machine = match self
             .prepare_turn_machine(messages, &event_tx, run_offset)
             .await
         {
             Ok(prepared) => prepared,
             Err(result) => return Ok(result),
         };
-        self.machine_config_snapshot = Some(machine_config_snapshot);
-        self.run_machine(machine, event_tx, cancel, run_offset)
-            .await
-    }
-
-    pub(in crate::runtime) async fn run_restored(
-        &mut self,
-        machine: TurnMachine,
-        event_tx: mpsc::Sender<RuntimeStreamEvent>,
-        cancel: CancellationToken,
-        run_offset: usize,
-    ) -> Result<(crate::MessageSequence, usize), RuntimeError> {
         self.run_machine(machine, event_tx, cancel, run_offset)
             .await
     }

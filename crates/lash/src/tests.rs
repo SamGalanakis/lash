@@ -21,21 +21,22 @@ fn mock_model_spec() -> lash_core::ModelSpec {
     model_spec("mock-model", None, 200_000)
 }
 
+fn test_current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 #[derive(Default)]
 struct SnapshotStore {
     read: std::sync::Mutex<Option<lash_core::store::PersistedSessionRead>>,
     scopes: std::sync::Mutex<Vec<lash_core::SessionReadScope>>,
-    runtime_turn_checkpoints: std::sync::Mutex<
-        std::collections::HashMap<(String, String), lash_core::store::RuntimeTurnCheckpoint>,
-    >,
-    runtime_effect_journal: std::sync::Mutex<
+    runtime_turn_commits: std::sync::Mutex<
         std::collections::HashMap<
-            (String, String, String),
-            lash_core::store::RuntimeEffectJournalRecord,
+            (String, String),
+            (String, lash_core::store::RuntimeCommitResult),
         >,
-    >,
-    runtime_turn_leases: std::sync::Mutex<
-        std::collections::HashMap<(String, String), lash_core::store::RuntimeTurnLease>,
     >,
 }
 
@@ -63,9 +64,7 @@ impl SnapshotStore {
                 token_ledger: Vec::new(),
             })),
             scopes: std::sync::Mutex::new(Vec::new()),
-            runtime_turn_checkpoints: std::sync::Mutex::new(std::collections::HashMap::new()),
-            runtime_effect_journal: std::sync::Mutex::new(std::collections::HashMap::new()),
-            runtime_turn_leases: std::sync::Mutex::new(std::collections::HashMap::new()),
+            runtime_turn_commits: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -85,32 +84,6 @@ impl SnapshotStore {
         }
         read.head_revision += 1;
     }
-
-    fn ensure_lease(
-        &self,
-        lease: &lash_core::store::RuntimeTurnLease,
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        self.runtime_turn_leases
-            .lock()
-            .expect("runtime turn leases lock")
-            .get(&(lease.session_id.clone(), lease.turn_id.clone()))
-            .filter(|current| {
-                current.lease_token == lease.lease_token
-                    && current.expires_at_epoch_ms > test_current_epoch_ms()
-            })
-            .ok_or_else(|| lash_core::store::StoreError::RuntimeTurnLeaseExpired {
-                session_id: lease.session_id.clone(),
-                turn_id: lease.turn_id.clone(),
-            })?;
-        Ok(())
-    }
-}
-
-fn test_current_epoch_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default()
 }
 
 lash_core::impl_noop_attachment_manifest!(SnapshotStore);
@@ -154,21 +127,25 @@ impl lash_core::RuntimePersistence for SnapshotStore {
     ) -> std::result::Result<lash_core::store::RuntimeCommitResult, lash_core::store::StoreError>
     {
         let mut read = self.read.lock().expect("snapshot store lock");
-        if let Some(completed) = &commit.completed_turn
-            && let Some(lease_token) = completed.lease_token.as_deref()
-        {
-            let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
-            let lease_matches = self
-                .runtime_turn_leases
-                .lock()
-                .expect("runtime turn leases lock")
-                .get(&lease_key)
-                .is_some_and(|lease| {
-                    lease.lease_token == lease_token
-                        && lease.expires_at_epoch_ms > test_current_epoch_ms()
+        if let Some(completed) = &commit.turn_commit {
+            if completed.session_id != commit.session_id {
+                return Err(lash_core::store::StoreError::RuntimeTurnCommitConflict {
+                    session_id: completed.session_id.clone(),
+                    turn_id: completed.turn_id.clone(),
                 });
-            if !lease_matches {
-                return Err(lash_core::store::StoreError::RuntimeTurnLeaseExpired {
+            }
+            let key = (completed.session_id.clone(), completed.turn_id.clone());
+            if let Some((stored_hash, result)) = self
+                .runtime_turn_commits
+                .lock()
+                .expect("runtime turn commits lock")
+                .get(&key)
+                .cloned()
+            {
+                if stored_hash == completed.turn_commit_hash {
+                    return Ok(result);
+                }
+                return Err(lash_core::store::StoreError::RuntimeTurnCommitConflict {
                     session_id: completed.session_id.clone(),
                     turn_id: completed.turn_id.clone(),
                 });
@@ -206,30 +183,21 @@ impl lash_core::RuntimePersistence for SnapshotStore {
             checkpoint: Some(commit.checkpoint),
             token_ledger: commit.usage_deltas,
         });
-        if let Some(completed) = &commit.completed_turn
-            && completed.lease_token.is_some()
-        {
-            let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
-            self.runtime_turn_checkpoints
-                .lock()
-                .expect("runtime turn checkpoints lock")
-                .remove(&lease_key);
-            self.runtime_turn_leases
-                .lock()
-                .expect("runtime turn leases lock")
-                .remove(&lease_key);
-            self.runtime_effect_journal
-                .lock()
-                .expect("runtime effect journal lock")
-                .retain(|(session_id, turn_id, _), _| {
-                    session_id != &completed.session_id || turn_id != &completed.turn_id
-                });
-        }
-        Ok(lash_core::store::RuntimeCommitResult {
+        let result = lash_core::store::RuntimeCommitResult {
             head_revision: 8,
             checkpoint_ref: lash_core::BlobRef("checkpoint".to_string()),
             manifest: lash_core::store::SessionCheckpoint::default(),
-        })
+        };
+        if let Some(completed) = &commit.turn_commit {
+            self.runtime_turn_commits
+                .lock()
+                .expect("runtime turn commits lock")
+                .insert(
+                    (completed.session_id.clone(), completed.turn_id.clone()),
+                    (completed.turn_commit_hash.clone(), result.clone()),
+                );
+        }
+        Ok(result)
     }
 
     async fn enqueue_queued_work(
@@ -283,10 +251,6 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         Ok(Vec::new())
     }
 
-    fn embedded_durable_turn_store(&self) -> Option<&dyn lash_core::EmbeddedDurableTurnStore> {
-        Some(self)
-    }
-
     async fn save_session_meta(
         &self,
         _meta: lash_core::SessionMeta,
@@ -317,136 +281,6 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         &self,
     ) -> std::result::Result<lash_core::GcReport, lash_core::store::StoreError> {
         Ok(lash_core::GcReport::default())
-    }
-}
-
-#[async_trait]
-impl lash_core::EmbeddedDurableTurnStore for SnapshotStore {
-    async fn claim_runtime_turn_lease(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        owner_id: &str,
-        lease_ttl_ms: u64,
-    ) -> std::result::Result<lash_core::store::RuntimeTurnLease, lash_core::store::StoreError> {
-        let lease = lash_core::store::RuntimeTurnLease {
-            schema_version: lash_core::store::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
-            session_id: session_id.to_string(),
-            turn_id: turn_id.to_string(),
-            owner_id: owner_id.to_string(),
-            lease_token: format!("{session_id}:{turn_id}:{owner_id}"),
-            fencing_token: 1,
-            claimed_at_epoch_ms: test_current_epoch_ms(),
-            expires_at_epoch_ms: test_current_epoch_ms().saturating_add(lease_ttl_ms),
-        };
-        self.runtime_turn_leases
-            .lock()
-            .expect("runtime turn leases lock")
-            .insert((session_id.to_string(), turn_id.to_string()), lease.clone());
-        Ok(lease)
-    }
-
-    async fn renew_runtime_turn_lease(
-        &self,
-        lease: &lash_core::store::RuntimeTurnLease,
-        lease_ttl_ms: u64,
-    ) -> std::result::Result<lash_core::store::RuntimeTurnLease, lash_core::store::StoreError> {
-        let renewed = lash_core::store::RuntimeTurnLease {
-            expires_at_epoch_ms: test_current_epoch_ms().saturating_add(lease_ttl_ms),
-            ..lease.clone()
-        };
-        self.runtime_turn_leases
-            .lock()
-            .expect("runtime turn leases lock")
-            .insert(
-                (renewed.session_id.clone(), renewed.turn_id.clone()),
-                renewed.clone(),
-            );
-        Ok(renewed)
-    }
-
-    async fn abandon_runtime_turn_lease(
-        &self,
-        lease: &lash_core::store::RuntimeTurnLease,
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        self.runtime_turn_leases
-            .lock()
-            .expect("runtime turn leases lock")
-            .remove(&(lease.session_id.clone(), lease.turn_id.clone()));
-        Ok(())
-    }
-
-    async fn save_runtime_turn_checkpoint(
-        &self,
-        lease: &lash_core::store::RuntimeTurnLease,
-        checkpoint: lash_core::store::RuntimeTurnCheckpoint,
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        self.ensure_lease(lease)?;
-        self.runtime_turn_checkpoints
-            .lock()
-            .expect("runtime turn checkpoints lock")
-            .insert(
-                (checkpoint.session_id.clone(), checkpoint.turn_id.clone()),
-                checkpoint,
-            );
-        Ok(())
-    }
-
-    async fn load_runtime_turn_checkpoint(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-    ) -> std::result::Result<
-        Option<lash_core::store::RuntimeTurnCheckpoint>,
-        lash_core::store::StoreError,
-    > {
-        Ok(self
-            .runtime_turn_checkpoints
-            .lock()
-            .expect("runtime turn checkpoints lock")
-            .get(&(session_id.to_string(), turn_id.to_string()))
-            .cloned())
-    }
-
-    async fn save_runtime_effect_outcome(
-        &self,
-        lease: &lash_core::store::RuntimeTurnLease,
-        record: lash_core::store::RuntimeEffectJournalRecord,
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        self.ensure_lease(lease)?;
-        self.runtime_effect_journal
-            .lock()
-            .expect("runtime effect journal lock")
-            .insert(
-                (
-                    record.session_id.clone(),
-                    record.turn_id.clone(),
-                    record.replay_key.clone(),
-                ),
-                record,
-            );
-        Ok(())
-    }
-
-    async fn load_runtime_effect_outcome(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        replay_key: &str,
-    ) -> std::result::Result<
-        Option<lash_core::store::RuntimeEffectJournalRecord>,
-        lash_core::store::StoreError,
-    > {
-        Ok(self
-            .runtime_effect_journal
-            .lock()
-            .expect("runtime effect journal lock")
-            .get(&(
-                session_id.to_string(),
-                turn_id.to_string(),
-                replay_key.to_string(),
-            ))
-            .cloned())
     }
 }
 
@@ -504,10 +338,6 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
 
     lash_core::impl_unsupported_queued_work_methods!();
 
-    fn embedded_durable_turn_store(&self) -> Option<&dyn lash_core::EmbeddedDurableTurnStore> {
-        Some(self)
-    }
-
     async fn save_session_meta(
         &self,
         _meta: lash_core::SessionMeta,
@@ -545,85 +375,6 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
         &self,
     ) -> std::result::Result<lash_core::GcReport, lash_core::store::StoreError> {
         Ok(lash_core::GcReport::default())
-    }
-}
-
-#[async_trait]
-impl lash_core::EmbeddedDurableTurnStore for BoundSessionStore {
-    async fn claim_runtime_turn_lease(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        owner_id: &str,
-        lease_ttl_ms: u64,
-    ) -> std::result::Result<lash_core::store::RuntimeTurnLease, lash_core::store::StoreError> {
-        Ok(lash_core::store::RuntimeTurnLease {
-            schema_version: lash_core::store::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
-            session_id: session_id.to_string(),
-            turn_id: turn_id.to_string(),
-            owner_id: owner_id.to_string(),
-            lease_token: format!("{session_id}:{turn_id}:{owner_id}"),
-            fencing_token: 1,
-            claimed_at_epoch_ms: 0,
-            expires_at_epoch_ms: lease_ttl_ms,
-        })
-    }
-
-    async fn renew_runtime_turn_lease(
-        &self,
-        lease: &lash_core::store::RuntimeTurnLease,
-        lease_ttl_ms: u64,
-    ) -> std::result::Result<lash_core::store::RuntimeTurnLease, lash_core::store::StoreError> {
-        Ok(lash_core::store::RuntimeTurnLease {
-            expires_at_epoch_ms: lease.expires_at_epoch_ms.saturating_add(lease_ttl_ms),
-            ..lease.clone()
-        })
-    }
-
-    async fn abandon_runtime_turn_lease(
-        &self,
-        _lease: &lash_core::store::RuntimeTurnLease,
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        Ok(())
-    }
-
-    async fn save_runtime_turn_checkpoint(
-        &self,
-        _lease: &lash_core::store::RuntimeTurnLease,
-        _checkpoint: lash_core::store::RuntimeTurnCheckpoint,
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        Ok(())
-    }
-
-    async fn load_runtime_turn_checkpoint(
-        &self,
-        _session_id: &str,
-        _turn_id: &str,
-    ) -> std::result::Result<
-        Option<lash_core::store::RuntimeTurnCheckpoint>,
-        lash_core::store::StoreError,
-    > {
-        Ok(None)
-    }
-
-    async fn save_runtime_effect_outcome(
-        &self,
-        _lease: &lash_core::store::RuntimeTurnLease,
-        _record: lash_core::store::RuntimeEffectJournalRecord,
-    ) -> std::result::Result<(), lash_core::store::StoreError> {
-        Ok(())
-    }
-
-    async fn load_runtime_effect_outcome(
-        &self,
-        _session_id: &str,
-        _turn_id: &str,
-        _replay_key: &str,
-    ) -> std::result::Result<
-        Option<lash_core::store::RuntimeEffectJournalRecord>,
-        lash_core::store::StoreError,
-    > {
-        Ok(None)
     }
 }
 
@@ -736,6 +487,53 @@ impl ToolProvider for AppTools {
     async fn execute(&self, _call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
         lash_core::ToolResult::ok(serde_json::json!({ "ok": true }))
     }
+}
+
+struct AgentFrameSwitchTools;
+
+#[async_trait]
+impl ToolProvider for AgentFrameSwitchTools {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![agent_frame_switch_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "switch_frame").then(|| Arc::new(agent_frame_switch_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        assert_eq!(call.name, "switch_frame");
+        let task = call
+            .args
+            .get("task")
+            .and_then(serde_json::Value::as_str)
+            .expect("task arg")
+            .to_string();
+        lash_core::ToolResult::ok(serde_json::json!({ "ok": true })).with_control(
+            lash_core::ToolControl::SwitchAgentFrame {
+                frame_id: "durable-follow-frame".to_string(),
+                initial_nodes: Vec::new(),
+                task: Some(task),
+            },
+        )
+    }
+}
+
+fn agent_frame_switch_tool_definition() -> lash_core::ToolDefinition {
+    lash_core::ToolDefinition::raw(
+        "tool:switch_frame",
+        "switch_frame",
+        "Switch to a fresh agent frame.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": { "type": "string" }
+            },
+            "required": ["task"],
+            "additionalProperties": false
+        }),
+        serde_json::json!({ "type": "object" }),
+    )
 }
 
 fn app_tool_definition() -> lash_core::ToolDefinition {
@@ -875,6 +673,32 @@ fn tool_roundtrip_provider() -> ProviderHandle {
             }],
             ..LlmResponse::default()
         },
+    ])));
+    crate::testing::TestProvider::builder()
+        .kind("embed-test")
+        .complete(move |_request| {
+            let responses = Arc::clone(&responses);
+            async move { Ok(responses.lock().await.pop_front().expect("queued response")) }
+        })
+        .build()
+        .into_handle()
+}
+
+fn agent_frame_switch_provider() -> ProviderHandle {
+    let responses = Arc::new(TokioMutex::new(VecDeque::from([
+        LlmResponse {
+            parts: vec![LlmOutputPart::ToolCall {
+                call_id: "switch-call".to_string(),
+                tool_name: "switch_frame".to_string(),
+                input_json: serde_json::json!({
+                    "task": "finish in the next frame"
+                })
+                .to_string(),
+                replay: None,
+            }],
+            ..LlmResponse::default()
+        },
+        text_response("done after frame switch"),
     ])));
     crate::testing::TestProvider::builder()
         .kind("embed-test")

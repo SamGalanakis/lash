@@ -331,7 +331,7 @@ impl ProcessService for UnavailableProcessService {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use serde_json::json;
 
@@ -536,6 +536,16 @@ mod tests {
         record
     }
 
+    fn test_process_scope(id: &str) -> ProcessOpScope<'static> {
+        ProcessOpScope::new(
+            crate::ScopedEffectController::shared(
+                Arc::new(crate::InlineRuntimeEffectController),
+                crate::EffectScope::runtime_operation(id),
+            )
+            .expect("test effect scope"),
+        )
+    }
+
     #[tokio::test]
     async fn default_process_cancel_ability_validates_visibility_and_calls_primitive() {
         let service =
@@ -547,7 +557,7 @@ mod tests {
                 ProcessCancelRequest::new(
                     "session-1",
                     "process-1",
-                    ProcessOpScope::new(),
+                    test_process_scope("cancel-visible"),
                     ProcessCancelSource::HostApi,
                 ),
             )
@@ -572,7 +582,7 @@ mod tests {
                 ProcessCancelRequest::new(
                     "session-1",
                     "p1",
-                    ProcessOpScope::new(),
+                    test_process_scope("cancel-hidden"),
                     ProcessCancelSource::Tool,
                 ),
             )
@@ -597,7 +607,7 @@ mod tests {
                 &service,
                 ProcessCancelAllRequest::new(
                     "session-1",
-                    ProcessOpScope::new(),
+                    test_process_scope("cancel-all"),
                     ProcessCancelSource::Tool,
                 )
                 .with_reason("requested by tool"),

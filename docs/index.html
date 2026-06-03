@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="dark light">
 <title>lash · an embeddable agent runtime for Rust</title>
-<meta name="description" content="lash is a sans-IO agent runtime for Rust: the layer you build an agent on, not a fixed loop. Swap the execution mode, context strategy, tools, and durability substrate. Its RLM mode lets the model write programs with lazy variables, every effect crossing a host boundary.">
+<meta name="description" content="lash is a sans-IO agent runtime for Rust: the layer you build an agent on, not a fixed loop. Swap the execution mode, context strategy, tools, stores, and effect hosts. Its RLM mode lets the model write programs with lazy variables, every effect crossing a host boundary.">
 <link rel="icon" type="image/svg+xml" href="./favicon.svg">
 <link rel="icon" href="./favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="./apple-touch-icon.png">
@@ -250,7 +250,7 @@
 
         <dl class="defs">
           <dt>host app owns</dt>
-          <dd>Auth, transport, product state, and the storage backend or workflow substrate. The host decides which providers, stores, resources, and authorities exist.</dd>
+          <dd>Auth, transport, product state, storage backends, and workflow/effect hosts. The host decides which providers, stores, resources, and authorities exist.</dd>
           <dt>lash owns</dt>
           <dd>The runtime records inside that boundary: session graph, turn commits, checkpoints, effect journal, queued work, attachment manifest, semantic events, and plugin execution.</dd>
         </dl>
@@ -322,9 +322,9 @@ start notify(mail: gmail.work)</code></pre>
           <dt>completed turns</dt>
           <dd>The turn is the unit a host observes. It settles as one atomic commit: the session graph, head revision, and usage applied together. How the turn was executed stays out of this contract, so the settled state is coherent no matter what ran underneath.</dd>
           <dt>in-flight effects</dt>
-          <dd>A durable turn provider handles the narrower question: what if the host crashes while one nondeterministic effect is in flight? Each effect (an LLM call, a tool call, process control, a retry sleep) is checkpointed and journaled, so the turn resumes and that effect runs exactly once.</dd>
+          <dd>A durable effect host handles the narrower question: what if the host crashes while one nondeterministic effect is in flight? Each named effect (an LLM call, a tool call, process control, a retry sleep) crosses a scoped controller so a workflow host such as Restate can replay it from host history.</dd>
         </dl>
-        <p>Where that in-flight replay lives is host wiring: <em>embedded</em>, with lash journaling to a local SQLite store, or <em>substrate-native</em>, where a workflow engine like Restate owns replay instead. The turn-commit contract underneath is the same either way.</p>
+        <p>In-flight replay lives in host wiring. The inline host is local and reopens only the last committed state after a crash. Durable workflow engines like Restate own effect replay and timers, while Lash retries the same final commit through the store's turn-commit stamp.</p>
       </div>
     </section>
 
@@ -379,7 +379,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     println!("{}", result.assistant_message().unwrap_or_default());
     Ok(())
 }</code></pre>
-        <p>From there the runtime hands a backend more: <code>session.resume_turn(id)</code> finishes an interrupted turn from its checkpoint, <code>session.next_queued_turn()</code> drives turns from an app-owned queue, and <code>turn.provider(…)</code> / <code>turn.model(…)</code> override the model per turn.</p>
+        <p>From there the runtime hands a backend more: <code>session.next_queued_turn()</code> drives turns from an app-owned queue, <code>turn.provider(…)</code> / <code>turn.model(…)</code> override the model per turn, and durable workflow hosts run turns with handler-scoped effect controllers.</p>
         <a class="stanza__link" href="./quickstart.html">read the quickstart <span class="arrow" aria-hidden="true">→</span></a>
       </div>
     </section>

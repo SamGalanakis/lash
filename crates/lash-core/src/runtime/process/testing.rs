@@ -25,6 +25,7 @@ use super::validation::{
 
 /// In-memory process registry for core tests.
 pub struct TestLocalProcessRegistry {
+    durability_tier: crate::DurabilityTier,
     managed: Arc<Mutex<ManagedProcessMap>>,
     grants: Arc<Mutex<ManagedGrantMap>>,
     leases: Arc<Mutex<ManagedLeaseMap>>,
@@ -33,6 +34,7 @@ pub struct TestLocalProcessRegistry {
 impl Default for TestLocalProcessRegistry {
     fn default() -> Self {
         Self {
+            durability_tier: crate::DurabilityTier::Inline,
             managed: Arc::new(Mutex::new(HashMap::new())),
             grants: Arc::new(Mutex::new(HashMap::new())),
             leases: Arc::new(Mutex::new(HashMap::new())),
@@ -53,6 +55,15 @@ struct ManagedProcessRecord {
 }
 
 impl TestLocalProcessRegistry {
+    pub fn with_durability_tier(mut self, durability_tier: crate::DurabilityTier) -> Self {
+        self.durability_tier = durability_tier;
+        self
+    }
+
+    pub fn durable() -> Self {
+        Self::default().with_durability_tier(crate::DurabilityTier::Durable)
+    }
+
     async fn insert_process(
         &self,
         mut registration: ProcessRegistration,
@@ -92,6 +103,10 @@ impl TestLocalProcessRegistry {
 
 #[async_trait::async_trait]
 impl ProcessRegistry for TestLocalProcessRegistry {
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        self.durability_tier
+    }
+
     async fn register_process(
         &self,
         registration: ProcessRegistration,
@@ -587,9 +602,8 @@ impl ProcessRegistry for TestLocalProcessRegistry {
     }
 }
 
-/// Loud, stable error for a fenced process-lease claim. Mirrors
-/// [`StoreError::RuntimeTurnLeaseConflict`](crate::StoreError) on the
-/// `PluginError` channel the [`ProcessRegistry`] trait returns.
+/// Loud, stable error for a fenced process-lease claim on the `PluginError`
+/// channel the [`ProcessRegistry`] trait returns.
 fn process_lease_conflict(process_id: &str, current: &ProcessLease) -> PluginError {
     PluginError::Session(format!(
         "process `{process_id}` is already leased by `{}` until {}",
@@ -597,8 +611,7 @@ fn process_lease_conflict(process_id: &str, current: &ProcessLease) -> PluginErr
     ))
 }
 
-/// Loud, stable error for a superseded or expired process lease. Mirrors
-/// [`StoreError::RuntimeTurnLeaseExpired`](crate::StoreError).
+/// Loud, stable error for a superseded or expired process lease.
 fn process_lease_expired(process_id: &str) -> PluginError {
     PluginError::Session(format!(
         "process lease for `{process_id}` is missing or expired"

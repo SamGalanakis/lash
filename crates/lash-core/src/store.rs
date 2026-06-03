@@ -50,21 +50,6 @@ pub enum StoreError {
     #[error("store head revision conflict: expected {expected:?}, actual {actual}")]
     HeadRevisionConflict { expected: Option<u64>, actual: u64 },
     #[error(
-        "turn `{turn_id}` for session `{session_id}` is already leased by `{owner_id}` until {expires_at_epoch_ms}"
-    )]
-    RuntimeTurnLeaseConflict {
-        session_id: String,
-        turn_id: String,
-        owner_id: String,
-        expires_at_epoch_ms: u64,
-    },
-    #[error("runtime turn lease for `{session_id}`/`{turn_id}` is missing or expired")]
-    RuntimeTurnLeaseExpired { session_id: String, turn_id: String },
-    #[error("runtime effect journal hash mismatch for replay key `{replay_key}`")]
-    RuntimeEffectJournalHashMismatch { replay_key: String },
-    #[error("runtime turn checkpoint hash mismatch for `{session_id}`/`{turn_id}`")]
-    RuntimeTurnCheckpointHashMismatch { session_id: String, turn_id: String },
-    #[error(
         "runtime turn `{turn_id}` for session `{session_id}` was already committed with a different commit hash"
     )]
     RuntimeTurnCommitConflict { session_id: String, turn_id: String },
@@ -282,7 +267,7 @@ pub struct RuntimeCommit {
     pub graph: GraphCommitDelta,
     pub checkpoint: HydratedSessionCheckpoint,
     pub usage_deltas: Vec<crate::TokenLedgerEntry>,
-    pub completed_turn: Option<RuntimeTurnCompletion>,
+    pub turn_commit: Option<RuntimeTurnCommitStamp>,
     pub completed_queue_claims: Vec<crate::QueuedWorkCompletion>,
     /// Attachment ids whose bytes are referenced by this commit and
     /// should be stamped `committed` in the write-ahead manifest as
@@ -552,22 +537,6 @@ macro_rules! impl_unsupported_queued_work_methods {
     };
 }
 
-/// Wire-format version stamped on every persisted [`RuntimeTurnCheckpoint`].
-///
-/// Bump when the on-wire shape of `RuntimeTurnCheckpoint` changes in a way that
-/// older code cannot safely deserialize (enum-variant renames, field-meaning
-/// changes, removed required fields). Bytes carrying older or newer versions
-/// are rejected at load via [`ensure_supported_schema_version`] so a binary
-/// upgrade against in-flight durable state (Restate / SQLite) fails closed
-/// rather than silently misparsing.
-pub const RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
-/// Wire-format version for [`RuntimeTurnLease`]. See
-/// [`RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION`] for upgrade semantics.
-pub const RUNTIME_TURN_LEASE_SCHEMA_VERSION: u32 = 1;
-/// Wire-format version for [`RuntimeEffectJournalRecord`]. See
-/// [`RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION`] for upgrade semantics.
-pub const RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION: u32 = 1;
-
 /// Reject a persisted record whose `schema_version` does not match the
 /// version this binary supports. Backends call this immediately after
 /// deserializing a record from durable storage.
@@ -588,85 +557,14 @@ pub fn ensure_supported_schema_version(
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RuntimeTurnMachineConfigSnapshot {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_session_id: Option<String>,
-    pub autonomous: bool,
-    pub model: crate::ModelSpec,
-    #[serde(default)]
-    pub generation: crate::GenerationOptions,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_turns: Option<usize>,
-    pub sync_execution_surface: bool,
-    pub tool_specs: std::sync::Arc<Vec<crate::llm::types::LlmToolSpec>>,
-    pub system_prompt: String,
-    pub termination: crate::ProtocolTurnOptions,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RuntimeTurnCheckpoint {
-    pub schema_version: u32,
-    pub session_id: String,
-    pub turn_id: String,
-    pub turn_index: usize,
-    pub protocol_iteration: usize,
-    pub checkpoint_hash: String,
-    pub machine_config: RuntimeTurnMachineConfigSnapshot,
-    pub checkpoint: lash_sansio::TurnCheckpoint<crate::HostTurnProtocol>,
-    pub protocol_turn_options: crate::ProtocolTurnOptions,
-    pub turn_prompt_layer: crate::PromptLayer,
-    pub provider_id: String,
-    pub model: crate::ModelSpec,
-    pub updated_at_epoch_ms: u64,
-}
-
-/// Durable lease over a runtime turn.
-///
-/// The lease pair `(owner_id, lease_token)` plus `fencing_token` are how lash
-/// guarantees that one logical turn is driven by exactly one worker at a
-/// time — even after a crash, even across two runtimes that both think
-/// they own the session. The local SQLite backend (`lash-sqlite-store`)
-/// uses these to serialize concurrent claims on the same `(session_id,
-/// turn_id)`; future distributed durable backends (Restate, hosted KV) use
-/// the *same* fields to coordinate workers that don't share a file system.
-///
-/// **This is not single-process theatre.** The owner / fencing-token /
-/// lease-token triple is the public contract that lets any future backend
-/// detect and reject stale writers. Treat it as load-bearing, not
-/// defensive.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RuntimeTurnLease {
-    pub schema_version: u32,
-    pub session_id: String,
-    pub turn_id: String,
-    pub owner_id: String,
-    pub lease_token: String,
-    pub fencing_token: u64,
-    pub claimed_at_epoch_ms: u64,
-    pub expires_at_epoch_ms: u64,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RuntimeTurnCompletion {
+pub struct RuntimeTurnCommitStamp {
     pub session_id: String,
     pub turn_id: String,
     pub turn_commit_hash: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lease_token: Option<String>,
 }
 
-impl RuntimeTurnCompletion {
-    pub fn from_lease(lease: &RuntimeTurnLease, turn_commit_hash: impl Into<String>) -> Self {
-        Self {
-            session_id: lease.session_id.clone(),
-            turn_id: lease.turn_id.clone(),
-            turn_commit_hash: turn_commit_hash.into(),
-            lease_token: Some(lease.lease_token.clone()),
-        }
-    }
-
-    pub fn substrate_native(
+impl RuntimeTurnCommitStamp {
+    pub fn new(
         session_id: impl Into<String>,
         turn_id: impl Into<String>,
         turn_commit_hash: impl Into<String>,
@@ -675,28 +573,8 @@ impl RuntimeTurnCompletion {
             session_id: session_id.into(),
             turn_id: turn_id.into(),
             turn_commit_hash: turn_commit_hash.into(),
-            lease_token: None,
         }
     }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RuntimeEffectJournalRecord {
-    pub schema_version: u32,
-    pub session_id: String,
-    pub turn_id: String,
-    pub replay_key: String,
-    pub envelope_hash: String,
-    pub effect_kind: crate::RuntimeEffectKind,
-    pub outcome: crate::RuntimeEffectOutcome,
-    pub created_at_epoch_ms: u64,
-}
-
-pub fn runtime_turn_checkpoint_hash(
-    checkpoint: &lash_sansio::TurnCheckpoint<crate::HostTurnProtocol>,
-) -> Result<String, StoreError> {
-    crate::stable_hash::stable_json_sha256_hex(checkpoint)
-        .map_err(|err| StoreError::Backend(format!("failed to serialize turn checkpoint: {err}")))
 }
 
 fn build_persisted_turn_state(state: &crate::RuntimeSessionState) -> crate::PersistedTurnState {
@@ -727,9 +605,15 @@ impl RuntimeCommit {
     pub fn turn_commit_hash(&self) -> Result<String, StoreError> {
         let mut semantic_commit = self.clone();
         semantic_commit.expected_head_revision = None;
-        semantic_commit.completed_turn = None;
-        crate::stable_hash::stable_json_sha256_hex(&semantic_commit).map_err(|err| {
+        semantic_commit.turn_commit = None;
+        let mut semantic_commit = serde_json::to_value(&semantic_commit).map_err(|err| {
             StoreError::Backend(format!("failed to serialize runtime turn commit: {err}"))
+        })?;
+        scrub_turn_commit_hash_value(&mut semantic_commit);
+        crate::stable_hash::stable_json_sha256_hex(&semantic_commit).map_err(|err| {
+            StoreError::Backend(format!(
+                "failed to serialize runtime turn commit hash: {err}"
+            ))
         })
     }
 
@@ -752,7 +636,7 @@ impl RuntimeCommit {
             },
             checkpoint: build_checkpoint_from_persisted_state(state),
             usage_deltas: usage_deltas.to_vec(),
-            completed_turn: None,
+            turn_commit: None,
             completed_queue_claims: Vec::new(),
             committed_attachment_ids: Vec::new(),
         }
@@ -772,14 +656,14 @@ impl RuntimeCommit {
             graph,
             checkpoint: build_checkpoint_from_persisted_state(state),
             usage_deltas: usage_deltas.to_vec(),
-            completed_turn: None,
+            turn_commit: None,
             completed_queue_claims: Vec::new(),
             committed_attachment_ids: Vec::new(),
         }
     }
 
-    pub fn clearing_completed_turn(mut self, completed_turn: RuntimeTurnCompletion) -> Self {
-        self.completed_turn = Some(completed_turn);
+    pub fn with_turn_commit(mut self, turn_commit: RuntimeTurnCommitStamp) -> Self {
+        self.turn_commit = Some(turn_commit);
         self
     }
 
@@ -805,6 +689,32 @@ impl RuntimeCommit {
     ) -> Self {
         self.committed_attachment_ids = attachment_ids.into_iter().collect();
         self
+    }
+}
+
+fn scrub_turn_commit_hash_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let is_message = map.contains_key("role") && map.contains_key("parts");
+            let is_message_part = map.contains_key("kind")
+                && map.contains_key("content")
+                && map.contains_key("prune_state");
+            if is_message || is_message_part {
+                map.remove("id");
+            }
+            for volatile_key in ["node_id", "parent_node_id", "leaf_node_id", "timestamp"] {
+                map.remove(volatile_key);
+            }
+            for child in map.values_mut() {
+                scrub_turn_commit_hash_value(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                scrub_turn_commit_hash_value(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -894,10 +804,8 @@ impl Default for SessionHeadMeta {
 /// This is the runtime's atomic transaction facade for visible session state:
 /// session graph/head commits, queued-work ingress and completion, final
 /// turn-commit idempotency, metadata, usage, and the attachment write-ahead
-/// manifest. In-flight turn leases, checkpoints, and effect-journal rows are
-/// backend-specific embedded durability concerns exposed through
-/// [`EmbeddedDurableTurnStore`](crate::EmbeddedDurableTurnStore), not the
-/// generic session persistence contract.
+/// manifest. In-flight nondeterministic work belongs to the active
+/// [`EffectHost`](crate::EffectHost), not to the store contract.
 ///
 /// The [`AttachmentManifest`] supertrait is required so the runtime can wrap
 /// any persistence backend with a
@@ -927,10 +835,6 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         &self,
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError>;
-
-    fn embedded_durable_turn_store(&self) -> Option<&dyn crate::runtime::EmbeddedDurableTurnStore> {
-        None
-    }
 
     async fn enqueue_queued_work(
         &self,

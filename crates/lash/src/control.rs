@@ -1,6 +1,5 @@
 pub use crate::session::SessionConfigPatch;
 use crate::support::*;
-use lash_core::runtime::{QueuedWorkBatchDraft, QueuedWorkPayload};
 pub use lash_core::{AcceptedInjectedTurnInput, PluginAction};
 
 #[derive(Clone)]
@@ -239,6 +238,24 @@ impl SessionControl {
         .await
     }
 
+    async fn emit_host_event_with_effect_host(
+        &self,
+        resource_type: &str,
+        alias: &str,
+        event: &str,
+        payload: serde_json::Value,
+        effect_host: &dyn EffectHost,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        let writer = self.runtime.writer();
+        let mut runtime = writer.lock().await;
+        let value = runtime
+            .emit_host_event_with_effect_host(resource_type, alias, event, payload, effect_host)
+            .await
+            .map_err(Into::into);
+        self.runtime.publish_from(&runtime);
+        value
+    }
+
     async fn activate_lashlang_trigger(
         &self,
         handle: &str,
@@ -251,6 +268,22 @@ impl SessionControl {
                 .map_err(Into::into)
         })
         .await
+    }
+
+    async fn activate_lashlang_trigger_with_effect_host(
+        &self,
+        handle: &str,
+        payload: serde_json::Value,
+        effect_host: &dyn EffectHost,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        let writer = self.runtime.writer();
+        let mut runtime = writer.lock().await;
+        let value = runtime
+            .activate_lashlang_trigger_with_effect_host(handle, payload, effect_host)
+            .await
+            .map_err(Into::into);
+        self.runtime.publish_from(&runtime);
+        value
     }
 
     async fn activate_lashlang_trigger_source_type(
@@ -266,6 +299,27 @@ impl SessionControl {
                 .map_err(Into::into)
         })
         .await
+    }
+
+    async fn activate_lashlang_trigger_source_type_with_effect_host(
+        &self,
+        source_type: impl AsRef<str>,
+        payload: serde_json::Value,
+        effect_host: &dyn EffectHost,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        let source_type = source_type.as_ref().to_string();
+        let writer = self.runtime.writer();
+        let mut runtime = writer.lock().await;
+        let value = runtime
+            .activate_lashlang_trigger_source_type_with_effect_host(
+                &source_type,
+                payload,
+                effect_host,
+            )
+            .await
+            .map_err(Into::into);
+        self.runtime.publish_from(&runtime);
+        value
     }
 
     async fn list_lashlang_trigger_registrations(
@@ -367,8 +421,14 @@ impl SessionControl {
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
         let processes = runtime.process_service()?;
+        let effect_host = runtime.effect_host();
+        let scope = lash_core::ProcessOpScope::new(
+            effect_host
+                .scoped(lash_core::EffectScope::process(request.id.clone()))
+                .map_err(EmbedError::from)?,
+        );
         processes
-            .start_from_request(&session_id, request, lash_core::ProcessOpScope::new())
+            .start_from_request(&session_id, request, scope)
             .await
             .map_err(Into::into)
     }
@@ -388,13 +448,19 @@ impl SessionControl {
         let session_id = runtime.session_id().to_string();
         let processes = runtime.process_service()?;
         let cancel_ability = runtime.process_cancel_ability();
+        let effect_host = runtime.effect_host();
+        let scope = lash_core::ProcessOpScope::new(
+            effect_host
+                .scoped(lash_core::EffectScope::process(process_id.to_string()))
+                .map_err(EmbedError::from)?,
+        );
         cancel_ability
             .cancel_summary(
                 processes.as_ref(),
                 lash_core::ProcessCancelRequest::new(
                     &session_id,
                     process_id,
-                    lash_core::ProcessOpScope::new(),
+                    scope,
                     lash_core::ProcessCancelSource::HostApi,
                 )
                 .with_reason("requested by host API"),
@@ -409,12 +475,20 @@ impl SessionControl {
         let session_id = runtime.session_id().to_string();
         let processes = runtime.process_service()?;
         let cancel_ability = runtime.process_cancel_ability();
+        let effect_host = runtime.effect_host();
+        let scope = lash_core::ProcessOpScope::new(
+            effect_host
+                .scoped(lash_core::EffectScope::runtime_operation(format!(
+                    "process:cancel-visible:{session_id}"
+                )))
+                .map_err(EmbedError::from)?,
+        );
         cancel_ability
             .cancel_all_visible(
                 processes.as_ref(),
                 lash_core::ProcessCancelAllRequest::new(
                     &session_id,
-                    lash_core::ProcessOpScope::new(),
+                    scope,
                     lash_core::ProcessCancelSource::HostApi,
                 )
                 .with_reason("requested by host API"),
@@ -565,30 +639,19 @@ impl SessionControl {
     }
 
     async fn inject_turn_inputs(&self, messages: Vec<lash_core::InjectedTurnInput>) -> Result<()> {
-        let observation = self.runtime.observe();
-        let store = observation.queue_store.as_ref().ok_or_else(|| {
-            EmbedError::Runtime(lash_core::RuntimeError::new(
-                lash_core::RuntimeErrorCode::StoreCommitFailed,
-                "queued turn input requires a persistent runtime store",
-            ))
-        })?;
         for input in messages {
             let source_key = input.id.map(|id| format!("injection:{id}"));
             let turn_input = turn_input_from_plugin_message(input.message);
-            lash_core::ensure_durable_turn_input(&turn_input).map_err(EmbedError::Runtime)?;
-            let mut draft = QueuedWorkBatchDraft::new(
-                observation.session_id().to_string(),
-                lash_core::DeliveryPolicy::EarliestSafeBoundary,
-                lash_core::SlotPolicy::Join,
-                vec![QueuedWorkPayload::turn_input(turn_input)],
-            );
-            draft.source_key = source_key;
-            store.enqueue_queued_work(draft).await.map_err(|err| {
-                EmbedError::Runtime(lash_core::RuntimeError::new(
-                    lash_core::RuntimeErrorCode::StoreCommitFailed,
-                    err.to_string(),
-                ))
-            })?;
+            self.runtime
+                .enqueue_turn_input(
+                    turn_input,
+                    lash_core::DeliveryPolicy::EarliestSafeBoundary,
+                    lash_core::SlotPolicy::Join,
+                    source_key,
+                )
+                .await
+                .map(|_| ())
+                .map_err(EmbedError::Runtime)?;
         }
         Ok(())
     }
@@ -785,6 +848,25 @@ impl HostEventsControl {
             )
             .await
     }
+
+    pub async fn emit_with_effect_host(
+        &self,
+        resource_type: impl AsRef<str>,
+        alias: impl AsRef<str>,
+        event: impl AsRef<str>,
+        payload: serde_json::Value,
+        effect_host: &dyn EffectHost,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        self.control
+            .emit_host_event_with_effect_host(
+                resource_type.as_ref(),
+                alias.as_ref(),
+                event.as_ref(),
+                payload,
+                effect_host,
+            )
+            .await
+    }
 }
 
 /// Host controls for Lashlang trigger registrations.
@@ -834,6 +916,17 @@ impl TriggersControl {
             .await
     }
 
+    pub async fn activate_with_effect_host(
+        &self,
+        handle: impl AsRef<str>,
+        payload: serde_json::Value,
+        effect_host: &dyn EffectHost,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        self.control
+            .activate_lashlang_trigger_with_effect_host(handle.as_ref(), payload, effect_host)
+            .await
+    }
+
     /// Activate every enabled trigger route whose source value has this host
     /// value type.
     pub async fn activate_source_type(
@@ -843,6 +936,21 @@ impl TriggersControl {
     ) -> Result<lash_core::HostEventEmitReport> {
         self.control
             .activate_lashlang_trigger_source_type(source_type.as_ref(), payload)
+            .await
+    }
+
+    pub async fn activate_source_type_with_effect_host(
+        &self,
+        source_type: impl AsRef<str>,
+        payload: serde_json::Value,
+        effect_host: &dyn EffectHost,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        self.control
+            .activate_lashlang_trigger_source_type_with_effect_host(
+                source_type.as_ref(),
+                payload,
+                effect_host,
+            )
             .await
     }
 }

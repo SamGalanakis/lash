@@ -212,10 +212,11 @@ pub use runtime::TestLocalProcessRegistry;
 pub use runtime::{
     AgentFrameRun, AssembledTurn, AssistantOutput, CausalRef, CodeOutputRecord,
     DefaultProcessCancelAbility, DeliveryPolicy, DirectCompletionClient, DurableProcessWorker,
-    DurableProcessWorkerConfig, DurableSubstrateFacet, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost,
-    EventSink, ExecutionSummary, InMemorySessionStore, InMemorySessionStoreFactory,
-    InlineProcessRunHandle, InlineRuntimeEffectController, InputItem, LashRuntime, MergeKey,
-    NoopEventSink, NoopTurnActivitySink, OutputState, PROCESS_LEASE_SCHEMA_VERSION, ParkedSession,
+    DurableProcessWorkerConfig, DurableStoreFacet, EffectHost, EffectScope, EmbeddedRuntimeBuilder,
+    EmbeddedRuntimeHost, EventSink, ExecutionSummary, InMemorySessionStore,
+    InMemorySessionStoreFactory, InlineEffectHost, InlineProcessRunHandle,
+    InlineRuntimeEffectController, InputItem, LashRuntime, MergeKey, NoopEventSink,
+    NoopTurnActivitySink, OutputState, PROCESS_LEASE_SCHEMA_VERSION, ParkedSession,
     ProcessAwaitOutput, ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest,
     ProcessCancelSource, ProcessCancelSummary, ProcessDefinitionSelector, ProcessDefinitionSummary,
     ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventType,
@@ -228,13 +229,14 @@ pub use runtime::{
     ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
     ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkPoke,
     ProcessWorkRunner, PromptUsage, ProtocolSessionExtension, ProtocolSessionExtensionHandle,
-    ProtocolTurnExtension, ProtocolTurnExtensionHandle, Residency, RuntimeEnvironment,
+    ProtocolTurnExtension, ProtocolTurnExtensionHandle, QueuedWorkPoke, QueuedWorkRunHandle,
+    QueuedWorkRunOutcome, QueuedWorkRunRequest, QueuedWorkRunner, Residency, RuntimeEnvironment,
     RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeHostConfig,
-    RuntimeObservation, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport,
-    SlotPolicy, TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId,
-    TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions,
+    RuntimeObservation, ScopedEffectController, SessionStoreCreateRequest, SessionStoreFactory,
+    SessionUsageReport, SlotPolicy, TerminationPolicy, TokenLedgerEntry, TurnActivity,
+    TurnActivityId, TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions,
     UnavailableProcessService, UsageReportRow, UsageTotals, current_epoch_ms, diff_token_ledger,
-    diff_usage_reports, ensure_durable_turn_input, epoch_ms_from_system_time,
+    diff_usage_reports, ensure_durable_effect_input, epoch_ms_from_system_time,
     lashlang_process_event_types, system_time_from_epoch_ms,
 };
 #[allow(unused_imports)]
@@ -248,17 +250,14 @@ pub(crate) use runtime::{
     process_wake_input_from_event_payload, process_wake_turn_cause, process_wake_turn_text,
     require_event_replay,
 };
-// Effect / process-control / durable-state types consumed by external durable
-// backends (e.g. lash-restate's LashProcessWorkflow) and their integration
-// tests. Kept on the public surface; the rest of the runtime block above
-// stays crate-internal.
+// Effect / process-control types consumed by external effect hosts (e.g.
+// lash-restate's workflows) and their integration tests. Kept on the public
+// surface; the rest of the runtime block above stays crate-internal.
 pub use runtime::{
-    BeginDurableTurnRequest, DurableTurnCheckpointSnapshot, DurableTurnProvider, DurableTurnRun,
-    DurableTurnScope, EmbeddedDurableTurnProvider, EmbeddedDurableTurnStore, LlmRequestSpec,
-    ProcessCommand, ProcessEffectOutcome, ProcessEventSemanticsSpec, ResumeDurableTurnRequest,
+    LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, ProcessEventSemanticsSpec,
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeInvocation, RuntimeSessionState, SubstrateDurableTurnProvider,
+    RuntimeInvocation, RuntimeSessionState,
 };
 pub use schemars::JsonSchema;
 pub use session::{
@@ -276,8 +275,6 @@ pub use store::{
     AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
     RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError, VacuumReport,
 };
-// Durable-state / checkpoint types consumed by external backends and their
-// conformance/integration tests (lash-sqlite-store, lash-restate, etc.).
 #[allow(unused_imports)]
 pub(crate) use store::{
     GraphCommitDelta, PersistedSessionRead, RuntimeCommitResult, SessionCheckpoint,
@@ -285,11 +282,8 @@ pub(crate) use store::{
     load_persisted_session_state_active_path,
 };
 pub use store::{
-    HydratedSessionCheckpoint, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
-    RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
-    RuntimeEffectJournalRecord, RuntimeTurnCheckpoint, RuntimeTurnCompletion, RuntimeTurnLease,
-    RuntimeTurnMachineConfigSnapshot, SessionHead, refresh_persisted_session_state,
-    runtime_turn_checkpoint_hash,
+    HydratedSessionCheckpoint, RuntimeCommit, RuntimeTurnCommitStamp, SessionHead,
+    refresh_persisted_session_state,
 };
 pub use tool_provider::{
     PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext,
@@ -382,8 +376,6 @@ mod tests {
             "SessionHead",
             "SessionCheckpoint",
             "RuntimeCommit",
-            "RuntimeTurnLease",
-            "RuntimeEffectJournalRecord",
             "HydratedSessionCheckpoint",
             "PersistedSessionRead",
             "GraphCommitDelta",

@@ -56,8 +56,6 @@ pub struct RuntimeInvocation {
     pub caused_by: Option<CausalRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<RuntimeReplay>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint_hash: Option<String>,
 }
 
 impl RuntimeInvocation {
@@ -66,7 +64,6 @@ impl RuntimeInvocation {
         effect_id: impl Into<String>,
         kind: RuntimeEffectKind,
         replay_key: impl Into<String>,
-        checkpoint_hash: Option<String>,
     ) -> Self {
         Self {
             scope,
@@ -78,7 +75,6 @@ impl RuntimeInvocation {
             replay: Some(RuntimeReplay {
                 key: replay_key.into(),
             }),
-            checkpoint_hash,
         }
     }
 

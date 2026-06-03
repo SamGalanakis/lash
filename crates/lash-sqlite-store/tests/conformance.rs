@@ -58,6 +58,35 @@ async fn sqlite_store_satisfies_runtime_persistence_conformance() {
 }
 
 #[test]
+fn sqlite_store_schema_excludes_embedded_turn_replay_tables() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("schema.db");
+    drop(Store::open(&path).expect("open store"));
+    let conn = rusqlite::Connection::open(&path).expect("open raw sqlite");
+    for removed in [
+        concat!("runtime_", "turn_", "checkpoints"),
+        concat!("runtime_", "effect_", "journal"),
+    ] {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [removed],
+                |row| row.get(0),
+            )
+            .expect("query sqlite_master");
+        assert_eq!(count, 0, "{removed} table must not exist");
+    }
+    let turn_commits: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'runtime_turn_commits'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query runtime_turn_commits");
+    assert_eq!(turn_commits, 1);
+}
+
+#[test]
 fn sqlite_store_satisfies_lashlang_artifact_store_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
     lash_core::testing::conformance::lashlang_artifact_store_reopenable(

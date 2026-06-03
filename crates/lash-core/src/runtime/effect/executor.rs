@@ -1,3 +1,4 @@
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -21,8 +22,243 @@ use super::envelope::{
 use super::journal::llm_call_error_from_transport;
 
 // =============================================================================
-// Controller trait + scope + error
+// Effect host + controller trait + scope + error
 // =============================================================================
+
+/// Stable semantic identity for one effectful runtime operation.
+///
+/// The scope is chosen by the host boundary before any nondeterministic work is
+/// planned. It is intentionally generic: Restate, an inline test host, or a
+/// future durable effect host all receive the same Lash scope vocabulary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EffectScope {
+    Turn {
+        session_id: String,
+        turn_id: String,
+    },
+    Process {
+        process_id: String,
+    },
+    HostEvent {
+        session_id: String,
+        event_id: String,
+    },
+    QueueDrain {
+        session_id: String,
+        drain_id: String,
+    },
+    Cron {
+        job_id: String,
+        execution_id: String,
+    },
+    SessionDelete {
+        session_id: String,
+    },
+    RuntimeOperation {
+        operation_id: String,
+    },
+}
+
+impl EffectScope {
+    pub fn turn(session_id: impl Into<String>, turn_id: impl Into<String>) -> Self {
+        Self::Turn {
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+        }
+    }
+
+    pub fn process(process_id: impl Into<String>) -> Self {
+        Self::Process {
+            process_id: process_id.into(),
+        }
+    }
+
+    pub fn host_event(session_id: impl Into<String>, event_id: impl Into<String>) -> Self {
+        Self::HostEvent {
+            session_id: session_id.into(),
+            event_id: event_id.into(),
+        }
+    }
+
+    pub fn queue_drain(session_id: impl Into<String>, drain_id: impl Into<String>) -> Self {
+        Self::QueueDrain {
+            session_id: session_id.into(),
+            drain_id: drain_id.into(),
+        }
+    }
+
+    pub fn cron(job_id: impl Into<String>, execution_id: impl Into<String>) -> Self {
+        Self::Cron {
+            job_id: job_id.into(),
+            execution_id: execution_id.into(),
+        }
+    }
+
+    pub fn session_delete(session_id: impl Into<String>) -> Self {
+        Self::SessionDelete {
+            session_id: session_id.into(),
+        }
+    }
+
+    pub fn runtime_operation(operation_id: impl Into<String>) -> Self {
+        Self::RuntimeOperation {
+            operation_id: operation_id.into(),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Turn { turn_id, .. } => turn_id,
+            Self::Process { process_id } => process_id,
+            Self::HostEvent { event_id, .. } => event_id,
+            Self::QueueDrain { drain_id, .. } => drain_id,
+            Self::Cron { execution_id, .. } => execution_id,
+            Self::SessionDelete { session_id } => session_id,
+            Self::RuntimeOperation { operation_id } => operation_id,
+        }
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Turn { session_id, .. }
+            | Self::HostEvent { session_id, .. }
+            | Self::QueueDrain { session_id, .. }
+            | Self::SessionDelete { session_id } => Some(session_id),
+            Self::Process { .. } | Self::Cron { .. } | Self::RuntimeOperation { .. } => None,
+        }
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        match self {
+            Self::Turn { turn_id, .. } => Some(turn_id),
+            _ => None,
+        }
+    }
+
+    pub fn validates_turn_trace_id(&self) -> bool {
+        matches!(self, Self::Turn { .. })
+    }
+
+    fn validate(&self) -> Result<(), RuntimeError> {
+        let missing = match self {
+            Self::Turn {
+                session_id,
+                turn_id,
+            } => session_id.trim().is_empty() || turn_id.trim().is_empty(),
+            Self::Process { process_id } => process_id.trim().is_empty(),
+            Self::HostEvent {
+                session_id,
+                event_id,
+            } => session_id.trim().is_empty() || event_id.trim().is_empty(),
+            Self::QueueDrain {
+                session_id,
+                drain_id,
+            } => session_id.trim().is_empty() || drain_id.trim().is_empty(),
+            Self::Cron {
+                job_id,
+                execution_id,
+            } => job_id.trim().is_empty() || execution_id.trim().is_empty(),
+            Self::SessionDelete { session_id } => session_id.trim().is_empty(),
+            Self::RuntimeOperation { operation_id } => operation_id.trim().is_empty(),
+        };
+        if missing {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::MissingEffectScopeId,
+                "effect scopes require non-empty stable ids",
+            ));
+        }
+        Ok(())
+    }
+}
+
+enum ScopedEffectControllerInner<'run> {
+    Borrowed(&'run dyn RuntimeEffectController),
+    Shared(Arc<dyn RuntimeEffectController>),
+}
+
+impl Clone for ScopedEffectControllerInner<'_> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Borrowed(controller) => Self::Borrowed(*controller),
+            Self::Shared(controller) => Self::Shared(Arc::clone(controller)),
+        }
+    }
+}
+
+/// Scoped low-level controller plus the semantic effect scope it is serving.
+#[derive(Clone)]
+pub struct ScopedEffectController<'run> {
+    controller: ScopedEffectControllerInner<'run>,
+    scope: EffectScope,
+}
+
+impl<'run> ScopedEffectController<'run> {
+    pub fn borrowed(
+        controller: &'run dyn RuntimeEffectController,
+        scope: EffectScope,
+    ) -> Result<Self, RuntimeError> {
+        scope.validate()?;
+        Ok(Self {
+            controller: ScopedEffectControllerInner::Borrowed(controller),
+            scope,
+        })
+    }
+
+    pub fn shared(
+        controller: Arc<dyn RuntimeEffectController>,
+        scope: EffectScope,
+    ) -> Result<Self, RuntimeError> {
+        scope.validate()?;
+        Ok(Self {
+            controller: ScopedEffectControllerInner::Shared(controller),
+            scope,
+        })
+    }
+
+    pub fn controller(&self) -> &dyn RuntimeEffectController {
+        match &self.controller {
+            ScopedEffectControllerInner::Borrowed(controller) => *controller,
+            ScopedEffectControllerInner::Shared(controller) => controller.as_ref(),
+        }
+    }
+
+    pub fn effect_scope(&self) -> &EffectScope {
+        &self.scope
+    }
+
+    pub fn scope_id(&self) -> &str {
+        self.scope.id()
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        self.scope.turn_id()
+    }
+}
+
+/// Deployment-level factory for scoped effect controllers.
+#[async_trait::async_trait]
+pub trait EffectHost: Send + Sync {
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        crate::DurabilityTier::Inline
+    }
+
+    fn requires_durable_attachment_store(&self) -> bool {
+        false
+    }
+
+    fn scoped<'run>(
+        &'run self,
+        scope: EffectScope,
+    ) -> Result<ScopedEffectController<'run>, RuntimeError>;
+
+    fn scoped_static(
+        &self,
+        _scope: EffectScope,
+    ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
+        Ok(None)
+    }
+}
 
 /// Boundary for nondeterministic runtime work.
 #[async_trait::async_trait]
@@ -44,65 +280,47 @@ pub trait RuntimeEffectController: Send + Sync {
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError>;
 }
 
-/// Borrowed durable turn scope for one runtime execution.
-///
-/// Durable integrations create one scope per externally
-/// identified turn and pass it to the scoped runtime entrypoints, making the
-/// turn identity part of the idempotency contract rather than a tracing-only
-/// hint.
-#[derive(Clone, Copy)]
-pub struct DurableTurnScope<'run> {
-    controller: &'run dyn RuntimeEffectController,
-    turn_id: &'run str,
-}
-
-impl<'run> DurableTurnScope<'run> {
-    pub fn new(
-        controller: &'run dyn RuntimeEffectController,
-        turn_id: &'run str,
-    ) -> Result<Self, RuntimeError> {
-        if turn_id.is_empty() {
-            return Err(RuntimeError::new(
-                RuntimeErrorCode::MissingDurableTurnScopeTurnId,
-                "durable turn scopes require a non-empty stable turn_id",
-            ));
-        }
-        Ok(Self {
-            controller,
-            turn_id,
-        })
-    }
-
-    pub fn controller(&self) -> &'run dyn RuntimeEffectController {
-        self.controller
-    }
-
-    pub fn turn_id(&self) -> &'run str {
-        self.turn_id
-    }
-}
-
 /// Runtime-internal handle for effect-controller references carried through
 /// per-turn execution contexts.
 #[derive(Clone)]
 pub(crate) enum RuntimeEffectControllerHandle<'run> {
-    Borrowed(&'run dyn RuntimeEffectController),
-    Shared(Arc<dyn RuntimeEffectController>),
+    Borrowed(ScopedEffectController<'run>),
+    #[cfg(any(test, feature = "testing"))]
+    Shared {
+        controller: Arc<dyn RuntimeEffectController>,
+        scope: EffectScope,
+    },
 }
 
 impl<'run> RuntimeEffectControllerHandle<'run> {
-    pub(crate) fn borrowed(controller: &'run dyn RuntimeEffectController) -> Self {
-        Self::Borrowed(controller)
+    pub(crate) fn borrowed(scoped: ScopedEffectController<'run>) -> Self {
+        Self::Borrowed(scoped)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn shared(controller: Arc<dyn RuntimeEffectController>) -> Self {
-        Self::Shared(controller)
+        Self::Shared {
+            controller,
+            scope: EffectScope::runtime_operation("test-runtime-effect-controller"),
+        }
     }
 
-    pub(crate) fn as_controller(&self) -> &dyn RuntimeEffectController {
+    pub(crate) fn controller(&self) -> &dyn RuntimeEffectController {
         match self {
-            Self::Borrowed(controller) => *controller,
-            Self::Shared(controller) => controller.as_ref(),
+            Self::Borrowed(scoped) => scoped.controller(),
+            #[cfg(any(test, feature = "testing"))]
+            Self::Shared { controller, .. } => controller.as_ref(),
+        }
+    }
+
+    pub(crate) fn scoped(&self) -> ScopedEffectController<'_> {
+        match self {
+            Self::Borrowed(scoped) => scoped.clone(),
+            #[cfg(any(test, feature = "testing"))]
+            Self::Shared { controller, scope } => {
+                ScopedEffectController::shared(Arc::clone(controller), scope.clone())
+                    .expect("runtime effect controller handle carries a valid scope")
+            }
         }
     }
 
@@ -171,6 +389,7 @@ pub(crate) trait ProcessRunner: Send + Sync {
         registration: crate::ProcessRegistration,
         execution_context: crate::ProcessExecutionContext,
         registry: Arc<dyn ProcessRegistry>,
+        scoped_effect_controller: crate::ScopedEffectController<'_>,
         cancellation: CancellationToken,
     ) -> crate::ProcessAwaitOutput;
 }
@@ -197,6 +416,23 @@ trait RuntimeEffectLocalRunner: Send {
         self: Box<Self>,
         envelope: RuntimeEffectEnvelope,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError>;
+}
+
+#[cfg(any(test, feature = "testing"))]
+type TestingRuntimeEffectLocalRunnerFn<'run> = dyn FnOnce(
+        RuntimeEffectEnvelope,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<RuntimeEffectOutcome, RuntimeEffectControllerError>>
+                + Send
+                + 'run,
+        >,
+    > + Send
+    + 'run;
+
+#[cfg(any(test, feature = "testing"))]
+struct TestingRuntimeEffectLocalRunner<'run> {
+    run: Box<TestingRuntimeEffectLocalRunnerFn<'run>>,
 }
 
 enum RuntimeEffectLocalExecutorState<'run> {
@@ -231,6 +467,23 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
     pub fn process_control(registry: Arc<dyn ProcessRegistry>) -> Self {
         Self {
             state: RuntimeEffectLocalExecutorState::Process(ProcessLocalExecution { registry }),
+        }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn testing<F, Fut>(run: F) -> Self
+    where
+        F: FnOnce(RuntimeEffectEnvelope) -> Fut + Send + 'run,
+        Fut: Future<Output = Result<RuntimeEffectOutcome, RuntimeEffectControllerError>>
+            + Send
+            + 'run,
+    {
+        Self {
+            state: RuntimeEffectLocalExecutorState::Runner(Box::new(
+                TestingRuntimeEffectLocalRunner {
+                    run: Box::new(move |envelope| Box::pin(run(envelope))),
+                },
+            )),
         }
     }
 
@@ -299,6 +552,17 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                 "no process executor is available for process command",
             )),
         }
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+#[async_trait::async_trait]
+impl RuntimeEffectLocalRunner for TestingRuntimeEffectLocalRunner<'_> {
+    async fn execute(
+        self: Box<Self>,
+        envelope: RuntimeEffectEnvelope,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        (self.run)(envelope).await
     }
 }
 
@@ -510,6 +774,51 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
             }
             _ => local_executor.execute(envelope).await,
         }
+    }
+}
+
+/// In-process deployment effect host.
+#[derive(Clone)]
+pub struct InlineEffectHost {
+    controller: Arc<dyn RuntimeEffectController>,
+}
+
+impl InlineEffectHost {
+    pub fn new(controller: Arc<dyn RuntimeEffectController>) -> Self {
+        Self { controller }
+    }
+}
+
+impl Default for InlineEffectHost {
+    fn default() -> Self {
+        Self::new(Arc::new(InlineRuntimeEffectController))
+    }
+}
+
+impl EffectHost for InlineEffectHost {
+    fn durability_tier(&self) -> crate::DurabilityTier {
+        self.controller.durability_tier()
+    }
+
+    fn requires_durable_attachment_store(&self) -> bool {
+        self.controller.requires_durable_attachment_store()
+    }
+
+    fn scoped<'run>(
+        &'run self,
+        scope: EffectScope,
+    ) -> Result<ScopedEffectController<'run>, RuntimeError> {
+        ScopedEffectController::shared(Arc::clone(&self.controller), scope)
+    }
+
+    fn scoped_static(
+        &self,
+        scope: EffectScope,
+    ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
+        Ok(Some(ScopedEffectController::shared(
+            Arc::clone(&self.controller),
+            scope,
+        )?))
     }
 }
 

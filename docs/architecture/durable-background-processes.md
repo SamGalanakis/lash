@@ -27,17 +27,17 @@ A background `process` can be started two ways:
 Before this work, only the first was durably re-executed in a Restate
 deployment, and the asymmetry was silent.
 
-Durability of execution used to be borrowed from the **turn-local controller
-scope**. A turn run with `stream_with_durable_turn(scope)` threaded the
-Restate-backed controller into process control via a silent
+Durability of execution used to be borrowed from the **turn-local effect
+scope**. A turn run with `stream_with_effect_scope(scope)` threaded the
+Restate-backed scoped controller into process control via a silent
 `effect_controller.unwrap_or(current.host.core.effect_controller)` fallback, so a
 turn's `start name(...)` scheduled a `LashProcessWorkflow` invocation that
 Restate re-invoked on crash — but trigger activation runs **outside** a turn. It
 cannot borrow a turn-scoped controller, so its process starts hit that fallback
-and ran on the **build-time** controller — necessarily
-`InlineRuntimeEffectController` in a Restate deployment (the Restate-backed
-controller is constructed per-invocation from a Restate `ctx`, so it can never be
-a process-global build-time controller). The inline path `tokio::spawn`ed the
+and ran on the **build-time** inline effect host in a Restate deployment (the
+Restate-backed controller is constructed per-invocation from a Restate `ctx`, so
+it can never be a process-global build-time controller). The inline path
+`tokio::spawn`ed the
 process and dropped the `JoinHandle`: the run completed
 in-process under normal operation, but the spawn held **no lease**, so a recovery
 sweep on another node or after a restart could re-run a process already running
@@ -56,11 +56,12 @@ holding its `ProcessLease`.
 
 ## Principle
 
-lash's thesis is that **the runtime is the durable end** — it already owns the
-turn's `RuntimeTurnLease` + checkpoint + effect journal + `resume_turn`, with the
-host supplying only the backend (Restate `ctx`, SQLite registry/store). Process
-execution should follow the same split: **lash owns the durability logic; the
-host supplies the backend.**
+lash's thesis is that **the runtime is the durable end** for committed session
+state and process control records, while the active effect host owns in-flight
+effect replay. Restate supplies durable handler history and timers for turn
+effects; SQLite supplies the committed session store and process registry.
+Process execution follows that split: **lash owns the process durability logic;
+the host supplies the backend.**
 
 ## What the OpenAI Agents SDK does — and why it is the wrong template
 
@@ -101,11 +102,12 @@ grant (+ causal session node) to the registry. The rows survive restart. None of
 these paths carries an execution scope.
 
 **2. Execution = a lash-owned durable worker with a per-process lease +
-recovery.** Mirrors the turn model 1:1:
+recovery.** Turns use effect-host replay plus final commit stamps; processes use
+registry events plus process leases:
 
 | Unit    | Single-owner lease | Resumable state             | Recovery entry         |
 | ------- | ------------------ | --------------------------- | ---------------------- |
-| Turn    | `RuntimeTurnLease` | checkpoint + effect journal | `resume_turn`          |
+| Turn    | effect-host history | host-recorded effects       | workflow handler replay |
 | Process | `ProcessLease`     | registry events + journal   | `drive_pending_processes` (poke/poll/startup) |
 
 The `DurableProcessWorker` — the Restate execution authority via
@@ -132,7 +134,7 @@ executes. "How it was started" leaves the durability story entirely.
 A generalization of code that already existed for turns — not a new subsystem:
 
 - **`ProcessLease`** — claim / renew / expire, single-owner, so a recovered
-  process is not double-run across nodes. Mirrors `RuntimeTurnLease`:
+  process is not double-run across nodes. Carries
   `schema_version`, `process_id`, `owner_id`, `lease_token`, `fencing_token`,
   `claimed_at_epoch_ms`, `expires_at_epoch_ms`, plus `ProcessLeaseCompletion`.
   The owner / lease-token / fencing-token triple is the distributed
@@ -145,8 +147,8 @@ A generalization of code that already existed for turns — not a new subsystem:
   drive: it lists non-terminal processes, claims each lease (skipping any held
   live by another owner), re-checks terminality after claiming, runs the claimed
   process on the worker's wired controller while renewing the lease across the
-  execution (model: `renew_runtime_turn_lease_for_effect`), then writes the
-  terminal outcome and releases the lease. Idempotent by `process_id`: terminal
+  execution, then writes the terminal outcome and releases the lease.
+  Idempotent by `process_id`: terminal
   processes are never on the worklist, and a process that became terminal between
   the list and the claim is detected and skipped.
 - **`ProcessWorkRunner` + `ProcessWorkPoke`** — the loop that *drives*
@@ -174,7 +176,8 @@ one owner. Process execution identity is the persisted `process_id` end-to-end
 retry — a Restate `run` re-invocation or a recovery sweep — must present that
 stable id, and an empty/fresh id is rejected loudly
 (`DurableProcessWorker::ensure_stable_process_id`), mirroring how
-`DurableTurnScope::new` rejects an empty turn id.
+`EffectScope::turn` rejects an empty turn id when scoped controller creation
+validates it.
 
 ## Non-goals
 
@@ -187,18 +190,19 @@ stable id, and an empty/fresh id is rejected loudly
 ## Implementation
 
 Durability is a property of each execution path, derived from what the host
-wired — there is no mode flag. Each trait that touches the substrate carries a
-defaulted `durability_tier()` returning `DurabilityTier::Inline`; durable host
+wired — there is no mode flag. Store traits and effect-host traits carry a
+defaulted `durability_tier()` returning `DurabilityTier::Inline`; durable
 implementations override it to `Durable`. The runtime never silently runs
 nondeterministic work on a non-durable controller picked as a fallback, and a
-durable controller paired with any ephemeral store fails **loudly** at the
-boundary where the tier is known:
+durable effect host paired with any ephemeral store facet fails **loudly** at
+the boundary where the tier is known:
 
 - **Scope boundary** (`turn_loop.rs`, resume/stream turn-scoped): when the
-  turn's controller is `Durable`, all wired stores must be `Durable`, else
-  `DurableSubstrateRequired { facet }`.
-- **Worker boundary** (`DurableProcessWorker::ensure_durable_substrate`): the
-  same check at process-run / runtime rebuild.
+  turn's effect host is `Durable`, all wired store facets must be `Durable`, else
+  `DurableStoreRequired { facet }`.
+- **Worker boundary** (`DurableProcessWorker::ensure_durable_store_facets`): the
+  same check at process-run / runtime rebuild, including the `ProcessRegistry`
+  store facet.
 - **Facade build** (`lash/src/core.rs::ensure_store_peer_coherence`): store
   peer-coherence only — the per-invocation durable controller is not visible at
   build, so build checks the stores against each other (durable session store
@@ -208,10 +212,10 @@ boundary where the tier is known:
 Out-of-turn starts (trigger activations in `session/triggers.rs`; facade
 `start`; `api.rs`) write durable intent and execute via the worker. The
 silent `effect_controller.unwrap_or(...)` fallback at
-`process_runners/control.rs` is gone — out of turn there is no scope controller,
-so the host's explicitly-named build-time controller is used. A `Start` only
-*registers* the row (the `InlineRuntimeEffectController`'s off-lease
-`tokio::spawn` is deleted), and `execute_process_effect` pokes the host's
+`process_runners/control.rs` is gone — out of turn there is no turn-scoped
+controller, so the host's explicitly named build-time effect host is used. A
+`Start` only *registers* the row (the inline off-lease `tokio::spawn` is
+deleted), and `execute_process_effect` pokes the host's
 `ProcessWorkRunner` after a successful `Start`. The runner is wired by the host:
 the `lash` facade lazily spawns a default inline runner on first
 `session().open()` when a process registry **and** a store factory are present
@@ -251,7 +255,7 @@ terminal are carried as request config / tool-access, not lost.
 ## References
 
 - `crates/lash-core/src/runtime/process_worker.rs` — `DurableProcessWorker`:
-  `drive_pending_processes`, `ensure_durable_substrate`, `ensure_stable_process_id`,
+  `drive_pending_processes`, `ensure_durable_store_facets`, `ensure_stable_process_id`,
   lease-renewing run.
 - `crates/lash-core/src/runtime/process_work_runner.rs` — `ProcessWorkRunner`
   (poke + poll + startup loop), `ProcessWorkPoke`, `ProcessRunHandle` /
@@ -269,13 +273,14 @@ terminal are carried as request config / tool-access, not lost.
   `ProcessService::start_from_request`, `ProcessCancelAbility`,
   `ProcessCancelAllRequest`, and typed cancel summaries.
 - `crates/lash-core/src/runtime/effect/executor.rs` —
-  `InlineRuntimeEffectController` (stateless; the off-lease `tokio::spawn` deleted,
-  `Start` only registers the row, cancel is a durable event append).
-- `crates/lash-core/src/runtime/turn_loop.rs` — scope-boundary durable-substrate
+  `InlineEffectHost` / inline controller (stateless; the off-lease
+  `tokio::spawn` deleted, `Start` only registers the row, cancel is a durable
+  event append).
+- `crates/lash-core/src/runtime/turn_loop.rs` — scope-boundary store-facet
   check.
 - `crates/lash/src/core.rs` — `ensure_store_peer_coherence` (facade build).
-- `crates/lash-core/src/runtime/error.rs` — `DurableSubstrateRequired { facet }`.
-- `crates/lash-core/src/store.rs` — `RuntimeTurnLease`
+- `crates/lash-core/src/runtime/error.rs` — `DurableStoreRequired { facet }`.
+- `crates/lash-core/src/store.rs` — committed session state and turn commit stamps
   (the model the process lease mirrors).
 - `crates/lash-subagents/src/rlm.rs` — `agents.spawn` emitting
   `ProcessInput::SessionTurn`.

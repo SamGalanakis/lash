@@ -376,7 +376,6 @@ mod tests {
             "effect-7",
             RuntimeEffectKind::ExecCode,
             "replay-key",
-            Some("0".repeat(64)),
         );
 
         assert_eq!(

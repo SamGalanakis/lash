@@ -65,31 +65,6 @@ CREATE TABLE IF NOT EXISTS session_meta (
     relation_json TEXT
 );
 
-CREATE TABLE IF NOT EXISTS runtime_turn_checkpoints (
-    session_id          TEXT NOT NULL,
-    turn_id             TEXT NOT NULL,
-    checkpoint_json     TEXT,
-    checkpoint_hash     TEXT,
-    lease_owner_id      TEXT,
-    lease_token         TEXT,
-    lease_fencing_token INTEGER NOT NULL DEFAULT 0,
-    lease_claimed_at_ms INTEGER NOT NULL DEFAULT 0,
-    lease_expires_at_ms INTEGER NOT NULL DEFAULT 0,
-    updated_at_ms       INTEGER NOT NULL,
-    PRIMARY KEY (session_id, turn_id)
-);
-
-CREATE TABLE IF NOT EXISTS runtime_effect_journal (
-    session_id       TEXT NOT NULL,
-    turn_id          TEXT NOT NULL,
-    idempotency_key  TEXT NOT NULL,
-    envelope_hash    TEXT NOT NULL,
-    effect_kind      TEXT NOT NULL,
-    outcome_json     TEXT NOT NULL,
-    created_at_ms    INTEGER NOT NULL,
-    PRIMARY KEY (session_id, turn_id, idempotency_key)
-);
-
 CREATE TABLE IF NOT EXISTS runtime_turn_commits (
     session_id        TEXT NOT NULL,
     turn_id           TEXT NOT NULL,

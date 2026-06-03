@@ -274,6 +274,7 @@ impl LashRuntime {
         // Thread the host's process-work poke onto this session's host so the
         // process control seam can wake the runner after a successful start.
         runtime.host.process_work_poke = env.process_work_poke.clone();
+        runtime.host.queued_work_poke = env.queued_work_poke.clone();
         Ok(runtime)
     }
 

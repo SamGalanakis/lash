@@ -153,7 +153,6 @@ impl RuntimeTurnDriver<'_> {
                 ));
             }
         };
-        let context = context.with_turn_lease(self.turn_lease.clone());
         let indexed_tools = pending_tools.into_iter().enumerate().collect::<Vec<_>>();
         let tool_cancel = cancel.child_token();
         let outcomes = schedule_tool_batch(

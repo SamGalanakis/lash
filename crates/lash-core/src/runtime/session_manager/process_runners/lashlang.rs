@@ -21,6 +21,7 @@ impl RuntimeSessionServices {
         process_name: String,
         args: serde_json::Map<String, serde_json::Value>,
         execution_context: crate::ProcessExecutionContext,
+        scoped_effect_controller: crate::ScopedEffectController<'_>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
         let artifact = match self
@@ -149,6 +150,7 @@ impl RuntimeSessionServices {
 
         let run_context = ProcessRunContext::builder(self)
             .surface(tool_surface)
+            .scoped_effect_controller(scoped_effect_controller)
             .causal_invocation(execution_context.causal_invocation.clone())
             .build()
             .map_err(|err| {
@@ -186,6 +188,7 @@ impl RuntimeSessionServices {
             lashlang_execution_context: lashlang_execution_context.clone(),
             wake_target_scope: execution_context.wake_target_scope,
             store: self.current.store.clone(),
+            queued_work_poke: self.current.host.queued_work_poke.clone(),
             cancellation: cancellation.clone(),
             sleep_sequence: AtomicU64::new(0),
             event_sequence: AtomicU64::new(0),
@@ -228,6 +231,7 @@ struct LashlangProcessHost<'run> {
     lashlang_execution_context: TraceContext,
     wake_target_scope: Option<crate::ProcessScope>,
     store: Option<Arc<dyn crate::RuntimePersistence>>,
+    queued_work_poke: Option<crate::QueuedWorkPoke>,
     cancellation: tokio_util::sync::CancellationToken,
     sleep_sequence: AtomicU64,
     /// Per-execution ordinal for wake/yield emissions. Deterministic replay
@@ -381,6 +385,7 @@ impl LashlangProcessHost<'_> {
             self.store.as_deref(),
             result.wake_delivery,
             Some(self.ctx.session_graph_service()),
+            self.queued_work_poke.as_ref(),
         )
         .await
         .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;

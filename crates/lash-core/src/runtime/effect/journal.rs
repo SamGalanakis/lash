@@ -286,24 +286,21 @@ mod tests {
                 .expect("replay key")
                 .starts_with("s:direct:tool:request:k")
         );
-        assert!(invocation.checkpoint_hash.is_none());
     }
 
     #[test]
-    fn tool_retry_sleep_invocation_preserves_parent_checkpoint_digest() {
-        let mut parent = crate::runtime::causal::direct_effect_invocation(
+    fn tool_retry_sleep_invocation_preserves_parent_replay_identity() {
+        let parent = crate::runtime::causal::direct_effect_invocation(
             "s",
             "tool",
             "request:k".to_string(),
             Some("turn"),
             None,
         );
-        parent.checkpoint_hash = Some("a".repeat(64));
 
         let sleep = crate::runtime::causal::tool_retry_sleep_invocation(&parent, "probe", 2);
 
         assert_eq!(sleep.effect_kind(), Some(RuntimeEffectKind::Sleep));
-        assert_eq!(sleep.checkpoint_hash, parent.checkpoint_hash);
         assert!(
             sleep
                 .replay_key()

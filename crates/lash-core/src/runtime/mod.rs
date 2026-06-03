@@ -2,7 +2,6 @@ mod assembly;
 mod builder;
 pub(crate) mod causal;
 mod config_ops;
-mod durable_turn;
 mod effect;
 mod environment;
 mod error;
@@ -14,6 +13,7 @@ mod observation;
 mod process;
 mod process_work_runner;
 mod process_worker;
+mod queued_work_runner;
 mod session_api;
 mod session_manager;
 mod session_ops;
@@ -79,24 +79,16 @@ use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
 pub use causal::process_event_invocation;
 pub(crate) use causal::tool_retry_sleep_invocation;
-pub use durable_turn::{
-    BeginDurableTurnRequest, DurableTurnCheckpointSnapshot, DurableTurnProvider, DurableTurnRun,
-    EmbeddedDurableTurnProvider, EmbeddedDurableTurnStore, ResumeDurableTurnRequest,
-    SubstrateDurableTurnProvider,
-};
-pub(crate) use durable_turn::{
-    execute_embedded_journaled_effect, invoke_embedded_journaled_effect,
-};
 pub(crate) use effect::RuntimeEffectControllerHandle;
 pub use effect::{
-    CausalRef, DurableTurnScope, InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec,
-    ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation, RuntimeReplay,
-    RuntimeScope, RuntimeSubject,
+    CausalRef, EffectHost, EffectScope, InlineEffectHost, InlineRuntimeEffectController,
+    LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeInvocation,
+    RuntimeReplay, RuntimeScope, RuntimeSubject, ScopedEffectController,
 };
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
-pub use error::{DurableSubstrateFacet, RuntimeError, RuntimeErrorCode};
+pub use error::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};
 pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeHostConfig};
 pub use in_memory_store::{InMemorySessionStore, InMemorySessionStoreFactory};
 use io::normalize_input_items;
@@ -126,13 +118,17 @@ pub use process_work_runner::{
     InlineProcessRunHandle, ProcessRunHandle, ProcessWorkPoke, ProcessWorkRunner,
 };
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
+pub use queued_work_runner::{
+    QueuedWorkPoke, QueuedWorkRunHandle, QueuedWorkRunOutcome, QueuedWorkRunRequest,
+    QueuedWorkRunner,
+};
 pub use session_manager::DirectCompletionClient;
 pub use state::RuntimeSessionState;
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
     apply_session_head, normalize_session_graph,
 };
-pub use turn_loop::ensure_durable_turn_input;
+pub use turn_loop::ensure_durable_effect_input;
 pub use turn_queue::{
     DeliveryPolicy, MergeKey, QUEUED_WORK_CLAIM_TTL_MS, QueuedCheckpointWork, QueuedTurnWork,
     QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
@@ -262,9 +258,10 @@ impl TurnInput {
 ///
 /// This is an `Any`-keyed map of live Rust values handed to plugins for a
 /// single turn. It is deliberately **not** serializable: the values never
-/// survive a process boundary, so the durable runtime explicitly rejects a turn
-/// that carries any live inputs (see [`LiveTurnInputs::durable_rejection`]).
-/// Durable callers must instead encode resumable data in
+/// survive a process boundary, so durable effect-host runs explicitly reject a
+/// turn that carries any live inputs (see
+/// [`LiveTurnInputs::durable_effect_rejection`]). Durable callers must instead
+/// encode replayable data in
 /// `protocol_turn_options` or persisted plugin state.
 #[derive(Clone, Default)]
 pub struct LiveTurnInputs {
@@ -300,16 +297,15 @@ impl LiveTurnInputs {
         self.inputs.keys().copied().collect()
     }
 
-    /// Returns an error if any live input is present, with the reason a durable
-    /// turn cannot carry it. Returns `Ok(())` when the channel is empty and the
-    /// turn is safe for durable replay.
-    pub(crate) fn durable_rejection(&self) -> Result<(), RuntimeError> {
+    /// Returns an error when live per-turn inputs would make a durable effect
+    /// host replay depend on process-local values.
+    pub(crate) fn durable_effect_rejection(&self) -> Result<(), RuntimeError> {
         if self.is_empty() {
             return Ok(());
         }
         Err(RuntimeError::new(
-            RuntimeErrorCode::DurableTurnLivePluginInput,
-            "durable turn resume does not support live TurnContext plugin inputs; encode resumable data in protocol_turn_options or persisted plugin state",
+            RuntimeErrorCode::DurableEffectLivePluginInput,
+            "durable effect hosts do not support live TurnContext plugin inputs; encode replayable data in protocol_turn_options or persisted plugin state",
         ))
     }
 }
@@ -764,17 +760,19 @@ impl TurnActivitySink for NoopTurnActivitySink {
     async fn emit(&self, _activity: TurnActivity) {}
 }
 
-/// Optional sinks and durable turn scope passed to one of [`LashRuntime`]'s
-/// turn-driving entry points (`stream_turn`, `resume_turn`,
+/// Optional sinks and scoped effect controller passed to one of [`LashRuntime`]'s
+/// turn-driving entry points (`stream_turn`,
 /// `stream_turn_with_agent_frames`).
 ///
-/// Construct via [`TurnOptions::new`] and chain `with_*` builders; defaults to
-/// no-op sinks and an inline durable turn scope derived from the runtime's own
-/// effect controller.
+/// Construct via [`TurnOptions::new`] and chain `with_*` builders. Event sinks
+/// default to no-op sinks. Effect scope is explicit: callers that are already
+/// executing under an effect host must pass
+/// [`TurnOptions::with_scoped_effect_controller`]; host-local entry points
+/// construct a host-configured scope at their boundary.
 pub struct TurnOptions<'a> {
     events: Option<&'a dyn EventSink>,
     turn_events: Option<&'a dyn TurnActivitySink>,
-    durable_turn_scope: Option<DurableTurnScope<'a>>,
+    scoped_effect_controller: Option<ScopedEffectController<'a>>,
     cancel: CancellationToken,
 }
 
@@ -783,7 +781,7 @@ impl<'a> TurnOptions<'a> {
         Self {
             events: None,
             turn_events: None,
-            durable_turn_scope: None,
+            scoped_effect_controller: None,
             cancel,
         }
     }
@@ -798,8 +796,11 @@ impl<'a> TurnOptions<'a> {
         self
     }
 
-    pub fn with_durable_turn_scope(mut self, durable_turn_scope: DurableTurnScope<'a>) -> Self {
-        self.durable_turn_scope = Some(durable_turn_scope);
+    pub fn with_scoped_effect_controller(
+        mut self,
+        scoped_effect_controller: ScopedEffectController<'a>,
+    ) -> Self {
+        self.scoped_effect_controller = Some(scoped_effect_controller);
         self
     }
 
@@ -811,23 +812,14 @@ impl<'a> TurnOptions<'a> {
         self.turn_events.unwrap_or(&NOOP_TURN_ACTIVITY_SINK)
     }
 
-    pub(crate) fn durable_turn_scope_id(&self) -> Option<&str> {
-        self.durable_turn_scope
+    pub(crate) fn effect_scope_id(&self) -> Option<&str> {
+        self.scoped_effect_controller
             .as_ref()
-            .map(DurableTurnScope::turn_id)
+            .map(ScopedEffectController::scope_id)
     }
 
-    /// Return the caller-supplied durable turn scope, or build a fresh inline scope
-    /// from `fallback_controller` targeting `turn_id`.
-    pub(crate) fn resolve_durable_turn_scope(
-        &self,
-        fallback_controller: &'a dyn RuntimeEffectController,
-        turn_id: &'a str,
-    ) -> Result<DurableTurnScope<'a>, RuntimeError> {
-        if let Some(scope) = self.durable_turn_scope {
-            return Ok(scope);
-        }
-        DurableTurnScope::new(fallback_controller, turn_id)
+    pub(crate) fn scoped_effect_controller(&self) -> Option<ScopedEffectController<'a>> {
+        self.scoped_effect_controller.clone()
     }
 }
 

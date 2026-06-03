@@ -133,18 +133,18 @@ impl BenchmarkRuntime {
             .map_err(anyhow::Error::from)
     }
 
-    pub(crate) async fn run_turn_with_durable_turn_scope(
+    pub(crate) async fn run_turn_with_effect_scope(
         &self,
         input: lash::TurnInput,
         cancel: tokio_util::sync::CancellationToken,
-        durable_turn_scope: lash::advanced::DurableTurnScope<'_>,
+        scoped_effect_controller: lash::advanced::ScopedEffectController<'_>,
     ) -> anyhow::Result<lash::TurnResult> {
         self.session
             .as_ref()
             .expect("benchmark session")
             .turn(input)
             .cancel(cancel)
-            .run_with_durable_turn(durable_turn_scope)
+            .run_with_effect_scope(scoped_effect_controller)
             .await
             .map(|output| output.result)
             .map_err(anyhow::Error::from)

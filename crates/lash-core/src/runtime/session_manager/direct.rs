@@ -9,7 +9,6 @@ struct RuntimeDirectSource<'run> {
     manager: Arc<RuntimeSessionServices>,
     effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     turn_id: Option<String>,
-    turn_lease: Option<crate::RuntimeTurnLease>,
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -43,14 +42,12 @@ impl<'run> DirectCompletionClient<'run> {
         manager: Arc<RuntimeSessionServices>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         turn_id: Option<String>,
-        turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Self {
         Self {
             source: DirectCompletionSource::Runtime(RuntimeDirectSource {
                 manager,
                 effect_controller,
                 turn_id,
-                turn_lease,
             }),
         }
     }
@@ -131,9 +128,8 @@ impl<'run> RuntimeDirectSource<'run> {
         DirectInvocationContext {
             current: &self.manager.current,
             usage_capability: &self.manager.usage,
-            effect_controller: self.effect_controller.as_controller(),
+            effect_controller: self.effect_controller.controller(),
             turn_id: self.turn_id.as_deref(),
-            turn_lease: self.turn_lease.as_ref(),
         }
     }
 }
@@ -143,7 +139,6 @@ pub(in crate::runtime::session_manager) struct DirectInvocationContext<'a> {
     usage_capability: &'a UsageCapability,
     effect_controller: &'a dyn crate::RuntimeEffectController,
     turn_id: Option<&'a str>,
-    turn_lease: Option<&'a crate::RuntimeTurnLease>,
 }
 
 struct DirectEffectPlan {
@@ -213,30 +208,23 @@ impl DirectCompletionCapability {
             request,
             usage_source,
         } = plan;
-        let journal_store = context
-            .turn_lease
-            .and(current.store.as_ref())
-            .and_then(|store| store.embedded_durable_turn_store());
-        crate::runtime::invoke_embedded_journaled_effect(
-            journal_store,
-            context.turn_lease,
-            context.effect_controller,
-            envelope,
-            crate::RuntimeEffectLocalExecutor::direct(
-                provider,
-                Arc::clone(&current.host.core.durability.attachment_store),
-            ),
-            |outcome| async move {
-                crate::runtime::effect::apply_direct_outcome(
-                    current,
-                    context.usage_capability,
-                    &request,
-                    &usage_source,
-                    caused_by.as_ref(),
-                    outcome,
-                )
-                .await
-            },
+        let outcome = context
+            .effect_controller
+            .execute_effect(
+                envelope,
+                crate::RuntimeEffectLocalExecutor::direct(
+                    provider,
+                    Arc::clone(&current.host.core.durability.attachment_store),
+                ),
+            )
+            .await?;
+        crate::runtime::effect::apply_direct_outcome(
+            current,
+            context.usage_capability,
+            &request,
+            &usage_source,
+            caused_by.as_ref(),
+            outcome,
         )
         .await
     }

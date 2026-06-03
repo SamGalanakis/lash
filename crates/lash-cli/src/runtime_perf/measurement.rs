@@ -487,15 +487,20 @@ pub(crate) async fn run_once(
         let turn = if matches!(scenario, RuntimePerfScenario::ScopedEffectController) {
             let effect_controller = ScopedPerfEffectController;
             let turn_id = format!("runtime-perf-scoped-{}", turn_index + 1);
-            let durable_turn_scope =
-                lash::advanced::DurableTurnScope::new(&effect_controller, &turn_id)
-                    .map_err(anyhow::Error::from)?;
+            let scoped_effect_controller = lash::advanced::ScopedEffectController::borrowed(
+                &effect_controller,
+                lash::advanced::EffectScope::turn(
+                    format!("runtime-perf-{}", scenario.name()),
+                    &turn_id,
+                ),
+            )
+            .map_err(anyhow::Error::from)?;
             runtime_perf_timed(
                 scenario,
                 turn_index,
                 "run_turn",
                 Some(cancel.clone()),
-                runtime.run_turn_with_durable_turn_scope(turn_input, cancel, durable_turn_scope),
+                runtime.run_turn_with_effect_scope(turn_input, cancel, scoped_effect_controller),
             )
             .await
         } else {

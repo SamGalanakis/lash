@@ -42,6 +42,7 @@ testing = ["lash-core/testing"]
 [dev-dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.20", features = ["testing"] }
 lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.20" }
+rusqlite = { version = "0.33", features = ["bundled"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 trybuild = "1"

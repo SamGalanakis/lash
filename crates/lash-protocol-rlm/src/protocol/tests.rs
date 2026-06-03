@@ -129,6 +129,20 @@ fn execution_section_hides_sleep_and_signals_independently() {
 }
 
 #[test]
+fn execution_section_documents_unwrapped_process_await_for_finished_values() {
+    let surface = prompt_surface(
+        tool_resources(),
+        lashlang::LashlangAbilities::default().with_processes(),
+    );
+    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+
+    assert!(section.contains("`await handle` waits and returns a result wrapper"));
+    assert!(section.contains("`result = (await handle)?`"));
+    assert!(section.contains("then read `result.field`"));
+    assert!(!section.contains("terminal result returned by `await handle`"));
+}
+
+#[test]
 fn execution_section_shows_sleep_without_processes() {
     let surface = prompt_surface(
         tool_resources(),

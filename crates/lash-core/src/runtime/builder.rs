@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
-    EmbeddedRuntimeHost, LashRuntime, PluginStack, ProcessRegistry, Residency,
-    RuntimeEffectController, RuntimeHostConfig, RuntimePersistence, RuntimeSessionState,
-    SessionError, SessionPolicy, SessionStoreFactory, TerminationPolicy,
+    EffectHost, EmbeddedRuntimeHost, LashRuntime, PluginStack, ProcessRegistry, Residency,
+    RuntimeHostConfig, RuntimePersistence, RuntimeSessionState, SessionError, SessionPolicy,
+    SessionStoreFactory, TerminationPolicy,
 };
 
 enum PluginSource {
@@ -182,11 +182,8 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    pub fn with_effect_controller(
-        mut self,
-        effect_controller: Arc<dyn RuntimeEffectController>,
-    ) -> Self {
-        self.core.control.effect_controller = effect_controller;
+    pub fn with_effect_host(mut self, effect_host: Arc<dyn EffectHost>) -> Self {
+        self.core.control.effect_host = effect_host;
         self
     }
 

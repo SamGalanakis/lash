@@ -778,8 +778,7 @@ mod tests {
             scope: &lash_core::ProcessOpScope<'_>,
         ) -> lash_core::ProcessScope {
             scope
-                .agent_frame_id
-                .as_deref()
+                .agent_frame_id()
                 .filter(|frame_id| !frame_id.is_empty())
                 .map(|frame_id| lash_core::ProcessScope::for_agent_frame(session_id, frame_id))
                 .unwrap_or_else(|| lash_core::ProcessScope::new(session_id))

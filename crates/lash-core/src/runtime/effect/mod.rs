@@ -8,8 +8,9 @@ pub use envelope::{
     RuntimeReplay, RuntimeScope, RuntimeSubject,
 };
 pub use executor::{
-    DurableTurnScope, InlineRuntimeEffectController, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectLocalExecutor,
+    EffectHost, EffectScope, InlineEffectHost, InlineRuntimeEffectController,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectLocalExecutor,
+    ScopedEffectController,
 };
 pub use lash_sansio::CausalRef;
 
@@ -106,7 +107,6 @@ mod tests {
             "process:start:call-123",
             RuntimeEffectKind::Process,
             "session:turn:process:start:call-123",
-            Some("0".repeat(64)),
         );
         let envelope = RuntimeEffectEnvelope::new(
             invocation,

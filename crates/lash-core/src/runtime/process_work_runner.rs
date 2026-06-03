@@ -10,8 +10,7 @@ use crate::PluginError;
 ///
 /// Pokes make consumption prompt; the poll is a safety net that picks up work
 /// no poke reached (a crash-orphaned non-terminal row, or a poke dropped while
-/// the runner was mid-drive). Mirrors the 400ms poll cadence of the
-/// agent-workbench `SessionQueueRunner`.
+/// the runner was mid-drive).
 const PROCESS_WORK_POLL_INTERVAL: Duration = Duration::from_millis(400);
 
 /// Drives the registry's non-terminal rows (the durable work queue) to terminal
@@ -22,9 +21,9 @@ const PROCESS_WORK_POLL_INTERVAL: Duration = Duration::from_millis(400);
 /// the [`ProcessRunHandle`], so a poke is idempotent (a leased or terminal row
 /// is skipped) and the same control seam can poke after any process start.
 ///
-/// Loop shape mirrors the agent-workbench `SessionQueueRunner`: a
-/// [`tokio::select`] over a [`Notify`] (poke) and an interval (poll), plus one
-/// startup drive that folds in the former startup-only recovery sweep.
+/// The loop is a [`tokio::select`] over a [`Notify`] (poke) and an interval
+/// (poll), plus one startup drive that folds in the former startup-only
+/// recovery sweep.
 pub struct ProcessWorkRunner {
     run_handle: Arc<dyn ProcessRunHandle>,
     notify: Arc<Notify>,

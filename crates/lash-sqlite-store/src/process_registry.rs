@@ -761,9 +761,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
             // Read the raw fencing token directly: a completed/abandoned lease
             // nulls the owner/token columns but retains the
             // monotonically-increasing `lease_fencing_token`, so a re-claim
-            // never reuses a stale writer's token (the same fencing rule
-            // `claim_runtime_turn_lease` uses; the shared predicate is
-            // `guard_lease`).
+            // never reuses a stale writer's token.
             let fencing_token: u64 = tx
                 .query_row(
                     "SELECT lease_fencing_token FROM process_leases WHERE process_id = ?1",
@@ -863,9 +861,8 @@ impl ProcessRegistry for SqliteProcessRegistry {
     }
 }
 
-/// Loud, stable error for a fenced process-lease claim. Mirrors
-/// [`StoreError::RuntimeTurnLeaseConflict`](lash_core::StoreError) on the
-/// `PluginError` channel the [`ProcessRegistry`] trait returns.
+/// Loud, stable error for a fenced process-lease claim on the `PluginError`
+/// channel the [`ProcessRegistry`] trait returns.
 fn process_lease_conflict(process_id: &str, current: &ProcessLease) -> lash_core::PluginError {
     lash_core::PluginError::Session(format!(
         "process `{process_id}` is already leased by `{}` until {}",
@@ -873,8 +870,7 @@ fn process_lease_conflict(process_id: &str, current: &ProcessLease) -> lash_core
     ))
 }
 
-/// Loud, stable error for a superseded or expired process lease. Mirrors
-/// [`StoreError::RuntimeTurnLeaseExpired`](lash_core::StoreError).
+/// Loud, stable error for a superseded or expired process lease.
 fn process_lease_expired(process_id: &str) -> lash_core::PluginError {
     lash_core::PluginError::Session(format!(
         "process lease for `{process_id}` is missing or expired"

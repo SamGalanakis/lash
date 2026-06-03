@@ -378,6 +378,9 @@ impl Compiler {
     fn compile_expr_discarding_value(&mut self, expression: &Expr) {
         match expression {
             Expr::LabelAnnotated { label, expr } => {
+                if self.try_compile_label_as_effect_step(expr, label, false) {
+                    return;
+                }
                 if !label_attaches_to_concrete_node(expr) {
                     self.emit_lashlang_execution_step(expression, label);
                 }
@@ -899,6 +902,9 @@ impl Compiler {
 
         match expr {
             Expr::LabelAnnotated { label, expr } => {
+                if self.try_compile_label_as_effect_step(expr, label, true) {
+                    return;
+                }
                 if !label_attaches_to_concrete_node(expr) {
                     self.emit_lashlang_execution_step(expr, label);
                 }
@@ -1273,6 +1279,90 @@ impl Compiler {
         }
     }
 
+    fn try_compile_label_as_effect_step(
+        &mut self,
+        expr: &Expr,
+        label: &LabelMetadata,
+        leave_value: bool,
+    ) -> bool {
+        let Some(site) = self.lashlang_execution_site(expr, "step", label.title.as_str()) else {
+            return false;
+        };
+        match expr {
+            Expr::Assign { target, expr } => self.compile_assignment_expr_with_forced_effect_site(
+                target,
+                expr,
+                leave_value,
+                site,
+            ),
+            _ => self.compile_expr_with_forced_effect_site(expr, site),
+        }
+    }
+
+    fn compile_assignment_expr_with_forced_effect_site(
+        &mut self,
+        target: &AssignTarget,
+        expr: &Expr,
+        leave_value: bool,
+        site: LashlangExecutionSite,
+    ) -> bool {
+        if !expr_supports_forced_effect_site(expr) {
+            return false;
+        }
+        if target.is_simple() {
+            let slot = self.push_slot(&target.root);
+            if !self.compile_expr_with_forced_effect_site(expr, site) {
+                return false;
+            }
+            self.code.push(Instruction::StoreName(slot));
+            self.set_const_slot(slot, None);
+            self.push_null_if(leave_value);
+            return true;
+        }
+
+        let slot = self.push_slot(&target.root);
+        for step in &target.steps {
+            if let AssignPathStep::Index(index) = step {
+                self.compile_expr(index);
+            }
+        }
+        if !self.compile_expr_with_forced_effect_site(expr, site) {
+            return false;
+        }
+        let path = self.push_assign_path(&target.steps);
+        self.code.push(Instruction::PathAssign { slot, path });
+        self.set_const_slot(slot, None);
+        self.push_null_if(leave_value);
+        true
+    }
+
+    fn compile_expr_with_forced_effect_site(
+        &mut self,
+        expr: &Expr,
+        site: LashlangExecutionSite,
+    ) -> bool {
+        match expr {
+            Expr::Await(handle) => {
+                self.compile_expr(handle);
+                let instruction = self.code.len();
+                self.code.push(Instruction::AwaitHandle);
+                self.mark_lashlang_execution_site(instruction, site);
+                true
+            }
+            Expr::ResultUnwrap(inner) => {
+                if let Expr::Await(handle) = inner.as_ref() {
+                    self.compile_expr(handle);
+                    let instruction = self.code.len();
+                    self.code.push(Instruction::AwaitHandleUnwrap);
+                    self.mark_lashlang_execution_site(instruction, site);
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn compile_start_process_expr(&mut self, process: &ProcessStartExpr) -> usize {
         for (_, expr) in &process.args {
             self.compile_expr(expr);
@@ -1603,6 +1693,11 @@ impl Compiler {
             _ => unreachable!("patched non-jump instruction"),
         }
     }
+}
+
+fn expr_supports_forced_effect_site(expr: &Expr) -> bool {
+    matches!(expr, Expr::Await(_))
+        || matches!(expr, Expr::ResultUnwrap(inner) if matches!(inner.as_ref(), Expr::Await(_)))
 }
 
 /// Maps a builtin name to the [`IntrinsicOp`] the VM dispatches on, threading

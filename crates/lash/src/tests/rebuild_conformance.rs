@@ -12,6 +12,27 @@
 
 use super::*;
 use crate::testing::conformance::{RuntimeRebuildBackend, runtime_rebuild_and_worker_recovery};
+use std::future::Future;
+
+fn run_async_test_on_large_stack<F, Fut>(name: &str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(test())
+        })
+        .expect("spawn large-stack test thread")
+        .join()
+        .expect("large-stack test thread");
+}
 
 fn fresh_sqlite_session_backend(
     root: &std::path::Path,
@@ -37,52 +58,56 @@ fn fresh_sqlite_session_backend(
     (dir, store_factory, registry)
 }
 
-#[tokio::test]
-async fn runtime_rebuild_and_worker_recovery_with_in_memory_artifact() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let root_path = root.path().to_path_buf();
-    runtime_rebuild_and_worker_recovery(move || {
-        let (_dir, store_factory, registry) = fresh_sqlite_session_backend(&root_path);
-        RuntimeRebuildBackend {
-            process_registry: registry,
-            build_core: Box::new(move |builder| {
-                builder
-                    .store_factory(Arc::clone(&store_factory))
-                    .in_memory_stores()
-                    .build()
-                    .expect("build core")
-            }),
-        }
-    })
-    .await;
+#[test]
+fn runtime_rebuild_and_worker_recovery_with_in_memory_artifact() {
+    run_async_test_on_large_stack("runtime-rebuild-in-memory-artifact", || async {
+        let root = tempfile::tempdir().expect("tempdir");
+        let root_path = root.path().to_path_buf();
+        runtime_rebuild_and_worker_recovery(move || {
+            let (_dir, store_factory, registry) = fresh_sqlite_session_backend(&root_path);
+            RuntimeRebuildBackend {
+                process_registry: registry,
+                build_core: Box::new(move |builder| {
+                    builder
+                        .store_factory(Arc::clone(&store_factory))
+                        .in_memory_stores()
+                        .build()
+                        .expect("build core")
+                }),
+            }
+        })
+        .await;
+    });
 }
 
-#[tokio::test]
-async fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let root_path = root.path().to_path_buf();
-    runtime_rebuild_and_worker_recovery(move || {
-        let (dir, store_factory, registry) = fresh_sqlite_session_backend(&root_path);
-        let attachment = Arc::new(crate::persistence::FileAttachmentStore::new(
-            dir.join("attachments"),
-        )) as Arc<dyn lash_core::AttachmentStore>;
-        let artifact = Arc::new(
-            lash_sqlite_store::Store::open(&dir.join("artifacts.db"))
-                .expect("open durable artifact store"),
-        ) as Arc<dyn lash_core::LashlangArtifactStore>;
-        RuntimeRebuildBackend {
-            process_registry: registry,
-            build_core: Box::new(move |builder| {
-                builder
-                    .store_factory(Arc::clone(&store_factory))
-                    .attachment_store(Arc::clone(&attachment))
-                    .lashlang_artifact_store(Arc::clone(&artifact))
-                    .advanced()
-                    .effect_controller(Arc::new(crate::advanced::InlineRuntimeEffectController))
-                    .build()
-                    .expect("build core")
-            }),
-        }
-    })
-    .await;
+#[test]
+fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
+    run_async_test_on_large_stack("runtime-rebuild-durable-stores", || async {
+        let root = tempfile::tempdir().expect("tempdir");
+        let root_path = root.path().to_path_buf();
+        runtime_rebuild_and_worker_recovery(move || {
+            let (dir, store_factory, registry) = fresh_sqlite_session_backend(&root_path);
+            let attachment = Arc::new(crate::persistence::FileAttachmentStore::new(
+                dir.join("attachments"),
+            )) as Arc<dyn lash_core::AttachmentStore>;
+            let artifact = Arc::new(
+                lash_sqlite_store::Store::open(&dir.join("artifacts.db"))
+                    .expect("open durable artifact store"),
+            ) as Arc<dyn lash_core::LashlangArtifactStore>;
+            RuntimeRebuildBackend {
+                process_registry: registry,
+                build_core: Box::new(move |builder| {
+                    builder
+                        .store_factory(Arc::clone(&store_factory))
+                        .attachment_store(Arc::clone(&attachment))
+                        .lashlang_artifact_store(Arc::clone(&artifact))
+                        .advanced()
+                        .effect_host(Arc::new(crate::advanced::InlineEffectHost::default()))
+                        .build()
+                        .expect("build core")
+                }),
+            }
+        })
+        .await;
+    });
 }

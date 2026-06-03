@@ -161,28 +161,17 @@ impl LashRuntime {
     pub(super) fn runtime_session_services(
         &self,
     ) -> Result<Arc<RuntimeSessionServices>, PluginActionInvokeError> {
-        Ok(Arc::new(RuntimeSessionServices::new(
-            self, true, None, None,
-        )?))
+        Ok(Arc::new(RuntimeSessionServices::new(self, true, None)?))
     }
 
     pub(super) fn runtime_session_services_for_turn(
         &self,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
     ) -> Result<Arc<RuntimeSessionServices>, PluginActionInvokeError> {
-        self.runtime_session_services_for_turn_with_lease(child_usage_event_relay, None)
-    }
-
-    pub(super) fn runtime_session_services_for_turn_with_lease(
-        &self,
-        child_usage_event_relay: Option<ChildUsageEventRelay>,
-        turn_lease: Option<crate::RuntimeTurnLease>,
-    ) -> Result<Arc<RuntimeSessionServices>, PluginActionInvokeError> {
         Ok(Arc::new(RuntimeSessionServices::new(
             self,
             false,
             child_usage_event_relay,
-            turn_lease,
         )?))
     }
 
@@ -218,6 +207,10 @@ impl LashRuntime {
         Arc::clone(&self.host.core.control.process_cancel_ability)
     }
 
+    pub fn effect_host(&self) -> Arc<dyn crate::EffectHost> {
+        Arc::clone(&self.host.core.control.effect_host)
+    }
+
     pub async fn enqueue_turn_input(
         &self,
         input: crate::TurnInput,
@@ -225,28 +218,21 @@ impl LashRuntime {
         slot_policy: crate::SlotPolicy,
         source_key: Option<String>,
     ) -> Result<crate::QueuedWorkBatch, RuntimeError> {
-        super::turn_loop::ensure_durable_turn_input(&input)?;
         let store = self
             .session
             .as_ref()
             .and_then(|session| session.history_store())
-            .ok_or_else(|| {
-                RuntimeError::new(
-                    RuntimeErrorCode::StoreCommitFailed,
-                    "queued turn input requires a persistent runtime store",
-                )
-            })?;
-        let mut draft = crate::QueuedWorkBatchDraft::new(
+            .ok_or_else(queued_turn_input_store_required)?;
+        enqueue_turn_input_to_store(
             self.state.session_id.clone(),
+            store,
+            self.host.queued_work_poke.clone(),
+            input,
             delivery_policy,
             slot_policy,
-            vec![crate::QueuedWorkPayload::turn_input(input)],
-        );
-        draft.source_key = source_key;
-        store
-            .enqueue_queued_work(draft)
-            .await
-            .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))
+            source_key,
+        )
+        .await
     }
 
     /// The plugin session bound to the currently active runtime session, if any.
@@ -356,4 +342,38 @@ impl LashRuntime {
             .await;
         self.state.policy = self.policy.clone();
     }
+}
+
+pub(in crate::runtime) async fn enqueue_turn_input_to_store(
+    session_id: String,
+    store: Arc<dyn crate::RuntimePersistence>,
+    queued_work_poke: Option<crate::QueuedWorkPoke>,
+    input: crate::TurnInput,
+    delivery_policy: crate::DeliveryPolicy,
+    slot_policy: crate::SlotPolicy,
+    source_key: Option<String>,
+) -> Result<crate::QueuedWorkBatch, RuntimeError> {
+    super::turn_loop::ensure_durable_effect_input(&input)?;
+    let mut draft = crate::QueuedWorkBatchDraft::new(
+        session_id,
+        delivery_policy,
+        slot_policy,
+        vec![crate::QueuedWorkPayload::turn_input(input)],
+    );
+    draft.source_key = source_key;
+    let enqueued = store
+        .enqueue_queued_work(draft)
+        .await
+        .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
+    if let Some(poke) = queued_work_poke.as_ref() {
+        poke.poke_session(enqueued.session_id.clone(), "queued_turn_input");
+    }
+    Ok(enqueued)
+}
+
+pub(in crate::runtime) fn queued_turn_input_store_required() -> RuntimeError {
+    RuntimeError::new(
+        RuntimeErrorCode::StoreCommitFailed,
+        "queued turn input requires a persistent runtime store",
+    )
 }

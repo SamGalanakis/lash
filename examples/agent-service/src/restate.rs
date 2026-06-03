@@ -7,7 +7,6 @@ use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use bytes::Bytes;
-use lash::advanced::RuntimeErrorCode;
 use lash::{TurnInput, TurnOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -210,29 +209,24 @@ async fn run_restate_chat_turn_and_persist(
         Arc::clone(&turn_state),
     );
 
-    let resume_scope = controller
-        .durable_turn_scope(&request.turn_id)
+    let effect_scope = controller
+        .scoped_effect_controller(lash::advanced::EffectScope::turn(
+            &request.chat_id,
+            &request.turn_id,
+        ))
         .map_err(|err| AppError::internal(err.to_string()))?;
-    let resume = session
-        .resume_turn(request.turn_id.clone())
-        .stream_with_durable_turn(&ui_events, resume_scope)
+    let mut input = TurnInput::text(request.text.clone());
+    input.trace_turn_id = Some(request.turn_id.clone());
+    let turn_model = model_spec_for_chat_selection(&ChatModelSelection {
+        model: request.model.clone(),
+        model_variant: request.model_variant.clone(),
+    })?;
+    let output = session
+        .turn(input)
+        .model(turn_model)
+        .require_submit()?
+        .stream_with_effect_scope(&ui_events, effect_scope)
         .await;
-    let output = route_restate_resume_or_start_fresh(resume, || async {
-        let fresh_scope = controller
-            .durable_turn_scope(&request.turn_id)
-            .map_err(|err| AppError::internal(err.to_string()))?;
-        let mut input = TurnInput::text(request.text.clone());
-        input.trace_turn_id = Some(request.turn_id.clone());
-        let turn_model = model_spec_for_chat_selection(&ChatModelSelection {
-            model: request.model.clone(),
-            model_variant: request.model_variant.clone(),
-        })?;
-        let turn = session.turn(input).model(turn_model).require_submit();
-        Ok(turn?
-            .stream_with_durable_turn(&ui_events, fresh_scope)
-            .await?)
-    })
-    .await;
 
     match output {
         Ok(output) => {
@@ -287,32 +281,6 @@ async fn run_restate_chat_turn_and_persist(
     Ok(())
 }
 
-#[cfg(feature = "restate")]
-async fn route_restate_resume_or_start_fresh<Output, Fresh, FreshFuture>(
-    resume: lash::Result<Output>,
-    fresh: Fresh,
-) -> AppResult<Output>
-where
-    Fresh: FnOnce() -> FreshFuture,
-    FreshFuture: std::future::Future<Output = AppResult<Output>>,
-{
-    match resume {
-        Ok(output) => Ok(output),
-        Err(err) if is_runtime_turn_checkpoint_missing(&err) => fresh().await,
-        Err(err) => Err(err.into()),
-    }
-}
-
-#[cfg(feature = "restate")]
-fn is_runtime_turn_checkpoint_missing(err: &lash::EmbedError) -> bool {
-    matches!(
-        err,
-        lash::EmbedError::Runtime(runtime)
-            if runtime.is_code(RuntimeErrorCode::RuntimeTurnCheckpointMissing)
-                || runtime.is_code(RuntimeErrorCode::RuntimeTurnResumeStoreRequired)
-    )
-}
-
 #[cfg(all(test, feature = "restate"))]
 mod restate_tests {
     use std::net::SocketAddr;
@@ -330,71 +298,6 @@ mod restate_tests {
     use lash_core::LlmOutputPart;
     use lash_core::llm::types::LlmResponse;
     use lash_restate::LashProcessWorkflow;
-
-    fn runtime_error(code: RuntimeErrorCode) -> lash::EmbedError {
-        lash::advanced::RuntimeError::new(code, "test resume failure").into()
-    }
-
-    #[tokio::test]
-    async fn checkpoint_missing_resume_starts_fresh_scoped_turn() {
-        let fresh_calls = Arc::new(AtomicUsize::new(0));
-        let fresh_calls_for_closure = Arc::clone(&fresh_calls);
-
-        let output = route_restate_resume_or_start_fresh(
-            Err(runtime_error(
-                RuntimeErrorCode::RuntimeTurnCheckpointMissing,
-            )),
-            move || async move {
-                fresh_calls_for_closure.fetch_add(1, Ordering::SeqCst);
-                Ok("fresh")
-            },
-        )
-        .await
-        .expect("fresh fallback");
-
-        assert_eq!(output, "fresh");
-        assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn substrate_native_resume_store_required_starts_fresh_scoped_turn() {
-        let fresh_calls = Arc::new(AtomicUsize::new(0));
-        let fresh_calls_for_closure = Arc::clone(&fresh_calls);
-
-        let output = route_restate_resume_or_start_fresh(
-            Err(runtime_error(
-                RuntimeErrorCode::RuntimeTurnResumeStoreRequired,
-            )),
-            move || async move {
-                fresh_calls_for_closure.fetch_add(1, Ordering::SeqCst);
-                Ok("fresh")
-            },
-        )
-        .await
-        .expect("fresh fallback");
-
-        assert_eq!(output, "fresh");
-        assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn non_checkpoint_resume_error_does_not_start_fresh_turn() {
-        let fresh_calls = Arc::new(AtomicUsize::new(0));
-        let fresh_calls_for_closure = Arc::clone(&fresh_calls);
-
-        let err = route_restate_resume_or_start_fresh(
-            Err(runtime_error(RuntimeErrorCode::RuntimeTurnCheckpointLoad)),
-            move || async move {
-                fresh_calls_for_closure.fetch_add(1, Ordering::SeqCst);
-                Ok("fresh")
-            },
-        )
-        .await
-        .expect_err("resume error should propagate");
-
-        assert_eq!(fresh_calls.load(Ordering::SeqCst), 0);
-        assert!(err.message.contains("test resume failure"));
-    }
 
     #[test]
     #[ignore = "requires a running Restate server; set RESTATE_INGRESS_URL and run with --ignored"]
@@ -606,7 +509,7 @@ submit "done via Restate E2E"
             )))
             .lashlang_artifact_store(artifact_store)
             .advanced()
-            .effect_controller(Arc::new(lash::advanced::InlineRuntimeEffectController))
+            .effect_host(Arc::new(lash::advanced::InlineEffectHost::default()))
             .process_registry(Arc::clone(&process_registry))
             .disable_default_process_work_runner()
             .with_process_work_runner(process_work_poke)

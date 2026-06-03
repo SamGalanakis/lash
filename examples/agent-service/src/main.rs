@@ -10,7 +10,7 @@ use axum::routing::get;
 use lash::PluginBinding;
 use lash::{
     LashCore, ModeId, ModePreset,
-    advanced::InlineRuntimeEffectController,
+    advanced::InlineEffectHost,
     provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
     tracing::{JsonlTraceSink, StderrTraceSink, TeeTraceSink, TraceLevel, TraceSink},
 };
@@ -125,7 +125,7 @@ async fn main() -> anyhow_like::Result<()> {
     let process_registry = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
             .map_err(|err| err.to_string())?,
-    ) as Arc<dyn lash::advanced::ProcessRegistry>;
+    ) as Arc<dyn lash::persistence::ProcessRegistry>;
     // Durable tier: a ProcessWorkRunner over a Restate ingress-client run handle
     // drives the registry's non-terminal rows to terminal by ingress-submitting
     // their LashProcessWorkflow (folding in the former startup-only recovery
@@ -141,22 +141,22 @@ async fn main() -> anyhow_like::Result<()> {
     let core = match durability {
         AgentServiceDurability::Local => core_builder
             .advanced()
-            .effect_controller(Arc::new(InlineRuntimeEffectController))
+            .effect_host(Arc::new(InlineEffectHost::default()))
             .process_registry(Arc::clone(&process_registry))
             .build()
             .map_err(|err| err.to_string())?,
         AgentServiceDurability::Restate => {
             #[cfg(feature = "restate")]
             {
-                // Base controller for turns that run outside a Restate
-                // workflow scope; durable turns pass a scoped controller per
-                // turn via `stream_with_durable_turn`. The Restate ingress
+                // Base host for turns that run outside a Restate workflow
+                // scope; durable turns pass a handler-scoped controller per
+                // turn via `stream_with_effect_scope`. The Restate ingress
                 // runner is the sole executor of out-of-turn/background
                 // processes, so disable the default inline runner and hand the
                 // core its poke (fired after every successful process start).
                 core_builder
                     .advanced()
-                    .effect_controller(Arc::new(InlineRuntimeEffectController))
+                    .effect_host(Arc::new(InlineEffectHost::default()))
                     .process_registry(Arc::clone(&process_registry))
                     .disable_default_process_work_runner()
                     .with_process_work_runner(

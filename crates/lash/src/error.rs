@@ -11,9 +11,9 @@ pub enum EmbedError {
     #[error("model spec is required; hosts must supply explicit model metadata")]
     MissingModelSpec,
     #[error(
-        "effect controller is required; call .effect_controller(...) (e.g. InlineRuntimeEffectController) or .in_memory_stores()"
+        "effect host is required; call .effect_host(...) (e.g. InlineEffectHost) or .in_memory_stores()"
     )]
-    MissingEffectController,
+    MissingEffectHost,
     #[error(
         "lashlang artifact store is required; call .lashlang_artifact_store(...) or .in_memory_stores()"
     )]

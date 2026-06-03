@@ -1065,7 +1065,7 @@ fn turn_result_total_usage_sums_parent_and_children() {
 }
 
 // =============================================================================
-// Phase-A: facade build store peer-coherence (durable substrate consistency)
+// Phase-A: facade build store peer-coherence (durable store consistency)
 // =============================================================================
 //
 // `LashCore::builder().build()` validates store peer-coherence only — it never
@@ -1205,7 +1205,7 @@ async fn all_durable_stores_build_successfully() -> Result<()> {
             .expect("open durable registry"),
     );
     peer_coherence_builder()
-        .effect_controller(Arc::new(lash_core::InlineRuntimeEffectController))
+        .effect_host(Arc::new(lash_core::InlineEffectHost::default()))
         .store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
         .lashlang_artifact_store(durable_artifact_store(dir.path()))
@@ -1230,7 +1230,7 @@ async fn durable_registry_with_only_child_store_factory_builds() -> Result<()> {
             .expect("open durable registry"),
     );
     peer_coherence_builder()
-        .effect_controller(Arc::new(lash_core::InlineRuntimeEffectController))
+        .effect_host(Arc::new(lash_core::InlineEffectHost::default()))
         .child_store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
         .lashlang_artifact_store(durable_artifact_store(dir.path()))

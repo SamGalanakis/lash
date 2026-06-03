@@ -7,25 +7,24 @@ struct ProcessCommandRunner<'scope> {
     current: &'scope CurrentSessionCapability,
     registry: Arc<dyn crate::ProcessRegistry>,
     parent_invocation: Option<crate::RuntimeInvocation>,
-    effect_controller: Option<&'scope dyn crate::RuntimeEffectController>,
-    turn_lease: Option<crate::RuntimeTurnLease>,
+    effect_controller: &'scope dyn crate::RuntimeEffectController,
 }
 
 impl<'scope> ProcessCommandRunner<'scope> {
     fn new(
         current: &'scope CurrentSessionCapability,
-        scope: &crate::ProcessOpScope<'scope>,
+        scope: &'scope crate::ProcessOpScope<'scope>,
         unavailable_message: &'static str,
     ) -> Result<Self, crate::PluginError> {
         let Some(registry) = current.host.process_registry.as_ref() else {
             return Err(crate::PluginError::Session(unavailable_message.to_string()));
         };
+        let effect_controller = scope.controller();
         Ok(Self {
             current,
             registry: Arc::clone(registry),
             parent_invocation: scope.parent_invocation.clone(),
-            effect_controller: scope.effect_controller,
-            turn_lease: scope.turn_lease.clone(),
+            effect_controller,
         })
     }
 
@@ -147,43 +146,16 @@ impl<'scope> ProcessCommandRunner<'scope> {
             invocation,
             crate::RuntimeEffectCommand::Process { command },
         );
-        // Route through the controller the host explicitly wired for this
-        // execution path. In-turn calls supply a scoped controller; out-of-turn
-        // calls use the host controller chosen in `RuntimeHostConfig`.
-        let controller = match self.effect_controller {
-            Some(controller) => controller,
-            None => self.current.host.core.control.effect_controller.as_ref(),
-        };
-        let turn_lease = self
-            .turn_lease
-            .as_ref()
-            .or(self.current.turn_lease.as_ref());
-        // Process registry/workflow idempotency is the replay boundary when a
-        // process control call is issued outside an active turn lease.
-        let journal_store = turn_lease
-            .and(self.current.store.as_ref())
-            .and_then(|store| store.embedded_durable_turn_store());
-        let has_turn_id = envelope.invocation.scope.turn_id.is_some();
-        let outcome = if let (Some(store), Some(lease), true) =
-            (journal_store, turn_lease, has_turn_id)
-        {
-            let mut lease = lease.clone();
-            crate::runtime::execute_embedded_journaled_effect(
-                store,
-                &mut lease,
-                controller,
+        // Route through the controller explicitly selected by the process
+        // operation scope: host-configured for host/API paths, scoped for
+        // in-turn paths.
+        let outcome = self
+            .effect_controller
+            .execute_effect(
                 envelope,
                 crate::RuntimeEffectLocalExecutor::process_control(Arc::clone(&self.registry)),
             )
-            .await?
-        } else {
-            controller
-                .execute_effect(
-                    envelope,
-                    crate::RuntimeEffectLocalExecutor::process_control(Arc::clone(&self.registry)),
-                )
-                .await?
-        };
+            .await?;
         if is_start && let Some(poke) = self.current.host.process_work_poke.as_ref() {
             poke.poke();
         }
@@ -199,7 +171,7 @@ impl ProcessCapability {
     fn command_runner<'scope>(
         &self,
         current: &'scope CurrentSessionCapability,
-        scope: &crate::ProcessOpScope<'scope>,
+        scope: &'scope crate::ProcessOpScope<'scope>,
     ) -> Result<ProcessCommandRunner<'scope>, crate::PluginError> {
         ProcessCommandRunner::new(
             current,
@@ -231,7 +203,7 @@ impl ProcessCapability {
         self.ensure_known_process_session(current, managed, session_id)
             .await?;
         self.mark_current_process_sync_needed(current, session_id);
-        let creator_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
+        let creator_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
         let caused_by = scope
             .parent_invocation
             .as_ref()
@@ -243,10 +215,9 @@ impl ProcessCapability {
             )
             .with_caused_by(caused_by),
         );
-        // The wake target is the creator scope, persisted in the process
-        // provenance; the worker derives it from there on execution. (Start no
-        // longer carries a wake target — a process always wakes its creator.)
-        let execution_context = options.execution_context(&scope);
+        let execution_context = options
+            .execution_context(&scope)
+            .with_wake_target_scope(creator_scope.clone());
         let runner = ProcessCommandRunner::new(
             current,
             &scope,
@@ -286,7 +257,7 @@ impl ProcessCapability {
     ) -> Result<Vec<crate::runtime::ProcessHandleGrantEntry>, crate::PluginError> {
         self.command_runner(current, &scope)?
             .list(
-                self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref()),
+                self.process_scope_for_op(session_id, scope.agent_frame_id()),
                 mode,
             )
             .await
@@ -320,7 +291,7 @@ impl ProcessCapability {
         scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessEvent, crate::PluginError> {
         let runner = self.command_runner(current, &scope)?;
-        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
+        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
         let visible = runner
             .registry()
             .list_live_handle_grants(&owner_scope)
@@ -349,7 +320,7 @@ impl ProcessCapability {
             return Ok(());
         }
         let runner = self.command_runner(current, &scope)?;
-        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
+        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
         for process_id in handle_ids {
             if !runner
                 .registry()
@@ -378,8 +349,8 @@ impl ProcessCapability {
         }
         self.command_runner(current, &scope)?
             .transfer(
-                self.process_scope_for_op(from_session_id, scope.agent_frame_id.as_deref()),
-                self.process_scope_for_op(to_session_id, scope.target_agent_frame_id.as_deref()),
+                self.process_scope_for_op(from_session_id, scope.agent_frame_id()),
+                self.process_scope_for_op(to_session_id, scope.target_agent_frame_id()),
                 process_ids,
             )
             .await
@@ -395,7 +366,7 @@ impl ProcessCapability {
     ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
         let keep = keep_process_ids.iter().cloned().collect::<HashSet<_>>();
         let runner = self.command_runner(current, &scope)?;
-        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id.as_deref());
+        let owner_scope = self.process_scope_for_op(session_id, scope.agent_frame_id());
         let tasks = runner.registry().list_handle_grants(&owner_scope).await?;
         let mut cancelled = Vec::new();
         for (grant, record) in tasks {

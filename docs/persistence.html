@@ -27,7 +27,7 @@
 <div class="section" id="contract">
           <div class="section-header">
             <h2>The Contract</h2>
-            <p>Runtime-facing trait. Most hosts use <code>lash-sqlite-store</code> rather than implementing it. The base contract covers session graph/head commits, queued work, metadata, garbage collection, and the attachment write-ahead manifest inherited through <code>AttachmentManifest</code>. Embedded durable-turn storage is exposed separately through <code>EmbeddedDurableTurnStore</code> so substrate-native providers can own replay without writing Lash effect-journal rows.</p>
+            <p>Runtime-facing trait. Most hosts use <code>lash-sqlite-store</code> rather than implementing it. The contract covers session graph/head commits, queued work, metadata, garbage collection, final turn commit idempotency, and the attachment write-ahead manifest inherited through <code>AttachmentManifest</code>. Stores do not execute or replay in-flight effects; durable workflow hosts own that through <code>EffectHost</code> history and timers.</p>
           </div>
           <pre><code>#[async_trait]
 pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
@@ -38,8 +38,6 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         -&gt; Result&lt;Option&lt;SessionNodeRecord&gt;, StoreError&gt;;
     async fn commit_runtime_state(&amp;self, commit: RuntimeCommit)
         -&gt; Result&lt;RuntimeCommitResult, StoreError&gt;;
-    fn embedded_durable_turn_store(&amp;self)
-        -&gt; Option&lt;&amp;dyn EmbeddedDurableTurnStore&gt; { None }
     async fn enqueue_queued_work(&amp;self, batch: QueuedWorkBatchDraft)
         -&gt; Result&lt;QueuedWorkBatch, StoreError&gt;;
     async fn claim_ready_queued_work(
@@ -66,43 +64,14 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     async fn gc_unreachable(&amp;self) -&gt; Result&lt;GcReport, StoreError&gt;;
 }
 
-#[async_trait]
-pub trait EmbeddedDurableTurnStore: Send + Sync {
-    async fn claim_runtime_turn_lease(
-        &amp;self,
-        session_id: &amp;str,
-        turn_id: &amp;str,
-        owner_id: &amp;str,
-        lease_ttl_ms: u64,
-    ) -&gt; Result&lt;RuntimeTurnLease, StoreError&gt;;
-    async fn renew_runtime_turn_lease(
-        &amp;self,
-        lease: &amp;RuntimeTurnLease,
-        lease_ttl_ms: u64,
-    ) -&gt; Result&lt;RuntimeTurnLease, StoreError&gt;;
-    async fn abandon_runtime_turn_lease(&amp;self, lease: &amp;RuntimeTurnLease)
-        -&gt; Result&lt;(), StoreError&gt;;
-    async fn save_runtime_turn_checkpoint(
-        &amp;self,
-        lease: &amp;RuntimeTurnLease,
-        checkpoint: RuntimeTurnCheckpoint,
-    ) -&gt; Result&lt;(), StoreError&gt;;
-    async fn load_runtime_turn_checkpoint(
-        &amp;self,
-        session_id: &amp;str,
-        turn_id: &amp;str,
-    ) -&gt; Result&lt;Option&lt;RuntimeTurnCheckpoint&gt;, StoreError&gt;;
-    async fn save_runtime_effect_outcome(
-        &amp;self,
-        lease: &amp;RuntimeTurnLease,
-        record: RuntimeEffectJournalRecord,
-    ) -&gt; Result&lt;(), StoreError&gt;;
-    async fn load_runtime_effect_outcome(
-        &amp;self,
-        session_id: &amp;str,
-        turn_id: &amp;str,
-        replay_key: &amp;str,
-    ) -&gt; Result&lt;Option&lt;RuntimeEffectJournalRecord&gt;, StoreError&gt;;
+pub struct RuntimeCommit {
+    pub session_id: String,
+    pub expected_head_revision: Option&lt;u64&gt;,
+    pub graph: GraphCommitDelta,
+    pub checkpoint: HydratedSessionCheckpoint,
+    pub usage_deltas: Vec&lt;TokenLedgerEntry&gt;,
+    pub turn_commit: Option&lt;RuntimeTurnCommitStamp&gt;,
+    pub completed_queue_claims: Vec&lt;QueuedWorkCompletion&gt;,
 }</code></pre>
           <p><code>SessionStoreFactory</code> produces one store per session, keyed by session id, relation, and policy:</p>
           <pre><code>pub trait SessionStoreFactory: Send + Sync {
@@ -133,7 +102,7 @@ pub trait EmbeddedDurableTurnStore: Send + Sync {
 }</code></pre>
           <p>Conflicts surface as a turn-level <code>Err</code> with <code>RuntimeError { code: "store_commit_failed", .. }</code> — not a <code>TurnStop</code> variant. The next read is identical to the read before the failed call. Hosts expecting concurrent access (multi-tab UIs, agent fleets) should serialize at their own layer or re-open against the refreshed head.</p>
           <p>In-memory sessions (no <code>store_factory</code>) enforce the same CAS against an in-process counter.</p>
-          <p>For per-effect durability under an external workflow runtime, install a custom <code>RuntimeEffectController</code>. Embedded providers use the store's <code>embedded_durable_turn_store()</code> for runtime turn leases, checkpoints, and effect journal rows; substrate-native providers use their own workflow history/timers and let Lash handle only final commit idempotency. See <a href="./architecture/durability.html">Architecture → Durability</a>.</p>
+          <p>For per-effect durability under an external workflow runtime, install a durable <code>EffectHost</code>. Local stores reopen the last committed state after a crash. Restate-style hosts use workflow history and timers to replay in-flight effects, then rely on <code>RuntimeTurnCommitStamp</code> so a repeated final commit is idempotent. See <a href="./architecture/durability.html">Architecture → Durability</a>.</p>
         </div>
 
         <div class="section" id="wiring">

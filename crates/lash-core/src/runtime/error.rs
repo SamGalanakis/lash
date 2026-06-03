@@ -1,24 +1,25 @@
-/// Durable substrate that a durable execution path requires but the host wired
-/// as ephemeral.
+/// Durable store facet that a durable execution path requires but the host
+/// wired as ephemeral.
 ///
-/// Names the failing facet so a [`RuntimeErrorCode::DurableSubstrateRequired`]
-/// can be matched and serialized losslessly per facet, while still subsuming the
-/// older attachment-only signal.
+/// Names the failing facet so a [`RuntimeErrorCode::DurableStoreRequired`]
+/// can be matched and serialized losslessly per facet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DurableSubstrateFacet {
+pub enum DurableStoreFacet {
     AttachmentStore,
     ArtifactStore,
     SessionStore,
+    ProcessRegistry,
 }
 
-impl DurableSubstrateFacet {
+impl DurableStoreFacet {
     /// Stable per-facet error-code string (the full
-    /// `durable_substrate_required:*` code surfaced in traces and host errors).
+    /// `durable_store_required:*` code surfaced in traces and host errors).
     fn as_code(self) -> &'static str {
         match self {
-            Self::AttachmentStore => "durable_substrate_required:attachment_store",
-            Self::ArtifactStore => "durable_substrate_required:artifact_store",
-            Self::SessionStore => "durable_substrate_required:session_store",
+            Self::AttachmentStore => "durable_store_required:attachment_store",
+            Self::ArtifactStore => "durable_store_required:artifact_store",
+            Self::SessionStore => "durable_store_required:session_store",
+            Self::ProcessRegistry => "durable_store_required:process_registry",
         }
     }
 }
@@ -29,25 +30,17 @@ impl DurableSubstrateFacet {
 /// errors, but callers should match this type instead of parsing display text.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RuntimeErrorCode {
-    MissingDurableTurnScopeTurnId,
-    DurableTurnScopeTurnIdMismatch,
+    MissingEffectScopeId,
+    EffectScopeTurnIdMismatch,
     /// A process (re-)execution was handed an empty/non-persisted process id.
     /// Process execution identity is the persisted `process_id`; a retry that
     /// cannot present that stable id has lost its idempotency anchor.
     MissingProcessExecutionId,
     /// A durable execution path was wired against an ephemeral store for the
-    /// named facet. Subsumes the former `DurableAttachmentStoreRequired`.
-    DurableSubstrateRequired {
-        facet: DurableSubstrateFacet,
+    /// named facet.
+    DurableStoreRequired {
+        facet: DurableStoreFacet,
     },
-    RuntimeTurnResumeStoreRequired,
-    RuntimeTurnCheckpointLoad,
-    RuntimeTurnCheckpointMissing,
-    RuntimeTurnResumeProviderMismatch,
-    RuntimeTurnLease,
-    RuntimeTurnCheckpointHash,
-    RuntimeTurnCheckpointHashMismatch,
-    RuntimeTurnRestoreTurnDriverPreamble,
     StoreCommitFailed,
     PluginSessionManager,
     PluginFinalizeTurn,
@@ -58,28 +51,18 @@ pub enum RuntimeErrorCode {
     ProtocolBeforeLlmCall,
     TurnStreamJoin,
     EmptyAgentFrameRun,
-    DurableTurnLiveProtocolExtension,
-    DurableTurnLivePluginInput,
+    DurableEffectLiveProtocolExtension,
+    DurableEffectLivePluginInput,
     Other(String),
 }
 
 impl RuntimeErrorCode {
     pub fn as_str(&self) -> &str {
         match self {
-            Self::MissingDurableTurnScopeTurnId => "missing_durable_turn_scope_turn_id",
-            Self::DurableTurnScopeTurnIdMismatch => "durable_turn_scope_turn_id_mismatch",
+            Self::MissingEffectScopeId => "missing_effect_scope_id",
+            Self::EffectScopeTurnIdMismatch => "effect_scope_turn_id_mismatch",
             Self::MissingProcessExecutionId => "missing_process_execution_id",
-            Self::DurableSubstrateRequired { facet } => facet.as_code(),
-            Self::RuntimeTurnResumeStoreRequired => "runtime_turn_resume_store_required",
-            Self::RuntimeTurnCheckpointLoad => "runtime_turn_checkpoint_load",
-            Self::RuntimeTurnCheckpointMissing => "runtime_turn_checkpoint_missing",
-            Self::RuntimeTurnResumeProviderMismatch => "runtime_turn_resume_provider_mismatch",
-            Self::RuntimeTurnLease => "runtime_turn_lease",
-            Self::RuntimeTurnCheckpointHash => "runtime_turn_checkpoint_hash",
-            Self::RuntimeTurnCheckpointHashMismatch => "runtime_turn_checkpoint_hash_mismatch",
-            Self::RuntimeTurnRestoreTurnDriverPreamble => {
-                "runtime_turn_restore_turn_driver_preamble"
-            }
+            Self::DurableStoreRequired { facet } => facet.as_code(),
             Self::StoreCommitFailed => "store_commit_failed",
             Self::PluginSessionManager => "plugin_session_manager",
             Self::PluginFinalizeTurn => "plugin_finalize_turn",
@@ -90,8 +73,8 @@ impl RuntimeErrorCode {
             Self::ProtocolBeforeLlmCall => "protocol_before_llm_call",
             Self::TurnStreamJoin => "turn_stream_join",
             Self::EmptyAgentFrameRun => "empty_agent_frame_run",
-            Self::DurableTurnLiveProtocolExtension => "durable_turn_live_protocol_extension",
-            Self::DurableTurnLivePluginInput => "durable_turn_live_plugin_input",
+            Self::DurableEffectLiveProtocolExtension => "durable_effect_live_protocol_extension",
+            Self::DurableEffectLivePluginInput => "durable_effect_live_plugin_input",
             Self::Other(code) => code.as_str(),
         }
     }
@@ -106,28 +89,21 @@ impl std::fmt::Display for RuntimeErrorCode {
 impl From<&str> for RuntimeErrorCode {
     fn from(code: &str) -> Self {
         match code {
-            "missing_durable_turn_scope_turn_id" => Self::MissingDurableTurnScopeTurnId,
-            "durable_turn_scope_turn_id_mismatch" => Self::DurableTurnScopeTurnIdMismatch,
+            "missing_effect_scope_id" => Self::MissingEffectScopeId,
+            "effect_scope_turn_id_mismatch" => Self::EffectScopeTurnIdMismatch,
             "missing_process_execution_id" => Self::MissingProcessExecutionId,
-            "durable_substrate_required:attachment_store" => Self::DurableSubstrateRequired {
-                facet: DurableSubstrateFacet::AttachmentStore,
+            "durable_store_required:attachment_store" => Self::DurableStoreRequired {
+                facet: DurableStoreFacet::AttachmentStore,
             },
-            "durable_substrate_required:artifact_store" => Self::DurableSubstrateRequired {
-                facet: DurableSubstrateFacet::ArtifactStore,
+            "durable_store_required:artifact_store" => Self::DurableStoreRequired {
+                facet: DurableStoreFacet::ArtifactStore,
             },
-            "durable_substrate_required:session_store" => Self::DurableSubstrateRequired {
-                facet: DurableSubstrateFacet::SessionStore,
+            "durable_store_required:session_store" => Self::DurableStoreRequired {
+                facet: DurableStoreFacet::SessionStore,
             },
-            "runtime_turn_resume_store_required" => Self::RuntimeTurnResumeStoreRequired,
-            "runtime_turn_checkpoint_load" => Self::RuntimeTurnCheckpointLoad,
-            "runtime_turn_checkpoint_missing" => Self::RuntimeTurnCheckpointMissing,
-            "runtime_turn_resume_provider_mismatch" => Self::RuntimeTurnResumeProviderMismatch,
-            "runtime_turn_lease" => Self::RuntimeTurnLease,
-            "runtime_turn_checkpoint_hash" => Self::RuntimeTurnCheckpointHash,
-            "runtime_turn_checkpoint_hash_mismatch" => Self::RuntimeTurnCheckpointHashMismatch,
-            "runtime_turn_restore_turn_driver_preamble" => {
-                Self::RuntimeTurnRestoreTurnDriverPreamble
-            }
+            "durable_store_required:process_registry" => Self::DurableStoreRequired {
+                facet: DurableStoreFacet::ProcessRegistry,
+            },
             "store_commit_failed" => Self::StoreCommitFailed,
             "plugin_session_manager" => Self::PluginSessionManager,
             "plugin_finalize_turn" => Self::PluginFinalizeTurn,
@@ -138,8 +114,8 @@ impl From<&str> for RuntimeErrorCode {
             "protocol_before_llm_call" => Self::ProtocolBeforeLlmCall,
             "turn_stream_join" => Self::TurnStreamJoin,
             "empty_agent_frame_run" => Self::EmptyAgentFrameRun,
-            "durable_turn_live_protocol_extension" => Self::DurableTurnLiveProtocolExtension,
-            "durable_turn_live_plugin_input" => Self::DurableTurnLivePluginInput,
+            "durable_effect_live_protocol_extension" => Self::DurableEffectLiveProtocolExtension,
+            "durable_effect_live_plugin_input" => Self::DurableEffectLivePluginInput,
             other => Self::Other(other.to_string()),
         }
     }
@@ -191,15 +167,16 @@ impl RuntimeError {
 
     /// Build the loud error raised when a durable execution path was wired
     /// against an ephemeral store for `facet`.
-    pub fn durable_substrate_required(facet: DurableSubstrateFacet) -> Self {
+    pub fn durable_store_required(facet: DurableStoreFacet) -> Self {
         let facet_label = match facet {
-            DurableSubstrateFacet::AttachmentStore => "attachment store",
-            DurableSubstrateFacet::ArtifactStore => "lashlang artifact store",
-            DurableSubstrateFacet::SessionStore => "session store",
+            DurableStoreFacet::AttachmentStore => "attachment store",
+            DurableStoreFacet::ArtifactStore => "lashlang artifact store",
+            DurableStoreFacet::SessionStore => "session store",
+            DurableStoreFacet::ProcessRegistry => "process registry",
         };
         Self::new(
-            RuntimeErrorCode::DurableSubstrateRequired { facet },
-            format!("durable effect controllers require a durable {facet_label}"),
+            RuntimeErrorCode::DurableStoreRequired { facet },
+            format!("durable effect hosts require a durable {facet_label}"),
         )
     }
 
@@ -208,8 +185,7 @@ impl RuntimeError {
     ///
     /// Process execution identity is the persisted `process_id`, so a retry
     /// must present that stable id — mirroring how
-    /// [`DurableTurnScope::new`](crate::DurableTurnScope)
-    /// rejects an empty turn id.
+    /// [`EffectScope`](crate::EffectScope) rejects an empty stable id.
     pub fn missing_process_execution_id() -> Self {
         Self::new(
             RuntimeErrorCode::MissingProcessExecutionId,
@@ -228,21 +204,22 @@ impl std::error::Error for RuntimeError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{DurableSubstrateFacet, RuntimeError, RuntimeErrorCode};
+    use super::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};
 
     #[test]
-    fn durable_substrate_required_round_trips_per_facet() {
+    fn durable_store_required_round_trips_per_facet() {
         for facet in [
-            DurableSubstrateFacet::AttachmentStore,
-            DurableSubstrateFacet::ArtifactStore,
-            DurableSubstrateFacet::SessionStore,
+            DurableStoreFacet::AttachmentStore,
+            DurableStoreFacet::ArtifactStore,
+            DurableStoreFacet::SessionStore,
+            DurableStoreFacet::ProcessRegistry,
         ] {
-            let err = RuntimeError::durable_substrate_required(facet);
+            let err = RuntimeError::durable_store_required(facet);
             let json = serde_json::to_value(&err).expect("serialize runtime error");
             let decoded: RuntimeError = serde_json::from_value(json).expect("decode runtime error");
             assert_eq!(
                 decoded.code,
-                RuntimeErrorCode::DurableSubstrateRequired { facet }
+                RuntimeErrorCode::DurableStoreRequired { facet }
             );
         }
     }
@@ -259,16 +236,13 @@ mod tests {
 
     #[test]
     fn runtime_error_code_serializes_as_stable_string() {
-        let err = RuntimeError::new(
-            RuntimeErrorCode::RuntimeTurnCheckpointMissing,
-            "missing checkpoint",
-        );
+        let err = RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, "commit failed");
 
         let json = serde_json::to_value(&err).expect("serialize runtime error");
-        assert_eq!(json["code"], "runtime_turn_checkpoint_missing");
+        assert_eq!(json["code"], "store_commit_failed");
 
         let decoded: RuntimeError = serde_json::from_value(json).expect("decode runtime error");
-        assert_eq!(decoded.code, RuntimeErrorCode::RuntimeTurnCheckpointMissing);
+        assert_eq!(decoded.code, RuntimeErrorCode::StoreCommitFailed);
     }
 
     #[test]
