@@ -6,6 +6,7 @@
 //!   success (the rows-affected check),
 //! * a poisoned connection mutex recovers instead of bricking the store,
 //! * the unsupported-schema error reports the real expected/found versions,
+//! * concurrent first opens do not expose a schema-version-0 store,
 //! * `gc_unreachable` never panics on a corrupt rooted manifest and keeps
 //!   every blob in that conservative case.
 
@@ -310,4 +311,35 @@ fn unsupported_schema_error_reports_real_versions() {
         !message.contains("version 1 only"),
         "error must not carry the stale 'version 1 only' text: {message}"
     );
+}
+
+#[test]
+fn concurrent_first_open_never_observes_version_zero_schema() {
+    let path = unique_db_path("concurrent-schema");
+    let workers = 16;
+    let barrier = Arc::new(std::sync::Barrier::new(workers));
+    let handles = (0..workers)
+        .map(|_| {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                Store::open(&path)
+                    .map(|_| ())
+                    .map_err(|err| err.to_string())
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for handle in handles {
+        handle
+            .join()
+            .expect("schema-open worker")
+            .expect("concurrent first open should succeed");
+    }
+    let conn = rusqlite::Connection::open(&path).expect("open initialized db");
+    let user_version: i32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("read user_version");
+    assert_eq!(user_version, 3);
 }
