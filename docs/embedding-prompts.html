@@ -40,7 +40,9 @@
               <p>Older turns collapse into rolling runtime-authored observations. Configurable: <code>observation_message_tokens</code> (default 30 000), <code>observation_buffer_tokens</code> (6 000), reflection thresholds.</p>
             </article>
           </div>
-          <pre><code>use lash::LashCore;
+          <pre><code>use std::sync::Arc;
+
+use lash::LashCore;
 use lash_standard_plugins::{
     standard_tool_stack, ObservationalMemoryConfig, StandardContextApproach,
     StandardToolStackOptions,
@@ -53,6 +55,9 @@ let core = LashCore::standard()
         )),
         ..Default::default()
     }))
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .build()?;</code></pre>
           <p>The CLI applies this only to the standard preset; RLM uses its protocol projection state and locked-down runtime stack instead.</p>
         </div>
@@ -118,6 +123,9 @@ let core = LashCore::builder()
     .install_mode(ModePreset::rlm_with_projection_resolver(registry.clone()))
     .default_mode(ModeId::rlm())
     .plugins(runtime_plugin_stack())
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .build()?;
 
 // `my_docs_projection` implements `lashlang::ProjectedHostValue`.
@@ -143,7 +151,9 @@ let input = TurnInput::text("Answer using docs only when needed.")
           </div>
           <div class="diagram">
             <div class="diagram-title">Template layout is separate from slot content</div>
-            <pre><code>use lash::prompt::{
+            <pre><code>use std::sync::Arc;
+
+use lash::prompt::{
     PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate,
     PromptTemplateEntry, PromptTemplateSection,
 };
@@ -162,6 +172,9 @@ let template = PromptTemplate::new(vec![
 let core = lash::LashCore::standard()
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None, None).expect("valid model metadata"))
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .prompt_template(template)
     .prompt_contribution(PromptContribution::guidance(
         "App",
@@ -305,6 +318,9 @@ impl ToneTurnExt for lash::TurnBuilder {
           <pre><code>let core = LashCore::rlm()
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
+    .effect_host(std::sync::Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(std::sync::Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .attachment_store(std::sync::Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .build()?;
 
 let session = core
@@ -313,6 +329,8 @@ let session = core
     .plugin::&lt;TonePlugin&gt;(ToneConfig)
     .open()
     .await?;
+
+use lash::modes::RlmTurnBuilderExt as _;
 
 let result = session
     .turn(TurnInput::text("Summarize this incident."))

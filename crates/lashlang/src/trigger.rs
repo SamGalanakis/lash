@@ -49,18 +49,35 @@ impl TriggerHostOperation {
     pub fn input_ty(self) -> TypeExpr {
         match self {
             Self::Register => TypeExpr::Object(vec![
-                required_field("source", TypeExpr::Any),
-                required_field("target", TypeExpr::Any),
-                required_field("inputs", TypeExpr::Any),
+                required_field("source", TypeExpr::Dict),
+                required_field(
+                    "target",
+                    TypeExpr::Process {
+                        input: Box::new(TypeExpr::Any),
+                        output: Box::new(TypeExpr::Any),
+                        input_count: 1,
+                    },
+                ),
+                required_field("inputs", TypeExpr::Dict),
                 optional_field("name", TypeExpr::Str),
             ]),
             Self::List => TypeExpr::Object(vec![
-                optional_field("target", TypeExpr::Any),
+                optional_field(
+                    "target",
+                    TypeExpr::Process {
+                        input: Box::new(TypeExpr::Any),
+                        output: Box::new(TypeExpr::Any),
+                        input_count: 1,
+                    },
+                ),
                 optional_field("name", TypeExpr::Str),
                 optional_field("source_type", TypeExpr::Str),
                 optional_field("enabled", TypeExpr::Bool),
             ]),
-            Self::Cancel => TypeExpr::Object(vec![required_field("handle", TypeExpr::Any)]),
+            Self::Cancel => TypeExpr::Object(vec![required_field(
+                "handle",
+                TypeExpr::TriggerHandle(Box::new(TypeExpr::Any)),
+            )]),
         }
     }
 
@@ -173,7 +190,7 @@ pub enum TriggerCallShapeError {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriggerRegistrationRequest {
-    pub source: TriggerSourceValue,
+    pub source: HostValue,
     pub target: TriggerTargetIdentity,
     pub inputs: TriggerInputTemplate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,7 +201,8 @@ impl TriggerRegistrationRequest {
     pub fn decode(request: &serde_json::Value) -> Result<Self, TriggerRequestDecodeError> {
         let operation = TriggerHostOperation::Register;
         Ok(Self {
-            source: TriggerSourceValue::decode(required_json_field(request, "source", operation)?)?,
+            source: HostValue::decode(required_json_field(request, "source", operation)?)
+                .map_err(TriggerRequestDecodeError::from)?,
             target: TriggerTargetIdentity::decode(
                 required_json_field(request, "target", operation)?,
                 "trigger target",
@@ -395,31 +413,71 @@ impl TriggerCancelRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TriggerSourceValue {
+pub struct HostValue {
     pub source_type: String,
     pub value: serde_json::Value,
 }
 
-impl TriggerSourceValue {
-    pub fn decode(source: &serde_json::Value) -> Result<Self, TriggerRequestDecodeError> {
+impl HostValue {
+    pub fn new(source_type: impl Into<String>, value: serde_json::Value) -> Self {
+        Self {
+            source_type: source_type.into(),
+            value,
+        }
+    }
+
+    pub fn decode(source: &serde_json::Value) -> Result<Self, HostValueError> {
         let source_type = source
             .get(LASH_HOST_VALUE_TYPE_KEY)
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned)
-            .ok_or(TriggerRequestDecodeError::InvalidSource)?;
+            .ok_or(HostValueError::InvalidHostValue)?;
         let value = source
             .get(LASH_HOST_VALUE_KEY)
             .cloned()
-            .ok_or(TriggerRequestDecodeError::InvalidSource)?;
+            .ok_or(HostValueError::InvalidHostValue)?;
         Ok(Self { source_type, value })
     }
 
-    pub fn to_host_value(&self) -> serde_json::Value {
+    pub fn encode(
+        source_type: impl Into<String>,
+        value: impl Serialize,
+    ) -> Result<serde_json::Value, HostValueError> {
+        let source_type = source_type.into();
+        let value =
+            serde_json::to_value(value).map_err(|err| HostValueError::MalformedPayload {
+                source_type: source_type.clone(),
+                message: err.to_string(),
+            })?;
+        Ok(Self::new(source_type, value).to_json())
+    }
+
+    pub fn decode_as<T: serde::de::DeserializeOwned>(
+        &self,
+        resources: &ResourceCatalog,
+    ) -> Result<T, HostValueError> {
+        resources.decode_host_value_as(&self.source_type, self.value.clone())
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             LASH_HOST_VALUE_TYPE_KEY: self.source_type,
             LASH_HOST_VALUE_KEY: self.value,
         })
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum HostValueError {
+    #[error("host value must be a host value constructor result")]
+    InvalidHostValue,
+    #[error("host value `{source_type}` is not declared in the resource catalog")]
+    UnknownSourceType { source_type: String },
+    #[error("host value `{source_type}` payload is invalid: {message}")]
+    MalformedPayload {
+        source_type: String,
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -508,6 +566,22 @@ pub enum TriggerRequestDecodeError {
     },
     #[error("host value `{source_type}` is not registered as a trigger source")]
     UnknownSourceType { source_type: String },
+}
+
+impl From<HostValueError> for TriggerRequestDecodeError {
+    fn from(err: HostValueError) -> Self {
+        match err {
+            HostValueError::InvalidHostValue => Self::InvalidSource,
+            HostValueError::UnknownSourceType { source_type } => {
+                Self::UnknownSourceType { source_type }
+            }
+            HostValueError::MalformedPayload { message, .. } => Self::InvalidField {
+                operation: TriggerHostOperation::Register.host_operation(),
+                field: "source",
+                message,
+            },
+        }
+    }
 }
 
 fn required_json_field<'json>(
@@ -858,4 +932,92 @@ fn type_aliases(artifact: &ModuleArtifact) -> BTreeMap<String, TypeExpr> {
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct ScheduleSource {
+        expr: String,
+        #[serde(default)]
+        tz: Option<String>,
+    }
+
+    fn resources() -> ResourceCatalog {
+        let mut resources = ResourceCatalog::new();
+        resources
+            .add_trigger_source_constructor(
+                ["cron", "Schedule"],
+                TypeExpr::Object(vec![
+                    TypeField {
+                        name: "expr".into(),
+                        ty: TypeExpr::Str,
+                        optional: false,
+                    },
+                    TypeField {
+                        name: "tz".into(),
+                        ty: TypeExpr::Str,
+                        optional: true,
+                    },
+                ]),
+                NamedDataType::object(
+                    "cron.Tick",
+                    vec![TypeField {
+                        name: "fired_at".into(),
+                        ty: TypeExpr::Str,
+                        optional: false,
+                    }],
+                )
+                .expect("valid cron tick type"),
+            )
+            .expect("valid cron schedule source");
+        resources
+    }
+
+    #[test]
+    fn host_value_encode_decode_and_typed_decode_round_trip() {
+        let value = serde_json::json!({
+            "expr": "*/10 * * * * *",
+            "tz": "UTC",
+        });
+        let encoded = HostValue::encode("cron.Schedule", value).expect("host value encode");
+        let decoded = HostValue::decode(&encoded).expect("host value decode");
+        let payload: ScheduleSource = decoded
+            .decode_as(&resources())
+            .expect("typed host value payload");
+
+        assert_eq!(
+            payload,
+            ScheduleSource {
+                expr: "*/10 * * * * *".to_string(),
+                tz: Some("UTC".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn host_value_typed_decode_rejects_unknown_source_type() {
+        let decoded = HostValue::new("missing.Source", serde_json::json!({ "expr": "*" }));
+        let err = decoded
+            .decode_as::<ScheduleSource>(&resources())
+            .expect_err("unknown source type should fail");
+
+        assert!(
+            matches!(err, HostValueError::UnknownSourceType { source_type } if source_type == "missing.Source")
+        );
+    }
+
+    #[test]
+    fn host_value_typed_decode_reports_malformed_payload() {
+        let decoded = HostValue::new("cron.Schedule", serde_json::json!({ "expr": 1 }));
+        let err = decoded
+            .decode_as::<ScheduleSource>(&resources())
+            .expect_err("malformed source payload should fail");
+
+        assert!(
+            matches!(err, HostValueError::MalformedPayload { source_type, .. } if source_type == "cron.Schedule")
+        );
+    }
 }

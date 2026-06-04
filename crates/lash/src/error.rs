@@ -10,15 +10,15 @@ pub enum EmbedError {
     ModeNotInstalled { mode: ModeId },
     #[error("model spec is required; hosts must supply explicit model metadata")]
     MissingModelSpec,
-    #[error(
-        "effect host is required; call .effect_host(...) (e.g. InlineEffectHost) or .in_memory_stores()"
-    )]
+    #[error("effect host is required; provide an explicit effect host with .effect_host(...)")]
     MissingEffectHost,
     #[error(
-        "lashlang artifact store is required; call .lashlang_artifact_store(...) or .in_memory_stores()"
+        "lashlang artifact store is required; provide an explicit Lashlang artifact store with .lashlang_artifact_store(...)"
     )]
     MissingLashlangArtifactStore,
-    #[error("attachment store is required; call .attachment_store(...) or .in_memory_stores()")]
+    #[error(
+        "attachment store is required; provide an explicit attachment store with .attachment_store(...)"
+    )]
     MissingAttachmentStore,
     #[error("failed to create store for session `{session_id}`: {message}")]
     StoreFactory { session_id: String, message: String },
@@ -35,13 +35,11 @@ pub enum EmbedError {
     )]
     DurableProcessRegistryRequiresStoreFactory,
     #[error(
-        "a process registry is configured but no process work runner is available; the default inline runner is disabled and no runner was supplied via .with_process_work_runner(...). Non-terminal processes would never execute. Enable the default runner or register an explicit one."
-    )]
-    ProcessRegistryWithoutWorkRunner,
-    #[error(
-        "a process registry is configured but no session store factory is wired; the default process work runner rebuilds a session runtime per process and cannot do so without one, so processes would never execute. Wire .store_factory(...) — InMemorySessionStoreFactory::new() for ephemeral process execution, or a durable factory — or .disable_default_process_work_runner() if processes are inspected but never run."
+        "a process registry is configured for the default inline process work runner but no session store factory is wired; the runner rebuilds a session runtime per process and cannot do so without one. Wire .store_factory(...) - InMemorySessionStoreFactory::new() for ephemeral process execution, or a durable factory - or use .process_work_driver(...) for an externally driven durable runner."
     )]
     ProcessRegistryRequiresStoreFactory,
+    #[error("durable process worker config requires a LashCore process registry")]
+    MissingProcessRegistry,
     #[error("session deletion requires a LashCore store factory")]
     MissingSessionStoreFactory,
     #[error("failed to delete process state for session `{session_id}`: {message}")]

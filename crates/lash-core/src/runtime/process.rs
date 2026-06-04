@@ -1,6 +1,7 @@
 mod events;
 mod materialization;
 mod model;
+mod observation;
 mod registry;
 mod service;
 #[cfg(any(test, feature = "testing"))]
@@ -26,6 +27,10 @@ pub use model::{
     ProcessListMode, ProcessOpScope, ProcessProvenance, ProcessRecord, ProcessRegistration,
     ProcessScope, ProcessScopeId, ProcessSessionDeleteReport, ProcessStartGrant,
     ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
+};
+pub use observation::{
+    ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessWorkObserver,
+    ProcessWorkSnapshot,
 };
 pub use registry::ProcessRegistry;
 pub use service::{

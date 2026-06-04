@@ -7,6 +7,7 @@ use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use bytes::Bytes;
+use lash::modes::RlmTurnBuilderExt as _;
 use lash::{TurnInput, TurnOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -210,7 +211,7 @@ async fn run_restate_chat_turn_and_persist(
     );
 
     let effect_scope = controller
-        .scoped_effect_controller(lash::advanced::EffectScope::turn(
+        .scoped_effect_controller(lash::runtime::EffectScope::turn(
             &request.chat_id,
             &request.turn_id,
         ))
@@ -346,17 +347,13 @@ mod restate_tests {
         } else {
             local_addr
         };
-        let process_runner = Arc::new(lash_restate::RestateCoreProcessRunner::new(
-            harness.process_worker.clone(),
-        ));
         let endpoint = restate_sdk::endpoint::Endpoint::builder()
             .bind(AgentServiceTurnWorkflowImpl::new(state.clone()).serve())
             .bind(
-                lash_restate::LashProcessWorkflowImpl::new(
-                    Arc::clone(&process_runner),
-                    Arc::clone(&harness.process_registry),
-                )
-                .serve(),
+                harness
+                    .process_deployment
+                    .workflow(harness.process_worker.clone())
+                    .serve(),
             )
             .build();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -367,7 +364,7 @@ mod restate_tests {
                 })
                 .await;
         });
-        harness.process_work_runner.spawn();
+        harness.process_deployment.spawn();
 
         wait_for_endpoint_socket(local_probe_addr).await;
         register_restate_deployment(&admin_url, &endpoint_url).await;
@@ -443,9 +440,8 @@ mod restate_tests {
 
     struct LiveRestateTestHarness {
         state: AppStateData,
-        process_registry: Arc<dyn lash_core::ProcessRegistry>,
         process_worker: lash_core::DurableProcessWorker,
-        process_work_runner: lash::advanced::ProcessWorkRunner,
+        process_deployment: lash_restate::RestateProcessDeployment,
     }
 
     fn live_restate_test_state(data_dir: &Path, ingress_url: String) -> LiveRestateTestHarness {
@@ -487,13 +483,8 @@ submit "done via Restate E2E"
             lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
                 .expect("open artifact store"),
         ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
-        let process_work_runner = lash::advanced::ProcessWorkRunner::new(Arc::new(
-            lash_restate::RestateProcessIngressRunner::new(
-                ingress_url,
-                Arc::clone(&process_registry),
-            ),
-        ));
-        let process_work_poke = process_work_runner.poke_handle();
+        let process_deployment =
+            lash_restate::RestateProcessDeployment::new(ingress_url, Arc::clone(&process_registry));
         let core = LashCore::builder()
             .install_mode(ModePreset::rlm())
             .default_mode(ModeId::rlm())
@@ -507,22 +498,16 @@ submit "done via Restate E2E"
                 data_dir.join("attachments"),
             )))
             .lashlang_artifact_store(artifact_store)
-            .advanced()
-            .effect_host(Arc::new(lash::advanced::InlineEffectHost::default()))
-            .process_registry(Arc::clone(&process_registry))
-            .disable_default_process_work_runner()
-            .with_process_work_runner(process_work_poke)
+            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .process_work_driver(process_deployment.process_work_driver())
             .build()
             .expect("build test core");
         let demo_factory = DemoPlugin::factory(&DemoPluginConfig {
             db: Arc::clone(&app_db),
         });
         let process_worker = lash_core::DurableProcessWorker::new(
-            core.durable_process_worker_config_with_plugins(
-                Arc::clone(&process_registry),
-                [demo_factory],
-            )
-            .expect("process worker config"),
+            core.durable_process_worker_config_with_plugins([demo_factory])
+                .expect("process worker config"),
         );
         let state = AppStateData::from_shared_db(
             core,
@@ -534,9 +519,8 @@ submit "done via Restate E2E"
         );
         LiveRestateTestHarness {
             state,
-            process_registry,
             process_worker,
-            process_work_runner,
+            process_deployment,
         }
     }
 

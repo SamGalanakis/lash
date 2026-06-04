@@ -13,13 +13,6 @@ pub(super) fn mock_model_spec() -> lash_core::ModelSpec {
     model_spec("mock-model", None, 200_000)
 }
 
-pub(super) fn test_current_epoch_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default()
-}
-
 pub(super) fn run_async_test_on_large_stack<F, Fut, T>(name: &str, test: F) -> T
 where
     F: FnOnce() -> Fut + Send + 'static,

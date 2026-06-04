@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use lash::{LashCore, ModeId, ModePreset};
 
 #[tokio::main]
@@ -10,7 +12,11 @@ async fn main() -> lash::Result<()> {
             lash::ModelSpec::from_token_limits("example-model", None, 200_000, None, None)
                 .expect("valid model spec"),
         )
-        .in_memory_stores()
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(
+            lash::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 
     let parent = core.session("main").standard().open().await?;

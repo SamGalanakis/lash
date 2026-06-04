@@ -28,7 +28,7 @@ pub struct TriggerActivationService<'a> {
     session_id: String,
     registry: Arc<SessionTriggerRegistry>,
     processes: Arc<dyn crate::ProcessService>,
-    effect_host: &'a dyn crate::EffectHost,
+    scoped_effect_controller: crate::ScopedEffectController<'a>,
 }
 
 impl<'a> TriggerActivationService<'a> {
@@ -36,13 +36,13 @@ impl<'a> TriggerActivationService<'a> {
         session_id: String,
         registry: Arc<SessionTriggerRegistry>,
         processes: Arc<dyn crate::ProcessService>,
-        effect_host: &'a dyn crate::EffectHost,
+        scoped_effect_controller: crate::ScopedEffectController<'a>,
     ) -> Self {
         Self {
             session_id,
             registry,
             processes,
-            effect_host,
+            scoped_effect_controller,
         }
     }
 
@@ -128,13 +128,18 @@ impl<'a> TriggerActivationService<'a> {
             },
         )
         .with_extra_event_types(crate::lashlang_process_event_types());
-        let scoped_effect_controller = self
-            .effect_host
-            .scoped(crate::EffectScope::host_event(
+        let scoped_effect_controller = crate::ScopedEffectController::borrowed(
+            self.scoped_effect_controller.controller(),
+            crate::EffectScope::host_event(
                 &self.session_id,
-                format!("trigger:{}:{process_id}", route.handle),
-            ))
-            .map_err(|err| PluginError::Session(err.to_string()))?;
+                format!(
+                    "{}:{}",
+                    self.scoped_effect_controller.scope_id(),
+                    route.handle
+                ),
+            ),
+        )
+        .map_err(|err| PluginError::Session(err.to_string()))?;
         self.processes
             .start(
                 &self.session_id,

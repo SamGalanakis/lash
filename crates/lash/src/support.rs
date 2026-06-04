@@ -7,9 +7,9 @@ pub(crate) use lash_core::plugin::StaticPluginFactory;
 pub(crate) use lash_core::runtime::{EffectHost, RuntimeSessionState, ScopedEffectController};
 pub(crate) use lash_core::{
     DurabilityTier, DurableProcessWorker, DurableProcessWorkerConfig, LashRuntime, MessageRole,
-    PluginHost, PluginSpec, PluginStack, ProcessWorkPoke, ProcessWorkRunner, QueuedWorkPoke,
-    RuntimeEnvironment, RuntimeHandle, RuntimeHostConfig, RuntimeObservation, SessionPolicy,
-    SessionSpec,
+    PluginHost, PluginSpec, PluginStack, ProcessWorkDriver, ProcessWorkObserver, ProcessWorkPoke,
+    ProcessWorkRunner, QueuedWorkPoke, RuntimeEnvironment, RuntimeHandle, RuntimeHostConfig,
+    RuntimeObservation, SessionPolicy, SessionSpec,
 };
 pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;
@@ -36,7 +36,7 @@ pub(crate) use crate::ToolState;
 pub(crate) use crate::control::*;
 pub(crate) use crate::core::*;
 pub(crate) use crate::error::*;
-pub(crate) use crate::mode::*;
+pub(crate) use crate::mode::{ModeId, ModePreset};
 pub(crate) use crate::plugin_binding::*;
 pub(crate) use crate::prompt_layer::PromptLayerSink;
 pub(crate) use crate::session::SessionBuilder;

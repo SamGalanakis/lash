@@ -112,13 +112,15 @@ pub struct RuntimeCommit {
         <div class="section" id="wiring">
           <div class="section-header">
             <h2>Wiring It Up</h2>
-            <p>Install one factory on the core; every session inherits it.</p>
+            <p>Install one session-store factory plus the explicit runtime facets on the core; every session inherits them.</p>
           </div>
           <pre><code>use std::sync::Arc;
 use lash::{LashCore, ModeId, ModePreset};
-use lash_sqlite_store::SqliteSessionStoreFactory;
+use lash_sqlite_store::{SqliteSessionStoreFactory, Store};
 
-let store_factory = Arc::new(SqliteSessionStoreFactory::new("./.lash-data"));
+let data_dir = std::path::PathBuf::from("./.lash-data");
+let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
+let artifact_store = Arc::new(Store::open(&amp;data_dir.join("artifacts.db"))?);
 
 let core = LashCore::builder()
     .install_mode(ModePreset::rlm())
@@ -126,6 +128,9 @@ let core = LashCore::builder()
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(artifact_store)
+    .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(data_dir.join("attachments"))))
     .build()?;</code></pre>
           <p>Per-session override (e.g. tests with an isolated store):</p>
           <pre><code>let session = core
@@ -133,7 +138,7 @@ let core = LashCore::builder()
     .store(Arc::new(my_custom_persistence))
     .open()
     .await?;</code></pre>
-          <p>Without a <code>store_factory</code>, sessions run in-memory: turns succeed but nothing is written or resumable. There is no separate in-memory impl — absence of a factory is the mechanism.</p>
+          <p>Without a <code>store_factory</code>, session state is in-process only: turns succeed but nothing is written or resumable. You still provide explicit in-memory effect, artifact, and attachment facets with <code>InlineEffectHost</code>, <code>InMemoryLashlangArtifactStore</code>, and <code>InMemoryAttachmentStore</code>.</p>
         </div>
 
         <div class="section" id="whats-persisted">
@@ -203,6 +208,9 @@ let core = LashCore::builder()
 let store_factory = Arc::new(SqliteSessionStoreFactory::new(
     data_dir.join("lash-sessions"),
 ));
+let artifact_store = Arc::new(lash_sqlite_store::Store::open(
+    &amp;data_dir.join("lash-artifacts.db"),
+)?);
 
 let core = LashCore::builder()
     .install_mode(ModePreset::rlm())
@@ -210,6 +218,11 @@ let core = LashCore::builder()
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits(model.clone(), Some(model_variant.clone()), 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(artifact_store)
+    .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
+        data_dir.join("attachments"),
+    )))
     .build()?;
 
 // Per request: open a session keyed by the app's chat id.

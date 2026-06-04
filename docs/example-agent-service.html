@@ -47,7 +47,7 @@
             <p>Read this example end-to-end when checking whether an app uses the <code>lash</code> facade correctly.</p>
           </div>
           <div class="module-grid">
-            <article class="panel"><h3>Shared core</h3><p>One <code>LashCore</code> holds provider, model defaults, RLM mode, store factory, and trace sink for the whole app.</p></article>
+            <article class="panel"><h3>Shared core</h3><p>One <code>LashCore</code> holds provider, model defaults, RLM mode, effect host, runtime stores, and trace sink for the whole app.</p></article>
             <article class="panel"><h3>Session per chat</h3><p>Each request opens a <code>LashSession</code> from the chat id and store. The app does not keep live runtime sessions in a process map.</p></article>
             <article class="panel"><h3>Per-chat model</h3><p>The product DB stores <code>model</code> and <code>model_variant</code>; turns apply the current selection through <code>TurnBuilder::model(...)</code>.</p></article>
             <article class="panel"><h3>App-owned board</h3><p>The board lives in the app database. Prompt hooks and tools load the canonical <code>chat_boards</code> row by session id; message payload snapshots are only for browser replay.</p></article>
@@ -59,7 +59,7 @@
         <div class="section" id="core-wiring">
           <div class="section-header">
             <h2>Core Wiring</h2>
-            <p>Build one core for the process. The example installs RLM explicitly and uses a SQLite session-store factory so every chat id maps back to durable runtime state.</p>
+            <p>Build one core for the process. The example installs RLM explicitly and wires the SQLite session factory, Lashlang artifact store, file attachment store, and effect host on the normal builder.</p>
           </div>
           <pre><code>let provider = ProviderHandle::new(
     OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
@@ -69,6 +69,9 @@
         })
         .into_components(),
 );
+let artifact_store = std::sync::Arc::new(lash_sqlite_store::Store::open(
+    &amp;data_dir.join("lash-artifacts.db"),
+)?);
 
 let core = LashCore::builder()
     .install_mode(ModePreset::rlm())
@@ -76,6 +79,11 @@ let core = LashCore::builder()
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits(model.clone(), Some(model_variant.clone()), 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
+    .effect_host(std::sync::Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(artifact_store)
+    .attachment_store(std::sync::Arc::new(lash::persistence::FileAttachmentStore::new(
+        data_dir.join("attachments"),
+    )))
     .trace_sink(Some(trace_sink))
     .trace_level(TraceLevel::Extended)
     .build()?;</code></pre>
@@ -87,6 +95,8 @@ let core = LashCore::builder()
             <p>The route stores the user message and UI replay board snapshot first, updates the canonical <code>chat_boards</code> row, opens the Lash session, then runs a turn with the chat's model selection.</p>
           </div>
           <pre><code>let session = state.open_session(&amp;chat_id).await?;
+
+use lash::modes::RlmTurnBuilderExt as _;
 
 let turn = session
     .turn(TurnInput::text(text))

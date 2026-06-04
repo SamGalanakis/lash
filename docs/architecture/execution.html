@@ -73,7 +73,7 @@ flowchart TD
 flowchart LR
   App["host app<br/>HTTP / DB / auth / UI"] --> Core["LashCore<br/>shared runtime environment"]
   Core --> Builder["LashCoreBuilder<br/>provider, model, modes, tools, plugins"]
-  Builder --> Advanced["builder.advanced()<br/>host/runtime knobs"]
+  Builder --> Advanced["builder.advanced()<br/>plugin host / runtime config"]
   Advanced --> Env["runtime environment<br/>plugins + stores + tracing"]
   App --> Session["core.session(id)<br/>SessionBuilder"]
   Session --> Runtime["parked runtime handle<br/>per chat/session"]
@@ -84,7 +84,7 @@ flowchart LR
           </div>
           <dl class="def-list">
             <dt><code>LashCore</code></dt>
-            <dd>Cloneable shared core: runtime env, default session policy, mode presets, store factory, tool providers, plugin factories, attachment store, trace sink. Residency and termination policy live in <code>.advanced()</code>.</dd>
+            <dd>Cloneable shared core: runtime env, default session policy, mode presets, effect host, session store factory, Lashlang artifact store, attachment store, trace sink, residency, and termination policy.</dd>
             <dt><code>ModePreset</code></dt>
             <dd><code>standard()</code>, <code>rlm()</code>, <code>rlm_with_config(...)</code>. Install multiple and pick a default with <code>default_mode</code>; override per session with <code>.standard()</code>, <code>.rlm()</code>, or <code>.mode(...)</code>.</dd>
             <dt><code>LashSession</code></dt>
@@ -100,6 +100,9 @@ flowchart LR
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
+    .effect_host(std::sync::Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(std::sync::Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("artifacts.db"))?))
+    .attachment_store(std::sync::Arc::new(lash::persistence::FileAttachmentStore::new(data_dir.join("attachments"))))
     .build()?;
 
 let session = core.session(chat_id).standard().open().await?;

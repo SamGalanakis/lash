@@ -35,6 +35,39 @@
           </div>
         </div>
 
+        <div class="section" id="explicit-runtime-facets">
+          <div class="section-header">
+            <h2>Explicit Runtime Facets</h2>
+            <p>Mode presets install protocol and plugin defaults only. Every core build names the host-owned runtime facets explicitly: an effect host, a Lashlang artifact store, and an attachment store. Add a session-store factory when sessions must survive process restarts or when the inline process worker is enabled.</p>
+          </div>
+          <pre><code>use std::sync::Arc;
+
+let core = LashCore::rlm()
+    .provider(provider)
+    .model(model)
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
+    .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+    .build()?;</code></pre>
+          <pre><code>use std::sync::Arc;
+use lash::persistence::FileAttachmentStore;
+use lash_sqlite_store::{SqliteSessionStoreFactory, Store};
+
+let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
+let artifact_store = Arc::new(Store::open(&amp;data_dir.join("artifacts.db"))?);
+
+let core = LashCore::rlm()
+    .provider(provider)
+    .model(model)
+    .store_factory(store_factory)
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(artifact_store)
+    .attachment_store(Arc::new(FileAttachmentStore::new(data_dir.join("attachments"))))
+    .build()?;</code></pre>
+        </div>
+
         <div class="section" id="session-lifecycle">
           <div class="section-header">
             <h2>Session Lifecycle</h2>
@@ -51,13 +84,18 @@
               <p>Only active-path nodes resident; orphans on disk. Lower memory, occasional store reads when crossing forks. Long-lived multi-session servers.</p>
             </article>
           </div>
-          <pre><code>use lash::advanced::Residency;
+          <pre><code>use std::sync::Arc;
+use lash::durability::{InlineEffectHost, Residency};
+use lash::persistence::FileAttachmentStore;
+use lash_sqlite_store::Store;
 
 let core = LashCore::rlm()
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
-    .advanced()
+    .effect_host(Arc::new(InlineEffectHost::default()))
+    .lashlang_artifact_store(Arc::new(Store::open(&amp;data_dir.join("artifacts.db"))?))
+    .attachment_store(Arc::new(FileAttachmentStore::new(data_dir.join("attachments"))))
     .residency(Residency::ActivePathOnly)
     .build()?;</code></pre>
           <p>Plugin background work — tasks tracked via <code>ToolContext::processes()</code>, post-turn observation summaries, MCP warm-ups — continues past turn return. To drain it before returning (one-shot processes that need observations persisted before exit):</p>
@@ -91,6 +129,9 @@ let subagents = SubagentsPluginFactory::new(registry)
 let core = LashCore::rlm()
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .plugin(Arc::new(subagents) as Arc&lt;dyn PluginFactory&gt;)
     .build()?;</code></pre>
           <p>Capabilities return <code>SessionSpec</code> overlays. <code>StaticCapability</code> pins exact child authority; <code>TierCapability</code> backs the built-in <code>explore</code> and <code>peer</code> tiers. Do not construct <code>SessionPolicy</code> directly — it's the resolved runtime artifact.</p>
@@ -136,6 +177,9 @@ let mcp = McpPluginFactory::new(servers).await?;
 let core = LashCore::rlm()
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
+    .effect_host(std::sync::Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(std::sync::Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .attachment_store(std::sync::Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .plugin(std::sync::Arc::new(mcp))
     .build()?;</code></pre>
           <p>Tools appear as <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> with original schemas preserved. <code>attach_server</code> / <code>detach_server</code> mutate the live pool without rebuilding the core.</p>
@@ -155,14 +199,16 @@ mcp.detach_server("old-tool").await?;</code></pre>
         <div class="section" id="advanced-runtime">
           <div class="section-header">
             <h2>Advanced Runtime</h2>
-            <p><code>.advanced()</code> exposes runtime-host concerns: effect hosts, custom plugin hosts, process workers/runners, residency policy, and a replaceable <code>RuntimeHostConfig</code>. The registry trait itself lives under <code>lash::persistence::ProcessRegistry</code>; installing one derives the explicit Lashlang process/lifecycle abilities for sessions built from the environment. Plugin hosts do not have a separate process-availability boolean. <code>RuntimeEnvironment</code> stores that config as <code>core</code>; the environment builder's attachment, prompt, trace, termination, and effect-host methods are thin core mutators.</p>
+            <p><code>.advanced()</code> is reserved for low-level overrides: a custom <code>PluginHost</code> or a replaceable <code>RuntimeHostConfig</code>. Durable embedding concerns such as effect hosts, process registries, process work drivers, residency policy, and termination policy live on the normal <code>LashCoreBuilder</code>. The registry trait itself lives under <code>lash::process::ProcessRegistry</code>; installing one derives the explicit Lashlang process/lifecycle abilities for sessions built from the environment.</p>
           </div>
           <pre><code>let core = LashCore::rlm()
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
-    .advanced()
-    .residency(lash::advanced::Residency::ActivePathOnly)
+    .effect_host(std::sync::Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(std::sync::Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("artifacts.db"))?))
+    .attachment_store(std::sync::Arc::new(lash::persistence::FileAttachmentStore::new(data_dir.join("attachments"))))
+    .residency(lash::durability::Residency::ActivePathOnly)
     .build()?;</code></pre>
           <p>Streaming is semantic: <code>TurnBuilder::stream</code> emits <code>TurnActivity</code> and resolves to a <code>TurnResult</code>. Raw runtime telemetry belongs in tracing, not the app surface.</p>
         </div>

@@ -169,13 +169,13 @@ impl PluginSession {
     pub(crate) fn trigger_activation_service<'a>(
         &'a self,
         processes: Arc<dyn crate::ProcessService>,
-        effect_host: &'a dyn crate::EffectHost,
+        scoped_effect_controller: crate::ScopedEffectController<'a>,
     ) -> crate::TriggerActivationService<'a> {
         crate::TriggerActivationService::new(
             self.session_id.clone(),
             Arc::clone(&self.trigger_registry),
             processes,
-            effect_host,
+            scoped_effect_controller,
         )
     }
 

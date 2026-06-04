@@ -236,7 +236,21 @@ impl PluginHost {
             .map_err(|message| {
             PluginError::Registration(format!("invalid host event catalog: {message}"))
         })?;
-        let lashlang_resources = self.lashlang_resources.clone();
+        let mut lashlang_resources = self.lashlang_resources.clone();
+        for event in host_events.events() {
+            lashlang_resources
+                .add_trigger_source_constructor(
+                    event.source_type().split('.'),
+                    lashlang::TypeExpr::Object(Vec::new()),
+                    event.payload_type().clone(),
+                )
+                .map_err(|err| {
+                    PluginError::Registration(format!(
+                        "invalid host event trigger source `{}.{}`: {err}",
+                        event.alias, event.event
+                    ))
+                })?;
+        }
         let trigger_registry = contributions.trigger_registry.clone().ok_or_else(|| {
             PluginError::Registration("missing session trigger registry".to_string())
         })?;

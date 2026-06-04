@@ -232,6 +232,19 @@ pub fn spawn_agent_tool_definition(capability_names: &[String]) -> ToolDefinitio
     spawn_agent_definition(
         capability_names,
         vec![
+            // Parallel subagent fan-out: start process handles first, then join.
+            format!(
+                r#"process research(agents: Agents, task: str) {{
+  result = await agents.spawn({{ task: task{capability_arg}, output: {{ summary: "str" }} }})?
+  finish result
+}}
+handles = {{
+  first: start research(agents: agents, task: "Research the first topic"),
+  second: start research(agents: agents, task: "Research the second topic")
+}}
+results = await handles
+submit {{ first: results.first?, second: results.second? }}"#
+            ),
             // Schema-first: the highest-leverage shape — bind a typed result.
             format!(
                 r#"typed = await agents.spawn({{ task: "Find the longest line in src/main.rs"{capability_arg}, output: {{ line: "str", length: "int" }} }})?"#
@@ -263,7 +276,7 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
     let cap_list = capability_list_for_description(capability_names);
     let capability_detail = capability_detail_for_tool_description(capability_names);
     let description = format!(
-        "Run a subagent through the `agents.spawn` module operation and return its final result. For process-level fan-out, declare a named process that accepts `agents: Agents`, call `await agents.spawn({{ ... }})?` inside it, then `start` that named process once per branch with `agents: agents`. {capability_detail} `output` defines the typed return shape. Available capabilities: {cap_list}. \
+        "Run one subagent through the `agents.spawn` module operation and return its final result. A direct `await agents.spawn(...)` call blocks until that child finishes, so multiple direct awaits are serial. For parallel subagent fan-out, declare a named process that accepts `agents: Agents`, call `await agents.spawn({{ ... }})?` inside it, start every branch process first with `agents: agents`, then join the handles with `results = await handles`. {capability_detail} `output` defines the typed return shape. Available capabilities: {cap_list}. \
         In record shorthand, each `output` field value is a string type descriptor such as `\"str\"`, `\"int\"`, or `\"list[str]\"`; pass a Lashlang `Type {{ ... }}` literal for nested shapes. \
         \n\nThe child starts with **no** inherited state — globals, projected bindings, message history are all blank. Hand it specific data via `seed: {{ name: value, ... }}`. Each entry's kind is preserved automatically: if `value`'s lashlang source root is a host-projected binding (e.g. `seed: {{ problem: input.prompt }}`) the child receives `problem` as a read-only projected binding, identical to how it appeared on the parent. Otherwise it lands as a regular RLM global. Computed expressions default to global. Projected seed entries require an RLM child; passing one to a non-RLM capability is an error.\
         \n\nA child can fail terminally with `await tools.submit_error({{ reason: \"...\" }})?`; this tool returns an error with that reason."

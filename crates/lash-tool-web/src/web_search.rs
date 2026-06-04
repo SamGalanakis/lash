@@ -35,14 +35,17 @@ impl StaticToolExecute for WebSearch {
             .get("query")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5)
+            .clamp(1, 20);
 
         if self.api_key.trim().is_empty() {
             return ToolResult::err(json!("Tavily API key is required for web.search"));
         }
 
         let body = json!({
-            "api_key": self.api_key,
             "query": query,
             "max_results": limit,
         });
@@ -50,14 +53,14 @@ impl StaticToolExecute for WebSearch {
         let resp = self
             .client
             .post("https://api.tavily.com/search")
+            .bearer_auth(&self.api_key)
             .json(&body)
             .send()
             .await;
         match resp {
             Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
                 Ok(data) => ToolResult::ok(json!({
-                    "results": data.get("results").cloned().unwrap_or_else(|| json!([])),
-                    "answer": data.get("answer").cloned().unwrap_or(Value::Null),
+                    "results": sanitize_results(data.get("results")),
                 })),
                 Err(e) => ToolResult::err_fmt(format_args!("Failed to parse response: {e}")),
             },
@@ -71,17 +74,33 @@ impl StaticToolExecute for WebSearch {
     }
 }
 
+fn sanitize_results(results: Option<&Value>) -> Vec<Value> {
+    results
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|item| {
+            json!({
+                "title": item.get("title").and_then(Value::as_str).unwrap_or_default(),
+                "url": item.get("url").and_then(Value::as_str).unwrap_or_default(),
+                "content": item.get("content").and_then(Value::as_str).unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
 fn web_search_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
                 "tool:search_web",
                 "search_web",
-                "Search the web for candidate sources. Returns `{results, answer?}` with snippet text; use `web.fetch` when you need the page itself.",
+                "Search the web for candidate sources. Returns ranked `results` with snippet text; use `web.fetch` when you need the page itself. This tool does not expose Tavily's optional generated answer; summarize from result snippets and fetched pages.",
                 object_schema(
                     serde_json::json!({
                         "query": { "type": "string" },
                         "limit": {
                             "type": "integer",
                             "minimum": 1,
+                            "maximum": 20,
                             "default": 5,
                             "description": "Maximum results to return (default 5)"
                         }
@@ -106,10 +125,6 @@ fn web_search_tool_definition() -> ToolDefinition {
                                 "required": ["title", "url", "content"],
                                 "additionalProperties": false
                             }
-                        },
-                        "answer": {
-                            "type": "string",
-                            "description": "Optional synthesized answer returned by the search backend."
                         }
                     },
                     "required": ["results"],
@@ -144,6 +159,7 @@ mod tests {
         assert!(properties.contains_key("limit"));
         assert!(!properties.contains_key("max_results"));
         assert_eq!(properties["limit"]["default"], serde_json::json!(5));
+        assert_eq!(properties["limit"]["maximum"], serde_json::json!(20));
         assert!(
             definition
                 .contract
@@ -159,6 +175,12 @@ mod tests {
             definition.contract.output_schema["required"],
             serde_json::json!(["results"])
         );
+        assert!(
+            !definition.contract.output_schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("answer")
+        );
         assert_eq!(
             definition.manifest.activation,
             lash_core::ToolActivation::Always
@@ -166,6 +188,29 @@ mod tests {
         assert_eq!(
             definition.manifest.availability.base,
             lash_core::ToolAvailability::Showcased
+        );
+    }
+
+    #[test]
+    fn search_web_sanitizes_tavily_results_to_contract() {
+        let results = sanitize_results(Some(&serde_json::json!([
+            {
+                "title": "Title",
+                "url": "https://example.com",
+                "content": "Snippet",
+                "score": 0.9,
+                "raw_content": null,
+                "favicon": "https://example.com/favicon.ico"
+            }
+        ])));
+
+        assert_eq!(
+            results,
+            vec![serde_json::json!({
+                "title": "Title",
+                "url": "https://example.com",
+                "content": "Snippet"
+            })]
         );
     }
 }

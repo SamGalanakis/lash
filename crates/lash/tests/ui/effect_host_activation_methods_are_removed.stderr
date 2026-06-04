@@ -1,0 +1,48 @@
+error[E0599]: no method named `emit_with_effect_host` found for struct `HostEventsControl` in the current scope
+ --> tests/ui/effect_host_activation_methods_are_removed.rs:7:10
+  |
+5 |       let _ = session
+  |  _____________-
+6 | |         .host_events()
+7 | |         .emit_with_effect_host("Button", "ui.button", "pressed", serde_json::json!({}), scope.controller())
+  | |_________-^^^^^^^^^^^^^^^^^^^^^
+  |
+help: there is a method `emit_with_effect_scope` with a similar name
+  |
+7 -         .emit_with_effect_host("Button", "ui.button", "pressed", serde_json::json!({}), scope.controller())
+7 +         .emit_with_effect_scope("Button", "ui.button", "pressed", serde_json::json!({}), scope.controller())
+  |
+
+error[E0599]: no method named `activate_with_effect_host` found for struct `TriggersControl` in the current scope
+  --> tests/ui/effect_host_activation_methods_are_removed.rs:11:10
+   |
+ 9 |       let _ = session
+   |  _____________-
+10 | |         .triggers()
+11 | |         .activate_with_effect_host("trigger:1", serde_json::json!({}), scope.controller())
+   | |_________-^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `activate_with_effect_scope` with a similar name
+   |
+11 -         .activate_with_effect_host("trigger:1", serde_json::json!({}), scope.controller())
+11 +         .activate_with_effect_scope("trigger:1", serde_json::json!({}), scope.controller())
+   |
+
+error[E0599]: no method named `activate_source_type_with_effect_host` found for struct `TriggersControl` in the current scope
+  --> tests/ui/effect_host_activation_methods_are_removed.rs:15:10
+   |
+13 |       let _ = session
+   |  _____________-
+14 | |         .triggers()
+15 | |         .activate_source_type_with_effect_host("ui.button.pressed", serde_json::json!({}), scope.controller())
+   | |_________-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `activate_source_type` with a similar name, but with different arguments
+  --> src/control.rs
+   |
+   | /     pub async fn activate_source_type(
+   | |         &self,
+   | |         source_type: impl AsRef<str>,
+   | |         payload: serde_json::Value,
+   | |     ) -> Result<lash_core::HostEventEmitReport> {
+   | |_______________________________________________^

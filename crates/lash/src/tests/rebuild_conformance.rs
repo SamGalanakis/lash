@@ -4,11 +4,10 @@
 //! rebuild of a trigger-mutated session and durable worker recovery across every
 //! `ProcessInput` variant the worker runs.
 //!
-//! Two backends differing in the attachment/artifact tier over a SQLite session
-//! store: the `.in_memory_stores()` defaults and explicit durable stores. (A
-//! fully in-memory session store has no public factory, and peer-coherence
-//! rejects a durable session factory paired with an explicit ephemeral artifact
-//! store, so the session store is SQLite in both.)
+//! Two backends cover the explicit-facet API: a fully inline backend using
+//! in-memory stores/registry and a fully durable backend using SQLite/file
+//! stores/registry. Peer coherence rejects mixed durable session stores with
+//! inline attachment or artifact stores, so the cases stay tier-consistent.
 
 use super::*;
 use crate::testing::conformance::{RuntimeRebuildBackend, runtime_rebuild_and_worker_recovery};
@@ -37,19 +36,28 @@ fn fresh_sqlite_session_backend(
     (dir, store_factory, registry)
 }
 
+fn fresh_in_memory_backend() -> (
+    Arc<dyn lash_core::SessionStoreFactory>,
+    Arc<dyn lash_core::ProcessRegistry>,
+) {
+    (
+        Arc::new(lash_core::InMemorySessionStoreFactory::new())
+            as Arc<dyn lash_core::SessionStoreFactory>,
+        Arc::new(lash_core::TestLocalProcessRegistry::default())
+            as Arc<dyn lash_core::ProcessRegistry>,
+    )
+}
+
 #[test]
-fn runtime_rebuild_and_worker_recovery_with_in_memory_artifact() {
-    run_async_test_on_large_stack("runtime-rebuild-in-memory-artifact", || async {
-        let root = tempfile::tempdir().expect("tempdir");
-        let root_path = root.path().to_path_buf();
+fn runtime_rebuild_and_worker_recovery_with_inline_stores() {
+    run_async_test_on_large_stack("runtime-rebuild-inline-stores", || async {
         runtime_rebuild_and_worker_recovery(move || {
-            let (_dir, store_factory, registry) = fresh_sqlite_session_backend(&root_path);
+            let (store_factory, registry) = fresh_in_memory_backend();
             RuntimeRebuildBackend {
                 process_registry: registry,
                 build_core: Box::new(move |builder| {
-                    builder
+                    explicit_ephemeral_facets(builder)
                         .store_factory(Arc::clone(&store_factory))
-                        .in_memory_stores()
                         .build()
                         .expect("build core")
                 }),
@@ -80,8 +88,7 @@ fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
                         .store_factory(Arc::clone(&store_factory))
                         .attachment_store(Arc::clone(&attachment))
                         .lashlang_artifact_store(Arc::clone(&artifact))
-                        .advanced()
-                        .effect_host(Arc::new(crate::advanced::InlineEffectHost::default()))
+                        .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
                         .build()
                         .expect("build core")
                 }),

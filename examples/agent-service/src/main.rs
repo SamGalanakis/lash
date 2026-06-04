@@ -10,7 +10,7 @@ use axum::routing::get;
 use lash::PluginBinding;
 use lash::{
     LashCore, ModeId, ModePreset,
-    advanced::InlineEffectHost,
+    durability::InlineEffectHost,
     provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
     tracing::{JsonlTraceSink, StderrTraceSink, TeeTraceSink, TraceLevel, TraceSink},
 };
@@ -35,12 +35,9 @@ use crate::routes::{
 };
 use crate::state::{AgentServiceDurability, AppStateData, anyhow_like};
 #[cfg(feature = "restate")]
-use lash::advanced::ProcessWorkRunner;
+use lash::durability::DurableProcessWorker;
 #[cfg(feature = "restate")]
-use lash_restate::{
-    LashProcessWorkflow, LashProcessWorkflowImpl, RestateCoreProcessRunner,
-    RestateProcessIngressRunner,
-};
+use lash_restate::{LashProcessWorkflow, RestateEffectHost, RestateProcessDeployment};
 
 #[tokio::main]
 async fn main() -> anyhow_like::Result<()> {
@@ -125,22 +122,13 @@ async fn main() -> anyhow_like::Result<()> {
     let process_registry = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
             .map_err(|err| err.to_string())?,
-    ) as Arc<dyn lash::persistence::ProcessRegistry>;
-    // Durable tier: a ProcessWorkRunner over a Restate ingress-client run handle
-    // drives the registry's non-terminal rows to terminal by ingress-submitting
-    // their LashProcessWorkflow (folding in the former startup-only recovery
-    // sweep as its first tick). The Local tier gets the default inline runner
-    // for free — LashCore lazily spawns it on first session open.
+    ) as Arc<dyn lash::process::ProcessRegistry>;
     #[cfg(feature = "restate")]
-    let process_work_runner = (durability == AgentServiceDurability::Restate).then(|| {
-        ProcessWorkRunner::new(Arc::new(RestateProcessIngressRunner::new(
-            restate_ingress_url.clone(),
-            Arc::clone(&process_registry),
-        )))
+    let process_deployment = (durability == AgentServiceDurability::Restate).then(|| {
+        RestateProcessDeployment::new(restate_ingress_url.clone(), Arc::clone(&process_registry))
     });
     let core = match durability {
         AgentServiceDurability::Local => core_builder
-            .advanced()
             .effect_host(Arc::new(InlineEffectHost::default()))
             .process_registry(Arc::clone(&process_registry))
             .build()
@@ -148,22 +136,19 @@ async fn main() -> anyhow_like::Result<()> {
         AgentServiceDurability::Restate => {
             #[cfg(feature = "restate")]
             {
-                // Base host for turns that run outside a Restate workflow
-                // scope; Restate-backed turns pass a handler-scoped controller per
-                // turn via `stream_with_effect_scope`. The Restate ingress
-                // runner is the sole executor of out-of-turn/background
-                // processes, so disable the default inline runner and hand the
-                // core its poke (fired after every successful process start).
+                // Deployment host for paths outside a Restate workflow scope;
+                // it fails loudly if an effect tries to execute without a
+                // handler. Restate-backed turns pass a handler-scoped
+                // controller per turn via `stream_with_effect_scope`. The
+                // Restate ingress runner is the sole executor of
+                // out-of-turn/background processes.
                 core_builder
-                    .advanced()
-                    .effect_host(Arc::new(InlineEffectHost::default()))
-                    .process_registry(Arc::clone(&process_registry))
-                    .disable_default_process_work_runner()
-                    .with_process_work_runner(
-                        process_work_runner
+                    .effect_host(Arc::new(RestateEffectHost::new()))
+                    .process_work_driver(
+                        process_deployment
                             .as_ref()
-                            .expect("process work runner configured for Restate")
-                            .poke_handle(),
+                            .expect("process deployment configured for Restate")
+                            .process_work_driver(),
                     )
                     .build()
                     .map_err(|err| err.to_string())?
@@ -178,12 +163,9 @@ async fn main() -> anyhow_like::Result<()> {
         let demo_factory = DemoPlugin::factory(&DemoPluginConfig {
             db: Arc::clone(&shared_db),
         });
-        Some(lash::advanced::DurableProcessWorker::new(
-            core.durable_process_worker_config_with_plugins(
-                Arc::clone(&process_registry),
-                [demo_factory],
-            )
-            .map_err(|err| err.to_string())?,
+        Some(DurableProcessWorker::new(
+            core.durable_process_worker_config_with_plugins([demo_factory])
+                .map_err(|err| err.to_string())?,
         ))
     } else {
         None
@@ -205,17 +187,13 @@ async fn main() -> anyhow_like::Result<()> {
 
     #[cfg(feature = "restate")]
     if durability == AgentServiceDurability::Restate {
-        let process_runner = Arc::new(RestateCoreProcessRunner::new(
-            process_worker.expect("process worker configured for Restate"),
-        ));
+        let process_deployment = process_deployment.expect("process deployment configured");
         let endpoint = restate_sdk::endpoint::Endpoint::builder()
             .bind(AgentServiceTurnWorkflowImpl::new(state.clone()).serve())
             .bind(
-                LashProcessWorkflowImpl::new(
-                    Arc::clone(&process_runner),
-                    Arc::clone(&process_registry),
-                )
-                .serve(),
+                process_deployment
+                    .workflow(process_worker.expect("process worker configured for Restate"))
+                    .serve(),
             )
             .build();
         tokio::spawn(async move {
@@ -228,9 +206,7 @@ async fn main() -> anyhow_like::Result<()> {
         // sweep) ingress-submits onto a registered LashProcessWorkflow. The
         // runner then drives the registry's non-terminal rows on every poke and
         // poll tick, lease-fencing each submit so a process runs exactly once.
-        process_work_runner
-            .expect("process work runner configured for Restate")
-            .spawn();
+        process_deployment.spawn();
         println!("agent-service Restate endpoint listening on http://{restate_endpoint_addr}");
     }
 

@@ -67,9 +67,10 @@ use lash_core::{
     DurabilityTier, DurableProcessWorker, EffectHost, EffectScope, PluginError, ProcessAwaitOutput,
     ProcessCommand, ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef,
     ProcessLease, ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
-    ProcessRunHandle, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-    RuntimeError, RuntimeInvocation, ScopedEffectController,
+    ProcessRunHandle, ProcessWorkDriver, ProcessWorkPoke, ProcessWorkRunner, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
+    RuntimeInvocation, ScopedEffectController,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
@@ -396,6 +397,47 @@ impl ProcessRunHandle for RestateProcessIngressRunner {
             self.submit_record(&owner_id, record).await?;
         }
         Ok(())
+    }
+}
+
+/// Bundled Restate process deployment wiring for a Lash core.
+///
+/// Construct this once per deployment, pass [`process_work_driver`](Self::process_work_driver)
+/// into `LashCoreBuilder::process_work_driver`, bind
+/// [`workflow`](Self::workflow) on the Restate endpoint, then call
+/// [`spawn`](Self::spawn) after the endpoint is listening.
+pub struct RestateProcessDeployment {
+    process_work_runner: ProcessWorkRunner,
+    driver: ProcessWorkDriver,
+}
+
+impl RestateProcessDeployment {
+    pub fn new(ingress_url: impl Into<String>, registry: Arc<dyn ProcessRegistry>) -> Self {
+        let ingress_runner = RestateProcessIngressRunner::new(ingress_url, Arc::clone(&registry));
+        let process_work_runner = ProcessWorkRunner::new(Arc::new(ingress_runner));
+        let driver = ProcessWorkDriver::new(registry, process_work_runner.poke_handle());
+        Self {
+            process_work_runner,
+            driver,
+        }
+    }
+
+    pub fn process_work_driver(&self) -> ProcessWorkDriver {
+        self.driver.clone()
+    }
+
+    pub fn workflow(
+        &self,
+        worker: DurableProcessWorker,
+    ) -> LashProcessWorkflowImpl<RestateCoreProcessRunner> {
+        LashProcessWorkflowImpl::new(
+            Arc::new(RestateCoreProcessRunner::new(worker)),
+            self.driver.process_registry(),
+        )
+    }
+
+    pub fn spawn(self) -> ProcessWorkPoke {
+        self.process_work_runner.spawn()
     }
 }
 

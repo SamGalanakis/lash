@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
-use lash::advanced::ProtocolTurnOptions;
+use lash::runtime::ProtocolTurnOptions;
 use lash::{LashCore, TurnActivity, TurnEvent};
 use lash_cli::config::LashConfig;
 use lash_core::TurnInput;
@@ -407,6 +407,11 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
         )
         .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
         let core_builder = LashCore::rlm()
+            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .lashlang_artifact_store(Arc::new(
+                lash::persistence::InMemoryLashlangArtifactStore::new(),
+            ))
+            .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
             .provider(self.provider.clone())
             .model(model_spec);
         let core = core_builder

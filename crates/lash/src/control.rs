@@ -73,7 +73,7 @@ impl SessionControl {
 
     async fn update_config(&self, patch: SessionConfigPatch) -> Result<()> {
         self.update_session_config(patch.provider, patch.model, patch.prompt)
-            .await;
+            .await?;
         Ok(())
     }
 
@@ -82,11 +82,12 @@ impl SessionControl {
         provider: Option<ProviderHandle>,
         model: Option<lash_core::ModelSpec>,
         prompt: Option<PromptLayer>,
-    ) {
+    ) -> Result<()> {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime.update_session_config(provider, model, prompt).await;
         })
-        .await
+        .await;
+        Ok(())
     }
 
     async fn export_state(&self) -> lash_core::SessionSnapshot {
@@ -238,18 +239,24 @@ impl SessionControl {
         .await
     }
 
-    async fn emit_host_event_with_effect_host(
+    async fn emit_host_event_with_effect_scope(
         &self,
         resource_type: &str,
         alias: &str,
         event: &str,
         payload: serde_json::Value,
-        effect_host: &dyn EffectHost,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<lash_core::HostEventEmitReport> {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
         let value = runtime
-            .emit_host_event_with_effect_host(resource_type, alias, event, payload, effect_host)
+            .emit_host_event_with_effect_scope(
+                resource_type,
+                alias,
+                event,
+                payload,
+                scoped_effect_controller,
+            )
             .await
             .map_err(Into::into);
         self.runtime.publish_from(&runtime);
@@ -270,16 +277,16 @@ impl SessionControl {
         .await
     }
 
-    async fn activate_lashlang_trigger_with_effect_host(
+    async fn activate_lashlang_trigger_with_effect_scope(
         &self,
         handle: &str,
         payload: serde_json::Value,
-        effect_host: &dyn EffectHost,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<lash_core::HostEventEmitReport> {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
         let value = runtime
-            .activate_lashlang_trigger_with_effect_host(handle, payload, effect_host)
+            .activate_lashlang_trigger_with_effect_scope(handle, payload, scoped_effect_controller)
             .await
             .map_err(Into::into);
         self.runtime.publish_from(&runtime);
@@ -301,20 +308,20 @@ impl SessionControl {
         .await
     }
 
-    async fn activate_lashlang_trigger_source_type_with_effect_host(
+    async fn activate_lashlang_trigger_source_type_with_effect_scope(
         &self,
         source_type: impl AsRef<str>,
         payload: serde_json::Value,
-        effect_host: &dyn EffectHost,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<lash_core::HostEventEmitReport> {
         let source_type = source_type.as_ref().to_string();
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
         let value = runtime
-            .activate_lashlang_trigger_source_type_with_effect_host(
+            .activate_lashlang_trigger_source_type_with_effect_scope(
                 &source_type,
                 payload,
-                effect_host,
+                scoped_effect_controller,
             )
             .await
             .map_err(Into::into);
@@ -721,10 +728,10 @@ impl ConfigControl {
         provider: Option<ProviderHandle>,
         model: Option<lash_core::ModelSpec>,
         prompt: Option<PromptLayer>,
-    ) {
+    ) -> Result<()> {
         self.control
             .update_session_config(provider, model, prompt)
-            .await;
+            .await
     }
 
     pub async fn set_prompt_template(&self, template: PromptTemplate) -> Result<()> {
@@ -869,21 +876,21 @@ impl HostEventsControl {
             .await
     }
 
-    pub async fn emit_with_effect_host(
+    pub async fn emit_with_effect_scope(
         &self,
         resource_type: impl AsRef<str>,
         alias: impl AsRef<str>,
         event: impl AsRef<str>,
         payload: serde_json::Value,
-        effect_host: &dyn EffectHost,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<lash_core::HostEventEmitReport> {
         self.control
-            .emit_host_event_with_effect_host(
+            .emit_host_event_with_effect_scope(
                 resource_type.as_ref(),
                 alias.as_ref(),
                 event.as_ref(),
                 payload,
-                effect_host,
+                scoped_effect_controller,
             )
             .await
     }
@@ -936,14 +943,18 @@ impl TriggersControl {
             .await
     }
 
-    pub async fn activate_with_effect_host(
+    pub async fn activate_with_effect_scope(
         &self,
         handle: impl AsRef<str>,
         payload: serde_json::Value,
-        effect_host: &dyn EffectHost,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<lash_core::HostEventEmitReport> {
         self.control
-            .activate_lashlang_trigger_with_effect_host(handle.as_ref(), payload, effect_host)
+            .activate_lashlang_trigger_with_effect_scope(
+                handle.as_ref(),
+                payload,
+                scoped_effect_controller,
+            )
             .await
     }
 
@@ -959,17 +970,17 @@ impl TriggersControl {
             .await
     }
 
-    pub async fn activate_source_type_with_effect_host(
+    pub async fn activate_source_type_with_effect_scope(
         &self,
         source_type: impl AsRef<str>,
         payload: serde_json::Value,
-        effect_host: &dyn EffectHost,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<lash_core::HostEventEmitReport> {
         self.control
-            .activate_lashlang_trigger_source_type_with_effect_host(
+            .activate_lashlang_trigger_source_type_with_effect_scope(
                 source_type.as_ref(),
                 payload,
-                effect_host,
+                scoped_effect_controller,
             )
             .await
     }

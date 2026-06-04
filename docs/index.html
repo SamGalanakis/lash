@@ -348,7 +348,9 @@ anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }</code></pre>
 
         <p>One <code>LashCore</code> per app, cloned freely; one <code>LashSession</code> per chat or task; <code>.run()</code> for a single collected turn, <code>.stream(&amp;sink)</code> for live events.</p>
-<pre data-lang="rust"><code>use lash::{provider::ProviderHandle, LashCore, ModelSpec, TurnInput};
+<pre data-lang="rust"><code>use std::sync::Arc;
+
+use lash::{provider::ProviderHandle, LashCore, ModelSpec, TurnInput};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
@@ -367,6 +369,9 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     let core = LashCore::standard()
         .provider(provider)
         .model(model)
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 
     // one session per chat / task; run one turn; read settled prose.

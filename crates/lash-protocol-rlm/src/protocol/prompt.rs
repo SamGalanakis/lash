@@ -56,8 +56,7 @@ Build collections with explicit loops, not comprehensions:
 ```lashlang
 items = []
 for key in ["a", "b"] {
-  value = await web.search({ query: key })?
-  items = push(items, { key: key, value: value })
+  items = push(items, { key: key, size: len(key) })
 }
 submit items
 ```
@@ -70,7 +69,7 @@ text = to_string(result)
 print { chars: len(text), head: slice(text, 0, 1200) }
 ```
 
-For multi-step work, inspect intermediate results before submitting success. Reaching `submit` ends the turn even mid-block:
+For dependent multi-step work, inspect intermediate results before submitting success. Reaching `submit` ends the turn even mid-block:
 
 ```lashlang
 first = await web.search({ query: "value" })?
@@ -343,7 +342,7 @@ fn render_language_section(
             forms.push("`signal run handle with payload`");
         }
         bullets.push(format!(
-            "- Background processes: `process name(param: TYPE) {{ ... }}` declares a reusable process definition. `handle = start name(param: value)` creates one process run from that definition and returns its run handle; trigger activations also create process runs. For account-parametric work, pass typed module authorities explicitly, e.g. `process notify(mail: Gmail) {{ await mail.send({{ body: body }})? finish true }}` and `start notify(mail: gmail.work)`. For one-off concrete automations, a process body may reference concrete host paths such as `agents`, `web`, or `gmail.work` directly; params and locals shadow those captures. Inside a process use {}. `wake value` emits a `process.wake` event that notifies the agent/session with `value`; use it when process progress, trigger output, or other background work should re-enter the model as context. `finish value` completes the run and stores `value` as the process success value. `fail value` completes it as failed; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside processes. `await handle` waits and returns a result wrapper like `{{ ok: true, value: ... }}`; when you need fields from the `finish` value, use `result = (await handle)?` and then read `result.field`. Cancel a live run with `cancel handle` (best-effort). If the Host Surface includes `processes.list`, use `await processes.list({{}})?` for running runs, `await processes.list({{ definition: name }})?` for runs of a definition, and `await processes.list({{ status: \"any\" }})?` for visible run history.",
+            "- Background processes: `process name(param: TYPE) {{ ... }}` declares a reusable process definition. `handle = start name(param: value)` creates one process run from that definition and returns its run handle; trigger activations also create process runs. For account-parametric work, pass typed module authorities explicitly, e.g. `process notify(mail: Gmail) {{ await mail.send({{ body: body }})? finish true }}` and `start notify(mail: gmail.work)`. For one-off concrete automations, a process body may reference concrete host paths such as `agents`, `web`, or `gmail.work` directly; params and locals shadow those captures. Inside a process use {}. `wake value` emits a `process.wake` event that notifies the agent/session with `value`; use it when process progress, trigger output, or other background work should re-enter the model as context. `finish value` completes the run and stores `value` as the process success value. `fail value` completes it as failed; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside processes. Parallelism comes from starting all independent process handles before waiting for any of them; join a list or record of handles with `results = await handles`. `await handle` waits and returns a result wrapper like `{{ ok: true, value: ... }}`; when you need fields from the `finish` value, use `result = (await handle)?` and then read `result.field`. Cancel a live run with `cancel handle` (best-effort). If the Host Surface includes `processes.list`, use `await processes.list({{}})?` for running runs, `await processes.list({{ definition: name }})?` for runs of a definition, and `await processes.list({{ status: \"any\" }})?` for visible run history.",
             join_words(&forms)
         ));
     }
@@ -357,14 +356,12 @@ fn render_language_section(
         bullets.push(format!("- Trigger registry: a trigger registration connects a typed source value to a process definition plus explicit inputs. Register with `handle = await {trigger_register}({{ source: source, target: daily_digest, inputs: {{ tick: trigger.event }}, name: \"daily_digest\" }})?`. Constructors build source values; the host/plugin that owns the source decides when to activate the returned handle. `target` is a process definition value. `inputs` is required and maps every process param exactly once. `trigger.event` is the direct whole-event value inside `inputs`; fixed inputs can pass concrete authorities like `gmail.work` or `agents` for account-parametric processes. Use `await {trigger_list}({{}})?` to discover visible registrations, or filter with `{{ target: daily_digest }}`, `{{ name: \"daily_digest\" }}`, `{{ source_type: \"cron.Schedule\" }}`, and `{{ enabled: true }}`. Use `await {trigger_cancel}({{ handle: handle }})?` to disable future activations for that registration."));
     }
     if has_operations {
-        let tail = if abilities.processes {
-            " Use a named process for multi-step background work."
+        let scheduling = if abilities.processes {
+            "- Operation scheduling: consecutive `await module.op(...)` statements run one at a time. For independent slow effects, wrap one branch in a named `process`, `start` every branch first, then join the handles with `await handles` or `await { key: handle }`. Call operations directly only for single effects, cheap probes, or steps that depend on earlier results."
         } else {
-            ""
+            "- Operation scheduling: consecutive `await module.op(...)` statements run one at a time. Direct operation calls are serial when process handles are unavailable; do not describe sequential awaits as parallel."
         };
-        bullets.push(format!(
-            "- Independent operation fanout: call independent operations directly and store their values, e.g. `a = await web.search({{ query: \"one\" }})?` and `b = await files.read({{ path: \"notes/two.md\" }})?`.{tail}"
-        ));
+        bullets.push(scheduling.to_string());
     }
     bullets.push("- Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string());
     bullets.push("- Bare expressions are valid statements in normal blocks.".to_string());
@@ -414,14 +411,16 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
     );
     if has_operations {
         if processes {
-            section.push_str("\n- Several independent operations are needed -> call each module operation and keep the values in variables; use a named `process` for multi-step background work.");
+            section.push_str("\n- Several independent slow operations are needed -> define one small branch `process`, start every branch handle first, then join the handles with `await handles`.");
         } else {
-            section.push_str("\n- Several independent operations are needed -> call each module operation and keep the values in variables.");
+            section.push_str("\n- Several operations are needed -> call each module operation and keep the values in variables; these awaits are serial without process handles.");
         }
     }
     section.push_str("\n- The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.");
-    if has_operations {
-        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample fanout to two available operations (use `?` for fail-fast unwrapping):\n\n```lashlang\na = await web.search({ query: \"one\" })?\nb = await files.read({ path: \"notes/two.md\" })?\none = a\ntwo = b\nsubmit [one, two]\n```");
+    if has_operations && processes {
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample parallel fan-out around an available operation (start first, then await handles; use `?` to unwrap each finished value):\n\n```lashlang\nprocess lookup(query: str) {\n  result = await web.search({ query: query })?\n  finish result\n}\n\nhandles = {\n  one: start lookup(query: \"one\"),\n  two: start lookup(query: \"two\")\n}\nresults = await handles\nsubmit { one: results.one?, two: results.two? }\n```");
+    } else if has_operations {
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.");
     } else {
         section.push_str("\n- No module operations are available in this turn — don't infer one exists from generic lashlang syntax.");
     }

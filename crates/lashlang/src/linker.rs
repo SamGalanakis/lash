@@ -229,6 +229,22 @@ impl ResourceCatalog {
             })
     }
 
+    pub fn decode_host_value_as<T: serde::de::DeserializeOwned>(
+        &self,
+        source_type: &str,
+        value: serde_json::Value,
+    ) -> Result<T, crate::HostValueError> {
+        if !self.is_known_opaque_value_type(source_type) {
+            return Err(crate::HostValueError::UnknownSourceType {
+                source_type: source_type.to_string(),
+            });
+        }
+        serde_json::from_value(value).map_err(|err| crate::HostValueError::MalformedPayload {
+            source_type: source_type.to_string(),
+            message: err.to_string(),
+        })
+    }
+
     pub fn module_instances(&self) -> impl Iterator<Item = (&str, &ModuleInstanceCatalog)> {
         self.module_instances
             .iter()

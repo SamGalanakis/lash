@@ -209,7 +209,11 @@ fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
             lash::ModelSpec::from_token_limits("mock-model", None, 16_000, None, None)
                 .expect("valid model spec"),
         )
-        .in_memory_stores()
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(
+            lash::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()
         .expect("core")
 }

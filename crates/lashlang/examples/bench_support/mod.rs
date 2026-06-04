@@ -1,10 +1,10 @@
 use compact_str::ToCompactString;
 use lashlang::{
-    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ImageValue, LASH_HOST_VALUE_KEY,
-    LASH_HOST_VALUE_TYPE_KEY, LASH_PROCESS_NAME_KEY, LashlangAbilities, LashlangSurface,
-    LinkedModule, ListValue, ProjectedBindings, ProjectedFuture, ProjectedHostValue,
-    ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record, ResourceCatalog, State,
-    TypeExpr, TypeField, Value, from_json,
+    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, HostValue, ImageValue,
+    LASH_PROCESS_NAME_KEY, LashlangAbilities, LashlangSurface, LinkedModule, ListValue,
+    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
+    ProjectedReadResponse, ProjectedValue, Record, ResourceCatalog, State, TypeExpr, TypeField,
+    Value, from_json,
 };
 use std::fmt;
 use std::sync::{Arc, OnceLock};
@@ -1473,10 +1473,11 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
 fn trigger_register_record(args: &Record) -> Value {
     let source_type = args
         .get("source")
-        .and_then(Value::as_record)
-        .and_then(|source| source.get(LASH_HOST_VALUE_TYPE_KEY))
-        .and_then(string_ref)
-        .unwrap_or("unknown.Source");
+        .cloned()
+        .and_then(|source| serde_json::to_value(source).ok())
+        .and_then(|source| HostValue::decode(&source).ok())
+        .map(|source| source.source_type)
+        .unwrap_or_else(|| "unknown.Source".to_string());
     let process_name = args
         .get("target")
         .and_then(Value::as_record)
@@ -1492,7 +1493,7 @@ fn trigger_register_record(args: &Record) -> Value {
     );
     record.insert(
         "source_type".to_string(),
-        Value::String(source_type.to_string().into()),
+        Value::String(source_type.clone().into()),
     );
     record.insert(
         "process_name".to_string(),
@@ -1545,16 +1546,9 @@ fn trigger_inputs_value(input_name: &str) -> Value {
 }
 
 fn trigger_source_value(source_type: &str) -> Value {
-    let mut source = Record::default();
-    source.insert(
-        LASH_HOST_VALUE_TYPE_KEY.to_string(),
-        Value::String(source_type.to_string().into()),
-    );
-    source.insert(
-        LASH_HOST_VALUE_KEY.to_string(),
-        Value::Record(Arc::new(Record::default())),
-    );
-    Value::Record(Arc::new(source))
+    let encoded = HostValue::encode(source_type, serde_json::json!({}))
+        .expect("benchmark trigger source should encode");
+    from_json(encoded)
 }
 
 fn continue_as_record(args: &Record) -> Value {

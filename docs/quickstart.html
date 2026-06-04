@@ -43,7 +43,7 @@ lash-runtime         = "=0.1.0-alpha.21"
 lash-provider-openai = "=0.1.0-alpha.21"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }</code></pre>
-      <p>For ordinary projects the bundled facade and provider crates cover the common ground. Drop down to <code>lash-core</code> only when you need runtime-host plumbing — custom <code>PluginHost</code> instances or an explicitly installed deployment-level <code>lash::persistence::ProcessRegistry</code> such as <code>lash-sqlite-store::SqliteProcessRegistry</code> for background process handles.</p>
+      <p>For ordinary projects the bundled facade and provider crates cover the common ground. Drop down to <code>lash-core</code> only when you need runtime-host plumbing — custom <code>PluginHost</code> instances or an explicitly installed deployment-level <code>lash::process::ProcessRegistry</code> such as <code>lash-sqlite-store::SqliteProcessRegistry</code> for background process handles.</p>
     </div>
   </section>
 
@@ -60,11 +60,11 @@ tokio                = { version = "1", features = ["full"] }</code></pre>
       <p class="stanza__lede">The minimal example below names <code>LashCore</code>, <code>LashSession</code>, <code>TurnInput</code>, <code>TurnBuilder</code>, and <code>ProviderHandle</code>. <code>SessionSpec</code> and <code>PluginStack</code> are the next two types you'll meet in the <a href="./embedding.html">Lash API guide</a>. Skim them before reading the code — the rest follows from how they compose.</p>
       <dl class="defs">
         <dt>LashCore</dt>
-        <dd>Cloneable shared configuration: provider, model, installed modes, tools, plugins. One per app, cloned freely.</dd>
+        <dd>Cloneable shared configuration: provider, model, installed modes, tools, plugins, effect host, and runtime stores. One per app, cloned freely.</dd>
         <dt>SessionSpec</dt>
         <dd>Reusable session configuration overlay for provider, model, mode, prompt layer, max context tokens, and max turns. The ergonomic builder methods update the same spec.</dd>
         <dt>PluginStack</dt>
-        <dd>Mutable list of plugin factories. <code>LashCore::standard()</code> and <code>LashCore::rlm()</code> start with the runtime defaults; <code>LashCore::builder()</code> is explicit and starts empty.</dd>
+        <dd>Mutable list of plugin factories. <code>LashCore::standard()</code> and <code>LashCore::rlm()</code> start with runtime plugin defaults; all builders still require explicit effect, artifact, and attachment facets.</dd>
         <dt>LashSession</dt>
         <dd>One logical conversation or task, opened from a <code>LashCore</code> by a stable session id.</dd>
         <dt>TurnInput</dt>
@@ -88,7 +88,9 @@ tokio                = { version = "1", features = ["full"] }</code></pre>
     <div class="stanza__body">
       <h2 class="stanza__title" data-id="§ 03 · run one turn">hello, turn</h2>
       <p class="stanza__lede">The smallest meaningful program: build a core, open a session, run one turn, print the settled assistant prose.</p>
-<pre data-lang="rust"><code>use lash::{provider::ProviderHandle, LashCore, TurnInput};
+<pre data-lang="rust"><code>use std::sync::Arc;
+
+use lash::{provider::ProviderHandle, LashCore, TurnInput};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
@@ -103,6 +105,9 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     let core = LashCore::standard()
         .provider(provider)
         .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 
     // one session per chat / task.
