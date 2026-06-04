@@ -7,8 +7,7 @@ pub(crate) fn ensure_process_schema(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     if user_version == 0 && !has_user_schema_objects(conn)? {
-        conn.execute_batch(PROCESS_SCHEMA)?;
-        conn.pragma_update(None, "user_version", PROCESS_SCHEMA_VERSION)?;
+        initialize_schema(conn, PROCESS_SCHEMA, PROCESS_SCHEMA_VERSION)?;
         return Ok(());
     }
     Err(rusqlite::Error::InvalidParameterName(
@@ -234,14 +233,29 @@ pub(crate) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     if user_version == 0 && !has_user_schema_objects(conn)? {
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        initialize_schema(conn, SCHEMA, SCHEMA_VERSION)?;
         return Ok(());
     }
 
     Err(rusqlite::Error::InvalidParameterName(
         unsupported_schema_message("session", SCHEMA_VERSION, user_version),
     ))
+}
+
+fn initialize_schema(conn: &Connection, schema: &str, schema_version: i32) -> rusqlite::Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let result = (|| {
+        conn.execute_batch(schema)?;
+        conn.pragma_update(None, "user_version", schema_version)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT;"),
+        Err(err) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(err)
+        }
+    }
 }
 
 pub(crate) fn has_user_schema_objects(conn: &Connection) -> rusqlite::Result<bool> {
