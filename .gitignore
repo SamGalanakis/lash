@@ -36,6 +36,7 @@ Thumbs.db
 .playwright-mcp/
 .impeccable/
 /.agents/lash/
+/.example-runs/
 /.lash/
 /.openrouter-chat-ui/
 /.agent-service/
