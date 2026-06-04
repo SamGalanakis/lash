@@ -2181,18 +2181,11 @@ mod tests {
         harness.process_work_runner.spawn();
         harness.queued_work_runner.spawn();
 
-        let Json(accepted) = send_turn(
-            State(harness.state.clone()),
-            Json(TurnRequest {
-                text: "Register a cron trigger that runs every two seconds and reports the tick."
-                    .to_string(),
-                model: None,
-                model_variant: None,
-            }),
+        run_workbench_turn_via_restate(
+            &harness.state,
+            "Register a cron trigger that runs every two seconds and reports the tick.",
         )
-        .await
-        .expect("submit Restate-backed workbench turn");
-        assert!(accepted.accepted);
+        .await;
         wait_for_workbench_message(&harness.state, "cron registered", Duration::from_secs(60))
             .await;
         wait_for_restate_cron_sync(&harness.state, &harness.trace_path, Duration::from_secs(30))
@@ -2217,6 +2210,35 @@ mod tests {
         );
         let _ = restate::cancel_known_cron_jobs(&harness.state, "live_e2e_cleanup").await;
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    async fn run_workbench_turn_via_restate(state: &AppState, text: &str) {
+        state.push_message("user", text);
+        let turn_id = format!("workbench-turn-{}", uuid::Uuid::new_v4());
+        let request = restate::WorkbenchTurnWorkflowRequest {
+            turn_id: turn_id.clone(),
+            session_id: state.current_session_id(),
+            text: text.to_string(),
+            model: state.selected_model(),
+        };
+        let url = format!(
+            "{}/WorkbenchTurnWorkflow/{}/run",
+            state.restate_ingress_url.trim_end_matches('/'),
+            turn_id,
+        );
+        let response = tokio::time::timeout(
+            Duration::from_secs(60),
+            state.restate_http.post(&url).json(&request).send(),
+        )
+        .await
+        .expect("Restate-backed workbench turn timed out")
+        .expect("submit Restate-backed workbench turn");
+        assert!(
+            response.status().is_success(),
+            "Restate-backed workbench turn failed: {} {}",
+            response.status(),
+            response.text().await.unwrap_or_default(),
+        );
     }
 
     struct LiveWorkbenchRestateHarness {
