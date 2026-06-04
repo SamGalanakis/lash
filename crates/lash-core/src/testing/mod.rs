@@ -841,17 +841,28 @@ mod test_protocol_fakes {
                     crate::SessionError::Protocol(format!("invalid test RLM create options: {err}"))
                 })?
             {
-                let options = crate::ProtocolTurnOptions::typed(extras.termination)?;
+                let options = crate::ProtocolTurnOptions::typed(extras)?;
                 ctx.set_protocol_turn_options(options);
             }
             Ok(())
         }
     }
 
-    #[derive(serde::Deserialize)]
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(default, deny_unknown_fields)]
     struct TestRlmCreateExtras {
-        #[serde(default = "default_test_rlm_termination")]
         termination: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        final_answer_format: Option<serde_json::Value>,
+    }
+
+    impl Default for TestRlmCreateExtras {
+        fn default() -> Self {
+            Self {
+                termination: default_test_rlm_termination(),
+                final_answer_format: None,
+            }
+        }
     }
 
     fn default_test_rlm_termination() -> serde_json::Value {

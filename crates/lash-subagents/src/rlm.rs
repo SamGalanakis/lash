@@ -27,6 +27,7 @@ pub(crate) struct RlmSubagentToolsProvider {
     pub(crate) registry: Arc<CapabilityRegistry>,
     pub(crate) session_spec: SessionSpec,
     pub(crate) tool_access: SessionToolAccess,
+    pub(crate) final_answer_format: lash_rlm_types::RlmFinalAnswerFormat,
     pub(crate) parent_subagent: Option<SubagentSessionContext>,
     pub(crate) include_submit_error: bool,
 }
@@ -114,6 +115,7 @@ impl RlmSubagentToolsProvider {
                 current_snapshot,
                 session_spec: &self.session_spec,
                 tool_access: &self.tool_access,
+                final_answer_format: self.final_answer_format.clone(),
                 capability_name: &capability_name,
                 output_schema: output_schema.clone(),
                 seed,

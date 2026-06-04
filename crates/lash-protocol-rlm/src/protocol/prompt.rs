@@ -48,7 +48,7 @@ Operation-level errors are different from successful results that contain domain
 
 ```lashlang
 probe = await web.search({ query: "value" })?
-submit probe
+submit format("Search returned {} characters.", len(to_string(probe)))
 ```
 
 Build collections with explicit loops, not comprehensions:
@@ -58,7 +58,7 @@ items = []
 for key in ["a", "b"] {
   items = push(items, { key: key, size: len(key) })
 }
-submit items
+submit format("Built {} items.", len(items))
 ```
 
 Print narrow observations. Keep large values in variables and print only keys, lengths, selected fields, or slices:
@@ -77,7 +77,7 @@ second = await web.fetch({ url: first[0].url })?
 if contains(to_string(second), "needs_more_work") {
   print { first: first, second: second }
 } else {
-  submit second
+  submit format("Fetched result: {}", slice(to_string(second), 0, 1200))
 }
 ```
 "#;
@@ -248,7 +248,7 @@ fn render_execution_intro(has_operations: bool) -> String {
     if has_operations {
         section.push_str("Invoke documented operations with module syntax like `await agents.spawn({ ... })?` or `await web.search({ ... })?` from inside a fenced `lashlang` block. Start from operations listed under **Showcased Tools**; if a discovery tool is available, use it to find additional module call forms before calling them. Emit a block whenever you need to call an available operation or compute a value. Plain prose is for direct conversational replies that need no action.");
     } else {
-        section.push_str("Use fenced `lashlang` blocks to compute values, inspect current variables, and submit structured answers. No module operations are available in this turn, so do not invent tool calls. Plain prose is for direct conversational replies that need no computation.");
+        section.push_str("Use fenced `lashlang` blocks to compute values, inspect current variables, and submit final answers. No module operations are available in this turn, so do not invent tool calls. Plain prose is for direct conversational replies that need no computation.");
     }
     section.push_str(
         r#"
@@ -256,7 +256,7 @@ fn render_execution_intro(has_operations: bool) -> String {
 ### `print` vs `submit`
 
 - `print <expr>` — inspect a value and keep going. Output appears on the next step and is capped: keep full tool results in variables and print only lengths, selected fields, samples, or slices. Don't print large objects just to hand-copy IDs back into code.
-- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply; other values render as pretty JSON. If a **Required output** schema is present, the value must match it.
+- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply. Non-string values render as pretty JSON for machine consumers; for user-facing turns, follow the current final-answer format guidance.
 
 Never `submit` a raw tool-result dump. If you need to look at something, `print` it, then `submit` a summary on a later step.
 
@@ -300,7 +300,7 @@ Example — compute and submit:
 ````
 ```lashlang
 items = ["alpha", "beta"]
-submit { count: len(items), first: items[0] }
+submit format("Found {} items; first item: {}.", len(items), items[0])
 ```
 ````
 "#,
@@ -382,7 +382,7 @@ items = []
 for key in ["a", "b"] {
   items = push(items, { key: key, size: len(key) })
 }
-submit items
+submit format("Built {} items.", len(items))
 ```
 
 Print narrow observations. Keep large values in variables and print only keys, lengths, selected fields, or slices:
@@ -399,7 +399,7 @@ first = trim(input.question)
 if empty(first) {
   print { problem: "missing question" }
 } else {
-  submit first
+  submit format("Question: {}", first)
 }
 ```"#
         .to_string()
@@ -418,7 +418,7 @@ fn render_decomposition_section(has_operations: bool, processes: bool) -> String
     }
     section.push_str("\n- The trace is bloated, stale, or failed attempts dominate -> use an available continuation tool to switch to a fresh AgentFrame with concrete state.");
     if has_operations && processes {
-        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample parallel fan-out around an available operation (start first, then await handles; use `?` to unwrap each finished value):\n\n```lashlang\nprocess lookup(query: str) {\n  result = await web.search({ query: query })?\n  finish result\n}\n\nhandles = {\n  one: start lookup(query: \"one\"),\n  two: start lookup(query: \"two\")\n}\nresults = await handles\nsubmit { one: results.one?, two: results.two? }\n```");
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample parallel fan-out around an available operation (start first, then await handles; use `?` to unwrap each finished value):\n\n```lashlang\nprocess lookup(query: str) {\n  result = await web.search({ query: query })?\n  finish result\n}\n\nhandles = {\n  one: start lookup(query: \"one\"),\n  two: start lookup(query: \"two\")\n}\nresults = await handles\none = results.one?\ntwo = results.two?\nsubmit format(\"First result: {}\\n\\nSecond result: {}\", slice(to_string(one), 0, 800), slice(to_string(two), 0, 800))\n```");
     } else if has_operations {
         section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.");
     } else {

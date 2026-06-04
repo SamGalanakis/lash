@@ -530,7 +530,58 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       color: var(--chalk);
     }
 
-    .message.assistant .msg-body { color: var(--chalk-mid); }
+    .message.assistant .msg-body {
+      color: var(--chalk-mid);
+      white-space: normal;
+    }
+    .message.assistant .msg-body > *:first-child { margin-top: 0; }
+    .message.assistant .msg-body > *:last-child { margin-bottom: 0; }
+    .message.assistant .msg-body h1,
+    .message.assistant .msg-body h2,
+    .message.assistant .msg-body h3 {
+      margin: 0 0 var(--space-xs);
+      color: var(--chalk);
+      font-family: var(--font-ui);
+      font-size: 1rem;
+      font-weight: 650;
+      letter-spacing: 0;
+      line-height: 1.35;
+    }
+    .message.assistant .msg-body p {
+      margin: 0 0 var(--space-sm);
+      line-height: 1.55;
+    }
+    .message.assistant .msg-body ul,
+    .message.assistant .msg-body ol {
+      margin: 0 0 var(--space-sm) 1.2rem;
+      padding: 0;
+      line-height: 1.5;
+    }
+    .message.assistant .msg-body li { padding-left: var(--space-3xs); }
+    .message.assistant .msg-body code {
+      padding: 0.05rem 0.25rem;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--panel-muted);
+      color: var(--chalk);
+      font-family: var(--font-mono);
+      font-size: 0.88em;
+    }
+    .message.assistant .msg-body pre {
+      margin: 0 0 var(--space-sm);
+      padding: var(--space-sm);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel-muted);
+      overflow: auto;
+      white-space: pre;
+    }
+    .message.assistant .msg-body pre code {
+      padding: 0;
+      border: 0;
+      background: transparent;
+      font-size: 0.82rem;
+    }
 
     .retry {
       display: inline-block;
@@ -1545,6 +1596,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
     const renderedMessages = new Set();
     let assistantDraft = null;
+    let assistantDraftText = "";
     let reasoning = null;
     let pendingCodeBlock = null;
     let pendingTools = [];
@@ -1615,6 +1667,103 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       return role;
     }
 
+    function escapeHtml(value) {
+      return String(value || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function renderInlineMarkdown(value) {
+      return escapeHtml(value)
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+    }
+
+    function renderMarkdownBlocks(markdown) {
+      const lines = String(markdown || "").replace(/\r\n?/g, "\n").split("\n");
+      const blocks = [];
+      let paragraph = [];
+      let list = null;
+      let code = null;
+
+      function flushParagraph() {
+        if (!paragraph.length) return;
+        blocks.push(`<p>${renderInlineMarkdown(paragraph.join(" ").trim())}</p>`);
+        paragraph = [];
+      }
+
+      function flushList() {
+        if (!list) return;
+        const items = list.items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("");
+        blocks.push(`<${list.tag}>${items}</${list.tag}>`);
+        list = null;
+      }
+
+      for (const line of lines) {
+        const fence = line.match(/^```(\w+)?\s*$/);
+        if (code) {
+          if (fence) {
+            blocks.push(`<pre><code>${escapeHtml(code.lines.join("\n"))}</code></pre>`);
+            code = null;
+          } else {
+            code.lines.push(line);
+          }
+          continue;
+        }
+        if (fence) {
+          flushParagraph();
+          flushList();
+          code = { lines: [] };
+          continue;
+        }
+        if (!line.trim()) {
+          flushParagraph();
+          flushList();
+          continue;
+        }
+
+        const heading = line.match(/^(#{1,3})\s+(.+)$/);
+        if (heading) {
+          flushParagraph();
+          flushList();
+          const level = heading[1].length;
+          blocks.push(`<h${level}>${renderInlineMarkdown(heading[2].trim())}</h${level}>`);
+          continue;
+        }
+
+        const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+        const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+        if (ordered || unordered) {
+          flushParagraph();
+          const tag = ordered ? "ol" : "ul";
+          if (!list || list.tag !== tag) flushList();
+          if (!list) list = { tag, items: [] };
+          list.items.push((ordered || unordered)[1].trim());
+          continue;
+        }
+
+        flushList();
+        paragraph.push(line.trim());
+      }
+
+      if (code) blocks.push(`<pre><code>${escapeHtml(code.lines.join("\n"))}</code></pre>`);
+      flushParagraph();
+      flushList();
+      return blocks.join("");
+    }
+
+    function setMessageBody(body, role, text) {
+      if (role === "assistant") {
+        body.innerHTML = renderMarkdownBlocks(text);
+      } else {
+        body.textContent = text;
+      }
+    }
+
     function renderMessage(message) {
       if (renderedMessages.has(message.id)) return;
       renderedMessages.add(message.id);
@@ -1623,6 +1772,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         const parent = assistantDraft.closest(".message");
         if (parent) parent.remove();
         assistantDraft = null;
+        assistantDraftText = "";
       }
       const node = document.createElement("div");
       node.className = "message " + message.role;
@@ -1631,7 +1781,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       role.textContent = roleLabel(message.role);
       const body = document.createElement("div");
       body.className = "msg-body";
-      body.textContent = message.text;
+      setMessageBody(body, message.role, message.text);
       node.append(role, body);
       timeline.appendChild(node);
       scrollToEnd();
@@ -1685,6 +1835,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       role.textContent = "agent";
       assistantDraft = document.createElement("div");
       assistantDraft.className = "msg-body";
+      assistantDraftText = "";
       node.append(role, assistantDraft);
       timeline.appendChild(node);
       return assistantDraft;
@@ -1763,12 +1914,14 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     function renderTerminalValue(value) {
       if (value === null || value === undefined) return "";
       if (typeof value === "string") return value;
-      return JSON.stringify(value, null, 2);
+      return "```json\n" + JSON.stringify(value, null, 2) + "\n```";
     }
 
     function appendAssistantText(delta) {
       if (!delta) return;
-      ensureAssistantDraft().textContent += delta;
+      const draft = ensureAssistantDraft();
+      assistantDraftText += delta;
+      draft.innerHTML = renderMarkdownBlocks(assistantDraftText);
       scrollToEnd();
     }
 
@@ -1978,6 +2131,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       lastRequest = { url, payload };
       controller = new AbortController();
       assistantDraft = null;
+      assistantDraftText = "";
       reasoning = null;
       pendingCodeBlock = null;
       pendingTools = [];
@@ -2074,6 +2228,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       timeline.innerHTML = "";
       renderedMessages.clear();
       assistantDraft = null;
+      assistantDraftText = "";
       reasoning = null;
       pendingCodeBlock = null;
       pendingTools = [];

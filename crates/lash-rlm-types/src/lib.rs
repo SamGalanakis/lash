@@ -195,13 +195,25 @@ impl Default for RlmTermination {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RlmFinalAnswerFormat {
+    Markdown,
+    Custom { guidance: String },
+    RawSubmitValue,
+}
+
 /// RLM protocol session config. RLM turns terminate through `submit`,
 /// optionally validated against a schema, unless prose completion is
-/// explicitly enabled for the turn.
+/// explicitly enabled for the turn. `final_answer_format` is a session
+/// presentation preference; schema-required turns ignore it.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct RlmCreateExtras {
     #[serde(default)]
     pub termination: RlmTermination,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_answer_format: Option<RlmFinalAnswerFormat>,
 }
 
 /// Wire-format snapshot of a set of projected bindings. Pairs of

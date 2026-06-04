@@ -117,11 +117,32 @@ impl RlmTurnBuilderExt for TurnBuilder {
     }
 }
 
+pub trait RlmSessionBuilderExt: Sized {
+    fn final_answer_format(self, format: lash_rlm_types::RlmFinalAnswerFormat) -> Self;
+}
+
+impl RlmSessionBuilderExt for SessionBuilder {
+    fn final_answer_format(mut self, format: lash_rlm_types::RlmFinalAnswerFormat) -> Self {
+        self.rlm_final_answer_format = Some(format);
+        self
+    }
+}
+
 fn rlm_termination(
-    builder: TurnBuilder,
+    mut builder: TurnBuilder,
     termination: lash_rlm_types::RlmTermination,
 ) -> Result<TurnBuilder> {
-    Ok(builder.protocol_turn_options(ProtocolTurnOptions::typed(termination)?))
+    let override_options = ProtocolTurnOptions::typed(lash_rlm_types::RlmCreateExtras {
+        termination,
+        final_answer_format: None,
+    })?;
+    let options = builder
+        .protocol_turn_options
+        .as_ref()
+        .map(|current| current.merged_with_override(&override_options))
+        .unwrap_or(override_options);
+    builder.protocol_turn_options = Some(options);
+    Ok(builder)
 }
 
 fn rlm_preset_config(

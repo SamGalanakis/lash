@@ -38,6 +38,7 @@ pub struct SubagentSpawnContext<'a> {
     pub parent_snapshot: &'a SessionSnapshot,
     pub session_spec: &'a SessionSpec,
     pub base_tool_access: &'a SessionToolAccess,
+    pub final_answer_format: lash_rlm_types::RlmFinalAnswerFormat,
     pub output_schema: Option<Value>,
     pub seed: lash_protocol_rlm::RlmSeed,
     pub parent_subagent: Option<&'a SubagentSessionContext>,
@@ -66,7 +67,10 @@ impl SubagentSpawnContext<'_> {
         };
         let plugin_options = PluginOptions::typed(
             lash_protocol_rlm::RLM_PROTOCOL_PLUGIN_ID,
-            lash_rlm_types::RlmCreateExtras { termination },
+            lash_rlm_types::RlmCreateExtras {
+                termination,
+                final_answer_format: Some(self.final_answer_format.clone()),
+            },
         )
         .map_err(|err| format!("failed to encode rlm plugin options: {err}"))?;
 

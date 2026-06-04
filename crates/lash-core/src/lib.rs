@@ -110,6 +110,19 @@ impl ProtocolTurnOptions {
         }
     }
 
+    pub fn merged_with_override(&self, override_options: &Self) -> Self {
+        match (&self.payload, &override_options.payload) {
+            (serde_json::Value::Object(base), serde_json::Value::Object(overrides)) => {
+                let mut payload = base.clone();
+                payload.extend(overrides.clone());
+                Self {
+                    payload: serde_json::Value::Object(payload),
+                }
+            }
+            _ => override_options.clone(),
+        }
+    }
+
     pub fn typed<T>(value: T) -> Result<Self, serde_json::Error>
     where
         T: serde::Serialize,

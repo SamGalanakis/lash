@@ -10,11 +10,11 @@ use lash_core::{
     LlmRequest, ProjectorContext, PromptContribution, PromptUsage, ProtocolBuildInput,
     TurnDriverConfig, TurnDriverPreamble,
 };
-use lash_rlm_types::RlmTermination;
+use lash_rlm_types::{RlmCreateExtras, RlmFinalAnswerFormat, RlmTermination};
 
 #[cfg(test)]
 use crate::projection::{rlm_history_projection, rlm_protocol_event};
-use crate::rlm_support::decode_rlm_termination_options;
+use crate::rlm_support::decode_rlm_options;
 
 use history::{RlmHistoryRenderInput, build_rlm_history_messages_from_turn};
 #[cfg(test)]
@@ -203,10 +203,11 @@ struct RlmContextProjector {
 
 impl ContextProjector<lash_core::HostTurnProtocol> for RlmContextProjector {
     fn project(&self, ctx: ProjectorContext<'_>) -> Arc<LlmRequest> {
-        let termination = decode_rlm_termination_options(&ctx.config.termination)
+        let options = decode_rlm_options(&ctx.config.termination)
             .expect("RLM turn options are validated before prompt projection");
-        let finalization = rlm_finalization_prompt(&termination);
-        let required_output = required_output_block(&termination);
+        let finalization = rlm_finalization_prompt(&options.termination);
+        let required_output = required_output_block(&options.termination);
+        let final_answer_format = final_answer_format_prompt(&options);
         let budget_suffix = self.last_prompt_usage.read().ok().and_then(|guard| {
             crate::rlm_support::format_budget_suffix(
                 ctx.protocol_iteration + 1,
@@ -232,6 +233,7 @@ impl ContextProjector<lash_core::HostTurnProtocol> for RlmContextProjector {
                 protocol_iteration: ctx.protocol_iteration + 1,
                 finalization,
                 required_output: required_output.as_deref(),
+                final_answer_format: final_answer_format.as_deref(),
                 budget_suffix: budget_suffix.as_deref(),
             },
             &mut attachments,
@@ -259,6 +261,26 @@ fn required_output_block(termination: &RlmTermination) -> Option<String> {
             schema: Some(schema),
         } => Some(render_value_schema_contract(schema)),
         _ => None,
+    }
+}
+
+fn final_answer_format_prompt(options: &RlmCreateExtras) -> Option<String> {
+    if matches!(
+        options.termination,
+        RlmTermination::SubmitRequired { schema: Some(_) }
+    ) {
+        return None;
+    }
+    match options.final_answer_format.as_ref()? {
+        RlmFinalAnswerFormat::Markdown => Some(
+            "When using `submit`, submit a nicely formatted Markdown string, not a raw record/list/tool-result value."
+                .to_string(),
+        ),
+        RlmFinalAnswerFormat::Custom { guidance } => {
+            let guidance = guidance.trim();
+            (!guidance.is_empty()).then(|| guidance.to_string())
+        }
+        RlmFinalAnswerFormat::RawSubmitValue => None,
     }
 }
 
@@ -565,6 +587,7 @@ mod tests {
             rlm_finalization_prompt(&RlmTermination::default()),
             None,
             None,
+            None,
             &mut attachments,
         );
         let history = projector.format_history(&projection);
@@ -603,6 +626,7 @@ mod tests {
                 protocol_iteration: 0,
                 finalization: rlm_finalization_prompt(&RlmTermination::default()),
                 required_output: None,
+                final_answer_format: None,
                 budget_suffix: None,
             },
             &mut attachments,
@@ -693,6 +717,7 @@ mod tests {
             rlm_finalization_prompt(&RlmTermination::default()),
             None,
             None,
+            None,
             &mut attachments,
         );
 
@@ -746,6 +771,7 @@ mod tests {
             "Call submit",
             Some(&render_value_schema_contract(&schema)),
             None,
+            None,
             &mut attachments,
         );
 
@@ -760,6 +786,50 @@ mod tests {
         assert!(tail.contains("=== REQUIRED OUTPUT ==="));
         assert!(tail.contains("{ action: enum[\"call\", \"fold\"], amount?: int >= 0 }"));
         assert!(tail.contains("Fields:"));
+    }
+
+    #[test]
+    fn final_answer_format_guidance_renders_markdown_for_unstructured_turns() {
+        let guidance = final_answer_format_prompt(&RlmCreateExtras {
+            termination: RlmTermination::SubmitRequired { schema: None },
+            final_answer_format: Some(RlmFinalAnswerFormat::Markdown),
+        })
+        .expect("markdown guidance");
+
+        assert!(guidance.contains("Markdown string"));
+        assert!(guidance.contains("not a raw record/list/tool-result value"));
+    }
+
+    #[test]
+    fn final_answer_format_guidance_honors_custom_text_and_raw_suppression() {
+        let custom = final_answer_format_prompt(&RlmCreateExtras {
+            termination: RlmTermination::ProseOrSubmit,
+            final_answer_format: Some(RlmFinalAnswerFormat::Custom {
+                guidance: "  Submit concise release-note Markdown.  ".to_string(),
+            }),
+        })
+        .expect("custom guidance");
+        assert_eq!(custom, "Submit concise release-note Markdown.");
+
+        assert!(
+            final_answer_format_prompt(&RlmCreateExtras {
+                termination: RlmTermination::SubmitRequired { schema: None },
+                final_answer_format: Some(RlmFinalAnswerFormat::RawSubmitValue),
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn required_output_schema_suppresses_final_answer_format_guidance() {
+        let guidance = final_answer_format_prompt(&RlmCreateExtras {
+            termination: RlmTermination::SubmitRequired {
+                schema: Some(serde_json::json!({ "type": "object" })),
+            },
+            final_answer_format: Some(RlmFinalAnswerFormat::Markdown),
+        });
+
+        assert!(guidance.is_none());
     }
 
     #[test]

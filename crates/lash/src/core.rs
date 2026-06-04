@@ -152,6 +152,7 @@ impl LashCore {
             provider: None,
             active_plugins: Vec::new(),
             plugin_factories: Vec::new(),
+            rlm_final_answer_format: None,
         }
     }
 

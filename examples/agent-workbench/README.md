@@ -72,7 +72,7 @@ and child execution links; command operations still go through the session's
 The button source config is `{}`. Red/blue selection arrives in the event
 payload:
 
-```lash
+```lashlang
 process on_button(event: ui.button.Pressed) {
   wake { kind: "button_pressed", button: event.button, message: event.message }
   finish true
@@ -85,7 +85,7 @@ handle = await triggers.register({
   name: "button watcher"
 })?
 registrations = await triggers.list({ name: "button watcher" })?
-submit { handle: handle, registrations: registrations }
+submit format("Registered button watcher `{}`. Active matching registrations: {}.", handle, len(registrations))
 ```
 
 The cron card is the schedule reference integration: there is no Lashlang
@@ -93,7 +93,7 @@ The cron card is the schedule reference integration: there is no Lashlang
 workbench plugin declares the `cron.Schedule` source; Lashlang builds a
 `cron.Schedule` value and registers it with the runtime trigger registry:
 
-```lash
+```lashlang
 process daily_digest(tick: cron.Tick) {
   wake { kind: "daily_digest_due", tick: tick }
   finish true
@@ -106,7 +106,8 @@ handle = await triggers.register({
   inputs: { tick: trigger.event },
   name: "daily_digest"
 })?
-submit { handle: handle, registrations: await triggers.list({ target: daily_digest })? }
+registrations = await triggers.list({ target: daily_digest })?
+submit format("Registered daily digest `{}`. Active matching registrations: {}.", handle, len(registrations))
 ```
 
 After a Restate-backed turn registers an enabled `cron.Schedule`, the workbench

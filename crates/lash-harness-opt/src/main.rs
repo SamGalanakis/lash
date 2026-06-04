@@ -17,7 +17,7 @@ use lash_harness_opt::{
     HarnessOptimizer, HarnessProject, OptimizationConfig, OptimizationRun, ProjectHarnessRunner,
     Split, SqliteHarnessStore,
 };
-use lash_rlm_types::RlmTermination;
+use lash_rlm_types::{RlmCreateExtras, RlmTermination};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -441,8 +441,11 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             .turn(TurnInput::text(prompt))
             .cancel(cancellation)
             .protocol_turn_options(
-                ProtocolTurnOptions::typed(RlmTermination::SubmitRequired {
-                    schema: Some(request.output_schema.clone()),
+                ProtocolTurnOptions::typed(RlmCreateExtras {
+                    termination: RlmTermination::SubmitRequired {
+                        schema: Some(request.output_schema.clone()),
+                    },
+                    final_answer_format: None,
                 })
                 .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?,
             )
