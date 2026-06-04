@@ -102,24 +102,6 @@ impl TurnBuilder {
         self
     }
 
-    pub fn require_submit(self) -> Result<Self> {
-        self.rlm_termination(lash_rlm_types::RlmTermination::SubmitRequired { schema: None })
-    }
-
-    pub fn require_submit_schema(self, schema: serde_json::Value) -> Result<Self> {
-        self.rlm_termination(lash_rlm_types::RlmTermination::SubmitRequired {
-            schema: Some(schema),
-        })
-    }
-
-    pub fn allow_prose_or_submit(self) -> Result<Self> {
-        self.rlm_termination(lash_rlm_types::RlmTermination::ProseOrSubmit)
-    }
-
-    fn rlm_termination(self, termination: lash_rlm_types::RlmTermination) -> Result<Self> {
-        Ok(self.protocol_turn_options(ProtocolTurnOptions::typed(termination)?))
-    }
-
     /// Attach typed per-turn input for an activated plugin binding.
     ///
     /// This is the generic primitive. Plugin crates should usually wrap it in a

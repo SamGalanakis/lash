@@ -241,12 +241,12 @@ struct RuntimePerfPhaseProbe {
 struct ScopedPerfEffectController;
 
 #[async_trait::async_trait]
-impl lash::advanced::RuntimeEffectController for ScopedPerfEffectController {
+impl lash::runtime::RuntimeEffectController for ScopedPerfEffectController {
     async fn execute_effect(
         &self,
-        envelope: lash::advanced::RuntimeEffectEnvelope,
-        local_executor: lash::advanced::RuntimeEffectLocalExecutor<'_>,
-    ) -> Result<lash::advanced::RuntimeEffectOutcome, lash::advanced::RuntimeEffectControllerError>
+        envelope: lash::runtime::RuntimeEffectEnvelope,
+        local_executor: lash::runtime::RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<lash::runtime::RuntimeEffectOutcome, lash::runtime::RuntimeEffectControllerError>
     {
         local_executor.execute(envelope).await
     }
@@ -487,9 +487,9 @@ pub(crate) async fn run_once(
         let turn = if matches!(scenario, RuntimePerfScenario::ScopedEffectController) {
             let effect_controller = ScopedPerfEffectController;
             let turn_id = format!("runtime-perf-scoped-{}", turn_index + 1);
-            let scoped_effect_controller = lash::advanced::ScopedEffectController::borrowed(
+            let scoped_effect_controller = lash::runtime::ScopedEffectController::borrowed(
                 &effect_controller,
-                lash::advanced::EffectScope::turn(
+                lash::runtime::EffectScope::turn(
                     format!("runtime-perf-{}", scenario.name()),
                     &turn_id,
                 ),
@@ -2121,7 +2121,7 @@ pub(crate) async fn run_once_embed(
                     )))
                     .cancel(cancel)
                     .advanced()
-                    .collect_session_events_with(&lash::advanced::NoopEventSink)
+                    .collect_session_events_with(&lash::runtime::NoopEventSink)
                     .await
                     .map_err(anyhow::Error::from)
             },

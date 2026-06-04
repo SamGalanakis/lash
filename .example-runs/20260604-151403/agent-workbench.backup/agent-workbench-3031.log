@@ -1,0 +1,36 @@
+./scripts/agent-workbench-dev.sh
+[agent-workbench] using existing Restate at ingress=http://127.0.0.1:8080 admin=http://127.0.0.1:19070
+[agent-workbench] starting workbench at http://127.0.0.1:3031
+   Compiling lash-core v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-core)
+warning: unused import: `std::pin::Pin`
+ --> crates/lash-core/src/runtime/effect/executor.rs:1:5
+  |
+1 | use std::pin::Pin;
+  |     ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling lash-tool-support v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-tool-support)
+   Compiling lash-plugin-tool-output-budget v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-plugin-tool-output-budget)
+   Compiling lash-local-store v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-local-store)
+   Compiling lash-protocol-standard v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-protocol-standard)
+   Compiling lash-llm-transport v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-llm-transport)
+   Compiling lash-restate v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-restate)
+   Compiling lash-sqlite-store v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-sqlite-store)
+   Compiling lash-protocol-rlm v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-protocol-rlm)
+   Compiling lash-provider-openai v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-provider-openai)
+   Compiling lash-llm-tools v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-llm-tools)
+   Compiling lash-tool-web v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-tool-web)
+   Compiling lash-plugin-process-controls v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-plugin-process-controls)
+   Compiling lash-subagents v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash-subagents)
+   Compiling lash-runtime v0.1.0-alpha.21 (/home/sam/code/lash/crates/lash)
+warning: `lash-core` (lib) generated 1 warning (run `cargo fix --lib -p lash-core` to apply 1 suggestion)
+   Compiling agent-workbench v0.1.0-alpha.21 (/home/sam/code/lash/examples/agent-workbench)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.91s
+     Running `target/debug/agent-workbench`
+agent-workbench trace: .agent-workbench/trace.jsonl
+agent-workbench Lashlang execution trace: .agent-workbench/lashlang-execution.jsonl
+{"schema_version":2,"id":"b7d83451-5b79-4f09-acfb-9e82b032a950","timestamp":"2026-06-03T19:53:22.611710181+00:00","context":{},"type":"custom","name":"agent_workbench.startup","payload":{"addr":"127.0.0.1:3031","data_dir":".agent-workbench","lashlang_execution_path":".agent-workbench/lashlang-execution.jsonl","model":{"model":"anthropic/claude-sonnet-4.6","model_variant":"high"},"restate_endpoint_addr":"127.0.0.1:9082","restate_ingress_url":"http://127.0.0.1:8080","trace_path":".agent-workbench/trace.jsonl","web_configured":true}}
+agent-workbench listening on http://127.0.0.1:3031
+agent-workbench Restate endpoint listening on http://127.0.0.1:9082
+[agent-workbench] registering Restate deployment http://127.0.0.1:9082

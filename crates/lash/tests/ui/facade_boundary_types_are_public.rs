@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lash::advanced::{AdvancedLashCoreBuilder, RuntimeHostConfig};
 use lash::direct::{
     DirectLlmClient, DirectLlmError, DirectRequest, LlmAttachment, LlmEventSender, LlmOutputPart,
     LlmResponse, LlmUsage, TokenUsage,
 };
+use lash::durability::RuntimeHostConfig;
 use lash::messages::MessageRole;
 use lash::persistence::{
     GcReport, GraphCommitDelta, PersistedSessionRead, RuntimeCommit, RuntimeCommitResult,
@@ -22,6 +22,7 @@ use lash::provider::{
     ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder, ProviderRetryPolicy,
     ProviderTimeoutPolicy,
 };
+use lash::runtime::AdvancedLashCoreBuilder;
 use lash::tools::{ToolActivation, ToolAgentSurface, ToolCallRecord, ToolOutputContract};
 use lash::turn::{AssistantOutput, TurnIssue};
 use lash::{ModelLimits, ModelSpec};

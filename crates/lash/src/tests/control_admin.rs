@@ -95,12 +95,11 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
 async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-        .advanced()
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("nonblocking-observation").open().await?;
@@ -132,13 +131,13 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
 async fn process_control_cancel_uses_host_cancel_ability() -> Result<()> {
     let ability = Arc::new(DenyCancelAbility::default());
     let runtime_host = RuntimeHostConfig::in_memory().with_process_cancel_ability(ability.clone());
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .advanced()
         .runtime_host_config(runtime_host)
-        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("host-cancel").open().await?;
     session
@@ -174,13 +173,13 @@ async fn process_control_cancel_uses_host_cancel_ability() -> Result<()> {
 async fn process_control_cancel_all_uses_host_cancel_ability() -> Result<()> {
     let ability = Arc::new(RecordingCancelAbility::default());
     let runtime_host = RuntimeHostConfig::in_memory().with_process_cancel_ability(ability.clone());
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .advanced()
         .runtime_host_config(runtime_host)
-        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("host-cancel-all").open().await?;
     for process_id in ["host-process-a", "host-process-b"] {
@@ -241,7 +240,7 @@ async fn observation_updates_after_completed_turn() -> Result<()> {
 
 #[tokio::test]
 async fn config_and_tool_mutations_publish_observation_immediately() -> Result<()> {
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(mock_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -281,11 +280,10 @@ async fn config_and_tool_mutations_publish_observation_immediately() -> Result<(
 async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-        .advanced()
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("child-observation-parent").open().await?;

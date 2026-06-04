@@ -221,7 +221,7 @@ fn execution_section_lists_typed_operations_constructors_and_trigger_sources() {
 
     assert!(section.contains("### Host Surface"));
     assert!(section.contains("`await triggers.register("));
-    assert!(section.contains("inputs: any"));
+    assert!(section.contains("inputs: dict"));
     assert!(section.contains("name: str?"));
     assert!(section.contains("`type timer.Tick = { fired_at: str }`"));
     assert!(

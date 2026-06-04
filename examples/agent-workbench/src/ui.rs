@@ -2314,7 +2314,10 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
     function executionRows(workItems, graphSummaries) {
       const rows = [];
-      const processKeys = new Set((workItems || []).map(item => item.graph_key || ("process:" + item.process_id)));
+      const processKeys = new Set((workItems || []).map(item => {
+        const process = item.process || {};
+        return process.graph_key || ("process:" + process.process_id);
+      }));
       for (const graph of graphSummaries || []) {
         if (graph.kind === "process" && processKeys.has(graph.graph_key)) continue;
         rows.push({
@@ -2332,18 +2335,19 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         });
       }
       for (const item of workItems || []) {
-        const graphKey = item.graph_key || ("process:" + item.process_id);
+        const process = item.process || {};
+        const graphKey = process.graph_key || ("process:" + process.process_id);
         const graph = graphIndexByKey.get(graphKey);
-        const recent = item.events.slice(-3).map(event => eventLabel(event.event_type));
+        const recent = (item.events || []).slice(-3).map(event => eventLabel(event.event_type));
         rows.push({
           key: graphKey,
           graph_key: graphKey,
-          title: item.label || shortId(item.process_id),
-          status: item.terminal,
+          title: item.label || process.label || shortId(process.process_id),
+          status: process.status_label || process.lifecycle,
           meta: [
             kindLabel(item.kind),
             graph ? graph.node_count + (graph.node_count === 1 ? " node" : " nodes") : "pending graph",
-            formatTime(item.updated_at_ms)
+            formatTime(process.updated_at_ms)
           ].filter(Boolean).join(" · "),
           detail: recent.length ? "latest: " + recent.join(" -> ") : "no events yet"
         });

@@ -1,4 +1,5 @@
 use super::*;
+use crate::modes::RlmTurnBuilderExt as _;
 
 #[derive(Clone, Debug)]
 struct DurableEffectInvocation {
@@ -112,7 +113,7 @@ async fn turn_builder_into_stream_emits_activities_and_finishes() -> Result<()> 
 
 #[tokio::test]
 async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(semantic_group_provider())
         .model(mock_model_spec())
         .build()?;
@@ -135,7 +136,7 @@ async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
 
 #[tokio::test]
 async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -> Result<()> {
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(semantic_group_provider())
         .model(mock_model_spec())
         .build()?;
@@ -150,7 +151,7 @@ async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -
 
 #[tokio::test]
 async fn retry_status_streams_as_semantic_turn_event() -> Result<()> {
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(retry_once_provider())
         .model(mock_model_spec())
         .build()?;
@@ -205,16 +206,10 @@ async fn control_turn_accepts_prebuilt_turn_input() -> Result<()> {
 async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
         .model(mock_model_spec())
-        .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
-            std::env::temp_dir().join(format!(
-                "lash-queued-input-{}-{}",
-                std::process::id(),
-                test_current_epoch_ms()
-            )),
-        )))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .build()?;
     let session = core.session("queued-input").open().await?;
     let events = Arc::new(RecordingEvents::default());
@@ -388,7 +383,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
 #[tokio::test]
 async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
     let live = Arc::new(RecordingEvents::default());
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(tool_roundtrip_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -460,7 +455,7 @@ async fn stream_returns_terminal_metadata_without_prose() -> Result<()> {
 
 #[tokio::test]
 async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Result<()> {
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(tool_roundtrip_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -516,7 +511,7 @@ fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
 }
 
 async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
-    let core = LashCore::rlm()
+    let core = explicit_ephemeral_facets(LashCore::rlm())
         .provider(queued_text_provider(vec![
             "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit \"done\"\n```",
         ]))
@@ -666,7 +661,7 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
         lash_core::EffectScope::turn(session_id, root_turn_id),
     )
     .expect("scoped durable effect controller");
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(agent_frame_switch_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AgentFrameSwitchTools))
@@ -741,7 +736,7 @@ fn process_control_lists_started_lashlang_process_until_awaited() -> Result<()> 
 async fn process_control_lists_started_lashlang_process_until_awaited_inner() -> Result<()> {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
-    let core = LashCore::rlm()
+    let core = explicit_ephemeral_facets(LashCore::rlm())
         .provider(queued_text_provider(vec![
             r#"```lashlang
 process lookup(tools: Tools) {
@@ -818,7 +813,7 @@ async fn lashlang_execution_graph_store_observes_lashlang_process_from_facade_in
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let graph_store = Arc::new(crate::tracing::TraceLashlangGraphStore::default());
-    let core = LashCore::rlm()
+    let core = explicit_ephemeral_facets(LashCore::rlm())
         .provider(queued_text_provider(vec![
             r#"```lashlang
 process lookup(tools: Tools) {
@@ -875,7 +870,7 @@ submit value
 
 #[tokio::test]
 async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()> {
-    let core = LashCore::rlm()
+    let core = explicit_ephemeral_facets(LashCore::rlm())
         .provider(queued_text_provider(vec!["done in prose"]))
         .model(mock_model_spec())
         .build()?;
@@ -911,7 +906,7 @@ async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()>
 
 #[tokio::test]
 async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
-    let core = LashCore::rlm()
+    let core = explicit_ephemeral_facets(LashCore::rlm())
         .provider(queued_text_provider(vec![
             "```lashlang\nsubmit \"done via submit\"\n```",
         ]))
@@ -951,7 +946,7 @@ async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
 
 #[tokio::test]
 async fn rlm_failed_code_emits_failed_code_completion_without_fake_tools() -> Result<()> {
-    let core = LashCore::rlm()
+    let core = explicit_ephemeral_facets(LashCore::rlm())
         .provider(queued_text_provider(vec![
             "```lashlang\nthis is not valid lashlang\n```",
             "```lashlang\nsubmit \"recovered\"\n```",

@@ -56,9 +56,14 @@ fn restore(&amp;self, _meta: &amp;PluginSnapshotMeta, _reader: &amp;dyn Snapshot
             <h2>Wiring It In</h2>
             <p>Pass your factory to <code>LashCoreBuilder::plugin(...)</code>. It's an <code>Arc&lt;dyn PluginFactory&gt;</code> so the same factory instance can be shared across cores if needed.</p>
           </div>
-          <pre><code>let core = LashCore::builder()
+          <pre><code>use std::sync::Arc;
+
+let core = LashCore::standard()
     .provider(provider)
     .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .plugin(Arc::new(UpdatePlanPluginFactory) as Arc&lt;dyn PluginFactory&gt;)
     .build()?;</code></pre>
           <p>For tools that aren't part of a plugin (no state, no lifecycle hooks), you can skip the factory and pass a <code>ToolProvider</code> directly to <code>.tools(Arc::new(MyTools))</code>. Both forms compose: provider-style tools live alongside plugin-registered tools on the same surface.</p>

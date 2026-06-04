@@ -19,10 +19,9 @@ pub mod turn;
 pub mod usage;
 
 pub use crate::control::{
-    AdvancedToolsControl, HostEventsControl, PluginActions, ProcessControl, ToolsControl,
-    TriggersControl,
+    AdvancedToolsControl, HostEventsControl, PluginActions, ToolsControl, TriggersControl,
 };
-pub use crate::core::{AdvancedLashCoreBuilder, LashCore, LashCoreBuilder, SessionDeleteReport};
+pub use crate::core::{LashCore, LashCoreBuilder, SessionDeleteReport};
 pub use crate::error::{EmbedError, Result};
 pub use crate::mode::{ModeId, ModePreset};
 pub use crate::plugin_binding::PluginBinding;
@@ -35,25 +34,19 @@ pub use crate::turn::{
     TurnStream, message_role, message_text,
 };
 pub use lash_core::{
-    HostEvent, HostEventEmitReport, InputItem, ModelLimits, ModelSpec, PluginStack,
-    ProcessCancelSummary, ProcessDefinitionSummary, ProcessHandleDescriptor, ProcessHandleSummary,
-    ProcessInput, ProcessLifecycleStatus, ProcessListFilter, ProcessStartRequest,
-    ProcessStatusFilter, SessionSpec, TriggerRegistration, TriggerSourceType, TriggerTargetSummary,
-    TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
-    impl_unsupported_queued_work_methods,
+    HostEvent, HostEventEmitReport, InputItem, ModelLimits, ModelSpec, PluginStack, SessionSpec,
+    TriggerRegistration, TriggerSourceType, TriggerTargetSummary, TurnActivity, TurnActivityId,
+    TurnActivitySink, TurnEvent, TurnInput, impl_unsupported_queued_work_methods,
 };
 
 pub mod prelude {
     pub use crate::{
-        AdvancedLashCoreBuilder, AdvancedToolsControl, EmbedError, HostEvent, HostEventEmitReport,
-        HostEventsControl, InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset,
-        ModelSpec, ObservableSession, PluginActions, PluginBinding, PluginStack,
-        ProcessCancelSummary, ProcessControl, ProcessDefinitionSummary, ProcessHandleDescriptor,
-        ProcessHandleSummary, ProcessInput, ProcessLifecycleStatus, ProcessListFilter,
-        ProcessStartRequest, ProcessStatusFilter, PromptLayerSink, QueuedTurnBuilder, Result,
-        SessionBuilder, SessionSpec, ToolsControl, TriggerRegistration, TriggerSourceType,
-        TriggerTargetSummary, TriggersControl, TurnActivity, TurnBuilder, TurnEvent, TurnInput,
-        TurnOutput, TurnResult, TurnStream,
+        AdvancedToolsControl, EmbedError, HostEvent, HostEventEmitReport, HostEventsControl,
+        InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ModelSpec,
+        ObservableSession, PluginActions, PluginBinding, PluginStack, PromptLayerSink,
+        QueuedTurnBuilder, Result, SessionBuilder, SessionSpec, ToolsControl, TriggerRegistration,
+        TriggerSourceType, TriggerTargetSummary, TriggersControl, TurnActivity, TurnBuilder,
+        TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
     };
     pub use lash_core::TurnActivitySink;
 }
@@ -85,8 +78,6 @@ pub mod direct {
 }
 
 pub mod persistence {
-    pub use lash_core::LashlangArtifactStore;
-    pub use lash_core::runtime::ProcessHandleGrantEntry;
     pub use lash_core::runtime::{
         DeliveryPolicy, InMemorySessionStore, InMemorySessionStoreFactory, MergeKey,
         QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
@@ -98,17 +89,14 @@ pub mod persistence {
         RuntimeCommitResult, RuntimeTurnCommitStamp, SessionCheckpoint, SessionHead,
         SessionHeadMeta, load_persisted_session_state, load_persisted_session_state_active_path,
     };
+    pub use lash_core::{AttachmentStore, InMemoryAttachmentStore};
     pub use lash_core::{
-        AttachmentStore, BlobRef, GcReport, PersistedSessionConfig, PersistedTurnState,
-        ProcessAwaitOutput, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
-        ProcessEventType, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
-        ProcessLease, ProcessLeaseCompletion, ProcessRecord, ProcessRegistration, ProcessRegistry,
-        ProcessScope, ProcessScopeId, ProcessSessionDeleteReport, ProcessTerminalState,
-        ProcessWake, ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, ProtocolEvent,
+        BlobRef, GcReport, PersistedSessionConfig, PersistedTurnState, ProtocolEvent,
         RuntimePersistence, SessionEventRecord, SessionGraph, SessionMeta, SessionNodeRecord,
         SessionReadScope, SessionReadView, SessionRelation, SessionSnapshot, StoreError,
         TokenLedgerEntry, VacuumReport,
     };
+    pub use lash_core::{InMemoryLashlangArtifactStore, LashlangArtifactStore};
     pub use lash_local_store::FileAttachmentStore;
 }
 
@@ -135,6 +123,7 @@ pub mod plugins {
 }
 
 pub mod modes {
+    pub use crate::mode::RlmTurnBuilderExt;
     pub use lash_protocol_rlm::{
         LashlangAbilities, LashlangLanguageFeatures, LashlangSurface, NamedDataType,
         ResourceCatalog, RlmProtocolPluginConfig, TypeExpr, TypeField, format_type_expr,
@@ -147,32 +136,44 @@ pub mod messages {
     pub use lash_core::MessageRole;
 }
 
-pub mod advanced {
-    pub use crate::AdvancedLashCoreBuilder;
-    pub use lash_core::runtime::{
-        AssembledTurn, DirectCompletionClient, DurableProcessWorker, DurableProcessWorkerConfig,
-        EffectHost, EffectScope, EmbeddedRuntimeHost, EventSink, InlineEffectHost,
-        InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
-        NoopEventSink, NoopTurnActivitySink, ProcessCancelAbility, ProcessCancelAllRequest,
-        ProcessCancelRequest, ProcessCancelSource, ProcessCancelSummary, ProcessCommand,
-        ProcessDefinitionSummary, ProcessEffectOutcome, ProcessHandleDescriptor,
-        ProcessHandleGrant, ProcessHandleSummary, ProcessInput, ProcessLifecycleStatus,
-        ProcessListFilter, ProcessListMode, ProcessOpScope, ProcessRecord, ProcessRegistration,
-        ProcessRunHandle, ProcessScope, ProcessScopeId, ProcessService, ProcessSessionDeleteReport,
-        ProcessStartOptions, ProcessStartRequest, ProcessStatus, ProcessStatusFilter,
-        ProcessWakeDelivery, ProcessWorkPoke, ProcessWorkRunner, QueuedWorkPoke,
-        QueuedWorkRunHandle, QueuedWorkRunOutcome, QueuedWorkRunRequest, QueuedWorkRunner,
-        Residency, RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-        RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
-        RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode,
-        RuntimeHandle, RuntimeHostConfig, RuntimeInvocation, RuntimeObservation, RuntimeScope,
-        RuntimeTurnPhase, RuntimeTurnPhaseProbe, ScopedEffectController, TerminationPolicy,
-        TurnContext, lashlang_process_event_types, process_wake_input_from_event_payload,
-        process_wake_turn_cause, process_wake_turn_text,
+pub mod process {
+    pub use crate::control::ProcessControl;
+    pub use lash_core::{
+        ObservedProcess, ObservedProcessEvent, ObservedWorkItem, ProcessAwaitOutput,
+        ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
+        ProcessCancelSummary, ProcessDefinitionSummary, ProcessEvent, ProcessEventAppendRequest,
+        ProcessEventAppendResult, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
+        ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleSummary, ProcessInput,
+        ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus, ProcessListFilter,
+        ProcessListMode, ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry,
+        ProcessRunHandle, ProcessRuntimeHost, ProcessScope, ProcessScopeId, ProcessService,
+        ProcessSessionDeleteReport, ProcessStartOptions, ProcessStartRequest, ProcessStatus,
+        ProcessStatusFilter, ProcessTerminalState, ProcessWake, ProcessWakeDedupeKey,
+        ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkDriver, ProcessWorkObserver,
+        ProcessWorkPoke, ProcessWorkRunner, ProcessWorkSnapshot, lashlang_process_event_types,
     };
-    // Benchmarks and diagnostics still need a semantic harness facade for
-    // preloaded state, event capture, plugin-stack presets, and graph seeding.
-    // Do not expose runtime bridge internals here to fill that gap.
+}
+
+pub mod durability {
+    pub use lash_core::{
+        DurableProcessWorker, DurableProcessWorkerConfig, EffectHost, InlineEffectHost, Residency,
+        RuntimeEnvironment, RuntimeHostConfig, TerminationPolicy,
+    };
+}
+
+pub mod runtime {
+    pub use crate::core::AdvancedLashCoreBuilder;
+    pub use lash_core::runtime::{
+        AssembledTurn, DirectCompletionClient, EffectScope, EmbeddedRuntimeHost, EventSink,
+        InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
+        NoopEventSink, NoopTurnActivitySink, ProcessCommand, ProcessEffectOutcome, QueuedWorkPoke,
+        QueuedWorkRunHandle, QueuedWorkRunOutcome, QueuedWorkRunRequest, QueuedWorkRunner,
+        RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+        RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+        RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
+        RuntimeInvocation, RuntimeObservation, RuntimeScope, RuntimeTurnPhase,
+        RuntimeTurnPhaseProbe, ScopedEffectController, TurnContext,
+    };
     pub use lash_core::{
         PersistentRuntimeServices, PluginMessage, ProtocolSessionExtensionHandle,
         ProtocolTurnOptions, RewriteTrigger, SessionEvent, SessionHandle, SessionPolicy,

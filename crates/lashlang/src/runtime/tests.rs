@@ -3592,10 +3592,10 @@ async fn linked_value_constructor_wraps_host_value() {
         panic!("expected host value record, got {outcome:?}");
     };
     assert_eq!(
-        record.get(crate::LASH_HOST_VALUE_TYPE_KEY),
+        record.get(LASH_HOST_VALUE_TYPE_KEY),
         Some(&Value::String("timer.Schedule".into()))
     );
-    let Some(Value::Record(source)) = record.get(crate::LASH_HOST_VALUE_KEY) else {
+    let Some(Value::Record(source)) = record.get(LASH_HOST_VALUE_KEY) else {
         panic!("expected wrapped source record");
     };
     assert_eq!(source.get("expr"), Some(&Value::String("0 8 * * *".into())));

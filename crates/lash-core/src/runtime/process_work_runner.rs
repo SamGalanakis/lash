@@ -4,6 +4,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use super::DurableProcessWorker;
+use super::process::ProcessRegistry;
 use crate::PluginError;
 
 /// How often the runner re-drives pending processes absent a poke.
@@ -88,6 +89,33 @@ impl ProcessWorkRunner {
         if let Err(err) = self.run_handle.claim_and_run_pending().await {
             tracing::warn!("process work runner drive ({reason}) failed: {err}");
         }
+    }
+}
+
+/// Registry and wake handle for a process work runner owned outside
+/// [`LashCore`](https://docs.rs/lash/latest/lash/struct.LashCore.html).
+///
+/// Durable deployments use this to bind one registry to the external runner
+/// that consumes that registry's non-terminal process rows. The facade can then
+/// configure process lifecycle support from the driver without accepting a
+/// second, potentially divergent registry argument.
+#[derive(Clone)]
+pub struct ProcessWorkDriver {
+    registry: Arc<dyn ProcessRegistry>,
+    poke: ProcessWorkPoke,
+}
+
+impl ProcessWorkDriver {
+    pub fn new(registry: Arc<dyn ProcessRegistry>, poke: ProcessWorkPoke) -> Self {
+        Self { registry, poke }
+    }
+
+    pub fn process_registry(&self) -> Arc<dyn ProcessRegistry> {
+        Arc::clone(&self.registry)
+    }
+
+    pub fn poke_handle(&self) -> ProcessWorkPoke {
+        self.poke.clone()
     }
 }
 

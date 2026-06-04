@@ -1938,6 +1938,44 @@ async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
 }
 
 #[tokio::test]
+async fn process_deployment_driver_and_workflow_share_registry() {
+    let registry = process_registry();
+    let deployment = RestateProcessDeployment::new("http://127.0.0.1:8080", Arc::clone(&registry));
+    let driver = deployment.process_work_driver();
+
+    assert!(Arc::ptr_eq(&driver.process_registry(), &registry));
+
+    let worker = DurableProcessWorker::new(lash_core::DurableProcessWorkerConfig::new(
+        Arc::new(lash_core::PluginHost::empty()),
+        lash_core::RuntimeHostConfig::in_memory(),
+        Arc::new(lash_core::InMemorySessionStoreFactory::new()),
+        Arc::clone(&registry),
+    ));
+    let service = deployment.workflow(worker).serve();
+    let discovery = discover_service(&service);
+    let endpoint = Endpoint::builder().bind(service).build();
+
+    assert_eq!(discovery.name.to_string(), "LashProcessWorkflow");
+    assert!(discovery.handlers.iter().any(|handler| {
+        handler.name.to_string() == "run"
+            && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("WORKFLOW")
+    }));
+    assert!(discovery.handlers.iter().any(|handler| {
+        handler.name.to_string() == "cancel"
+            && handler.ty.as_ref().map(ToString::to_string).as_deref() == Some("SHARED")
+    }));
+
+    let response = endpoint.handle(
+        http::Request::builder()
+            .uri("/discover")
+            .header("accept", "application/vnd.restate.endpointmanifest.v3+json")
+            .body(Empty::<bytes::Bytes>::new())
+            .expect("discover request"),
+    );
+    assert_eq!(response.status(), http::StatusCode::OK);
+}
+
+#[tokio::test]
 async fn process_workflow_impl_runs_and_cancels_through_runner() {
     let runner = Arc::new(RecordingRunner::default());
     let registry = process_registry();

@@ -65,7 +65,7 @@ pub enum TurnFinish {
           </div>
           <p>Host-driven stops are recoverable next request. Provider stops usually want a different model or shorter context. Runtime stops indicate a configuration or authoring problem. <code>RuntimeError</code> is the only category where identical-input retry is unlikely to help.</p>
           <p>CAS commit conflicts are <em>not</em> a <code>Stopped</code> variant — they surface as <code>Err</code> from <code>run()</code>/<code>stream()</code>, no partial commit. See <a href="./persistence.html#contract">Persistence → The Contract</a>.</p>
-          <pre><code>use lash::advanced::{TurnOutcome, TurnStop};
+          <pre><code>use lash::runtime::{TurnOutcome, TurnStop};
 
 match result.outcome {
     TurnOutcome::Finished(finish) =&gt; persist_terminal(finish)?,
@@ -231,7 +231,9 @@ impl TurnActivitySink for ChannelSink {
           <div class="two-col">
             <article class="panel">
               <h3>Per-turn RLM options</h3>
-              <pre><code>let submitted = session
+              <pre><code>use lash::modes::RlmTurnBuilderExt as _;
+
+let submitted = session
     .turn(TurnInput::text("Move on the board."))
     .require_submit()?
     .stream(&amp;sink)
@@ -245,7 +247,7 @@ let prose_or_submit = session
             </article>
             <article class="panel">
               <h3>Outcome shape</h3>
-              <pre><code>use lash::advanced::{TurnFinish, TurnOutcome};
+              <pre><code>use lash::runtime::{TurnFinish, TurnOutcome};
 
 match result.outcome {
     TurnOutcome::Finished(

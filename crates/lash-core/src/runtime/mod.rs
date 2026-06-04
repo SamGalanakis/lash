@@ -96,10 +96,11 @@ pub use observation::{RuntimeHandle, RuntimeObservation};
 #[cfg(any(test, feature = "testing"))]
 pub use process::TestLocalProcessRegistry;
 pub use process::{
-    DefaultProcessCancelAbility, PROCESS_LEASE_SCHEMA_VERSION, PreparedProcessEventAppend,
-    ProcessAwaitOutput, ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest,
-    ProcessCancelSource, ProcessCancelSummary, ProcessDefinitionSelector, ProcessDefinitionSummary,
-    ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSemantics,
+    DefaultProcessCancelAbility, ObservedProcess, ObservedProcessEvent, ObservedWorkItem,
+    PROCESS_LEASE_SCHEMA_VERSION, PreparedProcessEventAppend, ProcessAwaitOutput,
+    ProcessCancelAbility, ProcessCancelAllRequest, ProcessCancelRequest, ProcessCancelSource,
+    ProcessCancelSummary, ProcessDefinitionSelector, ProcessDefinitionSummary, ProcessEvent,
+    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessEventSemantics,
     ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessHandleSummary,
     ProcessId, ProcessInput, ProcessLease, ProcessLeaseCompletion, ProcessLifecycleStatus,
@@ -108,14 +109,15 @@ pub use process::{
     ProcessSessionDeleteReport, ProcessStartGrant, ProcessStartOptions, ProcessStartRequest,
     ProcessStatus, ProcessStatusFilter, ProcessTerminalSemantics, ProcessTerminalSpec,
     ProcessTerminalState, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
-    ProcessWakeDelivery, ProcessWakeSpec, UnavailableProcessService, current_epoch_ms,
-    epoch_ms_from_system_time, lashlang_process_event_types, materialize_process_event_semantics,
+    ProcessWakeDelivery, ProcessWakeSpec, ProcessWorkObserver, ProcessWorkSnapshot,
+    UnavailableProcessService, current_epoch_ms, epoch_ms_from_system_time,
+    lashlang_process_event_types, materialize_process_event_semantics,
     prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
     process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
     process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
 };
 pub use process_work_runner::{
-    InlineProcessRunHandle, ProcessRunHandle, ProcessWorkPoke, ProcessWorkRunner,
+    InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver, ProcessWorkPoke, ProcessWorkRunner,
 };
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
 pub use queued_work_runner::{

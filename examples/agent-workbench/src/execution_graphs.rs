@@ -4,7 +4,7 @@ use lash::tracing::{TraceLashlangGraph, TraceRuntimeScope, TraceRuntimeSubject};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{AppError, compact_payload, label_from_input, terminal_label};
+use crate::{AppError, compact_payload};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct LashlangGraphIndex {
@@ -33,12 +33,15 @@ pub(crate) struct LashlangGraphSummary {
 #[derive(Debug, Serialize)]
 pub(crate) struct LashlangGraphProcessSummary {
     pub(crate) process_id: String,
-    pub(crate) status: String,
-    pub(crate) label: Option<String>,
+    pub(crate) status_label: String,
+    pub(crate) lifecycle: lash::process::ProcessLifecycleStatus,
+    pub(crate) terminal: bool,
+    pub(crate) label: String,
     pub(crate) created_at_ms: u64,
     pub(crate) updated_at_ms: u64,
     pub(crate) input: Value,
     pub(crate) error: Option<String>,
+    pub(crate) child_session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,22 +60,22 @@ pub(crate) struct LashlangGraphLineageEdge {
 }
 
 pub(crate) async fn index_for_session(
-    process_registry: &dyn lash::persistence::ProcessRegistry,
+    process_observer: &lash::process::ProcessWorkObserver,
     current_session_id: &str,
     graphs: Vec<TraceLashlangGraph>,
 ) -> Result<LashlangGraphIndex, AppError> {
-    let mut projection = GraphProjection::new(process_registry, current_session_id, graphs).await?;
+    let mut projection = GraphProjection::new(process_observer, current_session_id, graphs).await?;
     projection.compute_visibility().await;
     projection.index().await
 }
 
 pub(crate) async fn visible_graph_by_key(
-    process_registry: &dyn lash::persistence::ProcessRegistry,
+    process_observer: &lash::process::ProcessWorkObserver,
     current_session_id: &str,
     graphs: Vec<TraceLashlangGraph>,
     graph_key: &str,
 ) -> Result<TraceLashlangGraph, AppError> {
-    let mut projection = GraphProjection::new(process_registry, current_session_id, graphs).await?;
+    let mut projection = GraphProjection::new(process_observer, current_session_id, graphs).await?;
     projection.compute_visibility().await;
     projection
         .graph_if_visible(graph_key)
@@ -81,32 +84,31 @@ pub(crate) async fn visible_graph_by_key(
 }
 
 struct GraphProjection<'a> {
-    process_registry: &'a dyn lash::persistence::ProcessRegistry,
+    process_observer: &'a lash::process::ProcessWorkObserver,
     graphs: Vec<TraceLashlangGraph>,
     graph_by_key: BTreeMap<String, usize>,
     effect_graphs_by_session: BTreeMap<String, Vec<usize>>,
-    process_records: BTreeMap<String, Option<lash::advanced::ProcessRecord>>,
+    processes: BTreeMap<String, Option<lash::process::ObservedProcess>>,
     visible_keys: BTreeSet<String>,
 }
 
 impl<'a> GraphProjection<'a> {
     async fn new(
-        process_registry: &'a dyn lash::persistence::ProcessRegistry,
+        process_observer: &'a lash::process::ProcessWorkObserver,
         current_session_id: &str,
         graphs: Vec<TraceLashlangGraph>,
     ) -> Result<Self, AppError> {
-        let owner_scope = lash::advanced::ProcessScope::new(current_session_id);
-        let visible_processes = process_registry
-            .list_handle_grants(&owner_scope)
+        let snapshot = process_observer
+            .snapshot_for_session(current_session_id)
             .await
             .map_err(AppError::internal)?;
-        let mut process_records = BTreeMap::new();
-        let visible_process_ids = visible_processes
+        let mut processes = BTreeMap::new();
+        for item in snapshot.items {
+            processes.insert(item.process.process_id.clone(), Some(item.process));
+        }
+        let visible_process_ids = snapshot
+            .visible_process_ids
             .into_iter()
-            .map(|(grant, record)| {
-                process_records.insert(record.id.clone(), Some(record));
-                grant.process_id
-            })
             .collect::<BTreeSet<_>>();
 
         let graph_by_key = graphs
@@ -148,11 +150,11 @@ impl<'a> GraphProjection<'a> {
         }
 
         Ok(Self {
-            process_registry,
+            process_observer,
             graphs,
             graph_by_key,
             effect_graphs_by_session,
-            process_records,
+            processes,
             visible_keys,
         })
     }
@@ -173,15 +175,10 @@ impl<'a> GraphProjection<'a> {
                     let Some(process_id) = process_id_from_graph_key(&child.child_graph_key) else {
                         continue;
                     };
-                    let Some(record) = self.process_record(process_id).await else {
+                    let Some(process) = self.observed_process(process_id).await else {
                         continue;
                     };
-                    let lash::advanced::ProcessInput::SessionTurn { create_request, .. } =
-                        record.input.as_ref()
-                    else {
-                        continue;
-                    };
-                    let Some(child_session_id) = create_request.session_id.as_deref() else {
+                    let Some(child_session_id) = process.child_session_id.as_deref() else {
                         continue;
                     };
                     let child_graph_keys = self
@@ -275,9 +272,9 @@ impl<'a> GraphProjection<'a> {
         let TraceRuntimeSubject::Process { process_id } = &graph.subject else {
             return None;
         };
-        self.process_record(process_id)
+        self.observed_process(process_id)
             .await
-            .map(|record| process_summary_from_record(&record))
+            .map(|process| process_summary_from_observed(&process))
     }
 
     async fn append_lineage_edges(
@@ -305,29 +302,24 @@ impl<'a> GraphProjection<'a> {
             return;
         };
 
-        let record = self.process_record(process_id).await;
-        if let Some(record) = record.as_ref()
-            && let lash::advanced::ProcessInput::SessionTurn { create_request, .. } =
-                record.input.as_ref()
+        let process = self.observed_process(process_id).await;
+        if let Some(process) = process.as_ref()
+            && let Some(child_session_id) = process.child_session_id.clone()
         {
-            let child_session_id = create_request.session_id.clone();
-            let child_graphs = child_session_id
-                .as_deref()
-                .map(|session_id| self.child_session_effect_graphs(session_id))
-                .unwrap_or_default();
+            let child_graphs = self.child_session_effect_graphs(&child_session_id);
             if child_graphs.is_empty() {
                 out.push(LashlangGraphLineageEdge {
                     parent_graph_key: child.parent_graph_key.clone(),
                     parent_node_id: child.parent_node_id.clone(),
                     bridge_graph_key: child.child_graph_key.clone(),
                     bridge_process_id: Some(process_id.to_string()),
-                    bridge_status: terminal_label(record),
-                    bridge_title: lineage_bridge_title(child, Some(record), process_id),
+                    bridge_status: process.status_label.clone(),
+                    bridge_title: lineage_bridge_title(child, Some(process), process_id),
                     child_graph_key: None,
-                    child_session_id,
-                    pending: !record.is_terminal(),
-                    terminal: record.is_terminal(),
-                    error: process_error(record),
+                    child_session_id: Some(child_session_id),
+                    pending: !process.terminal,
+                    terminal: process.terminal,
+                    error: process.error.clone(),
                 });
             } else {
                 for graph in child_graphs {
@@ -336,13 +328,13 @@ impl<'a> GraphProjection<'a> {
                         parent_node_id: child.parent_node_id.clone(),
                         bridge_graph_key: child.child_graph_key.clone(),
                         bridge_process_id: Some(process_id.to_string()),
-                        bridge_status: terminal_label(record),
-                        bridge_title: lineage_bridge_title(child, Some(record), process_id),
+                        bridge_status: process.status_label.clone(),
+                        bridge_title: lineage_bridge_title(child, Some(process), process_id),
                         child_graph_key: Some(graph.graph_key.clone()),
-                        child_session_id: child_session_id.clone(),
+                        child_session_id: Some(child_session_id.clone()),
                         pending: false,
-                        terminal: record.is_terminal(),
-                        error: process_error(record),
+                        terminal: process.terminal,
+                        error: process.error.clone(),
                     });
                 }
             }
@@ -350,25 +342,25 @@ impl<'a> GraphProjection<'a> {
         }
 
         let child_graph_observed = self.graph_by_key.contains_key(&child.child_graph_key);
-        let terminal = record
+        let terminal = process
             .as_ref()
-            .map(lash::advanced::ProcessRecord::is_terminal)
+            .map(|process| process.terminal)
             .unwrap_or(false);
         out.push(LashlangGraphLineageEdge {
             parent_graph_key: child.parent_graph_key.clone(),
             parent_node_id: child.parent_node_id.clone(),
             bridge_graph_key: child.child_graph_key.clone(),
             bridge_process_id: Some(process_id.to_string()),
-            bridge_status: record
+            bridge_status: process
                 .as_ref()
-                .map(terminal_label)
+                .map(|process| process.status_label.clone())
                 .unwrap_or_else(|| self.graph_presence_status(&child.child_graph_key)),
-            bridge_title: lineage_bridge_title(child, record.as_ref(), process_id),
+            bridge_title: lineage_bridge_title(child, process.as_ref(), process_id),
             child_graph_key: Some(child.child_graph_key.clone()),
             child_session_id: None,
             pending: !child_graph_observed && !terminal,
             terminal,
-            error: record.as_ref().and_then(process_error),
+            error: process.as_ref().and_then(|process| process.error.clone()),
         });
     }
 
@@ -389,27 +381,32 @@ impl<'a> GraphProjection<'a> {
         }
     }
 
-    async fn process_record(&mut self, process_id: &str) -> Option<lash::advanced::ProcessRecord> {
-        if !self.process_records.contains_key(process_id) {
-            let record = self.process_registry.get_process(process_id).await;
-            self.process_records.insert(process_id.to_string(), record);
+    async fn observed_process(
+        &mut self,
+        process_id: &str,
+    ) -> Option<lash::process::ObservedProcess> {
+        if !self.processes.contains_key(process_id) {
+            let process = self.process_observer.process(process_id).await;
+            self.processes.insert(process_id.to_string(), process);
         }
-        self.process_records.get(process_id).cloned().flatten()
+        self.processes.get(process_id).cloned().flatten()
     }
 }
 
-fn process_summary_from_record(
-    record: &lash::advanced::ProcessRecord,
+fn process_summary_from_observed(
+    process: &lash::process::ObservedProcess,
 ) -> LashlangGraphProcessSummary {
-    let input = serde_json::to_value(record.input.as_ref()).unwrap_or(Value::Null);
     LashlangGraphProcessSummary {
-        process_id: record.id.clone(),
-        status: terminal_label(record),
-        label: label_from_input(&input),
-        created_at_ms: record.created_at_ms,
-        updated_at_ms: record.updated_at_ms,
-        input: compact_payload(input),
-        error: process_error(record),
+        process_id: process.process_id.clone(),
+        status_label: process.status_label.clone(),
+        lifecycle: process.lifecycle,
+        terminal: process.terminal,
+        label: process.label.clone(),
+        created_at_ms: process.created_at_ms,
+        updated_at_ms: process.updated_at_ms,
+        input: compact_payload(serde_json::to_value(&process.input).unwrap_or(Value::Null)),
+        error: process.error.clone(),
+        child_session_id: process.child_session_id.clone(),
     }
 }
 
@@ -453,14 +450,11 @@ fn process_id_from_graph_key(graph_key: &str) -> Option<&str> {
 
 fn lineage_bridge_title(
     child: &lash::tracing::TraceLashlangGraphChildLink,
-    record: Option<&lash::advanced::ProcessRecord>,
+    process: Option<&lash::process::ObservedProcess>,
     process_id: &str,
 ) -> String {
-    record
-        .and_then(|record| {
-            let input = serde_json::to_value(record.input.as_ref()).ok()?;
-            label_from_input(&input)
-        })
+    process
+        .map(|process| process.label.clone())
         .or_else(|| child.child_entry_name.clone())
         .unwrap_or_else(|| process_id.to_string())
 }
@@ -472,28 +466,37 @@ fn short_graph_title(graph_key: &str) -> String {
     graph_key.to_string()
 }
 
-fn process_error(record: &lash::advanced::ProcessRecord) -> Option<String> {
-    match &record.status {
-        lash::advanced::ProcessStatus::Failed { await_output }
-        | lash::advanced::ProcessStatus::Cancelled { await_output } => {
-            serde_json::to_value(await_output).ok().and_then(|value| {
-                value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-        }
-        lash::advanced::ProcessStatus::Running
-        | lash::advanced::ProcessStatus::Completed { .. } => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::persistence::ProcessRegistry as _;
+    use lash::process::ProcessInput as RuntimeInput;
     use lash::tracing::{TraceLashlangGraphChildLink, TraceLashlangStatus};
     use serde_json::json;
+    use std::sync::Arc;
+
+    fn test_process_observer(
+        registry: Arc<dyn lash::process::ProcessRegistry>,
+    ) -> lash::process::ProcessWorkObserver {
+        let core = lash::LashCore::standard()
+            .model(
+                lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+                    .expect("model spec"),
+            )
+            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .lashlang_artifact_store(Arc::new(
+                lash::persistence::InMemoryLashlangArtifactStore::new(),
+            ))
+            .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+            .store_factory(Arc::new(
+                lash::persistence::InMemorySessionStoreFactory::new(),
+            ))
+            .process_registry(registry)
+            .build()
+            .expect("build core");
+        core.process_observer()
+            .expect("process observer configured")
+            .clone()
+    }
 
     fn test_graph(
         graph_key: &str,
@@ -518,7 +521,9 @@ mod tests {
 
     #[tokio::test]
     async fn graph_index_resolves_subagent_bridge_to_child_session_effect_graph() {
-        let registry = lash_core::TestLocalProcessRegistry::default();
+        let registry = Arc::new(lash_core::TestLocalProcessRegistry::default())
+            as Arc<dyn lash::process::ProcessRegistry>;
+        let observer = test_process_observer(Arc::clone(&registry));
         let child_session_id = "child-session";
         let create_request = lash_core::SessionCreateRequest::child_session(
             "root",
@@ -527,9 +532,9 @@ mod tests {
         )
         .with_session_id(child_session_id);
         registry
-            .register_process(lash::advanced::ProcessRegistration::new(
+            .register_process(lash::process::ProcessRegistration::new(
                 "subagent-process",
-                lash::ProcessInput::SessionTurn {
+                RuntimeInput::SessionTurn {
                     create_request: Box::new(create_request),
                     turn_input: Box::new(lash::TurnInput::text("run child")),
                     output_contract: lash::tools::ToolOutputContract::Static,
@@ -588,7 +593,7 @@ mod tests {
             children: Vec::new(),
         };
         let mut projection = GraphProjection::new(
-            &registry,
+            &observer,
             "root",
             vec![parent_graph.clone(), child_graph.clone()],
         )
@@ -614,7 +619,9 @@ mod tests {
 
     #[tokio::test]
     async fn graph_index_filters_to_current_session_and_reachable_children() {
-        let registry = lash_core::TestLocalProcessRegistry::default();
+        let registry = Arc::new(lash_core::TestLocalProcessRegistry::default())
+            as Arc<dyn lash::process::ProcessRegistry>;
+        let observer = test_process_observer(Arc::clone(&registry));
         let current_session_id = "current-session";
         let child_session_id = "child-session";
         let old_session_id = "old-session";
@@ -625,9 +632,9 @@ mod tests {
         )
         .with_session_id(child_session_id);
         registry
-            .register_process(lash::advanced::ProcessRegistration::new(
+            .register_process(lash::process::ProcessRegistration::new(
                 "subagent-process",
-                lash::ProcessInput::SessionTurn {
+                RuntimeInput::SessionTurn {
                     create_request: Box::new(create_request),
                     turn_input: Box::new(lash::TurnInput::text("run child")),
                     output_contract: lash::tools::ToolOutputContract::Static,
@@ -637,16 +644,16 @@ mod tests {
             .expect("register subagent process");
         registry
             .grant_handle(
-                &lash::advanced::ProcessScope::new(current_session_id),
+                &lash::process::ProcessScope::new(current_session_id),
                 "subagent-process",
-                lash::advanced::ProcessHandleDescriptor::new(Some("subagent"), Some("Subagent")),
+                lash::process::ProcessHandleDescriptor::new(Some("subagent"), Some("Subagent")),
             )
             .await
             .expect("grant current process handle");
         registry
-            .register_process(lash::advanced::ProcessRegistration::new(
+            .register_process(lash::process::ProcessRegistration::new(
                 "old-process",
-                lash::ProcessInput::External {
+                RuntimeInput::External {
                     metadata: json!({ "old": true }),
                 },
             ))
@@ -654,9 +661,9 @@ mod tests {
             .expect("register old process");
         registry
             .grant_handle(
-                &lash::advanced::ProcessScope::new(old_session_id),
+                &lash::process::ProcessScope::new(old_session_id),
                 "old-process",
-                lash::advanced::ProcessHandleDescriptor::new(Some("old"), Some("Old")),
+                lash::process::ProcessHandleDescriptor::new(Some("old"), Some("Old")),
             )
             .await
             .expect("grant old process handle");
@@ -704,7 +711,7 @@ mod tests {
         );
 
         let mut projection = GraphProjection::new(
-            &registry,
+            &observer,
             current_session_id,
             vec![parent_graph, process_graph, child_graph, old_graph],
         )

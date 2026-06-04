@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn plugin_surface_streams_as_semantic_turn_event() -> Result<()> {
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(mock_provider())
         .model(mock_model_spec())
         .plugin(Arc::new(SurfacePluginFactory))
@@ -46,7 +46,7 @@ async fn embedded_sessions_always_expose_tool_state() -> Result<()> {
 
 #[tokio::test]
 async fn registered_static_tools_appear_in_tool_state() -> Result<()> {
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(mock_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -61,7 +61,7 @@ async fn registered_static_tools_appear_in_tool_state() -> Result<()> {
 
 #[tokio::test]
 async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(mock_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -136,7 +136,7 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
 
 #[tokio::test]
 async fn persisted_session_restores_tool_state() -> Result<()> {
-    let core = LashCore::standard()
+    let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(mock_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -159,7 +159,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
         ..Default::default()
     };
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
-    let reopened_core = LashCore::standard()
+    let reopened_core = explicit_ephemeral_facets(LashCore::standard())
         .provider(mock_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
@@ -238,7 +238,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
                         })
                         .build()
                         .into_handle();
-                    let standard_core = LashCore::standard()
+                    let standard_core = explicit_ephemeral_facets(LashCore::standard())
                         .provider(standard_provider)
                         .model(mock_model_spec())
                         .tools(Arc::new(LongTextTools))
@@ -277,7 +277,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
                         .expect("projected model observation");
                     assert!(model_observation.contains("Full output saved to:"));
 
-                    let rlm_core = LashCore::rlm()
+                    let rlm_core = explicit_ephemeral_facets(LashCore::rlm())
                         .provider(queued_text_provider(vec![
                             "```lashlang\nvalue = await tools.app_lookup({})?\nsubmit \"done\"\n```",
                         ]))

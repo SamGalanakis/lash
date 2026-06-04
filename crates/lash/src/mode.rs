@@ -89,6 +89,41 @@ impl ModePreset {
     }
 }
 
+pub trait RlmTurnBuilderExt: Sized {
+    fn require_submit(self) -> Result<Self>;
+    fn require_submit_schema(self, schema: serde_json::Value) -> Result<Self>;
+    fn allow_prose_or_submit(self) -> Result<Self>;
+}
+
+impl RlmTurnBuilderExt for TurnBuilder {
+    fn require_submit(self) -> Result<Self> {
+        rlm_termination(
+            self,
+            lash_rlm_types::RlmTermination::SubmitRequired { schema: None },
+        )
+    }
+
+    fn require_submit_schema(self, schema: serde_json::Value) -> Result<Self> {
+        rlm_termination(
+            self,
+            lash_rlm_types::RlmTermination::SubmitRequired {
+                schema: Some(schema),
+            },
+        )
+    }
+
+    fn allow_prose_or_submit(self) -> Result<Self> {
+        rlm_termination(self, lash_rlm_types::RlmTermination::ProseOrSubmit)
+    }
+}
+
+fn rlm_termination(
+    builder: TurnBuilder,
+    termination: lash_rlm_types::RlmTermination,
+) -> Result<TurnBuilder> {
+    Ok(builder.protocol_turn_options(ProtocolTurnOptions::typed(termination)?))
+}
+
 fn rlm_preset_config(
     config: lash_protocol_rlm::RlmProtocolPluginConfig,
 ) -> lash_protocol_rlm::RlmProtocolPluginConfig {

@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use croner::parser::{CronParser, Seconds};
 use lash::TurnInput;
+use lash::modes::RlmTurnBuilderExt as _;
 use lash_restate::LashProcessWorkflow;
 use restate_sdk::context::{
     ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, InvocationHandle,
@@ -21,7 +22,7 @@ use serde_json::{Value, json};
 use crate::{
     AppError, AppState, ButtonChoice, CRON_SCHEDULE_SOURCE_TYPE, ChannelTurnEvents, ModelSelection,
     TurnStreamState, apply_model_selection_to_session, assistant_text_for_display,
-    emit_button_host_event_with_effect_host, model_spec_from_selection, started_process_text,
+    emit_button_host_event_with_effect_scope, model_spec_from_selection, started_process_text,
 };
 
 const CRON_STATE_KEY: &str = "state";
@@ -65,6 +66,13 @@ struct WorkbenchCronRequest {
     tz: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CronScheduleSource {
+    expr: String,
+    #[serde(default)]
+    tz: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -329,23 +337,23 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
 pub(crate) fn spawn_restate_endpoint(
     addr: SocketAddr,
     state: AppState,
-    process_registry: Arc<dyn lash::persistence::ProcessRegistry>,
-    process_worker: lash::advanced::DurableProcessWorker,
+    process_deployment: lash_restate::RestateProcessDeployment,
+    process_worker: lash::durability::DurableProcessWorker,
 ) {
-    let process_runner = Arc::new(lash_restate::RestateCoreProcessRunner::new(process_worker));
     let endpoint = Endpoint::builder()
         .bind(WorkbenchTurnWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchQueuedTurnWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchButtonTriggerWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchSessionDeleteWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchCronJobImpl::new(state).serve())
-        .bind(lash_restate::LashProcessWorkflowImpl::new(process_runner, process_registry).serve())
+        .bind(process_deployment.workflow(process_worker).serve())
         .build();
     tokio::spawn(async move {
         restate_sdk::http_server::HttpServer::new(endpoint)
             .listen_and_serve(addr)
             .await;
     });
+    process_deployment.spawn();
 }
 
 pub(crate) async fn submit_user_turn(
@@ -445,7 +453,7 @@ async fn run_user_turn(
         turn_state: Arc::clone(&turn_state),
     };
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::advanced::EffectScope::turn(
+        .scoped_effect_controller(lash::runtime::EffectScope::turn(
             &request.session_id,
             &request.turn_id,
         ))
@@ -484,12 +492,18 @@ async fn run_button_trigger(
         "restate_button_trigger",
     )
     .await?;
-    let report = emit_button_host_event_with_effect_host(
+    let scoped_effect_controller = controller
+        .scoped_effect_controller(lash::runtime::EffectScope::host_event(
+            &request.session_id,
+            &request.operation_id,
+        ))
+        .map_err(AppError::internal)?;
+    let report = emit_button_host_event_with_effect_scope(
         &state,
         &session,
         request.button,
         &request.pressed_at,
-        controller,
+        scoped_effect_controller,
     )
     .await
     .map_err(AppError::internal)?;
@@ -513,7 +527,7 @@ async fn run_session_delete(
     controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::advanced::EffectScope::session_delete(
+        .scoped_effect_controller(lash::runtime::EffectScope::session_delete(
             &request.session_id,
         ))
         .map_err(AppError::internal)?;
@@ -566,7 +580,7 @@ async fn run_queued_turn(
         }),
     );
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::advanced::EffectScope::queue_drain(
+        .scoped_effect_controller(lash::runtime::EffectScope::queue_drain(
             &request.session_id,
             &request.turn_id,
         ))
@@ -704,14 +718,20 @@ async fn activate_cron_trigger(
         .open()
         .await
         .map_err(|err| TerminalError::new(err.to_string()))?;
+    let scoped_effect_controller = controller
+        .scoped_effect_controller(lash::runtime::EffectScope::cron(
+            controller.context().key(),
+            fired_at.clone(),
+        ))
+        .map_err(|err| HandlerError::from(TerminalError::new(err.to_string())))?;
     let report = session
         .triggers()
-        .activate_with_effect_host(
+        .activate_with_effect_scope(
             request.trigger_handle.clone(),
             json!({
                 "fired_at": fired_at,
             }),
-            controller,
+            scoped_effect_controller,
         )
         .await
         .map_err(|err| HandlerError::from(TerminalError::new(err.to_string())))?;
@@ -799,24 +819,22 @@ fn cron_request_from_registration(
     if source_type != CRON_SCHEDULE_SOURCE_TYPE {
         return Err(format!("unexpected source type `{source_type}`"));
     }
-    let value = registration
-        .source
-        .get(lashlang::LASH_HOST_VALUE_KEY)
-        .ok_or_else(|| "missing host value payload".to_string())?;
-    let expr = value
-        .get("expr")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "cron.Schedule requires string field `expr`".to_string())?
-        .to_string();
-    let tz = value
-        .get("tz")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
+    let source =
+        lashlang::HostValue::decode(&registration.source).map_err(|err| err.to_string())?;
+    if source.source_type != source_type {
+        return Err(format!(
+            "registration source type `{source_type}` does not match host value `{}`",
+            source.source_type
+        ));
+    }
+    let payload: CronScheduleSource = source
+        .decode_as(&crate::workbench_lashlang_resources())
+        .map_err(|err| err.to_string())?;
     let request = WorkbenchCronRequest {
         session_id: session_id.to_string(),
         trigger_handle: registration.handle.clone(),
-        expr,
-        tz,
+        expr: payload.expr,
+        tz: payload.tz,
         name: registration.name.clone(),
     };
     Ok((cron_job_key(session_id, &registration.handle), request))

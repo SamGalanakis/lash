@@ -60,7 +60,7 @@
               <h3>Host-facing handles</h3>
               <dl class="def-list">
                 <dt><code>LashCore</code></dt>
-                <dd>Shared runtime factory for provider, model, mode presets, plugin stack, tool providers, store factory, attachment store, tracing, and advanced host knobs. It is cheap to clone and does not represent a conversation.</dd>
+                <dd>Shared runtime factory for provider, model, mode presets, plugin stack, tool providers, effect host, runtime stores, tracing, and durable policies. It is cheap to clone and does not represent a conversation.</dd>
                 <dt><code>SessionBuilder</code></dt>
                 <dd>Short-lived opener for one session id. It resolves <code>SessionSpec</code> into a concrete <code>SessionPolicy</code>, chooses the mode, attaches or creates the store, reloads persisted state when present, and then yields a <code>LashSession</code>.</dd>
                 <dt><code>LashSession</code></dt>
@@ -120,7 +120,9 @@
 
 use lash::{plugins::runtime_plugin_stack, tools::*, LashCore, ModeId, ModePreset, TurnEvent, TurnInput};
 
-let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new("lash-sessions"));
+let data_dir = std::path::PathBuf::from(".lash-data");
+let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(data_dir.join("sessions")));
+let artifact_store = Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("artifacts.db"))?);
 
 let core = LashCore::builder()
     .install_mode(ModePreset::standard())
@@ -131,6 +133,9 @@ let core = LashCore::builder()
     .plugins(runtime_plugin_stack())
     .tools(Arc::new(AppTools) as Arc&lt;dyn ToolProvider&gt;)
     .store_factory(store_factory)
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(artifact_store)
+    .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(data_dir.join("attachments"))))
     .build()?;
 
 let session = core.session("chat-123").rlm().open().await?;
@@ -143,13 +148,13 @@ println!("{assistant_text}");</code></pre>
           </div>
           <dl class="def-list">
             <dt><code>LashCore</code></dt>
-            <dd>Cloneable shared config: provider, model, modes, tool providers, plugin factories, store factory, attachment store, tracing. Residency and termination policy live behind <code>.advanced()</code>.</dd>
+            <dd>Cloneable shared config: provider, model, modes, tool providers, plugin factories, effect host, runtime stores, tracing, residency, and termination policy.</dd>
             <dt><code>ModePreset</code></dt>
             <dd>Installs execution modes. <code>ModePreset::standard()</code> for native provider tool calls; <code>ModePreset::rlm()</code> for Lashlang turns; <code>ModePreset::rlm_with_config(...)</code> to customize. Install multiple and pick a default with <code>default_mode</code>.</dd>
             <dt><code>SessionSpec</code></dt>
             <dd>Provider, model/variant, mode, max context tokens, max turns, prompt layer. Root cores: <code>SessionSpec::new()</code>. Children and subagents: <code>SessionSpec::inherit()</code>.</dd>
             <dt><code>PluginStack</code></dt>
-            <dd>Ordered plugin factory list. <code>LashCore::standard()</code> / <code>::rlm()</code> ship with <code>plugins::runtime_plugin_stack()</code>; raw <code>::builder()</code> starts empty.</dd>
+            <dd>Ordered plugin factory list. <code>LashCore::standard()</code> / <code>::rlm()</code> ship with <code>plugins::runtime_plugin_stack()</code>; raw <code>::builder()</code> starts without modes or plugins. All paths still require explicit effect, artifact, and attachment facets before <code>build()</code>.</dd>
             <dt><code>LashSession</code></dt>
             <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>run(...)</code>, <code>read_view()</code>, and <code>control()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
@@ -165,7 +170,8 @@ println!("{assistant_text}");</code></pre>
           <div class="two-col">
             <article class="panel">
               <h3>Root defaults</h3>
-              <pre><code>use lash::{plugins::{runtime_plugin_stack, PluginFactory}, LashCore, ModeId, ModePreset, SessionSpec};
+              <pre><code>use std::sync::Arc;
+use lash::{plugins::{runtime_plugin_stack, PluginFactory}, LashCore, ModeId, ModePreset, SessionSpec};
 
 let root_spec = SessionSpec::new()
     .provider_id(provider.kind())
@@ -173,6 +179,9 @@ let root_spec = SessionSpec::new()
 
 let core = LashCore::rlm()
     .session_spec(root_spec)
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .configure_plugins(|plugins| {
         plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
     })
@@ -180,7 +189,9 @@ let core = LashCore::rlm()
             </article>
             <article class="panel">
               <h3>Explicit stacks</h3>
-              <pre><code>let plugins = runtime_plugin_stack().configure(|plugins| {
+              <pre><code>use std::sync::Arc;
+
+let plugins = runtime_plugin_stack().configure(|plugins| {
     plugins.replace(Arc::new(CustomBudgetPlugin) as Arc&lt;dyn PluginFactory&gt;);
     plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
 });
@@ -190,6 +201,9 @@ let core = LashCore::builder()
     .default_mode(ModeId::rlm())
     .session_spec(root_spec)
     .plugins(plugins)
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .build()?;</code></pre>
             </article>
           </div>

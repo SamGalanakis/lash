@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_host_events_do_not_automatically_enter_lashlang_resources() {
+    fn declared_host_events_enter_session_lashlang_resources() {
         struct HostEventOnlyFactory;
 
         impl PluginFactory for HostEventOnlyFactory {
@@ -395,7 +395,13 @@ mod tests {
             session
                 .lashlang_resources()
                 .resolve_trigger_source("ui.button.pressed")
-                .is_none()
+                .is_some()
+        );
+        assert!(
+            session
+                .lashlang_resources()
+                .resolve_value_constructor(&["ui", "button", "pressed"])
+                .is_some()
         );
     }
 

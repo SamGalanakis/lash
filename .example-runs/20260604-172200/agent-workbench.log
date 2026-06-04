@@ -1,0 +1,2 @@
+agent-workbench trace: .agent-workbench/trace.jsonl
+agent-workbench Lashlang execution trace: .agent-workbench/lashlang-execution.jsonl

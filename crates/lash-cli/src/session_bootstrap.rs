@@ -297,9 +297,11 @@ impl CliSessionOpener {
             .plugins(self.plugin_stack.clone())
             .prompt_layer(self.prompt_layer.clone())
             // In-process CLI: inline effect controller + in-memory Lashlang
-            // artifact store. The explicit attachment store below overrides the
-            // in-memory one.
-            .in_memory_stores()
+            // artifact store. Attachments use the explicit store below.
+            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+            .lashlang_artifact_store(Arc::new(
+                lash::persistence::InMemoryLashlangArtifactStore::new(),
+            ))
             .attachment_store(Arc::clone(&self.attachment_store))
             .trace_jsonl_path(self.trace_jsonl_path.clone())
             .trace_level(self.trace_level)

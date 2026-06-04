@@ -2,11 +2,11 @@ use std::{fmt::Write as _, path::PathBuf, sync::Arc};
 
 use lash::{
     LashCore, ModeId, ModePreset,
-    advanced::{PluginMessage, TurnOutcome},
     messages::MessageRole,
     persistence::SessionSnapshot,
     plugins::{PluginSpec, StaticPluginFactory},
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
+    runtime::{PluginMessage, TurnOutcome},
 };
 use lash_core::SessionEventRecord;
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -30,6 +30,15 @@ const RUNTIME_PERF_MAX_TURNS: usize = 1;
 fn benchmark_model_spec() -> lash::ModelSpec {
     lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
         .expect("valid benchmark model spec")
+}
+
+fn explicit_ephemeral_facets(builder: lash::LashCoreBuilder) -> lash::LashCoreBuilder {
+    builder
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(
+            lash::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
 }
 
 pub(crate) struct BenchmarkRuntime {
@@ -108,7 +117,7 @@ impl BenchmarkRuntime {
 
     pub(crate) async fn set_turn_phase_probe(
         &self,
-        probe: Arc<dyn lash::advanced::RuntimeTurnPhaseProbe>,
+        probe: Arc<dyn lash::runtime::RuntimeTurnPhaseProbe>,
     ) {
         self.session
             .as_ref()
@@ -128,7 +137,7 @@ impl BenchmarkRuntime {
             .turn(input)
             .cancel(cancel)
             .advanced()
-            .collect_session_events_with(&lash::advanced::NoopEventSink)
+            .collect_session_events_with(&lash::runtime::NoopEventSink)
             .await
             .map_err(anyhow::Error::from)
     }
@@ -137,7 +146,7 @@ impl BenchmarkRuntime {
         &self,
         input: lash::TurnInput,
         cancel: tokio_util::sync::CancellationToken,
-        scoped_effect_controller: lash::advanced::ScopedEffectController<'_>,
+        scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
     ) -> anyhow::Result<lash::TurnResult> {
         self.session
             .as_ref()
@@ -196,7 +205,7 @@ pub(crate) fn validate_runtime_perf_turn(
     if scenario.execution_mode() == ModeId::rlm()
         && matches!(
             turn.outcome,
-            TurnOutcome::Finished(lash::advanced::TurnFinish::AssistantMessage { .. })
+            TurnOutcome::Finished(lash::runtime::TurnFinish::AssistantMessage { .. })
         )
     {
         anyhow::bail!(
@@ -207,7 +216,7 @@ pub(crate) fn validate_runtime_perf_turn(
         );
     }
     match &turn.outcome {
-        TurnOutcome::Finished(lash::advanced::TurnFinish::AssistantMessage { text }) => {
+        TurnOutcome::Finished(lash::runtime::TurnFinish::AssistantMessage { text }) => {
             let valid = if matches!(scenario, RuntimePerfScenario::OpenAiCompatStream) {
                 text.contains(expected) || turn.assistant_output.safe_text.contains(expected)
             } else {
@@ -223,7 +232,7 @@ pub(crate) fn validate_runtime_perf_turn(
                 text
             );
         }
-        TurnOutcome::Finished(lash::advanced::TurnFinish::SubmittedValue { value }) => {
+        TurnOutcome::Finished(lash::runtime::TurnFinish::SubmittedValue { value }) => {
             if value.as_str() == Some(expected) {
                 return Ok(());
             }
@@ -234,7 +243,7 @@ pub(crate) fn validate_runtime_perf_turn(
                 value
             );
         }
-        TurnOutcome::Finished(lash::advanced::TurnFinish::ToolValue { tool_name, value }) => {
+        TurnOutcome::Finished(lash::runtime::TurnFinish::ToolValue { tool_name, value }) => {
             anyhow::bail!(
                 "runtime perf scenario {} turn {} finished with tool value from {}: {}",
                 scenario.name(),
@@ -373,8 +382,8 @@ pub(crate) fn build_embed_core(
     store: Arc<RuntimePerfStore>,
 ) -> anyhow::Result<lash::LashCore> {
     let mut builder = match scenario {
-        RuntimePerfScenario::EmbedStandard => lash::LashCore::standard(),
-        RuntimePerfScenario::EmbedRlm => lash::LashCore::rlm()
+        RuntimePerfScenario::EmbedStandard => explicit_ephemeral_facets(lash::LashCore::standard()),
+        RuntimePerfScenario::EmbedRlm => explicit_ephemeral_facets(lash::LashCore::rlm())
             .tools(Arc::new(BenchmarkEchoTool::default()))
             .default_mode(lash::ModeId::rlm()),
         _ => anyhow::bail!("{} is not an embed scenario", scenario.name()),
@@ -444,12 +453,11 @@ pub(crate) async fn build_runtime_with_store(
             PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolSurface::default())),
         )));
     }
-    let mut builder = LashCore::builder()
+    let mut builder = explicit_ephemeral_facets(LashCore::builder())
         .install_mode(mode_preset(&mode_id)?)
         .default_mode(mode_id.clone())
         .provider(provider)
         .model(benchmark_model_spec())
-        .in_memory_stores()
         .plugins(plugin_stack);
     // RlmGlobals profiles live per-turn projected bindings. Store-backed turns
     // reject live mode extensions because they cannot be checkpointed/resumed,
@@ -472,8 +480,7 @@ pub(crate) async fn build_runtime_with_store(
     }
     let core = if matches!(scenario, RuntimePerfScenario::StoreReopen) {
         builder
-            .advanced()
-            .residency(lash::advanced::Residency::ActivePathOnly)
+            .residency(lash::durability::Residency::ActivePathOnly)
             .build()?
     } else {
         builder.build()?
@@ -508,13 +515,22 @@ pub(crate) async fn build_runtime_with_sqlite_store(
     )));
 
     let sessions_root = root.join("sessions");
+    let attachments_root = root.join("attachments");
+    let artifacts_db = root.join("artifacts.db");
     let process_db = root.join("processes.db");
     let mut builder = LashCore::builder()
         .install_mode(mode_preset(&mode_id)?)
         .default_mode(mode_id.clone())
         .provider(provider)
         .model(benchmark_model_spec())
-        .in_memory_stores()
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
+            attachments_root,
+        )))
+        .lashlang_artifact_store(Arc::new(
+            lash_sqlite_store::Store::open(&artifacts_db)
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+        ))
         .process_registry(Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
@@ -527,8 +543,7 @@ pub(crate) async fn build_runtime_with_sqlite_store(
         builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);
     }
     let core = builder
-        .advanced()
-        .residency(lash::advanced::Residency::ActivePathOnly)
+        .residency(lash::durability::Residency::ActivePathOnly)
         .build()?;
     let session = core
         .session(format!("runtime-perf-{}", scenario.name()))

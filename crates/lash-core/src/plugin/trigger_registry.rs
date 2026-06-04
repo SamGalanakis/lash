@@ -128,7 +128,7 @@ impl SessionTriggerRegistry {
         let request = lashlang::TriggerRegistrationRequest::decode(&request)
             .map_err(|err| PluginError::Session(err.to_string()))?;
         let source_type = request.source.source_type.clone();
-        let source = request.source.to_host_value();
+        let source = request.source.to_json();
         let event_type = lashlang::event_type_for_source(resources, &source_type)
             .map_err(|err| PluginError::Session(err.to_string()))?;
         let target = request.target;

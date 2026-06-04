@@ -52,7 +52,7 @@ pub(super) async fn run_turn_case_without_success_assertions(
         case.scripted_provider_responses.clone(),
         Arc::clone(&prompt_captures),
     );
-    let mut builder = LashCore::rlm()
+    let mut builder = explicit_ephemeral_facets(LashCore::rlm())
         .provider(provider)
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
@@ -142,7 +142,7 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
         vec!["```lashlang\nsubmit { child: \"done\", scoped: true }\n```"],
         Arc::clone(&prompt_captures),
     );
-    let core = LashCore::rlm()
+    let core = explicit_ephemeral_facets(LashCore::rlm())
         .provider(provider)
         .model(mock_model_spec())
         .plugin(subagents_plugin())

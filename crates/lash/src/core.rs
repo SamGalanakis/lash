@@ -14,6 +14,7 @@ pub struct LashCore {
     pub(crate) store_factory: Option<Arc<dyn SessionStoreFactory>>,
     pub(crate) plugin_factories: Arc<Vec<Arc<dyn PluginFactory>>>,
     pub(crate) provider: Option<ProviderHandle>,
+    pub(crate) process_observer: Option<ProcessWorkObserver>,
     /// Shared resolution of the process work runner. The poke it yields is
     /// threaded onto every session's host so the process control seam can wake
     /// the runner after a successful start. Shared across `LashCore` clones so
@@ -35,9 +36,36 @@ pub(crate) enum ProcessWorkRunnerSetup {
     LazyDefault {
         config: Box<DurableProcessWorkerConfig>,
     },
-    /// The host wired an explicit runner (e.g. the Restate ingress-client
-    /// runner) and handed its poke to the core.
-    Explicit { poke: ProcessWorkPoke },
+    /// The host wired an external runner (e.g. the Restate ingress-client
+    /// runner) and handed its driver to the core.
+    External { driver: ProcessWorkDriver },
+}
+
+#[derive(Clone)]
+pub(crate) enum ProcessWorkSource {
+    None,
+    Inline { registry: Arc<dyn ProcessRegistry> },
+    External(ProcessWorkDriver),
+}
+
+impl Default for ProcessWorkSource {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl ProcessWorkSource {
+    fn process_registry(&self) -> Option<Arc<dyn ProcessRegistry>> {
+        match self {
+            Self::None => None,
+            Self::Inline { registry } => Some(Arc::clone(registry)),
+            Self::External(driver) => Some(driver.process_registry()),
+        }
+    }
+
+    fn has_registry(&self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 /// Shared, lazily-initialized process-work-runner state for a [`LashCore`].
@@ -66,7 +94,7 @@ impl ProcessWorkRunnerSlot {
             .get_or_init(|| async {
                 match &self.setup {
                     ProcessWorkRunnerSetup::None => None,
-                    ProcessWorkRunnerSetup::Explicit { poke } => Some(poke.clone()),
+                    ProcessWorkRunnerSetup::External { driver } => Some(driver.poke_handle()),
                     ProcessWorkRunnerSetup::LazyDefault { config } => {
                         let worker = DurableProcessWorker::new((**config).clone());
                         Some(ProcessWorkRunner::inline(worker).spawn())
@@ -89,28 +117,28 @@ impl LashCore {
         LashCoreBuilder::default()
     }
 
-    /// Quickstart preset for `standard` mode. Defaults to the named in-memory
-    /// effect host and stores ([`LashCoreBuilder::in_memory_stores`]);
-    /// for durable deployments build from [`LashCore::builder`] and name the
-    /// stores explicitly, or override them with the builder setters.
+    /// Preset for `standard` mode.
+    ///
+    /// Storage and effect durability are still host-owned choices. Provide the
+    /// effect host, Lashlang artifact store, and attachment store facets with
+    /// the builder setters before calling [`LashCoreBuilder::build`].
     pub fn standard() -> LashCoreBuilder {
         Self::builder()
             .install_mode(ModePreset::standard())
             .default_mode(ModeId::standard())
             .plugins(default_runtime_stack())
-            .in_memory_stores()
     }
 
-    /// Quickstart preset for `rlm` mode. Defaults to the named in-memory
-    /// effect host and stores ([`LashCoreBuilder::in_memory_stores`]);
-    /// for durable deployments build from [`LashCore::builder`] and name the
-    /// stores explicitly, or override them with the builder setters.
+    /// Preset for `rlm` mode.
+    ///
+    /// Storage and effect durability are still host-owned choices. Provide the
+    /// effect host, Lashlang artifact store, and attachment store facets with
+    /// the builder setters before calling [`LashCoreBuilder::build`].
     pub fn rlm() -> LashCoreBuilder {
         Self::builder()
             .install_mode(ModePreset::rlm())
             .default_mode(ModeId::rlm())
             .plugins(default_runtime_stack())
-            .in_memory_stores()
     }
 
     pub fn session(&self, session_id: impl Into<String>) -> SessionBuilder {
@@ -204,18 +232,25 @@ impl LashCore {
         self.modes.keys()
     }
 
-    pub fn durable_process_worker_config(
-        &self,
-        process_registry: Arc<dyn ProcessRegistry>,
-    ) -> Result<DurableProcessWorkerConfig> {
-        self.durable_process_worker_config_with_plugins(process_registry, Vec::new())
+    pub fn process_observer(&self) -> Option<&ProcessWorkObserver> {
+        self.process_observer.as_ref()
+    }
+
+    pub fn process_registry(&self) -> Option<Arc<dyn ProcessRegistry>> {
+        self.env.process_registry.as_ref().cloned()
+    }
+
+    pub fn durable_process_worker_config(&self) -> Result<DurableProcessWorkerConfig> {
+        self.durable_process_worker_config_with_plugins(std::iter::empty::<Arc<dyn PluginFactory>>())
     }
 
     pub fn durable_process_worker_config_with_plugins(
         &self,
-        process_registry: Arc<dyn ProcessRegistry>,
         extra_plugin_factories: impl IntoIterator<Item = Arc<dyn PluginFactory>>,
     ) -> Result<DurableProcessWorkerConfig> {
+        let Some(process_registry) = self.process_registry() else {
+            return Err(EmbedError::MissingProcessRegistry);
+        };
         let Some(store_factory) = self.store_factory.as_ref() else {
             return Err(EmbedError::MissingProcessWorkerStoreFactory);
         };
@@ -251,12 +286,10 @@ pub struct LashCoreBuilder {
     child_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     // `RuntimeHostConfig` has no `Default`: the three host-owned durability
     // dependencies must be named. They are collected here and resolved in
-    // `build()`, which errors if any is unset — unless `in_memory_stores()`
-    // opted into the named in-memory versions.
+    // `build()`, which errors if any is unset.
     effect_host: Option<Arc<dyn EffectHost>>,
     attachment_store: Option<Arc<dyn AttachmentStore>>,
     lashlang_artifact_store: Option<Arc<dyn lash_core::LashlangArtifactStore>>,
-    in_memory_stores: bool,
     // Benign core overrides applied on top of the resolved core.
     prompt: Option<PromptLayer>,
     trace_sink: Option<Arc<dyn lash_trace::TraceSink>>,
@@ -270,15 +303,10 @@ pub struct LashCoreBuilder {
     plugin_stack: PluginStack,
     plugin_host: Option<PluginHost>,
     residency: Option<Residency>,
-    process_registry: Option<Arc<dyn ProcessRegistry>>,
-    // Process-work-runner wiring. A durable host registers its own runner and
-    // hands the core the poke via `with_process_work_runner`; otherwise the
-    // default inline runner is spawned lazily on first `session().open()`
-    // unless `disable_default_process_work_runner` opted out (the loud guard
-    // then rejects a registry with no runner).
-    process_work_poke: Option<ProcessWorkPoke>,
+    // Single source of truth for process lifecycle support and process-work
+    // consumption.
+    process_work_source: ProcessWorkSource,
     queued_work_poke: Option<QueuedWorkPoke>,
-    disable_default_process_work_runner: bool,
 }
 
 impl LashCoreBuilder {
@@ -352,9 +380,8 @@ impl LashCoreBuilder {
     }
 
     /// Set the deployment-level Lashlang artifact store (compiled module
-    /// cache, shared across the session tree). Required for RLM durability
-    /// unless [`in_memory_stores`](Self::in_memory_stores) is used; a SQLite
-    /// store such as `lash_sqlite_store::Store` implements it.
+    /// cache, shared across the session tree). A durable store such as
+    /// `lash_sqlite_store::Store` implements it.
     pub fn lashlang_artifact_store(
         mut self,
         artifact_store: Arc<dyn lash_core::LashlangArtifactStore>,
@@ -364,24 +391,11 @@ impl LashCoreBuilder {
     }
 
     /// Set the deployment effect host — the durability boundary every operation
-    /// crosses. Required unless [`in_memory_stores`](Self::in_memory_stores) is
-    /// used. Pass [`InlineEffectHost`](crate::advanced::InlineEffectHost) for
-    /// in-process execution, or a workflow-backed host for durable execution.
+    /// crosses. Pass [`InlineEffectHost`](crate::durability::InlineEffectHost)
+    /// for in-process execution, or a workflow-backed host for durable
+    /// execution.
     pub fn effect_host(mut self, effect_host: Arc<dyn EffectHost>) -> Self {
         self.effect_host = Some(effect_host);
-        self
-    }
-
-    /// Opt into the named in-memory effect host, Lashlang artifact
-    /// store, and attachment store.
-    ///
-    /// Convenient for quickstarts, tests, and local experiments; not durable.
-    /// Explicit calls to [`effect_host`](Self::effect_host),
-    /// [`lashlang_artifact_store`](Self::lashlang_artifact_store), or
-    /// [`attachment_store`](Self::attachment_store) still override the
-    /// corresponding in-memory default.
-    pub fn in_memory_stores(mut self) -> Self {
-        self.in_memory_stores = true;
         self
     }
 
@@ -442,15 +456,21 @@ impl LashCoreBuilder {
         self
     }
 
+    pub fn termination(mut self, termination: TerminationPolicy) -> Self {
+        self.termination = Some(termination);
+        self
+    }
+
+    pub fn residency(mut self, residency: Residency) -> Self {
+        self.residency = Some(residency);
+        self
+    }
+
     /// Resolve the runtime host config, requiring the three host-owned
-    /// durability dependencies to have been named (or `in_memory_stores()` to
-    /// have opted into the in-memory versions).
+    /// durability dependencies to have been named.
     fn resolve_runtime_host_config(&mut self) -> Result<RuntimeHostConfig> {
         if let Some(base) = self.runtime_host_config.take() {
             return Ok(self.apply_core_overrides(base));
-        }
-        if self.in_memory_stores {
-            return Ok(self.apply_core_overrides(RuntimeHostConfig::in_memory()));
         }
         let effect_host = self
             .effect_host
@@ -545,7 +565,7 @@ impl LashCoreBuilder {
             }
         }
 
-        if let Some(process_registry) = self.process_registry.as_ref() {
+        if let Some(process_registry) = self.process_work_source.process_registry().as_ref() {
             if process_registry.durability_tier() == DurabilityTier::Durable
                 && session_store_tier != Some(DurabilityTier::Durable)
             {
@@ -618,17 +638,20 @@ impl LashCoreBuilder {
             &default_mode,
             &plugin_factories,
             Vec::new(),
-            self.process_registry.is_some(),
+            self.process_work_source.has_registry(),
         )?;
 
-        // Resolve the process work runner before the registry is moved into the
-        // environment. The default inline runner's config is built eagerly so a
-        // missing store factory fails loudly at build, not at first open. It is
-        // built from the *default-mode* plugin host (preset protocol plugin +
-        // process-lifecycle abilities), the same host the live runtime uses, so
-        // the worker can rebuild a runtime for a default-mode process.
+        let process_registry = self.process_work_source.process_registry();
+
+        // Resolve the process work runner before the process source is moved
+        // into the environment. The default inline runner's config is built
+        // eagerly so a missing store factory fails loudly at build, not at
+        // first open. It is built from the *default-mode* plugin host (preset
+        // protocol plugin + process-lifecycle abilities), the same host the
+        // live runtime uses, so the worker can rebuild a runtime for a
+        // default-mode process.
         let process_work_runner = Self::resolve_process_work_runner(
-            self.process_registry.as_ref(),
+            &self.process_work_source,
             &default_plugin_host,
             &core,
             // The worker rebuilds sessions with the same factory `build()` wires
@@ -637,16 +660,14 @@ impl LashCoreBuilder {
                 .as_ref()
                 .or(self.store_factory.as_ref()),
             &policy,
-            self.process_work_poke.take(),
-            self.disable_default_process_work_runner,
             self.residency.unwrap_or_default(),
         )?;
 
         let mut env_builder = RuntimeEnvironment::builder()
             .with_plugin_host(Arc::new(default_plugin_host))
             .with_runtime_host_config(core);
-        if let Some(process_registry) = self.process_registry {
-            env_builder = env_builder.with_process_registry(process_registry);
+        if let Some(process_registry) = process_registry.as_ref() {
+            env_builder = env_builder.with_process_registry(Arc::clone(process_registry));
         }
         if let Some(residency) = self.residency {
             env_builder = env_builder.with_residency(residency);
@@ -670,6 +691,7 @@ impl LashCoreBuilder {
             store_factory: self.store_factory,
             plugin_factories: Arc::new(plugin_factories),
             provider: self.provider,
+            process_observer: process_registry.map(ProcessWorkObserver::new),
             process_work_runner: Arc::new(ProcessWorkRunnerSlot::new(process_work_runner)),
         })
     }
@@ -677,37 +699,27 @@ impl LashCoreBuilder {
     /// Decide how a built [`LashCore`] sources its process work runner.
     ///
     /// - no registry => nothing to run ([`ProcessWorkRunnerSetup::None`]);
-    /// - explicit poke wired => use it ([`ProcessWorkRunnerSetup::Explicit`]);
-    /// - default disabled, registry present, no explicit poke => loud guard
-    ///   ([`EmbedError::ProcessRegistryWithoutWorkRunner`], Decision 4);
-    /// - otherwise lazily spawn the default inline runner on first open. Its
+    /// - external driver wired => use it ([`ProcessWorkRunnerSetup::External`]);
+    /// - inline registry wired => lazily spawn the default inline runner on first open. Its
     ///   [`DurableProcessWorkerConfig`] is built eagerly when a store factory is
-    ///   present; without one the inline worker cannot rebuild session runtimes,
-    ///   so no runner is spawned (the registry-only inline host keeps its prior
-    ///   behavior — `build()` still succeeds).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "builder boundary combines process registry, worker host, policy, and residency inputs"
-    )]
+    ///   present; without one the inline worker cannot rebuild session runtimes.
     fn resolve_process_work_runner(
-        process_registry: Option<&Arc<dyn ProcessRegistry>>,
+        process_work_source: &ProcessWorkSource,
         worker_plugin_host: &PluginHost,
         core: &RuntimeHostConfig,
         store_factory: Option<&Arc<dyn SessionStoreFactory>>,
         policy: &SessionPolicy,
-        explicit_poke: Option<ProcessWorkPoke>,
-        default_disabled: bool,
         residency: lash_core::Residency,
     ) -> Result<ProcessWorkRunnerSetup> {
-        let Some(process_registry) = process_registry else {
-            return Ok(ProcessWorkRunnerSetup::None);
+        let process_registry = match process_work_source {
+            ProcessWorkSource::None => return Ok(ProcessWorkRunnerSetup::None),
+            ProcessWorkSource::External(driver) => {
+                return Ok(ProcessWorkRunnerSetup::External {
+                    driver: driver.clone(),
+                });
+            }
+            ProcessWorkSource::Inline { registry } => Arc::clone(registry),
         };
-        if let Some(poke) = explicit_poke {
-            return Ok(ProcessWorkRunnerSetup::Explicit { poke });
-        }
-        if default_disabled {
-            return Err(EmbedError::ProcessRegistryWithoutWorkRunner);
-        }
         // The worker rebuilds a session runtime per process, so it needs a store
         // factory; without one the default runner could not execute anything, so
         // fail loudly rather than silently leave processes unexecuted.
@@ -726,7 +738,7 @@ impl LashCoreBuilder {
                 Arc::new(worker_plugin_host.clone()),
                 core.clone(),
                 Arc::clone(store_factory),
-                Arc::clone(process_registry),
+                process_registry,
             )
             .with_session_policy(policy.clone())
             .with_residency(residency),
@@ -739,33 +751,25 @@ impl LashCoreBuilder {
     }
 
     pub fn process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
-        self.process_registry = Some(process_registry);
+        self.process_work_source = ProcessWorkSource::Inline {
+            registry: process_registry,
+        };
         self
     }
 
-    /// Register an explicit process work runner by handing the core the poke
-    /// that wakes it. Durable hosts spawn their own [`ProcessWorkRunner`] (e.g.
-    /// the Restate ingress-client runner), take its
-    /// [`poke_handle`](lash_core::ProcessWorkRunner::poke_handle), and pass it
-    /// here so the process control seam can make consumption prompt. Suppresses
-    /// the default inline runner.
-    pub fn with_process_work_runner(mut self, poke: ProcessWorkPoke) -> Self {
-        self.process_work_poke = Some(poke);
+    /// Configure an externally owned process work runner.
+    ///
+    /// Durable hosts construct a [`ProcessWorkDriver`] from the same process
+    /// registry and wake handle used by their deployment runner, then pass it
+    /// here. The driver registry becomes the core's process registry and no
+    /// inline runner is spawned.
+    pub fn process_work_driver(mut self, driver: ProcessWorkDriver) -> Self {
+        self.process_work_source = ProcessWorkSource::External(driver);
         self
     }
 
     pub fn with_queued_work_runner(mut self, poke: QueuedWorkPoke) -> Self {
         self.queued_work_poke = Some(poke);
-        self
-    }
-
-    /// Disable the default inline process work runner. With a process registry
-    /// configured and no explicit runner supplied via
-    /// [`with_process_work_runner`](Self::with_process_work_runner), `build()`
-    /// then fails with [`EmbedError::ProcessRegistryWithoutWorkRunner`] rather
-    /// than silently leaving non-terminal processes unexecuted.
-    pub fn disable_default_process_work_runner(mut self) -> Self {
-        self.disable_default_process_work_runner = true;
         self
     }
 }
@@ -814,60 +818,6 @@ impl AdvancedLashCoreBuilder {
 
     pub fn plugin_host(mut self, plugin_host: PluginHost) -> Self {
         self.builder.plugin_host = Some(plugin_host);
-        self
-    }
-
-    pub fn residency(mut self, residency: Residency) -> Self {
-        self.builder.residency = Some(residency);
-        self
-    }
-
-    pub fn process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
-        self.builder.process_registry = Some(process_registry);
-        self
-    }
-
-    pub fn effect_host(mut self, effect_host: Arc<dyn EffectHost>) -> Self {
-        self.builder.effect_host = Some(effect_host);
-        self
-    }
-
-    pub fn termination(mut self, termination: TerminationPolicy) -> Self {
-        self.builder.termination = Some(termination);
-        self
-    }
-
-    pub fn lashlang_execution_sink(
-        mut self,
-        lashlang_execution_sink: Option<Arc<dyn lash_trace::TraceSink>>,
-    ) -> Self {
-        self.builder.lashlang_execution_sink = lashlang_execution_sink;
-        self
-    }
-
-    pub fn lashlang_execution_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.builder.lashlang_execution_sink = path.map(|path| {
-            Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
-        });
-        self
-    }
-
-    /// Register an explicit process work runner by handing the core its poke.
-    /// See [`LashCoreBuilder::with_process_work_runner`].
-    pub fn with_process_work_runner(mut self, poke: ProcessWorkPoke) -> Self {
-        self.builder.process_work_poke = Some(poke);
-        self
-    }
-
-    pub fn with_queued_work_runner(mut self, poke: QueuedWorkPoke) -> Self {
-        self.builder.queued_work_poke = Some(poke);
-        self
-    }
-
-    /// Disable the default inline process work runner. See
-    /// [`LashCoreBuilder::disable_default_process_work_runner`].
-    pub fn disable_default_process_work_runner(mut self) -> Self {
-        self.builder.disable_default_process_work_runner = true;
         self
     }
 

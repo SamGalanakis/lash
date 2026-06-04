@@ -944,11 +944,22 @@ fn checkpoint_gated_provider(
 }
 
 fn standard_core() -> LashCore {
-    LashCore::standard()
+    explicit_ephemeral_facets(LashCore::standard())
         .provider(mock_provider())
         .model(mock_model_spec())
         .build()
         .expect("standard core")
+}
+
+fn explicit_ephemeral_facets(
+    builder: crate::core::LashCoreBuilder,
+) -> crate::core::LashCoreBuilder {
+    builder
+        .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(
+            crate::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
+        .attachment_store(Arc::new(crate::persistence::InMemoryAttachmentStore::new()))
 }
 
 fn text_message(role: lash_core::MessageRole, text: &str) -> lash_core::Message {
@@ -975,7 +986,7 @@ fn text_message(role: lash_core::MessageRole, text: &str) -> lash_core::Message 
 mod control_admin;
 mod core_session_builder;
 mod harness;
-use harness::{mock_model_spec, model_spec, run_async_test_on_large_stack, test_current_epoch_ms};
+use harness::{mock_model_spec, model_spec, run_async_test_on_large_stack};
 mod lash_e2e;
 mod plugin_stack;
 mod rebuild_conformance;
