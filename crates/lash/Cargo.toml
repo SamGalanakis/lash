@@ -21,14 +21,14 @@ path = "src/lib.rs"
 
 [dependencies]
 async-trait = { workspace = true }
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.22" }
-lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.22" }
-lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.22" }
-lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.22" }
-lash-local-store = { path = "../lash-local-store", version = "=0.1.0-alpha.22" }
-lash-plugin-tool-output-budget = { path = "../lash-plugin-tool-output-budget", version = "=0.1.0-alpha.22" }
-lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.22" }
-lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.22" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.23" }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.23" }
+lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.23" }
+lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.23" }
+lash-local-store = { path = "../lash-local-store", version = "=0.1.0-alpha.23" }
+lash-plugin-tool-output-budget = { path = "../lash-plugin-tool-output-budget", version = "=0.1.0-alpha.23" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.23" }
+lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.23" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -40,9 +40,9 @@ tokio-util = { workspace = true }
 testing = ["lash-core/testing"]
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.22", features = ["testing"] }
-lash-subagents = { path = "../lash-subagents", version = "=0.1.0-alpha.22" }
-lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.22" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.23", features = ["testing"] }
+lash-subagents = { path = "../lash-subagents", version = "=0.1.0-alpha.23" }
+lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.23" }
 rusqlite = { version = "0.33", features = ["bundled"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

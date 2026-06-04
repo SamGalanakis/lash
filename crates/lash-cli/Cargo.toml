@@ -27,29 +27,29 @@ name = "lash"
 path = "src/main.rs"
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.22", default-features = false }
-lash = { package = "lash-runtime", path = "../lash", version = "=0.1.0-alpha.22" }
-lash-plugin-mcp = { path = "../lash-plugin-mcp", version = "=0.1.0-alpha.22" }
-lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory", version = "=0.1.0-alpha.22", optional = true }
-lash-plugin-process-controls = { path = "../lash-plugin-process-controls", version = "=0.1.0-alpha.22" }
-lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.22" }
-lash-llm-tools = { path = "../lash-llm-tools", version = "=0.1.0-alpha.22" }
-lash-standard-plugins = { path = "../lash-standard-plugins", version = "=0.1.0-alpha.22" }
-lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.22" }
-lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.22" }
-lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.22" }
-lash-plugin-plan-mode = { path = "../lash-plugin-plan-mode", version = "=0.1.0-alpha.22" }
-lash-provider-anthropic = { path = "../lash-provider-anthropic", version = "=0.1.0-alpha.22" }
-lash-provider-auth = { path = "../lash-provider-auth", version = "=0.1.0-alpha.22" }
-lash-provider-codex = { path = "../lash-provider-codex", version = "=0.1.0-alpha.22" }
-lash-provider-google = { path = "../lash-provider-google", version = "=0.1.0-alpha.22" }
-lash-provider-openai = { path = "../lash-provider-openai", version = "=0.1.0-alpha.22" }
-lash-subagents = { path = "../lash-subagents", version = "=0.1.0-alpha.22" }
-lash-tui-extensions = { path = "../lash-tui-extensions", version = "=0.1.0-alpha.22" }
-lash-tui = { path = "../lash-tui", version = "=0.1.0-alpha.22" }
-lash-autoresearch = { path = "../lash-autoresearch", version = "=0.1.0-alpha.22" }
-lash-export = { path = "../lash-export", version = "=0.1.0-alpha.22" }
-lash-file-index = { path = "../lash-file-index", version = "=0.1.0-alpha.22" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.23", default-features = false }
+lash = { package = "lash-runtime", path = "../lash", version = "=0.1.0-alpha.23" }
+lash-plugin-mcp = { path = "../lash-plugin-mcp", version = "=0.1.0-alpha.23" }
+lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory", version = "=0.1.0-alpha.23", optional = true }
+lash-plugin-process-controls = { path = "../lash-plugin-process-controls", version = "=0.1.0-alpha.23" }
+lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.23" }
+lash-llm-tools = { path = "../lash-llm-tools", version = "=0.1.0-alpha.23" }
+lash-standard-plugins = { path = "../lash-standard-plugins", version = "=0.1.0-alpha.23" }
+lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.23" }
+lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.23" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.23" }
+lash-plugin-plan-mode = { path = "../lash-plugin-plan-mode", version = "=0.1.0-alpha.23" }
+lash-provider-anthropic = { path = "../lash-provider-anthropic", version = "=0.1.0-alpha.23" }
+lash-provider-auth = { path = "../lash-provider-auth", version = "=0.1.0-alpha.23" }
+lash-provider-codex = { path = "../lash-provider-codex", version = "=0.1.0-alpha.23" }
+lash-provider-google = { path = "../lash-provider-google", version = "=0.1.0-alpha.23" }
+lash-provider-openai = { path = "../lash-provider-openai", version = "=0.1.0-alpha.23" }
+lash-subagents = { path = "../lash-subagents", version = "=0.1.0-alpha.23" }
+lash-tui-extensions = { path = "../lash-tui-extensions", version = "=0.1.0-alpha.23" }
+lash-tui = { path = "../lash-tui", version = "=0.1.0-alpha.23" }
+lash-autoresearch = { path = "../lash-autoresearch", version = "=0.1.0-alpha.23" }
+lash-export = { path = "../lash-export", version = "=0.1.0-alpha.23" }
+lash-file-index = { path = "../lash-file-index", version = "=0.1.0-alpha.23" }
 crossterm = "0.28"
 tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true, features = ["derive", "env"] }
@@ -75,7 +75,7 @@ stats_alloc = "0.1"
 dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.22", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.23", default-features = false, features = ["testing"] }
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
