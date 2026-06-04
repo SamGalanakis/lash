@@ -17,7 +17,7 @@ categories = ["asynchronous", "api-bindings"]
 default = []
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.23", default-features = false }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.24", default-features = false }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 serde = { workspace = true, features = ["derive"] }

@@ -19,8 +19,8 @@ categories = ["asynchronous", "network-programming"]
 testing = []
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.23", default-features = false }
-lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.23" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.24", default-features = false }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.24" }
 tokio = { workspace = true, features = ["time"] }
 reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
 bytes = { workspace = true }
