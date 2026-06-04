@@ -1,5 +1,5 @@
 use super::*;
-use crate::modes::RlmTurnBuilderExt as _;
+use crate::modes::{RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _};
 
 #[tokio::test]
 async fn standard_core_runs_mock_turn() -> Result<()> {
@@ -334,6 +334,35 @@ async fn rlm_mode_config_lashlang_abilities_drive_prompt_surface() -> Result<()>
     assert!(prompts[0].contains("process definition"));
     assert!(prompts[0].contains("triggers.list({})"));
     assert!(!prompts[0].contains("TRIGGER."));
+    Ok(())
+}
+
+#[tokio::test]
+async fn rlm_root_session_final_answer_format_defaults_to_markdown_and_can_be_raw() -> Result<()> {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let core = explicit_ephemeral_facets(LashCore::rlm())
+        .provider(recording_request_provider(Arc::clone(&seen)))
+        .model(mock_model_spec())
+        .build()?;
+
+    let markdown = core.session("rlm-root-markdown").open().await?;
+    markdown.turn(TurnInput::text("hello")).run().await?;
+
+    let raw = core
+        .session("rlm-root-raw")
+        .final_answer_format(RlmFinalAnswerFormat::RawSubmitValue)
+        .open()
+        .await?;
+    raw.turn(TurnInput::text("hello"))
+        .require_submit()?
+        .run()
+        .await?;
+
+    let prompts = seen.lock().expect("seen prompts");
+    assert!(prompts[0].contains("=== FINAL ANSWER FORMAT ==="));
+    assert!(prompts[0].contains("Markdown string"));
+    assert!(!prompts[1].contains("=== FINAL ANSWER FORMAT ==="));
+    assert!(!prompts[1].contains("Markdown string"));
     Ok(())
 }
 

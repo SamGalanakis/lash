@@ -7,7 +7,7 @@ expression: "rlm_execution_section_for_surface(RlmPromptFeatures\n{ images: fals
 ### `print` vs `submit`
 
 - `print <expr>` — inspect a value and keep going. Output appears on the next step and is capped: keep full tool results in variables and print only lengths, selected fields, samples, or slices. Don't print large objects just to hand-copy IDs back into code.
-- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply; other values render as pretty JSON. If a **Required output** schema is present, the value must match it.
+- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply. Non-string values render as pretty JSON for machine consumers; for user-facing turns, follow the current final-answer format guidance.
 
 Never `submit` a raw tool-result dump. If you need to look at something, `print` it, then `submit` a summary on a later step.
 
@@ -89,7 +89,7 @@ Operation-level errors are different from successful results that contain domain
 
 ```lashlang
 probe = await web.search({ query: "value" })?
-submit probe
+submit format("Search returned {} characters.", len(to_string(probe)))
 ```
 
 Build collections with explicit loops, not comprehensions:
@@ -99,7 +99,7 @@ items = []
 for key in ["a", "b"] {
   items = push(items, { key: key, size: len(key) })
 }
-submit items
+submit format("Built {} items.", len(items))
 ```
 
 Print narrow observations. Keep large values in variables and print only keys, lengths, selected fields, or slices:
@@ -118,7 +118,7 @@ second = await web.fetch({ url: first[0].url })?
 if contains(to_string(second), "needs_more_work") {
   print { first: first, second: second }
 } else {
-  submit second
+  submit format("Fetched result: {}", slice(to_string(second), 0, 1200))
 }
 ```
 
@@ -163,5 +163,7 @@ handles = {
   two: start lookup(query: "two")
 }
 results = await handles
-submit { one: results.one?, two: results.two? }
+one = results.one?
+two = results.two?
+submit format("First result: {}\n\nSecond result: {}", slice(to_string(one), 0, 800), slice(to_string(two), 0, 800))
 ```

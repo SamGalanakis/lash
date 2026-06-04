@@ -42,6 +42,7 @@ pub(super) struct RlmHistoryRenderInput<'a> {
     pub(super) protocol_iteration: usize,
     pub(super) finalization: &'a str,
     pub(super) required_output: Option<&'a str>,
+    pub(super) final_answer_format: Option<&'a str>,
     pub(super) budget_suffix: Option<&'a str>,
 }
 
@@ -78,6 +79,7 @@ pub(super) fn build_rlm_history_messages_from_turn(
         input.turn_causes,
         input.finalization,
         input.required_output,
+        input.final_answer_format,
         input.budget_suffix,
     );
     messages
@@ -90,6 +92,7 @@ pub(super) fn build_rlm_history_messages(
     protocol_iteration: usize,
     finalization: &str,
     required_output: Option<&str>,
+    final_answer_format: Option<&str>,
     budget_suffix: Option<&str>,
     attachments: &mut Vec<LlmAttachment>,
 ) -> Vec<LlmMessage> {
@@ -112,6 +115,7 @@ pub(super) fn build_rlm_history_messages(
         &[],
         finalization,
         required_output,
+        final_answer_format,
         budget_suffix,
     );
     messages
@@ -124,6 +128,7 @@ fn append_current_iteration_message(
     turn_causes: &[lash_core::TurnCause],
     finalization: &str,
     required_output: Option<&str>,
+    final_answer_format: Option<&str>,
     budget_suffix: Option<&str>,
 ) {
     if !saw_history {
@@ -147,6 +152,10 @@ fn append_current_iteration_message(
     if let Some(block) = required_output {
         current_prompt.push_str("\n\n=== REQUIRED OUTPUT ===\n\n");
         current_prompt.push_str(block);
+    }
+    if let Some(guidance) = final_answer_format {
+        current_prompt.push_str("\n\n=== FINAL ANSWER FORMAT ===\n\n");
+        current_prompt.push_str(guidance);
     }
     if let Some(suffix) = budget_suffix {
         current_prompt.push_str("\n\n=== CONTEXT BUDGET ===\n\n");

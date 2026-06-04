@@ -852,6 +852,19 @@ fn system_text(request: &LlmRequest) -> String {
         .unwrap_or_default()
 }
 
+fn request_text(request: &LlmRequest) -> String {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            LlmContentBlock::Text { text, .. } => Some(text.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn recording_prompt_provider(seen: Arc<std::sync::Mutex<Vec<String>>>) -> ProviderHandle {
     crate::testing::TestProvider::builder()
         .kind("prompt-test")
@@ -869,6 +882,22 @@ fn recording_prompt_provider(seen: Arc<std::sync::Mutex<Vec<String>>>) -> Provid
                     }],
                     ..LlmResponse::default()
                 })
+            }
+        })
+        .build()
+        .into_handle()
+}
+
+fn recording_request_provider(seen: Arc<std::sync::Mutex<Vec<String>>>) -> ProviderHandle {
+    crate::testing::TestProvider::builder()
+        .kind("request-test")
+        .complete(move |request| {
+            let seen = Arc::clone(&seen);
+            async move {
+                seen.lock()
+                    .expect("seen prompts")
+                    .push(request_text(&request));
+                Ok(text_response("```lashlang\nsubmit \"ok\"\n```"))
             }
         })
         .build()

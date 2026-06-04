@@ -4,19 +4,25 @@ use std::sync::{Arc, Mutex};
 use lash_core::PromptContribution;
 use lash_core::PromptUsage;
 use lash_core::plugin::PromptHookContext;
-use lash_rlm_types::RlmTermination;
+use lash_rlm_types::{RlmCreateExtras, RlmTermination};
 
 use crate::projection::{project_rlm_globals_from_events, rlm_history_projection};
 
-pub(crate) fn decode_rlm_termination_options(
+pub(crate) fn decode_rlm_options(
     options: &lash_core::ProtocolTurnOptions,
-) -> Result<RlmTermination, String> {
+) -> Result<RlmCreateExtras, String> {
     if options.is_empty() {
-        return Ok(RlmTermination::default());
+        return Ok(RlmCreateExtras::default());
     }
     options
         .decode()
         .map_err(|err| format!("invalid RLM turn options: {err}"))
+}
+
+pub(crate) fn decode_rlm_termination_options(
+    options: &lash_core::ProtocolTurnOptions,
+) -> Result<RlmTermination, String> {
+    decode_rlm_options(options).map(|options| options.termination)
 }
 
 /// Render the "Context Budget" line for the volatile turn-tail message.

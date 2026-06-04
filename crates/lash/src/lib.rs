@@ -123,11 +123,12 @@ pub mod plugins {
 }
 
 pub mod modes {
-    pub use crate::mode::RlmTurnBuilderExt;
+    pub use crate::mode::{RlmSessionBuilderExt, RlmTurnBuilderExt};
     pub use lash_protocol_rlm::{
         LashlangAbilities, LashlangLanguageFeatures, LashlangSurface, NamedDataType,
         ResourceCatalog, RlmProtocolPluginConfig, TypeExpr, TypeField, format_type_expr,
     };
+    pub use lash_rlm_types::RlmFinalAnswerFormat;
 
     pub use crate::mode::{ModeId, ModePreset};
 }

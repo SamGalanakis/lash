@@ -4,7 +4,7 @@ use lash_core::sansio::{self, ChatContextProjector, ProtocolDriverHandle, Respon
 use lash_core::{Effect, TurnMachine, TurnMachineConfig};
 use lash_protocol_rlm::RlmDriver;
 use lash_protocol_standard::StandardDriver;
-use lash_rlm_types::{RlmProtocolEvent, RlmTermination, RlmTrajectoryEntry};
+use lash_rlm_types::{RlmCreateExtras, RlmProtocolEvent, RlmTermination, RlmTrajectoryEntry};
 use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 use lash_sansio::{CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionEvent};
 
@@ -24,7 +24,11 @@ fn test_config_with_termination(
 ) -> TurnMachineConfig {
     test_config_with_protocol_turn_options(
         protocol,
-        lash_core::ProtocolTurnOptions::typed(rlm_termination).expect("valid rlm turn options"),
+        lash_core::ProtocolTurnOptions::typed(RlmCreateExtras {
+            termination: rlm_termination,
+            final_answer_format: None,
+        })
+        .expect("valid rlm turn options"),
     )
 }
 
@@ -958,7 +962,9 @@ fn malformed_rlm_turn_options_fail_before_llm() {
     let config = test_config_with_protocol_turn_options(
         TestProtocol::Rlm,
         lash_core::ProtocolTurnOptions {
-            payload: serde_json::json!({ "kind": "unknown" }),
+            payload: serde_json::json!({
+                "termination": { "kind": "unknown" }
+            }),
         },
     );
     let msgs = vec![user_message("hello")];

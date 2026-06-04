@@ -11,6 +11,7 @@ pub struct SessionBuilder {
     pub(crate) provider: Option<ProviderHandle>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
     pub(crate) plugin_factories: Vec<Arc<dyn PluginFactory>>,
+    pub(crate) rlm_final_answer_format: Option<lash_rlm_types::RlmFinalAnswerFormat>,
 }
 
 impl SessionBuilder {
@@ -68,9 +69,10 @@ impl SessionBuilder {
     pub async fn open(self) -> Result<LashSession> {
         let (policy, mode) = self.session_policy()?;
         let store = self.create_store(&policy)?;
-        let state = self
+        let mut state = self
             .load_or_default_state(&policy, store.as_deref())
             .await?;
+        self.apply_rlm_session_options(&mode, &mut state)?;
         self.open_resolved(policy, mode, state, store).await
     }
 
@@ -87,6 +89,7 @@ impl SessionBuilder {
         state.policy = policy.clone();
         state.policy.provider_id = recorded_provider_id;
         Self::normalize_tool_state(&mut state);
+        self.apply_rlm_session_options(&mode, &mut state)?;
         self.open_resolved(policy, mode, state, store).await
     }
 
@@ -186,6 +189,44 @@ impl SessionBuilder {
             state.tool_state_generation = Some(normalized.generation());
             *snapshot = normalized;
         }
+    }
+
+    fn apply_rlm_session_options(
+        &self,
+        mode: &ModeId,
+        state: &mut RuntimeSessionState,
+    ) -> Result<()> {
+        let Some(final_answer_format) = self.rlm_session_final_answer_format(mode) else {
+            return Ok(());
+        };
+        let mut extras = if state.protocol_turn_options.is_empty() {
+            lash_rlm_types::RlmCreateExtras::default()
+        } else {
+            state.protocol_turn_options.decode()?
+        };
+        extras.final_answer_format = Some(final_answer_format);
+        let options = ProtocolTurnOptions::typed(extras)?;
+        state.protocol_turn_options = options.clone();
+        for frame in &mut state.agent_frames {
+            frame.protocol_turn_options = options.clone();
+        }
+        Ok(())
+    }
+
+    fn rlm_session_final_answer_format(
+        &self,
+        mode: &ModeId,
+    ) -> Option<lash_rlm_types::RlmFinalAnswerFormat> {
+        if mode != &ModeId::rlm() {
+            return None;
+        }
+        self.rlm_final_answer_format.clone().or_else(|| {
+            if self.parent_session_id.is_none() {
+                Some(lash_rlm_types::RlmFinalAnswerFormat::Markdown)
+            } else {
+                Some(lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue)
+            }
+        })
     }
 
     async fn open_resolved(

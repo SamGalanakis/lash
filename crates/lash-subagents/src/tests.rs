@@ -89,6 +89,7 @@ fn capability_can_build_complete_spawn_request() {
         current_snapshot: current_snapshot.to_snapshot(),
         session_spec: &SessionSpec::inherit(),
         tool_access: &tool_access,
+        final_answer_format: lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue,
         capability_name: "custom",
         output_schema: None,
         seed: Default::default(),
@@ -311,6 +312,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         current_snapshot: current_snapshot.to_snapshot(),
         session_spec: &SessionSpec::inherit(),
         tool_access: &tool_access,
+        final_answer_format: lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue,
         capability_name: "explore",
         output_schema: None,
         seed: Default::default(),
@@ -342,6 +344,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         current_snapshot: current_snapshot.to_snapshot(),
         session_spec: &SessionSpec::inherit(),
         tool_access: &tool_access,
+        final_answer_format: lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue,
         capability_name: "explore",
         output_schema: Some(json!({
             "type": "object",
@@ -366,6 +369,10 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
     assert!(matches!(
         extras.termination,
         lash_rlm_types::RlmTermination::SubmitRequired { .. }
+    ));
+    assert!(matches!(
+        extras.final_answer_format,
+        Some(lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue)
     ));
     assert!(structured_request.tool_access.tools.is_empty());
 }
@@ -867,6 +874,21 @@ async fn subagents_plugin_builds_without_mode_context() {
     };
     let plugin = factory.build(&ctx).expect("plugin");
     assert_eq!(plugin.id(), "subagents");
+}
+
+#[test]
+fn subagents_plugin_final_answer_format_defaults_raw_and_can_be_overridden() {
+    let factory = SubagentsPluginFactory::new(Arc::new(default_registry(&BTreeMap::new())));
+    assert_eq!(
+        factory.final_answer_format,
+        lash_rlm_types::RlmFinalAnswerFormat::RawSubmitValue
+    );
+
+    let factory = factory.with_final_answer_format(lash_rlm_types::RlmFinalAnswerFormat::Markdown);
+    assert_eq!(
+        factory.final_answer_format,
+        lash_rlm_types::RlmFinalAnswerFormat::Markdown
+    );
 }
 
 #[tokio::test]

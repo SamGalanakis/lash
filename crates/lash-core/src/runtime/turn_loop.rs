@@ -1038,9 +1038,11 @@ impl LashRuntime {
         if let Some(model) = turn_context.model_spec() {
             turn_policy.model = model.clone();
         }
+        let session_protocol_turn_options = self.state.effective_protocol_turn_options().clone();
         let effective_protocol_turn_options = protocol_turn_options
             .clone()
-            .unwrap_or_else(|| self.state.effective_protocol_turn_options().clone());
+            .map(|options| session_protocol_turn_options.merged_with_override(&options))
+            .unwrap_or(session_protocol_turn_options);
         let manager = self
             .runtime_session_services_for_turn(Some(child_usage_event_relay.clone()))
             .map_err(|err| {

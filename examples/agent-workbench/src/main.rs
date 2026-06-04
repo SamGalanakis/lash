@@ -1288,7 +1288,7 @@ fn cron_tick_event_type() -> lashlang::NamedDataType {
     .expect("valid cron tick type")
 }
 
-const WORKBENCH_PROMPT: &str = r#"You are running inside the Agent Workbench demo.
+const WORKBENCH_PROMPT: &str = r###"You are running inside the Agent Workbench demo.
 
 Available host features:
 - Web access is limited to `web.search(...)` and `web.fetch(...)`, both backed by the same Tavily tools the CLI uses.
@@ -1312,12 +1312,14 @@ handles = {
   second: start research(task: "Research the second topic")
 }
 results = await handles
-submit { first: results.first?, second: results.second? }
+first = results.first?
+second = results.second?
+submit format("## Results\n\n### First topic\n{}\n\nKey metrics:\n- {}\n\n### Second topic\n{}\n\nKey metrics:\n- {}", first.summary, join(first.key_metrics, "\n- "), second.summary, join(second.key_metrics, "\n- "))
 ```
 
 - The red and blue UI buttons emit `ui.button.pressed`. Register `ui.button.pressed({})`; the selected button arrives in the event payload, not in the source config:
 
-```lash
+```lashlang
 process on_button(event: ui.button.Pressed) {
   wake { kind: "button_pressed", button: event.button, message: event.message }
   finish true
@@ -1329,15 +1331,13 @@ handle = await triggers.register({
   inputs: { event: trigger.event },
   name: "button watcher"
 })?
-submit {
-  handle: handle,
-  registrations: await triggers.list({ name: "button watcher" })?
-}
+registrations = await triggers.list({ name: "button watcher" })?
+submit format("Registered button watcher `{}`. Active matching registrations: {}.", handle, len(registrations))
 ```
 
 - For schedule requests, build `cron.Schedule(...)` values and register a process definition with explicit `inputs`. Use `trigger.event` directly for the `cron.Tick` param, for example `inputs: { tick: trigger.event }`. The workbench syncs enabled `cron.Schedule` registrations to Restate cron objects, which activate the trigger with `cron.Tick { fired_at: str }`; use a seconds expression such as `*/10 * * * * *` when the user wants a quick smoke test. Use `await triggers.list({})?` to discover registrations and `await triggers.cancel({ handle: handle })?` to disable future activations.
 
-Use background processes or subagents only when they clarify the user's request or make parallel progress. Keep the visible answer concise and mention any background work you started."#;
+Use background processes or subagents only when they clarify the user's request or make parallel progress. Keep the visible answer concise and mention any background work you started."###;
 
 #[cfg(test)]
 mod tests {
@@ -1471,6 +1471,16 @@ mod tests {
             ),
             "summary ready"
         );
+    }
+
+    #[test]
+    fn workbench_ui_renders_assistant_markdown() {
+        assert!(ui::INDEX_HTML.contains("function renderMarkdownBlocks(markdown)"));
+        assert!(ui::INDEX_HTML.contains("setMessageBody(body, message.role, message.text)"));
+        assert!(
+            ui::INDEX_HTML.contains("draft.innerHTML = renderMarkdownBlocks(assistantDraftText)")
+        );
+        assert!(ui::INDEX_HTML.contains(".message.assistant .msg-body h1"));
     }
 
     #[test]

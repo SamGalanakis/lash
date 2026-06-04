@@ -122,7 +122,7 @@ impl ProtocolSessionPlugin for RlmProtocolSession {
             .decode::<RlmCreateExtras>(RLM_PROTOCOL_PLUGIN_ID)
             .map_err(|err| SessionError::Protocol(format!("invalid RLM create options: {err}")))?
         {
-            let options = lash_core::ProtocolTurnOptions::typed(extras.termination)?;
+            let options = lash_core::ProtocolTurnOptions::typed(extras)?;
             ctx.set_protocol_turn_options(options);
         }
         Ok(())
