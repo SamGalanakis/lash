@@ -1,2 +1,0 @@
-./scripts/agent-workbench-dev.sh
-[agent-workbench] starting Restate container lash-agent-workbench-dev-restate from restatedev/restate:latest
