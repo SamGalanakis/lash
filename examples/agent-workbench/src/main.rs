@@ -2193,21 +2193,16 @@ mod tests {
         .await
         .expect("submit Restate-backed workbench turn");
         assert!(accepted.accepted);
+        wait_for_workbench_message(&harness.state, "cron registered", Duration::from_secs(60))
+            .await;
+        wait_for_restate_cron_sync(&harness.state, &harness.trace_path, Duration::from_secs(30))
+            .await;
         wait_for_workbench_message(
             &harness.state,
             "cron tick observed",
-            Duration::from_secs(30),
+            Duration::from_secs(60),
         )
         .await;
-        assert!(
-            !harness
-                .state
-                .restate_cron_job_keys
-                .lock()
-                .expect("cron job key lock")
-                .is_empty(),
-            "cron trigger registration should sync to a Restate cron object"
-        );
         let trace_text =
             std::fs::read_to_string(&harness.trace_path).expect("read workbench trace jsonl");
         assert!(
@@ -2380,6 +2375,43 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    async fn wait_for_restate_cron_sync(
+        state: &AppState,
+        trace_path: &std::path::Path,
+        timeout: Duration,
+    ) {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let known_jobs = state
+                .restate_cron_job_keys
+                .lock()
+                .expect("cron job key lock")
+                .clone();
+            let trace_text = std::fs::read_to_string(trace_path).unwrap_or_default();
+            if !known_jobs.is_empty()
+                && trace_text.contains("agent_workbench.cron.restate.sync_upserted")
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for Restate cron sync; known_jobs={known_jobs:#?}; messages={:#?}; trace_tail={}",
+                state.messages_snapshot(),
+                trace_tail(trace_path),
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    fn trace_tail(path: &std::path::Path) -> String {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return format!("<unreadable {}>", path.display());
+        };
+        let mut lines = text.lines().rev().take(20).collect::<Vec<_>>();
+        lines.reverse();
+        lines.join("\n")
     }
 
     async fn wait_for_endpoint_socket(addr: SocketAddr) {
