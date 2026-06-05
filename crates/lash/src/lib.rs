@@ -56,9 +56,9 @@ pub mod tools {
     pub use lash_core::{
         PreparedToolCall, ToolActivation, ToolAgentSurface, ToolArgumentProjectionPolicy,
         ToolAvailability, ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord,
-        ToolContext, ToolContract, ToolDefinition, ToolManifest, ToolOutputContract,
-        ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult, ToolScheduling,
-        ToolSourceHandle,
+        ToolContext, ToolContract, ToolDefinition, ToolHostEventControl, ToolManifest,
+        ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
+        ToolScheduling, ToolSourceHandle,
     };
     /// Author a fixed-tool provider without hand-rolling `tool_manifests` /
     /// `resolve_contract`: supply the [`ToolDefinition`]s once and an

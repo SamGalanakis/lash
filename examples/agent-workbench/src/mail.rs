@@ -20,6 +20,7 @@
 
 use std::sync::{Arc, RwLock};
 
+use crate::{MAIL_EVENT_ALIAS, MAIL_EVENT_EVENT, MAIL_EVENT_RESOURCE};
 use async_trait::async_trait;
 use lash::tools::{
     ToolAgentSurface, ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider,
@@ -57,22 +58,6 @@ pub(crate) struct MailDelivery {
 pub(crate) struct DeliveredMail {
     pub message: MailMessage,
     pub delivery: MailDelivery,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct MailDeliveryContext {
-    pub session_id: String,
-    pub model: String,
-    pub model_variant: Option<String>,
-}
-
-#[async_trait]
-pub(crate) trait MailDeliverySink: Send + Sync {
-    async fn notify_delivery(
-        &self,
-        context: MailDeliveryContext,
-        delivery: MailDelivery,
-    ) -> Result<(), String>;
 }
 
 struct Account {
@@ -347,23 +332,11 @@ fn definition_for(slug: &str, display_name: &str, operation: &str) -> ToolDefini
 /// Dynamic provider: one `Inbox` authority per account, three operations each.
 pub(crate) struct MockMailProvider {
     world: MailWorld,
-    delivery_sink: Option<Arc<dyn MailDeliverySink>>,
 }
 
 impl MockMailProvider {
     pub(crate) fn new(world: MailWorld) -> Self {
-        Self {
-            world,
-            delivery_sink: None,
-        }
-    }
-
-    pub(crate) fn with_delivery_sink(
-        mut self,
-        delivery_sink: Option<Arc<dyn MailDeliverySink>>,
-    ) -> Self {
-        self.delivery_sink = delivery_sink;
-        self
+        Self { world }
     }
 
     /// Build the live tool definitions from the current account set.
@@ -418,22 +391,22 @@ impl ToolProvider for MockMailProvider {
         let result = match operation {
             "send" => match self.world.op_send(&slug, call.args) {
                 Ok(delivered) => {
-                    if let Some(delivery_sink) = &self.delivery_sink {
-                        let model = match call.context.sessions().model().await {
-                            Ok(model) => model,
-                            Err(err) => return ToolResult::err_fmt(err.to_string()),
-                        };
-                        let context = MailDeliveryContext {
-                            session_id: call.context.session_id().to_string(),
-                            model: model.model,
-                            model_variant: model.model_variant,
-                        };
-                        if let Err(err) = delivery_sink
-                            .notify_delivery(context, delivered.delivery.clone())
-                            .await
-                        {
-                            return ToolResult::err_fmt(err);
-                        }
+                    let payload = match serde_json::to_value(&delivered.delivery) {
+                        Ok(payload) => payload,
+                        Err(err) => return ToolResult::err_fmt(err.to_string()),
+                    };
+                    if let Err(err) = call
+                        .context
+                        .host_events()
+                        .emit(
+                            MAIL_EVENT_RESOURCE,
+                            MAIL_EVENT_ALIAS,
+                            MAIL_EVENT_EVENT,
+                            payload,
+                        )
+                        .await
+                    {
+                        return ToolResult::err_fmt(err.to_string());
                     }
                     Ok(json!({ "account": slug, "id": delivered.message.id }))
                 }

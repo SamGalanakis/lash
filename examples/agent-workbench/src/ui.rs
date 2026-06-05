@@ -688,6 +688,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
     .ghost-btn {
       min-height: 30px;
+      min-width: 96px;
       padding: 0 var(--space-sm);
       border: 1px solid var(--line);
       border-radius: 4px;
@@ -697,9 +698,11 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       font-size: 0.75rem;
       letter-spacing: 0.06em;
       cursor: pointer;
+      touch-action: manipulation;
     }
     .ghost-btn:hover { color: var(--chalk); border-color: var(--line-strong); }
     .ghost-btn.armed { color: var(--error); border-color: var(--line-danger); }
+    .ghost-btn.loading { color: var(--sodium); border-color: var(--line-strong); }
     .ghost-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
     .timeline {
@@ -1851,6 +1854,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     let pendingCodeBlock = null;
     let pendingTools = [];
     let busy = false;
+    let resetInFlight = false;
     let controller = null;
     let lastRequest = null;
     let workStale = false;
@@ -2413,7 +2417,8 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     async function postCommand(url, payload) {
       if (busy) return;
       lastRequest = { url, payload };
-      controller = new AbortController();
+      const commandController = new AbortController();
+      controller = commandController;
       assistantDraft = null;
       assistantDraftText = "";
       reasoning = null;
@@ -2425,7 +2430,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: payload ? JSON.stringify(payload) : "{}",
-          signal: controller.signal
+          signal: commandController.signal
         });
         if (!response.ok) {
           const text = await response.text();
@@ -2435,14 +2440,14 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         }
       } catch (error) {
         if (error.name === "AbortError") {
-          renderNote("turn stopped");
+          if (!resetInFlight) renderNote("turn stopped");
         } else {
           renderError(error.message || String(error), { retry: true });
         }
-        setBusy(false, "ready");
+        if (!resetInFlight) setBusy(false, "ready");
       } finally {
-        controller = null;
-        refreshWork();
+        if (controller === commandController) controller = null;
+        if (!resetInFlight) refreshWork();
       }
     }
 
@@ -2505,7 +2510,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       resetArmTimer = 0;
       resetArmed = false;
       resetButton.classList.remove("armed");
-      resetButton.textContent = "reset";
+      if (!resetInFlight) resetButton.textContent = "reset";
     }
 
     function clearTranscript() {
@@ -2525,7 +2530,20 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     }
 
     async function doReset() {
+      if (resetInFlight) return;
+      resetInFlight = true;
+      clearTimeout(resetArmTimer);
+      resetArmTimer = 0;
+      resetArmed = false;
+      resetButton.classList.remove("armed");
+      resetButton.classList.add("loading");
+      resetButton.textContent = "resetting";
       resetButton.disabled = true;
+      if (controller) {
+        controller.abort();
+        controller = null;
+      }
+      setBusy(true, "resetting");
       workRefreshGeneration += 1;
       try {
         const response = await fetch("/api/reset", { method: "POST" });
@@ -2539,12 +2557,18 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       } catch (error) {
         renderError(cleanErrorText(error.message || error));
       } finally {
+        resetInFlight = false;
         resetButton.disabled = false;
+        resetButton.classList.remove("loading");
+        resetButton.textContent = "reset";
+        setBusy(false, "ready");
+        refreshWork();
       }
     }
 
-    resetButton.addEventListener("click", () => {
-      if (busy) return;
+    resetButton.addEventListener("click", event => {
+      event.preventDefault();
+      if (resetInFlight) return;
       if (!resetArmed) {
         resetArmed = true;
         resetButton.classList.add("armed");

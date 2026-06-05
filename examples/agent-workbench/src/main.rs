@@ -156,10 +156,6 @@ async fn async_main() -> AnyhowResult<()> {
     let session_ids = WorkbenchSessionIds::fresh();
     let (event_tx, _) = broadcast::channel(1024);
     let restate_http = reqwest::Client::new();
-    let mail_delivery_sink: Arc<dyn mail::MailDeliverySink> = Arc::new(WorkbenchMailDeliverySink {
-        restate_http: restate_http.clone(),
-        restate_ingress_url: restate_ingress_url.clone(),
-    });
     let process_deployment =
         lash_restate::RestateProcessDeployment::new(restate_ingress_url.clone(), process_registry);
     let queued_work_runner =
@@ -190,8 +186,7 @@ async fn async_main() -> AnyhowResult<()> {
         .configure_plugins(|plugins| {
             plugins.push(Arc::new(
                 WorkbenchPluginFactory::new(tavily_api_key.clone())
-                    .with_mail_world(mail_world.clone())
-                    .with_mail_delivery_sink(Some(Arc::clone(&mail_delivery_sink))),
+                    .with_mail_world(mail_world.clone()),
             ));
             plugins.push(Arc::new(
                 lash_plugin_process_controls::ProcessControlsPluginFactory::new(),
@@ -1418,7 +1413,6 @@ impl IntoResponse for AppError {
 struct WorkbenchPluginFactory {
     tavily_api_key: String,
     mail_world: mail::MailWorld,
-    mail_delivery_sink: Option<Arc<dyn mail::MailDeliverySink>>,
 }
 
 impl WorkbenchPluginFactory {
@@ -1426,20 +1420,11 @@ impl WorkbenchPluginFactory {
         Self {
             tavily_api_key: tavily_api_key.into(),
             mail_world: mail::MailWorld::new(),
-            mail_delivery_sink: None,
         }
     }
 
     fn with_mail_world(mut self, mail_world: mail::MailWorld) -> Self {
         self.mail_world = mail_world;
-        self
-    }
-
-    fn with_mail_delivery_sink(
-        mut self,
-        mail_delivery_sink: Option<Arc<dyn mail::MailDeliverySink>>,
-    ) -> Self {
-        self.mail_delivery_sink = mail_delivery_sink;
         self
     }
 }
@@ -1457,7 +1442,6 @@ impl PluginFactory for WorkbenchPluginFactory {
         Ok(Arc::new(WorkbenchSessionPlugin {
             tavily_api_key: self.tavily_api_key.clone(),
             mail_world: self.mail_world.clone(),
-            mail_delivery_sink: self.mail_delivery_sink.clone(),
         }))
     }
 }
@@ -1465,7 +1449,6 @@ impl PluginFactory for WorkbenchPluginFactory {
 struct WorkbenchSessionPlugin {
     tavily_api_key: String,
     mail_world: mail::MailWorld,
-    mail_delivery_sink: Option<Arc<dyn mail::MailDeliverySink>>,
 }
 
 impl SessionPlugin for WorkbenchSessionPlugin {
@@ -1507,42 +1490,10 @@ impl SessionPlugin for WorkbenchSessionPlugin {
             .provider(Arc::new(lash_tool_web::fetch_url_provider(
                 self.tavily_api_key.clone(),
             )))?;
-        reg.tools().provider(Arc::new(
-            mail::MockMailProvider::new(self.mail_world.clone())
-                .with_delivery_sink(self.mail_delivery_sink.clone()),
-        ))?;
+        reg.tools().provider(Arc::new(mail::MockMailProvider::new(
+            self.mail_world.clone(),
+        )))?;
         Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct WorkbenchMailDeliverySink {
-    restate_http: reqwest::Client,
-    restate_ingress_url: String,
-}
-
-#[async_trait]
-impl mail::MailDeliverySink for WorkbenchMailDeliverySink {
-    async fn notify_delivery(
-        &self,
-        context: mail::MailDeliveryContext,
-        delivery: mail::MailDelivery,
-    ) -> Result<(), String> {
-        restate::submit_mail_received_with_client(
-            &self.restate_http,
-            &self.restate_ingress_url,
-            restate::WorkbenchMailReceivedWorkflowRequest {
-                operation_id: format!("workbench-mail-{}", uuid::Uuid::new_v4()),
-                session_id: context.session_id,
-                model: ModelSelection {
-                    model: context.model,
-                    model_variant: context.model_variant,
-                },
-                delivery,
-            },
-        )
-        .await
-        .map_err(|err| err.to_string())
     }
 }
 
