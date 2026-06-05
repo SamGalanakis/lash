@@ -192,10 +192,18 @@
     return { x: baseX, y: baseY - 44 * s };
   }
 
-  // Lowest a sun's centre may sit so its disc + corona never clip the
-  // scene's top edge (matters on the short docs-footer scenes). Callers
-  // clamp before drawing so the ray to the nun's dish stays attached.
-  function minSunY(r) { return r * 1.7 + 8; }
+  const SUN_BLOOM_MULTIPLIER = 7.0;
+  const SUN_HOVER_SCALE = 1.12;
+  const SUN_TOP_PAD = 12;
+
+  // Lowest a sun's centre may sit so the full soft bloom does not clip
+  // against the scene's top edge. This matters most on the short docs
+  // footer scenes, where the previous disc/corona clamp still allowed a
+  // flat cut across the bloom. Callers clamp before drawing so rays stay
+  // attached to the actual sun position.
+  function minSunY(r) {
+    return r * SUN_BLOOM_MULTIPLIER * SUN_HOVER_SCALE + SUN_TOP_PAD;
+  }
 
   function makeSun(parent, x, y, r) {
     // wrap in a group so the whole sun is one click target — clicking
@@ -217,7 +225,7 @@
     rg.appendChild(el("stop", { offset: "100%", "stop-color": PALETTE.sodium, "stop-opacity": "0" }));
     defs.appendChild(rg);
     g.appendChild(defs);
-    g.appendChild(el("circle", { class: "sun__bloom",  cx: x, cy: y, r: r * 7.0, fill: `url(#${gid})` }));
+    g.appendChild(el("circle", { class: "sun__bloom",  cx: x, cy: y, r: r * SUN_BLOOM_MULTIPLIER, fill: `url(#${gid})` }));
     g.appendChild(el("circle", { class: "sun__glow",   cx: x, cy: y, r: r * 2.6, fill: PALETTE.sodium, opacity: 0.12 }));
     g.appendChild(el("circle", { class: "sun__corona", cx: x, cy: y, r: r * 1.5, fill: PALETTE.sodium, opacity: 0.30 }));
     g.appendChild(el("circle", { class: "sun__disc",   cx: x, cy: y, r: r, fill: PALETTE.sodium, opacity: 0.95 }));

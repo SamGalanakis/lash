@@ -146,10 +146,144 @@
     });
   }
 
-  // Pan/zoom state for the currently-open dialog.
-  const view = { scale: 1, tx: 0, ty: 0 };
+  // Pan/zoom state for the currently-open dialog. Zoom changes the
+  // active SVG's viewBox instead of CSS-scaling a composited layer, so
+  // text and strokes stay vector-rendered while zooming.
+  const view = {
+    svg: null,
+    baseBox: null,
+    box: null,
+    scale: 1,
+    body: null,
+    zoomLabel: null,
+  };
   const MIN_SCALE = 0.3;
   const MAX_SCALE = 8;
+
+  function formatNumber(n) {
+    return Number(n.toFixed(3)).toString();
+  }
+
+  function cloneBox(box) {
+    return { x: box.x, y: box.y, width: box.width, height: box.height };
+  }
+
+  function boxToViewBox(box) {
+    return [box.x, box.y, box.width, box.height].map(formatNumber).join(" ");
+  }
+
+  function parseViewBox(value) {
+    if (!value) return null;
+    const parts = value.trim().split(/[\s,]+/).map(Number);
+    if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part))) return null;
+    const [x, y, width, height] = parts;
+    if (width <= 0 || height <= 0) return null;
+    return { x, y, width, height };
+  }
+
+  function readSvgViewBox(svg) {
+    const attrBox = parseViewBox(svg.getAttribute("viewBox"));
+    if (attrBox) return attrBox;
+
+    const width = Number.parseFloat(svg.getAttribute("width")) || svg.getBoundingClientRect().width;
+    const height = Number.parseFloat(svg.getAttribute("height")) || svg.getBoundingClientRect().height;
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return { x: 0, y: 0, width, height };
+    }
+
+    return { x: 0, y: 0, width: 1000, height: 700 };
+  }
+
+  function updateZoomLabel() {
+    if (view.zoomLabel) {
+      view.zoomLabel.textContent = Math.round(view.scale * 100) + "%";
+    }
+  }
+
+  function setViewBox(box) {
+    if (!view.svg || !view.baseBox) return;
+    view.box = cloneBox(box);
+    view.scale = view.baseBox.width / view.box.width;
+    view.svg.setAttribute("viewBox", boxToViewBox(view.box));
+    updateZoomLabel();
+  }
+
+  function resetView() {
+    if (!view.baseBox) {
+      view.scale = 1;
+      updateZoomLabel();
+      return;
+    }
+    setViewBox(view.baseBox);
+  }
+
+  function clearView() {
+    view.svg = null;
+    view.baseBox = null;
+    view.box = null;
+    view.scale = 1;
+    updateZoomLabel();
+  }
+
+  function pointFromClient(clientX, clientY) {
+    if (!view.svg || !view.box) return null;
+    if (typeof view.svg.createSVGPoint === "function") {
+      const matrix = view.svg.getScreenCTM();
+      if (matrix) {
+        const point = view.svg.createSVGPoint();
+        point.x = clientX;
+        point.y = clientY;
+        return point.matrixTransform(matrix.inverse());
+      }
+    }
+    return {
+      x: view.box.x + view.box.width / 2,
+      y: view.box.y + view.box.height / 2,
+    };
+  }
+
+  function unitsPerScreenPixel() {
+    if (!view.svg || !view.box) return { x: 1, y: 1 };
+    const matrix = view.svg.getScreenCTM?.();
+    if (matrix && matrix.a && matrix.d) {
+      return { x: 1 / matrix.a, y: 1 / matrix.d };
+    }
+    const rect = view.svg.getBoundingClientRect();
+    return {
+      x: view.box.width / Math.max(rect.width, 1),
+      y: view.box.height / Math.max(rect.height, 1),
+    };
+  }
+
+  function zoomAt(factor, clientX, clientY) {
+    if (!view.box || !view.baseBox) return;
+    const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, view.scale * factor));
+    if (newScale === view.scale) return;
+
+    const point = pointFromClient(clientX, clientY);
+    const ratio = newScale / view.scale;
+    const nextWidth = view.box.width / ratio;
+    const nextHeight = view.box.height / ratio;
+    const px = (point.x - view.box.x) / view.box.width;
+    const py = (point.y - view.box.y) / view.box.height;
+
+    setViewBox({
+      x: point.x - px * nextWidth,
+      y: point.y - py * nextHeight,
+      width: nextWidth,
+      height: nextHeight,
+    });
+  }
+
+  function zoomFromCenter(factor) {
+    if (!view.body) return;
+    const rect = view.body.getBoundingClientRect();
+    zoomAt(factor, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  }
+
+  function closeDialog(dlg) {
+    if (dlg.open) dlg.close();
+  }
 
   function ensureDialog() {
     let dlg = document.getElementById("diagram-modal");
@@ -176,47 +310,20 @@
     const body = dlg.querySelector(".diagram-modal__body");
     const stage = dlg.querySelector(".diagram-modal__stage");
     const zoomLabel = dlg.querySelector(".diagram-modal__zoom");
-
-    const apply = () => {
-      stage.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`;
-      zoomLabel.textContent = Math.round(view.scale * 100) + "%";
-    };
-
-    const reset = () => {
-      view.scale = 1;
-      view.tx = 0;
-      view.ty = 0;
-      apply();
-    };
-
-    const zoomAt = (factor, cx, cy) => {
-      const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, view.scale * factor));
-      const ratio = newScale / view.scale;
-      view.tx = cx - (cx - view.tx) * ratio;
-      view.ty = cy - (cy - view.ty) * ratio;
-      view.scale = newScale;
-      apply();
-    };
-
-    const zoomFromCenter = (factor) => {
-      const rect = body.getBoundingClientRect();
-      zoomAt(factor, rect.width / 2, rect.height / 2);
-    };
+    view.body = body;
+    view.zoomLabel = zoomLabel;
 
     dlg.querySelector("[data-action='zoom-in']").addEventListener("click", () => zoomFromCenter(1.25));
     dlg.querySelector("[data-action='zoom-out']").addEventListener("click", () => zoomFromCenter(1 / 1.25));
-    dlg.querySelector("[data-action='reset']").addEventListener("click", reset);
-    dlg.querySelector("[data-action='close']").addEventListener("click", () => dlg.close());
+    dlg.querySelector("[data-action='reset']").addEventListener("click", resetView);
+    dlg.querySelector("[data-action='close']").addEventListener("click", () => closeDialog(dlg));
 
     body.addEventListener(
       "wheel",
       (e) => {
         e.preventDefault();
-        const rect = body.getBoundingClientRect();
-        const cx = e.clientX - rect.left;
-        const cy = e.clientY - rect.top;
         const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-        zoomAt(factor, cx, cy);
+        zoomAt(factor, e.clientX, e.clientY);
       },
       { passive: false }
     );
@@ -224,14 +331,22 @@
     let drag = null;
     body.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
-      drag = { x: e.clientX - view.tx, y: e.clientY - view.ty };
+      drag = {
+        x: e.clientX,
+        y: e.clientY,
+        box: view.box ? cloneBox(view.box) : null,
+        units: unitsPerScreenPixel(),
+      };
       body.classList.add("is-panning");
     });
     window.addEventListener("mousemove", (e) => {
-      if (!drag) return;
-      view.tx = e.clientX - drag.x;
-      view.ty = e.clientY - drag.y;
-      apply();
+      if (!drag || !drag.box) return;
+      setViewBox({
+        x: drag.box.x - (e.clientX - drag.x) * drag.units.x,
+        y: drag.box.y - (e.clientY - drag.y) * drag.units.y,
+        width: drag.box.width,
+        height: drag.box.height,
+      });
     });
     window.addEventListener("mouseup", () => {
       drag = null;
@@ -239,7 +354,7 @@
     });
 
     dlg.addEventListener("click", (e) => {
-      if (e.target === dlg && !drag) dlg.close();
+      if (e.target === dlg && !drag) closeDialog(dlg);
     });
 
     dlg.addEventListener("keydown", (e) => {
@@ -251,11 +366,9 @@
         zoomFromCenter(1 / 1.25);
       } else if (e.key === "0") {
         e.preventDefault();
-        reset();
+        resetView();
       }
     });
-
-    dlg._diagramReset = reset;
 
     document.body.appendChild(dlg);
     return dlg;
@@ -267,8 +380,6 @@
     dlg.querySelector(".diagram-modal__title").textContent = titleText;
     const stage = dlg.querySelector(".diagram-modal__stage");
 
-    dlg._diagramReset();
-
     stage.innerHTML = "";
     const svg = diagramEl.querySelector(".mermaid svg");
     if (svg) {
@@ -277,12 +388,18 @@
         width: svg.getAttribute("width"),
         height: svg.getAttribute("height"),
         style: svg.getAttribute("style"),
+        viewBox: svg.getAttribute("viewBox"),
+        preserveAspectRatio: svg.getAttribute("preserveAspectRatio"),
       };
       svg.parentNode.insertBefore(placeholder, svg);
       stage.appendChild(svg);
-      svg.removeAttribute("width");
-      svg.removeAttribute("height");
       svg.removeAttribute("style");
+      svg.setAttribute("width", "100%");
+      svg.setAttribute("height", "100%");
+      svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      view.svg = svg;
+      view.baseBox = readSvgViewBox(svg);
+      setViewBox(view.baseBox);
 
       dlg.addEventListener(
         "close",
@@ -293,16 +410,18 @@
           else svg.setAttribute("height", savedAttrs.height);
           if (savedAttrs.style === null) svg.removeAttribute("style");
           else svg.setAttribute("style", savedAttrs.style);
+          if (savedAttrs.viewBox === null) svg.removeAttribute("viewBox");
+          else svg.setAttribute("viewBox", savedAttrs.viewBox);
+          if (savedAttrs.preserveAspectRatio === null) svg.removeAttribute("preserveAspectRatio");
+          else svg.setAttribute("preserveAspectRatio", savedAttrs.preserveAspectRatio);
           if (placeholder.parentNode) {
             placeholder.parentNode.replaceChild(svg, placeholder);
           }
           stage.innerHTML = "";
+          clearView();
         },
         { once: true }
       );
-    } else {
-      const clone = diagramEl.querySelector(".mermaid")?.cloneNode(true);
-      if (clone) stage.appendChild(clone);
     }
 
     dlg.showModal();

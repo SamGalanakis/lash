@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  const SCENE_ASSET_VERSION = "2";
+  const SCENE_ASSET_VERSION = "3";
 
   // ── single global TOC structure for the docs ──────────────
   // Edit this when adding / renaming / reordering pages.
@@ -31,6 +31,12 @@
         { name: "turns",    href: "embedding-turns.html" },
         { name: "prompts",  href: "embedding-prompts.html" },
         { name: "advanced", href: "embedding-advanced.html" },
+      ],
+    },
+    {
+      label: "rlm",
+      items: [
+        { name: "protocol", href: "rlm.html" },
       ],
     },
     {
@@ -337,7 +343,7 @@
   // ── mermaid loader — only if the page contains .mermaid elements ──
   // bumped MERMAID_LOADER_VERSION when mermaid.js changes so static
   // caches don't keep serving the old loader
-  const MERMAID_LOADER_VERSION = "3";
+  const MERMAID_LOADER_VERSION = "4";
   function loadMermaidIfNeeded() {
     if (!document.querySelector(".mermaid")) return;
     if (window.__lashMermaid) return;

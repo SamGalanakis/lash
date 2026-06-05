@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
+<title>rlm · lash docs</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css?v=10">
+<script src="./theme.js"></script>
+<script src="./docs.js?v=5" defer></script>
+<script src="./syntax.js" defer></script>
+</head>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">rlm<span class="slash">/</span>protocol</h1>
+    <p class="opener__lede">How RLM mode builds model requests, projects history and variables into Lashlang, and turns model-authored code into one settled Lash turn.</p>
+  </section>
+
+  <main class="body" id="content">
+<div class="section" id="what-rlm-owns">
+          <div class="section-header">
+            <h2>What RLM Owns</h2>
+            <p>RLM is a core execution mode, not a CLI feature. Hosts install it with <code>ModePreset::rlm()</code> and run normal <code>LashSession</code> turns; the protocol plugin changes how the model acts.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3>One action is a program</h3>
+              <p>The model writes a single fenced <code>lashlang</code> block. Lash executes that block in a persistent VM, records its print output and terminal value, then either asks the model for another block or commits the turn.</p>
+            </article>
+            <article class="panel">
+              <h3>Effects stay host-owned</h3>
+              <p>Lashlang has no direct filesystem, process, network, or provider access. Every operation crosses the linked <code>LashlangSurface</code> and the runtime effect controller.</p>
+            </article>
+          </div>
+          <pre><code>let core = LashCore::builder()
+    .install_mode(ModePreset::rlm())
+    .default_mode(ModeId::rlm())
+    .plugins(lash::plugins::runtime_plugin_stack())
+    .build()?;</code></pre>
+        </div>
+
+        <div class="section" id="provider-request-shape">
+          <div class="section-header">
+            <h2>Provider Request Shape</h2>
+            <p>RLM sends the provider a normal chat-style request, but with no native provider tools. Tool and host work happens only after the model emits Lashlang.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">One RLM iteration</div>
+            <pre><code>LlmRequest {
+  messages: [
+    System(rendered system prompt),
+    ...chronological history messages,
+    User(current iteration tail),
+  ],
+  tools: [],
+  tool_choice: None,
+}</code></pre>
+          </div>
+          <dl class="def-list">
+            <dt>System prompt</dt>
+            <dd>Rendered from the active prompt template. Its execution-instructions slot contains the RLM Lashlang instructions for the effective host surface, plus prompt contributions such as showcased tools and variable sections.</dd>
+            <dt>History messages</dt>
+            <dd>Prior user messages, tool calls, protocol events, and RLM steps are projected as separate model messages. User messages and tool calls render as user-role context; prior RLM steps and protocol events render as assistant-role context.</dd>
+            <dt>Current iteration tail</dt>
+            <dd>A volatile user-role message containing the iteration number, active turn causes, finalization rule, optional required-output schema, optional final-answer format, and optional context-budget guidance.</dd>
+          </dl>
+        </div>
+
+        <div class="section" id="system-prompt-construction">
+          <div class="section-header">
+            <h2>System Prompt Construction</h2>
+            <p>The system prompt is the stable instruction prefix. It tells the model how to write Lashlang and which host surface is callable; it does not inline the full runtime state.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Source</th><th>What It Contributes</th></tr></thead>
+              <tbody>
+                <tr><td><code>PromptTemplate</code></td><td>The layout: built-in execution instructions, slots, and sections.</td></tr>
+                <tr><td>RLM execution section</td><td><code>print</code> / <code>submit</code>, one-fence turn shape, Lashlang syntax, host-surface operations, builtins, common patterns, optional process / trigger syntax.</td></tr>
+                <tr><td>Showcased tools</td><td>Compact contracts for tools available through Lashlang module operations.</td></tr>
+                <tr><td><code>Bound Variables</code></td><td>Live RLM globals and <code>history</code>, listed with type and size hints.</td></tr>
+                <tr><td><code>Host Projected Variables</code></td><td>Session and per-turn projected names supplied through <code>RlmProjectedBindings</code>.</td></tr>
+                <tr><td>Plugin prompt hooks</td><td>Core, session, and turn prompt contributions filtered through the effective tool surface.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>The variable sections are advertisements, not the data transport. Execution receives real projected bindings separately, immediately before Lash runs the fenced code.</p>
+          <pre><code>### Bound Variables
+
+These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.
+Type and size hints help you plan before inspecting a value.
+
+Available variables:
+- `history`: `list&lt;HistoryItem&gt;`, Readonly: true, projected binding, 3 entries
+- `task`: `Task`, Readonly: true, projected binding, keys=4
+
+### Host Projected Variables
+
+Host-projected variables:
+- `board`: projected host value, Readonly: true, projected binding</code></pre>
+        </div>
+
+        <div class="section" id="history-projection">
+          <div class="section-header">
+            <h2>History Projection</h2>
+            <p>RLM keeps chronological context readable while avoiding giant prompt blobs. Long fields are head/tail truncated in the model message and paired with a <code>history[...]</code> handle for full lookup from Lashlang.</p>
+          </div>
+          <pre><code>--- history[0] &middot; user message &middot; 18 chars ---
+
+Find the failing test.
+
+--- history[1] &middot; rlm step &middot; protocol_iteration 1 ---
+
+Reasoning (31 chars):
+I should inspect the test output.
+
+Code:
+```lashlang
+result = await workspace.default.shell({ command: "cargo test" })?
+print { status: result.status, tail: slice(result.stderr, -1200, null) }
+```
+
+history[1].output[0] (1250 chars, full: history[1].output[0]):
+{ "status": 101, "tail": "..." }</code></pre>
+          <p>The same <code>history</code> name is available inside Lashlang as a read-only projected binding. If a rendered preview says <code>full: history[1].output[0]</code>, the model can recover the untruncated value by reading or printing that path.</p>
+          <dl class="def-list">
+            <dt>Messages</dt>
+            <dd>Rendered as <code>history[N].content</code>, with attachments exposed under <code>history[N].attachments[M]</code>.</dd>
+            <dt>Tool calls</dt>
+            <dd>Rendered with arguments and result previews; full values are reachable as <code>history[N].args</code> and <code>history[N].result</code> when truncated.</dd>
+            <dt>RLM steps</dt>
+            <dd>Rendered with reasoning, the exact Lashlang code, print outputs, images, errors, and final submitted output. Print outputs are addressable as <code>history[N].output[M]</code>.</dd>
+          </dl>
+        </div>
+
+        <div class="section" id="variables-and-state">
+          <div class="section-header">
+            <h2>Variables And State</h2>
+            <p>There are three state channels. Keeping them distinct is the key to understanding RLM prompts.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel">
+              <h3>VM globals</h3>
+              <p>Variables assigned by fenced blocks persist in the active AgentFrame's RLM execution state. A fresh AgentFrame starts a clean namespace unless values are passed explicitly through <code>seed</code>.</p>
+            </article>
+            <article class="panel">
+              <h3>Projected bindings</h3>
+              <p><code>history</code> plus host-injected values are read-only names. Session bindings and per-turn bindings are merged before execution; duplicate names are rejected.</p>
+            </article>
+            <article class="panel">
+              <h3>Prompt hints</h3>
+              <p>The prompt lists names, types, and size hints. It does not paste every bound value into the system prompt.</p>
+            </article>
+          </div>
+          <pre><code>```lashlang
+print {
+  history_entries: len(history),
+  board_turn: board.turn,
+  board_cells: len(board.cells)
+}
+```</code></pre>
+          <p>Projected names cannot be reassigned. A write like <code>history = []</code> or <code>board = {}</code> fails with a read-only projected binding error; copy the fields you need into a new local variable instead.</p>
+        </div>
+
+        <div class="section" id="execution-loop">
+          <div class="section-header">
+            <h2>Execution Loop</h2>
+            <p>Each RLM iteration has one model response and at most one executed Lashlang block. Anything after the first closed <code>```lashlang</code> fence is ignored by the driver.</p>
+          </div>
+          <div class="listing">
+            <div class="listing__row"><div class="listing__label">1. prompt</div><div class="listing__body"><p>The runtime renders the system prompt, projects chronological history, appends the current iteration tail, and sends the provider request.</p></div></div>
+            <div class="listing__row"><div class="listing__label">2. code</div><div class="listing__body"><p>The model emits prose plus one closed <code>lashlang</code> block. Stream masking keeps raw code out of normal assistant prose surfaces.</p></div></div>
+            <div class="listing__row"><div class="listing__label">3. execute</div><div class="listing__body"><p>The executor resolves projected bindings, links the code against the effective <code>LashlangSurface</code>, and runs it in the current VM state.</p></div></div>
+            <div class="listing__row"><div class="listing__label">4. observe</div><div class="listing__body"><p><code>print</code> output, operation results, diagnostics, and images become the next iteration's history context.</p></div></div>
+            <div class="listing__row"><div class="listing__label">5. finish</div><div class="listing__body"><p><code>submit</code> finishes the turn as <code>TurnFinish::SubmittedValue</code> or rendered prose. <code>control.continue_as(...)</code> ends the current trajectory and opens a fresh AgentFrame with explicit seed state.</p></div></div>
+          </div>
+        </div>
+
+        <div class="section" id="where-to-read-next">
+          <div class="section-header">
+            <h2>Where To Read Next</h2>
+            <p>This page is the protocol overview. The linked pages own the deeper contracts.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3><a href="./embedding-turns.html#rlm-and-submit">RLM submit</a></h3><p>Termination policies and host-facing <code>TurnOutcome</code> / stream behavior.</p></article>
+            <article class="panel"><h3><a href="./embedding-prompts.html#projected-bindings">Projected bindings</a></h3><p>Public embedding API for per-session and per-turn projected values.</p></article>
+            <article class="panel"><h3><a href="./architecture/lashlang.html">Lashlang</a></h3><p>Language form, fence extraction, REPL state, and <code>continue_as</code> examples.</p></article>
+            <article class="panel"><h3><a href="./architecture/lashlang-effects.html#projected-host-bindings">Projected host bindings</a></h3><p>Low-level executor behavior, projection refs, serialization markers, and tool argument policies.</p></article>
+          </div>
+        </div>
+  </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./embedding-advanced.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>lash api · advanced</strong></a>
+    <a class="pager__next" href="./examples.html"><span>next</span><strong>examples</strong><span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</section>
+</body>
+</html>

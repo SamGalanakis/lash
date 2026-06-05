@@ -1512,9 +1512,16 @@ body.docs-page .cover__top     { display: none; }
    "click-to-fullscreen" diagram view. Lives here so every page
    that loads styles.css can render it (the legacy architecture
    styles.css is no longer loaded on the new shell). */
+.diagram {
+  position: relative;
+}
 .diagram-zoom {
   appearance: none;
-  background: transparent;
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  z-index: 2;
+  background: var(--bg-elev);
   border: 1px solid var(--rule);
   color: var(--ink-dim);
   font-family: var(--font-mono);
@@ -1523,10 +1530,10 @@ body.docs-page .cover__top     { display: none; }
   padding: var(--space-2xs) var(--space-sm);
   cursor: pointer;
   border-radius: 2px;
-  transition: color 160ms ease, border-color 160ms ease;
-  margin-top: var(--space-2xs);
+  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
 }
 .diagram-zoom:hover {
+  background: var(--bg-faint);
   color: var(--sodium);
   border-color: var(--sodium);
 }
@@ -1550,6 +1557,9 @@ body.docs-page .cover__top     { display: none; }
   background: var(--bg-elev);
   color: var(--ink);
   border-radius: 4px;
+}
+.diagram-modal:not([open]) {
+  display: none;
 }
 .diagram-modal::backdrop {
   background: color-mix(in oklch, var(--bg) 78%, transparent);
@@ -1616,6 +1626,7 @@ body.docs-page .cover__top     { display: none; }
   overflow: hidden;
   background: var(--bg);
   cursor: grab;
+  user-select: none;
 }
 .diagram-modal__body.is-panning { cursor: grabbing; }
 .diagram-modal__stage {
@@ -1624,15 +1635,12 @@ body.docs-page .cover__top     { display: none; }
   display: flex;
   align-items: center;
   justify-content: center;
-  transform-origin: 0 0;
-  transition: transform 0ms;
-  will-change: transform;
 }
 .diagram-modal__body svg {
-  width: 100% !important;
-  height: 100% !important;
-  max-width: none !important;
-  max-height: none !important;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
   display: block;
 }
 
