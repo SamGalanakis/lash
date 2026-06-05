@@ -169,11 +169,18 @@ impl HostBridge<'_> {
         args: Vec<FlowValue>,
         call_site: Option<lashlang::LashlangExecutionCallSite>,
     ) -> Result<FlowValue, ExecutionHostError> {
-        if !matches!(&receiver, FlowValue::Resource(_)) {
-            return Err(ExecutionHostError::new(format!(
-                "module operation `{operation}` requires a module authority receiver"
-            )));
-        }
+        let receiver = match &receiver {
+            FlowValue::Resource(receiver) => receiver,
+            _ => {
+                return Err(ExecutionHostError::new(format!(
+                    "module operation `{operation}` requires a module authority receiver"
+                )));
+            }
+        };
+        let host_operation = self
+            .ctx
+            .resolve_lashlang_host_operation(receiver, &operation)
+            .map_err(ExecutionHostError::new)?;
         let mut payload = if let [FlowValue::Record(record)] = args.as_slice() {
             flow_record_json(record).await
         } else {
@@ -184,10 +191,10 @@ impl HostBridge<'_> {
         payload
             .as_object_mut()
             .ok_or_else(|| ExecutionHostError::new("module operation payload must be an object"))?;
-        if operation.starts_with("triggers.") {
+        if host_operation.starts_with("triggers.") {
             let value = self
                 .ctx
-                .perform_lashlang_trigger_operation(&operation, payload)
+                .perform_lashlang_trigger_operation(&host_operation, payload)
                 .await
                 .map_err(ExecutionHostError::new)?;
             return Ok(lashlang::from_json(value));
@@ -203,7 +210,7 @@ impl HostBridge<'_> {
             self.ctx
                 .call_tool_with_lashlang_execution_call_site(
                     call_id,
-                    operation.clone(),
+                    host_operation.clone(),
                     payload,
                     index,
                     call_site,
@@ -211,10 +218,10 @@ impl HostBridge<'_> {
                 .await
         } else {
             self.ctx
-                .call_tool(call_id, operation.clone(), payload, index)
+                .call_tool(call_id, host_operation.clone(), payload, index)
                 .await
         };
-        self.consume_reply(&operation, reply)
+        self.consume_reply(&host_operation, reply)
     }
 
     async fn start_process(&self, start: ProcessStart) -> Result<FlowValue, ExecutionHostError> {

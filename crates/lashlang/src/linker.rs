@@ -34,10 +34,10 @@ impl ResourceCatalog {
 
     pub fn tool_default(operations: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let mut catalog = Self::new();
-        catalog.add_module_instance(["tools"], "Tools");
         for operation in operations {
             let operation = operation.into();
-            catalog.add_operation(
+            catalog.add_module_operation(
+                ["tools"],
                 "Tools",
                 operation.clone(),
                 operation,
@@ -57,14 +57,19 @@ impl ResourceCatalog {
         assert!(!path.is_empty(), "module path must not be empty");
         let resource_type = resource_type.into();
         let key = module_path_key(&path);
-        self.module_instances.insert(
-            key.clone(),
-            ModuleInstanceCatalog {
+        self.module_instances
+            .entry(key.clone())
+            .and_modify(|module| {
+                module.path = path.clone();
+                module.resource_type = resource_type.clone();
+                module.alias = key.clone();
+            })
+            .or_insert_with(|| ModuleInstanceCatalog {
                 path,
                 resource_type: resource_type.clone(),
                 alias: key,
-            },
-        );
+                operations: BTreeMap::new(),
+            });
         self.ensure_resource_type(resource_type);
     }
 
@@ -76,7 +81,6 @@ impl ResourceCatalog {
         &mut self,
         resource_type: impl Into<String>,
         operation: impl Into<String>,
-        host_operation: impl Into<String>,
         input_ty: TypeExpr,
         output_ty: TypeExpr,
     ) {
@@ -87,9 +91,36 @@ impl ResourceCatalog {
             .insert(
                 operation.into(),
                 ResourceOperationBinding {
-                    host_operation: host_operation.into(),
                     input_ty,
                     output_ty,
+                },
+            );
+    }
+
+    pub fn add_module_operation(
+        &mut self,
+        module_path: impl IntoIterator<Item = impl Into<String>>,
+        resource_type: impl Into<String>,
+        operation: impl Into<String>,
+        host_operation: impl Into<String>,
+        input_ty: TypeExpr,
+        output_ty: TypeExpr,
+    ) {
+        let path = module_path.into_iter().map(Into::into).collect::<Vec<_>>();
+        assert!(!path.is_empty(), "module path must not be empty");
+        let resource_type = resource_type.into();
+        let operation = operation.into();
+        self.add_module_instance(path.iter().map(String::as_str), resource_type.clone());
+        self.add_operation(resource_type, operation.clone(), input_ty, output_ty);
+        let key = module_path_key(&path);
+        self.module_instances
+            .get_mut(&key)
+            .expect("module instance was just inserted")
+            .operations
+            .insert(
+                operation,
+                ModuleOperationBinding {
+                    host_operation: host_operation.into(),
                 },
             );
     }
@@ -166,7 +197,27 @@ impl ResourceCatalog {
             let entry = self.resource_types.entry(resource_type).or_default();
             entry.operations.extend(incoming.operations);
         }
-        self.module_instances.extend(other.module_instances);
+        for (alias, incoming) in other.module_instances {
+            match self.module_instances.get_mut(&alias) {
+                Some(existing)
+                    if existing.path == incoming.path
+                        && existing.resource_type == incoming.resource_type
+                        && existing.alias == incoming.alias =>
+                {
+                    existing.operations.extend(incoming.operations);
+                }
+                Some(existing) => {
+                    return Err(ResourceCatalogError::ConflictingModuleInstance {
+                        alias,
+                        existing: existing.resource_type.clone(),
+                        incoming: incoming.resource_type,
+                    });
+                }
+                None => {
+                    self.module_instances.insert(alias, incoming);
+                }
+            }
+        }
         for data_type in other.named_data_types.into_values() {
             self.merge_named_data_type(data_type)?;
         }
@@ -182,8 +233,19 @@ impl ResourceCatalog {
 
     pub fn satisfies(&self, required: &Self) -> bool {
         for (path, required_module) in &required.module_instances {
-            if self.module_instances.get(path) != Some(required_module) {
+            let Some(module) = self.module_instances.get(path) else {
                 return false;
+            };
+            if module.path != required_module.path
+                || module.resource_type != required_module.resource_type
+                || module.alias != required_module.alias
+            {
+                return false;
+            }
+            for (operation, required_binding) in &required_module.operations {
+                if module.operations.get(operation) != Some(required_binding) {
+                    return false;
+                }
             }
         }
         for (resource_type, required_catalog) in &required.resource_types {
@@ -316,24 +378,21 @@ impl ResourceCatalog {
             .get(operation)
     }
 
-    pub fn resolve_operation_by_host(
-        &self,
-        resource_type: &str,
-        host_operation: &str,
-    ) -> Option<(&str, &ResourceOperationBinding)> {
-        self.resource_types
-            .get(resource_type)?
-            .operations
-            .iter()
-            .find_map(|(operation, binding)| {
-                (binding.host_operation == host_operation).then_some((operation.as_str(), binding))
-            })
-    }
-
     pub fn has_operations(&self) -> bool {
         self.resource_types
             .values()
             .any(|resource_type| !resource_type.operations.is_empty())
+    }
+
+    pub fn resolve_module_operation(
+        &self,
+        resource_type: &str,
+        alias: &str,
+        operation: &str,
+    ) -> Option<&ModuleOperationBinding> {
+        let module = self.module_instances.get(alias)?;
+        (module.resource_type == resource_type).then_some(())?;
+        module.operations.get(operation)
     }
 
     pub fn resolve_value_constructor(
@@ -355,10 +414,7 @@ impl ResourceCatalog {
     pub fn operation_suggestions_for_host(&self, host_operation: &str) -> Vec<String> {
         let mut suggestions = Vec::new();
         for module in self.module_instances.values() {
-            let Some(resource_type) = self.resource_types.get(&module.resource_type) else {
-                continue;
-            };
-            for (operation, binding) in &resource_type.operations {
+            for (operation, binding) in &module.operations {
                 if binding.host_operation == host_operation {
                     suggestions.push(format!("{}.{}", module.alias, operation));
                 }
@@ -475,6 +531,14 @@ pub enum ResourceCatalogError {
     #[error("conflicting host data type definition `{name}`")]
     ConflictingNamedDataType { name: String },
     #[error(
+        "module `{alias}` already has resource type `{existing}`, cannot change it to `{incoming}`"
+    )]
+    ConflictingModuleInstance {
+        alias: String,
+        existing: String,
+        incoming: String,
+    },
+    #[error(
         "trigger source `{source_type}` already emits `{existing}`, cannot change it to `{incoming}`"
     )]
     ConflictingTriggerSource {
@@ -563,13 +627,19 @@ pub struct ModuleInstanceCatalog {
     pub path: Vec<String>,
     pub resource_type: String,
     pub alias: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub operations: BTreeMap<String, ModuleOperationBinding>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceOperationBinding {
-    pub host_operation: String,
     pub input_ty: TypeExpr,
     pub output_ty: TypeExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleOperationBinding {
+    pub host_operation: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1646,11 +1716,13 @@ impl<'module> Linker<'module> {
                         ));
                     }
                 }
-                let (lowered_receiver, resource_type) =
-                    if let Some(resource) = self.resolve_module_expr(receiver, scope) {
+                let resolved_receiver = self.resolve_module_expr(receiver, scope);
+                let (lowered_receiver, resource_type, receiver_alias) =
+                    if let Some(resource) = resolved_receiver.as_ref() {
                         (
                             Expr::ResourceRef(resource.clone()),
                             Some(resource.resource_type.to_string()),
+                            Some(resource.alias.to_string()),
                         )
                     } else {
                         let (lowered_receiver, binding) = self.lower_expr(receiver, scope)?;
@@ -1658,7 +1730,7 @@ impl<'module> Linker<'module> {
                             Some(Binding::Resource { resource_type }) => Some(resource_type),
                             _ => None,
                         };
-                        (lowered_receiver, resource_type)
+                        (lowered_receiver, resource_type, None)
                     };
                 let Some(resource_type) = resource_type else {
                     if let Some(path) = module_path_for_expr(receiver) {
@@ -1680,6 +1752,19 @@ impl<'module> Linker<'module> {
                         span: scope.span,
                     });
                 };
+                if let Some(alias) = receiver_alias.as_deref()
+                    && self
+                        .surface
+                        .resources
+                        .resolve_module_operation(&resource_type, alias, operation.as_str())
+                        .is_none()
+                {
+                    return Err(LinkError::UnknownResourceOperation {
+                        resource_type: resource_type.clone(),
+                        operation: operation.to_string(),
+                        span: scope.span,
+                    });
+                }
                 let Some(operation_binding) = self
                     .surface
                     .resources
@@ -1687,22 +1772,24 @@ impl<'module> Linker<'module> {
                     .cloned()
                 else {
                     return Err(LinkError::UnknownResourceOperation {
-                        resource_type,
+                        resource_type: resource_type.clone(),
                         operation: operation.to_string(),
                         span: scope.span,
                     });
                 };
-                let trigger_operation = crate::TriggerHostOperation::from_host_operation(
-                    operation_binding.host_operation.as_str(),
-                );
-                if let Some(operation) = trigger_operation {
+                let trigger_operation = if crate::is_trigger_resource_type(&resource_type) {
+                    crate::TriggerHostOperation::from_receiver_method(operation.as_str())
+                } else {
+                    None
+                };
+                if let Some(trigger_operation) = trigger_operation {
                     self.ensure_feature(self.surface.abilities.triggers, "triggers", scope.span)?;
                     let (lowered_args, output_ty) =
-                        self.lower_trigger_operation_args(operation, args, scope)?;
+                        self.lower_trigger_operation_args(trigger_operation, args, scope)?;
                     return Ok((
                         Expr::ReceiverCall {
                             receiver: Box::new(lowered_receiver),
-                            operation: operation_binding.host_operation.into(),
+                            operation: operation.clone(),
                             args: lowered_args,
                         },
                         Some(Binding::Value(output_ty)),
@@ -1718,7 +1805,7 @@ impl<'module> Linker<'module> {
                 let actual_input = call_input_type(arg_types);
                 if !self.is_type_assignable(&actual_input, &operation_binding.input_ty) {
                     return Err(LinkError::IncompatibleOperationInput {
-                        operation: operation_binding.host_operation.clone(),
+                        operation: operation.to_string(),
                         expected: format_type_expr(
                             &self.resolve_type_aliases(&operation_binding.input_ty),
                         ),
@@ -1729,7 +1816,7 @@ impl<'module> Linker<'module> {
                 (
                     Expr::ReceiverCall {
                         receiver: Box::new(lowered_receiver),
-                        operation: operation_binding.host_operation.into(),
+                        operation: operation.clone(),
                         args: lowered_args,
                     },
                     Some(Binding::Value(operation_binding.output_ty.clone())),
@@ -2022,7 +2109,7 @@ impl<'module> Linker<'module> {
                             let filter_ty = self.infer_expr_type(expr, &mut scope.clone())?;
                             if !self.is_type_assignable(&filter_ty, &TypeExpr::Str) {
                                 return Err(LinkError::IncompatibleOperationInput {
-                                    operation: operation.host_operation().to_string(),
+                                    operation: operation.receiver_method().to_string(),
                                     expected: format_type_expr(&TypeExpr::Str),
                                     actual: format_type_expr(&filter_ty),
                                     span: scope.span,
@@ -2033,7 +2120,7 @@ impl<'module> Linker<'module> {
                             let filter_ty = self.infer_expr_type(expr, &mut scope.clone())?;
                             if !self.is_type_assignable(&filter_ty, &TypeExpr::Bool) {
                                 return Err(LinkError::IncompatibleOperationInput {
-                                    operation: operation.host_operation().to_string(),
+                                    operation: operation.receiver_method().to_string(),
                                     expected: format_type_expr(&TypeExpr::Bool),
                                     actual: format_type_expr(&filter_ty),
                                     span: scope.span,
@@ -2082,7 +2169,7 @@ impl<'module> Linker<'module> {
                             let filter_ty = self.infer_expr_type(expr, &mut scope.clone())?;
                             if !self.is_type_assignable(&filter_ty, &TypeExpr::Str) {
                                 return Err(LinkError::IncompatibleOperationInput {
-                                    operation: operation.host_operation().to_string(),
+                                    operation: operation.receiver_method().to_string(),
                                     expected: format_type_expr(&TypeExpr::Str),
                                     actual: format_type_expr(&filter_ty),
                                     span: scope.span,
@@ -2093,7 +2180,7 @@ impl<'module> Linker<'module> {
                             let filter_ty = self.infer_expr_type(expr, &mut scope.clone())?;
                             if !self.is_type_assignable(&filter_ty, &TypeExpr::Bool) {
                                 return Err(LinkError::IncompatibleOperationInput {
-                                    operation: operation.host_operation().to_string(),
+                                    operation: operation.receiver_method().to_string(),
                                     expected: format_type_expr(&TypeExpr::Bool),
                                     actual: format_type_expr(&filter_ty),
                                     span: scope.span,
@@ -2484,34 +2571,54 @@ impl<'module> Linker<'module> {
                         return Ok(constructor.output_ty.clone());
                     }
                 }
-                let resource_type =
-                    if let Some(resource) = self.resolve_module_expr(receiver, scope) {
-                        resource.resource_type.to_string()
+                let resolved_receiver = self.resolve_module_expr(receiver, scope);
+                let (resource_type, receiver_alias) =
+                    if let Some(resource) = resolved_receiver.as_ref() {
+                        (
+                            resource.resource_type.to_string(),
+                            Some(resource.alias.to_string()),
+                        )
                     } else {
                         let receiver_ty = self.infer_expr_type(receiver, scope)?;
-                        self.resource_type_for_type(&receiver_ty).ok_or_else(|| {
-                            LinkError::UnresolvedReceiver {
-                                operation: operation.to_string(),
-                                span: scope.span,
-                            }
-                        })?
+                        (
+                            self.resource_type_for_type(&receiver_ty).ok_or_else(|| {
+                                LinkError::UnresolvedReceiver {
+                                    operation: operation.to_string(),
+                                    span: scope.span,
+                                }
+                            })?,
+                            None,
+                        )
                     };
+                if let Some(alias) = receiver_alias.as_deref()
+                    && self
+                        .surface
+                        .resources
+                        .resolve_module_operation(&resource_type, alias, operation.as_str())
+                        .is_none()
+                {
+                    return Err(LinkError::UnknownResourceOperation {
+                        resource_type: resource_type.clone(),
+                        operation: operation.to_string(),
+                        span: scope.span,
+                    });
+                }
                 let binding = self
                     .surface
                     .resources
                     .resolve_operation(&resource_type, operation)
                     .ok_or_else(|| LinkError::UnknownResourceOperation {
-                        resource_type,
+                        resource_type: resource_type.clone(),
                         operation: operation.to_string(),
                         span: scope.span,
                     })?;
-                match crate::TriggerHostOperation::from_host_operation(
-                    binding.host_operation.as_str(),
-                ) {
-                    Some(operation) => {
-                        self.validate_trigger_operation_args(operation, args, scope)?
-                    }
-                    None => binding.output_ty.clone(),
+                if crate::is_trigger_resource_type(&resource_type)
+                    && let Some(trigger_operation) =
+                        crate::TriggerHostOperation::from_receiver_method(operation.as_str())
+                {
+                    self.validate_trigger_operation_args(trigger_operation, args, scope)?
+                } else {
+                    binding.output_ty.clone()
                 }
             }
             Expr::Await(inner) | Expr::ResultUnwrap(inner) => self.infer_expr_type(inner, scope)?,
@@ -2826,8 +2933,8 @@ mod tests {
 
     fn resources() -> ResourceCatalog {
         let mut catalog = ResourceCatalog::new();
-        catalog.add_module_instance(["tools"], "Tools");
-        catalog.add_operation(
+        catalog.add_module_operation(
+            ["tools"],
             "Tools",
             "read_file",
             "read_file",
@@ -2838,7 +2945,14 @@ mod tests {
             }]),
             TypeExpr::Str,
         );
-        catalog.add_operation("Tools", "echo", "echo", TypeExpr::Any, TypeExpr::Any);
+        catalog.add_module_operation(
+            ["tools"],
+            "Tools",
+            "echo",
+            "echo",
+            TypeExpr::Any,
+            TypeExpr::Any,
+        );
         crate::add_trigger_resource_operations(&mut catalog);
         catalog
             .add_trigger_source_constructor(
@@ -3905,7 +4019,8 @@ mod tests {
     #[test]
     fn required_surface_ref_tracks_resource_requirements_not_unrelated_tools() {
         let mut with_extra = resources();
-        with_extra.add_operation(
+        with_extra.add_module_operation(
+            ["tools"],
             "Tools",
             "unrelated",
             "unrelated",

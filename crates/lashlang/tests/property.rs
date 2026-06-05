@@ -88,15 +88,16 @@ async fn execute<H: ExecutionHost>(
 
 fn property_surface() -> lashlang::LashlangSurface {
     let mut resources = lashlang::ResourceCatalog::new();
-    resources.add_module_instance(["tools"], "Tools");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["tools"],
         "Tools",
         "echo",
         "echo",
         lashlang::TypeExpr::Any,
         lashlang::TypeExpr::Any,
     );
-    resources.add_operation(
+    resources.add_module_operation(
+        ["tools"],
         "Tools",
         "fail",
         "fail",

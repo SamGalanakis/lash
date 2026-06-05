@@ -239,6 +239,229 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       line-height: 1.45;
     }
 
+    /* ─── view tabs ─── */
+
+    .view-tabs { display: flex; gap: var(--space-2xs); }
+
+    .view-tab {
+      border: 0;
+      background: none;
+      cursor: pointer;
+      padding: var(--space-3xs) 0;
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 1.5rem;
+      line-height: 1;
+      color: var(--ash-text);
+      border-bottom: 2px solid transparent;
+      transition: color 140ms ease-out, border-color 140ms ease-out;
+    }
+    .view-tab:hover { color: var(--chalk-dim); }
+    .view-tab.active { color: var(--chalk); border-bottom-color: var(--sodium); }
+
+    /* ─── mock email accounts (accounts tab) ─── */
+
+    .accounts-view {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      background:
+        linear-gradient(180deg, oklch(0.20 0.005 75 / 0.36), transparent 38vh),
+        var(--form-deep);
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      min-height: 0;
+    }
+    .accounts-view[hidden] { display: none; }
+
+    .accounts-view-head {
+      display: flex;
+      align-items: center;
+      gap: var(--space-lg);
+      padding: var(--space-md) var(--space-xl);
+      border-bottom: 1px solid var(--line);
+      flex-wrap: wrap;
+    }
+
+    .accounts-count {
+      margin-left: auto;
+      font-family: var(--font-ui);
+      font-size: 0.75rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ash-text);
+    }
+
+    .accounts-grid {
+      min-height: 0;
+      overflow: auto;
+      padding: var(--space-lg) var(--space-xl);
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: var(--space-lg);
+      align-content: start;
+    }
+
+    .account-add { display: flex; gap: var(--space-2xs); }
+
+    .account-add input {
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--form-deep);
+      color: var(--chalk);
+      font-family: var(--font-ui);
+      font-size: 0.8rem;
+      padding: 0 var(--space-sm);
+      outline: none;
+    }
+
+    .account-add input:focus-visible { box-shadow: var(--focus-ring); border-color: var(--line-strong); }
+
+    .mini-btn,
+    .account-add button {
+      flex: none;
+      min-height: 34px;
+      padding: 0 var(--space-sm);
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: var(--form-raised);
+      color: var(--chalk);
+      font-family: var(--font-ui);
+      font-size: 0.76rem;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+    }
+
+    .mini-btn:hover,
+    .account-add button:hover { border-color: var(--sodium); }
+
+    .accounts-error {
+      margin: 0;
+      padding: var(--space-2xs) var(--space-xl) 0;
+      font-family: var(--font-ui);
+      font-size: 0.78rem;
+      color: var(--error);
+      line-height: 1.4;
+    }
+    .accounts-error[hidden] { display: none; }
+
+    .accounts-empty {
+      grid-column: 1 / -1;
+      margin: 0;
+      font-family: var(--font-ui);
+      font-size: 0.85rem;
+      line-height: 1.5;
+      color: var(--ash-text);
+    }
+
+    .account-delete {
+      flex: none;
+      border: 0;
+      background: none;
+      cursor: pointer;
+      color: var(--ash-text);
+      font-family: var(--font-ui);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px var(--space-2xs);
+      border-radius: 4px;
+    }
+    .account-delete:hover { color: var(--error); }
+
+    .account {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--form-raised);
+      display: grid;
+      gap: var(--space-2xs);
+      padding: var(--space-sm);
+    }
+
+    .account-top { display: flex; align-items: center; gap: var(--space-2xs); }
+
+    .account-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex: none;
+      background: var(--account-color, var(--sodium));
+    }
+
+    .account-name {
+      font-family: var(--font-ui);
+      font-size: 0.86rem;
+      font-weight: 500;
+      color: var(--chalk);
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .account-badge {
+      margin-left: auto;
+      flex: none;
+      font-family: var(--font-ui);
+      font-size: 0.66rem;
+      letter-spacing: 0.04em;
+      color: var(--form-deep);
+      background: var(--sodium);
+      border-radius: 999px;
+      padding: 1px 0.5rem;
+    }
+    .account-badge.zero { color: var(--ash-text); background: transparent; border: 1px solid var(--line); }
+
+    .account-authority {
+      font-family: var(--font-ui);
+      font-size: 0.72rem;
+      letter-spacing: 0.04em;
+      color: var(--sodium-soft);
+      overflow-wrap: anywhere;
+    }
+
+    .account-actions { display: flex; gap: var(--space-2xs); margin-top: var(--space-3xs); }
+
+    .account-compose { display: grid; gap: var(--space-2xs); margin-top: var(--space-2xs); }
+
+    .account-compose input,
+    .account-compose textarea {
+      width: 100%;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--form-deep);
+      color: var(--chalk);
+      font-family: var(--font-ui);
+      font-size: 0.78rem;
+      padding: var(--space-2xs) var(--space-sm);
+      outline: none;
+      resize: vertical;
+    }
+
+    .account-compose input:focus-visible,
+    .account-compose textarea:focus-visible { box-shadow: var(--focus-ring); border-color: var(--line-strong); }
+
+    .account-inbox { display: grid; gap: var(--space-2xs); margin-top: var(--space-2xs); }
+
+    .inbox-msg { border-top: 1px solid var(--line); padding-top: var(--space-2xs); display: grid; gap: 1px; }
+    .inbox-msg-head { display: flex; align-items: baseline; gap: var(--space-2xs); }
+    .inbox-msg .subject { flex: 1 1 auto; min-width: 0; font-family: var(--font-ui); font-size: 0.78rem; color: var(--chalk); overflow-wrap: anywhere; }
+    .inbox-msg .meta { font-family: var(--font-ui); font-size: 0.7rem; color: var(--ash-text); overflow-wrap: anywhere; }
+    .msg-delete {
+      flex: none;
+      border: 0;
+      background: none;
+      cursor: pointer;
+      color: var(--ash-text);
+      font-size: 1rem;
+      line-height: 1;
+      padding: 0 var(--space-3xs);
+    }
+    .msg-delete:hover { color: var(--error); }
+    .inbox-empty { font-family: var(--font-ui); font-size: 0.74rem; color: var(--ash-text); }
+
     .model-config { display: grid; gap: var(--space-md); }
 
     .field { display: grid; gap: var(--space-2xs); }
@@ -465,6 +688,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
     .ghost-btn {
       min-height: 30px;
+      min-width: 96px;
       padding: 0 var(--space-sm);
       border: 1px solid var(--line);
       border-radius: 4px;
@@ -474,9 +698,11 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       font-size: 0.75rem;
       letter-spacing: 0.06em;
       cursor: pointer;
+      touch-action: manipulation;
     }
     .ghost-btn:hover { color: var(--chalk); border-color: var(--line-strong); }
     .ghost-btn.armed { color: var(--error); border-color: var(--line-danger); }
+    .ghost-btn.loading { color: var(--sodium); border-color: var(--line-strong); }
     .ghost-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
     .timeline {
@@ -1043,6 +1269,8 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       min-height: 0;
       overflow: hidden;
       position: relative;
+      touch-action: none;
+      overscroll-behavior: contain;
       background-color: var(--form-deep);
       background-image:
         linear-gradient(oklch(0.94 0.018 90 / 0.055) 1px, transparent 1px),
@@ -1478,7 +1706,12 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     <main id="mainPanel" class="main">
       <header class="topbar">
         <div class="title-block">
-          <h1 class="title">chat</h1>
+          <div class="view-tabs" role="tablist" aria-label="Workbench views">
+            <button class="view-tab active" type="button" data-view="chat" role="tab"
+                    aria-selected="true">chat</button>
+            <button class="view-tab" type="button" data-view="accounts" role="tab"
+                    aria-selected="false">accounts</button>
+          </div>
           <div class="subtitle" id="streamState">ready</div>
         </div>
         <div class="topbar-right">
@@ -1556,6 +1789,26 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       </div>
       <div id="workList" class="work-list"></div>
     </aside>
+
+    <section id="accountsView" class="accounts-view" aria-label="Mock email accounts" hidden>
+      <header class="accounts-view-head">
+        <div class="view-tabs" role="tablist" aria-label="Workbench views">
+          <button class="view-tab" type="button" data-view="chat" role="tab"
+                  aria-selected="false">chat</button>
+          <button class="view-tab active" type="button" data-view="accounts" role="tab"
+                  aria-selected="true">accounts</button>
+        </div>
+        <form class="account-add" id="accountAddForm">
+          <input id="accountNameInput" placeholder="add account, e.g. Work" autocomplete="off"
+                 spellcheck="false" aria-label="New mock email account name"
+                 title="Connect a mock account; the agent sees it as gmail.<name>." />
+          <button type="submit" title="Connect a mock email account">add account</button>
+        </form>
+        <span class="accounts-count" id="accountsCount">0 accounts</span>
+      </header>
+      <p class="accounts-error" id="accountsError" hidden></p>
+      <div id="accountsGrid" class="accounts-grid"></div>
+    </section>
   </div>
 
   <script>
@@ -1601,6 +1854,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     let pendingCodeBlock = null;
     let pendingTools = [];
     let busy = false;
+    let resetInFlight = false;
     let controller = null;
     let lastRequest = null;
     let workStale = false;
@@ -1610,6 +1864,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     let currentExecutionExport = null;
     let graphIndex = { graphs: [], lineage_edges: [] };
     let graphIndexByKey = new Map();
+    let executionViewStates = new Map();
     let executionView = {
       graph: null,
       nodes: [],
@@ -1656,7 +1911,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     }
 
     function scrollToEnd() {
-      timeline.scrollTop = timeline.scrollHeight;
+      // Automatic transcript updates should not steal the reader's scroll position.
     }
 
     function roleLabel(role) {
@@ -1997,34 +2252,65 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       return result?.message || result?.error || "Tool failed";
     }
 
-    function appendCodeBlock(event, linkedTools = []) {
-      clearEmpty();
+    function codeBlockStateLabel(event) {
+      if (event.phase === "running" || event.success === undefined) return "running";
+      return event.success ? "completed" : "failed";
+    }
+
+    function renderCodeBlockSummary(el, event, linkedTools = []) {
+      const toolCount = linkedTools.length || (event.tool_call_ids || []).length;
+      const toolLabel = toolCount ? ` · ${toolCount} tool${toolCount === 1 ? "" : "s"}` : "";
+      const durationLabel = event.duration_ms === undefined ? "" : ` in ${event.duration_ms || 0}ms`;
+      const summary = el.querySelector("summary");
+      summary.textContent = `${event.language || "code"} ${codeBlockStateLabel(event)}${durationLabel}${toolLabel}`;
+      if (!event.graph_key) return;
+      const graphButton = document.createElement("button");
+      graphButton.className = "work-diagram-button";
+      graphButton.type = "button";
+      graphButton.title = "open execution graph";
+      graphButton.setAttribute("aria-label", "Open execution graph for this code block");
+      graphButton.innerHTML = `<span class="diagram-button-icon" aria-hidden="true"><span></span><span></span><span></span></span>`;
+      graphButton.addEventListener("click", click => {
+        click.preventDefault();
+        click.stopPropagation();
+        openExecutionGraph(event.graph_key);
+      });
+      summary.append(" ", graphButton);
+    }
+
+    function createCodeBlockElement(event, linkedTools = []) {
       const el = document.createElement("details");
       el.className = "code-block" + (event.success === false ? " fail" : "");
       el.open = false;
       el.innerHTML = "<summary></summary><pre></pre>";
-      const toolCount = linkedTools.length || (event.tool_call_ids || []).length;
-      const toolLabel = toolCount ? ` · ${toolCount} tool${toolCount === 1 ? "" : "s"}` : "";
-      const summary = el.querySelector("summary");
-      summary.textContent = `${event.language || "code"} ${event.success ? "completed" : "failed"} in ${event.duration_ms || 0}ms${toolLabel}`;
-      if (event.graph_key) {
-        const graphButton = document.createElement("button");
-        graphButton.className = "work-diagram-button";
-        graphButton.type = "button";
-        graphButton.title = "open execution graph";
-        graphButton.setAttribute("aria-label", "Open execution graph for this code block");
-        graphButton.innerHTML = `<span class="diagram-button-icon" aria-hidden="true"><span></span><span></span><span></span></span>`;
-        graphButton.addEventListener("click", click => {
-          click.preventDefault();
-          click.stopPropagation();
-          openExecutionGraph(event.graph_key);
-        });
-        summary.append(" ", graphButton);
-      }
+      renderCodeBlockSummary(el, event, linkedTools);
       el.querySelector("pre").textContent = event.code || "";
       for (const tool of linkedTools) appendTool(tool, el);
+      return el;
+    }
+
+    function appendCodeBlock(event, linkedTools = []) {
+      clearEmpty();
+      const el = createCodeBlockElement(event, linkedTools);
       timeline.appendChild(el);
       scrollToEnd();
+      return el;
+    }
+
+    function startCodeBlock(event) {
+      clearEmpty();
+      const runningEvent = { ...event, phase: "running" };
+      const el = appendCodeBlock(runningEvent);
+      pendingCodeBlock = { event: runningEvent, el };
+      if (event.graph_key) refreshWork();
+    }
+
+    function updateCodeBlock(el, event, linkedTools = []) {
+      el.classList.toggle("fail", event.success === false);
+      renderCodeBlockSummary(el, event, linkedTools);
+      const pre = el.querySelector("pre");
+      pre.textContent = event.code || pre.textContent || "";
+      for (const tool of linkedTools) appendTool(tool, el);
     }
 
     function appendCompletedTool(event) {
@@ -2039,10 +2325,12 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       const linkedIds = new Set(event.tool_call_ids || []);
       const linkedTools = pendingTools.filter(tool => tool.call_id && linkedIds.has(tool.call_id));
       const unlinkedTools = pendingTools.filter(tool => !tool.call_id || !linkedIds.has(tool.call_id));
-      appendCodeBlock(
-        { ...event, code: event.code || pendingCodeBlock?.code || "" },
-        linkedTools
-      );
+      const completedEvent = { ...event, code: event.code || pendingCodeBlock?.event?.code || "" };
+      if (pendingCodeBlock?.el) {
+        updateCodeBlock(pendingCodeBlock.el, completedEvent, linkedTools);
+      } else {
+        appendCodeBlock(completedEvent, linkedTools);
+      }
       pendingCodeBlock = null;
       for (const tool of unlinkedTools) appendTool(tool);
       pendingTools = [];
@@ -2109,7 +2397,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       if (event.type === "queued_work_started") renderQueuedWorkStarted(event);
       if (event.type === "assistant_prose_delta") appendAssistantText(event.text);
       if (event.type === "reasoning_delta") appendReasoning(event.text);
-      if (event.type === "code_block_started") pendingCodeBlock = event;
+      if (event.type === "code_block_started") startCodeBlock(event);
       if (event.type === "code_block_completed") completeCodeBlock(event);
       if (event.type === "tool_call_completed") appendCompletedTool(event);
       if (event.type === "submitted_value") appendAssistantText(renderTerminalValue(event.value));
@@ -2129,7 +2417,8 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     async function postCommand(url, payload) {
       if (busy) return;
       lastRequest = { url, payload };
-      controller = new AbortController();
+      const commandController = new AbortController();
+      controller = commandController;
       assistantDraft = null;
       assistantDraftText = "";
       reasoning = null;
@@ -2141,7 +2430,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: payload ? JSON.stringify(payload) : "{}",
-          signal: controller.signal
+          signal: commandController.signal
         });
         if (!response.ok) {
           const text = await response.text();
@@ -2151,14 +2440,14 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         }
       } catch (error) {
         if (error.name === "AbortError") {
-          renderNote("turn stopped");
+          if (!resetInFlight) renderNote("turn stopped");
         } else {
           renderError(error.message || String(error), { retry: true });
         }
-        setBusy(false, "ready");
+        if (!resetInFlight) setBusy(false, "ready");
       } finally {
-        controller = null;
-        refreshWork();
+        if (controller === commandController) controller = null;
+        if (!resetInFlight) refreshWork();
       }
     }
 
@@ -2221,7 +2510,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       resetArmTimer = 0;
       resetArmed = false;
       resetButton.classList.remove("armed");
-      resetButton.textContent = "reset";
+      if (!resetInFlight) resetButton.textContent = "reset";
     }
 
     function clearTranscript() {
@@ -2241,7 +2530,20 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     }
 
     async function doReset() {
+      if (resetInFlight) return;
+      resetInFlight = true;
+      clearTimeout(resetArmTimer);
+      resetArmTimer = 0;
+      resetArmed = false;
+      resetButton.classList.remove("armed");
+      resetButton.classList.add("loading");
+      resetButton.textContent = "resetting";
       resetButton.disabled = true;
+      if (controller) {
+        controller.abort();
+        controller = null;
+      }
+      setBusy(true, "resetting");
       workRefreshGeneration += 1;
       try {
         const response = await fetch("/api/reset", { method: "POST" });
@@ -2255,12 +2557,18 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       } catch (error) {
         renderError(cleanErrorText(error.message || error));
       } finally {
+        resetInFlight = false;
         resetButton.disabled = false;
+        resetButton.classList.remove("loading");
+        resetButton.textContent = "reset";
+        setBusy(false, "ready");
+        refreshWork();
       }
     }
 
-    resetButton.addEventListener("click", () => {
-      if (busy) return;
+    resetButton.addEventListener("click", event => {
+      event.preventDefault();
+      if (resetInFlight) return;
       if (!resetArmed) {
         resetArmed = true;
         resetButton.classList.add("armed");
@@ -2333,6 +2641,266 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     for (const button of buttonTriggerButtons) {
       button.addEventListener("click", fireButtonTrigger);
     }
+
+    /* ── mock email accounts (accounts tab) ── */
+    const accountsView = document.getElementById("accountsView");
+    const accountsGrid = document.getElementById("accountsGrid");
+    const accountsCount = document.getElementById("accountsCount");
+    const accountsError = document.getElementById("accountsError");
+    const accountAddForm = document.getElementById("accountAddForm");
+    const accountNameInput = document.getElementById("accountNameInput");
+    let lastAccountsSignature = "";
+
+    function setView(view) {
+      const accountsActive = view === "accounts";
+      accountsView.hidden = !accountsActive;
+      for (const tab of document.querySelectorAll(".view-tab")) {
+        const active = tab.dataset.view === view;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-selected", String(active));
+      }
+      if (accountsActive) {
+        loadAccounts(true);
+        accountNameInput.focus();
+      }
+    }
+
+    for (const tab of document.querySelectorAll(".view-tab")) {
+      tab.addEventListener("click", () => setView(tab.dataset.view));
+    }
+
+    function accountColor(slug) {
+      let hash = 0;
+      for (let i = 0; i < slug.length; i++) hash = (hash * 31 + slug.charCodeAt(i)) >>> 0;
+      return "oklch(0.74 0.13 " + (hash % 360) + ")";
+    }
+
+    function showAccountsError(message) {
+      accountsError.textContent = message || "";
+      accountsError.hidden = !message;
+    }
+
+    function errorTextFrom(text, fallback) {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && parsed.error) return parsed.error;
+      } catch (_) { /* not json */ }
+      return (text && text.trim()) || fallback;
+    }
+
+    async function loadAccounts(force) {
+      if (accountsView.hidden && !force) return;
+      let accounts;
+      try {
+        const response = await fetch("/api/accounts");
+        if (!response.ok) throw new Error("accounts request failed");
+        accounts = await response.json();
+      } catch (_) {
+        return;
+      }
+      const signature = JSON.stringify(accounts.map(a => [a.slug, a.total, a.unread]));
+      if (!force) {
+        if (signature === lastAccountsSignature) return;
+        if (accountsGrid.contains(document.activeElement)) return;
+      }
+      lastAccountsSignature = signature;
+      renderAccounts(accounts);
+    }
+
+    function renderAccounts(accounts) {
+      accountsCount.textContent = accounts.length === 1 ? "1 account" : accounts.length + " accounts";
+      accountsGrid.innerHTML = "";
+      if (!accounts.length) {
+        const empty = document.createElement("p");
+        empty.className = "accounts-empty";
+        empty.textContent = "no accounts yet. add one above to expose it to the agent as gmail.<name>.";
+        accountsGrid.appendChild(empty);
+        return;
+      }
+      for (const account of accounts) accountsGrid.appendChild(renderAccount(account));
+    }
+
+    function renderAccount(account) {
+      const card = document.createElement("article");
+      card.className = "account";
+      card.style.setProperty("--account-color", accountColor(account.slug));
+
+      const top = document.createElement("div");
+      top.className = "account-top";
+      const dot = document.createElement("span");
+      dot.className = "account-dot";
+      const name = document.createElement("span");
+      name.className = "account-name";
+      name.textContent = account.display_name;
+      const badge = document.createElement("span");
+      badge.className = "account-badge" + (account.total ? "" : " zero");
+      badge.textContent = account.total + (account.total === 1 ? " msg" : " msgs");
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "account-delete";
+      remove.textContent = "delete";
+      remove.title = "Disconnect this account; triggers using its authority will stop matching.";
+      remove.addEventListener("click", () => deleteAccount(account.slug, account.display_name));
+      top.append(dot, name, badge, remove);
+
+      const authority = document.createElement("div");
+      authority.className = "account-authority";
+      authority.textContent = account.authority;
+
+      const inbox = document.createElement("div");
+      inbox.className = "account-inbox";
+      inbox.dataset.slug = account.slug;
+      inbox.textContent = "loading…";
+
+      card.append(top, authority, renderCompose(account), inbox);
+      loadInbox(account.slug);
+      return card;
+    }
+
+    function renderCompose(account) {
+      const form = document.createElement("form");
+      form.className = "account-compose";
+      const title = composeInput("title");
+      const text = document.createElement("textarea");
+      text.rows = 2;
+      text.placeholder = "text";
+      const send = document.createElement("button");
+      send.type = "submit";
+      send.className = "mini-btn";
+      send.textContent = "deliver to inbox";
+      send.title = "Deliver this message and emit mail.received for any registered trigger.";
+      form.append(title, text, send);
+      form.addEventListener("submit", event => {
+        event.preventDefault();
+        if (!title.value.trim()) { title.focus(); return; }
+        if (modelEmpty()) { validateModel(); setView("chat"); modelInput.focus(); return; }
+        injectMessage(account.slug, { title: title.value.trim(), text: text.value.trim() });
+        form.reset();
+      });
+      return form;
+    }
+
+    function composeInput(placeholder) {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.placeholder = placeholder;
+      input.autocomplete = "off";
+      return input;
+    }
+
+    async function loadInbox(slug) {
+      let messages;
+      try {
+        const response = await fetch("/api/accounts/" + encodeURIComponent(slug) + "/inbox");
+        if (!response.ok) throw new Error("inbox request failed");
+        messages = await response.json();
+      } catch (_) {
+        return;
+      }
+      const container = accountsGrid.querySelector('.account-inbox[data-slug="' + CSS.escape(slug) + '"]');
+      if (!container) return;
+      container.innerHTML = "";
+      if (!messages.length) {
+        const empty = document.createElement("div");
+        empty.className = "inbox-empty";
+        empty.textContent = "inbox empty";
+        container.appendChild(empty);
+        return;
+      }
+      for (const message of messages) {
+        const row = document.createElement("div");
+        row.className = "inbox-msg";
+        const head = document.createElement("div");
+        head.className = "inbox-msg-head";
+        const title = document.createElement("div");
+        title.className = "subject";
+        title.textContent = message.title;
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "msg-delete";
+        del.textContent = "×";
+        del.title = "Delete this message";
+        del.setAttribute("aria-label", "Delete message " + message.title);
+        del.addEventListener("click", () => deleteMessage(slug, message.id));
+        head.append(title, del);
+        const body = document.createElement("div");
+        body.className = "meta";
+        body.textContent = message.text;
+        row.append(head, body);
+        container.appendChild(row);
+      }
+    }
+
+    async function deleteMessage(slug, id) {
+      showAccountsError("");
+      try {
+        const response = await fetch("/api/accounts/" + encodeURIComponent(slug) +
+          "/messages/" + encodeURIComponent(id), { method: "DELETE" });
+        if (!response.ok) {
+          showAccountsError(errorTextFrom(await response.text(), "could not delete message"));
+          return;
+        }
+        await loadAccounts(true);
+      } catch (error) {
+        showAccountsError(error.message || String(error));
+      }
+    }
+
+    async function injectMessage(slug, payload) {
+      showAccountsError("");
+      try {
+        const response = await fetch("/api/accounts/" + encodeURIComponent(slug) + "/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payload, ...selectedModelPayload() })
+        });
+        if (!response.ok) {
+          showAccountsError(errorTextFrom(await response.text(), "delivery failed"));
+          return;
+        }
+        await loadAccounts(true);
+      } catch (error) {
+        showAccountsError(error.message || String(error));
+      }
+    }
+
+    async function deleteAccount(slug, displayName) {
+      if (!window.confirm("Delete account \"" + displayName + "\"? The gmail." + slug +
+          " authority disappears and any trigger using it will stop matching.")) return;
+      showAccountsError("");
+      try {
+        const response = await fetch("/api/accounts/" + encodeURIComponent(slug), { method: "DELETE" });
+        if (!response.ok) {
+          showAccountsError(errorTextFrom(await response.text(), "could not delete account"));
+          return;
+        }
+        await loadAccounts(true);
+      } catch (error) {
+        showAccountsError(error.message || String(error));
+      }
+    }
+
+    accountAddForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      const name = accountNameInput.value.trim();
+      if (!name) return;
+      showAccountsError("");
+      try {
+        const response = await fetch("/api/accounts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name })
+        });
+        if (!response.ok) {
+          showAccountsError(errorTextFrom(await response.text(), "could not add account"));
+          return;
+        }
+        accountNameInput.value = "";
+        await loadAccounts(true);
+      } catch (error) {
+        showAccountsError(error.message || String(error));
+      }
+    });
 
     const knownModels = new Set();
     const modelHint = document.getElementById("modelHint");
@@ -2517,6 +3085,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
 
     function openExecutionGraph(graphKey, opts = {}) {
       if (!graphKey) return;
+      saveExecutionViewState();
       activeExecutionGraphKey = graphKey;
       selectedWorkKey = graphKey;
       executionExplorer.hidden = false;
@@ -2531,6 +3100,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     }
 
     function closeExecutionExplorer() {
+      saveExecutionViewState();
       executionExplorer.hidden = true;
       mainPanel.classList.remove("explorer-open");
       shell.classList.remove("execution-fullscreen");
@@ -2547,10 +3117,18 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       empty.className = "diagram-empty";
       empty.textContent = text;
       executionCanvas.appendChild(empty);
+      executionView.graph = null;
+      executionView.nodes = [];
+      executionView.edges = [];
+      executionView.layout = null;
+      executionView.stage = null;
+      executionView.selectedNodeId = null;
+      executionView.dragging = false;
       renderNodeInspector(null);
     }
 
     function renderExecutionGraph(graph) {
+      saveExecutionViewState();
       const nodes = normalizedDiagramNodes(graph);
       const edges = normalizedDiagramEdges(graph, nodes);
       executionTitle.textContent = executionTitleForGraph(graph);
@@ -2570,6 +3148,9 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       }
 
       const layout = layoutDiagram(nodes, edges);
+      const graphKey = graph.graph_key || activeExecutionGraphKey || "";
+      const savedView = savedExecutionViewState(graphKey);
+      const selectedNodeId = restoredSelectedNodeId(nodes, savedView);
       currentExecutionExport = {
         graph,
         nodes,
@@ -2593,6 +3174,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       svg.setAttribute("viewBox", "0 0 " + layout.width + " " + layout.height);
       stage.appendChild(svg);
 
+      executionView.selectedNodeId = selectedNodeId;
       for (const edge of edges) renderDiagramEdge(stage, svg, edge, layout.positions);
       for (const node of nodes) stage.appendChild(renderDiagramNode(node, layout.positions.get(node.id)));
       executionCanvas.appendChild(stage);
@@ -2604,13 +3186,17 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         edges,
         layout,
         stage,
-        selectedNodeId: nodes[0]?.id || null,
-        scale: 1,
-        panX: 0,
-        panY: 0
+        selectedNodeId,
+        scale: savedView ? savedView.scale : 1,
+        panX: savedView ? savedView.panX : 0,
+        panY: savedView ? savedView.panY : 0
       };
       selectDiagramNode(executionView.selectedNodeId);
-      requestAnimationFrame(fitExecutionGraph);
+      if (savedView) {
+        applyExecutionTransform();
+      } else {
+        requestAnimationFrame(fitExecutionGraph);
+      }
     }
 
     function graphKind(graph) {
@@ -2845,6 +3431,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       }
       const node = executionView.nodes.find(candidate => candidate.id === nodeId) || null;
       renderNodeInspector(node);
+      saveExecutionViewState();
     }
 
     function renderNodeInspector(node) {
@@ -2918,6 +3505,40 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     function applyExecutionTransform() {
       if (!executionView.stage) return;
       executionView.stage.style.transform = `translate(${executionView.panX}px, ${executionView.panY}px) scale(${executionView.scale})`;
+      saveExecutionViewState();
+    }
+
+    function savedExecutionViewState(graphKey) {
+      const state = executionViewStates.get(graphKey);
+      if (!state) return null;
+      const scale = Number(state.scale);
+      const panX = Number(state.panX);
+      const panY = Number(state.panY);
+      if (!Number.isFinite(scale) || !Number.isFinite(panX) || !Number.isFinite(panY)) return null;
+      return {
+        scale: Math.max(0.25, Math.min(2.5, scale)),
+        panX,
+        panY,
+        selectedNodeId: state.selectedNodeId || null,
+      };
+    }
+
+    function saveExecutionViewState() {
+      const graphKey = executionView.graph?.graph_key;
+      if (!graphKey || !executionView.layout) return;
+      executionViewStates.set(graphKey, {
+        scale: executionView.scale,
+        panX: executionView.panX,
+        panY: executionView.panY,
+        selectedNodeId: executionView.selectedNodeId,
+      });
+    }
+
+    function restoredSelectedNodeId(nodes, savedView) {
+      const ids = new Set(nodes.map(node => node.id));
+      if (savedView?.selectedNodeId && ids.has(savedView.selectedNodeId)) return savedView.selectedNodeId;
+      if (executionView.selectedNodeId && ids.has(executionView.selectedNodeId)) return executionView.selectedNodeId;
+      return nodes[0]?.id || null;
     }
 
     function zoomExecution(factor, origin) {
@@ -2961,13 +3582,14 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       currentExecutionExport = null;
       graphIndex = { graphs: [], lineage_edges: [] };
       graphIndexByKey = new Map();
+      executionViewStates.clear();
       closeExecutionExplorer();
       renderWork([]);
     }
 
     function toggleExecutionFullscreen() {
       shell.classList.toggle("execution-fullscreen");
-      requestAnimationFrame(fitExecutionGraph);
+      requestAnimationFrame(applyExecutionTransform);
     }
 
     function setGraphExportAvailable(available) {
@@ -3334,6 +3956,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       connectEvents();
     });
     setInterval(refreshWork, 1400);
+    setInterval(loadAccounts, 1500);
   </script>
 </body>
 </html>

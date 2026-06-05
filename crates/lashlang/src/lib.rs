@@ -54,8 +54,9 @@ pub use trigger::{
     HostValue, HostValueError, LASH_TRIGGER_EVENT_KEY, TriggerCancelRequest, TriggerHostOperation,
     TriggerInputBinding, TriggerInputTemplate, TriggerListRequest, TriggerRegistrationRequest,
     TriggerTargetIdentity, TriggerTargetValidation, TriggerTargetValidationError,
-    add_trigger_resource_operations, cancel_call_args, event_type_for_source, list_call_args,
-    register_call_args, trigger_event_placeholder_expr, validate_trigger_target,
+    add_trigger_resource_operations, cancel_call_args, event_type_for_source,
+    is_trigger_resource_type, list_call_args, register_call_args, trigger_event_placeholder_expr,
+    validate_trigger_target,
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {
@@ -313,8 +314,8 @@ mod tests {
             LashlangAbilities::default(),
         );
         let mut changed_resources = ResourceCatalog::new();
-        changed_resources.add_module_instance(["tools"], "Tools");
-        changed_resources.add_operation(
+        changed_resources.add_module_operation(
+            ["tools"],
             "Tools",
             "read_file",
             "read_file_v2",

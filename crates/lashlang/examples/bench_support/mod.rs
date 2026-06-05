@@ -865,34 +865,40 @@ fn build_benchmark_surface() -> LashlangSurface {
             .expect("valid button event type"),
         )
         .expect("valid button trigger source");
-    resources.add_module_instance(["shell"], "Shell");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["shell"],
         "Shell",
         "exec",
         "exec_command",
         TypeExpr::Any,
         TypeExpr::Any,
     );
-    resources.add_module_instance(["llm"], "Llm");
-    resources.add_operation("Llm", "query", "llm_query", TypeExpr::Any, TypeExpr::Any);
-    resources.add_module_instance(["agents"], "Agents");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["llm"],
+        "Llm",
+        "query",
+        "llm_query",
+        TypeExpr::Any,
+        TypeExpr::Any,
+    );
+    resources.add_module_operation(
+        ["agents"],
         "Agents",
         "spawn",
         "spawn_agent",
         TypeExpr::Any,
         TypeExpr::Any,
     );
-    resources.add_module_instance(["processes"], "Processes");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["processes"],
         "Processes",
         "list",
         "list_process_handles",
         TypeExpr::Any,
         TypeExpr::Any,
     );
-    resources.add_module_instance(["control"], "Control");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["control"],
         "Control",
         "continue_as",
         "continue_as",

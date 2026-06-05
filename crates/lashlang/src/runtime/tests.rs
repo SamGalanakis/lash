@@ -182,29 +182,32 @@ fn compile_program(program: &Program) -> CompiledProgram {
 
 fn runtime_test_surface() -> crate::LashlangSurface {
     let mut resources = crate::ResourceCatalog::new();
-    resources.add_module_instance(["tools"], "Tools");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["tools"],
         "Tools",
         "echo",
         "echo",
         crate::TypeExpr::Any,
         crate::TypeExpr::Any,
     );
-    resources.add_operation(
+    resources.add_module_operation(
+        ["tools"],
         "Tools",
         "err",
         "err",
         crate::TypeExpr::Any,
         crate::TypeExpr::Any,
     );
-    resources.add_operation(
+    resources.add_module_operation(
+        ["tools"],
         "Tools",
         "missing",
         "missing",
         crate::TypeExpr::Any,
         crate::TypeExpr::Any,
     );
-    resources.add_operation(
+    resources.add_module_operation(
+        ["tools"],
         "Tools",
         "spawn",
         "spawn",

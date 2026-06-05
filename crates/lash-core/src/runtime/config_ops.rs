@@ -112,6 +112,11 @@ impl LashRuntime {
                 "runtime session not available".to_string(),
             ));
         };
+        session
+            .plugins()
+            .tool_registry()
+            .refresh_sources()
+            .map_err(|err| SessionError::Protocol(format!("tool refresh failed: {err}")))?;
         session.refresh_tool_surface().await?;
         self.stamp_live_plugin_state();
         Ok(())

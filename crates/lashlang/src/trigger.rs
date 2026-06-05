@@ -46,6 +46,12 @@ impl TriggerHostOperation {
             .find(|candidate| candidate.host_operation() == operation)
     }
 
+    pub fn from_receiver_method(operation: &str) -> Option<Self> {
+        [Self::Register, Self::List, Self::Cancel]
+            .into_iter()
+            .find(|candidate| candidate.receiver_method() == operation)
+    }
+
     pub fn input_ty(self) -> TypeExpr {
         match self {
             Self::Register => TypeExpr::Object(vec![
@@ -90,14 +96,18 @@ impl TriggerHostOperation {
     }
 }
 
+pub fn is_trigger_resource_type(resource_type: &str) -> bool {
+    resource_type == TRIGGERS_RESOURCE_TYPE
+}
+
 pub fn add_trigger_resource_operations(catalog: &mut ResourceCatalog) {
-    catalog.add_module_instance([TRIGGERS_ALIAS], TRIGGERS_RESOURCE_TYPE);
     for operation in [
         TriggerHostOperation::Register,
         TriggerHostOperation::List,
         TriggerHostOperation::Cancel,
     ] {
-        catalog.add_operation(
+        catalog.add_module_operation(
+            [TRIGGERS_ALIAS],
             TRIGGERS_RESOURCE_TYPE,
             operation.receiver_method(),
             operation.host_operation(),

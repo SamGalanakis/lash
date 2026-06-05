@@ -2702,6 +2702,20 @@ name = "lash-providers-builtin"
 version = "0.1.0-alpha.24"
 
 [[package]]
+name = "lash-remote-protocol"
+version = "0.1.0-alpha.24"
+dependencies = [
+ "base64 0.22.1",
+ "lash-core",
+ "lash-sansio",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "lash-restate"
 version = "0.1.0-alpha.24"
 dependencies = [

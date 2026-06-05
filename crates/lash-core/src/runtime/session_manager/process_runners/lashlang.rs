@@ -245,7 +245,6 @@ struct LashlangProcessHost<'run> {
 impl LashlangProcessHost<'_> {
     fn resource_payload(
         &self,
-        _receiver: &::lashlang::Value,
         args: &[::lashlang::Value],
     ) -> Result<serde_json::Value, ::lashlang::ExecutionHostError> {
         let mut payload = if let [::lashlang::Value::Record(record)] = args {
@@ -285,23 +284,31 @@ impl LashlangProcessHost<'_> {
         args: Vec<::lashlang::Value>,
         call_site: Option<::lashlang::LashlangExecutionCallSite>,
     ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
-        if !matches!(&receiver, ::lashlang::Value::Resource(_)) {
-            return Err(::lashlang::ExecutionHostError::new(format!(
-                "module operation `{operation}` requires a module authority receiver"
-            )));
-        }
-        if operation.starts_with("triggers.") {
-            let payload = self.resource_payload(&receiver, &args)?;
+        let receiver = match &receiver {
+            ::lashlang::Value::Resource(receiver) => receiver,
+            _ => {
+                return Err(::lashlang::ExecutionHostError::new(format!(
+                    "module operation `{operation}` requires a module authority receiver"
+                )));
+            }
+        };
+        let host_operation = self
+            .ctx
+            .resolve_lashlang_host_operation(receiver, &operation)
+            .map_err(::lashlang::ExecutionHostError::new)?;
+        if host_operation.starts_with("triggers.") {
+            let payload = self.resource_payload(&args)?;
             let value = self
                 .ctx
-                .perform_lashlang_trigger_operation(&operation, payload)
+                .perform_lashlang_trigger_operation(&host_operation, payload)
                 .await
                 .map_err(::lashlang::ExecutionHostError::new)?;
             return Ok(::lashlang::from_json(value));
         }
-        let manifest = self.ctx.callable_tool_manifest(&operation).ok_or_else(|| {
+        let manifest = self.ctx.callable_tool_manifest(&host_operation).ok_or_else(|| {
             ::lashlang::ExecutionHostError::new(format!(
-                "module operation `{operation}` is unavailable in this session"
+                "module operation `{}` resolved to unavailable host operation `{host_operation}`",
+                operation
             ))
         })?;
         let call_site = call_site.and_then(|call_site| {
@@ -315,7 +322,7 @@ impl LashlangProcessHost<'_> {
                 )
             })
         });
-        let payload = self.resource_payload(&receiver, &args)?;
+        let payload = self.resource_payload(&args)?;
         let call_id = uuid::Uuid::new_v4().to_string();
         let reply = if let Some(call_site) = call_site {
             self.ctx
@@ -844,6 +851,29 @@ fn lashlang_surface_satisfies_requirements(
                 module.alias, current_module.resource_type, module.resource_type
             ));
         }
+        for (operation, required_binding) in &module.operations {
+            match current.resources.resolve_module_operation(
+                &module.resource_type,
+                &module.alias,
+                operation,
+            ) {
+                Some(current_binding) if current_binding == required_binding => {}
+                Some(current_binding) => {
+                    return Err(format!(
+                        "module `{}` operation `{operation}` resolves to `{}`, expected `{}`",
+                        module.alias,
+                        current_binding.host_operation,
+                        required_binding.host_operation
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "module `{}` does not expose operation `{operation}`",
+                        module.alias
+                    ));
+                }
+            }
+        }
     }
 
     for (resource_type, required_type) in required.resources.resource_types() {
@@ -859,12 +889,6 @@ fn lashlang_surface_satisfies_requirements(
                         "resource type `{resource_type}` does not expose operation `{operation}`"
                     )
                 })?;
-            if current_binding.host_operation != required_binding.host_operation {
-                return Err(format!(
-                    "resource type `{resource_type}` operation `{operation}` resolves to `{}`, expected `{}`",
-                    current_binding.host_operation, required_binding.host_operation
-                ));
-            }
             if current_binding.input_ty != required_binding.input_ty {
                 return Err(format!(
                     "resource type `{resource_type}` operation `{operation}` has incompatible input type"

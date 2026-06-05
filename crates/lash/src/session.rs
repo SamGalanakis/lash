@@ -76,6 +76,34 @@ impl SessionBuilder {
         self.open_resolved(policy, mode, state, store).await
     }
 
+    /// Open this session with a fresh resident graph, ignoring any persisted
+    /// session graph/checkpoint state that may already exist for the same
+    /// session id.
+    ///
+    /// The next successful commit writes a full replacement graph, so normal
+    /// embedders can use this to start over without manually calling
+    /// `load_persisted_session_state` or constructing a `RuntimeSessionState`.
+    /// Use [`Self::open`] for resume and [`Self::open_with_state`] only when
+    /// restoring explicit host-owned state.
+    pub async fn open_fresh(self) -> Result<LashSession> {
+        let (policy, mode) = self.session_policy()?;
+        let store = self.create_store(&policy)?;
+        let mut state = RuntimeSessionState {
+            session_id: self.session_id.clone(),
+            policy: policy.clone(),
+            graph_replace_required: true,
+            ..RuntimeSessionState::default()
+        };
+        self.apply_rlm_session_options(&mode, &mut state)?;
+        self.open_resolved(policy, mode, state, store).await
+    }
+
+    /// Open with an explicitly supplied runtime state.
+    ///
+    /// This is for advanced hosts that already own a complete state snapshot.
+    /// Normal embedders should use [`Self::open`] to resume according to Lash's
+    /// residency policy or [`Self::open_fresh`] to start over and replace prior
+    /// persisted state on the next commit.
     pub async fn open_with_state(self, mut state: RuntimeSessionState) -> Result<LashSession> {
         let (policy, mode) = self.session_policy()?;
         let store = self.create_store(&policy)?;

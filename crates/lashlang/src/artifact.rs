@@ -415,6 +415,12 @@ fn write_surface_requirements(writer: &mut HashWriter, requirements: &SurfaceReq
         writer.atom(module_path);
         writer.atom(&module.resource_type);
         writer.atom(&module.alias);
+        writer.atom("operations");
+        writer.usize(module.operations.len());
+        for (operation, binding) in &module.operations {
+            writer.atom(operation);
+            writer.atom(&binding.host_operation);
+        }
     }
     writer.usize(requirements.resources.resource_types().count());
     for (resource_type, catalog) in requirements.resources.resource_types() {
@@ -423,7 +429,6 @@ fn write_surface_requirements(writer: &mut HashWriter, requirements: &SurfaceReq
         writer.usize(catalog.operations.len());
         for (operation, binding) in &catalog.operations {
             writer.atom(operation);
-            writer.atom(&binding.host_operation);
             write_type(writer, &binding.input_ty);
             write_type(writer, &binding.output_ty);
         }
@@ -925,7 +930,10 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[derive(Clone, Debug)]
 enum RequirementBinding {
     Value,
-    Resource { resource_type: String },
+    Resource {
+        resource_type: String,
+        path: Option<Vec<String>>,
+    },
 }
 
 struct RequirementsCollector<'program> {
@@ -981,6 +989,7 @@ impl<'program> RequirementsCollector<'program> {
                                 param.name.to_string(),
                                 RequirementBinding::Resource {
                                     resource_type: name.to_string(),
+                                    path: None,
                                 },
                             );
                         } else {
@@ -1185,6 +1194,7 @@ impl<'program> RequirementsCollector<'program> {
                 self.require_resource_ref(resource);
                 Some(RequirementBinding::Resource {
                     resource_type: resource.resource_type.to_string(),
+                    path: Some(resource.path.iter().map(ToString::to_string).collect()),
                 })
             }
             Expr::ReceiverCall {
@@ -1193,16 +1203,12 @@ impl<'program> RequirementsCollector<'program> {
                 args,
             } => {
                 let receiver = self.collect_expr(receiver, scope);
-                if let Some(RequirementBinding::Resource { resource_type }) = receiver {
-                    let (operation, host_operation, input_ty, output_ty) =
-                        self.resource_operation_requirement(&resource_type, operation.as_str());
-                    self.requirements.resources.add_operation(
-                        resource_type,
-                        operation,
-                        host_operation,
-                        input_ty,
-                        output_ty,
-                    );
+                if let Some(RequirementBinding::Resource {
+                    resource_type,
+                    path,
+                }) = receiver
+                {
+                    self.require_resource_operation(resource_type, path, operation.as_str());
                 }
                 for arg in args {
                     self.collect_expr(arg, scope);
@@ -1281,36 +1287,49 @@ impl<'program> RequirementsCollector<'program> {
         );
     }
 
+    fn require_resource_operation(
+        &mut self,
+        resource_type: String,
+        path: Option<Vec<String>>,
+        operation: &str,
+    ) {
+        let (operation, input_ty, output_ty) =
+            self.resource_operation_requirement(&resource_type, operation);
+        if let (Some(catalog), Some(path)) = (self.resource_catalog, path.as_ref()) {
+            let alias = path.join(".");
+            if let Some(module_binding) =
+                catalog.resolve_module_operation(&resource_type, &alias, &operation)
+            {
+                self.requirements.resources.add_module_operation(
+                    path.iter().map(String::as_str),
+                    resource_type,
+                    operation,
+                    module_binding.host_operation.clone(),
+                    input_ty,
+                    output_ty,
+                );
+                return;
+            }
+        }
+        self.requirements
+            .resources
+            .add_operation(resource_type, operation, input_ty, output_ty);
+    }
+
     fn resource_operation_requirement(
         &self,
         resource_type: &str,
         operation: &str,
-    ) -> (String, String, TypeExpr, TypeExpr) {
+    ) -> (String, TypeExpr, TypeExpr) {
         if let Some(catalog) = self.resource_catalog {
             if let Some(binding) = catalog.resolve_operation(resource_type, operation) {
                 return (
                     operation.to_string(),
-                    binding.host_operation.clone(),
-                    binding.input_ty.clone(),
-                    binding.output_ty.clone(),
-                );
-            }
-            if let Some((surface_operation, binding)) =
-                catalog.resolve_operation_by_host(resource_type, operation)
-            {
-                return (
-                    surface_operation.to_string(),
-                    binding.host_operation.clone(),
                     binding.input_ty.clone(),
                     binding.output_ty.clone(),
                 );
             }
         }
-        (
-            operation.to_string(),
-            operation.to_string(),
-            TypeExpr::Any,
-            TypeExpr::Any,
-        )
+        (operation.to_string(), TypeExpr::Any, TypeExpr::Any)
     }
 }

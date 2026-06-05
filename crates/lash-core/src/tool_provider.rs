@@ -11,6 +11,7 @@ use crate::{AttachmentStore, ToolContract, ToolManifest, ToolResult};
 mod attachments;
 mod direct_completion;
 mod dispatch;
+mod host_events;
 mod process;
 pub(crate) mod process_events;
 mod session;
@@ -18,6 +19,7 @@ mod session;
 pub use attachments::ToolAttachmentControl;
 pub use direct_completion::ToolDirectCompletionControl;
 pub use dispatch::ToolDispatchControl;
+pub use host_events::ToolHostEventControl;
 pub use process::ToolProcessControl;
 pub use process_events::ToolProcessEventControl;
 pub use session::{ToolSessionControl, ToolSessionModel};
@@ -296,6 +298,12 @@ impl<'run> ToolContext<'run> {
 
     pub fn dispatch(&self) -> ToolDispatchControl<'run> {
         ToolDispatchControl {
+            context: self.clone(),
+        }
+    }
+
+    pub fn host_events(&self) -> ToolHostEventControl<'run> {
+        ToolHostEventControl {
             context: self.clone(),
         }
     }

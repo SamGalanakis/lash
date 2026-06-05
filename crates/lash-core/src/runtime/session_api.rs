@@ -129,6 +129,12 @@ impl LashRuntime {
     }
 
     pub(super) async fn refresh_session_graph_from_store(&mut self) -> Result<(), SessionError> {
+        // Fresh replacement opens intentionally start from an empty resident
+        // graph and commit a full replacement. Do not resurrect the old head
+        // before that first commit.
+        if self.state.graph_replace_required && self.state.head_revision.is_none() {
+            return Ok(());
+        }
         let Some(store) = self
             .session
             .as_ref()
