@@ -822,8 +822,8 @@ mod tests {
 
     fn linked(source: &str) -> crate::LinkedModule {
         let mut resources = crate::ResourceCatalog::new();
-        resources.add_module_instance(["tools"], "Tools");
-        resources.add_operation(
+        resources.add_module_operation(
+            ["tools"],
             "Tools",
             "read_file",
             "read_file",

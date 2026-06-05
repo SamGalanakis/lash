@@ -226,6 +226,24 @@ mod tests {
         program: ::lashlang::Program,
         args: serde_json::Map<String, serde_json::Value>,
     ) -> Result<crate::ProcessRegistration, ::lashlang::LinkError> {
+        let mut resources = ::lashlang::ResourceCatalog::new();
+        resources.add_module_operation(
+            ["tools"],
+            "Tools",
+            "process_echo",
+            "process_echo",
+            ::lashlang::TypeExpr::Any,
+            ::lashlang::TypeExpr::Any,
+        );
+        try_lashlang_process_registration_with_resources(process_id, program, args, resources)
+    }
+
+    fn try_lashlang_process_registration_with_resources(
+        process_id: &str,
+        program: ::lashlang::Program,
+        args: serde_json::Map<String, serde_json::Value>,
+        resources: ::lashlang::ResourceCatalog,
+    ) -> Result<crate::ProcessRegistration, ::lashlang::LinkError> {
         let module = if program.process("main").is_some() {
             program
         } else {
@@ -242,15 +260,6 @@ mod tests {
                 expression_spans: Vec::new(),
             }
         };
-        let mut resources = ::lashlang::ResourceCatalog::new();
-        resources.add_module_instance(["tools"], "Tools");
-        resources.add_operation(
-            "Tools",
-            "process_echo",
-            "process_echo",
-            ::lashlang::TypeExpr::Any,
-            ::lashlang::TypeExpr::Any,
-        );
         let linked_module = ::lashlang::LinkedModule::link(
             module,
             ::lashlang::LashlangSurface::new(
@@ -282,6 +291,16 @@ mod tests {
         .with_extra_event_types(crate::lashlang_process_event_types()))
     }
 
+    fn lashlang_process_registration_with_resources(
+        process_id: &str,
+        program: ::lashlang::Program,
+        args: serde_json::Map<String, serde_json::Value>,
+        resources: ::lashlang::ResourceCatalog,
+    ) -> crate::ProcessRegistration {
+        try_lashlang_process_registration_with_resources(process_id, program, args, resources)
+            .expect("link lashlang test module")
+    }
+
     struct ProcessEchoTool;
 
     fn process_echo_tool_definition() -> crate::ToolDefinition {
@@ -311,6 +330,70 @@ mod tests {
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
             crate::ToolResult::ok(serde_json::json!({ "payload": format!("raw:{value}") }))
+        }
+    }
+
+    struct InboxDispatchTool;
+
+    fn inbox_send_tool_definition(slug: &str) -> crate::ToolDefinition {
+        crate::ToolDefinition::raw(
+            format!("tool:inbox__{slug}__send"),
+            format!("inbox__{slug}__send"),
+            format!("Send to {slug} inbox."),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )
+        .with_agent_surface(
+            crate::ToolAgentSurface::new(["inbox", slug], "send").with_authority_type("Inbox"),
+        )
+    }
+
+    fn inbox_resources() -> ::lashlang::ResourceCatalog {
+        let mut resources = ::lashlang::ResourceCatalog::new();
+        for slug in ["test", "work"] {
+            resources.add_module_operation(
+                ["inbox", slug],
+                "Inbox",
+                "send",
+                format!("inbox__{slug}__send"),
+                ::lashlang::TypeExpr::Any,
+                ::lashlang::TypeExpr::Any,
+            );
+        }
+        resources
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ToolProvider for InboxDispatchTool {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            ["test", "work"]
+                .into_iter()
+                .map(|slug| inbox_send_tool_definition(slug).manifest())
+                .collect()
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            match name {
+                "inbox__test__send" => {
+                    Some(Arc::new(inbox_send_tool_definition("test").contract()))
+                }
+                "inbox__work__send" => {
+                    Some(Arc::new(inbox_send_tool_definition("work").contract()))
+                }
+                _ => None,
+            }
+        }
+
+        async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+            let account = match call.name {
+                "inbox__test__send" => "test",
+                "inbox__work__send" => "work",
+                other => return crate::ToolResult::err_fmt(format_args!("unknown tool {other}")),
+            };
+            crate::ToolResult::ok(serde_json::json!({
+                "account": account,
+                "title": call.args.get("title").and_then(|value| value.as_str()).unwrap_or_default(),
+            }))
         }
     }
 
@@ -377,6 +460,15 @@ mod tests {
         runtime_host: crate::RuntimeHostConfig,
     ) -> crate::DurableProcessWorker {
         let tools: Arc<dyn crate::ToolProvider> = Arc::new(ProcessEchoTool);
+        process_worker_with_tools(registry, factory, runtime_host, tools)
+    }
+
+    fn process_worker_with_tools(
+        registry: Arc<dyn crate::ProcessRegistry>,
+        factory: Arc<dyn crate::SessionStoreFactory>,
+        runtime_host: crate::RuntimeHostConfig,
+        tools: Arc<dyn crate::ToolProvider>,
+    ) -> crate::DurableProcessWorker {
         let plugin_host =
             crate::PluginHost::new(vec![Arc::new(crate::plugin::StaticPluginFactory::new(
                 "worker-test-tools",

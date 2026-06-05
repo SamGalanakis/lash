@@ -44,23 +44,24 @@ fn prompt_surface_with_features(
 
 fn tool_resources() -> lashlang::ResourceCatalog {
     let mut resources = lashlang::ResourceCatalog::new();
-    resources.add_module_instance(["web"], "Web");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["web"],
         "Web",
         "search",
         "search_web",
         lashlang::TypeExpr::Any,
         lashlang::TypeExpr::Any,
     );
-    resources.add_operation(
+    resources.add_module_operation(
+        ["web"],
         "Web",
         "fetch",
         "fetch_url",
         lashlang::TypeExpr::Any,
         lashlang::TypeExpr::Any,
     );
-    resources.add_module_instance(["files"], "Files");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["files"],
         "Files",
         "read",
         "read_file",

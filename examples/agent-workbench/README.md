@@ -60,7 +60,9 @@ Open the workbench at `http://127.0.0.1:3030`. Restate ingress is
 The browser UI has three work areas: the left rail contains red and blue host
 event buttons, a cron schedule card, and per-turn model controls; the center
 pane is a chat/event stream; and the right rail polls the process registry for
-visible background work. The buttons emit `ui.button.pressed`. The cron card is
+visible background work. A **chat / accounts** tab switch at the top of the
+center pane opens a dedicated mock-email view (see below). The buttons emit
+`ui.button.pressed`. The cron card is
 backed by Restate: ask the agent to schedule something and it can construct a
 typed `cron.Schedule` source whose registrations sync to Restate virtual
 objects. Started Lashlang background processes appear in the right rail.
@@ -68,6 +70,71 @@ The Lashlang graph panel is backed by `TraceLashlangGraphStore`, a public
 trace-derived observation store for foreground blocks, durable process runs,
 and child execution links; command operations still go through the session's
 `ProcessControl` facade.
+
+The **accounts** tab is a mocked multi-account inbox world you control live.
+Type a name (for example `Work`) and press **add account** to connect one;
+**delete** disconnects it. Each account card has a compose form that delivers a
+message into its inbox and shows that inbox inline, with a per-message delete.
+Each account is projected into the RLM Lashlang surface as a typed module
+authority of type `Inbox` at `inbox.<slug>`, exposing three operations — a
+message is just a title and text, with no recipient address:
+
+```lashlang
+await inbox.work.send({ title: "Standup", text: "Notes attached." })?
+listed = await inbox.work.list({})?            // { account, messages: [{ id, title, text }] }
+await inbox.work.delete({ id: listed.messages[0].id })?
+```
+
+Because every account shares the `Inbox` authority type, one account-parametric
+process can be started against any account, which is the point of the
+multi-account showcase:
+
+```lashlang
+process triage(box: Inbox) {
+  items = await box.list({})?
+  wake { kind: "triage", account: items.account, count: len(items.messages) }
+  finish true
+}
+
+work = start triage(box: inbox.work)
+personal = start triage(box: inbox.personal)
+results = await { work: work, personal: personal }
+```
+
+Adding an account changes the authority surface; the next opened turn picks up
+the new `inbox.<slug>` authority automatically (the runtime re-reads the tool
+provider when it rebuilds the surface), so no restart or refresh is needed.
+
+Delivering a message is the third trigger
+source in the demo: the host appends it to the inbox and emits `mail.received`
+with payload `mail.Received { account: str, title: str, text: str }`. Like the
+button, the emission runs inside a Restate effect scope
+(`WorkbenchMailReceivedWorkflow`) so any registered trigger starts a durable
+process. Register an inbox concierge once and it fires on every delivery:
+
+```lashlang
+process on_mail(event: mail.Received) {
+  work = start inbox.work.list({})
+  personal = start inbox.personal.list({})
+  inboxes = await { work: work, personal: personal }
+  wake { kind: "mail_brief", arrived_in: event.account, title: event.title }
+  finish true
+}
+
+handle = await triggers.register({
+  source: mail.received({}),
+  target: on_mail,
+  inputs: { event: trigger.event },
+  name: "inbox concierge"
+})?
+submit format("Inbox concierge registered as `{}`.", handle)
+```
+
+This gives the demo three kinds of trigger source — a UI button (synthetic
+event), an inbound email (data event), and a cron schedule (clock) — all
+activating durable processes through the same registry. The host declares the
+`mail.received` source through the plugin's `lashlang_resources()` hook and a
+matching `mail` host-event registration, exactly like the button.
 
 The button source config is `{}`. Red/blue selection arrives in the event
 payload:

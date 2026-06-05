@@ -116,39 +116,40 @@ async fn execute<H: ExecutionHost>(
 
 fn test_surface() -> lashlang::LashlangSurface {
     let mut resources = lashlang::ResourceCatalog::tool_default(["echo", "boom"]);
-    resources.add_module_instance(["files"], "Files");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["files"],
         "Files",
         "read",
         "read_file",
         lashlang::TypeExpr::Any,
         lashlang::TypeExpr::Any,
     );
-    resources.add_operation(
+    resources.add_module_operation(
+        ["files"],
         "Files",
         "patch",
         "apply_patch",
         lashlang::TypeExpr::Any,
         lashlang::TypeExpr::Any,
     );
-    resources.add_module_instance(["shell"], "Shell");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["shell"],
         "Shell",
         "exec",
         "exec_command",
         lashlang::TypeExpr::Any,
         lashlang::TypeExpr::Any,
     );
-    resources.add_module_instance(["agents"], "Agents");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["agents"],
         "Agents",
         "spawn",
         "spawn_agent",
         lashlang::TypeExpr::Any,
         lashlang::TypeExpr::Any,
     );
-    resources.add_module_instance(["processes"], "Processes");
-    resources.add_operation(
+    resources.add_module_operation(
+        ["processes"],
         "Processes",
         "list",
         "list_process_handles",

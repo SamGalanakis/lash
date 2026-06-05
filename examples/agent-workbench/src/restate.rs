@@ -22,7 +22,8 @@ use serde_json::{Value, json};
 use crate::{
     AppError, AppState, ButtonChoice, CRON_SCHEDULE_SOURCE_TYPE, ChannelTurnEvents, ModelSelection,
     TurnStreamState, apply_model_selection_to_session, assistant_text_for_display,
-    emit_button_host_event_with_effect_scope, model_spec_from_selection, started_process_text,
+    emit_button_host_event_with_effect_scope, emit_mail_received_host_event_with_effect_scope,
+    model_spec_from_selection, started_process_text,
 };
 
 const CRON_STATE_KEY: &str = "state";
@@ -55,6 +56,14 @@ pub(crate) struct WorkbenchButtonTriggerWorkflowRequest {
 pub(crate) struct WorkbenchSessionDeleteWorkflowRequest {
     pub operation_id: String,
     pub session_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct WorkbenchMailReceivedWorkflowRequest {
+    pub operation_id: String,
+    pub session_id: String,
+    pub model: ModelSelection,
+    pub delivery: crate::mail::MailDelivery,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -217,6 +226,39 @@ impl WorkbenchButtonTriggerWorkflow for WorkbenchButtonTriggerWorkflowImpl {
 }
 
 #[restate_sdk::workflow]
+pub(crate) trait WorkbenchMailReceivedWorkflow {
+    async fn run(request: Json<WorkbenchMailReceivedWorkflowRequest>) -> HandlerResult<Json<()>>;
+}
+
+pub(crate) struct WorkbenchMailReceivedWorkflowImpl {
+    state: AppState,
+}
+
+impl WorkbenchMailReceivedWorkflowImpl {
+    pub(crate) fn new(state: AppState) -> Self {
+        Self { state }
+    }
+}
+
+impl WorkbenchMailReceivedWorkflow for WorkbenchMailReceivedWorkflowImpl {
+    async fn run(
+        &self,
+        ctx: WorkflowContext<'_>,
+        Json(request): Json<WorkbenchMailReceivedWorkflowRequest>,
+    ) -> HandlerResult<Json<()>> {
+        let session_id = request.session_id.clone();
+        let controller = lash_restate::RestateRuntimeEffectController::new(ctx);
+        run_mail_received(self.state.clone(), request, &controller)
+            .await
+            .map_err(terminal_handler_error)?;
+        self.state
+            .queued_work_poke
+            .poke_session(session_id, "mail_received");
+        Ok(Json(()))
+    }
+}
+
+#[restate_sdk::workflow]
 pub(crate) trait WorkbenchSessionDeleteWorkflow {
     async fn run(request: Json<WorkbenchSessionDeleteWorkflowRequest>) -> HandlerResult<Json<()>>;
 }
@@ -344,6 +386,7 @@ pub(crate) fn spawn_restate_endpoint(
         .bind(WorkbenchTurnWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchQueuedTurnWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchButtonTriggerWorkflowImpl::new(state.clone()).serve())
+        .bind(WorkbenchMailReceivedWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchSessionDeleteWorkflowImpl::new(state.clone()).serve())
         .bind(WorkbenchCronJobImpl::new(state).serve())
         .bind(process_deployment.workflow(process_worker).serve())
@@ -391,6 +434,26 @@ pub(crate) async fn submit_button_trigger(
         request.operation_id
     );
     submit_restate_json(state, url, &request).await
+}
+
+pub(crate) async fn submit_mail_received(
+    state: &AppState,
+    request: WorkbenchMailReceivedWorkflowRequest,
+) -> Result<(), AppError> {
+    submit_mail_received_with_client(&state.restate_http, &state.restate_ingress_url, request).await
+}
+
+pub(crate) async fn submit_mail_received_with_client(
+    restate_http: &reqwest::Client,
+    restate_ingress_url: &str,
+    request: WorkbenchMailReceivedWorkflowRequest,
+) -> Result<(), AppError> {
+    let url = format!(
+        "{}/WorkbenchMailReceivedWorkflow/{}/run/send",
+        restate_ingress_url.trim_end_matches('/'),
+        request.operation_id
+    );
+    submit_restate_json_with_client(restate_http, url, &request).await
 }
 
 pub(crate) async fn submit_session_delete(
@@ -518,6 +581,57 @@ async fn run_button_trigger(
         "event",
         started_process_text(report.started_process_ids.len()),
     );
+    // Host-event dispatch is the end of this client-initiated request. Emit a
+    // terminal Done so the UI clears its busy state even when no trigger
+    // matched (any process the event started streams its own turn separately).
+    state.publish(crate::StreamItem::Done);
+    Ok(())
+}
+
+async fn run_mail_received(
+    state: AppState,
+    request: WorkbenchMailReceivedWorkflowRequest,
+    controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+) -> Result<(), AppError> {
+    let turn_model = model_spec_from_selection(request.model);
+    let session = state
+        .core
+        .session(request.session_id.clone())
+        .rlm()
+        .open()
+        .await
+        .map_err(AppError::internal)?;
+    apply_model_selection_to_session(&state, &session, turn_model, "restate_mail_received").await?;
+    let scoped_effect_controller = controller
+        .scoped_effect_controller(lash::runtime::EffectScope::host_event(
+            &request.session_id,
+            &request.operation_id,
+        ))
+        .map_err(AppError::internal)?;
+    let report = emit_mail_received_host_event_with_effect_scope(
+        &state,
+        &session,
+        &request.delivery,
+        scoped_effect_controller,
+    )
+    .await
+    .map_err(AppError::internal)?;
+    state.trace(
+        "mail_received.restate.host_event_report",
+        json!({
+            "account": request.delivery.account,
+            "title": request.delivery.title,
+            "started_process_ids": report.started_process_ids.clone(),
+        }),
+    );
+    state.push_message(
+        "event",
+        started_process_text(report.started_process_ids.len()),
+    );
+    // Host-event dispatch is the end of this client-initiated request. Emit a
+    // terminal Done so the UI clears its busy state even when no trigger
+    // matched (any process the event started streams its own turn separately).
+    state.publish(crate::StreamItem::Done);
     Ok(())
 }
 

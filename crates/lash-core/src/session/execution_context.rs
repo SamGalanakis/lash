@@ -27,13 +27,10 @@ pub(crate) fn lashlang_resources_from_tool_surface(
                 .manifest
                 .agent_surface
                 .executable_for(&entry.manifest.name);
-            catalog.add_module_instance(
+            catalog.add_module_operation(
                 agent_surface.module_path.iter().map(String::as_str),
                 agent_surface.authority_type.clone(),
-            );
-            catalog.add_operation(
-                agent_surface.authority_type,
-                agent_surface.operation,
+                agent_surface.operation.clone(),
                 entry.manifest.name.clone(),
                 lashlang::TypeExpr::Any,
                 lashlang::TypeExpr::Any,
@@ -204,6 +201,23 @@ impl<'run> RuntimeExecutionContext<'run> {
 
     pub fn callable_tool_manifest_by_id(&self, id: &crate::ToolId) -> Option<crate::ToolManifest> {
         crate::tool_dispatch::resolve_callable_manifest_by_id(&self.dispatch, id)
+    }
+
+    pub fn resolve_lashlang_host_operation(
+        &self,
+        receiver: &lashlang::ResourceHandle,
+        operation: &str,
+    ) -> Result<String, String> {
+        self.lashlang_surface
+            .resources
+            .resolve_module_operation(&receiver.resource_type, &receiver.alias, operation)
+            .map(|binding| binding.host_operation.clone())
+            .ok_or_else(|| {
+                format!(
+                    "module `{}` of type `{}` does not expose operation `{operation}`",
+                    receiver.alias, receiver.resource_type
+                )
+            })
     }
 
     pub fn prepare_lashlang_process_start(

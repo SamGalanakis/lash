@@ -212,30 +212,40 @@ impl ToolProviderSource {
 struct ToolProviderGroupSource {
     id: String,
     tools: RwLock<BTreeMap<String, (ToolManifest, usize)>>,
-    providers: Vec<(Arc<dyn ToolProvider>, Vec<String>)>,
+    providers: Vec<Arc<dyn ToolProvider>>,
 }
 
 impl ToolProviderGroupSource {
     fn new(id: impl Into<String>, providers: Vec<Arc<dyn ToolProvider>>) -> Self {
         let mut tools = BTreeMap::new();
-        let mut entries = Vec::new();
-        for provider in providers {
-            let tool_names = provider
-                .tool_manifests()
-                .into_iter()
-                .map(|manifest| {
-                    let name = manifest.name.clone();
-                    tools.insert(name.clone(), (manifest, entries.len()));
-                    name
-                })
-                .collect::<Vec<_>>();
-            entries.push((provider, tool_names));
+        for (provider_idx, provider) in providers.iter().enumerate() {
+            for manifest in provider.tool_manifests() {
+                tools.insert(manifest.name.clone(), (manifest, provider_idx));
+            }
         }
         Self {
             id: id.into(),
             tools: RwLock::new(tools),
-            providers: entries,
+            providers,
         }
+    }
+
+    fn read_advertised_tools(&self) -> Vec<ToolManifest> {
+        let mut tools = BTreeMap::new();
+        for (provider_idx, provider) in self.providers.iter().enumerate() {
+            for manifest in provider.tool_manifests() {
+                tools.insert(manifest.name.clone(), (manifest, provider_idx));
+            }
+        }
+        let manifests = tools
+            .values()
+            .map(|(manifest, _)| manifest.clone())
+            .collect::<Vec<_>>();
+        *self
+            .tools
+            .write()
+            .expect("tool provider group lock poisoned") = tools;
+        manifests
     }
 
     fn provider_index_for(&self, name: &str) -> Option<usize> {
@@ -256,12 +266,7 @@ impl ToolSourceExecutor for ToolProviderGroupSource {
     }
 
     fn advertised_tools(&self) -> Vec<ToolManifest> {
-        self.tools
-            .read()
-            .expect("tool provider group lock poisoned")
-            .values()
-            .map(|(manifest, _)| manifest.clone())
-            .collect()
+        self.read_advertised_tools()
     }
 
     fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
@@ -273,7 +278,7 @@ impl ToolSourceExecutor for ToolProviderGroupSource {
         {
             return Some(manifest.clone());
         }
-        for (provider_idx, (provider, _)) in self.providers.iter().enumerate() {
+        for (provider_idx, provider) in self.providers.iter().enumerate() {
             if let Some(manifest) = provider.resolve_manifest(name) {
                 self.tools
                     .write()
@@ -287,7 +292,7 @@ impl ToolSourceExecutor for ToolProviderGroupSource {
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
         let provider_idx = self.provider_index_for(name)?;
-        self.providers[provider_idx].0.resolve_contract(name)
+        self.providers[provider_idx].resolve_contract(name)
     }
 
     async fn prepare_tool_call(
@@ -298,7 +303,7 @@ impl ToolSourceExecutor for ToolProviderGroupSource {
         let Some(provider_idx) = self.provider_index_for(&name) else {
             return Err(ToolResult::err_fmt(format_args!("Unknown tool: {name}")));
         };
-        self.providers[provider_idx].0.prepare_tool_call(call).await
+        self.providers[provider_idx].prepare_tool_call(call).await
     }
 
     async fn execute(
@@ -312,7 +317,6 @@ impl ToolSourceExecutor for ToolProviderGroupSource {
             return ToolResult::err_fmt(format_args!("Unknown tool: {tool}"));
         };
         self.providers[provider_idx]
-            .0
             .execute(ToolCall {
                 name: tool,
                 args,
@@ -677,6 +681,21 @@ impl ToolRegistry {
         self.remove_source_id(handle.as_str())
     }
 
+    pub fn refresh_sources(&self) -> Result<u64, ReconfigureError> {
+        let sources = self
+            .sources
+            .read()
+            .expect("tool source lock poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut generation = self.generation();
+        for source in sources {
+            generation = self.upsert_source(source)?;
+        }
+        Ok(generation)
+    }
+
     pub(crate) fn remove_source_id(&self, source_id: &str) -> Result<u64, ReconfigureError> {
         {
             let mut sources = self.sources.write().expect("tool source lock poisoned");
@@ -1000,6 +1019,9 @@ mod tests {
     struct NamedExactSource {
         id: &'static str,
     }
+    struct DynamicToolProvider {
+        names: Arc<std::sync::Mutex<Vec<String>>>,
+    }
 
     fn test_tool(
         name: &str,
@@ -1028,6 +1050,10 @@ mod tests {
             .into_iter()
             .find(|tool| tool.name() == name)
             .map(|tool| Arc::new(tool.contract()))
+    }
+
+    fn dynamic_definition(name: &str) -> ToolDefinition {
+        test_tool(name, "dynamic", crate::ToolAvailabilityConfig::callable())
     }
 
     fn test_tool_context() -> crate::ToolContext<'static> {
@@ -1254,6 +1280,31 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl ToolProvider for DynamicToolProvider {
+        fn tool_manifests(&self) -> Vec<ToolManifest> {
+            self.names
+                .lock()
+                .expect("dynamic tool names lock")
+                .iter()
+                .map(|name| dynamic_definition(name).manifest())
+                .collect()
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+            self.names
+                .lock()
+                .expect("dynamic tool names lock")
+                .iter()
+                .any(|tool_name| tool_name == name)
+                .then(|| Arc::new(dynamic_definition(name).contract()))
+        }
+
+        async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+            ToolResult::ok(json!(call.name))
+        }
+    }
+
     #[test]
     fn registry_preserves_initial_availability_state() {
         let registry =
@@ -1399,6 +1450,44 @@ mod tests {
             Some("mock_tool".to_string())
         );
         assert_eq!(manifest_resolutions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn refresh_sources_re_reads_group_provider_manifests() {
+        let names = Arc::new(std::sync::Mutex::new(vec!["dynamic_one".to_string()]));
+        let provider: Arc<dyn ToolProvider> = Arc::new(DynamicToolProvider {
+            names: Arc::clone(&names),
+        });
+        let registry = ToolRegistry::from_tool_providers(vec![provider]).expect("registry");
+
+        let tool_names = || {
+            registry
+                .tool_manifests()
+                .into_iter()
+                .map(|manifest| manifest.name)
+                .collect::<BTreeSet<_>>()
+        };
+
+        assert!(tool_names().contains("dynamic_one"));
+        assert!(!tool_names().contains("dynamic_two"));
+
+        names
+            .lock()
+            .expect("dynamic tool names lock")
+            .push("dynamic_two".to_string());
+        registry.refresh_sources().expect("refresh sources");
+        let refreshed = tool_names();
+        assert!(refreshed.contains("dynamic_one"));
+        assert!(refreshed.contains("dynamic_two"));
+
+        names
+            .lock()
+            .expect("dynamic tool names lock")
+            .retain(|name| name != "dynamic_one");
+        registry.refresh_sources().expect("refresh sources");
+        let refreshed = tool_names();
+        assert!(!refreshed.contains("dynamic_one"));
+        assert!(refreshed.contains("dynamic_two"));
     }
 
     #[tokio::test]

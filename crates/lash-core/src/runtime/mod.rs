@@ -295,7 +295,7 @@ impl LiveTurnInputs {
         self.inputs.is_empty()
     }
 
-    fn plugin_ids(&self) -> Vec<&'static str> {
+    pub fn plugin_ids(&self) -> Vec<&'static str> {
         self.inputs.keys().copied().collect()
     }
 
@@ -357,6 +357,14 @@ impl TurnContext {
 
     pub fn has_plugin_input(&self, plugin_id: &'static str) -> bool {
         self.plugin_inputs.contains(plugin_id)
+    }
+
+    pub fn has_live_plugin_inputs(&self) -> bool {
+        !self.plugin_inputs.is_empty()
+    }
+
+    pub fn live_plugin_input_ids(&self) -> Vec<&'static str> {
+        self.plugin_inputs.plugin_ids()
     }
 
     /// Live plugin inputs for this turn. The durable boundary inspects this to

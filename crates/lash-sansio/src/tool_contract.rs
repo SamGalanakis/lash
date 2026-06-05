@@ -274,6 +274,59 @@ impl ToolAgentSurface {
         }
     }
 
+    /// Resolve a remote-callable surface without applying local prompt fallbacks.
+    ///
+    /// Remote hosts must provide an explicit module path and operation so
+    /// serialized tool grants have one canonical call path. This deliberately
+    /// rejects the prompt-only conveniences used by [`Self::executable_for`],
+    /// where an empty module path falls back to `tools` and an empty operation
+    /// falls back to the flat tool name.
+    pub fn required_for_remote(
+        manifest: &ToolManifest,
+    ) -> Result<ToolAgentExecutableSurface, String> {
+        manifest
+            .agent_surface
+            .required_executable_for_remote(&manifest.name)
+    }
+
+    pub fn required_executable_for_remote(
+        &self,
+        tool_name: &str,
+    ) -> Result<ToolAgentExecutableSurface, String> {
+        if self.module_path.is_empty() {
+            return Err(format!(
+                "tool `{tool_name}` is missing an explicit remote module path"
+            ));
+        }
+        if let Some(empty) = self.module_path.iter().find(|part| part.trim().is_empty()) {
+            return Err(format!(
+                "tool `{tool_name}` has an empty remote module path segment `{empty}`"
+            ));
+        }
+        let Some(operation) = self
+            .operation
+            .as_deref()
+            .map(str::trim)
+            .filter(|operation| !operation.is_empty())
+        else {
+            return Err(format!(
+                "tool `{tool_name}` is missing an explicit remote operation"
+            ));
+        };
+        let authority_type = self
+            .authority_type
+            .as_deref()
+            .filter(|authority_type| !authority_type.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| default_authority_type(&self.module_path));
+        Ok(ToolAgentExecutableSurface {
+            module_path: self.module_path.clone(),
+            operation: operation.to_string(),
+            authority_type,
+            aliases: self.aliases.clone(),
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.module_path.is_empty()
             && self.operation.is_none()

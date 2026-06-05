@@ -1,4 +1,5 @@
 mod execution_graphs;
+mod mail;
 mod restate;
 mod ui;
 
@@ -16,7 +17,7 @@ use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use chrono::Utc;
@@ -47,6 +48,10 @@ pub(crate) const BUTTON_TRIGGER_ALIAS: &str = "ui.button";
 pub(crate) const BUTTON_TRIGGER_EVENT: &str = "pressed";
 pub(crate) const BUTTON_TRIGGER_SOURCE_TYPE: &str = "ui.button.pressed";
 pub(crate) const CRON_SCHEDULE_SOURCE_TYPE: &str = "cron.Schedule";
+pub(crate) const MAIL_EVENT_RESOURCE: &str = "Mail";
+pub(crate) const MAIL_EVENT_ALIAS: &str = "mail";
+pub(crate) const MAIL_EVENT_EVENT: &str = "received";
+pub(crate) const MAIL_RECEIVED_SOURCE_TYPE: &str = "mail.received";
 const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 fn main() -> AnyhowResult<()> {
@@ -147,9 +152,14 @@ async fn async_main() -> AnyhowResult<()> {
             .context("open lashlang artifact store")?,
     ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
     let subagent_registry = Arc::new(lash_subagents::default_registry(&BTreeMap::new()));
+    let mail_world = mail::MailWorld::new();
     let session_ids = WorkbenchSessionIds::fresh();
     let (event_tx, _) = broadcast::channel(1024);
     let restate_http = reqwest::Client::new();
+    let mail_delivery_sink: Arc<dyn mail::MailDeliverySink> = Arc::new(WorkbenchMailDeliverySink {
+        restate_http: restate_http.clone(),
+        restate_ingress_url: restate_ingress_url.clone(),
+    });
     let process_deployment =
         lash_restate::RestateProcessDeployment::new(restate_ingress_url.clone(), process_registry);
     let queued_work_runner =
@@ -169,7 +179,7 @@ async fn async_main() -> AnyhowResult<()> {
         .default_mode(ModeId::rlm())
         .provider(provider)
         .model(model_spec)
-        .store_factory(core_store_factory)
+        .store_factory(Arc::clone(&core_store_factory))
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )))
@@ -178,9 +188,11 @@ async fn async_main() -> AnyhowResult<()> {
         .lashlang_execution_sink(Some(Arc::clone(&lashlang_execution_sink)))
         .trace_level(TraceLevel::Extended)
         .configure_plugins(|plugins| {
-            plugins.push(Arc::new(WorkbenchPluginFactory::new(
-                tavily_api_key.clone(),
-            )));
+            plugins.push(Arc::new(
+                WorkbenchPluginFactory::new(tavily_api_key.clone())
+                    .with_mail_world(mail_world.clone())
+                    .with_mail_delivery_sink(Some(Arc::clone(&mail_delivery_sink))),
+            ));
             plugins.push(Arc::new(
                 lash_plugin_process_controls::ProcessControlsPluginFactory::new(),
             ));
@@ -206,6 +218,7 @@ async fn async_main() -> AnyhowResult<()> {
     let state = AppState {
         core,
         process_observer,
+        session_store_factory: Arc::clone(&core_store_factory),
         session_ids,
         messages: Arc::new(Mutex::new(Vec::new())),
         timeline: Arc::new(Mutex::new(Vec::new())),
@@ -221,6 +234,7 @@ async fn async_main() -> AnyhowResult<()> {
         restate_ingress_url,
         restate_http,
         restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+        mail_world,
     };
     restate::spawn_restate_endpoint(
         restate_endpoint_addr,
@@ -252,6 +266,11 @@ async fn async_main() -> AnyhowResult<()> {
         .route("/api/turn", post(send_turn))
         .route("/api/reset", post(reset_chat))
         .route("/api/button-trigger", post(button_trigger))
+        .route("/api/accounts", get(list_accounts).post(add_account))
+        .route("/api/accounts/{slug}", delete(delete_account))
+        .route("/api/accounts/{slug}/messages", post(inject_message))
+        .route("/api/accounts/{slug}/messages/{id}", delete(delete_message))
+        .route("/api/accounts/{slug}/inbox", get(account_inbox))
         .route("/api/work", get(list_work))
         .route("/api/lashlang-graphs", get(list_lashlang_graphs))
         .route("/api/lashlang-graph/{graph_key}", get(lashlang_graph))
@@ -270,6 +289,7 @@ async fn async_main() -> AnyhowResult<()> {
 struct AppState {
     core: LashCore,
     process_observer: lash::process::ProcessWorkObserver,
+    session_store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
     session_ids: WorkbenchSessionIds,
     messages: Arc<Mutex<Vec<ChatMessage>>>,
     timeline: Arc<Mutex<Vec<StreamItem>>>,
@@ -282,6 +302,7 @@ struct AppState {
     restate_ingress_url: String,
     restate_http: reqwest::Client,
     restate_cron_job_keys: Arc<Mutex<BTreeSet<String>>>,
+    mail_world: mail::MailWorld,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -355,6 +376,19 @@ impl ButtonChoice {
 #[derive(Debug, Deserialize)]
 struct ButtonEventRequest {
     button: ButtonChoice,
+    model: Option<String>,
+    model_variant: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddAccountRequest {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct InjectMessageRequest {
+    title: Option<String>,
+    text: Option<String>,
     model: Option<String>,
     model_variant: Option<String>,
 }
@@ -594,6 +628,164 @@ async fn button_trigger(
     Ok(Json(CommandAccepted { accepted: true }))
 }
 
+async fn list_accounts(State(state): State<AppState>) -> Json<Vec<mail::AccountSummary>> {
+    Json(state.mail_world.account_summaries())
+}
+
+async fn add_account(
+    State(state): State<AppState>,
+    Json(request): Json<AddAccountRequest>,
+) -> Result<Json<mail::AccountSummary>, AppError> {
+    let summary = state
+        .mail_world
+        .add_account(&request.name)
+        .map_err(AppError::bad_request)?;
+    state.trace(
+        "api.accounts.add",
+        json!({ "slug": summary.slug, "authority": summary.authority }),
+    );
+    refresh_persisted_tool_surface(&state, "account_added").await?;
+    state.push_message(
+        "event",
+        format!("connected mock account `{}`", summary.authority),
+    );
+    Ok(Json(summary))
+}
+
+async fn delete_account(
+    AxumPath(slug): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<CommandAccepted>, AppError> {
+    state
+        .mail_world
+        .remove_account(&slug)
+        .map_err(AppError::not_found)?;
+    state.trace("api.accounts.remove", json!({ "slug": slug }));
+    refresh_persisted_tool_surface(&state, "account_removed").await?;
+    state.push_message("event", format!("removed mock account `inbox.{slug}`"));
+    Ok(Json(CommandAccepted { accepted: true }))
+}
+
+async fn delete_message(
+    AxumPath((slug, id)): AxumPath<(String, String)>,
+    State(state): State<AppState>,
+) -> Result<Json<CommandAccepted>, AppError> {
+    state
+        .mail_world
+        .remove_message(&slug, &id)
+        .map_err(AppError::not_found)?;
+    state.trace(
+        "api.accounts.message.delete",
+        json!({ "account": slug, "id": id }),
+    );
+    Ok(Json(CommandAccepted { accepted: true }))
+}
+
+async fn account_inbox(
+    AxumPath(slug): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<mail::MailMessage>>, AppError> {
+    let inbox = state.mail_world.inbox(&slug).map_err(AppError::not_found)?;
+    Ok(Json(inbox))
+}
+
+async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Result<(), AppError> {
+    let session_id = state.current_session_id();
+    let session = state
+        .core
+        .session(session_id.clone())
+        .rlm()
+        .open()
+        .await
+        .map_err(AppError::internal)?;
+    session
+        .tools()
+        .refresh_surface()
+        .await
+        .map_err(AppError::internal)?;
+    let persisted = session
+        .control()
+        .state()
+        .persist_current()
+        .await
+        .map_err(AppError::internal)?;
+    let tool_count = persisted
+        .tool_state_snapshot
+        .as_ref()
+        .map(lash::ToolState::len)
+        .unwrap_or_default();
+    let store = state
+        .session_store_factory
+        .create_store(&lash::persistence::SessionStoreCreateRequest {
+            session_id: session_id.clone(),
+            relation: lash::persistence::SessionRelation::default(),
+            policy: persisted.policy.clone(),
+        })
+        .map_err(AppError::internal)?;
+    let result = store
+        .commit_runtime_state(lash::persistence::RuntimeCommit::persisted_state(
+            &persisted,
+            &[],
+        ))
+        .await
+        .map_err(AppError::internal)?;
+    session.close().await.map_err(AppError::internal)?;
+    state.trace(
+        "mail.tool_surface.refresh",
+        json!({
+            "reason": reason,
+            "session_id": session_id,
+            "tool_state_generation": persisted.tool_state_generation,
+            "tool_count": tool_count,
+            "head_revision": result.head_revision,
+        }),
+    );
+    Ok(())
+}
+
+async fn inject_message(
+    AxumPath(slug): AxumPath<String>,
+    State(state): State<AppState>,
+    Json(request): Json<InjectMessageRequest>,
+) -> Result<Json<CommandAccepted>, AppError> {
+    let turn_model = model_spec_for_request(
+        &state,
+        request.model.as_deref(),
+        request.model_variant.as_deref(),
+    )?;
+    let model = ModelSelection::from_spec(&turn_model);
+    state.set_selected_model(model.clone());
+    let delivered = state
+        .mail_world
+        .deliver(
+            &slug,
+            request.title.as_deref().unwrap_or_default(),
+            request.text.as_deref().unwrap_or_default(),
+        )
+        .map_err(AppError::not_found)?;
+    let message = delivered.message;
+    let delivery = delivered.delivery;
+    state.trace(
+        "api.accounts.inject",
+        json!({ "account": slug, "title": message.title }),
+    );
+    state.push_message(
+        "event",
+        format!("message delivered to `inbox.{}`: {}", slug, message.title),
+    );
+    restate::submit_mail_received(
+        &state,
+        restate::WorkbenchMailReceivedWorkflowRequest {
+            operation_id: format!("workbench-mail-{}", uuid::Uuid::new_v4()),
+            session_id: state.current_session_id(),
+            model,
+            delivery,
+        },
+    )
+    .await?;
+    Ok(Json(CommandAccepted { accepted: true }))
+}
+
 async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>, AppError> {
     let old_session_id = state.current_session_id();
     restate::cancel_known_cron_jobs(&state, "reset").await?;
@@ -778,6 +970,40 @@ pub(crate) async fn emit_button_host_event_with_effect_scope(
         )
         .await
         .context("emit button host event")
+}
+
+pub(crate) async fn emit_mail_received_host_event_with_effect_scope(
+    state: &AppState,
+    session: &lash::LashSession,
+    message: &mail::MailDelivery,
+    scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
+) -> AnyhowResult<lash::HostEventEmitReport> {
+    let payload = json!({
+        "account": message.account,
+        "title": message.title,
+        "text": message.text,
+    });
+    state.trace(
+        "host_event.emit",
+        json!({
+            "resource_type": MAIL_EVENT_RESOURCE,
+            "alias": MAIL_EVENT_ALIAS,
+            "event": MAIL_EVENT_EVENT,
+            "source_type": MAIL_RECEIVED_SOURCE_TYPE,
+            "payload": payload.clone(),
+        }),
+    );
+    session
+        .host_events()
+        .emit_with_effect_scope(
+            MAIL_EVENT_RESOURCE,
+            MAIL_EVENT_ALIAS,
+            MAIL_EVENT_EVENT,
+            payload,
+            scoped_effect_controller,
+        )
+        .await
+        .context("emit mail received host event")
 }
 
 fn button_trigger_event_type() -> lashlang::NamedDataType {
@@ -1191,13 +1417,30 @@ impl IntoResponse for AppError {
 
 struct WorkbenchPluginFactory {
     tavily_api_key: String,
+    mail_world: mail::MailWorld,
+    mail_delivery_sink: Option<Arc<dyn mail::MailDeliverySink>>,
 }
 
 impl WorkbenchPluginFactory {
     fn new(tavily_api_key: impl Into<String>) -> Self {
         Self {
             tavily_api_key: tavily_api_key.into(),
+            mail_world: mail::MailWorld::new(),
+            mail_delivery_sink: None,
         }
+    }
+
+    fn with_mail_world(mut self, mail_world: mail::MailWorld) -> Self {
+        self.mail_world = mail_world;
+        self
+    }
+
+    fn with_mail_delivery_sink(
+        mut self,
+        mail_delivery_sink: Option<Arc<dyn mail::MailDeliverySink>>,
+    ) -> Self {
+        self.mail_delivery_sink = mail_delivery_sink;
+        self
     }
 }
 
@@ -1213,12 +1456,16 @@ impl PluginFactory for WorkbenchPluginFactory {
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(WorkbenchSessionPlugin {
             tavily_api_key: self.tavily_api_key.clone(),
+            mail_world: self.mail_world.clone(),
+            mail_delivery_sink: self.mail_delivery_sink.clone(),
         }))
     }
 }
 
 struct WorkbenchSessionPlugin {
     tavily_api_key: String,
+    mail_world: mail::MailWorld,
+    mail_delivery_sink: Option<Arc<dyn mail::MailDeliverySink>>,
 }
 
 impl SessionPlugin for WorkbenchSessionPlugin {
@@ -1227,11 +1474,16 @@ impl SessionPlugin for WorkbenchSessionPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.prompt().contribute(Arc::new(|_ctx| {
-            Box::pin(async {
+        let mail_world = self.mail_world.clone();
+        reg.prompt().contribute(Arc::new(move |_ctx| {
+            let mail_world = mail_world.clone();
+            Box::pin(async move {
                 Ok(vec![PromptContribution::environment(
                     "Agent Workbench",
-                    WORKBENCH_PROMPT.to_string(),
+                    format!(
+                        "{WORKBENCH_PROMPT}\n\n{}",
+                        connected_accounts_prompt(&mail_world)
+                    ),
                 )])
             })
         }));
@@ -1241,6 +1493,12 @@ impl SessionPlugin for WorkbenchSessionPlugin {
             BUTTON_TRIGGER_EVENT,
             button_trigger_event_type(),
         ))?;
+        reg.host_events().declare(HostEvent::new(
+            MAIL_EVENT_RESOURCE,
+            MAIL_EVENT_ALIAS,
+            MAIL_EVENT_EVENT,
+            mail_received_event_type(),
+        ))?;
         reg.tools()
             .provider(Arc::new(lash_tool_web::web_search_provider(
                 self.tavily_api_key.clone(),
@@ -1249,7 +1507,42 @@ impl SessionPlugin for WorkbenchSessionPlugin {
             .provider(Arc::new(lash_tool_web::fetch_url_provider(
                 self.tavily_api_key.clone(),
             )))?;
+        reg.tools().provider(Arc::new(
+            mail::MockMailProvider::new(self.mail_world.clone())
+                .with_delivery_sink(self.mail_delivery_sink.clone()),
+        ))?;
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct WorkbenchMailDeliverySink {
+    restate_http: reqwest::Client,
+    restate_ingress_url: String,
+}
+
+#[async_trait]
+impl mail::MailDeliverySink for WorkbenchMailDeliverySink {
+    async fn notify_delivery(
+        &self,
+        context: mail::MailDeliveryContext,
+        delivery: mail::MailDelivery,
+    ) -> Result<(), String> {
+        restate::submit_mail_received_with_client(
+            &self.restate_http,
+            &self.restate_ingress_url,
+            restate::WorkbenchMailReceivedWorkflowRequest {
+                operation_id: format!("workbench-mail-{}", uuid::Uuid::new_v4()),
+                session_id: context.session_id,
+                model: ModelSelection {
+                    model: context.model,
+                    model_variant: context.model_variant,
+                },
+                delivery,
+            },
+        )
+        .await
+        .map_err(|err| err.to_string())
     }
 }
 
@@ -1274,6 +1567,57 @@ fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
         )
         .expect("valid cron trigger source");
     resources
+        .add_trigger_source_constructor(
+            MAIL_RECEIVED_SOURCE_TYPE.split('.'),
+            lashlang::TypeExpr::Object(vec![]),
+            mail_received_event_type(),
+        )
+        .expect("valid mail trigger source");
+    resources
+}
+
+fn mail_received_event_type() -> lashlang::NamedDataType {
+    lashlang::NamedDataType::object(
+        "mail.Received",
+        vec![
+            field("account", lashlang::TypeExpr::Str),
+            field("title", lashlang::TypeExpr::Str),
+            field("text", lashlang::TypeExpr::Str),
+        ],
+    )
+    .expect("valid mail received event type")
+}
+
+fn field(name: &str, ty: lashlang::TypeExpr) -> lashlang::TypeField {
+    lashlang::TypeField {
+        name: name.into(),
+        ty,
+        optional: false,
+    }
+}
+
+/// Live, per-turn prompt line naming the inbox authorities that actually exist,
+/// so the agent never assumes the illustrative `inbox.work`/`inbox.personal`
+/// names from the static guidance are real.
+fn connected_accounts_prompt(mail_world: &mail::MailWorld) -> String {
+    let accounts = mail_world.account_summaries();
+    if accounts.is_empty() {
+        return "Connected inbox accounts: none yet. The `inbox` namespace is empty until the \
+            user adds an account from the Accounts tab, so `inbox.<anything>` will not resolve. \
+            If asked to use an inbox, tell the user to add one first instead of guessing a name."
+            .to_string();
+    }
+    let list = accounts
+        .iter()
+        .map(|account| account.authority.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Connected inbox authorities right now: {list}. These are the ONLY inbox accounts that \
+        exist — use these exact paths and never reference any other `inbox.<name>`. The \
+        `inbox.work` / `inbox.personal` names used in the examples above are illustrative only; \
+        substitute the real authorities listed here."
+    )
 }
 
 fn cron_tick_event_type() -> lashlang::NamedDataType {
@@ -1336,6 +1680,34 @@ submit format("Registered button watcher `{}`. Active matching registrations: {}
 ```
 
 - For schedule requests, build `cron.Schedule(...)` values and register a process definition with explicit `inputs`. Use `trigger.event` directly for the `cron.Tick` param, for example `inputs: { tick: trigger.event }`. The workbench syncs enabled `cron.Schedule` registrations to Restate cron objects, which activate the trigger with `cron.Tick { fired_at: str }`; use a seconds expression such as `*/10 * * * * *` when the user wants a quick smoke test. Use `await triggers.list({})?` to discover registrations and `await triggers.cancel({ handle: handle })?` to disable future activations.
+
+- Mock email accounts the user has connected appear as typed `Inbox` authorities at `inbox.<account>` (for example `inbox.work`, `inbox.personal`). Every account exposes the same three operations:
+  - `await inbox.work.send({ title: t, text: b })?` adds a message to that inbox and returns `{ account, id }`. There is no recipient address — a message is just a title and text.
+  - `await inbox.work.list({})?` returns `{ account, messages: [{ id, title, text }] }`.
+  - `await inbox.work.delete({ id: id })?` removes a message.
+  Because they all share the `Inbox` authority type, write account-parametric processes once and start them per account: `process triage(box: Inbox) { items = await box.list({})? wake { kind: "triage", account: items.account, count: len(items.messages) } finish true }` then `start triage(box: inbox.work)`. To sweep several inboxes in parallel, start one handle per account before awaiting any of them.
+
+- When a message is delivered from the Accounts tab or sent with `inbox.<account>.send(...)`, the host emits `mail.received` with payload `mail.Received { account: str, title: str, text: str }`. Register an inbox concierge once and it will fire on every delivery:
+
+```lashlang
+process on_mail(event: mail.Received) {
+  work = start inbox.work.list({})
+  personal = start inbox.personal.list({})
+  inboxes = await { work: work, personal: personal }
+  wake { kind: "mail_brief", arrived_in: event.account, title: event.title }
+  finish true
+}
+
+handle = await triggers.register({
+  source: mail.received({}),
+  target: on_mail,
+  inputs: { event: trigger.event },
+  name: "inbox concierge"
+})?
+submit format("Inbox concierge registered as `{}`.", handle)
+```
+
+Reference only the `inbox.<account>` authorities that actually exist; if the user has not connected an account yet, ask them to add one from the Accounts tab first.
 
 Use background processes or subagents only when they clarify the user's request or make parallel progress. Keep the visible answer concise and mention any background work you started."###;
 
@@ -1481,6 +1853,24 @@ mod tests {
             ui::INDEX_HTML.contains("draft.innerHTML = renderMarkdownBlocks(assistantDraftText)")
         );
         assert!(ui::INDEX_HTML.contains(".message.assistant .msg-body h1"));
+    }
+
+    #[test]
+    fn workbench_ui_renders_accounts_panel() {
+        assert!(ui::INDEX_HTML.contains("id=\"accountsView\""));
+        assert!(ui::INDEX_HTML.contains("data-view=\"accounts\""));
+        assert!(ui::INDEX_HTML.contains("id=\"accountAddForm\""));
+        assert!(ui::INDEX_HTML.contains("async function loadAccounts"));
+        assert!(ui::INDEX_HTML.contains("async function deleteAccount"));
+    }
+
+    #[test]
+    fn mail_received_event_type_matches_source_type() {
+        let resources = workbench_lashlang_resources();
+        let binding = resources
+            .resolve_trigger_source(MAIL_RECEIVED_SOURCE_TYPE)
+            .expect("mail.received source registered");
+        assert_eq!(binding.event_type_name(), "mail.Received");
     }
 
     #[test]
@@ -1637,7 +2027,7 @@ mod tests {
             .default_mode(ModeId::rlm())
             .provider(provider)
             .model(model)
-            .store_factory(core_store_factory)
+            .store_factory(Arc::clone(&core_store_factory))
             .process_registry(Arc::clone(&process_registry))
             .build()
             .expect("build core");
@@ -1648,6 +2038,7 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
+            session_store_factory: Arc::clone(&core_store_factory),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -1663,12 +2054,199 @@ mod tests {
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            mail_world: mail::MailWorld::new(),
         };
 
         state.publish(StreamItem::Done);
 
         assert!(state.timeline_snapshot().is_empty());
         assert!(matches!(events.try_recv(), Ok(StreamItem::Done)));
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn inbox_authority_resolves_for_any_account_name() {
+        run_async_test_on_large_stack("workbench-inbox-authority-test", || {
+            inbox_authority_resolves_for_any_account_name_inner()
+        });
+    }
+
+    // Names other than the prompt's illustrative work/personal must resolve too:
+    // an account called "test" should yield a usable `inbox.test` authority.
+    async fn inbox_authority_resolves_for_any_account_name_inner() {
+        let data_dir =
+            std::env::temp_dir().join(format!("agent-workbench-inbox-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory;
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .expect("open registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let mail_world = mail::MailWorld::new();
+        mail_world.add_account("test").expect("add test");
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .complete(|_| async {
+                Ok(text_response(
+                    "```lashlang\nresult = await inbox.test.send({ title: \"Hi\", text: \"Yo\" })?\nsubmit result.id\n```",
+                ))
+            })
+            .build()
+            .into_handle();
+        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+            .expect("model spec");
+        let session_id = WorkbenchSessionIds::fresh().current();
+        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
+            .install_mode(ModePreset::rlm_with_config(
+                lash::modes::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            ))
+            .default_mode(ModeId::rlm())
+            .provider(provider)
+            .model(model)
+            .store_factory(Arc::clone(&core_store_factory))
+            .plugin(Arc::new(
+                WorkbenchPluginFactory::new("").with_mail_world(mail_world.clone()),
+            ))
+            .process_registry(Arc::clone(&process_registry))
+            .build()
+            .expect("build core");
+        let session = core
+            .session(session_id)
+            .rlm()
+            .open()
+            .await
+            .expect("open session");
+
+        let tool_names = session
+            .tools()
+            .active_definitions()
+            .await
+            .expect("active tools")
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(
+            tool_names.iter().any(|name| name == "inbox__test__send"),
+            "inbox.test send tool should be active: {tool_names:?}"
+        );
+
+        let output = session
+            .turn(lash::TurnInput::text("send a message"))
+            .run()
+            .await
+            .expect("turn should resolve inbox.test.send, not fail with unknown name");
+        assert_eq!(output.submitted_value(), Some(&serde_json::json!("test-1")));
+        assert_eq!(mail_world.inbox("test").expect("inbox").len(), 1);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn inbox_added_after_session_open_updates_persisted_tool_surface() {
+        run_async_test_on_large_stack("workbench-dynamic-inbox-surface-test", || {
+            inbox_added_after_session_open_updates_persisted_tool_surface_inner()
+        });
+    }
+
+    async fn inbox_added_after_session_open_updates_persisted_tool_surface_inner() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "agent-workbench-dynamic-inbox-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
+        let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
+            session_store_factory;
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .expect("open registry"),
+        ) as Arc<dyn lash::process::ProcessRegistry>;
+        let mail_world = mail::MailWorld::new();
+        let provider = lash::testing::TestProvider::builder()
+            .kind("workbench-test")
+            .complete_error("dynamic inbox surface test should not call the provider")
+            .build()
+            .into_handle();
+        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+            .expect("model spec");
+        let session_ids = WorkbenchSessionIds::fresh();
+        let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
+            .install_mode(ModePreset::rlm_with_config(
+                lash::modes::RlmProtocolPluginConfig::default()
+                    .with_lashlang_abilities(workbench_lashlang_abilities()),
+            ))
+            .default_mode(ModeId::rlm())
+            .provider(provider)
+            .model(model)
+            .store_factory(Arc::clone(&core_store_factory))
+            .plugin(Arc::new(
+                WorkbenchPluginFactory::new("").with_mail_world(mail_world.clone()),
+            ))
+            .process_registry(Arc::clone(&process_registry))
+            .build()
+            .expect("build core");
+        let process_observer = core
+            .process_observer()
+            .expect("process observer configured")
+            .clone();
+        let state = AppState {
+            core,
+            process_observer,
+            session_store_factory: Arc::clone(&core_store_factory),
+            session_ids,
+            messages: Arc::new(Mutex::new(Vec::new())),
+            timeline: Arc::new(Mutex::new(Vec::new())),
+            selected_model: Arc::new(Mutex::new(ModelSelection {
+                model: "test-model".to_string(),
+                model_variant: None,
+            })),
+            web_configured: false,
+            trace_sink: None,
+            lashlang_execution: Arc::new(TraceLashlangGraphStore::default()),
+            event_tx: broadcast::channel(1024).0,
+            queued_work_poke: inert_queued_work_poke(),
+            restate_ingress_url: "http://127.0.0.1:8080".to_string(),
+            restate_http: reqwest::Client::new(),
+            restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            mail_world: mail_world.clone(),
+        };
+
+        refresh_persisted_tool_surface(&state, "initial_empty")
+            .await
+            .expect("persist initial empty surface");
+        mail_world.add_account("Late Account").expect("add account");
+        refresh_persisted_tool_surface(&state, "account_added")
+            .await
+            .expect("refresh account surface");
+
+        let reopened = state
+            .core
+            .session(state.current_session_id())
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session");
+        let tool_names = reopened
+            .tools()
+            .active_definitions()
+            .await
+            .expect("active tools")
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "inbox__late_account__send"),
+            "late account send tool should be active after persisted refresh: {tool_names:?}"
+        );
+        reopened.close().await.expect("close session");
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -1707,7 +2285,7 @@ mod tests {
             .default_mode(ModeId::rlm())
             .provider(provider)
             .model(model)
-            .store_factory(core_store_factory)
+            .store_factory(Arc::clone(&core_store_factory))
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .process_registry(Arc::clone(&process_registry))
             .build()
@@ -1774,6 +2352,7 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
+            session_store_factory: Arc::clone(&core_store_factory),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -1789,6 +2368,7 @@ mod tests {
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            mail_world: mail::MailWorld::new(),
         };
         let target_scope_id = lash::process::ProcessScope::new(state.current_session_id()).id();
         let session_store =
@@ -1872,7 +2452,7 @@ mod tests {
             .default_mode(ModeId::rlm())
             .provider(provider)
             .model(model)
-            .store_factory(core_store_factory)
+            .store_factory(Arc::clone(&core_store_factory))
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .process_registry(Arc::clone(&process_registry))
             .advanced()
@@ -1892,6 +2472,7 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
+            session_store_factory: Arc::clone(&core_store_factory),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -1907,6 +2488,7 @@ mod tests {
             restate_ingress_url,
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            mail_world: mail::MailWorld::new(),
         };
         let session = state
             .core
@@ -2037,7 +2619,7 @@ mod tests {
             .default_mode(ModeId::rlm())
             .provider(provider)
             .model(model)
-            .store_factory(core_store_factory)
+            .store_factory(Arc::clone(&core_store_factory))
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .process_registry(Arc::clone(&process_registry))
             .build()
@@ -2049,6 +2631,7 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
+            session_store_factory: Arc::clone(&core_store_factory),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(vec![ChatMessage {
                 id: "message".to_string(),
@@ -2075,6 +2658,7 @@ mod tests {
             restate_ingress_url,
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            mail_world: mail::MailWorld::new(),
         };
         let old_session_id = state.current_session_id();
         let session = state
@@ -2349,7 +2933,7 @@ mod tests {
             .default_mode(ModeId::rlm())
             .provider(provider)
             .model(model)
-            .store_factory(core_store_factory)
+            .store_factory(Arc::clone(&core_store_factory))
             .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
                 data_dir.join("attachments"),
             )))
@@ -2375,6 +2959,7 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
+            session_store_factory: Arc::clone(&core_store_factory),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -2390,6 +2975,7 @@ mod tests {
             restate_ingress_url,
             restate_http,
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            mail_world: mail::MailWorld::new(),
         };
         LiveWorkbenchRestateHarness {
             state,

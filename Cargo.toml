@@ -6,6 +6,7 @@ members = [
     "crates/lash-trace-viewer",
     "crates/lash-rlm-types",
     "crates/lash-core",
+    "crates/lash-remote-protocol",
     "crates/lash-llm-transport",
     "crates/lash-provider-auth",
     "crates/lash-sqlite-store",
@@ -50,6 +51,7 @@ members = [
 # Internal bins/benches/examples build with `cargo build --workspace` or `-p <name>`.
 default-members = [
     "crates/lash-core",
+    "crates/lash-remote-protocol",
     "crates/lash",
     "crates/lash-trace",
     "crates/lash-rlm-types",

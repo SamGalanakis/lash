@@ -1,0 +1,31 @@
+[package]
+name = "lash-remote-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Versioned remote embedding protocol DTOs for Lash sessions, turns, activities, tools, and LLM calls."
+keywords = ["lash", "agent", "runtime", "protocol"]
+categories = ["api-bindings", "data-structures"]
+
+[dependencies]
+base64 = { workspace = true }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.24", optional = true }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.24" }
+schemars = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = []
+core-conversions = ["dep:lash-core"]
+
+[dev-dependencies]
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.24", features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
