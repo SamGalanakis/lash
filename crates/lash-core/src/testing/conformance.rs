@@ -1792,7 +1792,8 @@ fn queued_batch_text(batch: &QueuedWorkBatch) -> Option<&str> {
         }),
         QueuedWorkPayload::ProcessWake { .. }
         | QueuedWorkPayload::HostEvent { .. }
-        | QueuedWorkPayload::Timer { .. } => None,
+        | QueuedWorkPayload::Timer { .. }
+        | QueuedWorkPayload::SessionCommand { .. } => None,
     }
 }
 
@@ -2929,7 +2930,7 @@ use lash_sansio::{AttachmentCreateMeta, ImageMediaType, MediaType};
 /// Run the full [`AttachmentStore`] conformance suite against the backend
 /// produced by `make`. `make` must return a fresh, empty store on each call.
 /// `expected_persistence` is the tier this backend declares (`Ephemeral` for
-/// in-memory, `Durable` for file/SQLite-backed).
+/// in-memory, `Durable` for file/Turso-backed).
 pub fn attachment_store<F>(make: F, expected_persistence: AttachmentStorePersistence)
 where
     F: Fn() -> Arc<dyn AttachmentStore>,
@@ -3040,23 +3041,23 @@ fn attachment_store_survives_reopen(factory: ReopenableAttachmentStore) {
 /// Run the full [`LashlangArtifactStore`] conformance suite against the backend
 /// produced by `make`. `make` must return a fresh, empty store on each call.
 /// `expected_tier` is the tier this backend declares (`Inline` for in-memory,
-/// `Durable` for SQLite-backed).
-pub fn lashlang_artifact_store<F>(make: F, expected_tier: DurabilityTier)
+/// `Durable` for Turso-backed).
+pub async fn lashlang_artifact_store<F>(make: F, expected_tier: DurabilityTier)
 where
     F: Fn() -> Arc<dyn LashlangArtifactStore>,
 {
-    artifact_put_get_round_trips(make());
-    artifact_get_unknown_is_none(make());
+    artifact_put_get_round_trips(make()).await;
+    artifact_get_unknown_is_none(make()).await;
     artifact_reports_declared_tier(make(), expected_tier);
 }
 
 /// Run the full [`LashlangArtifactStore`] suite plus durable reopen checks.
-pub fn lashlang_artifact_store_reopenable<F>(make: F, expected_tier: DurabilityTier)
+pub async fn lashlang_artifact_store_reopenable<F>(make: F, expected_tier: DurabilityTier)
 where
     F: Fn() -> ReopenableLashlangArtifactStore,
 {
-    lashlang_artifact_store(|| make().open, expected_tier);
-    lashlang_artifact_store_survives_reopen(make());
+    lashlang_artifact_store(|| make().open, expected_tier).await;
+    lashlang_artifact_store_survives_reopen(make()).await;
 }
 
 fn sample_artifact() -> lashlang::ModuleArtifact {
@@ -3065,13 +3066,15 @@ fn sample_artifact() -> lashlang::ModuleArtifact {
     lashlang::ModuleArtifact::from_program(program).expect("module artifact builds")
 }
 
-fn artifact_put_get_round_trips(store: Arc<dyn LashlangArtifactStore>) {
+async fn artifact_put_get_round_trips(store: Arc<dyn LashlangArtifactStore>) {
     let artifact = sample_artifact();
     store
         .put_module_artifact(&artifact)
+        .await
         .expect("put module artifact");
     let loaded = store
         .get_module_artifact(&artifact.module_ref)
+        .await
         .expect("get module artifact")
         .expect("artifact present after put");
 
@@ -3087,10 +3090,11 @@ fn artifact_put_get_round_trips(store: Arc<dyn LashlangArtifactStore>) {
     );
 }
 
-fn artifact_get_unknown_is_none(store: Arc<dyn LashlangArtifactStore>) {
+async fn artifact_get_unknown_is_none(store: Arc<dyn LashlangArtifactStore>) {
     let unknown = sample_artifact().module_ref;
     let result = store
         .get_module_artifact(&unknown)
+        .await
         .expect("get of an unknown ref must not error");
     assert!(
         result.is_none(),
@@ -3106,15 +3110,17 @@ fn artifact_reports_declared_tier(store: Arc<dyn LashlangArtifactStore>, expecte
     );
 }
 
-fn lashlang_artifact_store_survives_reopen(factory: ReopenableLashlangArtifactStore) {
+async fn lashlang_artifact_store_survives_reopen(factory: ReopenableLashlangArtifactStore) {
     let artifact = sample_artifact();
     factory
         .open
         .put_module_artifact(&artifact)
+        .await
         .expect("put module artifact before reopen");
     let loaded = factory
         .reopen
         .get_module_artifact(&artifact.module_ref)
+        .await
         .expect("get module artifact after reopen")
         .expect("artifact present after reopen");
     assert_eq!(loaded.module_ref, artifact.module_ref);
@@ -3134,15 +3140,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn in_memory_lashlang_artifact_store_satisfies_conformance() {
+    #[tokio::test]
+    async fn in_memory_lashlang_artifact_store_satisfies_conformance() {
         lashlang_artifact_store(
             || {
                 Arc::new(crate::InMemoryLashlangArtifactStore::new())
                     as Arc<dyn LashlangArtifactStore>
             },
             DurabilityTier::Inline,
-        );
+        )
+        .await;
     }
 
     #[tokio::test]

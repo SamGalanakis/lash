@@ -32,7 +32,7 @@ lash = { package = "lash-runtime", path = "../lash", version = "=0.1.0-alpha.24"
 lash-plugin-mcp = { path = "../lash-plugin-mcp", version = "=0.1.0-alpha.24" }
 lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory", version = "=0.1.0-alpha.24", optional = true }
 lash-plugin-process-controls = { path = "../lash-plugin-process-controls", version = "=0.1.0-alpha.24" }
-lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.24" }
+lash-turso-store = { path = "../lash-turso-store", version = "=0.1.0-alpha.24" }
 lash-llm-tools = { path = "../lash-llm-tools", version = "=0.1.0-alpha.24" }
 lash-standard-plugins = { path = "../lash-standard-plugins", version = "=0.1.0-alpha.24" }
 lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.24" }

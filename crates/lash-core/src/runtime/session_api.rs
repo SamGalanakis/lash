@@ -403,6 +403,202 @@ pub(in crate::runtime) async fn enqueue_turn_input_to_store(
     Ok(enqueued)
 }
 
+impl LashRuntime {
+    pub async fn submit_session_command(
+        &mut self,
+        command: crate::SessionCommand,
+        idempotency_key: impl Into<String>,
+    ) -> Result<crate::SessionCommandReceipt, RuntimeError> {
+        let idempotency_key = idempotency_key.into();
+        if idempotency_key.trim().is_empty() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::Other("session_command_idempotency_key".to_string()),
+                "session command idempotency key cannot be empty",
+            ));
+        }
+        let source_key = command.source_key(&idempotency_key);
+        let session_id = self.state.session_id.clone();
+        let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        else {
+            let batch_id = format!("inline-command:{}", uuid::Uuid::new_v4());
+            self.apply_session_command(command, None).await?;
+            return Ok(crate::SessionCommandReceipt {
+                session_id,
+                batch_id,
+                source_key,
+            });
+        };
+        let draft = crate::QueuedWorkBatchDraft::new(
+            session_id.clone(),
+            crate::DeliveryPolicy::AfterCurrentTurnCommit,
+            crate::SlotPolicy::Exclusive,
+            vec![crate::QueuedWorkPayload::session_command(command)],
+        )
+        .with_source_key(source_key.clone());
+        let enqueued = store.enqueue_queued_work(draft).await.map_err(|err| {
+            RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
+        })?;
+        if let Some(poke) = self.host.queued_work_poke.as_ref() {
+            poke.poke_session(session_id.clone(), "session_command");
+        }
+        Ok(crate::SessionCommandReceipt {
+            session_id,
+            batch_id: enqueued.batch_id,
+            source_key,
+        })
+    }
+
+    pub async fn drain_next_session_command(
+        &mut self,
+    ) -> Result<Option<crate::SessionCommandReceipt>, RuntimeError> {
+        let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        else {
+            return Ok(None);
+        };
+        let claim = store
+            .claim_ready_queued_work(
+                &self.state.session_id,
+                &self.runtime_scope_id,
+                crate::QueuedWorkClaimBoundary::Idle,
+                crate::QUEUED_WORK_CLAIM_TTL_MS,
+                1,
+            )
+            .await
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
+            })?;
+        let Some(claim) = claim else {
+            return Ok(None);
+        };
+        let Some((batch, command)) = claim.exclusive_session_command() else {
+            store
+                .abandon_queued_work_claim(&claim)
+                .await
+                .map_err(|err| {
+                    RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
+                })?;
+            return Ok(None);
+        };
+        let batch_id = batch.batch_id.clone();
+        let source_key = batch.source_key.clone().unwrap_or_else(|| batch_id.clone());
+        let command = command.clone();
+        self.apply_session_command(command, Some(claim.completion()))
+            .await?;
+        Ok(Some(crate::SessionCommandReceipt {
+            session_id: self.state.session_id.clone(),
+            batch_id,
+            source_key,
+        }))
+    }
+
+    async fn apply_session_command(
+        &mut self,
+        command: crate::SessionCommand,
+        completion: Option<crate::QueuedWorkCompletion>,
+    ) -> Result<(), RuntimeError> {
+        self.refresh_session_graph_from_store()
+            .await
+            .map_err(|err| RuntimeError::new("session_command_refresh", err.to_string()))?;
+        let graph = match command {
+            crate::SessionCommand::RefreshToolSurface {
+                expected_generation,
+                ..
+            } => {
+                if let Some(expected) = expected_generation {
+                    let actual = self
+                        .tool_state()
+                        .map_err(|err| {
+                            RuntimeError::new("session_command_tool_state", err.to_string())
+                        })?
+                        .generation();
+                    if actual != expected {
+                        return Err(RuntimeError::new(
+                            "session_command_generation_mismatch",
+                            format!(
+                                "expected tool generation {expected}, but live generation is {actual}"
+                            ),
+                        ));
+                    }
+                }
+                self.refresh_session_tool_surface().await.map_err(|err| {
+                    RuntimeError::new("session_command_refresh_tools", err.to_string())
+                })?;
+                crate::store::GraphCommitDelta::Unchanged {
+                    leaf_node_id: self.state.session_graph.leaf_node_id.clone(),
+                }
+            }
+            crate::SessionCommand::EmitHostEvent {
+                resource_type,
+                alias,
+                event,
+                payload,
+            } => {
+                let effect_host = Arc::clone(&self.host.core.control.effect_host);
+                let drain_id = completion
+                    .as_ref()
+                    .map(|completion| completion.claim_id.clone())
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                let scoped = effect_host
+                    .scoped(crate::EffectScope::queue_drain(
+                        &self.state.session_id,
+                        drain_id,
+                    ))
+                    .map_err(|err| {
+                        RuntimeError::new("session_command_effect_scope", err.to_string())
+                    })?;
+                let (_report, graph) = self
+                    .emit_host_event_without_persist(
+                        &resource_type,
+                        &alias,
+                        &event,
+                        payload,
+                        scoped,
+                    )
+                    .await
+                    .map_err(|err| {
+                        RuntimeError::new("session_command_host_event", err.to_string())
+                    })?;
+                graph
+            }
+            crate::SessionCommand::ResetSession { .. } => {
+                let mut state = crate::RuntimeSessionState {
+                    session_id: self.state.session_id.clone(),
+                    policy: self.policy.clone(),
+                    graph_replace_required: true,
+                    ..crate::RuntimeSessionState::default()
+                };
+                state.ensure_agent_frame_initialized();
+                self.set_persisted_state(state)
+                    .map_err(|err| RuntimeError::new("session_command_reset", err.to_string()))?;
+                crate::store::GraphCommitDelta::ReplaceFull(self.state.session_graph.clone())
+            }
+        };
+        let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        else {
+            return Ok(());
+        };
+        let mut commit =
+            crate::store::RuntimeCommit::persisted_state_with_graph_commit(&self.state, graph, &[]);
+        if let Some(completion) = completion {
+            commit = commit.completing_queue_claim(completion);
+        }
+        let result = store.commit_runtime_state(commit).await.map_err(|err| {
+            RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
+        })?;
+        self.state.apply_persisted_commit_result(result);
+        Ok(())
+    }
+}
+
 pub(in crate::runtime) fn queued_turn_input_store_required() -> RuntimeError {
     RuntimeError::new(
         RuntimeErrorCode::StoreCommitFailed,

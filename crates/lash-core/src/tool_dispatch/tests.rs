@@ -321,6 +321,7 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -362,6 +363,7 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -410,6 +412,7 @@ fn projection_policy_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -564,6 +567,7 @@ fn lazy_contract_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -594,6 +598,7 @@ fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContex
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -650,6 +655,7 @@ fn parallel_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -1277,6 +1283,7 @@ fn serial_dispatch_context(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     }
@@ -1425,6 +1432,7 @@ async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     });
@@ -1559,6 +1567,7 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
         attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
         turn_context: crate::TurnContext::default(),
     });

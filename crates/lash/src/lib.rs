@@ -19,7 +19,7 @@ pub mod turn;
 pub mod usage;
 
 pub use crate::control::{
-    AdvancedToolsControl, HostEventsControl, PluginActions, ToolsControl, TriggersControl,
+    AdvancedToolsControl, PluginActions, SessionCommandsControl, ToolsControl, TriggersControl,
 };
 pub use crate::core::{LashCore, LashCoreBuilder, SessionDeleteReport};
 pub use crate::error::{EmbedError, Result};
@@ -34,19 +34,21 @@ pub use crate::turn::{
     TurnStream, message_role, message_text,
 };
 pub use lash_core::{
-    HostEvent, HostEventEmitReport, InputItem, ModelLimits, ModelSpec, PluginStack, SessionSpec,
-    TriggerRegistration, TriggerSourceType, TriggerTargetSummary, TurnActivity, TurnActivityId,
-    TurnActivitySink, TurnEvent, TurnInput, impl_unsupported_queued_work_methods,
+    HostEvent, HostEventEmitReport, InputItem, ModelLimits, ModelSpec, PluginStack, SessionCommand,
+    SessionCommandReceipt, SessionSpec, TriggerRegistration, TriggerSourceType,
+    TriggerTargetSummary, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
+    impl_unsupported_queued_work_methods,
 };
 
 pub mod prelude {
     pub use crate::{
-        AdvancedToolsControl, EmbedError, HostEvent, HostEventEmitReport, HostEventsControl,
-        InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ModelSpec,
-        ObservableSession, PluginActions, PluginBinding, PluginStack, PromptLayerSink,
-        QueuedTurnBuilder, Result, SessionBuilder, SessionSpec, ToolsControl, TriggerRegistration,
-        TriggerSourceType, TriggerTargetSummary, TriggersControl, TurnActivity, TurnBuilder,
-        TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
+        AdvancedToolsControl, EmbedError, HostEvent, HostEventEmitReport, InputItem, LashCore,
+        LashCoreBuilder, LashSession, ModeId, ModePreset, ModelSpec, ObservableSession,
+        PluginActions, PluginBinding, PluginStack, PromptLayerSink, QueuedTurnBuilder, Result,
+        SessionBuilder, SessionCommand, SessionCommandReceipt, SessionCommandsControl, SessionSpec,
+        ToolsControl, TriggerRegistration, TriggerSourceType, TriggerTargetSummary,
+        TriggersControl, TurnActivity, TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult,
+        TurnStream,
     };
     pub use lash_core::TurnActivitySink;
 }
@@ -82,7 +84,8 @@ pub mod persistence {
         DeliveryPolicy, InMemorySessionStore, InMemorySessionStoreFactory, MergeKey,
         QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
         QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, RuntimeSessionState,
-        SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy,
+        SessionCommand, SessionCommandReceipt, SessionStoreCreateRequest, SessionStoreFactory,
+        SlotPolicy,
     };
     pub use lash_core::store::{
         GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead, RuntimeCommit,
@@ -173,7 +176,8 @@ pub mod runtime {
         RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
         RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
         RuntimeInvocation, RuntimeObservation, RuntimeScope, RuntimeTurnPhase,
-        RuntimeTurnPhaseProbe, ScopedEffectController, TurnContext,
+        RuntimeTurnPhaseProbe, ScopedEffectController, SessionCommand, SessionCommandReceipt,
+        TurnContext,
     };
     pub use lash_core::{
         PersistentRuntimeServices, PluginMessage, ProtocolSessionExtensionHandle,

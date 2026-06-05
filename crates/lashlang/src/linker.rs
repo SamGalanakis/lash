@@ -52,25 +52,33 @@ impl ResourceCatalog {
         &mut self,
         module_path: impl IntoIterator<Item = impl Into<String>>,
         resource_type: impl Into<String>,
-    ) {
+    ) -> Result<(), ResourceCatalogError> {
         let path = module_path.into_iter().map(Into::into).collect::<Vec<_>>();
         assert!(!path.is_empty(), "module path must not be empty");
         let resource_type = resource_type.into();
         let key = module_path_key(&path);
-        self.module_instances
-            .entry(key.clone())
-            .and_modify(|module| {
-                module.path = path.clone();
-                module.resource_type = resource_type.clone();
-                module.alias = key.clone();
-            })
-            .or_insert_with(|| ModuleInstanceCatalog {
+        if let Some(existing) = self.module_instances.get(&key) {
+            if existing.resource_type != resource_type {
+                return Err(ResourceCatalogError::ConflictingModuleInstance {
+                    alias: key,
+                    existing: existing.resource_type.clone(),
+                    incoming: resource_type,
+                });
+            }
+            self.ensure_resource_type(resource_type);
+            return Ok(());
+        }
+        self.module_instances.insert(
+            key.clone(),
+            ModuleInstanceCatalog {
                 path,
                 resource_type: resource_type.clone(),
                 alias: key,
                 operations: BTreeMap::new(),
-            });
+            },
+        );
         self.ensure_resource_type(resource_type);
+        Ok(())
     }
 
     pub fn ensure_resource_type(&mut self, resource_type: impl Into<String>) {
@@ -110,7 +118,8 @@ impl ResourceCatalog {
         assert!(!path.is_empty(), "module path must not be empty");
         let resource_type = resource_type.into();
         let operation = operation.into();
-        self.add_module_instance(path.iter().map(String::as_str), resource_type.clone());
+        self.add_module_instance(path.iter().map(String::as_str), resource_type.clone())
+            .expect("module operation resource type cannot conflict with existing module alias");
         self.add_operation(resource_type, operation.clone(), input_ty, output_ty);
         let key = module_path_key(&path);
         self.module_instances
@@ -189,7 +198,7 @@ impl ResourceCatalog {
 
     pub fn extend(&mut self, other: Self) {
         self.try_extend(other)
-            .expect("conflicting named host data type definitions");
+            .expect("conflicting resource catalog entries");
     }
 
     pub fn try_extend(&mut self, other: Self) -> Result<(), ResourceCatalogError> {
@@ -4055,6 +4064,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn module_aliases_sharing_resource_type_route_to_distinct_host_operations() {
+        let mut catalog = ResourceCatalog::new();
+        catalog.add_module_operation(
+            ["inbox", "work"],
+            "Inbox",
+            "send",
+            "inbox__work__send",
+            TypeExpr::Any,
+            TypeExpr::Any,
+        );
+        catalog.add_module_operation(
+            ["inbox", "personal"],
+            "Inbox",
+            "send",
+            "inbox__personal__send",
+            TypeExpr::Any,
+            TypeExpr::Any,
+        );
+
+        assert_eq!(
+            catalog
+                .resolve_module_operation("Inbox", "inbox.work", "send")
+                .map(|binding| binding.host_operation.as_str()),
+            Some("inbox__work__send")
+        );
+        assert_eq!(
+            catalog
+                .resolve_module_operation("Inbox", "inbox.personal", "send")
+                .map(|binding| binding.host_operation.as_str()),
+            Some("inbox__personal__send")
+        );
+    }
+
+    #[test]
+    fn reusing_module_alias_for_different_resource_type_fails() {
+        let mut catalog = ResourceCatalog::new();
+        catalog
+            .add_module_instance(["tools"], "Tools")
+            .expect("initial module instance");
+
+        assert!(matches!(
+            catalog.add_module_instance(["tools"], "Inbox"),
+            Err(ResourceCatalogError::ConflictingModuleInstance {
+                alias,
+                existing,
+                incoming,
+            }) if alias == "tools" && existing == "Tools" && incoming == "Inbox"
+        ));
+    }
+
     // --- behaviour-pinning tests for the single linking walk -------------
     //
     // These lock in the error *set*, *ordering*, and *spans* the linker
@@ -4154,8 +4214,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn module_artifact_store_bytes_reject_corruption() {
+    #[tokio::test]
+    async fn module_artifact_store_bytes_reject_corruption() {
         use crate::LashlangArtifactStore;
 
         let linked = LinkedModule::link(
@@ -4167,10 +4227,12 @@ mod tests {
 
         store
             .put_module_artifact(&linked.artifact)
+            .await
             .expect("put artifact");
         assert_eq!(
             store
                 .get_module_artifact(&linked.module_ref)
+                .await
                 .expect("get artifact")
                 .expect("artifact exists")
                 .module_ref,

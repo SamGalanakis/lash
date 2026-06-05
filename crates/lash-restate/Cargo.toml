@@ -30,6 +30,6 @@ http-body-util = "0.1"
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.24", features = ["testing"] }
 lashlang = { path = "../lashlang", version = "=0.1.0-alpha.24" }
 lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.24" }
-lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.24" }
-rusqlite = { version = "0.33", features = ["bundled"] }
+lash-turso-store = { path = "../lash-turso-store", version = "=0.1.0-alpha.24" }
 tempfile = { workspace = true }
+turso = { version = "0.7.0-pre.5", default-features = false }

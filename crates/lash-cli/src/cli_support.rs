@@ -3,10 +3,10 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lash::ModeId;
 use lash::provider::ProviderHandle;
-#[cfg(test)]
-use lash_sqlite_store::Store;
 use lash_standard_plugins::{StandardContextApproach, StandardContextApproachKind};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiHostEffect};
+#[cfg(test)]
+use lash_turso_store::Store;
 use sha2::{Digest, Sha256};
 
 use crate::SkillCatalog;
@@ -864,22 +864,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn file_backed_store_creates_wal_file() {
-        let _env_guard = env_lock().blocking_lock();
+    #[tokio::test]
+    async fn file_backed_store_creates_wal_file() {
+        let _env_guard = env_lock().lock().await;
         let temp = TempDirGuard::new("lash-cli-store-wal");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
         let db_path = temp.path().join("session.db");
-        let store = Store::open(&db_path).expect("store");
+        let store = Store::open(&db_path).await.expect("store");
 
-        store.save_session_meta(SessionMeta {
-            session_id: "s1".to_string(),
-            session_name: "demo".to_string(),
-            created_at: "2026-03-26T10:00:00Z".to_string(),
-            model: "gpt-5".to_string(),
-            cwd: Some("/tmp/demo".to_string()),
-            relation: lash_core::SessionRelation::Root,
-        });
+        store
+            .save_session_meta(SessionMeta {
+                session_id: "s1".to_string(),
+                session_name: "demo".to_string(),
+                created_at: "2026-03-26T10:00:00Z".to_string(),
+                model: "gpt-5".to_string(),
+                cwd: Some("/tmp/demo".to_string()),
+                relation: lash_core::SessionRelation::Root,
+            })
+            .await;
 
         assert!(db_path.with_extension("db-wal").exists());
     }

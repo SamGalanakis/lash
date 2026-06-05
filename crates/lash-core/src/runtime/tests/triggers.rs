@@ -18,21 +18,22 @@ impl CountingArtifactStore {
     }
 }
 
+#[async_trait::async_trait]
 impl lashlang::LashlangArtifactStore for CountingArtifactStore {
-    fn put_module_artifact(
+    async fn put_module_artifact(
         &self,
         artifact: &lashlang::ModuleArtifact,
     ) -> Result<(), lashlang::ArtifactStoreError> {
         self.puts.fetch_add(1, AtomicOrdering::SeqCst);
-        self.inner.put_module_artifact(artifact)
+        self.inner.put_module_artifact(artifact).await
     }
 
-    fn get_module_artifact(
+    async fn get_module_artifact(
         &self,
         module_ref: &lashlang::ModuleRef,
     ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
         self.gets.fetch_add(1, AtomicOrdering::SeqCst);
-        self.inner.get_module_artifact(module_ref)
+        self.inner.get_module_artifact(module_ref).await
     }
 }
 
@@ -374,18 +375,20 @@ impl lashlang::ExecutionHost for TriggerRegistrationHost {
             lashlang::AbilityOp::ResourceOperation(operation) => {
                 let payload = resource_operation_payload(operation.args)?;
                 let value = match operation.operation.as_str() {
-                    "triggers.register" => self
+                    "triggers.register" | "register" => self
                         .plugins
                         .register_lashlang_trigger(payload, Arc::clone(&self.artifact_store))
+                        .await
                         .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?,
-                    "triggers.list" => self
+                    "triggers.list" | "list" => self
                         .plugins
                         .list_lashlang_triggers(payload)
                         .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?,
-                    "triggers.cancel" => self
-                        .plugins
-                        .cancel_lashlang_trigger(payload)
-                        .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?,
+                    "triggers.cancel" | "cancel" => {
+                        self.plugins
+                            .cancel_lashlang_trigger(payload)
+                            .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?
+                    }
                     other => {
                         return Err(lashlang::ExecutionHostError::new(format!(
                             "unsupported operation `{other}`"
@@ -445,6 +448,7 @@ async fn execute_trigger_registration(runtime: &mut LashRuntime, source: &str) -
         .durability
         .lashlang_artifact_store
         .put_module_artifact(&linked.artifact)
+        .await
         .expect("store module artifact");
     let compiled = lashlang::compile_linked(&linked);
     let host = TriggerRegistrationHost {

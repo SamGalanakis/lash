@@ -644,15 +644,17 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
     let dir = tempfile::tempdir().expect("tempdir");
     let session_id = "agent-frame-durable";
     let root_turn_id = "agent-frame-root-turn";
-    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+    let store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
         dir.path().join("sessions"),
     ));
     let artifact_store = Arc::new(
-        lash_sqlite_store::Store::open(&dir.path().join("artifacts.db"))
+        lash_turso_store::Store::open(&dir.path().join("artifacts.db"))
+            .await
             .expect("open artifact store"),
     );
     let process_registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
+        lash_turso_store::TursoProcessRegistry::open(&dir.path().join("processes.db"))
+            .await
             .expect("open process registry"),
     );
     let controller = Arc::new(RecordingDurableEffectController::default());
@@ -709,16 +711,27 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
         "follow turn replay keys should include {follow_turn_id}: {replay_keys:?}"
     );
 
-    let conn = rusqlite::Connection::open(store_factory.path_for_session(session_id))
-        .expect("open session sqlite store");
-    let mut stmt = conn
-        .prepare("SELECT turn_id FROM runtime_turn_commits ORDER BY turn_id ASC")
-        .expect("prepare turn commit query");
-    let turn_commit_ids = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .expect("query turn commits")
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .expect("collect turn commits");
+    let db =
+        turso::Builder::new_local(&store_factory.path_for_session(session_id).to_string_lossy())
+            .build()
+            .await
+            .expect("open session turso store");
+    let conn = db.connect().expect("connect session turso store");
+    let mut rows = conn
+        .query(
+            "SELECT turn_id FROM runtime_turn_commits ORDER BY turn_id ASC",
+            (),
+        )
+        .await
+        .expect("query turn commits");
+    let mut turn_commit_ids = Vec::new();
+    while let Some(row) = rows.next().await.expect("read turn commit row") {
+        let turn_id = match row.get_value(0).expect("turn id value") {
+            turso::Value::Text(value) => value,
+            other => panic!("expected text turn id, got {other:?}"),
+        };
+        turn_commit_ids.push(turn_id);
+    }
     assert_eq!(
         turn_commit_ids,
         vec![root_turn_id.to_string(), follow_turn_id]

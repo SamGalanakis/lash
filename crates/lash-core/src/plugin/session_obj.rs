@@ -125,16 +125,15 @@ impl PluginSession {
         &self.host_events
     }
 
-    pub fn register_lashlang_trigger(
+    pub async fn register_lashlang_trigger(
         &self,
         request: serde_json::Value,
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     ) -> Result<serde_json::Value, PluginError> {
-        let route = self.trigger_registry.register_route(
-            request,
-            &self.lashlang_resources,
-            artifact_store.as_ref(),
-        )?;
+        let route = self
+            .trigger_registry
+            .register_route(request, &self.lashlang_resources, artifact_store.as_ref())
+            .await?;
         Ok(super::trigger_registry::trigger_handle_json(&route.handle))
     }
 

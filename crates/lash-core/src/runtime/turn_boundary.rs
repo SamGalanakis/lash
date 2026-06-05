@@ -120,6 +120,15 @@ impl TurnBoundary {
         self.draft_mut().apply_prepared_messages(messages);
     }
 
+    pub(super) fn append_tool_host_events(
+        &mut self,
+        events: &[crate::tool_dispatch::ToolHostEventEffectOutcome],
+    ) {
+        if !events.is_empty() {
+            self.draft_mut().append_tool_host_events(events);
+        }
+    }
+
     pub(super) fn record_tool_calls<I>(&mut self, records: I)
     where
         I: IntoIterator<Item = ToolCallRecord>,

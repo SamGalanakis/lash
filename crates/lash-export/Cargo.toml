@@ -8,13 +8,14 @@ publish = false
 [dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.24" }
 lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.24" }
-lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.24" }
+lash-turso-store = { path = "../lash-turso-store", version = "=0.1.0-alpha.24" }
 lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.24" }
 anyhow = { workspace = true }
 pulldown-cmark = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

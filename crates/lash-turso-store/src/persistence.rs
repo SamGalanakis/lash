@@ -10,59 +10,60 @@ impl RuntimePersistence for Store {
         &self,
         scope: SessionReadScope,
     ) -> Result<Option<PersistedSessionRead>, StoreError> {
-        self.with_read(|conn| {
-            let Some(meta) = try_load_session_head_meta_from_conn(conn)? else {
-                return Ok(None);
-            };
-            let leaf_node_id = match &scope {
-                SessionReadScope::FullGraph => meta.leaf_node_id.clone(),
-                SessionReadScope::ActivePath { leaf_node_id } => {
-                    leaf_node_id.clone().or_else(|| meta.leaf_node_id.clone())
-                }
-            };
-            let mut graph = match scope {
-                SessionReadScope::FullGraph => {
-                    Self::load_session_graph_from_conn(conn, meta.leaf_node_id.clone())
-                }
-                SessionReadScope::ActivePath { .. } => {
-                    Self::load_active_path_session_graph_from_conn(conn, leaf_node_id.clone())
-                        .map_err(sqlite_error)?
-                }
-            };
-            graph.set_leaf_node_id(leaf_node_id);
-            let checkpoint = meta
-                .checkpoint_ref
-                .as_ref()
-                .and_then(|blob_ref| Self::get_checkpoint_conn(conn, blob_ref));
-            Ok(Some(PersistedSessionRead {
-                session_id: meta.session_id,
-                head_revision: meta.head_revision,
-                config: meta.config,
-                agent_frames: meta.agent_frames,
-                current_agent_frame_id: meta.current_agent_frame_id,
-                graph,
-                checkpoint_ref: meta.checkpoint_ref,
-                checkpoint,
-                token_ledger: merge_token_ledger_entries(Self::load_usage_deltas_conn(conn)),
-            }))
-        })
+        let conn = self.conn.lock().await;
+        let Some(meta) = try_load_session_head_meta_from_conn(&conn).await? else {
+            return Ok(None);
+        };
+        let leaf_node_id = match &scope {
+            SessionReadScope::FullGraph => meta.leaf_node_id.clone(),
+            SessionReadScope::ActivePath { leaf_node_id } => {
+                leaf_node_id.clone().or_else(|| meta.leaf_node_id.clone())
+            }
+        };
+        let mut graph = match scope {
+            SessionReadScope::FullGraph => {
+                Self::load_session_graph_from_conn(&conn, meta.leaf_node_id.clone()).await
+            }
+            SessionReadScope::ActivePath { .. } => {
+                Self::load_active_path_session_graph_from_conn(&conn, leaf_node_id.clone())
+                    .await
+                    .map_err(turso_error)?
+            }
+        };
+        graph.set_leaf_node_id(leaf_node_id);
+        let checkpoint = match meta.checkpoint_ref.as_ref() {
+            Some(blob_ref) => Self::get_checkpoint_conn(&conn, blob_ref).await,
+            None => None,
+        };
+        Ok(Some(PersistedSessionRead {
+            session_id: meta.session_id,
+            head_revision: meta.head_revision,
+            config: meta.config,
+            agent_frames: meta.agent_frames,
+            current_agent_frame_id: meta.current_agent_frame_id,
+            graph,
+            checkpoint_ref: meta.checkpoint_ref,
+            checkpoint,
+            token_ledger: merge_token_ledger_entries(Self::load_usage_deltas_conn(&conn).await),
+        }))
     }
 
     async fn load_node(
         &self,
         node_id: &str,
     ) -> Result<Option<lash_core::SessionNodeRecord>, StoreError> {
-        self.with_read(|conn| {
-            let row: Option<String> = conn
-                .query_row(
-                    "SELECT node_json FROM graph_nodes WHERE node_id = ?1 AND tombstoned = 0",
-                    params![node_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(sqlite_error)?;
-            Ok(row.and_then(|json| serde_json::from_str(&json).ok()))
-        })
+        let conn = self.conn.lock().await;
+        let row = optional_row(
+            &conn,
+            "SELECT node_json FROM graph_nodes WHERE node_id = ?1 AND tombstoned = 0",
+            params![node_id],
+        )
+        .await
+        .map_err(turso_error)?;
+        Ok(row.and_then(|row| {
+            let json = row_string(&row, 0).ok()?;
+            serde_json::from_str(&json).ok()
+        }))
     }
 
     async fn commit_runtime_state(
@@ -70,8 +71,12 @@ impl RuntimePersistence for Store {
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError> {
         let blob_profile = self.options.blob_profile;
-        let result = self.with_write_tx(|tx| {
-            let existing = try_load_session_head_meta_from_conn(tx)?;
+        let conn = self.conn.lock().await;
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(turso_error)?;
+        let result = async {
+            let existing = try_load_session_head_meta_from_conn(&conn).await?;
             if let Some(bound_session_id) = existing.as_ref().map(|meta| meta.session_id.as_str())
                 && bound_session_id != commit.session_id
             {
@@ -87,16 +92,17 @@ impl RuntimePersistence for Store {
                         turn_id: completed.turn_id.clone(),
                     });
                 }
-                let prior: Option<(String, String)> = tx
-                    .query_row(
-                        "SELECT turn_commit_hash, result_json FROM runtime_turn_commits
-                         WHERE session_id = ?1 AND turn_id = ?2",
-                        params![completed.session_id, completed.turn_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(sqlite_error)?;
-                if let Some((turn_commit_hash, result_json)) = prior {
+                let prior = optional_row(
+                    &conn,
+                    "SELECT turn_commit_hash, result_json FROM runtime_turn_commits
+                     WHERE session_id = ?1 AND turn_id = ?2",
+                    params![completed.session_id.as_str(), completed.turn_id.as_str()],
+                )
+                .await
+                .map_err(turso_error)?;
+                if let Some(row) = prior {
+                    let turn_commit_hash = row_string(&row, 0).map_err(turso_error)?;
+                    let result_json = row_string(&row, 1).map_err(turso_error)?;
                     if turn_commit_hash == completed.turn_commit_hash {
                         let result: RuntimeCommitResult =
                             serde_json::from_str(&result_json).map_err(|err| {
@@ -121,14 +127,6 @@ impl RuntimePersistence for Store {
                     actual: actual_revision,
                 });
             }
-            if let Some(completed) = &commit.turn_commit {
-                if completed.session_id != commit.session_id {
-                    return Err(StoreError::RuntimeTurnCommitConflict {
-                        session_id: completed.session_id.clone(),
-                        turn_id: completed.turn_id.clone(),
-                    });
-                }
-            }
             for completed in &commit.completed_queue_claims {
                 if completed.session_id != commit.session_id {
                     return Err(StoreError::QueuedWorkClaimExpired {
@@ -136,32 +134,30 @@ impl RuntimePersistence for Store {
                         claim_id: completed.claim_id.clone(),
                     });
                 }
-                ensure_queued_work_completion_conn(tx, completed)?;
+                ensure_queued_work_completion_conn(&conn, completed).await?;
             }
 
             let stored_checkpoint =
-                Self::put_checkpoint_conn(tx, &commit.checkpoint, blob_profile)
-                    .map_err(sqlite_error)?;
+                Self::put_checkpoint_conn(&conn, &commit.checkpoint, blob_profile)
+                    .await
+                    .map_err(turso_error)?;
 
-            if !commit.usage_deltas.is_empty() {
-                let mut stmt = tx
-                    .prepare(
-                        "INSERT INTO usage_deltas (
-                            source, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    )
-                    .map_err(sqlite_error)?;
-                for entry in &commit.usage_deltas {
-                    stmt.execute(params![
-                        entry.source,
-                        entry.model,
-                        entry.usage.input_tokens,
-                        entry.usage.output_tokens,
-                        entry.usage.cached_input_tokens,
-                        entry.usage.reasoning_tokens,
-                    ])
-                    .map_err(sqlite_error)?;
-                }
+            for entry in &commit.usage_deltas {
+                conn.execute(
+                    "INSERT INTO usage_deltas (
+                        source, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        entry.source.as_str(),
+                        entry.model.as_str(),
+                        entry.usage.input_tokens as i64,
+                        entry.usage.output_tokens as i64,
+                        entry.usage.cached_input_tokens as i64,
+                        entry.usage.reasoning_tokens as i64,
+                    ],
+                )
+                .await
+                .map_err(turso_error)?;
             }
 
             let leaf_node_id = match &commit.graph {
@@ -172,35 +168,39 @@ impl RuntimePersistence for Store {
                 } => {
                     for node in nodes {
                         let node_json = encode_json(node);
-                        tx.execute(
+                        conn.execute(
                             "INSERT INTO graph_nodes (node_id, node_json) VALUES (?1, ?2)",
-                            params![node.node_id, node_json],
+                            params![node.node_id.as_str(), node_json],
                         )
-                        .map_err(sqlite_error)?;
+                        .await
+                        .map_err(turso_error)?;
                     }
                     leaf_node_id.clone()
                 }
                 GraphCommitDelta::ReplaceFull(graph) => {
-                    tx.execute("DELETE FROM graph_nodes", [])
-                        .map_err(sqlite_error)?;
+                    conn.execute("DELETE FROM graph_nodes", ())
+                        .await
+                        .map_err(turso_error)?;
                     for node in &graph.nodes {
                         let node_json = encode_json(node);
-                        tx.execute(
+                        conn.execute(
                             "INSERT INTO graph_nodes (node_id, node_json) VALUES (?1, ?2)",
-                            params![node.node_id, node_json],
+                            params![node.node_id.as_str(), node_json],
                         )
-                        .map_err(sqlite_error)?;
+                        .await
+                        .map_err(turso_error)?;
                     }
                     graph.leaf_node_id.clone()
                 }
             };
-            let graph_node_count: usize = tx
-                .query_row(
-                    "SELECT COUNT(*) FROM graph_nodes WHERE tombstoned = 0",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(sqlite_error)? as usize;
+            let row = required_row(
+                &conn,
+                "SELECT COUNT(*) FROM graph_nodes WHERE tombstoned = 0",
+                (),
+            )
+            .await
+            .map_err(turso_error)?;
+            let graph_node_count = row_i64(&row, 0).map_err(turso_error)? as usize;
             let next_revision = actual_revision + 1;
             let meta = SessionHeadMeta {
                 session_id: commit.session_id.clone(),
@@ -213,46 +213,47 @@ impl RuntimePersistence for Store {
                 graph_node_count,
                 token_ledger: Vec::new(),
             };
-            tx.execute(
+            conn.execute(
                 "INSERT OR REPLACE INTO session_head (singleton, session_id, head_json, head_revision)
                  VALUES (1, ?1, ?2, ?3)",
                 params![
-                    meta.session_id,
+                    meta.session_id.as_str(),
                     encode_json(&meta),
                     meta.head_revision as i64
                 ],
             )
-            .map_err(sqlite_error)?;
+            .await
+            .map_err(turso_error)?;
             for completed in &commit.completed_queue_claims {
                 for batch_id in &completed.batch_ids {
-                    tx.execute(
+                    conn.execute(
                         "DELETE FROM queued_work_batches
                          WHERE session_id = ?1
                            AND batch_id = ?2
                            AND claim_id = ?3
                            AND claim_token = ?4",
                         params![
-                            completed.session_id,
-                            batch_id,
-                            completed.claim_id,
-                            completed.lease_token
+                            completed.session_id.as_str(),
+                            batch_id.as_str(),
+                            completed.claim_id.as_str(),
+                            completed.lease_token.as_str()
                         ],
                     )
-                    .map_err(sqlite_error)?;
+                    .await
+                    .map_err(turso_error)?;
                 }
             }
             if !commit.committed_attachment_ids.is_empty() {
                 let now = current_epoch_ms() as i64;
-                let mut stmt = tx
-                    .prepare(
+                for id in &commit.committed_attachment_ids {
+                    conn.execute(
                         "UPDATE attachment_manifest
                          SET committed_at_ms = COALESCE(committed_at_ms, ?1)
                          WHERE attachment_id = ?2 AND session_id = ?3",
+                        params![now, id.as_str(), commit.session_id.as_str()],
                     )
-                    .map_err(sqlite_error)?;
-                for id in &commit.committed_attachment_ids {
-                    stmt.execute(params![now, id.as_str(), commit.session_id])
-                        .map_err(sqlite_error)?;
+                    .await
+                    .map_err(turso_error)?;
                 }
             }
             let result = RuntimeCommitResult {
@@ -261,25 +262,37 @@ impl RuntimePersistence for Store {
                 manifest: stored_checkpoint.manifest,
             };
             if let Some(completed) = &commit.turn_commit {
-                tx.execute(
+                conn.execute(
                     "INSERT INTO runtime_turn_commits (
                         session_id, turn_id, turn_commit_hash, result_json, committed_at_ms
                      )
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
-                        completed.session_id,
-                        completed.turn_id,
-                        completed.turn_commit_hash,
+                        completed.session_id.as_str(),
+                        completed.turn_id.as_str(),
+                        completed.turn_commit_hash.as_str(),
                         encode_json(&result),
                         current_epoch_ms() as i64
                     ],
                 )
-                .map_err(sqlite_error)?;
+                .await
+                .map_err(turso_error)?;
             }
             Ok(result)
-        })?;
-        self.maybe_auto_gc();
-        Ok(result)
+        }
+        .await;
+        match result {
+            Ok(result) => {
+                conn.execute("COMMIT", ()).await.map_err(turso_error)?;
+                drop(conn);
+                self.maybe_auto_gc().await;
+                Ok(result)
+            }
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
     }
 
     async fn enqueue_queued_work(
@@ -287,21 +300,27 @@ impl RuntimePersistence for Store {
         batch: QueuedWorkBatchDraft,
     ) -> Result<QueuedWorkBatch, StoreError> {
         let nonce = self.commit_count.fetch_add(1, AtomicOrdering::Relaxed);
-        self.with_write_tx(|tx| {
+        let conn = self.conn.lock().await;
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(turso_error)?;
+        let result = async {
             if let Some(source_key) = batch.source_key.as_deref() {
-                let existing_id: Option<String> = tx
-                    .query_row(
-                        "SELECT batch_id
-                         FROM queued_work_batches
-                         WHERE session_id = ?1 AND source_key = ?2",
-                        params![batch.session_id, source_key],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(sqlite_error)?;
+                let existing_id = optional_row(
+                    &conn,
+                    "SELECT batch_id
+                     FROM queued_work_batches
+                     WHERE session_id = ?1 AND source_key = ?2",
+                    params![batch.session_id.as_str(), source_key],
+                )
+                .await
+                .map_err(turso_error)?
+                .map(|row| row_string(&row, 0).map_err(turso_error))
+                .transpose()?;
                 if let Some(batch_id) = existing_id {
-                    let existing =
-                        load_queued_batch_by_id_conn(tx, &batch_id)?.ok_or_else(|| {
+                    let existing = load_queued_batch_by_id_conn(&conn, &batch_id)
+                        .await?
+                        .ok_or_else(|| {
                             StoreError::Backend("queued work source row disappeared".to_string())
                         })?;
                     return Ok(existing);
@@ -314,15 +333,15 @@ impl RuntimePersistence for Store {
                     format!("{}:{:?}:{now}:{nonce}", batch.session_id, batch.source_key).as_bytes()
                 )
             );
-            tx.execute(
+            conn.execute(
                 "INSERT INTO queued_work_batches (
                     batch_id, session_id, source_key, delivery_policy, slot_policy,
                     merge_key_json, available_at_ms, enqueued_at_ms
                  )
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
-                    &batch_id,
-                    &batch.session_id,
+                    batch_id.as_str(),
+                    batch.session_id.as_str(),
                     batch.source_key.as_deref(),
                     batch.delivery_policy.as_str(),
                     batch.slot_policy.as_str(),
@@ -331,19 +350,38 @@ impl RuntimePersistence for Store {
                     now as i64,
                 ],
             )
-            .map_err(sqlite_error)?;
+            .await
+            .map_err(turso_error)?;
             for (index, payload) in batch.payloads.iter().enumerate() {
                 let item_id = format!("{batch_id}:item:{index}");
-                tx.execute(
+                conn.execute(
                     "INSERT INTO queued_work_items (batch_id, item_index, item_id, payload_json)
                      VALUES (?1, ?2, ?3, ?4)",
-                    params![&batch_id, index as i64, item_id, encode_json(payload)],
+                    params![
+                        batch_id.as_str(),
+                        index as i64,
+                        item_id,
+                        encode_json(payload)
+                    ],
                 )
-                .map_err(sqlite_error)?;
+                .await
+                .map_err(turso_error)?;
             }
-            load_queued_batch_by_id_conn(tx, &batch_id)?
+            load_queued_batch_by_id_conn(&conn, &batch_id)
+                .await?
                 .ok_or_else(|| StoreError::Backend("queued work insert disappeared".to_string()))
-        })
+        }
+        .await;
+        match result {
+            Ok(batch) => {
+                conn.execute("COMMIT", ()).await.map_err(turso_error)?;
+                Ok(batch)
+            }
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
     }
 
     async fn claim_ready_queued_work(
@@ -357,34 +395,34 @@ impl RuntimePersistence for Store {
         if max_batches == 0 {
             return Ok(None);
         }
-        self.with_write_tx_flow(|tx| {
+        let conn = self.conn.lock().await;
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(turso_error)?;
+        let result = async {
             let now = current_epoch_ms();
-            let candidate_rows = {
-                let mut stmt = tx
-                    .prepare(
-                        "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
-                                slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                                claim_fencing_token
-                         FROM queued_work_batches
-                         WHERE session_id = ?1
-                           AND available_at_ms <= ?2
-                           AND (claim_token IS NULL OR claim_expires_at_ms <= ?2)
-                         ORDER BY enqueue_seq ASC
-                         LIMIT ?3",
-                    )
-                    .map_err(sqlite_error)?;
-                let rows = stmt
-                    .query_map(
-                        params![
-                            session_id,
-                            now as i64,
-                            (max_batches as i64).saturating_add(32)
-                        ],
-                        queued_batch_row_from_sql,
-                    )
-                    .map_err(sqlite_error)?;
-                rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
-            };
+            let candidate_rows = collect_rows(
+                &conn,
+                "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                        slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                        claim_fencing_token
+                 FROM queued_work_batches
+                 WHERE session_id = ?1
+                   AND available_at_ms <= ?2
+                   AND (claim_token IS NULL OR claim_expires_at_ms <= ?2)
+                 ORDER BY enqueue_seq ASC
+                 LIMIT ?3",
+                params![
+                    session_id,
+                    now as i64,
+                    (max_batches as i64).saturating_add(32)
+                ],
+            )
+            .await
+            .map_err(turso_error)?
+            .into_iter()
+            .map(|row| queued_batch_row_from_sql(&row).map_err(turso_error))
+            .collect::<Result<Vec<_>, _>>()?;
             let Some(first_row) = candidate_rows.first() else {
                 return Ok(TxOutcome::Commit(None));
             };
@@ -431,14 +469,7 @@ impl RuntimePersistence for Store {
             );
             let expires_at = now.saturating_add(lease_ttl_ms);
             for row in &selected {
-                // Under `BEGIN IMMEDIATE` this connection already holds the
-                // write lock, but the row could still have been claimed by an
-                // earlier committed writer (its `claim_token` set and not yet
-                // expired). The `WHERE` clause filters those out, so a 0-row
-                // update means we lost the race for this batch: treat the whole
-                // claim as not-won rather than returning a claim that doesn't
-                // actually own the row.
-                let claimed = tx
+                let claimed = conn
                     .execute(
                         "UPDATE queued_work_batches
                          SET claim_id = ?3,
@@ -452,25 +483,23 @@ impl RuntimePersistence for Store {
                            AND (claim_token IS NULL OR claim_expires_at_ms <= ?6)",
                         params![
                             session_id,
-                            row.batch_id,
-                            claim_id,
+                            row.batch_id.as_str(),
+                            claim_id.as_str(),
                             owner_id,
-                            lease_token,
+                            lease_token.as_str(),
                             now as i64,
                             expires_at as i64
                         ],
                     )
-                    .map_err(sqlite_error)?;
+                    .await
+                    .map_err(turso_error)?;
                 if claimed == 0 {
-                    // Lost the race for this batch. Roll back any sibling rows
-                    // we already claimed in this transaction so we never return
-                    // a half-owned claim.
                     return Ok(TxOutcome::Rollback(None));
                 }
             }
             let mut batches = Vec::new();
             for row in selected {
-                batches.push(queued_work_batch_from_conn(tx, row)?);
+                batches.push(queued_work_batch_from_conn(&conn, row).await?);
             }
             Ok(TxOutcome::Commit(Some(QueuedWorkClaim {
                 session_id: session_id.to_string(),
@@ -482,7 +511,22 @@ impl RuntimePersistence for Store {
                 expires_at_epoch_ms: expires_at,
                 batches,
             })))
-        })
+        }
+        .await;
+        match result {
+            Ok(TxOutcome::Commit(value)) => {
+                conn.execute("COMMIT", ()).await.map_err(turso_error)?;
+                Ok(value)
+            }
+            Ok(TxOutcome::Rollback(value)) => {
+                conn.execute("ROLLBACK", ()).await.map_err(turso_error)?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
     }
 
     async fn renew_queued_work_claim(
@@ -490,7 +534,7 @@ impl RuntimePersistence for Store {
         claim: &QueuedWorkClaim,
         lease_ttl_ms: u64,
     ) -> Result<QueuedWorkClaim, StoreError> {
-        let conn = lock_conn(&self.conn);
+        let conn = self.conn.lock().await;
         let now = current_epoch_ms();
         let expires_at = now.saturating_add(lease_ttl_ms);
         let changed = conn
@@ -499,14 +543,15 @@ impl RuntimePersistence for Store {
                  SET claim_expires_at_ms = ?4
                  WHERE session_id = ?1 AND claim_id = ?2 AND claim_token = ?3",
                 params![
-                    claim.session_id,
-                    claim.claim_id,
-                    claim.lease_token,
+                    claim.session_id.as_str(),
+                    claim.claim_id.as_str(),
+                    claim.lease_token.as_str(),
                     expires_at as i64
                 ],
             )
-            .map_err(sqlite_error)?;
-        if changed != claim.batches.len() {
+            .await
+            .map_err(turso_error)?;
+        if changed as usize != claim.batches.len() {
             return Err(StoreError::QueuedWorkClaimExpired {
                 session_id: claim.session_id.clone(),
                 claim_id: claim.claim_id.clone(),
@@ -519,7 +564,7 @@ impl RuntimePersistence for Store {
     }
 
     async fn abandon_queued_work_claim(&self, claim: &QueuedWorkClaim) -> Result<(), StoreError> {
-        let conn = lock_conn(&self.conn);
+        let conn = self.conn.lock().await;
         conn.execute(
             "UPDATE queued_work_batches
              SET claim_id = NULL,
@@ -528,88 +573,94 @@ impl RuntimePersistence for Store {
                  claim_claimed_at_ms = 0,
                  claim_expires_at_ms = 0
              WHERE session_id = ?1 AND claim_id = ?2 AND claim_token = ?3",
-            params![claim.session_id, claim.claim_id, claim.lease_token],
+            params![
+                claim.session_id.as_str(),
+                claim.claim_id.as_str(),
+                claim.lease_token.as_str()
+            ],
         )
-        .map_err(sqlite_error)?;
+        .await
+        .map_err(turso_error)?;
         Ok(())
     }
 
     async fn list_queued_work(&self, session_id: &str) -> Result<Vec<QueuedWorkBatch>, StoreError> {
-        self.with_read(|conn| {
-            let rows = {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
-                                slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                                claim_fencing_token
-                         FROM queued_work_batches
-                         WHERE session_id = ?1
-                         ORDER BY enqueue_seq ASC",
-                    )
-                    .map_err(sqlite_error)?;
-                let rows = stmt
-                    .query_map(params![session_id], queued_batch_row_from_sql)
-                    .map_err(sqlite_error)?;
-                rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)?
-            };
-            rows.into_iter()
-                .map(|row| queued_work_batch_from_conn(conn, row))
-                .collect()
-        })
+        let conn = self.conn.lock().await;
+        let rows = collect_rows(
+            &conn,
+            "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                    slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                    claim_fencing_token
+             FROM queued_work_batches
+             WHERE session_id = ?1
+             ORDER BY enqueue_seq ASC",
+            params![session_id],
+        )
+        .await
+        .map_err(turso_error)?
+        .into_iter()
+        .map(|row| queued_batch_row_from_sql(&row).map_err(turso_error))
+        .collect::<Result<Vec<_>, _>>()?;
+        let mut batches = Vec::new();
+        for row in rows {
+            batches.push(queued_work_batch_from_conn(&conn, row).await?);
+        }
+        Ok(batches)
     }
 
     async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
-        let conn = lock_conn(&self.conn);
-        let relation_json = serde_json::to_string(&meta.relation)
-            .map_err(|err| StoreError::Backend(err.to_string()))?;
-        conn.execute(
-            "INSERT OR REPLACE INTO session_meta
-             (singleton, session_id, session_name, created_at, model, cwd, relation_json)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                meta.session_id,
-                meta.session_name,
-                meta.created_at,
-                meta.model,
-                meta.cwd,
-                relation_json
-            ],
-        )
-        .map_err(sqlite_error)?;
+        Store::save_session_meta(self, meta).await;
         Ok(())
     }
 
     async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError> {
-        self.with_read(|conn| Ok(load_session_meta_from_conn(conn)))
+        Ok(Store::load_session_meta(self).await)
     }
 
     async fn tombstone_nodes(&self, ids: &[String]) -> Result<(), StoreError> {
         if ids.is_empty() {
             return Ok(());
         }
-        self.with_write_tx(|tx| {
+        let conn = self.conn.lock().await;
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(turso_error)?;
+        let result = async {
             for id in ids {
-                tx.execute(
+                conn.execute(
                     "UPDATE graph_nodes SET tombstoned = 1 WHERE node_id = ?1",
-                    params![id],
+                    params![id.as_str()],
                 )
-                .map_err(sqlite_error)?;
+                .await
+                .map_err(turso_error)?;
             }
-            Ok(())
-        })
+            Ok::<(), StoreError>(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", ()).await.map_err(turso_error)?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
     }
 
     async fn vacuum(&self) -> Result<VacuumReport, StoreError> {
-        let conn = lock_conn(&self.conn);
+        let conn = self.conn.lock().await;
         let removed = conn
-            .execute("DELETE FROM graph_nodes WHERE tombstoned = 1", [])
-            .map_err(sqlite_error)?;
+            .execute("DELETE FROM graph_nodes WHERE tombstoned = 1", ())
+            .await
+            .map_err(turso_error)?;
         Ok(VacuumReport {
-            removed_node_count: removed,
+            removed_node_count: removed as usize,
         })
     }
 
     async fn gc_unreachable(&self) -> Result<GcReport, StoreError> {
-        Ok(Self::gc_unreachable(self))
+        Ok(Store::gc_unreachable(self).await)
     }
 }

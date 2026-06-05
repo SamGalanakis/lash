@@ -12,6 +12,22 @@
 use super::*;
 use crate::testing::conformance::{RuntimeRebuildBackend, runtime_rebuild_and_worker_recovery};
 
+fn sync_await<T, F>(future: F) -> T
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(future)
+    })
+    .join()
+    .expect("runtime thread")
+}
+
 fn fresh_sqlite_session_backend(
     root: &std::path::Path,
 ) -> (
@@ -26,13 +42,15 @@ fn fresh_sqlite_session_backend(
         SCENARIO.fetch_add(1, Ordering::SeqCst)
     ));
     std::fs::create_dir_all(&dir).expect("create scenario dir");
-    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+    let store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
         dir.join("sessions"),
     )) as Arc<dyn lash_core::SessionStoreFactory>;
-    let registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&dir.join("processes.db"))
-            .expect("open process registry"),
-    ) as Arc<dyn lash_core::ProcessRegistry>;
+    let process_db = dir.join("processes.db");
+    let registry = Arc::new(sync_await(async move {
+        lash_turso_store::TursoProcessRegistry::open(&process_db)
+            .await
+            .expect("open process registry")
+    })) as Arc<dyn lash_core::ProcessRegistry>;
     (dir, store_factory, registry)
 }
 
@@ -77,10 +95,12 @@ fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
             let attachment = Arc::new(crate::persistence::FileAttachmentStore::new(
                 dir.join("attachments"),
             )) as Arc<dyn lash_core::AttachmentStore>;
-            let artifact = Arc::new(
-                lash_sqlite_store::Store::open(&dir.join("artifacts.db"))
-                    .expect("open durable artifact store"),
-            ) as Arc<dyn lash_core::LashlangArtifactStore>;
+            let artifact_db = dir.join("artifacts.db");
+            let artifact = Arc::new(sync_await(async move {
+                lash_turso_store::Store::open(&artifact_db)
+                    .await
+                    .expect("open durable artifact store")
+            })) as Arc<dyn lash_core::LashlangArtifactStore>;
             RuntimeRebuildBackend {
                 process_registry: registry,
                 build_core: Box::new(move |builder| {

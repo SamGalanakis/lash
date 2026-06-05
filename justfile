@@ -117,7 +117,7 @@ agent-workbench-restate-e2e:
 # `cargo metadata` then frozen here; edit by hand if a new internal
 # dep edge appears. Single space-separated line so bash for-loops
 # iterate cleanly when {{publish-crates}} is interpolated.
-publish-crates := "lash-provider-auth lash-sansio lash-trace lashlang lash-core lash-openai-schema lash-rlm-types lash-llm-tools lash-llm-transport lash-protocol-rlm lash-protocol-standard lash-plugin-mcp lash-plugin-observational-memory lash-plugin-prompt-context lash-plugin-rolling-history lash-plugin-tool-discovery lash-sqlite-store lash-tool-support lash-provider-anthropic lash-provider-codex lash-provider-google lash-provider-openai lash-runtime lash-subagents lash-tool-apply-patch lash-tool-files lash-tool-search lash-tool-shell lash-tool-web lash-plugin-plan-mode lash-providers-builtin lash-standard-plugins"
+publish-crates := "lash-provider-auth lash-sansio lash-trace lashlang lash-core lash-openai-schema lash-rlm-types lash-llm-tools lash-llm-transport lash-protocol-rlm lash-protocol-standard lash-plugin-mcp lash-plugin-observational-memory lash-plugin-prompt-context lash-plugin-rolling-history lash-plugin-tool-discovery lash-turso-store lash-tool-support lash-provider-anthropic lash-provider-codex lash-provider-google lash-provider-openai lash-runtime lash-subagents lash-tool-apply-patch lash-tool-files lash-tool-search lash-tool-shell lash-tool-web lash-plugin-plan-mode lash-providers-builtin lash-standard-plugins"
 
 # Show the publish order and current workspace version.
 publish-order:

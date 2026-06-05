@@ -10,6 +10,7 @@
 //! * `gc_unreachable` never panics on a corrupt rooted manifest and keeps
 //!   every blob in that conservative case.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use lash_core::runtime::{QueuedWorkBatchDraft, QueuedWorkClaimBoundary, QueuedWorkPayload};
@@ -17,7 +18,7 @@ use lash_core::{
     DeliveryPolicy, PluginSessionSnapshot, RuntimeCommit, RuntimePersistence, RuntimeSessionState,
     SlotPolicy, StoreError, ToolState, TurnInput,
 };
-use lash_sqlite_store::Store;
+use lash_turso_store::Store;
 
 fn unique_db_path(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -30,6 +31,14 @@ fn unique_db_path(name: &str) -> std::path::PathBuf {
     ));
     std::fs::create_dir_all(&dir).expect("temp dir");
     dir.join("session.db")
+}
+
+fn block_on<T>(future: impl Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(future)
 }
 
 fn commit_at(session_id: &str, expected_head_revision: Option<u64>) -> RuntimeCommit {
@@ -56,23 +65,20 @@ fn commit_at(session_id: &str, expected_head_revision: Option<u64>) -> RuntimeCo
 #[test]
 fn head_revision_cas_holds_across_two_connections() {
     let path = unique_db_path("cas");
-    let store_a = Store::open(&path).expect("open store a");
-    let store_b = Store::open(&path).expect("open store b");
 
     let barrier = Arc::new(std::sync::Barrier::new(2));
-    let run = |store: Store, barrier: Arc<std::sync::Barrier>| {
+    let run = |path: std::path::PathBuf, barrier: Arc<std::sync::Barrier>| {
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime");
-            barrier.wait();
-            rt.block_on(store.commit_runtime_state(commit_at("root", Some(0))))
+            block_on(async move {
+                let store = Store::open(&path).await.expect("open store");
+                barrier.wait();
+                store.commit_runtime_state(commit_at("root", Some(0))).await
+            })
         })
     };
 
-    let handle_a = run(store_a, Arc::clone(&barrier));
-    let handle_b = run(store_b, Arc::clone(&barrier));
+    let handle_a = run(path.clone(), Arc::clone(&barrier));
+    let handle_b = run(path.clone(), Arc::clone(&barrier));
     let result_a = handle_a.join().expect("thread a");
     let result_b = handle_b.join().expect("thread b");
 
@@ -95,12 +101,8 @@ fn head_revision_cas_holds_across_two_connections() {
     );
 
     // The persisted head must reflect exactly one applied commit.
-    let store = Store::open(&path).expect("reopen store");
-    let read = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime")
-        .block_on(store.load_session(lash_core::SessionReadScope::FullGraph))
+    let store = block_on(Store::open(&path)).expect("reopen store");
+    let read = block_on(store.load_session(lash_core::SessionReadScope::FullGraph))
         .expect("load")
         .expect("session present");
     assert_eq!(read.head_revision, 1);
@@ -113,11 +115,13 @@ fn head_revision_cas_holds_across_two_connections() {
 // the commit while doing so.
 #[tokio::test]
 async fn gc_keeps_live_committed_checkpoint_blobs() {
-    let store = Store::memory().expect("store");
-    let orphan = store.put_artifact_blob(
-        lash_sqlite_store::BlobArtifactDescriptor::plugin_session_snapshot(),
-        b"orphan-blob",
-    );
+    let store = Store::memory().await.expect("store");
+    let orphan = store
+        .put_artifact_blob(
+            lash_turso_store::BlobArtifactDescriptor::plugin_session_snapshot(),
+            b"orphan-blob",
+        )
+        .await;
 
     let state = RuntimeSessionState {
         session_id: "root".to_string(),
@@ -137,24 +141,25 @@ async fn gc_keeps_live_committed_checkpoint_blobs() {
         .await
         .expect("commit");
 
-    let report = store.gc_unreachable();
+    let report = store.gc_unreachable().await;
     assert!(
         report.deleted_blob_count >= 1,
         "the orphan blob should be collected, report={report:?}"
     );
     assert!(
-        store.get_blob(&orphan).is_none(),
+        store.get_blob(&orphan).await.is_none(),
         "orphan blob must be collected"
     );
 
     // The live committed checkpoint manifest and every snapshot it references
     // must survive GC.
     assert!(
-        store.get_blob(&result.checkpoint_ref).is_some(),
+        store.get_blob(&result.checkpoint_ref).await.is_some(),
         "live checkpoint manifest must survive gc"
     );
     let manifest = store
         .get_checkpoint(&result.checkpoint_ref)
+        .await
         .expect("checkpoint manifest");
     for blob_ref in [
         manifest.tool_state_ref.as_ref(),
@@ -165,7 +170,7 @@ async fn gc_keeps_live_committed_checkpoint_blobs() {
     .flatten()
     {
         assert!(
-            store.get_blob(blob_ref).is_some(),
+            store.get_blob(blob_ref).await.is_some(),
             "live checkpoint child blob {blob_ref} must survive gc"
         );
     }
@@ -186,7 +191,7 @@ fn exclusive_draft(session_id: &str, text: &str) -> QueuedWorkBatchDraft {
 // get `None`.
 #[tokio::test]
 async fn second_claim_on_held_batch_is_not_won() {
-    let store = Store::memory().expect("store");
+    let store = Store::memory().await.expect("store");
     store
         .enqueue_queued_work(exclusive_draft("root", "work"))
         .await
@@ -223,36 +228,34 @@ async fn second_claim_on_held_batch_is_not_won() {
 #[test]
 fn concurrent_claims_never_double_own_a_batch() {
     let path = unique_db_path("claim-race");
-    let seed = Store::open(&path).expect("seed store");
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime")
-        .block_on(seed.enqueue_queued_work(exclusive_draft("root", "work")))
-        .expect("enqueue");
+    block_on(async {
+        let seed = Store::open(&path).await.expect("seed store");
+        seed.enqueue_queued_work(exclusive_draft("root", "work"))
+            .await
+            .expect("enqueue");
+    });
 
     let barrier = Arc::new(std::sync::Barrier::new(2));
-    let run = |owner: &'static str, store: Store, barrier: Arc<std::sync::Barrier>| {
+    let run = |owner: &'static str, path: std::path::PathBuf, barrier: Arc<std::sync::Barrier>| {
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime");
-            barrier.wait();
-            rt.block_on(store.claim_ready_queued_work(
-                "root",
-                owner,
-                QueuedWorkClaimBoundary::Idle,
-                60_000,
-                10,
-            ))
+            block_on(async move {
+                let store = Store::open(&path).await.expect("open store");
+                barrier.wait();
+                store
+                    .claim_ready_queued_work(
+                        "root",
+                        owner,
+                        QueuedWorkClaimBoundary::Idle,
+                        60_000,
+                        10,
+                    )
+                    .await
+            })
         })
     };
 
-    let store_a = Store::open(&path).expect("open store a");
-    let store_b = Store::open(&path).expect("open store b");
-    let handle_a = run("owner-a", store_a, Arc::clone(&barrier));
-    let handle_b = run("owner-b", store_b, Arc::clone(&barrier));
+    let handle_a = run("owner-a", path.clone(), Arc::clone(&barrier));
+    let handle_b = run("owner-b", path.clone(), Arc::clone(&barrier));
     let result_a = handle_a.join().expect("thread a");
     let result_b = handle_b.join().expect("thread b");
 
@@ -272,30 +275,31 @@ fn concurrent_claims_never_double_own_a_batch() {
     if let Some(claim) = winners.first() {
         // A successful claim must really own the batch: renewing it must update
         // exactly the claimed batch.
-        let verify = Store::open(&path).expect("verify store");
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime")
-            .block_on(verify.renew_queued_work_claim(claim, 60_000))
+        let verify = block_on(Store::open(&path)).expect("verify store");
+        block_on(verify.renew_queued_work_claim(claim, 60_000))
             .expect("the winning claim must actually own its batch");
     }
 }
 
 // Finding 7: opening a database stamped with an unsupported schema version must
 // report the actual expected and found versions, not a stale "version 1 only".
-#[test]
-fn unsupported_schema_error_reports_real_versions() {
+#[tokio::test]
+async fn unsupported_schema_error_reports_real_versions() {
     let path = unique_db_path("schema");
     {
-        let conn = rusqlite::Connection::open(&path).expect("open raw");
+        let db = turso::Builder::new_local(&path.to_string_lossy())
+            .build()
+            .await
+            .expect("open raw");
+        let conn = db.connect().expect("connect raw");
         // Create a user object and stamp a bogus, unsupported user_version so
         // the store's open path takes the reject branch.
         conn.execute_batch("CREATE TABLE legacy (id INTEGER); PRAGMA user_version = 99;")
+            .await
             .expect("seed legacy schema");
     }
 
-    let message = match Store::open(&path) {
+    let message = match Store::open(&path).await {
         Ok(_) => panic!("opening an unsupported schema must fail"),
         Err(err) => err.to_string(),
     };
@@ -324,7 +328,7 @@ fn concurrent_first_open_never_observes_version_zero_schema() {
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 barrier.wait();
-                Store::open(&path)
+                block_on(Store::open(&path))
                     .map(|_| ())
                     .map_err(|err| err.to_string())
             })
@@ -337,9 +341,25 @@ fn concurrent_first_open_never_observes_version_zero_schema() {
             .expect("schema-open worker")
             .expect("concurrent first open should succeed");
     }
-    let conn = rusqlite::Connection::open(&path).expect("open initialized db");
-    let user_version: i32 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .expect("read user_version");
+    let user_version = block_on(async {
+        let db = turso::Builder::new_local(&path.to_string_lossy())
+            .build()
+            .await
+            .expect("open initialized db");
+        let conn = db.connect().expect("connect initialized db");
+        let mut rows = conn
+            .query("PRAGMA user_version", ())
+            .await
+            .expect("read user_version");
+        let row = rows
+            .next()
+            .await
+            .expect("read user_version row")
+            .expect("row");
+        match row.get_value(0).expect("user_version value") {
+            turso::Value::Integer(value) => value as i32,
+            other => panic!("expected integer user_version, got {other:?}"),
+        }
+    });
     assert_eq!(user_version, 3);
 }

@@ -32,9 +32,8 @@ impl ExecutionHost for TestHost {
                     .first()
                     .and_then(Value::as_record)
                     .map_or(&empty, |record| record);
-                self.call_tool(&operation.operation, args)
-                    .await
-                    .map(AbilityResult::Value)
+                let name = test_host_operation(&operation)?;
+                self.call_tool(&name, args).await.map(AbilityResult::Value)
             }
             AbilityOp::StartProcess(start) => self
                 .call_tool(&start.process_name, &start.args)
@@ -101,6 +100,28 @@ impl TestHost {
             }
             _ => Err(ExecutionHostError::new(format!("unknown tool: {name}"))),
         }
+    }
+}
+
+fn test_host_operation(
+    operation: &lashlang::ResourceOperation,
+) -> Result<String, ExecutionHostError> {
+    match &operation.receiver {
+        Value::Resource(receiver) => test_surface()
+            .resources
+            .resolve_module_operation(
+                &receiver.resource_type,
+                &receiver.alias,
+                &operation.operation,
+            )
+            .map(|binding| binding.host_operation.clone())
+            .ok_or_else(|| {
+                ExecutionHostError::new(format!(
+                    "module `{}` of type `{}` does not expose operation `{}`",
+                    receiver.alias, receiver.resource_type, operation.operation
+                ))
+            }),
+        _ => Ok(operation.operation.clone()),
     }
 }
 

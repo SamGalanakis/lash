@@ -14,6 +14,7 @@ keywords = ["lash", "lashlang", "agent", "codeact", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
+async-trait = { workspace = true }
 compact_str = { version = "0.9.0", features = ["serde"] }
 futures-executor = "0.3"
 rustc-hash = "2"

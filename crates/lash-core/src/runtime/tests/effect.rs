@@ -172,6 +172,7 @@ impl RuntimeEffectController for RecordingEffectController {
                         duration_ms: 0,
                         replay: call.replay,
                     },
+                    host_events: Vec::new(),
                 })
             }
             RuntimeEffectCommand::Process { .. } => Err(RuntimeEffectControllerError::new(
@@ -300,23 +301,24 @@ struct DurableInMemoryArtifactStore {
     inner: lashlang::InMemoryLashlangArtifactStore,
 }
 
+#[async_trait::async_trait]
 impl lashlang::LashlangArtifactStore for DurableInMemoryArtifactStore {
     fn durability_tier(&self) -> crate::DurabilityTier {
         crate::DurabilityTier::Durable
     }
 
-    fn put_module_artifact(
+    async fn put_module_artifact(
         &self,
         artifact: &lashlang::ModuleArtifact,
     ) -> Result<(), lashlang::ArtifactStoreError> {
-        self.inner.put_module_artifact(artifact)
+        self.inner.put_module_artifact(artifact).await
     }
 
-    fn get_module_artifact(
+    async fn get_module_artifact(
         &self,
         module_ref: &lashlang::ModuleRef,
     ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
-        self.inner.get_module_artifact(module_ref)
+        self.inner.get_module_artifact(module_ref).await
     }
 }
 
@@ -875,6 +877,189 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
     assert!(scoped_recorder.records().iter().any(|record| {
         record.kind == RuntimeEffectKind::ToolCall && record.replay_key.contains("direct-call-1")
     }));
+}
+
+#[tokio::test]
+async fn tool_emitted_host_event_is_serialized_and_appended_to_final_turn_commit() {
+    #[derive(Clone, Default)]
+    struct CapturingToolReplayController {
+        llm_calls: Arc<Mutex<usize>>,
+        tool_outcomes: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl CapturingToolReplayController {
+        fn tool_outcomes(&self) -> Vec<serde_json::Value> {
+            self.tool_outcomes.lock().expect("tool outcomes").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeEffectController for CapturingToolReplayController {
+        async fn execute_effect(
+            &self,
+            envelope: RuntimeEffectEnvelope,
+            local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+            if matches!(&envelope.command, RuntimeEffectCommand::ToolCall { .. }) {
+                let outcome = local_executor.execute(envelope).await?;
+                self.tool_outcomes
+                    .lock()
+                    .expect("tool outcomes")
+                    .push(serde_json::to_value(&outcome).expect("serialize tool outcome"));
+                return Ok(outcome);
+            }
+
+            match envelope.command {
+                RuntimeEffectCommand::LlmCall { .. } => {
+                    let mut llm_calls = self.llm_calls.lock().expect("llm calls");
+                    *llm_calls += 1;
+                    let parts = if *llm_calls == 1 {
+                        vec![LlmOutputPart::ToolCall {
+                            call_id: "host-event-call".to_string(),
+                            tool_name: "host_event_tool".to_string(),
+                            input_json: serde_json::json!({}).to_string(),
+                            replay: None,
+                        }]
+                    } else {
+                        vec![LlmOutputPart::Text {
+                            text: "finished".to_string(),
+                            response_meta: None,
+                        }]
+                    };
+                    Ok(RuntimeEffectOutcome::LlmCall {
+                        result: Ok(LlmResponse {
+                            full_text: if *llm_calls == 1 {
+                                String::new()
+                            } else {
+                                "finished".to_string()
+                            },
+                            parts,
+                            usage: LlmUsage {
+                                input_tokens: 1,
+                                output_tokens: 1,
+                                cached_input_tokens: 0,
+                                reasoning_tokens: 0,
+                            },
+                            ..LlmResponse::default()
+                        }),
+                        text_streamed: false,
+                    })
+                }
+                RuntimeEffectCommand::Checkpoint { .. } => Ok(RuntimeEffectOutcome::Checkpoint {
+                    result: Ok(crate::CheckpointDelivery::default()),
+                }),
+                other => Err(RuntimeEffectControllerError::new(
+                    "unexpected_effect",
+                    format!("unexpected effect {}", other.kind().as_str()),
+                )),
+            }
+        }
+    }
+
+    struct HostEventTool;
+
+    fn host_event_tool_definition() -> crate::ToolDefinition {
+        crate::ToolDefinition::raw(
+            "tool:host_event_tool",
+            "host_event_tool",
+            "Emit a test host event.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ToolProvider for HostEventTool {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            vec![host_event_tool_definition().manifest()]
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            (name == "host_event_tool").then(|| Arc::new(host_event_tool_definition().contract()))
+        }
+
+        async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+            call.context
+                .host_events()
+                .emit(
+                    "Button",
+                    "ui.button",
+                    "pressed",
+                    serde_json::json!({ "pressed": true }),
+                )
+                .await
+                .expect("emit tool host event");
+            crate::ToolResult::ok(serde_json::json!({ "emitted": true }))
+        }
+    }
+
+    let controller = CapturingToolReplayController::default();
+    let mut config = runtime_host_config_with_inline_controller(Arc::new(controller.clone()));
+    config.providers.provider_resolver = Arc::new(crate::SingleProviderResolver::new(
+        mock_provider(Vec::new()).into_handle(),
+    ));
+    let host_event = crate::HostEvent::new(
+        "Button",
+        "ui.button",
+        "pressed",
+        lashlang::NamedDataType::object("ui.button.Pressed", Vec::new()).expect("event type"),
+    );
+    let mut runtime = runtime_with_plugins_and_tools_and_host(
+        vec![Arc::new(StaticPluginFactory::new(
+            "button-host-events",
+            crate::PluginSpec::new().with_host_event(host_event),
+        ))],
+        Arc::new(HostEventTool),
+        mock_provider(Vec::new()),
+        EmbeddedRuntimeHost::new(config),
+    )
+    .await;
+
+    let turn = runtime
+        .stream_turn(
+            TurnInput::text("emit host event from tool"),
+            TurnOptions::new(CancellationToken::new()).with_events(&NoopEventSink),
+        )
+        .await
+        .expect("turn");
+
+    assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
+    let tool_outcomes = controller.tool_outcomes();
+    assert_eq!(tool_outcomes.len(), 1);
+    assert_eq!(tool_outcomes[0]["type"], "tool_call");
+    assert_eq!(
+        tool_outcomes[0]["host_events"][0]["source_type"],
+        serde_json::json!("ui.button.pressed")
+    );
+    assert_eq!(
+        tool_outcomes[0]["host_events"][0]["payload"],
+        serde_json::json!({ "pressed": true })
+    );
+
+    let host_event_nodes = turn
+        .state
+        .session_graph
+        .active_path_nodes()
+        .into_iter()
+        .filter_map(|node| match &node.payload {
+            crate::SessionNodePayload::Plugin { plugin_type, body }
+                if plugin_type == "lash.host_event" =>
+            {
+                Some(body.as_ref().clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(host_event_nodes.len(), 1);
+    assert_eq!(host_event_nodes[0]["source_type"], "ui.button.pressed");
+    assert_eq!(
+        host_event_nodes[0]["payload"],
+        serde_json::json!({ "pressed": true })
+    );
 }
 
 #[tokio::test]

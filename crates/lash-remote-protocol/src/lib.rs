@@ -8,6 +8,17 @@ pub const REMOTE_PROTOCOL_VERSION: u32 = 1;
 pub type RemoteLlmRequest = lash_sansio::llm::types::LlmRequest;
 pub type RemoteLlmResponse = lash_sansio::llm::types::LlmResponse;
 
+pub fn ensure_protocol_version(actual: u32) -> Result<(), RemoteProtocolError> {
+    if actual == REMOTE_PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(RemoteProtocolError::UnsupportedProtocolVersion {
+            actual,
+            expected: REMOTE_PROTOCOL_VERSION,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteProtocolTurnOptions {
     #[serde(default = "empty_protocol_turn_payload")]
@@ -41,6 +52,7 @@ impl RemoteProtocolTurnOptions {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteTurnInput {
+    pub protocol_version: u32,
     #[serde(default)]
     pub items: Vec<RemoteInputItem>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -57,12 +69,17 @@ pub struct RemoteTurnInput {
 impl RemoteTurnInput {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
             items: vec![RemoteInputItem::Text { text: text.into() }],
             image_blobs_base64: HashMap::new(),
             protocol_turn_options: None,
             trace_turn_id: None,
             prompt_layer: None,
         }
+    }
+
+    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version)
     }
 }
 
@@ -75,6 +92,7 @@ pub enum RemoteInputItem {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoteToolGrant {
+    pub protocol_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub name: String,
@@ -118,6 +136,7 @@ impl RemoteToolGrant {
     }
 
     pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version)?;
         if self.name.trim().is_empty() {
             return Err(RemoteProtocolError::InvalidToolGrant {
                 tool_name: self.name.clone(),
@@ -348,14 +367,38 @@ pub struct RemoteToolCallRequest {
     pub headers: HashMap<String, String>,
 }
 
+impl RemoteToolCallRequest {
+    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version)?;
+        if self.tool_name.trim().is_empty() {
+            return Err(RemoteProtocolError::UnknownRemoteTool {
+                tool_name: self.tool_name.clone(),
+            });
+        }
+        if self.call_path.trim().is_empty() {
+            return Err(RemoteProtocolError::RemoteToolTransport(
+                "remote tool call request requires a non-empty call_path".to_string(),
+            ));
+        }
+        if self.session_id.trim().is_empty() {
+            return Err(RemoteProtocolError::RemoteToolTransport(
+                "remote tool call request requires a non-empty session_id".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RemoteToolCallResponse {
     Success {
+        protocol_version: u32,
         #[serde(default)]
         value: serde_json::Value,
     },
     Failure {
+        protocol_version: u32,
         #[serde(default = "default_failure_code")]
         code: String,
         message: String,
@@ -365,10 +408,31 @@ pub enum RemoteToolCallResponse {
         retry_after_ms: Option<u64>,
     },
     Cancelled {
+        protocol_version: u32,
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         raw: Option<serde_json::Value>,
     },
+}
+
+impl RemoteToolCallResponse {
+    pub fn protocol_version(&self) -> u32 {
+        match self {
+            Self::Success {
+                protocol_version, ..
+            }
+            | Self::Failure {
+                protocol_version, ..
+            }
+            | Self::Cancelled {
+                protocol_version, ..
+            } => *protocol_version,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version())
+    }
 }
 
 fn default_failure_code() -> String {
@@ -399,6 +463,12 @@ pub struct RemoteTurnActivity {
     pub correlation_id: String,
     #[serde(flatten)]
     pub event: RemoteTurnEvent,
+}
+
+impl RemoteTurnActivity {
+    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -532,6 +602,8 @@ fn remote_registry_call_paths(
 
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteProtocolError {
+    #[error("unsupported remote protocol version {actual}; expected {expected}")]
+    UnsupportedProtocolVersion { actual: u32, expected: u32 },
     #[error("invalid image blob `{id}`: {message}")]
     InvalidImageBlob { id: String, message: String },
     #[error("turn input is not remote-safe: {0}")]
@@ -597,6 +669,7 @@ mod core_conversions {
         type Error = RemoteProtocolError;
 
         fn try_from(value: RemoteTurnInput) -> Result<Self, Self::Error> {
+            value.validate()?;
             let mut image_blobs = HashMap::new();
             for (id, encoded) in value.image_blobs_base64 {
                 let bytes = base64::engine::general_purpose::STANDARD
@@ -646,6 +719,7 @@ mod core_conversions {
             let prompt_layer = (!value.turn_context.prompt_layer().is_empty())
                 .then(|| value.turn_context.prompt_layer().clone());
             Ok(Self {
+                protocol_version: REMOTE_PROTOCOL_VERSION,
                 items: value.items.into_iter().map(Into::into).collect(),
                 image_blobs_base64: value
                     .image_blobs
@@ -1088,12 +1162,13 @@ mod core_conversions {
     impl RemoteToolCallResponse {
         pub fn into_tool_result(self) -> ToolResult {
             match self {
-                Self::Success { value } => ToolResult::ok(value),
+                Self::Success { value, .. } => ToolResult::ok(value),
                 Self::Failure {
                     code,
                     message,
                     raw,
                     retry_after_ms,
+                    ..
                 } => {
                     let mut failure = if let Some(after_ms) = retry_after_ms {
                         lash_core::ToolFailure::safe_retry(
@@ -1112,7 +1187,7 @@ mod core_conversions {
                     failure.raw = raw.map(lash_core::ToolValue::from);
                     ToolResult::failure(failure)
                 }
-                Self::Cancelled { message, raw } => {
+                Self::Cancelled { message, raw, .. } => {
                     if let Some(raw) = raw {
                         ToolResult::cancelled_with_raw(message, raw)
                     } else {
@@ -1245,7 +1320,10 @@ mod core_conversions {
                     headers,
                 };
                 match self.transport.send(executor, request).await {
-                    Ok(response) => response.into_tool_result(),
+                    Ok(response) => match response.validate() {
+                        Ok(()) => response.into_tool_result(),
+                        Err(err) => ToolResult::err_fmt(err),
+                    },
                     Err(err) => ToolResult::err_fmt(err),
                 }
             })
@@ -1393,6 +1471,7 @@ mod core_conversions {
             let transport = RecordingTransport {
                 requests: Mutex::new(Vec::new()),
                 response: RemoteToolCallResponse::Failure {
+                    protocol_version: REMOTE_PROTOCOL_VERSION,
                     code: "failed".to_string(),
                     message: "nope".to_string(),
                     raw: Some(serde_json::json!({ "detail": true })),
@@ -1475,6 +1554,7 @@ mod core_conversions {
 
         fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
             RemoteToolGrant {
+                protocol_version: REMOTE_PROTOCOL_VERSION,
                 id: None,
                 name: name.to_string(),
                 description: "demo".to_string(),
@@ -1518,6 +1598,7 @@ mod tests {
     #[test]
     fn remote_turn_input_json_round_trips() {
         let input = RemoteTurnInput {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
             items: vec![
                 RemoteInputItem::Text {
                     text: "first".to_string(),
@@ -1560,6 +1641,72 @@ mod tests {
     }
 
     #[test]
+    fn wrong_protocol_versions_are_rejected() {
+        let mut input = RemoteTurnInput::text("hello");
+        input.protocol_version = REMOTE_PROTOCOL_VERSION + 1;
+        assert!(matches!(
+            input.validate(),
+            Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
+        ));
+
+        let mut grant = demo_grant("one", "tools", "search");
+        grant.protocol_version = REMOTE_PROTOCOL_VERSION + 1;
+        assert!(matches!(
+            grant.validate(),
+            Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
+        ));
+
+        let request = RemoteToolCallRequest {
+            protocol_version: REMOTE_PROTOCOL_VERSION + 1,
+            tool_name: "demo".to_string(),
+            call_path: "tools.demo".to_string(),
+            args: serde_json::Value::Null,
+            session_id: "session".to_string(),
+            tool_call_id: None,
+            replay_key: None,
+            attempt_number: 1,
+            max_attempts: 1,
+            headers: HashMap::new(),
+        };
+        assert!(matches!(
+            request.validate(),
+            Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
+        ));
+
+        let response = RemoteToolCallResponse::Success {
+            protocol_version: REMOTE_PROTOCOL_VERSION + 1,
+            value: serde_json::Value::Null,
+        };
+        assert!(matches!(
+            response.validate(),
+            Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
+        ));
+
+        let activity = RemoteTurnActivity {
+            protocol_version: REMOTE_PROTOCOL_VERSION + 1,
+            sequence: 1,
+            id: "event".to_string(),
+            correlation_id: "corr".to_string(),
+            event: RemoteTurnEvent::AssistantProseDelta {
+                text: "hi".to_string(),
+            },
+        };
+        assert!(matches!(
+            activity.validate(),
+            Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn top_level_protocol_schema_exports_include_versions() {
+        assert_schema_has_protocol_version::<RemoteTurnInput>();
+        assert_schema_has_protocol_version::<RemoteToolGrant>();
+        assert_schema_has_protocol_version::<RemoteToolCallRequest>();
+        assert_schema_has_protocol_version::<RemoteToolCallResponse>();
+        assert_schema_has_protocol_version::<RemoteTurnActivity>();
+    }
+
+    #[test]
     fn remote_tool_registry_reopen_conformance_compares_call_paths() {
         let before = VecRegistry(vec![demo_grant("one", "tools", "search")]);
         let reopened = VecRegistry(vec![demo_grant("one", "tools", "search")]);
@@ -1574,6 +1721,7 @@ mod tests {
 
     fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
         RemoteToolGrant {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
             id: None,
             name: name.to_string(),
             description: "demo".to_string(),
@@ -1591,5 +1739,15 @@ mod tests {
             agent_surface: Some(RemoteToolAgentSurface::new([module], operation)),
             http_executor: RemoteHttpToolExecutor::post("https://example.com/tool"),
         }
+    }
+
+    fn assert_schema_has_protocol_version<T: JsonSchema>() {
+        let schema = schemars::schema_for!(T);
+        let schema_json = serde_json::to_value(&schema).expect("schema json");
+        let schema_text = schema_json.to_string();
+        assert!(
+            schema_text.contains("protocol_version"),
+            "schema did not include protocol_version: {schema_text}"
+        );
     }
 }

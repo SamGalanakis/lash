@@ -594,7 +594,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
             }
             RuntimeEffectCommand::ToolCall { call } => {
                 let tool_name = call.tool_name.clone();
-                let mut results = runner
+                let mut outcome = runner
                     .driver
                     .run_tool_calls(
                         vec![(call, envelope.invocation)],
@@ -602,13 +602,16 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                         &runner.cancellation,
                     )
                     .await?;
-                let result = results.pop().ok_or_else(|| {
+                let result = outcome.completed.pop().ok_or_else(|| {
                     RuntimeEffectControllerError::new(
                         "tool_result_missing",
                         format!("tool `{tool_name}` completed without a result"),
                     )
                 })?;
-                Ok(RuntimeEffectOutcome::ToolCall { result })
+                Ok(RuntimeEffectOutcome::ToolCall {
+                    result,
+                    host_events: outcome.host_events,
+                })
             }
             RuntimeEffectCommand::ExecCode { code } => {
                 let protocol_iteration = runner.machine.protocol_iteration();

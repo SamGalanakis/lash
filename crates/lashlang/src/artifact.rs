@@ -21,7 +21,7 @@ pub const LASHLANG_VM_ABI_VERSION: &str = "lashlang-vm-abi-v1";
 /// flag: each runtime trait reports the tier of the concrete implementation
 /// behind it, and the runtime validates that wiring is internally consistent.
 /// `Inline` covers in-memory / build-time wiring; `Durable` covers a
-/// crash-recoverable store or effect host (e.g. SQLite-backed persistence or a
+/// crash-recoverable store or effect host (e.g. Turso-backed persistence or a
 /// Restate-backed effect host).
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
@@ -252,15 +252,19 @@ impl From<ModuleArtifactError> for ArtifactStoreError {
     }
 }
 
+#[async_trait::async_trait]
 pub trait LashlangArtifactStore: Send + Sync {
     /// Durability tier this artifact store provides; defaults to [`DurabilityTier::Inline`].
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Inline
     }
 
-    fn put_module_artifact(&self, artifact: &ModuleArtifact) -> Result<(), ArtifactStoreError>;
+    async fn put_module_artifact(
+        &self,
+        artifact: &ModuleArtifact,
+    ) -> Result<(), ArtifactStoreError>;
 
-    fn get_module_artifact(
+    async fn get_module_artifact(
         &self,
         module_ref: &ModuleRef,
     ) -> Result<Option<Arc<ModuleArtifact>>, ArtifactStoreError>;
@@ -284,8 +288,12 @@ pub fn global_in_memory_lashlang_artifact_store() -> Arc<InMemoryLashlangArtifac
         .clone()
 }
 
+#[async_trait::async_trait]
 impl LashlangArtifactStore for InMemoryLashlangArtifactStore {
-    fn put_module_artifact(&self, artifact: &ModuleArtifact) -> Result<(), ArtifactStoreError> {
+    async fn put_module_artifact(
+        &self,
+        artifact: &ModuleArtifact,
+    ) -> Result<(), ArtifactStoreError> {
         let mut modules = self
             .modules
             .lock()
@@ -294,7 +302,7 @@ impl LashlangArtifactStore for InMemoryLashlangArtifactStore {
         Ok(())
     }
 
-    fn get_module_artifact(
+    async fn get_module_artifact(
         &self,
         module_ref: &ModuleRef,
     ) -> Result<Option<Arc<ModuleArtifact>>, ArtifactStoreError> {
@@ -1281,10 +1289,13 @@ impl<'program> RequirementsCollector<'program> {
     }
 
     fn require_resource_ref(&mut self, resource: &ResourceRefExpr) {
-        self.requirements.resources.add_module_instance(
-            resource.path.iter().map(|segment| segment.as_str()),
-            resource.resource_type.to_string(),
-        );
+        self.requirements
+            .resources
+            .add_module_instance(
+                resource.path.iter().map(|segment| segment.as_str()),
+                resource.resource_type.to_string(),
+            )
+            .expect("resolved resource references cannot conflict");
     }
 
     fn require_resource_operation(

@@ -20,8 +20,8 @@ impl SessionControl {
         }
     }
 
-    pub fn host_events(&self) -> HostEventsControl {
-        HostEventsControl {
+    pub fn commands(&self) -> SessionCommandsControl {
+        SessionCommandsControl {
             control: self.clone(),
         }
     }
@@ -223,44 +223,19 @@ impl SessionControl {
         .await
     }
 
-    async fn emit_host_event(
+    async fn submit_session_command(
         &self,
-        resource_type: &str,
-        alias: &str,
-        event: &str,
-        payload: serde_json::Value,
-    ) -> Result<lash_core::HostEventEmitReport> {
+        command: lash_core::SessionCommand,
+        idempotency_key: impl Into<String>,
+    ) -> Result<lash_core::SessionCommandReceipt> {
+        let idempotency_key = idempotency_key.into();
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
-                .emit_host_event(resource_type, alias, event, payload)
+                .submit_session_command(command, idempotency_key)
                 .await
                 .map_err(Into::into)
         })
         .await
-    }
-
-    async fn emit_host_event_with_effect_scope(
-        &self,
-        resource_type: &str,
-        alias: &str,
-        event: &str,
-        payload: serde_json::Value,
-        scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<lash_core::HostEventEmitReport> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let value = runtime
-            .emit_host_event_with_effect_scope(
-                resource_type,
-                alias,
-                event,
-                payload,
-                scoped_effect_controller,
-            )
-            .await
-            .map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        value
     }
 
     async fn activate_lashlang_trigger(
@@ -771,15 +746,6 @@ impl ToolsControl {
 }
 
 impl ToolsControl {
-    /// Re-register the current tool registry with the live runtime session.
-    ///
-    /// Use this after lower-level code mutates tool providers outside this
-    /// control surface. `add_provider` and `remove_source` refresh
-    /// automatically.
-    pub async fn refresh_surface(&self) -> Result<()> {
-        self.control.refresh_tool_surface().await
-    }
-
     pub async fn state(&self) -> Result<ToolState> {
         self.control.tool_state().await
     }
@@ -854,43 +820,60 @@ impl AdvancedToolsControl {
 }
 
 #[derive(Clone)]
-pub struct HostEventsControl {
+pub struct SessionCommandsControl {
     control: SessionControl,
 }
 
-impl HostEventsControl {
-    pub async fn emit(
+impl SessionCommandsControl {
+    pub async fn refresh_tool_surface(
         &self,
-        resource_type: impl AsRef<str>,
-        alias: impl AsRef<str>,
-        event: impl AsRef<str>,
-        payload: serde_json::Value,
-    ) -> Result<lash_core::HostEventEmitReport> {
+        reason: impl Into<String>,
+        expected_generation: Option<u64>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<lash_core::SessionCommandReceipt> {
         self.control
-            .emit_host_event(
-                resource_type.as_ref(),
-                alias.as_ref(),
-                event.as_ref(),
-                payload,
+            .submit_session_command(
+                lash_core::SessionCommand::RefreshToolSurface {
+                    reason: reason.into(),
+                    expected_generation,
+                },
+                idempotency_key,
             )
             .await
     }
 
-    pub async fn emit_with_effect_scope(
+    pub async fn emit_host_event(
         &self,
         resource_type: impl AsRef<str>,
         alias: impl AsRef<str>,
         event: impl AsRef<str>,
         payload: serde_json::Value,
-        scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<lash_core::HostEventEmitReport> {
+        idempotency_key: impl Into<String>,
+    ) -> Result<lash_core::SessionCommandReceipt> {
         self.control
-            .emit_host_event_with_effect_scope(
-                resource_type.as_ref(),
-                alias.as_ref(),
-                event.as_ref(),
-                payload,
-                scoped_effect_controller,
+            .submit_session_command(
+                lash_core::SessionCommand::EmitHostEvent {
+                    resource_type: resource_type.as_ref().to_string(),
+                    alias: alias.as_ref().to_string(),
+                    event: event.as_ref().to_string(),
+                    payload,
+                },
+                idempotency_key,
+            )
+            .await
+    }
+
+    pub async fn reset(
+        &self,
+        reason: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<lash_core::SessionCommandReceipt> {
+        self.control
+            .submit_session_command(
+                lash_core::SessionCommand::ResetSession {
+                    reason: reason.into(),
+                },
+                idempotency_key,
             )
             .await
     }

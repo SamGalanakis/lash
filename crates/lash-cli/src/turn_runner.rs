@@ -5,7 +5,7 @@ use lash_core::{
     AssistantOutput, ExecutionSummary, OutputState, TokenUsage, TurnIssue, TurnOutcome, TurnStop,
 };
 #[cfg(test)]
-use lash_sqlite_store::Store;
+use lash_turso_store::Store;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -185,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_runtime_persistence_state_recovers_latest_token_ledger() {
-        let store = Store::memory().expect("store");
+        let store = Store::memory().await.expect("store");
         let mut graph = SessionGraph::default();
         graph.append_message(Message {
             id: fresh_message_id(),
@@ -236,28 +236,31 @@ mod tests {
                 execution_state_ref: None,
                 execution_state: None,
             })
+            .await
             .checkpoint_ref;
-        store.append_usage_deltas(&ledger);
-        store.save_session_head(SessionHead {
-            session_id: "root".to_string(),
-            head_revision: 0,
-            agent_frames: Vec::new(),
-            current_agent_frame_id: String::new(),
-            graph: graph.clone(),
-            config: PersistedSessionConfig {
-                provider_id: "openai-compatible".into(),
-                model: lash_core::ModelSpec::from_token_limits(
-                    "gpt-5.4-mini",
-                    None,
-                    200_000,
-                    None,
-                    None,
-                )
-                .expect("valid model spec"),
-            },
-            checkpoint_ref: Some(checkpoint_ref),
-            token_ledger: ledger,
-        });
+        store.append_usage_deltas(&ledger).await;
+        store
+            .save_session_head(SessionHead {
+                session_id: "root".to_string(),
+                head_revision: 0,
+                agent_frames: Vec::new(),
+                current_agent_frame_id: String::new(),
+                graph: graph.clone(),
+                config: PersistedSessionConfig {
+                    provider_id: "openai-compatible".into(),
+                    model: lash_core::ModelSpec::from_token_limits(
+                        "gpt-5.4-mini",
+                        None,
+                        200_000,
+                        None,
+                        None,
+                    )
+                    .expect("valid model spec"),
+                },
+                checkpoint_ref: Some(checkpoint_ref),
+                token_ledger: ledger,
+            })
+            .await;
 
         let mut persistence_state = RuntimeSessionState {
             session_graph: SessionGraph::default(),

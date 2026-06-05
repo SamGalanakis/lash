@@ -123,13 +123,13 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Graph To UI Projection</h2>
-            <p>Chronological rendering is a projection policy, not a storage policy. The graph remains durable and branchable; UI and exports choose readable order. <code>lash-export</code> walks an entire session tree: <code>load_tree_from_paths</code> assembles a <code>LoadedSessionTree</code> from the SQLite store and trace JSONL, and <code>render_tree</code> emits a multi-view HTML.</p>
+            <p>Chronological rendering is a projection policy, not a storage policy. The graph remains durable and branchable; UI and exports choose readable order. <code>lash-export</code> walks an entire session tree: <code>load_tree_from_paths</code> assembles a <code>LoadedSessionTree</code> from the Turso store and trace JSONL, and <code>render_tree</code> emits a multi-view HTML.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Read projection path</div>
             <div class="mermaid">
 flowchart LR
-  Store["Store<br/>SQLite + blobs + session_head"] --> State["PersistedSessionRead"]
+  Store["Store<br/>Turso + blobs + session_head"] --> State["PersistedSessionRead"]
   State --> Graph["SessionGraph<br/>nodes + leaf_node_id"]
   Graph --> ReadModel["internal SessionReadModel cache<br/>active_events, messages, tool_calls"]
   ReadModel --> View["SessionReadView"]
@@ -157,7 +157,7 @@ flowchart TD
   Runtime --> Usage["SessionUsageReport<br/>ledger by source + model"]
   Usage --> Deltas["usage deltas<br/>host reports"]
   Runtime --> Trace["provider JSONL trace<br/>LLM started/completed"]
-  Runtime --> Store["SQLite session DB"]
+  Runtime --> Store["Turso session DB"]
   Trace --> Export["lash-export prompt snapshots<br/>context %, cached %, token bars"]
   Store --> Export
             </div>

@@ -317,7 +317,7 @@ impl LashRuntime {
         env: &RuntimeEnvironment,
     ) -> Result<Self, SessionError> {
         // Under ActivePathOnly, skip the full-graph load: fetch head
-        // metadata + the active-path chain only. SQLite impls can
+        // metadata + the active-path chain only. Durable impls can
         // ActivePathOnly is an exact store capability. Stores that do
         // not support it must return UnsupportedReadScope; resume does
         // not fall back to a full graph load.

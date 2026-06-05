@@ -1,6 +1,6 @@
 //! Render persisted lash sessions into human-viewable formats.
 //!
-//! This crate is independent of `lash-cli`. It reads a session's SQLite
+//! This crate is independent of `lash-cli`. It reads a session's Turso
 //! store, projects the `SessionGraph` into messages + tool calls, and
 //! writes a self-contained HTML (or JSON) document.
 
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use lash_core::{ChronologicalEntry, SessionGraph, SessionMeta, SessionSnapshot};
-use lash_sqlite_store::Store;
+use lash_turso_store::Store;
 
 pub mod html;
 pub mod json;
@@ -51,18 +51,23 @@ pub struct LoadedSession {
     pub llm_prompts: Vec<LlmPromptSnapshot>,
 }
 
-/// Load a session by its SQLite store path and full provider trace path.
-pub fn load_session_from_paths(store_path: &Path, trace_path: &Path) -> Result<LoadedSession> {
+/// Load a session by its Turso store path and full provider trace path.
+pub async fn load_session_from_paths(
+    store_path: &Path,
+    trace_path: &Path,
+) -> Result<LoadedSession> {
     let store = Store::open_readonly(store_path)
+        .await
         .with_context(|| format!("opening session store at {}", store_path.display()))?;
-    let meta = store.load_session_meta();
-    let head = store.load_session_head();
+    let meta = store.load_session_meta().await;
+    let head = store.load_session_head().await;
     let context_window_tokens = head
         .as_ref()
         .map(|head| head.config.model.context_window_tokens() as u64);
-    let graph = head
-        .map(|head| head.graph)
-        .unwrap_or_else(|| load_graph(&store));
+    let graph = match head {
+        Some(head) => head.graph,
+        None => load_graph(&store).await,
+    };
     let state = SessionSnapshot {
         session_graph: graph,
         ..SessionSnapshot::default()
@@ -112,7 +117,7 @@ pub fn render_tree(tree: &LoadedSessionTree, format: ExportFormat) -> String {
 /// for descendants reachable via `parent_session_id`. If any are found the
 /// html exporter renders them as a tree of views with breadcrumb navigation;
 /// otherwise it falls back to single-session rendering.
-pub fn export(
+pub async fn export(
     store_path: &Path,
     trace_path: &Path,
     format: ExportFormat,
@@ -123,20 +128,20 @@ pub fn export(
             // Try multi-session first; fall back to single-session for
             // sessions whose .db isn't co-located in a sessions dir
             // (e.g. ad-hoc per-run artifacts under .benchmarks/...).
-            match load_tree_from_paths(store_path, trace_path) {
+            match load_tree_from_paths(store_path, trace_path).await {
                 Ok(tree) if tree.nodes.len() > 1 => render_tree(&tree, format),
                 Ok(_) => {
-                    let session = load_session_from_paths(store_path, trace_path)?;
+                    let session = load_session_from_paths(store_path, trace_path).await?;
                     render(&session, format)
                 }
                 Err(_) => {
-                    let session = load_session_from_paths(store_path, trace_path)?;
+                    let session = load_session_from_paths(store_path, trace_path).await?;
                     render(&session, format)
                 }
             }
         }
         ExportFormat::Json => {
-            let session = load_session_from_paths(store_path, trace_path)?;
+            let session = load_session_from_paths(store_path, trace_path).await?;
             render(&session, format)
         }
     };
@@ -147,11 +152,11 @@ pub fn export(
     Ok(rendered)
 }
 
-fn load_graph(store: &Store) -> SessionGraph {
-    if let Some(head) = store.load_session_head() {
+async fn load_graph(store: &Store) -> SessionGraph {
+    if let Some(head) = store.load_session_head().await {
         return head.graph;
     }
     // No committed head but graph nodes may still have been appended —
     // read the raw node stream directly.
-    store.load_session_graph()
+    store.load_session_graph().await
 }

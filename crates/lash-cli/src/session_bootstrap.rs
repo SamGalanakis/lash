@@ -10,8 +10,8 @@ use lash_core::{
     AttachmentStore, PersistedSessionConfig, ProcessRegistry, RuntimePersistence, SessionGraph,
     SessionPolicy,
 };
-use lash_sqlite_store::Store;
 use lash_standard_plugins::StandardContextApproach;
+use lash_turso_store::Store;
 
 use crate::session_log::{self, SessionLogger, SessionStart};
 
@@ -104,10 +104,12 @@ fn save_host_config(
 }
 
 impl SessionBootstrapSource {
-    pub(crate) fn from_resume_arg(resume: Option<String>) -> Self {
+    pub(crate) async fn from_resume_arg(resume: Option<String>) -> Self {
         match resume {
             Some(identifier) => Self::Resume(
-                session_log::filename_for_session_identifier(&identifier).unwrap_or(identifier),
+                session_log::filename_for_session_identifier(&identifier)
+                    .await
+                    .unwrap_or(identifier),
             ),
             None => Self::Fresh,
         }
@@ -115,7 +117,7 @@ impl SessionBootstrapSource {
 }
 
 impl SessionBootstrap {
-    pub(crate) fn open(source: SessionBootstrapSource) -> Result<Self> {
+    pub(crate) async fn open(source: SessionBootstrapSource) -> Result<Self> {
         let sessions_dir = session_log::sessions_dir();
         std::fs::create_dir_all(&sessions_dir)?;
         let filename = match &source {
@@ -128,21 +130,21 @@ impl SessionBootstrap {
         if matches!(source, SessionBootstrapSource::Resume(_)) && !db_path.is_file() {
             return Err(anyhow::anyhow!("Could not resolve session `{filename}`"));
         }
-        let store = Arc::new(Store::open(&db_path)?);
+        let store = Arc::new(Store::open(&db_path).await?);
         let resume_start = if matches!(source, SessionBootstrapSource::Resume(_)) {
-            store.load_session_meta().map(|meta| SessionStart {
+            store.load_session_meta().await.map(|meta| SessionStart {
                 session_id: meta.session_id,
                 session_name: meta.session_name,
             })
         } else {
             None
         };
-        let session_name = resume_start
-            .as_ref()
-            .map(|start| start.session_name.clone())
-            .unwrap_or_else(|| crate::generate_session_name(&sessions_dir));
+        let session_name = match resume_start.as_ref() {
+            Some(start) => start.session_name.clone(),
+            None => crate::generate_session_name(&sessions_dir).await,
+        };
         let resume_head = if matches!(source, SessionBootstrapSource::Resume(_)) {
-            store.load_session_head()
+            store.load_session_head().await
         } else {
             None
         };
@@ -201,18 +203,25 @@ impl SessionBootstrap {
         self.session_name.clone()
     }
 
-    pub(crate) fn logger(&self, model: &str, session_id: Option<String>) -> Result<SessionLogger> {
+    pub(crate) async fn logger(
+        &self,
+        model: &str,
+        session_id: Option<String>,
+    ) -> Result<SessionLogger> {
         match &self.source {
             SessionBootstrapSource::Resume(_) => {
-                SessionLogger::resume(Arc::clone(&self.store), &self.filename)
+                SessionLogger::resume(Arc::clone(&self.store), &self.filename).await
             }
-            SessionBootstrapSource::Fresh => SessionLogger::new(
-                Arc::clone(&self.store),
-                self.filename.clone(),
-                model,
-                session_id,
-                self.session_name(),
-            ),
+            SessionBootstrapSource::Fresh => {
+                SessionLogger::new(
+                    Arc::clone(&self.store),
+                    self.filename.clone(),
+                    model,
+                    session_id,
+                    self.session_name(),
+                )
+                .await
+            }
             SessionBootstrapSource::ForkChild { parent_session_id } => {
                 let logger = SessionLogger::new(
                     Arc::clone(&self.store),
@@ -220,18 +229,22 @@ impl SessionBootstrap {
                     model,
                     session_id,
                     self.session_name(),
-                )?;
-                logger.mark_as_child_of(parent_session_id)?;
+                )
+                .await?;
+                logger.mark_as_child_of(parent_session_id).await?;
                 Ok(logger)
             }
         }
     }
 
-    pub(crate) fn fork_child(parent_session_id: &str, model: &str) -> Result<Self> {
+    pub(crate) async fn fork_child(parent_session_id: &str, model: &str) -> Result<Self> {
         let bootstrap = Self::open(SessionBootstrapSource::ForkChild {
             parent_session_id: parent_session_id.to_string(),
-        })?;
-        let _logger = bootstrap.logger(model, Some(uuid::Uuid::new_v4().to_string()))?;
+        })
+        .await?;
+        let _logger = bootstrap
+            .logger(model, Some(uuid::Uuid::new_v4().to_string()))
+            .await?;
         Ok(bootstrap)
     }
 }
@@ -264,7 +277,7 @@ impl CliSessionOpener {
         fallback_execution_mode: ModeId,
         fallback_standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
-        let bootstrap = SessionBootstrap::open(source)?;
+        let bootstrap = SessionBootstrap::open(source).await?;
         let session_id = bootstrap
             .run_session_id()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -277,7 +290,9 @@ impl CliSessionOpener {
             CliSessionHostConfig::new(fallback_execution_mode, fallback_standard_context_approach)
         });
         bootstrap.save_host_config(&host_config)?;
-        let logger = bootstrap.logger(&policy.model.id, Some(session_id.clone()))?;
+        let logger = bootstrap
+            .logger(&policy.model.id, Some(session_id.clone()))
+            .await?;
         let state = RuntimeSessionState {
             session_id: session_id.clone(),
             policy: policy.clone(),
@@ -285,23 +300,24 @@ impl CliSessionOpener {
             ..RuntimeSessionState::default()
         };
         let store: Arc<dyn RuntimePersistence> = bootstrap.store();
+        let artifact_store = Arc::new(Store::open(&crate::paths::artifacts_db_file()).await?)
+            as Arc<dyn lash::persistence::LashlangArtifactStore>;
+        let effect_host = Arc::new(
+            lash_turso_store::TursoEffectHost::open(&crate::paths::effects_db_file()).await?,
+        );
         let core_builder = LashCore::builder()
             .install_mode(ModePreset::standard())
             .install_mode(ModePreset::rlm())
             .default_mode(host_config.execution_mode.clone())
             .provider(self.provider.clone())
             .model(policy.model.clone())
-            .child_store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            .child_store_factory(Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
                 bootstrap.sessions_dir().to_path_buf(),
             )))
             .plugins(self.plugin_stack.clone())
             .prompt_layer(self.prompt_layer.clone())
-            // In-process CLI: inline effect controller + in-memory Lashlang
-            // artifact store. Attachments use the explicit store below.
-            .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-            .lashlang_artifact_store(Arc::new(
-                lash::persistence::InMemoryLashlangArtifactStore::new(),
-            ))
+            .effect_host(effect_host)
+            .lashlang_artifact_store(artifact_store)
             .attachment_store(Arc::clone(&self.attachment_store))
             .trace_jsonl_path(self.trace_jsonl_path.clone())
             .trace_level(self.trace_level)
@@ -343,11 +359,63 @@ impl CliSessionOpener {
         standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
         self.open(
-            SessionBootstrapSource::from_resume_arg(Some(identifier.to_string())),
+            SessionBootstrapSource::from_resume_arg(Some(identifier.to_string())).await,
             fallback_policy,
             execution_mode,
             standard_context_approach,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
+
+    #[tokio::test]
+    async fn fresh_cli_session_opens_with_durable_artifact_store() -> Result<()> {
+        let _env = env_lock().lock().await;
+        let temp = TempDirGuard::new("lash-cli-session-bootstrap");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        let provider = lash_core::testing::TestProvider::builder()
+            .build()
+            .into_handle();
+        let process_registry = Arc::new(
+            lash_turso_store::TursoProcessRegistry::open(
+                &crate::paths::lash_home().join("processes.db"),
+            )
+            .await?,
+        ) as Arc<dyn ProcessRegistry>;
+        let opener = CliSessionOpener::new(
+            PluginStack::new(),
+            lash_core::PromptLayer::new(),
+            Arc::new(lash::persistence::FileAttachmentStore::new(
+                crate::paths::attachments_dir(),
+            )),
+            provider,
+            None,
+            lash::tracing::TraceLevel::Standard,
+            process_registry,
+        );
+        let policy = SessionPolicy {
+            model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+                .expect("model spec"),
+            provider_id: "test".to_string(),
+            ..Default::default()
+        };
+
+        let opened = opener
+            .fresh(
+                policy,
+                ModeId::standard(),
+                Some(StandardContextApproach::default()),
+            )
+            .await?;
+
+        assert!(!opened.session.session_id().is_empty());
+        assert!(crate::paths::artifacts_db_file().is_file());
+        assert!(crate::paths::effects_db_file().is_file());
+        Ok(())
     }
 }

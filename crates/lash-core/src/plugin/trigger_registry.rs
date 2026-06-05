@@ -119,7 +119,7 @@ pub(crate) struct SessionTriggerRegistry {
 }
 
 impl SessionTriggerRegistry {
-    pub(crate) fn register_route(
+    pub(crate) async fn register_route(
         &self,
         request: serde_json::Value,
         resources: &lashlang::ResourceCatalog,
@@ -133,7 +133,7 @@ impl SessionTriggerRegistry {
             .map_err(|err| PluginError::Session(err.to_string()))?;
         let target = request.target;
         let validation =
-            validate_target_process(&target, &event_type, &request.inputs, artifact_store)?;
+            validate_target_process(&target, &event_type, &request.inputs, artifact_store).await?;
 
         let mut state = self
             .state
@@ -369,7 +369,7 @@ pub(super) fn trigger_handle_json(handle: &str) -> serde_json::Value {
     })
 }
 
-fn validate_target_process(
+async fn validate_target_process(
     target: &lashlang::TriggerTargetIdentity,
     event_ty: &lashlang::NamedDataType,
     inputs: &lashlang::TriggerInputTemplate,
@@ -377,6 +377,7 @@ fn validate_target_process(
 ) -> Result<lashlang::TriggerTargetValidation, PluginError> {
     let artifact = artifact_store
         .get_module_artifact(&target.module_ref)
+        .await
         .map_err(|err| PluginError::Session(format!("load trigger target artifact: {err}")))?
         .ok_or_else(|| {
             PluginError::Session(format!(

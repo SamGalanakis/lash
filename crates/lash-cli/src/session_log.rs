@@ -11,7 +11,7 @@ use lash_core::session_model::Message;
 #[cfg(test)]
 use lash_core::session_model::{MessageRole, PartKind};
 use lash_core::{SessionSnapshot, TokenUsage};
-use lash_sqlite_store::Store;
+use lash_turso_store::Store;
 
 use crate::app::{
     LiveToolOutput, PreparedTurn, UiTimeline, UiTimelineItem, timeline_from_read_view,
@@ -61,7 +61,7 @@ struct HostInputRecord {
 }
 
 impl SessionLogger {
-    pub fn new(
+    pub async fn new(
         store: Arc<Store>,
         filename: String,
         model: &str,
@@ -70,16 +70,18 @@ impl SessionLogger {
     ) -> Result<Self> {
         std::fs::create_dir_all(sessions_dir())?;
         let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        store.save_session_meta(lash_core::SessionMeta {
-            session_id: session_id.clone(),
-            session_name: session_name.clone(),
-            created_at: chrono::Local::now().to_rfc3339(),
-            model: model.to_string(),
-            cwd: std::env::current_dir()
-                .ok()
-                .and_then(|path| path.to_str().map(str::to_string)),
-            relation: lash_core::SessionRelation::Root,
-        });
+        store
+            .save_session_meta(lash_core::SessionMeta {
+                session_id: session_id.clone(),
+                session_name: session_name.clone(),
+                created_at: chrono::Local::now().to_rfc3339(),
+                model: model.to_string(),
+                cwd: std::env::current_dir()
+                    .ok()
+                    .and_then(|path| path.to_str().map(str::to_string)),
+                relation: lash_core::SessionRelation::Root,
+            })
+            .await;
         Ok(Self {
             store,
             session_id,
@@ -87,9 +89,10 @@ impl SessionLogger {
         })
     }
 
-    pub fn resume(store: Arc<Store>, filename: &str) -> Result<Self> {
+    pub async fn resume(store: Arc<Store>, filename: &str) -> Result<Self> {
         let start = store
             .load_session_meta()
+            .await
             .map(|meta| SessionStart {
                 session_id: meta.session_id,
                 session_name: meta.session_name,
@@ -132,22 +135,25 @@ impl SessionLogger {
         Ok(())
     }
 
-    pub fn mark_as_child_of(&self, parent_session_id: &str) -> Result<()> {
+    pub async fn mark_as_child_of(&self, parent_session_id: &str) -> Result<()> {
         let meta = self
             .store
             .load_session_meta()
+            .await
             .ok_or_else(|| anyhow::anyhow!("Missing session metadata for {}", self.filename))?;
-        self.store.save_session_meta(lash_core::SessionMeta {
-            session_id: meta.session_id,
-            session_name: meta.session_name,
-            created_at: meta.created_at,
-            model: meta.model,
-            cwd: meta.cwd,
-            relation: lash_core::SessionRelation::Child {
-                parent_session_id: parent_session_id.to_string(),
-                caused_by: None,
-            },
-        });
+        self.store
+            .save_session_meta(lash_core::SessionMeta {
+                session_id: meta.session_id,
+                session_name: meta.session_name,
+                created_at: meta.created_at,
+                model: meta.model,
+                cwd: meta.cwd,
+                relation: lash_core::SessionRelation::Child {
+                    parent_session_id: parent_session_id.to_string(),
+                    caused_by: None,
+                },
+            })
+            .await;
         Ok(())
     }
 }
@@ -221,9 +227,13 @@ fn is_resumable_session_store(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("db")
 }
 
-fn parse_session_info(path: &Path, filename: String, modified: SystemTime) -> Option<SessionInfo> {
-    let store = Store::open_readonly(path).ok()?;
-    let info = store.load_picker_info()?;
+async fn parse_session_info(
+    path: &Path,
+    filename: String,
+    modified: SystemTime,
+) -> Option<SessionInfo> {
+    let store = Store::open_readonly(path).await.ok()?;
+    let info = store.load_picker_info().await?;
     if info.parent_session_id().is_some() {
         return None;
     }
@@ -264,10 +274,11 @@ fn collect_session_candidates() -> Vec<(PathBuf, String, SystemTime)> {
     candidates
 }
 
-pub fn load_session_start(filename: &str) -> Result<SessionStart> {
-    let store = Store::open(&sessions_dir().join(filename))?;
+pub async fn load_session_start(filename: &str) -> Result<SessionStart> {
+    let store = Store::open(&sessions_dir().join(filename)).await?;
     let meta = store
         .load_session_meta()
+        .await
         .ok_or_else(|| anyhow::anyhow!("Could not load session metadata for {}", filename))?;
     Ok(SessionStart {
         session_id: meta.session_id,
@@ -275,18 +286,21 @@ pub fn load_session_start(filename: &str) -> Result<SessionStart> {
     })
 }
 
-fn filename_for_session_meta(
+async fn filename_for_session_meta(
     candidates: Vec<(PathBuf, String, SystemTime)>,
     mut matches: impl FnMut(&lash_core::SessionMeta) -> bool,
 ) -> Option<String> {
-    candidates.into_iter().find_map(|(path, filename, _)| {
-        let store = Store::open_readonly(&path).ok()?;
-        let meta = store.load_session_meta()?;
-        matches(&meta).then_some(filename)
-    })
+    for (path, filename, _) in candidates {
+        let store = Store::open_readonly(&path).await.ok()?;
+        let meta = store.load_session_meta().await?;
+        if matches(&meta) {
+            return Some(filename);
+        }
+    }
+    None
 }
 
-pub(crate) fn filename_for_session_identifier(identifier: &str) -> Option<String> {
+pub(crate) async fn filename_for_session_identifier(identifier: &str) -> Option<String> {
     let identifier = identifier.trim();
     if identifier.is_empty() {
         return None;
@@ -303,29 +317,35 @@ pub(crate) fn filename_for_session_identifier(identifier: &str) -> Option<String
     filename_for_session_meta(candidates, |meta| {
         meta.session_id == identifier || meta.session_name == identifier
     })
+    .await
 }
 
-pub fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
+pub async fn list_recent_sessions(limit: usize) -> Vec<SessionInfo> {
     if limit == 0 {
         return Vec::new();
     }
 
     // Candidates are pre-sorted by modified time (latest first).
-    let mut sessions: Vec<_> = collect_session_candidates()
-        .into_iter()
-        .filter_map(|(path, filename, modified)| parse_session_info(&path, filename, modified))
-        .take(limit)
-        .collect();
+    let mut sessions = Vec::new();
+    for (path, filename, modified) in collect_session_candidates() {
+        if let Some(info) = parse_session_info(&path, filename, modified).await {
+            sessions.push(info);
+            if sessions.len() >= limit {
+                break;
+            }
+        }
+    }
     sessions.sort_by_key(|session| Reverse(session.modified));
     sessions
 }
 
-pub fn load_session(filename: &str) -> Result<LoadedSession> {
-    let store = Store::open(&sessions_dir().join(filename))?;
+pub async fn load_session(filename: &str) -> Result<LoadedSession> {
+    let store = Store::open(&sessions_dir().join(filename)).await?;
     let meta = store
         .load_session_meta()
+        .await
         .ok_or_else(|| anyhow::anyhow!("Could not load session metadata for {}", filename))?;
-    let head = store.load_session_head().unwrap_or_default();
+    let head = store.load_session_head().await.unwrap_or_default();
     let checkpoint_ref = head.checkpoint_ref.clone();
     let state = SessionSnapshot {
         session_id: head.session_id,
@@ -337,7 +357,11 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
     let ui_state = crate::app::UiProjectionState::default();
     let checkpoint = checkpoint_ref
         .as_ref()
-        .and_then(|blob_ref| store.get_checkpoint(blob_ref));
+        .map(|blob_ref| async { store.get_checkpoint(blob_ref).await });
+    let checkpoint = match checkpoint {
+        Some(checkpoint) => checkpoint.await,
+        None => None,
+    };
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
     let live_tool_output = ui_state.live_tool_output.clone();
     let mut blocks = timeline_from_read_view(&read_view, &ui_state);
@@ -374,6 +398,14 @@ mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
 
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(future)
+    }
+
     fn with_temp_lash_home(test_name: &str, f: impl FnOnce()) {
         let _env_guard = env_lock().blocking_lock();
         let temp = TempDirGuard::new(test_name);
@@ -382,7 +414,7 @@ mod tests {
         f();
     }
 
-    fn persist_root_snapshot(
+    async fn persist_root_snapshot(
         store: &Store,
         messages: Vec<Message>,
         tool_calls: Vec<ToolCallRecord>,
@@ -405,23 +437,26 @@ mod tests {
                 execution_state_ref: None,
                 execution_state: None,
             })
+            .await
             .checkpoint_ref;
-        store.save_session_head(lash_core::store::SessionHead {
-            session_id: "root".to_string(),
-            head_revision: 0,
-            agent_frames: Vec::new(),
-            current_agent_frame_id: String::new(),
-            graph,
-            config: lash_core::PersistedSessionConfig {
-                provider_id: "openai_generic".to_string(),
-                model: lash_core::ModelSpec::from_token_limits(
-                    "gpt-test", None, 200_000, None, None,
-                )
-                .expect("valid model spec"),
-            },
-            checkpoint_ref: Some(checkpoint_ref),
-            token_ledger: Vec::new(),
-        });
+        store
+            .save_session_head(lash_core::store::SessionHead {
+                session_id: "root".to_string(),
+                head_revision: 0,
+                agent_frames: Vec::new(),
+                current_agent_frame_id: String::new(),
+                graph,
+                config: lash_core::PersistedSessionConfig {
+                    provider_id: "openai_generic".to_string(),
+                    model: lash_core::ModelSpec::from_token_limits(
+                        "gpt-test", None, 200_000, None, None,
+                    )
+                    .expect("valid model spec"),
+                },
+                checkpoint_ref: Some(checkpoint_ref),
+                token_ledger: Vec::new(),
+            })
+            .await;
     }
 
     fn text_message(role: MessageRole, id: &str, content: &str) -> Message {
@@ -469,233 +504,263 @@ mod tests {
     #[test]
     fn load_session_reads_persisted_root_snapshot() {
         with_temp_lash_home("lash-session-load-root-snapshot", || {
-            let filename = new_session_filename();
-            let path = sessions_dir().join(&filename);
-            let store = Arc::new(Store::open(&path).unwrap());
-            SessionLogger::new(
-                Arc::clone(&store),
-                filename.clone(),
-                "gpt-test",
-                Some("s1".into()),
-                "demo".into(),
-            )
-            .unwrap();
-            let messages = vec![
-                text_message(MessageRole::User, "m0", "Hi"),
-                text_message(MessageRole::Assistant, "m1", "Hello world"),
-            ];
-            persist_root_snapshot(
-                &store,
-                messages.clone(),
-                Vec::new(),
-                TokenUsage {
-                    input_tokens: 12,
-                    output_tokens: 7,
-                    cached_input_tokens: 2,
-                    reasoning_tokens: 1,
-                },
-            );
+            block_on(async {
+                let filename = new_session_filename();
+                let path = sessions_dir().join(&filename);
+                let store = Arc::new(Store::open(&path).await.unwrap());
+                SessionLogger::new(
+                    Arc::clone(&store),
+                    filename.clone(),
+                    "gpt-test",
+                    Some("s1".into()),
+                    "demo".into(),
+                )
+                .await
+                .unwrap();
+                let messages = vec![
+                    text_message(MessageRole::User, "m0", "Hi"),
+                    text_message(MessageRole::Assistant, "m1", "Hello world"),
+                ];
+                persist_root_snapshot(
+                    &store,
+                    messages.clone(),
+                    Vec::new(),
+                    TokenUsage {
+                        input_tokens: 12,
+                        output_tokens: 7,
+                        cached_input_tokens: 2,
+                        reasoning_tokens: 1,
+                    },
+                )
+                .await;
 
-            let loaded = load_session(&filename).unwrap();
-            assert_eq!(loaded.messages.len(), 2);
-            // blocks[0] is the TurnStart marker the projection emits above
-            // the first user input.
-            assert!(matches!(
-                loaded.blocks.first(),
-                Some(UiTimelineItem::TurnStart(_))
-            ));
-            assert!(matches!(
-                loaded.blocks.get(1),
-                Some(UiTimelineItem::UserInput(text)) if text == "Hi"
-            ));
-            assert!(matches!(
-                loaded.blocks.get(2),
-                Some(UiTimelineItem::AssistantText(text)) if text == "Hello world"
-            ));
-            assert_eq!(loaded.last_token_usage.input_tokens, 12);
-            assert!(loaded.plugin_mode_indicators.is_empty());
-            assert!(loaded.live_tool_output.lines.is_empty());
-            assert_eq!(loaded.live_tool_output.hidden, 0);
-            assert!(loaded.live_tool_output.partial.is_empty());
+                let loaded = load_session(&filename).await.unwrap();
+                assert_eq!(loaded.messages.len(), 2);
+                // blocks[0] is the TurnStart marker the projection emits above
+                // the first user input.
+                assert!(matches!(
+                    loaded.blocks.first(),
+                    Some(UiTimelineItem::TurnStart(_))
+                ));
+                assert!(matches!(
+                    loaded.blocks.get(1),
+                    Some(UiTimelineItem::UserInput(text)) if text == "Hi"
+                ));
+                assert!(matches!(
+                    loaded.blocks.get(2),
+                    Some(UiTimelineItem::AssistantText(text)) if text == "Hello world"
+                ));
+                assert_eq!(loaded.last_token_usage.input_tokens, 12);
+                assert!(loaded.plugin_mode_indicators.is_empty());
+                assert!(loaded.live_tool_output.lines.is_empty());
+                assert_eq!(loaded.live_tool_output.hidden, 0);
+                assert!(loaded.live_tool_output.partial.is_empty());
+            });
         });
     }
 
     #[test]
     fn load_session_projects_activity_blocks_from_session_graph() {
         with_temp_lash_home("lash-session-load-activity-blocks", || {
-            let filename = new_session_filename();
-            let path = sessions_dir().join(&filename);
-            let store = Arc::new(Store::open(&path).unwrap());
-            SessionLogger::new(
-                Arc::clone(&store),
-                filename.clone(),
-                "gpt-test",
-                Some("s-activity".into()),
-                "demo".into(),
-            )
-            .unwrap();
-            let messages = vec![
-                text_message(MessageRole::User, "m0", "inspect repo"),
-                tool_result_message("m1", "call-shell", "exec_command"),
-                text_message(MessageRole::Assistant, "m2", "Done"),
-            ];
-            let tool_calls = vec![ToolCallRecord {
-                call_id: Some("call-shell".to_string()),
-                tool: "exec_command".to_string(),
-                args: serde_json::json!({"cmd":"git status --short"}),
-                output: lash_core::ToolCallOutput::success(serde_json::json!({
-                    "stdout":"",
-                    "stderr":"",
-                    "exit_code":0
-                })),
-                duration_ms: 42,
-            }];
-            persist_root_snapshot(&store, messages, tool_calls, TokenUsage::default());
+            block_on(async {
+                let filename = new_session_filename();
+                let path = sessions_dir().join(&filename);
+                let store = Arc::new(Store::open(&path).await.unwrap());
+                SessionLogger::new(
+                    Arc::clone(&store),
+                    filename.clone(),
+                    "gpt-test",
+                    Some("s-activity".into()),
+                    "demo".into(),
+                )
+                .await
+                .unwrap();
+                let messages = vec![
+                    text_message(MessageRole::User, "m0", "inspect repo"),
+                    tool_result_message("m1", "call-shell", "exec_command"),
+                    text_message(MessageRole::Assistant, "m2", "Done"),
+                ];
+                let tool_calls = vec![ToolCallRecord {
+                    call_id: Some("call-shell".to_string()),
+                    tool: "exec_command".to_string(),
+                    args: serde_json::json!({"cmd":"git status --short"}),
+                    output: lash_core::ToolCallOutput::success(serde_json::json!({
+                        "stdout":"",
+                        "stderr":"",
+                        "exit_code":0
+                    })),
+                    duration_ms: 42,
+                }];
+                persist_root_snapshot(&store, messages, tool_calls, TokenUsage::default()).await;
 
-            let loaded = load_session(&filename).unwrap();
-            // blocks[0] = TurnStart, [1] = UserInput, [2] = Activity, [3] = AssistantText
-            assert!(matches!(
-                loaded.blocks.first(),
-                Some(UiTimelineItem::TurnStart(_))
-            ));
-            assert!(matches!(
-                loaded.blocks.get(2),
-                Some(UiTimelineItem::Activity(activity))
-                    if activity.call.summary == "git status --short"
-            ));
-            assert!(matches!(
-                loaded.blocks.get(3),
-                Some(UiTimelineItem::AssistantText(text)) if text == "Done"
-            ));
+                let loaded = load_session(&filename).await.unwrap();
+                // blocks[0] = TurnStart, [1] = UserInput, [2] = Activity, [3] = AssistantText
+                assert!(matches!(
+                    loaded.blocks.first(),
+                    Some(UiTimelineItem::TurnStart(_))
+                ));
+                assert!(matches!(
+                    loaded.blocks.get(2),
+                    Some(UiTimelineItem::Activity(activity))
+                        if activity.call.summary == "git status --short"
+                ));
+                assert!(matches!(
+                    loaded.blocks.get(3),
+                    Some(UiTimelineItem::AssistantText(text)) if text == "Done"
+                ));
+            });
         });
     }
 
     #[test]
     fn load_session_rebuilds_blocks_from_messages_when_ui_snapshot_is_stale() {
         with_temp_lash_home("lash-session-load-rebuilds-blocks", || {
-            let filename = new_session_filename();
-            let path = sessions_dir().join(&filename);
-            let store = Arc::new(Store::open(&path).unwrap());
-            SessionLogger::new(
-                Arc::clone(&store),
-                filename.clone(),
-                "gpt-test",
-                Some("s2".into()),
-                "demo".into(),
-            )
-            .unwrap();
-            let assistant = "Line one\n\n1. first\n2. second\n";
-            let messages = vec![
-                text_message(MessageRole::User, "m0", "Hi"),
-                text_message(MessageRole::Assistant, "m1", assistant),
-            ];
-            persist_root_snapshot(&store, messages, Vec::new(), TokenUsage::default());
+            block_on(async {
+                let filename = new_session_filename();
+                let path = sessions_dir().join(&filename);
+                let store = Arc::new(Store::open(&path).await.unwrap());
+                SessionLogger::new(
+                    Arc::clone(&store),
+                    filename.clone(),
+                    "gpt-test",
+                    Some("s2".into()),
+                    "demo".into(),
+                )
+                .await
+                .unwrap();
+                let assistant = "Line one\n\n1. first\n2. second\n";
+                let messages = vec![
+                    text_message(MessageRole::User, "m0", "Hi"),
+                    text_message(MessageRole::Assistant, "m1", assistant),
+                ];
+                persist_root_snapshot(&store, messages, Vec::new(), TokenUsage::default()).await;
 
-            let loaded = load_session(&filename).unwrap();
-            // blocks[0] = TurnStart, [1] = UserInput, [2] = AssistantText
-            assert!(matches!(
-                loaded.blocks.get(2),
-                Some(UiTimelineItem::AssistantText(text)) if text == assistant.trim()
-            ));
+                let loaded = load_session(&filename).await.unwrap();
+                // blocks[0] = TurnStart, [1] = UserInput, [2] = AssistantText
+                assert!(matches!(
+                    loaded.blocks.get(2),
+                    Some(UiTimelineItem::AssistantText(text)) if text == assistant.trim()
+                ));
+            });
         });
     }
 
     #[test]
     fn list_recent_sessions_ignores_child_sessions() {
         with_temp_lash_home("lash-session-log-list", || {
-            let parent = sessions_dir().join("parent.db");
-            let child = sessions_dir().join("child.db");
-            let parent_store = Arc::new(Store::open(&parent).unwrap());
-            let child_store = Store::open(&child).unwrap();
-            SessionLogger::new(
-                Arc::clone(&parent_store),
-                "parent.db".into(),
-                "gpt-test",
-                Some("parent".into()),
-                "demo".into(),
-            )
-            .unwrap();
-            persist_root_snapshot(
-                &parent_store,
-                vec![text_message(MessageRole::User, "m0", "hello there")],
-                Vec::new(),
-                TokenUsage::default(),
-            );
-            child_store.save_session_meta(lash_core::SessionMeta {
-                session_id: "child".to_string(),
-                session_name: "demo".to_string(),
-                created_at: "2026-03-25T10:00:00Z".to_string(),
-                model: "gpt-test".to_string(),
-                cwd: std::env::current_dir()
-                    .ok()
-                    .and_then(|path| path.to_str().map(str::to_string)),
-                relation: lash_core::SessionRelation::Child {
-                    parent_session_id: "parent".to_string(),
-                    caused_by: None,
-                },
-            });
-            persist_root_snapshot(
-                &child_store,
-                vec![text_message(MessageRole::User, "m0", "child prompt")],
-                Vec::new(),
-                TokenUsage::default(),
-            );
+            block_on(async {
+                let parent = sessions_dir().join("parent.db");
+                let child = sessions_dir().join("child.db");
+                let parent_store = Arc::new(Store::open(&parent).await.unwrap());
+                let child_store = Store::open(&child).await.unwrap();
+                SessionLogger::new(
+                    Arc::clone(&parent_store),
+                    "parent.db".into(),
+                    "gpt-test",
+                    Some("parent".into()),
+                    "demo".into(),
+                )
+                .await
+                .unwrap();
+                persist_root_snapshot(
+                    &parent_store,
+                    vec![text_message(MessageRole::User, "m0", "hello there")],
+                    Vec::new(),
+                    TokenUsage::default(),
+                )
+                .await;
+                child_store
+                    .save_session_meta(lash_core::SessionMeta {
+                        session_id: "child".to_string(),
+                        session_name: "demo".to_string(),
+                        created_at: "2026-03-25T10:00:00Z".to_string(),
+                        model: "gpt-test".to_string(),
+                        cwd: std::env::current_dir()
+                            .ok()
+                            .and_then(|path| path.to_str().map(str::to_string)),
+                        relation: lash_core::SessionRelation::Child {
+                            parent_session_id: "parent".to_string(),
+                            caused_by: None,
+                        },
+                    })
+                    .await;
+                persist_root_snapshot(
+                    &child_store,
+                    vec![text_message(MessageRole::User, "m0", "child prompt")],
+                    Vec::new(),
+                    TokenUsage::default(),
+                )
+                .await;
 
-            let sessions = list_recent_sessions(10);
-            assert_eq!(sessions.len(), 1);
-            assert_eq!(sessions[0].filename, "parent.db");
-            assert_eq!(sessions[0].message_count, 1);
-            assert_eq!(sessions[0].first_message, "hello there");
+                let sessions = list_recent_sessions(10).await;
+                assert_eq!(sessions.len(), 1);
+                assert_eq!(sessions[0].filename, "parent.db");
+                assert_eq!(sessions[0].message_count, 1);
+                assert_eq!(sessions[0].first_message, "hello there");
+            });
         });
     }
 
     #[test]
     fn session_identifier_resolves_filename_id_and_name_including_children() {
         with_temp_lash_home("lash-session-identifier", || {
-            let parent = sessions_dir().join("parent.db");
-            let child = sessions_dir().join("child.db");
-            let parent_store = Arc::new(Store::open(&parent).unwrap());
-            let child_store = Store::open(&child).unwrap();
-            SessionLogger::new(
-                Arc::clone(&parent_store),
-                "parent.db".into(),
-                "gpt-test",
-                Some("parent-id".into()),
-                "parent-name".into(),
-            )
-            .unwrap();
-            child_store.save_session_meta(lash_core::SessionMeta {
-                session_id: "child-id".to_string(),
-                session_name: "child-name".to_string(),
-                created_at: "2026-03-25T10:00:00Z".to_string(),
-                model: "gpt-test".to_string(),
-                cwd: None,
-                relation: lash_core::SessionRelation::Child {
-                    parent_session_id: "parent-id".to_string(),
-                    caused_by: None,
-                },
-            });
+            block_on(async {
+                let parent = sessions_dir().join("parent.db");
+                let child = sessions_dir().join("child.db");
+                let parent_store = Arc::new(Store::open(&parent).await.unwrap());
+                let child_store = Store::open(&child).await.unwrap();
+                SessionLogger::new(
+                    Arc::clone(&parent_store),
+                    "parent.db".into(),
+                    "gpt-test",
+                    Some("parent-id".into()),
+                    "parent-name".into(),
+                )
+                .await
+                .unwrap();
+                child_store
+                    .save_session_meta(lash_core::SessionMeta {
+                        session_id: "child-id".to_string(),
+                        session_name: "child-name".to_string(),
+                        created_at: "2026-03-25T10:00:00Z".to_string(),
+                        model: "gpt-test".to_string(),
+                        cwd: None,
+                        relation: lash_core::SessionRelation::Child {
+                            parent_session_id: "parent-id".to_string(),
+                            caused_by: None,
+                        },
+                    })
+                    .await;
 
-            assert_eq!(
-                filename_for_session_identifier("parent.db").as_deref(),
-                Some("parent.db")
-            );
-            assert_eq!(
-                filename_for_session_identifier("parent-id").as_deref(),
-                Some("parent.db")
-            );
-            assert_eq!(
-                filename_for_session_identifier("parent-name").as_deref(),
-                Some("parent.db")
-            );
-            assert_eq!(
-                filename_for_session_identifier("child-id").as_deref(),
-                Some("child.db")
-            );
-            assert_eq!(
-                filename_for_session_identifier("child-name").as_deref(),
-                Some("child.db")
-            );
+                assert_eq!(
+                    filename_for_session_identifier("parent.db")
+                        .await
+                        .as_deref(),
+                    Some("parent.db")
+                );
+                assert_eq!(
+                    filename_for_session_identifier("parent-id")
+                        .await
+                        .as_deref(),
+                    Some("parent.db")
+                );
+                assert_eq!(
+                    filename_for_session_identifier("parent-name")
+                        .await
+                        .as_deref(),
+                    Some("parent.db")
+                );
+                assert_eq!(
+                    filename_for_session_identifier("child-id").await.as_deref(),
+                    Some("child.db")
+                );
+                assert_eq!(
+                    filename_for_session_identifier("child-name")
+                        .await
+                        .as_deref(),
+                    Some("child.db")
+                );
+            });
         });
     }
 }

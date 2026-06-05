@@ -281,8 +281,9 @@ impl RecordingSessionStoreFactory {
     }
 }
 
+#[async_trait::async_trait]
 impl SessionStoreFactory for RecordingSessionStoreFactory {
-    fn create_store(
+    async fn create_store(
         &self,
         request: &SessionStoreCreateRequest,
     ) -> Result<Arc<dyn crate::store::RuntimePersistence>, String> {
@@ -302,7 +303,7 @@ impl SessionStoreFactory for RecordingSessionStoreFactory {
         Ok(store as Arc<dyn crate::store::RuntimePersistence>)
     }
 
-    fn delete_session(&self, _session_id: &str) -> Result<(), String> {
+    async fn delete_session(&self, _session_id: &str) -> Result<(), String> {
         Ok(())
     }
 }

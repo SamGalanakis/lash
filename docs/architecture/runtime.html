@@ -38,7 +38,7 @@ flowchart TD
   Runtime --> Env["RuntimeEnvironment<br/>providers, tools, tasks, traces"]
   Runtime --> Manager["RuntimeSessionServices<br/>host capability set"]
   Runtime --> Persistence["RuntimePersistence trait"]
-  Persistence --> Sqlite["lash-sqlite-store<br/>SQLite + blobs"]
+  Persistence --> Turso["lash-turso-store<br/>Turso + blobs"]
   Manager --> Session["Session"]
   Session --> Machine["lash-sansio TurnMachine"]
   Session --> Plugins["SessionPlugin hooks"]
@@ -140,7 +140,7 @@ flowchart LR
 flowchart LR
   Driver["RuntimeTurnDriver"] --> Pipeline["TurnBoundary"]
   Pipeline --> Delta["RuntimeCommit<br/>GraphCommitDelta"]
-  Delta --> Store["lash-sqlite-store"]
+  Delta --> Store["lash-turso-store"]
   Store --> Head["session_head revision"]
   Store --> Blobs["checkpoint + attachment blobs"]
   Store --> Ledger["usage ledger<br/>source + model + tokens"]

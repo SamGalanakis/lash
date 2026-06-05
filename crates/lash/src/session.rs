@@ -68,7 +68,7 @@ impl SessionBuilder {
 
     pub async fn open(self) -> Result<LashSession> {
         let (policy, mode) = self.session_policy()?;
-        let store = self.create_store(&policy)?;
+        let store = self.create_store(&policy).await?;
         let mut state = self
             .load_or_default_state(&policy, store.as_deref())
             .await?;
@@ -87,7 +87,7 @@ impl SessionBuilder {
     /// restoring explicit host-owned state.
     pub async fn open_fresh(self) -> Result<LashSession> {
         let (policy, mode) = self.session_policy()?;
-        let store = self.create_store(&policy)?;
+        let store = self.create_store(&policy).await?;
         let mut state = RuntimeSessionState {
             session_id: self.session_id.clone(),
             policy: policy.clone(),
@@ -106,7 +106,7 @@ impl SessionBuilder {
     /// persisted state on the next commit.
     pub async fn open_with_state(self, mut state: RuntimeSessionState) -> Result<LashSession> {
         let (policy, mode) = self.session_policy()?;
-        let store = self.create_store(&policy)?;
+        let store = self.create_store(&policy).await?;
         if state.session_id != self.session_id {
             return Err(EmbedError::StoreSessionMismatch {
                 loaded: state.session_id,
@@ -116,7 +116,6 @@ impl SessionBuilder {
         let recorded_provider_id = state.policy.recorded_provider_id().to_string();
         state.policy = policy.clone();
         state.policy.provider_id = recorded_provider_id;
-        Self::normalize_tool_state(&mut state);
         self.apply_rlm_session_options(&mode, &mut state)?;
         self.open_resolved(policy, mode, state, store).await
     }
@@ -156,7 +155,6 @@ impl SessionBuilder {
                 let recorded_provider_id = state.policy.recorded_provider_id().to_string();
                 state.policy = policy.clone();
                 state.policy.provider_id = recorded_provider_id;
-                Self::normalize_tool_state(&mut state);
                 state
             }
             None => RuntimeSessionState {
@@ -208,14 +206,6 @@ impl SessionBuilder {
                 }
                 Ok(active)
             }
-        }
-    }
-
-    fn normalize_tool_state(state: &mut RuntimeSessionState) {
-        if let Some(snapshot) = state.tool_state_snapshot.as_mut() {
-            let normalized = snapshot.clone().with_generation(1);
-            state.tool_state_generation = Some(normalized.generation());
-            *snapshot = normalized;
         }
     }
 
@@ -292,7 +282,10 @@ impl SessionBuilder {
         })
     }
 
-    fn create_store(&self, policy: &SessionPolicy) -> Result<Option<Arc<dyn RuntimePersistence>>> {
+    async fn create_store(
+        &self,
+        policy: &SessionPolicy,
+    ) -> Result<Option<Arc<dyn RuntimePersistence>>> {
         if let Some(store) = self.store.as_ref() {
             return Ok(Some(Arc::clone(store)));
         }
@@ -313,6 +306,7 @@ impl SessionBuilder {
         };
         factory
             .create_store(&request)
+            .await
             .map(Some)
             .map_err(|message| EmbedError::StoreFactory {
                 session_id: self.session_id.clone(),
@@ -409,8 +403,8 @@ impl LashSession {
         ToolsControl::new(self.control())
     }
 
-    pub fn host_events(&self) -> HostEventsControl {
-        self.control().host_events()
+    pub fn commands(&self) -> SessionCommandsControl {
+        self.control().commands()
     }
 
     pub fn triggers(&self) -> TriggersControl {

@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
             "openai_compat_stream, standard_shell_output, "
             "tool_discovery_search, openai_responses_sse_parse, "
             "direct_llm_client, process_list_stress, embed_standard, embed_rlm, "
-            "scoped_effect_controller, store_reopen, sqlite_store_reopen, "
+            "scoped_effect_controller, store_reopen, turso_store_reopen, "
             "turn_checkpoint, all."
         ),
     )

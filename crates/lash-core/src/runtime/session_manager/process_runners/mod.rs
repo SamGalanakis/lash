@@ -125,6 +125,7 @@ impl<'a, 'run> ProcessRunContextBuilder<'a, 'run> {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
             attachment_store: Arc::clone(
                 &self.services.current.host.core.durability.attachment_store,
             ),
@@ -212,16 +213,17 @@ mod tests {
         .with_extra_event_types([probe_event_type()])
     }
 
-    fn lashlang_process_registration(
+    async fn lashlang_process_registration(
         process_id: &str,
         program: ::lashlang::Program,
         args: serde_json::Map<String, serde_json::Value>,
     ) -> crate::ProcessRegistration {
         try_lashlang_process_registration(process_id, program, args)
+            .await
             .expect("link lashlang test module")
     }
 
-    fn try_lashlang_process_registration(
+    async fn try_lashlang_process_registration(
         process_id: &str,
         program: ::lashlang::Program,
         args: serde_json::Map<String, serde_json::Value>,
@@ -235,10 +237,10 @@ mod tests {
             ::lashlang::TypeExpr::Any,
             ::lashlang::TypeExpr::Any,
         );
-        try_lashlang_process_registration_with_resources(process_id, program, args, resources)
+        try_lashlang_process_registration_with_resources(process_id, program, args, resources).await
     }
 
-    fn try_lashlang_process_registration_with_resources(
+    async fn try_lashlang_process_registration_with_resources(
         process_id: &str,
         program: ::lashlang::Program,
         args: serde_json::Map<String, serde_json::Value>,
@@ -272,6 +274,7 @@ mod tests {
         )?;
         ::lashlang::global_in_memory_lashlang_artifact_store()
             .put_module_artifact(&linked_module.artifact)
+            .await
             .expect("store lashlang test module artifact");
         let process_ref = linked_module
             .artifact
@@ -291,13 +294,14 @@ mod tests {
         .with_extra_event_types(crate::lashlang_process_event_types()))
     }
 
-    fn lashlang_process_registration_with_resources(
+    async fn lashlang_process_registration_with_resources(
         process_id: &str,
         program: ::lashlang::Program,
         args: serde_json::Map<String, serde_json::Value>,
         resources: ::lashlang::ResourceCatalog,
     ) -> crate::ProcessRegistration {
         try_lashlang_process_registration_with_resources(process_id, program, args, resources)
+            .await
             .expect("link lashlang test module")
     }
 
@@ -527,15 +531,16 @@ mod tests {
         store: Arc<RecordingStore>,
     }
 
+    #[async_trait::async_trait]
     impl crate::SessionStoreFactory for SharedSessionStoreFactory {
-        fn create_store(
+        async fn create_store(
             &self,
             _request: &crate::SessionStoreCreateRequest,
         ) -> Result<Arc<dyn crate::RuntimePersistence>, String> {
             Ok(Arc::clone(&self.store) as Arc<dyn crate::RuntimePersistence>)
         }
 
-        fn delete_session(&self, _session_id: &str) -> Result<(), String> {
+        async fn delete_session(&self, _session_id: &str) -> Result<(), String> {
             Ok(())
         }
     }
@@ -557,13 +562,14 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn lashlang_process_registration_serializes_refs_only() {
+    #[tokio::test]
+    async fn lashlang_process_registration_serializes_refs_only() {
         let registration = lashlang_process_registration(
             "refs-only",
             ::lashlang::parse("process main() { finish 1 }").expect("parse module"),
             serde_json::Map::new(),
-        );
+        )
+        .await;
 
         let json = serde_json::to_string(&registration).expect("serialize registration");
 
@@ -592,11 +598,14 @@ mod tests {
                 config
             },
         );
-        let registration = worker_registration(lashlang_process_registration(
-            "missing-artifact",
-            ::lashlang::parse("process main() { finish 1 }").expect("parse module"),
-            serde_json::Map::new(),
-        ));
+        let registration = worker_registration(
+            lashlang_process_registration(
+                "missing-artifact",
+                ::lashlang::parse("process main() { finish 1 }").expect("parse module"),
+                serde_json::Map::new(),
+            )
+            .await,
+        );
 
         let output = worker
             .run_process(
@@ -1108,18 +1117,21 @@ mod tests {
 
         let mut args = serde_json::Map::new();
         args.insert("value".to_string(), serde_json::json!("linked"));
-        let lashlang_registration = worker_registration(lashlang_process_registration(
-            "worker-lashlang",
-            ::lashlang::parse(
-                r#"
+        let lashlang_registration = worker_registration(
+            lashlang_process_registration(
+                "worker-lashlang",
+                ::lashlang::parse(
+                    r#"
                 process main(value: str) {
                   finish { value: value }
                 }
                 "#,
+                )
+                .expect("process module"),
+                args,
             )
-            .expect("process module"),
-            args,
-        ));
+            .await,
+        );
         let crate::ProcessInput::LashlangProcess { module_ref, .. } =
             lashlang_registration.input.as_ref()
         else {
@@ -1127,6 +1139,7 @@ mod tests {
         };
         let artifact = ::lashlang::global_in_memory_lashlang_artifact_store()
             .get_module_artifact(module_ref)
+            .await
             .expect("load lashlang module artifact")
             .expect("lashlang module artifact exists");
         let requirements = ::lashlang::surface_requirements_for_program(&artifact.canonical_ir);
@@ -1241,7 +1254,7 @@ mod tests {
             "#,
         )
         .expect("lashlang process body");
-        let registration = lashlang_process_registration("process-1", program, input);
+        let registration = lashlang_process_registration("process-1", program, input).await;
 
         manager
             .processes
@@ -1375,13 +1388,14 @@ mod tests {
         )
         .expect("process module");
         let registration =
-            lashlang_process_registration("snapshot-parent", program, serde_json::Map::new());
+            lashlang_process_registration("snapshot-parent", program, serde_json::Map::new()).await;
         let crate::ProcessInput::LashlangProcess { module_ref, .. } = registration.input.as_ref()
         else {
             panic!("expected lashlang process input");
         };
         let artifact = ::lashlang::global_in_memory_lashlang_artifact_store()
             .get_module_artifact(module_ref)
+            .await
             .expect("load lashlang module artifact")
             .expect("lashlang module artifact exists");
         let requirements = ::lashlang::surface_requirements_for_program(&artifact.canonical_ir);
@@ -1454,10 +1468,11 @@ mod tests {
 
         let mut args = serde_json::Map::new();
         args.insert("flag".to_string(), serde_json::json!(true));
-        let registration = worker_registration(lashlang_process_registration(
-            "tracking-parent",
-            ::lashlang::parse(
-                r#"
+        let registration = worker_registration(
+            lashlang_process_registration(
+                "tracking-parent",
+                ::lashlang::parse(
+                    r#"
                 process child() {
                   finish "child"
                 }
@@ -1471,10 +1486,12 @@ mod tests {
                   }
                 }
                 "#,
+                )
+                .expect("tracking process"),
+                args,
             )
-            .expect("tracking process"),
-            args,
-        ));
+            .await,
+        );
         registry_dyn
             .register_process(registration.clone())
             .await
@@ -1603,7 +1620,8 @@ mod tests {
             )
             .expect("target process"),
             serde_json::Map::new(),
-        );
+        )
+        .await;
         manager
             .processes
             .start_process(
@@ -1638,7 +1656,8 @@ mod tests {
             )
             .expect("signaler process"),
             signaler_args,
-        );
+        )
+        .await;
         manager
             .processes
             .start_process(
@@ -1730,7 +1749,7 @@ mod tests {
             )]),
         ))]);
         let registration =
-            lashlang_process_registration("process-fail", program, serde_json::Map::new());
+            lashlang_process_registration("process-fail", program, serde_json::Map::new()).await;
 
         manager
             .processes
@@ -1779,6 +1798,7 @@ mod tests {
             no_parent_program,
             serde_json::Map::new(),
         )
+        .await
         .expect_err("linked process should reject parent capture");
         assert!(err.to_string().contains("unknown name `parent`"), "{err}");
 
@@ -1790,6 +1810,7 @@ mod tests {
             fallback_program,
             serde_json::Map::new(),
         )
+        .await
         .expect_err("bare operation-name fallback should be rejected by linker");
         assert!(
             err.to_string()

@@ -1,6 +1,6 @@
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::store::RuntimeCommit;
-use lash_sqlite_store::Store;
+use lash_turso_store::Store;
 
 pub(crate) async fn persist_committed_runtime_state(
     store: &Store,

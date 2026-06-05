@@ -228,6 +228,7 @@ impl HostBridge<'_> {
         let (registration, label) = self
             .ctx
             .prepare_lashlang_process_start(start)
+            .await
             .map_err(ExecutionHostError::new)?;
         let reply = self.ctx.start_lashlang_process(registration, label).await;
         self.consume_reply("start_process", reply)

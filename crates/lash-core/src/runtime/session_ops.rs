@@ -12,8 +12,10 @@ use super::state::{RuntimeSessionState, append_session_nodes_to_state, normalize
 
 struct AppendedHostEvent {
     source_type: String,
+    #[cfg(test)]
     node_id: String,
     invocation: crate::RuntimeInvocation,
+    graph: crate::store::GraphCommitDelta,
 }
 
 struct AppendedActivation {
@@ -230,7 +232,8 @@ impl LashRuntime {
         Ok(())
     }
 
-    pub async fn emit_host_event(
+    #[cfg(test)]
+    pub(in crate::runtime) async fn emit_host_event(
         &mut self,
         resource_type: &str,
         alias: &str,
@@ -256,26 +259,7 @@ impl LashRuntime {
         .await
     }
 
-    pub async fn emit_host_event_with_effect_scope(
-        &mut self,
-        resource_type: &str,
-        alias: &str,
-        event: &str,
-        payload: serde_json::Value,
-        scoped_effect_controller: crate::ScopedEffectController<'_>,
-    ) -> Result<crate::HostEventEmitReport, SessionError> {
-        let appended = self
-            .validate_and_append_host_event(resource_type, alias, event, &payload)
-            .await?;
-        self.activate_host_event_source(
-            &appended.source_type,
-            payload,
-            scoped_effect_controller,
-            appended.invocation,
-        )
-        .await
-    }
-
+    #[cfg(test)]
     async fn validate_and_append_host_event(
         &mut self,
         resource_type: &str,
@@ -283,6 +267,57 @@ impl LashRuntime {
         event: &str,
         payload: &serde_json::Value,
     ) -> Result<AppendedHostEvent, SessionError> {
+        let appended = self
+            .validate_and_append_host_event_to_state(resource_type, alias, event, payload)
+            .await?;
+        if let Some(store) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+        {
+            let commit = crate::store::RuntimeCommit::persisted_state_with_graph_commit(
+                &self.state,
+                appended.graph.clone(),
+                &[],
+            );
+            match store.commit_runtime_state(commit).await {
+                Ok(result) => self.state.apply_persisted_commit_result(result),
+                Err(err) => tracing::warn!("failed to persist runtime state: {err}"),
+            }
+        }
+        Ok(appended)
+    }
+
+    pub(in crate::runtime) async fn emit_host_event_without_persist(
+        &mut self,
+        resource_type: &str,
+        alias: &str,
+        event: &str,
+        payload: serde_json::Value,
+        scoped_effect_controller: crate::ScopedEffectController<'_>,
+    ) -> Result<(crate::HostEventEmitReport, crate::store::GraphCommitDelta), SessionError> {
+        let appended = self
+            .validate_and_append_host_event_to_state(resource_type, alias, event, &payload)
+            .await?;
+        let report = self
+            .activate_host_event_source(
+                &appended.source_type,
+                payload,
+                scoped_effect_controller,
+                appended.invocation.clone(),
+            )
+            .await?;
+        Ok((report, appended.graph))
+    }
+
+    async fn validate_and_append_host_event_to_state(
+        &mut self,
+        resource_type: &str,
+        alias: &str,
+        event: &str,
+        payload: &serde_json::Value,
+    ) -> Result<AppendedHostEvent, SessionError> {
+        self.refresh_session_graph_from_store().await?;
         {
             let Some(session) = self.session.as_ref() else {
                 return Err(SessionError::Protocol(
@@ -299,33 +334,38 @@ impl LashRuntime {
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
         }
         let source_type = crate::host_event_source_type(alias, event);
-        let append = self
-            .append_session_nodes(crate::AppendSessionNodesRequest {
-                nodes: vec![crate::SessionAppendNode::plugin(
-                    "lash.host_event",
-                    serde_json::json!({
-                        "resource_type": resource_type,
-                        "alias": alias,
-                        "event": event,
-                        "source_type": source_type.clone(),
-                        "payload": payload.clone(),
-                    }),
-                )],
-                requires_ancestor_node_id: None,
-            })
-            .await?;
-        let host_event_node_id = match append {
-            crate::AppendSessionNodesResult::Appended { node_ids, .. } => {
-                node_ids.into_iter().next().unwrap_or_default()
-            }
-            crate::AppendSessionNodesResult::StaleBranch {
-                current_leaf_node_id,
-            } => {
-                return Err(SessionError::Protocol(format!(
-                    "host event append targeted a stale session branch at {:?}",
-                    current_leaf_node_id
-                )));
-            }
+        let nodes = vec![crate::SessionAppendNode::plugin(
+            "lash.host_event",
+            serde_json::json!({
+                "resource_type": resource_type,
+                "alias": alias,
+                "event": event,
+                "source_type": source_type.clone(),
+                "payload": payload.clone(),
+            }),
+        )];
+        let node_ids = append_session_nodes_to_state(&mut self.state, &nodes);
+        if let Some(session) = self.session.as_mut() {
+            let protocol_session = Arc::clone(session.plugins().protocol_session());
+            let session_id = self.state.session_id.clone();
+            protocol_session
+                .append_session_nodes(
+                    crate::plugin::ProtocolSessionContext::new(session, &session_id),
+                    &nodes,
+                )
+                .await?;
+        }
+        self.stamp_live_plugin_state();
+        let host_event_node_id = node_ids.into_iter().next().unwrap_or_default();
+        let graph = crate::store::GraphCommitDelta::Append {
+            nodes: self
+                .state
+                .session_graph
+                .find_node(&host_event_node_id)
+                .cloned()
+                .into_iter()
+                .collect(),
+            leaf_node_id: self.state.session_graph.leaf_node_id.clone(),
         };
         let host_event_invocation = crate::runtime::causal::session_node_invocation(
             &self.state.session_id,
@@ -333,8 +373,10 @@ impl LashRuntime {
         );
         Ok(AppendedHostEvent {
             source_type,
-            node_id: host_event_node_id,
+            #[cfg(test)]
+            node_id: host_event_node_id.clone(),
             invocation: host_event_invocation,
+            graph,
         })
     }
 

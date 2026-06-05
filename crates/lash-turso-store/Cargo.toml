@@ -1,5 +1,5 @@
 [package]
-name = "lash-sqlite-store"
+name = "lash-turso-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,8 +9,8 @@ homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "SQLite-backed session store for the lash agent runtime."
-keywords = ["lash", "agent", "sqlite", "persistence", "store"]
+description = "Turso-backed session store for the lash agent runtime."
+keywords = ["lash", "agent", "turso", "persistence", "store"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
@@ -18,8 +18,9 @@ lash-core = { path = "../lash-core", version = "=0.1.0-alpha.24" }
 lashlang = { path = "../lashlang", version = "=0.1.0-alpha.24" }
 async-trait = { workspace = true }
 flate2 = "1"
+futures-executor = "0.3"
 rmp-serde = "1"
-rusqlite = { version = "0.33", features = ["bundled"] }
+turso = { version = "0.7.0-pre.5", default-features = false }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

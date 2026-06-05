@@ -45,10 +45,21 @@ impl<'run> ToolHostEventControl<'run> {
         let started_process_ids = activation
             .activate_source_type(
                 &source_type,
-                payload,
+                payload.clone(),
                 self.context.parent_invocation.clone(),
             )
             .await?;
+        dispatch
+            .host_event_outcomes
+            .enqueue(crate::tool_dispatch::ToolHostEventEffectOutcome {
+                resource_type: resource_type.to_string(),
+                alias: alias.to_string(),
+                event: event.to_string(),
+                source_type,
+                payload: payload.clone(),
+                started_process_ids: started_process_ids.clone(),
+            })
+            .map_err(PluginError::Session)?;
         Ok(HostEventEmitReport {
             started_process_ids,
         })

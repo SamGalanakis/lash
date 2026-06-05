@@ -18,7 +18,7 @@ use anyhow::{Context, Result, anyhow};
 use lash_core::{
     ChronologicalEntry, ChronologicalPayload, SessionGraph, SessionMeta, ToolCallStatus,
 };
-use lash_sqlite_store::Store;
+use lash_turso_store::Store;
 
 use crate::trace::{LlmPromptSnapshot, load_prompts_from_trace};
 
@@ -116,7 +116,7 @@ impl LoadedSessionTree {
 /// `trace_path` may cover any subset of sessions in the tree; prompts are
 /// partitioned by `context.session_id`. Sessions for which no prompts are
 /// found in the trace render fine — they just don't show LLM-call rows.
-pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedSessionTree> {
+pub async fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedSessionTree> {
     let prompts_all = load_prompts_from_trace(trace_path)?;
     let mut prompts_by_session: HashMap<String, Vec<LlmPromptSnapshot>> = HashMap::new();
     let mut prompts_unkeyed: Vec<LlmPromptSnapshot> = Vec::new();
@@ -142,19 +142,20 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
         if path.extension().and_then(|s| s.to_str()) != Some("db") {
             continue;
         }
-        let Ok(store) = Store::open_readonly(&path) else {
+        let Ok(store) = Store::open_readonly(&path).await else {
             continue;
         };
-        let Some(meta) = store.load_session_meta() else {
+        let Some(meta) = store.load_session_meta().await else {
             continue;
         };
-        let head = store.load_session_head();
+        let head = store.load_session_head().await;
         let context_window_tokens = head
             .as_ref()
             .map(|h| h.config.model.context_window_tokens() as u64);
-        let graph = head
-            .map(|h| h.graph)
-            .unwrap_or_else(|| store.load_session_graph());
+        let graph = match head {
+            Some(head) => head.graph,
+            None => store.load_session_graph().await,
+        };
         let chronological = build_chronological(graph);
         candidates.push(CandidateLoad {
             db_path: path,

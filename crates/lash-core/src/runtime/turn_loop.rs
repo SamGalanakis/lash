@@ -54,6 +54,7 @@ fn queued_work_payload_type(payload: &crate::QueuedWorkPayload) -> &'static str 
         crate::QueuedWorkPayload::ProcessWake { .. } => "process_wake",
         crate::QueuedWorkPayload::HostEvent { .. } => "host_event",
         crate::QueuedWorkPayload::Timer { .. } => "timer",
+        crate::QueuedWorkPayload::SessionCommand { command } => command.kind(),
     }
 }
 
@@ -154,6 +155,7 @@ struct TurnFinishInput {
     policy: RuntimeSessionPolicy,
     turn_index: usize,
     queued_work_completions: Vec<crate::QueuedWorkCompletion>,
+    tool_host_events: Vec<crate::tool_dispatch::ToolHostEventEffectOutcome>,
     trace_turn_id: String,
 }
 
@@ -192,6 +194,7 @@ impl LashRuntime {
             policy,
             turn_index,
             queued_work_completions,
+            tool_host_events,
             trace_turn_id,
         } = finish;
         self.policy = self.state.effective_policy().clone();
@@ -216,6 +219,7 @@ impl LashRuntime {
             &assembler.tool_calls,
             cancel_state.is_cancelled(),
         );
+        turn_pipeline.append_tool_host_events(&tool_host_events);
         if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
             turn_pipeline.state_mut().token_usage = assembler.token_usage.clone();
         }
@@ -437,6 +441,9 @@ impl LashRuntime {
         &mut self,
         opts: TurnOptions<'_>,
     ) -> Result<Option<AssembledTurn>, RuntimeError> {
+        if self.drain_next_session_command().await?.is_some() {
+            return Ok(None);
+        }
         let Some(store) = self
             .session
             .as_ref()
@@ -581,6 +588,9 @@ impl LashRuntime {
         cancel: CancellationToken,
         queued_claim: Option<crate::QueuedWorkClaim>,
     ) -> Result<AssembledTurn, RuntimeError> {
+        if queued_claim.is_none() {
+            while self.drain_next_session_command().await?.is_some() {}
+        }
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
             && scoped_effect_controller
                 .effect_scope()
@@ -1208,6 +1218,7 @@ impl LashRuntime {
             turn_causes: initial_turn_causes,
             pending_queue_claims: initial_queue_claim.into_iter().collect(),
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+            pending_tool_host_events: Vec::new(),
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let protocol_run_offset = 0;
@@ -1242,6 +1253,7 @@ impl LashRuntime {
             policy,
             turn_pipeline,
             pending_queue_claims,
+            pending_tool_host_events,
             ..
         } = driver;
         self.session = Some(session);
@@ -1256,6 +1268,7 @@ impl LashRuntime {
                     .iter()
                     .map(crate::QueuedWorkClaim::completion)
                     .collect(),
+                tool_host_events: pending_tool_host_events,
                 trace_turn_id,
             },
             events,

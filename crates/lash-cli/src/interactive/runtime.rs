@@ -142,8 +142,8 @@ pub(super) async fn sync_runtime_tool_surface(
 ) -> Result<(), String> {
     if let Some(rt) = runtime.as_mut() {
         rt.control()
-            .tools()
-            .refresh_surface()
+            .commands()
+            .refresh_tool_surface("interactive sync", None, "interactive-sync-runtime-tools")
             .await
             .map_err(|err| err.to_string())?;
     }
@@ -296,7 +296,7 @@ pub(crate) fn notify_desktop(title: &str, body: &str) {
 
 /// Generate a unique session name like "juniper-mountain".
 /// Scans existing session files for collisions.
-pub(crate) fn generate_session_name(sessions_dir: &std::path::Path) -> String {
+pub(crate) async fn generate_session_name(sessions_dir: &std::path::Path) -> String {
     use rand::Rng;
 
     const ADJECTIVES: &[&str] = &[
@@ -374,7 +374,7 @@ pub(crate) fn generate_session_name(sessions_dir: &std::path::Path) -> String {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("db")
                 && let Some(filename) = path.file_name().and_then(|name| name.to_str())
-                && let Ok(start) = session_log::load_session_start(filename)
+                && let Ok(start) = session_log::load_session_start(filename).await
             {
                 existing.insert(start.session_name);
             }

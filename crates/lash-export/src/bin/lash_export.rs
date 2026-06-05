@@ -44,7 +44,11 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let format = ExportFormat::parse(&cli.format)?;
 
-    let rendered = export(&cli.db, &cli.trace, format, cli.out.as_deref())
+    let rendered = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .with_context(|| "starting async runtime")?
+        .block_on(export(&cli.db, &cli.trace, format, cli.out.as_deref()))
         .with_context(|| "rendering session")?;
 
     if cli.out.is_none() {

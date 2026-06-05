@@ -10,7 +10,7 @@ use lash_core::store::HydratedSessionCheckpoint;
 use lash_core::{
     PersistedSessionConfig, PersistedTurnState, PromptUsage, ProviderHandle, TokenUsage, ToolState,
 };
-use lash_sqlite_store::Store;
+use lash_turso_store::Store;
 
 use crate::app::{App, UiTimelineItem};
 use crate::model_catalog::CachedModelCatalog;
@@ -226,7 +226,11 @@ async fn apply_graph_resume_state(
             })
             .await
             .map_err(|err| err.to_string())?;
-        let _ = rt.control().tools().refresh_surface().await;
+        let _ = rt
+            .control()
+            .commands()
+            .refresh_tool_surface("resume provider update", None, "resume-provider-update")
+            .await;
     }
 
     Ok(())
@@ -247,14 +251,18 @@ pub async fn load_resumed_session(
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
     let filename = session_log::filename_for_session_identifier(identifier)
+        .await
         .unwrap_or_else(|| identifier.to_string());
-    let loaded =
-        session_log::load_session(&filename).map_err(|err| format!("Could not load: {err}"))?;
+    let loaded = session_log::load_session(&filename)
+        .await
+        .map_err(|err| format!("Could not load: {err}"))?;
     let store = Arc::new(
         Store::open(&session_log::sessions_dir().join(&loaded.filename))
+            .await
             .map_err(|err| format!("Could not open session database: {err}"))?,
     );
     *logger = session_log::SessionLogger::resume(store, &loaded.filename)
+        .await
         .map_err(|err| format!("Could not resume session logger: {err}"))?;
     *history = loaded.messages;
     app.timeline = loaded.blocks;
@@ -307,7 +315,7 @@ pub async fn restore_session_state(
         return Ok(());
     }
 
-    let resume_store = match Store::open(&db_path) {
+    let resume_store = match Store::open(&db_path).await {
         Ok(s) => s,
         Err(err) => {
             app.timeline.push(UiTimelineItem::SystemMessage(format!(
@@ -317,11 +325,11 @@ pub async fn restore_session_state(
         }
     };
 
-    if let Some(head) = resume_store.load_session_head() {
-        let checkpoint = head
-            .checkpoint_ref
-            .as_ref()
-            .and_then(|blob_ref| resume_store.get_checkpoint(blob_ref));
+    if let Some(head) = resume_store.load_session_head().await {
+        let checkpoint = match head.checkpoint_ref.as_ref() {
+            Some(blob_ref) => resume_store.get_checkpoint(blob_ref).await,
+            None => None,
+        };
         return apply_graph_resume_state(
             head.graph,
             Some(head.config),
@@ -354,26 +362,30 @@ mod tests {
 
     use crate::model_catalog::MemoryModelCatalogStore;
 
-    fn persist_session_head(
+    async fn persist_session_head(
         store: &Store,
         graph: lash_core::SessionGraph,
         checkpoint: lash_core::store::HydratedSessionCheckpoint,
     ) {
-        let checkpoint_ref = store.put_checkpoint(&checkpoint).checkpoint_ref;
-        store.save_session_head(lash_core::store::SessionHead {
-            session_id: "root".to_string(),
-            head_revision: 0,
-            agent_frames: Vec::new(),
-            current_agent_frame_id: String::new(),
-            graph,
-            config: lash_core::PersistedSessionConfig {
-                provider_id: "openai_generic".to_string(),
-                model: lash_core::ModelSpec::from_token_limits("gpt-5", None, 200_000, None, None)
+        let checkpoint_ref = store.put_checkpoint(&checkpoint).await.checkpoint_ref;
+        store
+            .save_session_head(lash_core::store::SessionHead {
+                session_id: "root".to_string(),
+                head_revision: 0,
+                agent_frames: Vec::new(),
+                current_agent_frame_id: String::new(),
+                graph,
+                config: lash_core::PersistedSessionConfig {
+                    provider_id: "openai_generic".to_string(),
+                    model: lash_core::ModelSpec::from_token_limits(
+                        "gpt-5", None, 200_000, None, None,
+                    )
                     .expect("valid model spec"),
-            },
-            checkpoint_ref: Some(checkpoint_ref),
-            token_ledger: Vec::new(),
-        });
+                },
+                checkpoint_ref: Some(checkpoint_ref),
+                token_ledger: Vec::new(),
+            })
+            .await;
     }
 
     fn state_with_graph(
@@ -419,7 +431,7 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
         let db_path = sessions_dir.join("resume-usage.db");
-        let store = Store::open(&db_path).expect("store");
+        let store = Store::open(&db_path).await.expect("store");
         let (graph, checkpoint) = state_with_graph(
             Vec::new(),
             7,
@@ -436,7 +448,7 @@ mod tests {
                 context_budget_tokens: 0,
             }),
         );
-        persist_session_head(&store, graph, checkpoint);
+        persist_session_head(&store, graph, checkpoint).await;
 
         let provider = lash_core::ProviderHandle::new(
             lash_provider_openai::OpenAiCompatibleProvider::new(
