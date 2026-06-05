@@ -135,20 +135,22 @@ async fn async_main() -> AnyhowResult<()> {
         None,
     )
     .map_err(|err| anyhow!("invalid OPENROUTER_MODEL metadata: {err}"))?;
-    let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+    let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
         data_dir.join("lash-sessions"),
     ));
     let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
         session_store_factory.clone();
     let process_registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+        lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+            .await
             .context("open process registry")?,
     ) as Arc<dyn lash::process::ProcessRegistry>;
     // Deployment-level Lashlang artifact store (compiled trigger/process
     // modules), shared across the session tree. SQLite keeps installed triggers
     // durable across restarts.
     let artifact_store = Arc::new(
-        lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
+        lash_turso_store::Store::open(&data_dir.join("artifacts.db"))
+            .await
             .context("open lashlang artifact store")?,
     ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
     let subagent_registry = Arc::new(lash_subagents::default_registry(&BTreeMap::new()));
@@ -455,6 +457,7 @@ impl WorkbenchQueuedWorkSubmitter {
                 relation: lash::persistence::SessionRelation::default(),
                 policy: lash::runtime::SessionPolicy::default(),
             })
+            .await
             .map_err(PluginError::Session)?;
         let queued = store
             .list_queued_work(session_id)
@@ -693,9 +696,29 @@ async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Resul
         .open()
         .await
         .map_err(AppError::internal)?;
-    session
+    let expected_generation = session
         .tools()
-        .refresh_surface()
+        .state()
+        .await
+        .map_err(AppError::internal)?
+        .generation();
+    let receipt = session
+        .commands()
+        .refresh_tool_surface(
+            reason,
+            Some(expected_generation),
+            format!(
+                "workbench-refresh-tool-surface:{}:{}:{}",
+                session_id,
+                reason,
+                uuid::Uuid::new_v4()
+            ),
+        )
+        .await
+        .map_err(AppError::internal)?;
+    let _ = session
+        .next_queued_turn()
+        .run()
         .await
         .map_err(AppError::internal)?;
     let persisted = session
@@ -716,6 +739,7 @@ async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Resul
             relation: lash::persistence::SessionRelation::default(),
             policy: persisted.policy.clone(),
         })
+        .await
         .map_err(AppError::internal)?;
     let result = store
         .commit_runtime_state(lash::persistence::RuntimeCommit::persisted_state(
@@ -730,6 +754,8 @@ async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Resul
         json!({
             "reason": reason,
             "session_id": session_id,
+            "command_batch_id": receipt.batch_id,
+            "command_source_key": receipt.source_key,
             "tool_state_generation": persisted.tool_state_generation,
             "tool_count": tool_count,
             "head_revision": result.head_revision,
@@ -879,14 +905,6 @@ async fn lashlang_graph(
     Ok(Json(graph))
 }
 
-fn started_process_text(count: usize) -> String {
-    match count {
-        0 => "no trigger handled the event".to_string(),
-        1 => "started 1 background process".to_string(),
-        count => format!("started {count} background processes"),
-    }
-}
-
 fn ndjson_response(rx: mpsc::Receiver<StreamItem>) -> Response {
     let stream = ReceiverStream::new(rx).map(|item| {
         let mut line = serde_json::to_string(&item).unwrap_or_else(|err| {
@@ -932,13 +950,13 @@ impl TurnActivitySink for ChannelTurnEvents {
     }
 }
 
-pub(crate) async fn emit_button_host_event_with_effect_scope(
+pub(crate) async fn enqueue_button_host_event_command(
     state: &AppState,
     session: &lash::LashSession,
     button: ButtonChoice,
     pressed_at: &str,
-    scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
-) -> AnyhowResult<lash::HostEventEmitReport> {
+    operation_id: &str,
+) -> AnyhowResult<lash::SessionCommandReceipt> {
     let payload = json!({
         "pressed_at": pressed_at,
         "button": button.as_str(),
@@ -955,24 +973,24 @@ pub(crate) async fn emit_button_host_event_with_effect_scope(
         }),
     );
     session
-        .host_events()
-        .emit_with_effect_scope(
+        .commands()
+        .emit_host_event(
             BUTTON_TRIGGER_RESOURCE,
             BUTTON_TRIGGER_ALIAS,
             BUTTON_TRIGGER_EVENT,
             payload,
-            scoped_effect_controller,
+            format!("workbench-button-host-event:{operation_id}"),
         )
         .await
-        .context("emit button host event")
+        .context("enqueue button host event command")
 }
 
-pub(crate) async fn emit_mail_received_host_event_with_effect_scope(
+pub(crate) async fn enqueue_mail_received_host_event_command(
     state: &AppState,
     session: &lash::LashSession,
     message: &mail::MailDelivery,
-    scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
-) -> AnyhowResult<lash::HostEventEmitReport> {
+    operation_id: &str,
+) -> AnyhowResult<lash::SessionCommandReceipt> {
     let payload = json!({
         "account": message.account,
         "title": message.title,
@@ -989,16 +1007,16 @@ pub(crate) async fn emit_mail_received_host_event_with_effect_scope(
         }),
     );
     session
-        .host_events()
-        .emit_with_effect_scope(
+        .commands()
+        .emit_host_event(
             MAIL_EVENT_RESOURCE,
             MAIL_EVENT_ALIAS,
             MAIL_EVENT_EVENT,
             payload,
-            scoped_effect_controller,
+            format!("workbench-mail-host-event:{operation_id}"),
         )
         .await
-        .context("emit mail received host event")
+        .context("enqueue mail received host event command")
 }
 
 fn button_trigger_event_type() -> lashlang::NamedDataType {
@@ -1674,6 +1692,22 @@ mod tests {
     };
     use std::future::Future;
 
+    fn sync_await<T, F>(future: F) -> T
+    where
+        T: Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+    {
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(future)
+        })
+        .join()
+        .expect("runtime thread")
+    }
+
     fn explicit_durable_test_facets(
         builder: lash::LashCoreBuilder,
         data_dir: &std::path::Path,
@@ -1683,10 +1717,14 @@ mod tests {
             .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
                 data_dir.join("attachments"),
             )))
-            .lashlang_artifact_store(Arc::new(
-                lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
-                    .expect("open artifact store"),
-            ))
+            .lashlang_artifact_store(Arc::new(sync_await({
+                let path = data_dir.join("artifacts.db");
+                async move {
+                    lash_turso_store::Store::open(&path)
+                        .await
+                        .expect("open artifact store")
+                }
+            })))
     }
 
     fn run_async_test_on_large_stack<F, Fut>(name: &str, test: F)
@@ -1952,11 +1990,15 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
-                .expect("open registry"),
-        ) as Arc<dyn lash::process::ProcessRegistry>;
-        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        let process_registry = Arc::new(sync_await({
+            let path = data_dir.join("processes.db");
+            async move {
+                lash_turso_store::TursoProcessRegistry::open(&path)
+                    .await
+                    .expect("open registry")
+            }
+        })) as Arc<dyn lash::process::ProcessRegistry>;
+        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
@@ -2028,13 +2070,14 @@ mod tests {
         let data_dir =
             std::env::temp_dir().join(format!("agent-workbench-inbox-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let mail_world = mail::MailWorld::new();
@@ -2109,13 +2152,14 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let mail_world = mail::MailWorld::new();
@@ -2215,13 +2259,15 @@ mod tests {
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
         let db_path = data_dir.join("processes.db");
-        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory.clone();
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&db_path).expect("open registry"),
+            lash_turso_store::TursoProcessRegistry::open(&db_path)
+                .await
+                .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let provider = trigger_registration_provider();
         let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
@@ -2323,7 +2369,8 @@ mod tests {
         };
         let target_scope_id = lash::process::ProcessScope::new(state.current_session_id()).id();
         let session_store =
-            lash_sqlite_store::Store::open(&session_store_factory.path_for_session(&session_id))
+            lash_turso_store::Store::open(&session_store_factory.path_for_session(&session_id))
+                .await
                 .expect("open session store");
         let queued = session_store
             .list_queued_work(&session_id)
@@ -2370,17 +2417,19 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let artifact_store = Arc::new(
-            lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
+            lash_turso_store::Store::open(&data_dir.join("artifacts.db"))
+                .await
                 .expect("open artifact store"),
         );
         let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
@@ -2549,13 +2598,14 @@ mod tests {
         let data_dir =
             std::env::temp_dir().join(format!("agent-workbench-reset-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let provider = trigger_registration_provider();
@@ -2728,7 +2778,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let harness = live_workbench_restate_state(&data_dir, ingress_url);
+        let harness = live_workbench_restate_state(&data_dir, ingress_url).await;
         restate::spawn_restate_endpoint(
             endpoint_bind,
             harness.state.clone(),
@@ -2807,21 +2857,23 @@ mod tests {
         trace_path: PathBuf,
     }
 
-    fn live_workbench_restate_state(
+    async fn live_workbench_restate_state(
         data_dir: &std::path::Path,
         restate_ingress_url: String,
     ) -> LiveWorkbenchRestateHarness {
-        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory.clone();
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
                 .expect("open process registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let artifact_store = Arc::new(
-            lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
+            lash_turso_store::Store::open(&data_dir.join("artifacts.db"))
+                .await
                 .expect("open artifact store"),
         ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
         let trace_path = data_dir.join("trace.jsonl");
@@ -3030,17 +3082,17 @@ mod tests {
     }
 
     #[test]
-    fn persisted_trigger_route_fires_after_reopening_sqlite_artifact_store() {
+    fn persisted_trigger_route_fires_after_reopening_turso_artifact_store() {
         run_async_test_on_large_stack("workbench-persisted-trigger-test", || {
-            persisted_trigger_route_fires_after_reopening_sqlite_artifact_store_inner()
+            persisted_trigger_route_fires_after_reopening_turso_artifact_store_inner()
         });
     }
 
-    async fn persisted_trigger_route_fires_after_reopening_sqlite_artifact_store_inner() {
+    async fn persisted_trigger_route_fires_after_reopening_turso_artifact_store_inner() {
         let data_dir =
             std::env::temp_dir().join(format!("agent-workbench-trigger-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let process_registry_path = data_dir.join("processes.db");
@@ -3049,12 +3101,15 @@ mod tests {
 
         {
             let artifact_store = Arc::new(
-                lash_sqlite_store::Store::open(&artifact_store_path).expect("open artifacts"),
+                lash_turso_store::Store::open(&artifact_store_path)
+                    .await
+                    .expect("open artifacts"),
             );
             let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
                 artifact_store.clone();
             let process_registry = Arc::new(
-                lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
+                lash_turso_store::TursoProcessRegistry::open(&process_registry_path)
+                    .await
                     .expect("open registry"),
             ) as Arc<dyn lash::process::ProcessRegistry>;
             let core = test_workbench_core(
@@ -3074,12 +3129,15 @@ mod tests {
         }
 
         let artifact_store = Arc::new(
-            lash_sqlite_store::Store::open(&artifact_store_path).expect("reopen artifacts"),
+            lash_turso_store::Store::open(&artifact_store_path)
+                .await
+                .expect("reopen artifacts"),
         );
         let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
             artifact_store.clone();
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
+            lash_turso_store::TursoProcessRegistry::open(&process_registry_path)
+                .await
                 .expect("reopen registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let core = test_workbench_core(
@@ -3168,9 +3226,17 @@ mod tests {
         session: &lash::LashSession,
         button: ButtonChoice,
     ) -> lash::HostEventEmitReport {
+        let before = session
+            .process_control()
+            .list_all()
+            .await
+            .expect("list process handles before event")
+            .into_iter()
+            .map(|handle| handle.process_id)
+            .collect::<BTreeSet<_>>();
         session
-            .host_events()
-            .emit(
+            .commands()
+            .emit_host_event(
                 BUTTON_TRIGGER_RESOURCE,
                 BUTTON_TRIGGER_ALIAS,
                 BUTTON_TRIGGER_EVENT,
@@ -3179,9 +3245,31 @@ mod tests {
                     "message": format!("user pressed the {} button", button.lower()),
                     "pressed_at": "2026-06-02T12:00:00Z"
                 }),
+                format!(
+                    "workbench-test-button-host-event:{}:{}",
+                    button.as_str(),
+                    uuid::Uuid::new_v4()
+                ),
             )
             .await
-            .expect("emit button trigger")
+            .expect("enqueue button trigger command");
+        let _ = session
+            .next_queued_turn()
+            .run()
+            .await
+            .expect("drain button trigger command");
+        let started_process_ids = session
+            .process_control()
+            .list_all()
+            .await
+            .expect("list process handles after event")
+            .into_iter()
+            .map(|handle| handle.process_id)
+            .filter(|process_id| !before.contains(process_id))
+            .collect();
+        lash::HostEventEmitReport {
+            started_process_ids,
+        }
     }
 
     fn trigger_registration_provider() -> ProviderHandle {

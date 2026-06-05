@@ -22,8 +22,8 @@ use serde_json::{Value, json};
 use crate::{
     AppError, AppState, ButtonChoice, CRON_SCHEDULE_SOURCE_TYPE, ChannelTurnEvents, ModelSelection,
     TurnStreamState, apply_model_selection_to_session, assistant_text_for_display,
-    emit_button_host_event_with_effect_scope, emit_mail_received_host_event_with_effect_scope,
-    model_spec_from_selection, started_process_text,
+    enqueue_button_host_event_command, enqueue_mail_received_host_event_command,
+    model_spec_from_selection,
 };
 
 const CRON_STATE_KEY: &str = "state";
@@ -538,7 +538,7 @@ async fn run_user_turn(
 async fn run_button_trigger(
     state: AppState,
     request: WorkbenchButtonTriggerWorkflowRequest,
-    controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+    _controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
     let turn_model = model_spec_from_selection(request.model);
     let session = state
@@ -555,32 +555,24 @@ async fn run_button_trigger(
         "restate_button_trigger",
     )
     .await?;
-    let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::host_event(
-            &request.session_id,
-            &request.operation_id,
-        ))
-        .map_err(AppError::internal)?;
-    let report = emit_button_host_event_with_effect_scope(
+    let receipt = enqueue_button_host_event_command(
         &state,
         &session,
         request.button,
         &request.pressed_at,
-        scoped_effect_controller,
+        &request.operation_id,
     )
     .await
     .map_err(AppError::internal)?;
     state.trace(
-        "button_trigger.restate.host_event_report",
+        "button_trigger.restate.host_event_command",
         json!({
             "button": request.button,
-            "started_process_ids": report.started_process_ids.clone(),
+            "batch_id": receipt.batch_id,
+            "source_key": receipt.source_key,
         }),
     );
-    state.push_message(
-        "event",
-        started_process_text(report.started_process_ids.len()),
-    );
+    state.push_message("event", "button host event queued");
     // Host-event dispatch is the end of this client-initiated request. Emit a
     // terminal Done so the UI clears its busy state even when no trigger
     // matched (any process the event started streams its own turn separately).
@@ -591,7 +583,7 @@ async fn run_button_trigger(
 async fn run_mail_received(
     state: AppState,
     request: WorkbenchMailReceivedWorkflowRequest,
-    controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+    _controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
     let turn_model = model_spec_from_selection(request.model);
     let session = state
@@ -602,32 +594,24 @@ async fn run_mail_received(
         .await
         .map_err(AppError::internal)?;
     apply_model_selection_to_session(&state, &session, turn_model, "restate_mail_received").await?;
-    let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::host_event(
-            &request.session_id,
-            &request.operation_id,
-        ))
-        .map_err(AppError::internal)?;
-    let report = emit_mail_received_host_event_with_effect_scope(
+    let receipt = enqueue_mail_received_host_event_command(
         &state,
         &session,
         &request.delivery,
-        scoped_effect_controller,
+        &request.operation_id,
     )
     .await
     .map_err(AppError::internal)?;
     state.trace(
-        "mail_received.restate.host_event_report",
+        "mail_received.restate.host_event_command",
         json!({
             "account": request.delivery.account,
             "title": request.delivery.title,
-            "started_process_ids": report.started_process_ids.clone(),
+            "batch_id": receipt.batch_id,
+            "source_key": receipt.source_key,
         }),
     );
-    state.push_message(
-        "event",
-        started_process_text(report.started_process_ids.len()),
-    );
+    state.push_message("event", "mail received host event queued");
     // Host-event dispatch is the end of this client-initiated request. Emit a
     // terminal Done so the UI clears its busy state even when no trigger
     // matched (any process the event started streams its own turn separately).

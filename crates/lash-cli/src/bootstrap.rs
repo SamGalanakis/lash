@@ -500,9 +500,12 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let session_bootstrap_probe = if args.info {
         None
     } else {
-        Some(crate::session_bootstrap::SessionBootstrap::open(
-            SessionBootstrapSource::from_resume_arg(args.resume.clone()),
-        )?)
+        Some(
+            crate::session_bootstrap::SessionBootstrap::open(
+                SessionBootstrapSource::from_resume_arg(args.resume.clone()).await,
+            )
+            .await?,
+        )
     };
     if let Some(session_bootstrap_probe) = session_bootstrap_probe.as_ref() {
         tracing::debug!(
@@ -648,15 +651,16 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         trace_path,
         trace_level,
         Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(
+            lash_turso_store::TursoProcessRegistry::open(
                 &crate::paths::lash_home().join("processes.db"),
             )
+            .await
             .map_err(|err| anyhow::anyhow!(err.to_string()))?,
         ),
     );
     let opened_session = runtime_factory
         .open(
-            SessionBootstrapSource::from_resume_arg(args.resume.clone()),
+            SessionBootstrapSource::from_resume_arg(args.resume.clone()).await,
             session_policy.clone(),
             execution_mode.clone(),
             configured_standard_context_approach.clone(),
@@ -676,7 +680,11 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let store = opened_session.bootstrap.store();
     let session_name = opened_session.bootstrap.session_name();
     let mut logger = opened_session.logger;
-    session.control().tools().refresh_surface().await?;
+    session
+        .control()
+        .commands()
+        .refresh_tool_surface("bootstrap", None, "bootstrap-refresh-tool-surface")
+        .await?;
     if rlm_projected_bindings.is_some() && args.print_prompt.is_none() {
         return Err(anyhow::anyhow!(
             "`--rlm-var` and `--rlm-vars-file` are currently supported for autonomous `--print-prompt` turns; interactive hosts should use the RLM projection API."

@@ -9,6 +9,7 @@ use crate::llm::types::{
 };
 use crate::runtime::ProcessHandleGrantEntry;
 use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
+use crate::tool_dispatch::ToolHostEventEffectOutcome;
 use crate::{
     AttachmentCreateMeta, AttachmentRef, AttachmentStore, CausalRef, CheckpointDelivery,
     ExecResponse, LlmRequest as CoreLlmRequest, LlmResponse, MediaType, ProcessAwaitOutput,
@@ -412,6 +413,13 @@ pub enum ProcessEffectOutcome {
     },
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolCallEffectOutcome {
+    pub result: CompletedToolCall,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_events: Vec<ToolHostEventEffectOutcome>,
+}
+
 /// Serializable result of a runtime effect command.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -425,6 +433,8 @@ pub enum RuntimeEffectOutcome {
     },
     ToolCall {
         result: CompletedToolCall,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        host_events: Vec<ToolHostEventEffectOutcome>,
     },
     Process {
         result: ProcessEffectOutcome,
@@ -599,7 +609,25 @@ impl RuntimeEffectOutcome {
 
     pub fn into_tool_call(self) -> Result<CompletedToolCall, RuntimeEffectControllerError> {
         match self {
-            Self::ToolCall { result } => Ok(result),
+            Self::ToolCall { result, .. } => Ok(result),
+            other => Err(RuntimeEffectControllerError::wrong_outcome(
+                RuntimeEffectKind::ToolCall,
+                other.kind(),
+            )),
+        }
+    }
+
+    pub fn into_tool_call_effect(
+        self,
+    ) -> Result<ToolCallEffectOutcome, RuntimeEffectControllerError> {
+        match self {
+            Self::ToolCall {
+                result,
+                host_events,
+            } => Ok(ToolCallEffectOutcome {
+                result,
+                host_events,
+            }),
             other => Err(RuntimeEffectControllerError::wrong_outcome(
                 RuntimeEffectKind::ToolCall,
                 other.kind(),

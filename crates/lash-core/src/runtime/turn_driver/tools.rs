@@ -1,6 +1,11 @@
 use super::*;
 use crate::tool_dispatch::schedule_tool_batch;
 
+pub(in crate::runtime) struct ToolBatchRunOutcome {
+    pub completed: Vec<crate::sansio::CompletedToolCall>,
+    pub host_events: Vec<crate::tool_dispatch::ToolHostEventEffectOutcome>,
+}
+
 /// Run a single pending tool call through the dispatch context and result
 /// projection pipeline, returning the completed call annotated with its
 /// original emission index.
@@ -97,7 +102,7 @@ impl RuntimeTurnDriver<'_> {
                 id,
                 &prepared.call_id,
             );
-            let result = self
+            let outcome = self
                 .execute_typed_turn_effect(
                     machine,
                     event_tx,
@@ -106,10 +111,11 @@ impl RuntimeTurnDriver<'_> {
                         invocation,
                         RuntimeEffectCommand::ToolCall { call: prepared },
                     ),
-                    RuntimeEffectOutcome::into_tool_call,
+                    RuntimeEffectOutcome::into_tool_call_effect,
                 )
                 .await?;
-            results.push(result);
+            self.pending_tool_host_events.extend(outcome.host_events);
+            results.push(outcome.result);
         }
         drop(prepare_context);
         drop(tool_event_tx);
@@ -122,7 +128,7 @@ impl RuntimeTurnDriver<'_> {
         pending_tools: Vec<(crate::PreparedToolCall, crate::RuntimeInvocation)>,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
-    ) -> Result<Vec<crate::sansio::CompletedToolCall>, crate::RuntimeEffectControllerError> {
+    ) -> Result<ToolBatchRunOutcome, crate::RuntimeEffectControllerError> {
         let (tool_event_tx, mut tool_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(64);
         let (turn_event_tx, mut turn_event_rx) = tokio::sync::mpsc::channel::<TurnActivity>(64);
         let runtime_event_tx = event_tx.clone();
@@ -197,11 +203,20 @@ impl RuntimeTurnDriver<'_> {
         )
         .await;
 
+        let host_events = context.drain_tool_host_event_outcomes().map_err(|err| {
+            crate::RuntimeEffectControllerError::new(
+                "tool_host_event_outcome_drain",
+                err.to_string(),
+            )
+        })?;
         drop(context);
         drop(tool_event_tx);
         drop(turn_event_tx);
         let _ = tool_event_forwarder.await;
         let _ = turn_event_forwarder.await;
-        Ok(outcomes)
+        Ok(ToolBatchRunOutcome {
+            completed: outcomes,
+            host_events,
+        })
     }
 }

@@ -65,7 +65,11 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
     session.run(TurnInput::text("usage")).await?;
     let usage = session.usage_report();
     assert_eq!(usage.usage.output_tokens, 2);
-    session.control().tools().refresh_surface().await?;
+    session
+        .control()
+        .commands()
+        .refresh_tool_surface("control admin test", None, "control-admin-refresh")
+        .await?;
     session.process_control().await_all().await?;
     assert!(session.process_control().list().await?.is_empty());
     let err = session
@@ -88,6 +92,87 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
         err,
         EmbedError::Session(SessionError::CodeExecutionUnavailable)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_commands_enqueue_idempotently_by_source_key() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()?;
+    let session = core.session("command-idempotency").open().await?;
+
+    let first = session
+        .commands()
+        .refresh_tool_surface("test refresh", None, "same-refresh")
+        .await?;
+    let second = session
+        .commands()
+        .refresh_tool_surface("test refresh", None, "same-refresh")
+        .await?;
+
+    assert_eq!(first.batch_id, second.batch_id);
+    assert_eq!(
+        first.source_key,
+        "command:refresh_tool_surface:same-refresh"
+    );
+    let queued = session.queued_work().await?;
+    assert_eq!(queued.len(), 1);
+    assert!(matches!(
+        &queued[0].items[0].payload,
+        lash_core::runtime::QueuedWorkPayload::SessionCommand { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_host_event_command_appends_node_and_completes_claim() -> Result<()> {
+    let host_event = lash_core::HostEvent::new(
+        "Button",
+        "ui.button",
+        "pressed",
+        lash_protocol_rlm::NamedDataType::object("ui.button.Pressed", Vec::new())
+            .expect("event type"),
+    );
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .plugin(Arc::new(StaticPluginFactory::new(
+            "button-host-events",
+            lash_core::PluginSpec::new().with_host_event(host_event),
+        )))
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()?;
+    let session = core.session("command-host-event").open().await?;
+
+    let receipt = session
+        .commands()
+        .emit_host_event(
+            "Button",
+            "ui.button",
+            "pressed",
+            serde_json::json!({ "pressed": true }),
+            "button-press-1",
+        )
+        .await?;
+    assert_eq!(receipt.source_key, "command:emit_host_event:button-press-1");
+    assert_eq!(session.queued_work().await?.len(), 1);
+
+    assert!(session.next_queued_turn().run().await?.is_none());
+    assert!(session.queued_work().await?.is_empty());
+    let persisted = session.control().state().persist_current().await?;
+    let host_event_nodes = persisted
+        .session_graph
+        .nodes
+        .iter()
+        .filter_map(|node| node.plugin())
+        .filter(|(plugin_type, body)| {
+            *plugin_type == "lash.host_event" && body["source_type"] == "ui.button.pressed"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(host_event_nodes.len(), 1);
     Ok(())
 }
 

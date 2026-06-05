@@ -534,7 +534,7 @@ pub const PROCESS_LEASE_SCHEMA_VERSION: u32 = 1;
 /// one non-terminal process is re-executed by exactly one worker at a time —
 /// even after a crash, even across two workers that both sweep the same
 /// registry for recoverable work. The durable backend
-/// (`lash-sqlite-store`) uses these to serialize concurrent claims on the same
+/// (`lash-turso-store`) uses these to serialize concurrent claims on the same
 /// `process_id`; future distributed durable backends use the *same* fields to
 /// coordinate workers that don't share a file system.
 ///

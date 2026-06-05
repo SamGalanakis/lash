@@ -107,8 +107,28 @@ fn external_registration(id: &str) -> ProcessRegistration {
     )
 }
 
+fn sync_await<T, F>(future: F) -> T
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(future)
+    })
+    .join()
+    .expect("runtime thread")
+}
+
 fn process_registry() -> Arc<dyn ProcessRegistry> {
-    Arc::new(lash_sqlite_store::SqliteProcessRegistry::memory().expect("sqlite registry"))
+    Arc::new(sync_await(async {
+        lash_turso_store::TursoProcessRegistry::memory()
+            .await
+            .expect("turso registry")
+    }))
 }
 
 #[derive(Default)]
@@ -745,11 +765,14 @@ async fn restate_handler_replay_retries_final_lash_commit_idempotently() {
     host.providers.provider_resolver = Arc::new(lash_core::SingleProviderResolver::new(provider));
     host.durability.attachment_store = Arc::new(DurableMemoryAttachmentStore::default());
     host.durability.lashlang_artifact_store = Arc::new(
-        lash_sqlite_store::Store::open(&dir.path().join("artifacts.db"))
+        lash_turso_store::Store::open(&dir.path().join("artifacts.db"))
+            .await
             .expect("open artifact store"),
     );
     let store = Arc::new(
-        lash_sqlite_store::Store::open(&dir.path().join("session.db")).expect("open session store"),
+        lash_turso_store::Store::open(&dir.path().join("session.db"))
+            .await
+            .expect("open session store"),
     );
     let runtime_store: Arc<dyn lash_core::RuntimePersistence> = store.clone();
     let policy = replay_test_policy(session_id);
@@ -787,15 +810,27 @@ async fn restate_handler_replay_retries_final_lash_commit_idempotently() {
     ));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
 
-    let conn = rusqlite::Connection::open(dir.path().join("session.db"))
-        .expect("open raw session sqlite store");
-    let rows: i64 = conn
-        .query_row(
+    let db = turso::Builder::new_local(&dir.path().join("session.db").to_string_lossy())
+        .build()
+        .await
+        .expect("open raw session turso store");
+    let conn = db.connect().expect("connect raw session turso store");
+    let mut rows = conn
+        .query(
             "SELECT COUNT(*) FROM runtime_turn_commits WHERE session_id = ?1 AND turn_id = ?2",
-            [session_id, turn_id],
-            |row| row.get(0),
+            turso::params![session_id, turn_id],
         )
+        .await
         .expect("count turn commit stamps");
+    let row = rows
+        .next()
+        .await
+        .expect("read turn commit count")
+        .expect("turn commit count row");
+    let rows = match row.get_value(0).expect("turn commit count value") {
+        turso::Value::Integer(value) => value,
+        other => panic!("expected integer turn commit count, got {other:?}"),
+    };
     assert_eq!(rows, 1);
 }
 
@@ -1502,14 +1537,16 @@ fn process_wake_event_type() -> lash_core::ProcessEventType {
 }
 
 #[tokio::test]
-async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel() {
+async fn turso_process_recovery_reopens_registry_worker_grants_wakes_and_cancel() {
     let temp = tempfile::tempdir().expect("tempdir");
     let process_db = temp.path().join("processes.db");
-    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+    let store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
         temp.path().join("sessions"),
     )) as Arc<dyn lash_core::SessionStoreFactory>;
     let registry_a = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db).expect("open registry"),
+        lash_turso_store::TursoProcessRegistry::open(&process_db)
+            .await
+            .expect("open registry"),
     ) as Arc<dyn ProcessRegistry>;
     let worker_a = recovery_worker(Arc::clone(&registry_a), Arc::clone(&store_factory));
     let endpoint_a = Endpoint::builder()
@@ -1572,7 +1609,9 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
     drop(registry_a);
 
     let registry_b = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db).expect("reopen registry"),
+        lash_turso_store::TursoProcessRegistry::open(&process_db)
+            .await
+            .expect("reopen registry"),
     ) as Arc<dyn ProcessRegistry>;
     let grants = registry_b
         .list_handle_grants(&creator_scope)
@@ -1606,6 +1645,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
                 ..lash_core::SessionPolicy::default()
             },
         })
+        .await
         .expect("open root session store");
     let queued = queue_store
         .list_queued_work("root")
@@ -1666,7 +1706,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
 /// in the process-global in-memory artifact store, mirroring how a trigger
 /// route's linked module is published before the process runs; that store
 /// survives the registry/worker reopen within a single test process.
-fn trigger_lashlang_registration(process_id: &str, resource: &str) -> ProcessRegistration {
+async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> ProcessRegistration {
     let module =
         lashlang::parse("process notify(resource: str) { finish { triggered: resource } }")
             .expect("lashlang trigger module");
@@ -1682,6 +1722,7 @@ fn trigger_lashlang_registration(process_id: &str, resource: &str) -> ProcessReg
         lashlang::global_in_memory_lashlang_artifact_store().as_ref(),
         &linked_module.artifact,
     )
+    .await
     .expect("store lashlang trigger module artifact");
     let process_ref = linked_module
         .artifact
@@ -1717,16 +1758,16 @@ fn trigger_lashlang_registration(process_id: &str, resource: &str) -> ProcessReg
 /// that registry must drive it to completion via the recovery sweep — the same
 /// durable re-execution guarantee a turn-started process has (invariant 3).
 ///
-/// Mirrors `sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`
+/// Mirrors `turso_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`
 /// but the process is started by a trigger/host event (a `LashlangProcess` row
 /// with host-event provenance), not by a live turn's tool call. It also pins
 /// the lease single-owner / fencing contract: an active lease fences a
 /// competing owner and a superseded (stale) writer is rejected (invariant 4).
 #[tokio::test]
-async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen() {
+async fn turso_trigger_started_process_recovered_after_worker_registry_reopen() {
     let temp = tempfile::tempdir().expect("tempdir");
     let process_db = temp.path().join("processes.db");
-    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+    let store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
         temp.path().join("sessions"),
     )) as Arc<dyn lash_core::SessionStoreFactory>;
 
@@ -1734,10 +1775,12 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
     // the durable row exists and is non-terminal. We register it directly to
     // model exactly that mid-flight crash state.
     let registry_a = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db).expect("open registry"),
+        lash_turso_store::TursoProcessRegistry::open(&process_db)
+            .await
+            .expect("open registry"),
     ) as Arc<dyn ProcessRegistry>;
     registry_a
-        .register_process(trigger_lashlang_registration("trigger-notify", "issue-42"))
+        .register_process(trigger_lashlang_registration("trigger-notify", "issue-42").await)
         .await
         .expect("register trigger-started process");
     assert!(
@@ -1754,7 +1797,9 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
     // runs the process on the worker's wired controller, and writes its
     // terminal outcome — idempotent by process_id.
     let registry_b = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db).expect("reopen registry"),
+        lash_turso_store::TursoProcessRegistry::open(&process_db)
+            .await
+            .expect("reopen registry"),
     ) as Arc<dyn ProcessRegistry>;
     assert_eq!(
         registry_b
@@ -1815,7 +1860,7 @@ async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen()
     // exactly one owner. An active lease fences a competing owner, and a
     // superseded (stale) writer cannot renew once a new owner has claimed.
     registry_b
-        .register_process(trigger_lashlang_registration("trigger-lease", "issue-7"))
+        .register_process(trigger_lashlang_registration("trigger-lease", "issue-7").await)
         .await
         .expect("register lease-probe process");
     let owner_a = registry_b

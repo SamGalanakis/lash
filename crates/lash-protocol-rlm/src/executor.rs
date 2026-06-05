@@ -107,7 +107,10 @@ async fn execute_code_inner(
             .stored_lashlang_modules
             .contains(&linked_module.module_ref)
     {
-        if let Err(err) = ctx.put_lashlang_module_artifact(&linked_module.artifact) {
+        if let Err(err) = ctx
+            .put_lashlang_module_artifact(&linked_module.artifact)
+            .await
+        {
             return ExecResponse {
                 observations: Vec::new(),
                 observation_truncation: Vec::new(),

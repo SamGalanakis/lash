@@ -1,21 +1,73 @@
 use super::*;
 
-pub(crate) fn ensure_process_schema(conn: &Connection) -> rusqlite::Result<()> {
-    let user_version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if user_version == PROCESS_SCHEMA_VERSION {
-        conn.execute_batch(PROCESS_SCHEMA)?;
-        return Ok(());
+const SCHEMA_CHANGED_RETRY_ATTEMPTS: usize = 8;
+const SCHEMA_CHANGED_RETRY_BASE_DELAY: Duration = Duration::from_millis(5);
+
+pub(crate) async fn ensure_process_schema(conn: &Connection) -> turso::Result<()> {
+    for attempt in 0..SCHEMA_CHANGED_RETRY_ATTEMPTS {
+        match ensure_process_schema_once(conn).await {
+            Err(err)
+                if is_database_schema_changed(&err)
+                    && attempt + 1 < SCHEMA_CHANGED_RETRY_ATTEMPTS =>
+            {
+                schema_changed_backoff(attempt);
+            }
+            result => return result,
+        }
     }
-    if user_version == 0 && !has_user_schema_objects(conn)? {
-        initialize_schema(conn, PROCESS_SCHEMA, PROCESS_SCHEMA_VERSION)?;
-        return Ok(());
-    }
-    Err(rusqlite::Error::InvalidParameterName(
-        unsupported_schema_message("process registry", PROCESS_SCHEMA_VERSION, user_version),
-    ))
+    unreachable!("schema retry loop always returns")
 }
 
-/// Canonical SQLite schema for a lash session database.
+async fn ensure_process_schema_once(conn: &Connection) -> turso::Result<()> {
+    let user_version = pragma_user_version(conn).await?;
+    if user_version == PROCESS_SCHEMA_VERSION {
+        conn.execute_batch(PROCESS_SCHEMA).await?;
+        return Ok(());
+    }
+    if user_version == 0 && !has_user_schema_objects(conn).await? {
+        initialize_schema(conn, PROCESS_SCHEMA, PROCESS_SCHEMA_VERSION).await?;
+        return Ok(());
+    }
+    Err(turso::Error::Misuse(unsupported_schema_message(
+        "process registry",
+        PROCESS_SCHEMA_VERSION,
+        user_version,
+    )))
+}
+
+pub(crate) async fn ensure_effect_schema(conn: &Connection) -> turso::Result<()> {
+    for attempt in 0..SCHEMA_CHANGED_RETRY_ATTEMPTS {
+        match ensure_effect_schema_once(conn).await {
+            Err(err)
+                if is_database_schema_changed(&err)
+                    && attempt + 1 < SCHEMA_CHANGED_RETRY_ATTEMPTS =>
+            {
+                schema_changed_backoff(attempt);
+            }
+            result => return result,
+        }
+    }
+    unreachable!("schema retry loop always returns")
+}
+
+async fn ensure_effect_schema_once(conn: &Connection) -> turso::Result<()> {
+    let user_version = pragma_user_version(conn).await?;
+    if user_version == EFFECT_SCHEMA_VERSION {
+        conn.execute_batch(EFFECT_SCHEMA).await?;
+        return Ok(());
+    }
+    if user_version == 0 && !has_user_schema_objects(conn).await? {
+        initialize_schema(conn, EFFECT_SCHEMA, EFFECT_SCHEMA_VERSION).await?;
+        return Ok(());
+    }
+    Err(turso::Error::Misuse(unsupported_schema_message(
+        "effect replay",
+        EFFECT_SCHEMA_VERSION,
+        user_version,
+    )))
+}
+
+/// Canonical Turso schema for a lash session database.
 ///
 /// This is the *only* schema the store supports. Older session databases —
 /// including any rolled forward through prior migration chains — must be
@@ -38,14 +90,14 @@ CREATE TABLE IF NOT EXISTS session_head (
 );
 
 CREATE TABLE IF NOT EXISTS graph_nodes (
-    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    seq        INTEGER PRIMARY KEY,
     node_id    TEXT NOT NULL UNIQUE,
     node_json  TEXT NOT NULL,
     tombstoned INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS usage_deltas (
-    seq                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    seq                  INTEGER PRIMARY KEY,
     source               TEXT NOT NULL,
     model                TEXT NOT NULL,
     input_tokens         INTEGER NOT NULL,
@@ -74,7 +126,7 @@ CREATE TABLE IF NOT EXISTS runtime_turn_commits (
 );
 
 CREATE TABLE IF NOT EXISTS queued_work_batches (
-    enqueue_seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+    enqueue_seq       INTEGER PRIMARY KEY,
     batch_id          TEXT NOT NULL UNIQUE,
     session_id        TEXT NOT NULL,
     source_key        TEXT,
@@ -133,8 +185,14 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// rationale.
 pub(crate) const SCHEMA_VERSION: i32 = 3;
 
-pub(crate) const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
-pub(crate) const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 1_000;
+pub(crate) const TURSO_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
+
+pub(crate) async fn file_schema_open_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
 
 pub(crate) const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (
@@ -203,69 +261,134 @@ CREATE TABLE IF NOT EXISTS process_leases (
 
 pub(crate) const PROCESS_SCHEMA_VERSION: i32 = 6;
 
+pub(crate) const EFFECT_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS runtime_effect_replay (
+    scope_id             TEXT NOT NULL,
+    replay_key           TEXT NOT NULL,
+    envelope_hash        TEXT NOT NULL,
+    status               TEXT NOT NULL,
+    outcome_json         TEXT,
+    error_json           TEXT,
+    lease_owner_id       TEXT,
+    lease_token          TEXT,
+    lease_expires_at_ms  INTEGER NOT NULL DEFAULT 0,
+    due_at_ms            INTEGER,
+    created_at_ms        INTEGER NOT NULL,
+    updated_at_ms        INTEGER NOT NULL,
+    PRIMARY KEY (scope_id, replay_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_effect_replay_lease
+    ON runtime_effect_replay(status, lease_expires_at_ms);
+";
+
+pub(crate) const EFFECT_SCHEMA_VERSION: i32 = 1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StoreBacking {
     File,
     Memory,
 }
 
-pub(crate) fn apply_pragmas(conn: &Connection, backing: StoreBacking) -> rusqlite::Result<()> {
-    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+pub(crate) async fn apply_pragmas(conn: &Connection, backing: StoreBacking) -> turso::Result<()> {
+    conn.busy_timeout(TURSO_BUSY_TIMEOUT)?;
     conn.execute_batch(
         "PRAGMA synchronous = NORMAL;
          PRAGMA foreign_keys = ON;
          PRAGMA cache_size = -2000;",
-    )?;
+    )
+    .await?;
     if matches!(backing, StoreBacking::File) {
-        conn.execute_batch(&format!(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA wal_autocheckpoint = {SQLITE_WAL_AUTOCHECKPOINT_PAGES};"
-        ))?;
+        drain_pragma_rows(conn, "PRAGMA journal_mode = 'mvcc'").await?;
     }
     Ok(())
 }
 
-pub(crate) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
-    let user_version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if user_version == SCHEMA_VERSION {
-        conn.execute_batch(SCHEMA)?;
-        return Ok(());
-    }
-
-    if user_version == 0 && !has_user_schema_objects(conn)? {
-        initialize_schema(conn, SCHEMA, SCHEMA_VERSION)?;
-        return Ok(());
-    }
-
-    Err(rusqlite::Error::InvalidParameterName(
-        unsupported_schema_message("session", SCHEMA_VERSION, user_version),
-    ))
+async fn drain_pragma_rows(conn: &Connection, sql: &str) -> turso::Result<()> {
+    let mut rows = conn.query(sql, ()).await?;
+    while rows.next().await?.is_some() {}
+    Ok(())
 }
 
-fn initialize_schema(conn: &Connection, schema: &str, schema_version: i32) -> rusqlite::Result<()> {
-    conn.execute_batch("BEGIN IMMEDIATE;")?;
-    let result = (|| {
-        conn.execute_batch(schema)?;
-        conn.pragma_update(None, "user_version", schema_version)?;
+pub(crate) async fn ensure_schema(conn: &Connection) -> turso::Result<()> {
+    for attempt in 0..SCHEMA_CHANGED_RETRY_ATTEMPTS {
+        match ensure_schema_once(conn).await {
+            Err(err)
+                if is_database_schema_changed(&err)
+                    && attempt + 1 < SCHEMA_CHANGED_RETRY_ATTEMPTS =>
+            {
+                schema_changed_backoff(attempt);
+            }
+            result => return result,
+        }
+    }
+    unreachable!("schema retry loop always returns")
+}
+
+async fn ensure_schema_once(conn: &Connection) -> turso::Result<()> {
+    let user_version = pragma_user_version(conn).await?;
+    if user_version == SCHEMA_VERSION {
+        conn.execute_batch(SCHEMA).await?;
+        return Ok(());
+    }
+
+    if user_version == 0 && !has_user_schema_objects(conn).await? {
+        initialize_schema(conn, SCHEMA, SCHEMA_VERSION).await?;
+        return Ok(());
+    }
+
+    Err(turso::Error::Misuse(unsupported_schema_message(
+        "session",
+        SCHEMA_VERSION,
+        user_version,
+    )))
+}
+
+fn is_database_schema_changed(err: &turso::Error) -> bool {
+    err.to_string().contains("Database schema changed")
+}
+
+fn schema_changed_backoff(attempt: usize) {
+    let multiplier = (attempt + 1) as u32;
+    std::thread::sleep(SCHEMA_CHANGED_RETRY_BASE_DELAY * multiplier);
+}
+
+async fn initialize_schema(
+    conn: &Connection,
+    schema: &str,
+    schema_version: i32,
+) -> turso::Result<()> {
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
+    let result = async {
+        conn.execute_batch(schema).await?;
+        conn.pragma_update("user_version", schema_version).await?;
         Ok(())
-    })();
+    }
+    .await;
     match result {
-        Ok(()) => conn.execute_batch("COMMIT;"),
+        Ok(()) => conn.execute("COMMIT", ()).await.map(|_| ()),
         Err(err) => {
-            let _ = conn.execute_batch("ROLLBACK;");
+            let _ = conn.execute("ROLLBACK", ()).await;
             Err(err)
         }
     }
 }
 
-pub(crate) fn has_user_schema_objects(conn: &Connection) -> rusqlite::Result<bool> {
-    let count: i64 = conn.query_row(
+async fn pragma_user_version(conn: &Connection) -> turso::Result<i32> {
+    let row = required_row(conn, "PRAGMA user_version", ()).await?;
+    Ok(row_i64(&row, 0)? as i32)
+}
+
+pub(crate) async fn has_user_schema_objects(conn: &Connection) -> turso::Result<bool> {
+    let row = required_row(
+        conn,
         "SELECT COUNT(*) FROM sqlite_master
          WHERE name NOT LIKE 'sqlite_%'
            AND type IN ('table', 'index', 'trigger', 'view')",
-        [],
-        |row| row.get(0),
-    )?;
+        (),
+    )
+    .await?;
+    let count = row_i64(&row, 0)?;
     Ok(count > 0)
 }
 

@@ -31,6 +31,7 @@ impl RuntimeSessionServices {
             .durability
             .lashlang_artifact_store
             .get_module_artifact(&module_ref)
+            .await
         {
             Ok(Some(artifact)) => artifact,
             Ok(None) => {
@@ -377,6 +378,7 @@ impl LashlangProcessHost<'_> {
         let (registration, label) = self
             .ctx
             .prepare_lashlang_process_start(start)
+            .await
             .map_err(::lashlang::ExecutionHostError::new)?;
         let reply = self.ctx.start_lashlang_process(registration, label).await;
         protocol_reply_to_lashlang_value(reply)

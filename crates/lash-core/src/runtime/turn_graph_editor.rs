@@ -124,6 +124,24 @@ impl TurnGraphEditor {
         self.append_appended_nodes(nodes);
     }
 
+    pub(super) fn append_plugin_nodes<I>(&mut self, nodes: I)
+    where
+        I: IntoIterator<Item = (String, serde_json::Value, Option<crate::CausalRef>)>,
+    {
+        let drafts = nodes
+            .into_iter()
+            .map(|(plugin_type, body, caused_by)| {
+                crate::session_graph::SessionNodeDraft::plugin(plugin_type, body)
+                    .with_caused_by(caused_by)
+            })
+            .collect::<Vec<_>>();
+        if drafts.is_empty() {
+            return;
+        }
+        let nodes = self.append_builder.append_drafts(drafts);
+        self.append_appended_nodes(nodes);
+    }
+
     fn append_tool_call_records<I>(&mut self, records: I)
     where
         I: IntoIterator<Item = ToolCallRecord>,

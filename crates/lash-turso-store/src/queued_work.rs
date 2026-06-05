@@ -22,26 +22,24 @@ pub(crate) fn decode_queued_payload(value: String) -> Result<QueuedWorkPayload, 
         .map_err(|err| StoreError::Backend(format!("failed to decode queued-work payload: {err}")))
 }
 
-pub(crate) fn queued_work_batch_from_conn(
+pub(crate) async fn queued_work_batch_from_conn(
     conn: &Connection,
     row: QueuedBatchRow,
 ) -> Result<QueuedWorkBatch, StoreError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT item_id, payload_json
-             FROM queued_work_items
-             WHERE batch_id = ?1
-             ORDER BY item_index ASC",
-        )
-        .map_err(sqlite_error)?;
-    let rows = stmt
-        .query_map(params![row.batch_id.as_str()], |item_row| {
-            Ok((item_row.get::<_, String>(0)?, item_row.get::<_, String>(1)?))
-        })
-        .map_err(sqlite_error)?;
+    let item_rows = collect_rows(
+        conn,
+        "SELECT item_id, payload_json
+         FROM queued_work_items
+         WHERE batch_id = ?1
+         ORDER BY item_index ASC",
+        params![row.batch_id.as_str()],
+    )
+    .await
+    .map_err(turso_error)?;
     let mut items = Vec::new();
-    for item in rows {
-        let (item_id, payload_json) = item.map_err(sqlite_error)?;
+    for item_row in item_rows {
+        let item_id = row_string(&item_row, 0).map_err(turso_error)?;
+        let payload_json = row_string(&item_row, 1).map_err(turso_error)?;
         items.push(QueuedWorkItem {
             item_id,
             payload: decode_queued_payload(payload_json)?,
@@ -74,66 +72,64 @@ pub(crate) struct QueuedBatchRow {
     pub(crate) claim_fencing_token: u64,
 }
 
-pub(crate) fn queued_batch_row_from_sql(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<QueuedBatchRow> {
+pub(crate) fn queued_batch_row_from_sql(row: &Row) -> turso::Result<QueuedBatchRow> {
     Ok(QueuedBatchRow {
-        enqueue_seq: row.get::<_, i64>(0)? as u64,
-        batch_id: row.get(1)?,
-        session_id: row.get(2)?,
-        source_key: row.get(3)?,
-        delivery_policy: row.get(4)?,
-        slot_policy: row.get(5)?,
-        merge_key_json: row.get(6)?,
-        available_at_ms: row.get::<_, i64>(7)? as u64,
-        enqueued_at_ms: row.get::<_, i64>(8)? as u64,
-        claim_fencing_token: row.get::<_, i64>(9)? as u64,
+        enqueue_seq: row_i64(row, 0)? as u64,
+        batch_id: row_string(row, 1)?,
+        session_id: row_string(row, 2)?,
+        source_key: row_optional_string(row, 3)?,
+        delivery_policy: row_string(row, 4)?,
+        slot_policy: row_string(row, 5)?,
+        merge_key_json: row_string(row, 6)?,
+        available_at_ms: row_i64(row, 7)? as u64,
+        enqueued_at_ms: row_i64(row, 8)? as u64,
+        claim_fencing_token: row_i64(row, 9)? as u64,
     })
 }
 
-pub(crate) fn load_queued_batch_by_id_conn(
+pub(crate) async fn load_queued_batch_by_id_conn(
     conn: &Connection,
     batch_id: &str,
 ) -> Result<Option<QueuedWorkBatch>, StoreError> {
-    let row = conn
-        .query_row(
-            "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
-                    slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
-                    claim_fencing_token
-             FROM queued_work_batches
-             WHERE batch_id = ?1",
-            params![batch_id],
-            queued_batch_row_from_sql,
-        )
-        .optional()
-        .map_err(sqlite_error)?;
-    row.map(|row| queued_work_batch_from_conn(conn, row))
-        .transpose()
+    let row = optional_row(
+        conn,
+        "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                claim_fencing_token
+         FROM queued_work_batches
+         WHERE batch_id = ?1",
+        params![batch_id],
+    )
+    .await
+    .map_err(turso_error)?
+    .map(|row| queued_batch_row_from_sql(&row).map_err(turso_error))
+    .transpose()?;
+    match row {
+        Some(row) => queued_work_batch_from_conn(conn, row).await.map(Some),
+        None => Ok(None),
+    }
 }
 
-pub(crate) fn ensure_queued_work_completion_conn(
+pub(crate) async fn ensure_queued_work_completion_conn(
     conn: &Connection,
     completed: &QueuedWorkCompletion,
 ) -> Result<(), StoreError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT COUNT(*)
-             FROM queued_work_batches
-             WHERE session_id = ?1
-               AND claim_id = ?2
-               AND claim_token = ?3",
-        )
-        .map_err(sqlite_error)?;
-    let count: usize = stmt
-        .query_row(
-            params![
-                completed.session_id,
-                completed.claim_id,
-                completed.lease_token
-            ],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(sqlite_error)? as usize;
+    let row = required_row(
+        conn,
+        "SELECT COUNT(*)
+         FROM queued_work_batches
+         WHERE session_id = ?1
+           AND claim_id = ?2
+           AND claim_token = ?3",
+        params![
+            completed.session_id.as_str(),
+            completed.claim_id.as_str(),
+            completed.lease_token.as_str()
+        ],
+    )
+    .await
+    .map_err(turso_error)?;
+    let count = row_i64(&row, 0).map_err(turso_error)? as usize;
     if count != completed.batch_ids.len() {
         return Err(StoreError::QueuedWorkClaimExpired {
             session_id: completed.session_id.clone(),

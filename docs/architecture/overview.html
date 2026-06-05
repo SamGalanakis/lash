@@ -48,7 +48,7 @@ flowchart TD
     Graph["SessionGraph<br/>durable event graph"]
     Read["SessionReadView<br/>public read seam"]
     Tools["Tool dispatch<br/>dynamic tools, built-ins"]
-    Sqlite["lash-sqlite-store<br/>concrete SQLite persistence"]
+    Turso["lash-turso-store<br/>Turso persistence"]
     Trace["lash-trace<br/>JSONL trace records"]
   end
 
@@ -76,7 +76,7 @@ flowchart TD
   EffectController --> Env
   L --> LL
   L --> Graph
-  L --> Sqlite
+  L --> Turso
   L --> Trace
   Graph --> Read
   L --> Tools

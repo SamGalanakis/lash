@@ -134,7 +134,8 @@ pub use turn_loop::ensure_durable_effect_input;
 pub use turn_queue::{
     DeliveryPolicy, MergeKey, QUEUED_WORK_CLAIM_TTL_MS, QueuedCheckpointWork, QueuedTurnWork,
     QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
-    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, SlotPolicy, process_wake_batch_draft,
+    QueuedWorkCompletion, QueuedWorkItem, QueuedWorkPayload, SessionCommand, SessionCommandReceipt,
+    SlotPolicy, process_wake_batch_draft,
 };
 pub use usage::{
     SessionUsageReport, TokenLedgerEntry, UsageReportRow, UsageTotals, diff_token_ledger,
@@ -851,6 +852,7 @@ impl SessionStoreCreateRequest {
     }
 }
 
+#[async_trait::async_trait]
 pub trait SessionStoreFactory: Send + Sync {
     /// Durability tier the stores produced by this factory provide; defaults to
     /// [`DurabilityTier::Inline`].
@@ -858,12 +860,12 @@ pub trait SessionStoreFactory: Send + Sync {
         crate::DurabilityTier::Inline
     }
 
-    fn create_store(
+    async fn create_store(
         &self,
         request: &SessionStoreCreateRequest,
     ) -> Result<Arc<dyn crate::store::RuntimePersistence>, String>;
 
-    fn delete_session(&self, session_id: &str) -> Result<(), String>;
+    async fn delete_session(&self, session_id: &str) -> Result<(), String>;
 }
 
 /// Generic runtime for CLI or programmatic embedding.

@@ -344,6 +344,7 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         agent_frame_id: String::new(),
         event_tx,
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+        host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
         attachment_store: attachment_store.clone(),
         turn_context: crate::TurnContext::default(),
     });

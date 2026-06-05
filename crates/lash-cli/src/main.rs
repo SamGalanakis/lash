@@ -399,14 +399,14 @@ struct Args {
     export_out: Option<std::path::PathBuf>,
 }
 
-fn run_export(
+async fn run_export(
     db: &str,
     trace: &std::path::Path,
     format: &str,
     out: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let format = lash_export::ExportFormat::parse(format)?;
-    let rendered = lash_export::export(std::path::Path::new(db), trace, format, out)?;
+    let rendered = lash_export::export(std::path::Path::new(db), trace, format, out).await?;
     if out.is_none() {
         print!("{rendered}");
     }
@@ -494,7 +494,8 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             trace,
             &args.export_format,
             args.export_out.as_deref(),
-        );
+        )
+        .await;
     }
     // Set up file-based structured tracing (JSON logs at $LASH_HOME/lash.log)
     {

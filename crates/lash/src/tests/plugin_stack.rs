@@ -147,7 +147,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
         .tools()
         .set_availability("app_lookup", ToolAvailability::Off)
         .await?;
-    let persisted_tool_state = session.control().tools().state().await?;
+    let persisted_tool_state = session.control().tools().state().await?.with_generation(9);
     let state = RuntimeSessionState {
         session_id: "persisted-tools".to_string(),
         policy: lash_core::SessionPolicy {
@@ -155,6 +155,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
             model: mock_model_spec(),
             ..Default::default()
         },
+        tool_state_generation: Some(persisted_tool_state.generation()),
         tool_state_snapshot: Some(persisted_tool_state),
         ..Default::default()
     };
@@ -168,6 +169,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
 
     let reopened = reopened_core.session("persisted-tools").open().await?;
     let state = reopened.control().tools().state().await?;
+    assert_eq!(state.generation(), 9);
 
     assert_eq!(
         state

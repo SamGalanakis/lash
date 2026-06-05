@@ -4,7 +4,7 @@ use lash_core::{
     LashRuntime, Message, MessageRole, ModelSpec, Part, PartKind, PersistedSessionConfig,
     PersistedTurnState, PruneState, RuntimePersistence, SessionGraph, SessionHead, TokenUsage,
 };
-use lash_sqlite_store::Store;
+use lash_turso_store::Store;
 
 fn test_model_spec() -> ModelSpec {
     ModelSpec::from_token_limits("gpt-5.4-mini", None, 200_000, None, None)
@@ -34,7 +34,7 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
 
 #[tokio::test]
 async fn embedded_runtime_builder_loads_state_from_store() {
-    let store = Arc::new(Store::memory().expect("store"));
+    let store = Arc::new(Store::memory().await.expect("store"));
     let checkpoint_ref = store
         .put_checkpoint(&lash_core::store::HydratedSessionCheckpoint {
             turn_state: PersistedTurnState {
@@ -56,23 +56,26 @@ async fn embedded_runtime_builder_loads_state_from_store() {
             execution_state_ref: None,
             execution_state: None,
         })
+        .await
         .checkpoint_ref;
-    store.save_session_head(SessionHead {
-        session_id: "stored-session".to_string(),
-        head_revision: 0,
-        agent_frames: Vec::new(),
-        current_agent_frame_id: String::new(),
-        graph: SessionGraph::from_active_read_state(
-            &[text_message("u0", MessageRole::User, "stored question")],
-            &[],
-        ),
-        config: PersistedSessionConfig {
-            provider_id: "openai-compatible".into(),
-            model: test_model_spec(),
-        },
-        checkpoint_ref: Some(checkpoint_ref),
-        token_ledger: Vec::new(),
-    });
+    store
+        .save_session_head(SessionHead {
+            session_id: "stored-session".to_string(),
+            head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
+            graph: SessionGraph::from_active_read_state(
+                &[text_message("u0", MessageRole::User, "stored question")],
+                &[],
+            ),
+            config: PersistedSessionConfig {
+                provider_id: "openai-compatible".into(),
+                model: test_model_spec(),
+            },
+            checkpoint_ref: Some(checkpoint_ref),
+            token_ledger: Vec::new(),
+        })
+        .await;
 
     let runtime = LashRuntime::builder()
         .with_store(store.clone() as Arc<dyn RuntimePersistence>)
@@ -95,20 +98,22 @@ async fn embedded_runtime_builder_loads_state_from_store() {
 
 #[tokio::test]
 async fn embedded_runtime_builder_rejects_store_bound_to_different_session_id() {
-    let store = Arc::new(Store::memory().expect("store"));
-    store.save_session_head(SessionHead {
-        session_id: "alpha".to_string(),
-        head_revision: 0,
-        agent_frames: Vec::new(),
-        current_agent_frame_id: String::new(),
-        graph: SessionGraph::default(),
-        config: PersistedSessionConfig {
-            provider_id: "openai-compatible".into(),
-            model: test_model_spec(),
-        },
-        checkpoint_ref: None,
-        token_ledger: Vec::new(),
-    });
+    let store = Arc::new(Store::memory().await.expect("store"));
+    store
+        .save_session_head(SessionHead {
+            session_id: "alpha".to_string(),
+            head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
+            graph: SessionGraph::default(),
+            config: PersistedSessionConfig {
+                provider_id: "openai-compatible".into(),
+                model: test_model_spec(),
+            },
+            checkpoint_ref: None,
+            token_ledger: Vec::new(),
+        })
+        .await;
 
     let err = match LashRuntime::builder()
         .with_store(store as Arc<dyn RuntimePersistence>)

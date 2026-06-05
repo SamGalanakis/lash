@@ -442,6 +442,7 @@ impl DurableProcessWorker {
                 relation: crate::SessionRelation::Root,
                 policy: self.config.session_policy.clone(),
             })
+            .await
             .map_err(|err| {
                 PluginError::Session(format!(
                     "failed to open session store for process worker session `{session_id}`: {err}"
@@ -626,23 +627,24 @@ mod boundary_tests {
         inner: lashlang::InMemoryLashlangArtifactStore,
     }
 
+    #[async_trait::async_trait]
     impl LashlangArtifactStore for DurableArtifactStore {
         fn durability_tier(&self) -> DurabilityTier {
             DurabilityTier::Durable
         }
 
-        fn put_module_artifact(
+        async fn put_module_artifact(
             &self,
             artifact: &lashlang::ModuleArtifact,
         ) -> Result<(), lashlang::ArtifactStoreError> {
-            self.inner.put_module_artifact(artifact)
+            self.inner.put_module_artifact(artifact).await
         }
 
-        fn get_module_artifact(
+        async fn get_module_artifact(
             &self,
             module_ref: &lashlang::ModuleRef,
         ) -> Result<Option<Arc<lashlang::ModuleArtifact>>, lashlang::ArtifactStoreError> {
-            self.inner.get_module_artifact(module_ref)
+            self.inner.get_module_artifact(module_ref).await
         }
     }
 
@@ -652,19 +654,20 @@ mod boundary_tests {
         tier: DurabilityTier,
     }
 
+    #[async_trait::async_trait]
     impl SessionStoreFactory for TierSessionStoreFactory {
         fn durability_tier(&self) -> DurabilityTier {
             self.tier
         }
 
-        fn create_store(
+        async fn create_store(
             &self,
             _request: &crate::SessionStoreCreateRequest,
         ) -> Result<Arc<dyn crate::RuntimePersistence>, String> {
             unreachable!("worker boundary rejects before creating a session store")
         }
 
-        fn delete_session(&self, _session_id: &str) -> Result<(), String> {
+        async fn delete_session(&self, _session_id: &str) -> Result<(), String> {
             Ok(())
         }
     }

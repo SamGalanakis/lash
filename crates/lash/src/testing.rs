@@ -448,9 +448,9 @@ submit "registered"
             .open()
             .await
             .expect("reopen session");
-        let report = session
-            .host_events()
-            .emit(
+        let _receipt = session
+            .commands()
+            .emit_host_event(
                 "Button",
                 "ui.button",
                 "pressed",
@@ -459,13 +459,23 @@ submit "registered"
                     "message": "user pressed the red button",
                     "pressed_at": "2026-06-02T12:00:00Z"
                 }),
+                "runtime-rebuild-host-event",
             )
             .await
             .expect("emit host event");
-        assert_eq!(report.started_process_ids.len(), 1);
-        let process_id = &report.started_process_ids[0];
+        let _ = session
+            .next_queued_turn()
+            .run()
+            .await
+            .expect("drain host event command");
+        let process_records = registry
+            .list_non_terminal()
+            .await
+            .expect("host-event-triggered process records");
+        assert_eq!(process_records.len(), 1);
+        let process_id = process_records[0].id.clone();
         let record = registry
-            .get_process(process_id)
+            .get_process(&process_id)
             .await
             .expect("host-event-triggered process record");
         let process_caused_by = record
@@ -481,7 +491,7 @@ submit "registered"
             } if session_id == SESSION_ID && node_id.starts_with("plugin:")
         ));
 
-        await_success(&registry, process_id).await;
+        await_success(&registry, &process_id).await;
         let queued = session.queued_work().await.expect("queued wake");
         let wake = queued
             .iter()
@@ -491,7 +501,7 @@ submit "registered"
                 _ => None,
             })
             .expect("process wake queued for host-event-triggered process");
-        assert_eq!(wake.process_id, *process_id);
+        assert_eq!(wake.process_id, process_id);
         assert_eq!(wake.process_caused_by, Some(process_caused_by));
         assert!(matches!(
             &wake.event_invocation.subject,
@@ -499,7 +509,7 @@ submit "registered"
                 process_id: wake_process_id,
                 event_type,
                 ..
-            } if wake_process_id == process_id && event_type == "process.wake"
+            } if wake_process_id == &process_id && event_type == "process.wake"
         ));
     }
 

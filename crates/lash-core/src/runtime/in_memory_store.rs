@@ -6,7 +6,7 @@
 //! session from the store factory — so even an in-memory host needs a factory.
 //! This is the named, opt-in counterpart to a durable factory; there is no
 //! silent in-memory default. Holds the same `RuntimePersistence` contract as the
-//! SQLite backend (verified by the `runtime_persistence` conformance suite).
+//! durable backend (verified by the `runtime_persistence` conformance suite).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -531,12 +531,13 @@ impl InMemorySessionStoreFactory {
     }
 }
 
+#[async_trait::async_trait]
 impl SessionStoreFactory for InMemorySessionStoreFactory {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Inline
     }
 
-    fn create_store(
+    async fn create_store(
         &self,
         request: &SessionStoreCreateRequest,
     ) -> Result<Arc<dyn RuntimePersistence>, String> {
@@ -559,7 +560,7 @@ impl SessionStoreFactory for InMemorySessionStoreFactory {
         Ok(store as Arc<dyn RuntimePersistence>)
     }
 
-    fn delete_session(&self, session_id: &str) -> Result<(), String> {
+    async fn delete_session(&self, session_id: &str) -> Result<(), String> {
         self.stores
             .lock()
             .expect("in-memory store factory")

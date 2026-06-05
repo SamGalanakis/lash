@@ -36,5 +36,6 @@ pub(super) struct RuntimeTurnDriver<'a> {
     pub(super) turn_causes: Vec<crate::TurnCause>,
     pub(super) pending_queue_claims: Vec<crate::QueuedWorkClaim>,
     pub(super) checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer,
+    pub(super) pending_tool_host_events: Vec<crate::tool_dispatch::ToolHostEventEffectOutcome>,
     pub(super) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
 }

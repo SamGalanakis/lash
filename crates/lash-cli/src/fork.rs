@@ -4,7 +4,7 @@ use std::process::Stdio;
 use anyhow::{Context, Result, anyhow};
 use lash_core::provider::ProviderHandle;
 use lash_core::store::SessionHead;
-use lash_sqlite_store::Store;
+use lash_turso_store::Store;
 
 use crate::persistence::persist_committed_runtime_state;
 use crate::session_bootstrap::SessionBootstrap;
@@ -548,7 +548,7 @@ pub fn spawn_in_new_terminal(exe: &Path, args: &[String]) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn materialize_child_from_graph(
+async fn materialize_child_from_graph(
     child_session_id: &str,
     child_store: &Store,
     parent_store: &Store,
@@ -557,24 +557,31 @@ fn materialize_child_from_graph(
     checkpoint_ref: Option<&lash_core::BlobRef>,
 ) {
     let child_graph = graph.fork_current_path();
-    let child_checkpoint_ref = checkpoint_ref.and_then(|blob_ref| {
-        parent_store
-            .get_checkpoint(blob_ref)
-            .map(|checkpoint| child_store.put_checkpoint(&checkpoint).checkpoint_ref)
-    });
-    child_store.save_session_head(SessionHead {
-        session_id: child_session_id.to_string(),
-        head_revision: 0,
-        agent_frames: Vec::new(),
-        current_agent_frame_id: String::new(),
-        graph: child_graph.clone(),
-        config: config.clone(),
-        checkpoint_ref: child_checkpoint_ref.clone(),
-        token_ledger: parent_store
-            .load_session_head()
-            .map(|head| head.token_ledger)
-            .unwrap_or_default(),
-    });
+    let child_checkpoint_ref = if let Some(blob_ref) = checkpoint_ref {
+        match parent_store.get_checkpoint(blob_ref).await {
+            Some(checkpoint) => Some(child_store.put_checkpoint(&checkpoint).await.checkpoint_ref),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let token_ledger = parent_store
+        .load_session_head()
+        .await
+        .map(|head| head.token_ledger)
+        .unwrap_or_default();
+    child_store
+        .save_session_head(SessionHead {
+            session_id: child_session_id.to_string(),
+            head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
+            graph: child_graph.clone(),
+            config: config.clone(),
+            checkpoint_ref: child_checkpoint_ref.clone(),
+            token_ledger,
+        })
+        .await;
 }
 
 pub struct ForkedSession {
@@ -593,12 +600,14 @@ pub async fn fork_current_session(
     if let Some(session) = session {
         persist_parent_root_snapshot(session, logger.store().as_ref()).await?;
     }
-    let child_bootstrap = SessionBootstrap::fork_child(&logger.session_id, configured_model)?;
+    let child_bootstrap =
+        SessionBootstrap::fork_child(&logger.session_id, configured_model).await?;
     let child_store = child_bootstrap.store();
     let child_meta = child_store
         .load_session_meta()
+        .await
         .ok_or_else(|| anyhow!("Fork child session metadata was not created"))?;
-    let parent_head = if let Some(head) = logger.store().load_session_head() {
+    let parent_head = if let Some(head) = logger.store().load_session_head().await {
         head
     } else {
         let model = lash_core::ModelSpec::from_token_limits(
@@ -630,7 +639,8 @@ pub async fn fork_current_session(
         &parent_head.graph,
         &parent_head.config,
         parent_head.checkpoint_ref.as_ref(),
-    );
+    )
+    .await;
 
     Ok(ForkedSession {
         session_id: child_meta.session_id,
@@ -691,24 +701,29 @@ mod fork_tests {
         }
     }
 
-    fn save_persisted_root(store: &Store, graph: lash_core::SessionGraph, iteration: usize) {
+    async fn save_persisted_root(store: &Store, graph: lash_core::SessionGraph, iteration: usize) {
         let checkpoint_ref = store
             .put_checkpoint(&persisted_checkpoint(iteration))
+            .await
             .checkpoint_ref;
-        store.save_session_head(lash_core::store::SessionHead {
-            session_id: "root".to_string(),
-            head_revision: 0,
-            agent_frames: Vec::new(),
-            current_agent_frame_id: String::new(),
-            graph,
-            config: lash_core::PersistedSessionConfig {
-                provider_id: dummy_provider().kind().to_string(),
-                model: lash_core::ModelSpec::from_token_limits("gpt-test", None, 1024, None, None)
+        store
+            .save_session_head(lash_core::store::SessionHead {
+                session_id: "root".to_string(),
+                head_revision: 0,
+                agent_frames: Vec::new(),
+                current_agent_frame_id: String::new(),
+                graph,
+                config: lash_core::PersistedSessionConfig {
+                    provider_id: dummy_provider().kind().to_string(),
+                    model: lash_core::ModelSpec::from_token_limits(
+                        "gpt-test", None, 1024, None, None,
+                    )
                     .expect("valid model spec"),
-            },
-            checkpoint_ref: Some(checkpoint_ref),
-            token_ledger: Vec::new(),
-        });
+                },
+                checkpoint_ref: Some(checkpoint_ref),
+                token_ledger: Vec::new(),
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -741,7 +756,7 @@ mod fork_tests {
 
         let parent_filename = "parent.db".to_string();
         let parent_path = session_log::sessions_dir().join(&parent_filename);
-        let parent_store = Arc::new(Store::open(&parent_path).expect("parent store"));
+        let parent_store = Arc::new(Store::open(&parent_path).await.expect("parent store"));
         let parent_logger = SessionLogger::new(
             Arc::clone(&parent_store),
             parent_filename.clone(),
@@ -749,6 +764,7 @@ mod fork_tests {
             Some("parent-session".into()),
             "parent".into(),
         )
+        .await
         .expect("parent logger");
         let messages = vec![lash_core::Message {
             id: "u1".to_string(),
@@ -768,7 +784,7 @@ mod fork_tests {
             .into(),
             origin: None,
         }];
-        save_persisted_root(parent_store.as_ref(), persisted_graph(messages, 1), 1);
+        save_persisted_root(parent_store.as_ref(), persisted_graph(messages, 1), 1).await;
 
         let child = fork_current_session(
             None,
@@ -782,22 +798,23 @@ mod fork_tests {
         .expect("fork should succeed");
 
         let child_filename = session_log::filename_for_session_identifier(&child.session_id)
+            .await
             .expect("child filename");
-        let child_store =
-            Store::open(&session_log::sessions_dir().join(child_filename)).expect("child store");
-        let child_meta = child_store.load_session_meta().expect("child meta");
+        let child_store = Store::open(&session_log::sessions_dir().join(child_filename))
+            .await
+            .expect("child store");
+        let child_meta = child_store.load_session_meta().await.expect("child meta");
         assert_eq!(child.session_id, child_meta.session_id);
         assert_eq!(child.session_name, child_meta.session_name);
         assert_eq!(child_meta.parent_session_id(), Some("parent-session"));
 
-        let child_head = child_store.load_session_head().expect("child head");
+        let child_head = child_store.load_session_head().await.expect("child head");
         let child_graph = child_head.graph;
-        let child_turn = child_head
-            .checkpoint_ref
-            .as_ref()
-            .and_then(|blob_ref| child_store.get_checkpoint(blob_ref))
-            .expect("child checkpoint")
-            .turn_state;
+        let child_checkpoint = match child_head.checkpoint_ref.as_ref() {
+            Some(blob_ref) => child_store.get_checkpoint(blob_ref).await,
+            None => None,
+        };
+        let child_turn = child_checkpoint.expect("child checkpoint").turn_state;
         assert_eq!(child_turn.turn_index, 1);
 
         let child_state = lash_core::SessionSnapshot {

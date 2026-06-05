@@ -247,12 +247,13 @@ pub use runtime::{
     ProtocolTurnExtensionHandle, QueuedWorkPoke, QueuedWorkRunHandle, QueuedWorkRunOutcome,
     QueuedWorkRunRequest, QueuedWorkRunner, Residency, RuntimeEnvironment,
     RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeHostConfig,
-    RuntimeObservation, ScopedEffectController, SessionStoreCreateRequest, SessionStoreFactory,
-    SessionUsageReport, SlotPolicy, TerminationPolicy, TokenLedgerEntry, TurnActivity,
-    TurnActivityId, TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions,
-    UnavailableProcessService, UsageReportRow, UsageTotals, current_epoch_ms, diff_token_ledger,
-    diff_usage_reports, ensure_durable_effect_input, epoch_ms_from_system_time,
-    lashlang_process_event_types, system_time_from_epoch_ms,
+    RuntimeObservation, ScopedEffectController, SessionCommand, SessionCommandReceipt,
+    SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, SlotPolicy,
+    TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink,
+    TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions, UnavailableProcessService,
+    UsageReportRow, UsageTotals, current_epoch_ms, diff_token_ledger, diff_usage_reports,
+    ensure_durable_effect_input, epoch_ms_from_system_time, lashlang_process_event_types,
+    system_time_from_epoch_ms,
 };
 #[allow(unused_imports)]
 pub(crate) use runtime::{

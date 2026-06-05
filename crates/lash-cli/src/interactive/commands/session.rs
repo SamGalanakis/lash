@@ -2,7 +2,6 @@ use lash::{LashSession, ModeId, provider::ProviderHandle};
 use lash_core::session_model::Message;
 use lash_core::{SessionPolicy, ToolState};
 use lash_standard_plugins::StandardContextApproach;
-use tokio::task;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{App, UiTimelineItem};
@@ -52,8 +51,8 @@ async fn activate_opened_session(
     };
     session
         .control()
-        .tools()
-        .refresh_surface()
+        .commands()
+        .refresh_tool_surface("interactive session open", None, "interactive-session-open")
         .await
         .map_err(|err| err.to_string())?;
     *desired_tool_state = session
@@ -135,8 +134,12 @@ pub(super) async fn handle_clear(
     };
     if let Some(rt) = runtime.as_ref() {
         rt.control()
-            .tools()
-            .refresh_surface()
+            .commands()
+            .refresh_tool_surface(
+                "interactive session switch",
+                None,
+                "interactive-session-switch",
+            )
             .await
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         let session_id = rt.session_id();
@@ -419,13 +422,8 @@ pub(super) async fn handle_resume(
     } else {
         const SESSION_PICKER_LIMIT: usize = 50;
         let current_session_id = logger.session_id.clone();
-        let mut sessions = task::spawn_blocking(move || {
-            let mut s = session_log::list_recent_sessions(SESSION_PICKER_LIMIT + 1);
-            s.retain(|si| si.session_id != current_session_id);
-            s
-        })
-        .await
-        .unwrap_or_default();
+        let mut sessions = session_log::list_recent_sessions(SESSION_PICKER_LIMIT + 1).await;
+        sessions.retain(|si| si.session_id != current_session_id);
         if sessions.is_empty() {
             app.timeline.push(UiTimelineItem::SystemMessage(
                 "No sessions found.".to_string(),

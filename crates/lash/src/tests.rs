@@ -269,15 +269,16 @@ struct ReusableStoreFactory {
     store: Arc<dyn lash_core::RuntimePersistence>,
 }
 
+#[async_trait::async_trait]
 impl lash_core::SessionStoreFactory for ReusableStoreFactory {
-    fn create_store(
+    async fn create_store(
         &self,
         _request: &lash_core::SessionStoreCreateRequest,
     ) -> std::result::Result<Arc<dyn lash_core::RuntimePersistence>, String> {
         Ok(Arc::clone(&self.store))
     }
 
-    fn delete_session(&self, _session_id: &str) -> std::result::Result<(), String> {
+    async fn delete_session(&self, _session_id: &str) -> std::result::Result<(), String> {
         Ok(())
     }
 }
@@ -374,8 +375,9 @@ impl RecordingStoreFactory {
     }
 }
 
+#[async_trait::async_trait]
 impl lash_core::SessionStoreFactory for RecordingStoreFactory {
-    fn create_store(
+    async fn create_store(
         &self,
         request: &lash_core::SessionStoreCreateRequest,
     ) -> std::result::Result<Arc<dyn lash_core::RuntimePersistence>, String> {
@@ -386,7 +388,7 @@ impl lash_core::SessionStoreFactory for RecordingStoreFactory {
         Ok(Arc::new(SnapshotStore::default()))
     }
 
-    fn delete_session(&self, _session_id: &str) -> std::result::Result<(), String> {
+    async fn delete_session(&self, _session_id: &str) -> std::result::Result<(), String> {
         Ok(())
     }
 }
@@ -396,8 +398,9 @@ struct DeletingStoreFactory {
     stores: std::sync::Mutex<std::collections::HashMap<String, Arc<SnapshotStore>>>,
 }
 
+#[async_trait::async_trait]
 impl lash_core::SessionStoreFactory for DeletingStoreFactory {
-    fn create_store(
+    async fn create_store(
         &self,
         request: &lash_core::SessionStoreCreateRequest,
     ) -> std::result::Result<Arc<dyn lash_core::RuntimePersistence>, String> {
@@ -411,7 +414,7 @@ impl lash_core::SessionStoreFactory for DeletingStoreFactory {
         Ok(store as Arc<dyn lash_core::RuntimePersistence>)
     }
 
-    fn delete_session(&self, session_id: &str) -> std::result::Result<(), String> {
+    async fn delete_session(&self, session_id: &str) -> std::result::Result<(), String> {
         self.stores
             .lock()
             .expect("deleting factory lock")

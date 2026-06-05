@@ -25,7 +25,7 @@ lashlang = { path = "../../crates/lashlang", version = "=0.1.0-alpha.24" }
 lash-plugin-process-controls = { path = "../../crates/lash-plugin-process-controls", version = "=0.1.0-alpha.24" }
 lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.24" }
 lash-restate = { path = "../../crates/lash-restate", version = "=0.1.0-alpha.24" }
-lash-sqlite-store = { path = "../../crates/lash-sqlite-store", version = "=0.1.0-alpha.24" }
+lash-turso-store = { path = "../../crates/lash-turso-store", version = "=0.1.0-alpha.24" }
 lash-subagents = { path = "../../crates/lash-subagents", version = "=0.1.0-alpha.24" }
 lash-tool-web = { path = "../../crates/lash-tool-web", version = "=0.1.0-alpha.24" }
 reqwest = { workspace = true, features = ["json", "rustls", "http2"] }

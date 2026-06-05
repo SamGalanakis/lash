@@ -53,15 +53,16 @@ pub(crate) struct RuntimePerfStoreFactory {
     pub(crate) store: Arc<RuntimePerfStore>,
 }
 
+#[async_trait::async_trait]
 impl SessionStoreFactory for RuntimePerfStoreFactory {
-    fn create_store(
+    async fn create_store(
         &self,
         _request: &SessionStoreCreateRequest,
     ) -> Result<Arc<dyn RuntimePersistence>, String> {
         Ok(Arc::clone(&self.store) as Arc<dyn RuntimePersistence>)
     }
 
-    fn delete_session(&self, _session_id: &str) -> Result<(), String> {
+    async fn delete_session(&self, _session_id: &str) -> Result<(), String> {
         Ok(())
     }
 }

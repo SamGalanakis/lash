@@ -64,7 +64,7 @@ Use `lash --info` to inspect the active provider, model, execution mode, standar
 
 const SESSIONS_MD: &str = r#"# Sessions
 
-Lash sessions are persisted as SQLite databases under `$LASH_HOME/sessions`.
+Lash sessions are persisted as Turso databases under `$LASH_HOME/sessions`.
 
 Useful operations:
 

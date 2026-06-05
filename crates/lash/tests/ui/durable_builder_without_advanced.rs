@@ -2,7 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use lash::{LashCore, ModeId, ModePreset};
 
-fn durable_core_without_advanced(
+async fn durable_core_without_advanced(
     provider: lash::provider::ProviderHandle,
     data_dir: &Path,
 ) -> lash::Result<lash::LashCore> {
@@ -14,15 +14,16 @@ fn durable_core_without_advanced(
         .default_mode(ModeId::rlm())
         .provider(provider)
         .model(model)
-        .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        .store_factory(Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
             data_dir.join("sessions"),
         )))
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),
         )))
         .lashlang_artifact_store(Arc::new(
-            lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
-                .expect("sqlite artifact store"),
+            lash_turso_store::Store::open(&data_dir.join("artifacts.db"))
+                .await
+                .expect("turso artifact store"),
         ))
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .residency(lash::durability::Residency::ActivePathOnly)

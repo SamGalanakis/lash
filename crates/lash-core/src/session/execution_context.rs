@@ -60,6 +60,15 @@ pub struct RuntimeExecutionContext<'run> {
 }
 
 impl<'run> RuntimeExecutionContext<'run> {
+    pub(crate) fn drain_tool_host_event_outcomes(
+        &self,
+    ) -> Result<Vec<crate::tool_dispatch::ToolHostEventEffectOutcome>, crate::PluginError> {
+        self.dispatch
+            .host_event_outcomes
+            .drain()
+            .map_err(crate::PluginError::Session)
+    }
+
     pub(super) fn process_scope(
         &self,
         parent_invocation: Option<crate::RuntimeInvocation>,
@@ -117,12 +126,13 @@ impl<'run> RuntimeExecutionContext<'run> {
         Arc::clone(&self.attachment_store)
     }
 
-    pub fn put_lashlang_module_artifact(
+    pub async fn put_lashlang_module_artifact(
         &self,
         artifact: &lashlang::ModuleArtifact,
     ) -> Result<(), String> {
         self.lashlang_artifact_store
             .put_module_artifact(artifact)
+            .await
             .map_err(|err| err.to_string())
     }
 
@@ -220,7 +230,7 @@ impl<'run> RuntimeExecutionContext<'run> {
             })
     }
 
-    pub fn prepare_lashlang_process_start(
+    pub async fn prepare_lashlang_process_start(
         &self,
         start: lashlang::ProcessStart,
     ) -> Result<(crate::ProcessRegistration, Option<String>), String> {
@@ -228,6 +238,7 @@ impl<'run> RuntimeExecutionContext<'run> {
         let artifact = self
             .lashlang_artifact_store
             .get_module_artifact(&start.module_ref)
+            .await
             .map_err(|err| format!("failed to load lashlang module artifact: {err}"))?
             .ok_or_else(|| {
                 format!(
@@ -298,6 +309,7 @@ impl<'run> RuntimeExecutionContext<'run> {
                 .dispatch
                 .plugins
                 .register_lashlang_trigger(payload, Arc::clone(&self.lashlang_artifact_store))
+                .await
                 .map_err(|err| err.to_string()),
             Some(lashlang::TriggerHostOperation::List) => self
                 .dispatch
@@ -442,6 +454,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -467,8 +480,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prepare_lashlang_process_start_captures_tool_ids_and_explicit_input() {
+    #[tokio::test]
+    async fn prepare_lashlang_process_start_captures_tool_ids_and_explicit_input() {
         let tool = crate::ToolDefinition::raw(
             "tool:alpha",
             "alpha",
@@ -503,6 +516,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -525,6 +539,7 @@ mod tests {
             )
             .expect("link process module");
         ctx.put_lashlang_module_artifact(&linked.artifact)
+            .await
             .expect("store module artifact");
         let process_ref = linked
             .artifact
@@ -539,6 +554,7 @@ mod tests {
                 process_name: "scan".to_string(),
                 args: input,
             })
+            .await
             .expect("process start should prepare");
 
         assert_eq!(label.as_deref(), Some("scan"));
@@ -594,6 +610,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });
@@ -680,6 +697,7 @@ mod tests {
             agent_frame_id: String::new(),
             event_tx,
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             turn_context: crate::TurnContext::default(),
         });

@@ -107,7 +107,7 @@ The plugin demonstrates:
   `TurnEvent::ReasoningDelta`, assistant prose as
   `TurnEvent::AssistantProseDelta`, code/tool activity as structured cards, and
   RLM `submit` as `TurnEvent::SubmittedValue`.
-- Runtime persistence is handled by `SqliteSessionStoreFactory`; each request
+- Runtime persistence is handled by `TursoSessionStoreFactory`; each request
   opens the Lash session from the chat id and store instead of keeping runtime
   sessions in a process-global map.
 - Product persistence is app-owned: chat rows, board snapshots, reasoning, code

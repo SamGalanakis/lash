@@ -1,7 +1,7 @@
-//! # lash-sqlite-store
+//! # lash-turso-store
 //!
 //! The high-performance local **durable** persistence backend for the lash
-//! agent runtime. One SQLite database per session, opened with WAL journal
+//! agent runtime. One Turso database per session, opened with MVCC journal
 //! mode and a 15-second busy timeout, satisfying the full
 //! [`RuntimePersistence`] + [`AttachmentManifest`] contract from `lash-core`.
 //!
@@ -11,13 +11,13 @@
 //! debug-only convenience. Every primitive that lets the runtime survive a
 //! crash — head-revision CAS, final turn-commit idempotency, attachment
 //! write-ahead manifests, blob content-addressing with optional compression —
-//! is implemented in this crate against SQLite for one reason: SQLite is the
+//! is implemented in this crate against Turso for one reason: Turso is the
 //! simplest backend that gives us *atomic multi-statement transactions on a
 //! single file* with durability guarantees we can reason about. The settled
 //! `RuntimePersistence` contract stays separate from in-flight effect
 //! durability so effect hosts can use their own history/timers for replay.
 //!
-//! In other words: SQLite stores committed Lash state. The
+//! In other words: Turso stores committed Lash state. The
 //! `RuntimeCommit::committed_attachment_ids` plumbing and turn-commit
 //! idempotency are the contract that lets final session state stay coherent
 //! even when an effect host owns in-flight replay.
@@ -26,7 +26,7 @@
 //!
 //! There is exactly one supported schema (see [`SCHEMA`] below). Older
 //! databases must be deleted before opening — we do not carry migration
-//! code. The SQLite schema itself is a snapshot.
+//! code. The Turso schema itself is a snapshot.
 //!
 //! [`RuntimePersistence`]: lash_core::RuntimePersistence
 //! [`AttachmentManifest`]: lash_core::AttachmentManifest
@@ -59,30 +59,33 @@ use lash_core::{
     RuntimePersistence, SessionMeta, SessionPickerInfo, SessionReadScope,
     SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, VacuumReport,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
+use turso::{Connection, Row, Value, params};
 
-/// SQLite-backed store for checkpoint blobs and the canonical session head.
+/// Turso-backed store for checkpoint blobs and the canonical session head.
 pub struct Store {
-    conn: Mutex<Connection>,
+    _db: turso::Database,
+    conn: tokio::sync::Mutex<Connection>,
     artifact_cache: Mutex<BTreeMap<lashlang::ModuleRef, Arc<lashlang::ModuleArtifact>>>,
     options: StoreOptions,
     commit_count: AtomicU64,
 }
 
-/// SQLite-backed process registry for one configured runtime deployment.
+/// Turso-backed process registry for one configured runtime deployment.
 ///
 /// This is intentionally separate from [`Store`]: session databases persist
 /// one conversation, while this registry persists background process state and
 /// handle visibility across all sessions in the same host profile.
-pub struct SqliteProcessRegistry {
-    conn: Mutex<Connection>,
+pub struct TursoProcessRegistry {
+    _db: turso::Database,
+    conn: tokio::sync::Mutex<Connection>,
     notify: tokio::sync::Notify,
 }
 
 mod attachments;
 mod blobs;
 mod conn;
+mod effect_replay;
 mod graph;
 mod leases;
 mod lifecycle;
@@ -91,16 +94,20 @@ mod process_registry;
 mod queued_work;
 mod schema;
 
-use conn::{TxOutcome, lock_conn};
+use conn::TxOutcome;
+pub use effect_replay::{TursoEffectHost, TursoEffectReplayOptions, TursoRuntimeEffectController};
 use leases::*;
 use queued_work::*;
-use schema::{StoreBacking, apply_pragmas, ensure_process_schema, ensure_schema};
+use schema::{
+    StoreBacking, TURSO_BUSY_TIMEOUT, apply_pragmas, ensure_effect_schema, ensure_process_schema,
+    ensure_schema, file_schema_open_guard,
+};
 
-fn sqlite_error(err: rusqlite::Error) -> StoreError {
+fn turso_error(err: turso::Error) -> StoreError {
     StoreError::Backend(err.to_string())
 }
 
-fn process_sqlite_error(err: rusqlite::Error) -> lash_core::PluginError {
+fn process_turso_error(err: turso::Error) -> lash_core::PluginError {
     lash_core::PluginError::Session(err.to_string())
 }
 
@@ -112,6 +119,118 @@ fn process_encode_json<T: serde::Serialize>(value: &T) -> Result<String, lash_co
     serde_json::to_string(value).map_err(|err| {
         lash_core::PluginError::Session(format!("failed to encode process row: {err}"))
     })
+}
+
+fn turso_conversion_error(message: impl Into<String>) -> turso::Error {
+    turso::Error::ConversionFailure(message.into())
+}
+
+fn value_to_string(value: Value) -> turso::Result<String> {
+    match value {
+        Value::Text(value) => Ok(value),
+        Value::Null => Err(turso_conversion_error("expected TEXT, got NULL")),
+        other => Err(turso_conversion_error(format!(
+            "expected TEXT, got {other:?}"
+        ))),
+    }
+}
+
+fn value_to_optional_string(value: Value) -> turso::Result<Option<String>> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Text(value) => Ok(Some(value)),
+        other => Err(turso_conversion_error(format!(
+            "expected nullable TEXT, got {other:?}"
+        ))),
+    }
+}
+
+fn value_to_i64(value: Value) -> turso::Result<i64> {
+    match value {
+        Value::Integer(value) => Ok(value),
+        Value::Null => Err(turso_conversion_error("expected INTEGER, got NULL")),
+        other => Err(turso_conversion_error(format!(
+            "expected INTEGER, got {other:?}"
+        ))),
+    }
+}
+
+fn value_to_optional_i64(value: Value) -> turso::Result<Option<i64>> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Integer(value) => Ok(Some(value)),
+        other => Err(turso_conversion_error(format!(
+            "expected nullable INTEGER, got {other:?}"
+        ))),
+    }
+}
+
+fn value_to_blob(value: Value) -> turso::Result<Vec<u8>> {
+    match value {
+        Value::Blob(value) => Ok(value),
+        Value::Null => Err(turso_conversion_error("expected BLOB, got NULL")),
+        other => Err(turso_conversion_error(format!(
+            "expected BLOB, got {other:?}"
+        ))),
+    }
+}
+
+fn row_string(row: &Row, idx: usize) -> turso::Result<String> {
+    value_to_string(row.get_value(idx)?)
+}
+
+fn row_optional_string(row: &Row, idx: usize) -> turso::Result<Option<String>> {
+    value_to_optional_string(row.get_value(idx)?)
+}
+
+fn row_i64(row: &Row, idx: usize) -> turso::Result<i64> {
+    value_to_i64(row.get_value(idx)?)
+}
+
+fn row_optional_i64(row: &Row, idx: usize) -> turso::Result<Option<i64>> {
+    value_to_optional_i64(row.get_value(idx)?)
+}
+
+fn row_blob(row: &Row, idx: usize) -> turso::Result<Vec<u8>> {
+    value_to_blob(row.get_value(idx)?)
+}
+
+async fn optional_row(
+    conn: &Connection,
+    sql: &str,
+    params: impl turso::IntoParams,
+) -> turso::Result<Option<Row>> {
+    let mut rows = conn.query(sql, params).await?;
+    let row = rows.next().await?;
+    while rows.next().await?.is_some() {}
+    Ok(row)
+}
+
+async fn required_row(
+    conn: &Connection,
+    sql: &str,
+    params: impl turso::IntoParams,
+) -> turso::Result<Row> {
+    optional_row(conn, sql, params)
+        .await?
+        .ok_or(turso::Error::QueryReturnedNoRows)
+}
+
+async fn collect_rows(
+    conn: &Connection,
+    sql: &str,
+    params: impl turso::IntoParams,
+) -> turso::Result<Vec<Row>> {
+    let mut rows = conn.query(sql, params).await?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        out.push(row);
+    }
+    Ok(out)
+}
+
+fn block_on_store<T>(future: impl std::future::Future<Output = T>) -> T {
+    futures_executor::block_on(future)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -226,18 +345,18 @@ pub struct StoredSessionCheckpoint {
     pub manifest: SessionCheckpoint,
 }
 
-/// Explicit first-party factory for one SQLite session database per Lash session.
+/// Explicit first-party factory for one Turso session database per Lash session.
 ///
 /// Hosts opt into this by passing it to `lash::LashCoreBuilder::store_factory`.
 /// The factory never becomes a default: app storage and runtime storage remain
 /// host-owned decisions.
 #[derive(Clone, Debug)]
-pub struct SqliteSessionStoreFactory {
+pub struct TursoSessionStoreFactory {
     root: PathBuf,
     options: StoreOptions,
 }
 
-impl SqliteSessionStoreFactory {
+impl TursoSessionStoreFactory {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
@@ -257,40 +376,46 @@ impl SqliteSessionStoreFactory {
     }
 }
 
-impl SessionStoreFactory for SqliteSessionStoreFactory {
+#[async_trait::async_trait]
+impl SessionStoreFactory for TursoSessionStoreFactory {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
 
-    fn create_store(
+    async fn create_store(
         &self,
         request: &SessionStoreCreateRequest,
     ) -> Result<Arc<dyn RuntimePersistence>, String> {
         std::fs::create_dir_all(&self.root).map_err(|err| err.to_string())?;
         let path = self.path_for_session(&request.session_id);
-        let store =
-            Arc::new(Store::open_with_options(&path, self.options).map_err(|err| err.to_string())?);
-        if store.load_session_meta().is_none() {
-            store.save_session_meta(SessionMeta {
-                session_id: request.session_id.clone(),
-                session_name: request.session_id.clone(),
-                created_at: current_timestamp_string(),
-                model: request.policy.model.id.clone(),
-                cwd: std::env::current_dir()
-                    .ok()
-                    .and_then(|path| path.to_str().map(str::to_string)),
-                relation: request.relation.clone(),
-            });
+        let store = Arc::new(
+            Store::open_with_options(&path, self.options)
+                .await
+                .map_err(|err| err.to_string())?,
+        );
+        if store.load_session_meta().await.is_none() {
+            store
+                .save_session_meta(SessionMeta {
+                    session_id: request.session_id.clone(),
+                    session_name: request.session_id.clone(),
+                    created_at: current_timestamp_string(),
+                    model: request.policy.model.id.clone(),
+                    cwd: std::env::current_dir()
+                        .ok()
+                        .and_then(|path| path.to_str().map(str::to_string)),
+                    relation: request.relation.clone(),
+                })
+                .await;
         }
         Ok(store as Arc<dyn RuntimePersistence>)
     }
 
-    fn delete_session(&self, session_id: &str) -> Result<(), String> {
+    async fn delete_session(&self, session_id: &str) -> Result<(), String> {
         let db_path = self.path_for_session(session_id);
         for path in [
             db_path.clone(),
-            sqlite_sidecar_path(&db_path, "-wal"),
-            sqlite_sidecar_path(&db_path, "-shm"),
+            turso_sidecar_path(&db_path, "-wal"),
+            turso_sidecar_path(&db_path, "-shm"),
         ] {
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
@@ -321,7 +446,7 @@ fn safe_session_db_file_name(session_id: &str) -> String {
     format!("{safe}-{}.db", &hash[..16])
 }
 
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+fn turso_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(suffix);
     PathBuf::from(sidecar)
@@ -436,51 +561,57 @@ fn decode_artifact_blob(bytes: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-fn try_load_session_head_meta_from_conn(
+async fn try_load_session_head_meta_from_conn(
     conn: &Connection,
 ) -> Result<Option<SessionHeadMeta>, StoreError> {
-    let row: Option<(String, u64)> = conn
-        .query_row(
-            "SELECT head_json, head_revision FROM session_head WHERE singleton = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)),
-        )
-        .optional()
-        .map_err(sqlite_error)?;
-    let Some((head_json, head_revision)) = row else {
+    let row = optional_row(
+        conn,
+        "SELECT head_json, head_revision FROM session_head WHERE singleton = 1",
+        (),
+    )
+    .await
+    .map_err(turso_error)?;
+    let Some(row) = row else {
         return Ok(None);
     };
+    let head_json = row_string(&row, 0).map_err(turso_error)?;
+    let head_revision = row_i64(&row, 1).map_err(turso_error)? as u64;
     let mut meta: SessionHeadMeta = serde_json::from_str(&head_json)
         .map_err(|err| StoreError::Backend(format!("decode session head: {err}")))?;
     meta.head_revision = head_revision;
     Ok(Some(meta))
 }
 
-fn load_session_head_meta_from_conn(conn: &Connection) -> Option<SessionHeadMeta> {
-    try_load_session_head_meta_from_conn(conn).ok().flatten()
+async fn load_session_head_meta_from_conn(conn: &Connection) -> Option<SessionHeadMeta> {
+    try_load_session_head_meta_from_conn(conn)
+        .await
+        .ok()
+        .flatten()
 }
 
-fn load_session_meta_from_conn(conn: &Connection) -> Option<SessionMeta> {
-    conn.query_row(
+async fn load_session_meta_from_conn(conn: &Connection) -> Option<SessionMeta> {
+    let row = optional_row(
+        conn,
         "SELECT session_id, session_name, created_at, model, cwd, relation_json
          FROM session_meta WHERE singleton = 1",
-        [],
-        |row| {
-            let relation_json: Option<String> = row.get(5)?;
-            let relation = relation_json
-                .and_then(|json| serde_json::from_str(&json).ok())
-                .unwrap_or_default();
-            Ok(SessionMeta {
-                session_id: row.get(0)?,
-                session_name: row.get(1)?,
-                created_at: row.get(2)?,
-                model: row.get(3)?,
-                cwd: row.get(4)?,
-                relation,
-            })
-        },
+        (),
     )
+    .await
     .ok()
+    .flatten()?;
+    let relation = row_optional_string(&row, 5)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+    Some(SessionMeta {
+        session_id: row_string(&row, 0).ok()?,
+        session_name: row_string(&row, 1).ok()?,
+        created_at: row_string(&row, 2).ok()?,
+        model: row_string(&row, 3).ok()?,
+        cwd: row_optional_string(&row, 4).ok()?,
+        relation,
+    })
 }
 
 fn decode_checkpoint(bytes: &[u8]) -> Option<SessionCheckpoint> {
@@ -543,9 +674,9 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn sqlite_lashlang_artifact_store_round_trips_verified_module_artifacts() {
-        let store = Store::memory().expect("memory store");
+    #[tokio::test]
+    async fn turso_lashlang_artifact_store_round_trips_verified_module_artifacts() {
+        let store = Store::memory().await.expect("memory store");
         let module =
             lashlang::parse("process scan(root: str) { finish root }").expect("parse module");
         let linked = lashlang::LinkedModule::link(
@@ -559,9 +690,11 @@ mod tests {
 
         store
             .put_module_artifact(&linked.artifact)
+            .await
             .expect("put artifact");
         let restored = store
             .get_module_artifact(&linked.module_ref)
+            .await
             .expect("get artifact")
             .expect("artifact exists");
 
@@ -573,11 +706,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_process_registry_persists_rows_after_reopen() {
+    async fn turso_process_registry_persists_rows_after_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("processes.db");
         {
-            let registry = SqliteProcessRegistry::open(&path).expect("open registry");
+            let registry = TursoProcessRegistry::open(&path)
+                .await
+                .expect("open registry");
             let owner_scope = lash_core::ProcessScope::new("session");
             registry
                 .register_process(registration("proc-persist"))
@@ -603,7 +738,9 @@ mod tests {
                 .expect("complete");
         }
 
-        let registry = SqliteProcessRegistry::open(&path).expect("reopen registry");
+        let registry = TursoProcessRegistry::open(&path)
+            .await
+            .expect("reopen registry");
         let owner_scope = lash_core::ProcessScope::new("session");
         let record = registry
             .get_process("proc-persist")

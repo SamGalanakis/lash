@@ -345,6 +345,7 @@ impl Session {
             agent_frame_id: agent_frame_id.to_string(),
             event_tx,
             checkpoint_messages,
+            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
             attachment_store: Arc::clone(&self.services.attachment_store),
             turn_context: turn_context.clone(),
         });

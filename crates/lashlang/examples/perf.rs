@@ -211,11 +211,10 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             );
             let store = InMemoryLashlangArtifactStore::new();
             for _ in 0..iterations {
-                store
-                    .put_module_artifact(&linked.artifact)
+                rt.block_on(store.put_module_artifact(&linked.artifact))
                     .expect("artifact store put should succeed");
-                let artifact = store
-                    .get_module_artifact(&linked.module_ref)
+                let artifact = rt
+                    .block_on(store.get_module_artifact(&linked.module_ref))
                     .expect("artifact store get should succeed")
                     .expect("artifact should exist");
                 std::hint::black_box(artifact);

@@ -336,7 +336,7 @@ mod restate_tests {
             .unwrap_or_else(|_| format!("http://{bind_addr}"));
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let harness = live_restate_test_state(temp.path(), ingress_url.clone());
+        let harness = live_restate_test_state(temp.path(), ingress_url.clone()).await;
         let state = harness.state.clone();
         let listener = tokio::net::TcpListener::bind(bind_addr)
             .await
@@ -444,12 +444,16 @@ mod restate_tests {
         process_deployment: lash_restate::RestateProcessDeployment,
     }
 
-    fn live_restate_test_state(data_dir: &Path, ingress_url: String) -> LiveRestateTestHarness {
+    async fn live_restate_test_state(
+        data_dir: &Path,
+        ingress_url: String,
+    ) -> LiveRestateTestHarness {
         let app_db = Arc::new(Mutex::new(
             AppDb::open(&data_dir.join("app.db")).expect("open app db"),
         ));
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+                .await
                 .expect("open process registry"),
         ) as Arc<dyn lash_core::ProcessRegistry>;
         let provider = lash_core::testing::TestProvider::builder()
@@ -476,11 +480,12 @@ submit "done via Restate E2E"
             })
             .build()
             .into_handle();
-        let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        let store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let artifact_store = Arc::new(
-            lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
+            lash_turso_store::Store::open(&data_dir.join("artifacts.db"))
+                .await
                 .expect("open artifact store"),
         ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
         let process_deployment =

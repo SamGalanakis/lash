@@ -34,6 +34,41 @@ impl CheckpointMessageBuffer {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ToolHostEventEffectOutcome {
+    pub resource_type: String,
+    pub alias: String,
+    pub event: String,
+    pub source_type: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    pub started_process_ids: Vec<String>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ToolHostEventOutcomeBuffer {
+    queue: Arc<Mutex<Vec<ToolHostEventEffectOutcome>>>,
+}
+
+impl ToolHostEventOutcomeBuffer {
+    pub(crate) fn enqueue(&self, outcome: ToolHostEventEffectOutcome) -> Result<(), String> {
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|_| "tool host event outcome buffer poisoned".to_string())?;
+        queue.push(outcome);
+        Ok(())
+    }
+
+    pub(crate) fn drain(&self) -> Result<Vec<ToolHostEventEffectOutcome>, String> {
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|_| "tool host event outcome buffer poisoned".to_string())?;
+        Ok(queue.drain(..).collect())
+    }
+}
+
 #[derive(Clone)]
 pub struct ToolDispatchContext<'run> {
     pub plugins: Arc<PluginSession>,
@@ -51,6 +86,7 @@ pub struct ToolDispatchContext<'run> {
     pub agent_frame_id: crate::AgentFrameId,
     pub event_tx: mpsc::Sender<SessionEvent>,
     pub(crate) checkpoint_messages: CheckpointMessageBuffer,
+    pub(crate) host_event_outcomes: ToolHostEventOutcomeBuffer,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub turn_context: crate::TurnContext,
 }

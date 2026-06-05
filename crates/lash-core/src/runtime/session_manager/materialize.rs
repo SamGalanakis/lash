@@ -83,6 +83,7 @@ async fn bind_session_store(
             relation: plan.relation.clone(),
             policy: plan.policy.clone(),
         })
+        .await
         .map_err(|message| {
             crate::PluginError::Session(child_store_factory_error(
                 &plan.session_id,

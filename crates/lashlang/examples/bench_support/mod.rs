@@ -1393,7 +1393,7 @@ impl ExecutionHost for BenchHost {
                     .first()
                     .and_then(Value::as_record)
                     .unwrap_or(&empty);
-                bench_call(&operation.operation, args).map(AbilityResult::Value)
+                bench_resource_call(&operation, args).map(AbilityResult::Value)
             }
             AbilityOp::StartProcess(start) => {
                 Self::task_handle(&start.process_name, &start.args).map(AbilityResult::Value)
@@ -1414,6 +1414,30 @@ impl ExecutionHost for BenchHost {
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
+}
+
+fn bench_resource_call(
+    operation: &lashlang::ResourceOperation,
+    args: &Record,
+) -> Result<Value, ExecutionHostError> {
+    let host_operation = match &operation.receiver {
+        Value::Resource(receiver) => benchmark_surface()
+            .resources
+            .resolve_module_operation(
+                &receiver.resource_type,
+                &receiver.alias,
+                &operation.operation,
+            )
+            .map(|binding| binding.host_operation.as_str())
+            .ok_or_else(|| {
+                ExecutionHostError::new(format!(
+                    "module `{}` of type `{}` does not expose operation `{}`",
+                    receiver.alias, receiver.resource_type, operation.operation
+                ))
+            })?,
+        _ => operation.operation.as_str(),
+    };
+    bench_call(host_operation, args)
 }
 
 fn bench_call(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {

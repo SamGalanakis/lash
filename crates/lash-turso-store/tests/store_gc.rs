@@ -4,9 +4,9 @@ use lash_core::{
     SessionHead, SessionPolicy, SessionStoreCreateRequest, SessionStoreFactory, TokenUsage,
     ToolState,
 };
-use lash_sqlite_store::{
-    BlobArtifactDescriptor, BuiltinBlobProfile, SqliteSessionStoreFactory, Store, StoreGcPolicy,
-    StoreOptions,
+use lash_turso_store::{
+    BlobArtifactDescriptor, BuiltinBlobProfile, Store, StoreGcPolicy, StoreOptions,
+    TursoSessionStoreFactory,
 };
 
 fn model_spec(id: &str) -> ModelSpec {
@@ -17,54 +17,60 @@ fn test_model_spec() -> ModelSpec {
     model_spec("gpt-5.4-mini")
 }
 
-#[test]
-fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
-    let store = Store::memory().expect("store");
-    let stored = store.put_checkpoint(&HydratedSessionCheckpoint {
-        turn_state: PersistedTurnState {
-            turn_index: 1,
-            token_usage: TokenUsage::default(),
-            last_prompt_usage: None,
-            protocol_turn_options: Default::default(),
-        },
-        tool_state_ref: None,
-        tool_state: Some(ToolState::default().with_generation(7)),
-        plugin_snapshot_ref: None,
-        plugin_snapshot_revision: Some(11),
-        plugin_snapshot: Some(PluginSessionSnapshot {
-            plugins: Default::default(),
-        }),
-        execution_state_ref: None,
-        execution_state: None,
-    });
-    store.save_session_head(SessionHead {
-        session_id: "root".to_string(),
-        head_revision: 0,
-        agent_frames: Vec::new(),
-        current_agent_frame_id: String::new(),
-        graph: SessionGraph::default(),
-        config: PersistedSessionConfig {
-            provider_id: "openai-compatible".into(),
-            model: test_model_spec(),
-        },
-        checkpoint_ref: Some(stored.checkpoint_ref.clone()),
-        token_ledger: Vec::new(),
-    });
-    let orphan =
-        store.put_artifact_blob(BlobArtifactDescriptor::plugin_session_snapshot(), b"orphan");
+#[tokio::test]
+async fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
+    let store = Store::memory().await.expect("store");
+    let stored = store
+        .put_checkpoint(&HydratedSessionCheckpoint {
+            turn_state: PersistedTurnState {
+                turn_index: 1,
+                token_usage: TokenUsage::default(),
+                last_prompt_usage: None,
+                protocol_turn_options: Default::default(),
+            },
+            tool_state_ref: None,
+            tool_state: Some(ToolState::default().with_generation(7)),
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: Some(11),
+            plugin_snapshot: Some(PluginSessionSnapshot {
+                plugins: Default::default(),
+            }),
+            execution_state_ref: None,
+            execution_state: None,
+        })
+        .await;
+    store
+        .save_session_head(SessionHead {
+            session_id: "root".to_string(),
+            head_revision: 0,
+            agent_frames: Vec::new(),
+            current_agent_frame_id: String::new(),
+            graph: SessionGraph::default(),
+            config: PersistedSessionConfig {
+                provider_id: "openai-compatible".into(),
+                model: test_model_spec(),
+            },
+            checkpoint_ref: Some(stored.checkpoint_ref.clone()),
+            token_ledger: Vec::new(),
+        })
+        .await;
+    let orphan = store
+        .put_artifact_blob(BlobArtifactDescriptor::plugin_session_snapshot(), b"orphan")
+        .await;
 
-    let report = store.gc_unreachable();
+    let report = store.gc_unreachable().await;
 
     assert_eq!(report.deleted_blob_count, 1);
     let checkpoint = store
         .get_checkpoint(&stored.checkpoint_ref)
+        .await
         .expect("checkpoint manifest");
     let dynamic_ref = checkpoint.tool_state_ref.expect("dynamic state ref");
     let plugin_ref = checkpoint.plugin_snapshot_ref.expect("plugin snapshot ref");
-    assert!(store.get_blob(&stored.checkpoint_ref).is_some());
-    assert!(store.get_blob(&dynamic_ref).is_some());
-    assert!(store.get_blob(&plugin_ref).is_some());
-    assert!(store.get_blob(&orphan).is_none());
+    assert!(store.get_blob(&stored.checkpoint_ref).await.is_some());
+    assert!(store.get_blob(&dynamic_ref).await.is_some());
+    assert!(store.get_blob(&plugin_ref).await.is_some());
+    assert!(store.get_blob(&orphan).await.is_none());
 }
 
 #[tokio::test]
@@ -75,9 +81,11 @@ async fn auto_gc_runs_after_commit_without_reentrant_locking() {
             auto_run_every_commits: Some(1),
         },
     })
+    .await
     .expect("store");
-    let orphan =
-        store.put_artifact_blob(BlobArtifactDescriptor::plugin_session_snapshot(), b"orphan");
+    let orphan = store
+        .put_artifact_blob(BlobArtifactDescriptor::plugin_session_snapshot(), b"orphan")
+        .await;
     let state = RuntimeSessionState {
         session_id: "auto-gc".to_string(),
         ..RuntimeSessionState::default()
@@ -88,13 +96,13 @@ async fn auto_gc_runs_after_commit_without_reentrant_locking() {
         .await
         .expect("commit");
 
-    assert!(store.get_blob(&orphan).is_none());
+    assert!(store.get_blob(&orphan).await.is_none());
 }
 
 #[test]
-fn sqlite_factory_uses_deterministic_safe_session_paths() {
+fn turso_factory_uses_deterministic_safe_session_paths() {
     let root = unique_temp_dir("paths");
-    let factory = SqliteSessionStoreFactory::new(&root);
+    let factory = TursoSessionStoreFactory::new(&root);
 
     let first = factory.path_for_session("../weird/session");
     let second = factory.path_for_session("../weird/session");
@@ -112,9 +120,9 @@ fn sqlite_factory_uses_deterministic_safe_session_paths() {
 }
 
 #[tokio::test]
-async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
+async fn turso_factory_creates_metadata_once_and_preserves_on_reopen() {
     let root = unique_temp_dir("metadata");
-    let factory = SqliteSessionStoreFactory::new(&root);
+    let factory = TursoSessionStoreFactory::new(&root);
     let request = SessionStoreCreateRequest {
         session_id: "chat/alpha".to_string(),
         relation: lash_core::SessionRelation::Child {
@@ -127,7 +135,7 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
         },
     };
 
-    let store = factory.create_store(&request).expect("create store");
+    let store = factory.create_store(&request).await.expect("create store");
     let meta = store
         .load_session_meta()
         .await
@@ -159,6 +167,7 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
             },
             ..request
         })
+        .await
         .expect("reopen store");
     let reopened_meta = reopened
         .load_session_meta()
@@ -171,10 +180,10 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
 }
 
 #[tokio::test]
-async fn sqlite_factory_is_explicitly_usable_as_session_store_factory() {
+async fn turso_factory_is_explicitly_usable_as_session_store_factory() {
     let root = unique_temp_dir("explicit");
     let factory: std::sync::Arc<dyn SessionStoreFactory> =
-        std::sync::Arc::new(SqliteSessionStoreFactory::new(&root));
+        std::sync::Arc::new(TursoSessionStoreFactory::new(&root));
     let request = SessionStoreCreateRequest {
         session_id: "explicit".to_string(),
         relation: lash_core::SessionRelation::Root,
@@ -184,7 +193,7 @@ async fn sqlite_factory_is_explicitly_usable_as_session_store_factory() {
         },
     };
 
-    let store = factory.create_store(&request).expect("create store");
+    let store = factory.create_store(&request).await.expect("create store");
 
     assert!(
         store
@@ -196,9 +205,9 @@ async fn sqlite_factory_is_explicitly_usable_as_session_store_factory() {
 }
 
 #[tokio::test]
-async fn sqlite_factory_delete_session_removes_database_and_sidecars_idempotently() {
+async fn turso_factory_delete_session_removes_database_and_sidecars_idempotently() {
     let root = unique_temp_dir("delete-session");
-    let factory = SqliteSessionStoreFactory::new(&root);
+    let factory = TursoSessionStoreFactory::new(&root);
     let request = SessionStoreCreateRequest {
         session_id: "delete/me".to_string(),
         relation: lash_core::SessionRelation::Root,
@@ -207,7 +216,7 @@ async fn sqlite_factory_delete_session_removes_database_and_sidecars_idempotentl
             ..SessionPolicy::default()
         },
     };
-    let store = factory.create_store(&request).expect("create store");
+    let store = factory.create_store(&request).await.expect("create store");
     drop(store);
     let db_path = factory.path_for_session("delete/me");
     let wal_path = sidecar_path(&db_path, "-wal");
@@ -215,9 +224,13 @@ async fn sqlite_factory_delete_session_removes_database_and_sidecars_idempotentl
     std::fs::write(&wal_path, b"wal").expect("write wal sidecar");
     std::fs::write(&shm_path, b"shm").expect("write shm sidecar");
 
-    factory.delete_session("delete/me").expect("delete session");
     factory
         .delete_session("delete/me")
+        .await
+        .expect("delete session");
+    factory
+        .delete_session("delete/me")
+        .await
         .expect("delete session again");
 
     assert!(!db_path.exists());
@@ -227,7 +240,7 @@ async fn sqlite_factory_delete_session_removes_database_and_sidecars_idempotentl
 
 fn unique_temp_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "lash-sqlite-store-{name}-{}-{}",
+        "lash-turso-store-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

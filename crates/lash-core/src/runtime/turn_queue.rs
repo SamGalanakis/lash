@@ -3,6 +3,47 @@ use crate::{PluginMessage, TurnCause, TurnInput};
 
 pub const QUEUED_WORK_CLAIM_TTL_MS: u64 = 15 * 60 * 1000;
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionCommand {
+    RefreshToolSurface {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_generation: Option<u64>,
+    },
+    EmitHostEvent {
+        resource_type: String,
+        alias: String,
+        event: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
+    ResetSession {
+        reason: String,
+    },
+}
+
+impl SessionCommand {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::RefreshToolSurface { .. } => "refresh_tool_surface",
+            Self::EmitHostEvent { .. } => "emit_host_event",
+            Self::ResetSession { .. } => "reset_session",
+        }
+    }
+
+    pub fn source_key(&self, idempotency_key: impl AsRef<str>) -> String {
+        format!("command:{}:{}", self.kind(), idempotency_key.as_ref())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionCommandReceipt {
+    pub session_id: String,
+    pub batch_id: String,
+    pub source_key: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryPolicy {
@@ -78,6 +119,9 @@ pub enum QueuedWorkPayload {
         #[serde(default)]
         payload: serde_json::Value,
     },
+    SessionCommand {
+        command: Box<SessionCommand>,
+    },
 }
 
 impl QueuedWorkPayload {
@@ -90,6 +134,12 @@ impl QueuedWorkPayload {
     pub fn process_wake(wake: ProcessWakeDelivery) -> Self {
         Self::ProcessWake {
             wake: Box::new(wake),
+        }
+    }
+
+    pub fn session_command(command: SessionCommand) -> Self {
+        Self::SessionCommand {
+            command: Box::new(command),
         }
     }
 }
@@ -230,6 +280,7 @@ impl QueuedWorkClaim {
                             matches!(&item.payload, QueuedWorkPayload::Timer { .. }),
                         ));
                     }
+                    QueuedWorkPayload::SessionCommand { .. } => {}
                 }
             }
         }
@@ -270,6 +321,7 @@ impl QueuedWorkClaim {
                             matches!(&item.payload, QueuedWorkPayload::Timer { .. }),
                         ));
                     }
+                    QueuedWorkPayload::SessionCommand { .. } => {}
                 }
             }
         }
@@ -302,6 +354,21 @@ impl QueuedWorkClaim {
             }
         }
         accepted
+    }
+
+    pub fn exclusive_session_command(&self) -> Option<(&QueuedWorkBatch, &SessionCommand)> {
+        if self.batches.len() != 1 {
+            return None;
+        }
+        let batch = self.batches.first()?;
+        if batch.slot_policy != SlotPolicy::Exclusive || batch.items.len() != 1 {
+            return None;
+        }
+        let item = batch.items.first()?;
+        match &item.payload {
+            QueuedWorkPayload::SessionCommand { command } => Some((batch, command.as_ref())),
+            _ => None,
+        }
     }
 
     pub fn materialize_for_turn(&self) -> QueuedTurnWork {

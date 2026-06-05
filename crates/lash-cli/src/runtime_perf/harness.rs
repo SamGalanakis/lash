@@ -498,7 +498,7 @@ pub(crate) async fn build_runtime_with_store(
     })
 }
 
-pub(crate) async fn build_runtime_with_sqlite_store(
+pub(crate) async fn build_runtime_with_turso_store(
     scenario: RuntimePerfScenario,
     root: PathBuf,
 ) -> anyhow::Result<BenchmarkRuntime> {
@@ -517,25 +517,32 @@ pub(crate) async fn build_runtime_with_sqlite_store(
     let sessions_root = root.join("sessions");
     let attachments_root = root.join("attachments");
     let artifacts_db = root.join("artifacts.db");
+    let effects_db = root.join("effects.db");
     let process_db = root.join("processes.db");
     let mut builder = LashCore::builder()
         .install_mode(mode_preset(&mode_id)?)
         .default_mode(mode_id.clone())
         .provider(provider)
         .model(benchmark_model_spec())
-        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .effect_host(Arc::new(
+            lash_turso_store::TursoEffectHost::open(&effects_db)
+                .await
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+        ))
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             attachments_root,
         )))
         .lashlang_artifact_store(Arc::new(
-            lash_sqlite_store::Store::open(&artifacts_db)
+            lash_turso_store::Store::open(&artifacts_db)
+                .await
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
         ))
         .process_registry(Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
+            lash_turso_store::TursoProcessRegistry::open(&process_db)
+                .await
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
         ))
-        .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        .store_factory(Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
             sessions_root,
         )))
         .plugins(plugin_stack);
@@ -790,7 +797,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
             "Turn {} in scoped effect-controller benchmark mode. Continue the benchmark chat and reply with exactly: runtime perf benchmark ok",
             turn_index + 1
         ),
-        RuntimePerfScenario::StoreReopen | RuntimePerfScenario::SqliteStoreReopen => format!(
+        RuntimePerfScenario::StoreReopen | RuntimePerfScenario::TursoStoreReopen => format!(
             "Turn {} in store reopen benchmark mode. Continue after persisted reload and reply with exactly: runtime perf benchmark ok",
             turn_index + 1
         ),

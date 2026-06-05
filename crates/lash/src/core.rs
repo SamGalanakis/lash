@@ -219,6 +219,7 @@ impl LashCore {
         };
         store_factory
             .delete_session(&session_id)
+            .await
             .map_err(|message| EmbedError::StoreFactory {
                 session_id: session_id.clone(),
                 message,
@@ -382,7 +383,7 @@ impl LashCoreBuilder {
 
     /// Set the deployment-level Lashlang artifact store (compiled module
     /// cache, shared across the session tree). A durable store such as
-    /// `lash_sqlite_store::Store` implements it.
+    /// `lash_turso_store::Store` implements it.
     pub fn lashlang_artifact_store(
         mut self,
         artifact_store: Arc<dyn lash_core::LashlangArtifactStore>,
