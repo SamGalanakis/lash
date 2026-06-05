@@ -12,15 +12,15 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=9">
+<link rel="stylesheet" href="./styles.css?v=10">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=3" defer></script>
+<script src="./docs.js?v=5" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">lash<span class="slash">/</span>prompts</h1>
-    <p class="opener__lede">Context-window strategy, projected bindings into RLM scope, prompt template slots, and typed plugin input.</p>
+    <p class="opener__lede">Context-window strategy, projected bindings into RLM scope, prompt template slots, and typed plugin input. For the full RLM prompt/request contract, start with the <a href="./rlm.html">RLM protocol guide</a>.</p>
   </section>
 
   <main class="body" id="content">
@@ -59,7 +59,7 @@ let core = LashCore::standard()
     .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .build()?;</code></pre>
-          <p>The CLI applies this only to the standard preset; RLM uses its protocol projection state and locked-down runtime stack instead.</p>
+          <p>The CLI applies this only to the standard preset; RLM uses its protocol projection state and locked-down runtime stack instead. See <a href="./rlm.html#history-projection">RLM history projection</a> for the model-visible request shape.</p>
         </div>
 
         <div class="section" id="projected-bindings">
@@ -141,7 +141,7 @@ let input = TurnInput::text("Answer using docs only when needed.")
           <p>Duplicate names between session and turn scopes are rejected at <code>run()</code> time. Pick one scope; merge at the source.</p>
           <h3>Seeds for AgentFrame switches and subagents</h3>
           <p><code>continue_as</code> and <code>spawn_agent</code> accept a <code>seed:</code> map whose entries re-project in the AgentFrame or child session. Ref-backed projected values keep their <code>ProjectionRef</code>; value-backed projected values serialize as JSON. See <a href="./embedding-advanced.html#subagents">Subagents</a> and <a href="./architecture/lashlang-effects.html#projected-host-bindings">Projected Host Bindings</a>.</p>
-          <p>Deep reference: <a href="./architecture/lashlang-effects.html#projected-host-bindings">Architecture → Lashlang → Projected Host Bindings</a>.</p>
+          <p>Prompt-level contract: <a href="./rlm.html#variables-and-state">RLM variables and state</a>. Deep reference: <a href="./architecture/lashlang-effects.html#projected-host-bindings">Architecture → Lashlang → Projected Host Bindings</a>.</p>
         </div>
 
         <div class="section" id="prompt-templates">

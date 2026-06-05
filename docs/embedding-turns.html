@@ -12,9 +12,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=9">
+<link rel="stylesheet" href="./styles.css?v=10">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=3" defer></script>
+<script src="./docs.js?v=5" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -226,7 +226,7 @@ impl TurnActivitySink for ChannelSink {
         <div class="section" id="rlm-and-submit">
           <div class="section-header">
             <h2>RLM And Submit</h2>
-            <p>Two RLM termination policies: <code>SubmitRequired</code> validates <code>submit</code> against the configured schema and finishes as <code>TurnFinish::SubmittedValue</code> (also emitted on the stream). <code>ProseOrSubmit</code> allows a no-code prose answer that finishes as <code>TurnFinish::AssistantMessage</code> with no terminal stream event.</p>
+            <p>Two RLM termination policies: <code>SubmitRequired</code> validates <code>submit</code> against the configured schema and finishes as <code>TurnFinish::SubmittedValue</code> (also emitted on the stream). <code>ProseOrSubmit</code> allows a no-code prose answer that finishes as <code>TurnFinish::AssistantMessage</code> with no terminal stream event. For prompt construction, history, variables, and the execution loop, see the <a href="./rlm.html">RLM protocol guide</a>.</p>
           </div>
           <div class="two-col">
             <article class="panel">
