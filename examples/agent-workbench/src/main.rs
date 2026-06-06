@@ -1747,6 +1747,31 @@ mod tests {
             .expect("large-stack test thread");
     }
 
+    fn run_async_test_on_large_multi_thread_stack<F, Fut>(
+        name: &str,
+        worker_threads: usize,
+        test: F,
+    ) where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        std::thread::Builder::new()
+            .name(name.to_string())
+            .stack_size(DEFAULT_TOKIO_THREAD_STACK_BYTES)
+            .spawn(move || {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(worker_threads)
+                    .thread_stack_size(DEFAULT_TOKIO_THREAD_STACK_BYTES)
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime")
+                    .block_on(test())
+            })
+            .expect("spawn large-stack multi-thread test thread")
+            .join()
+            .expect("large-stack multi-thread test thread");
+    }
+
     fn test_graph(
         graph_key: &str,
         session_id: &str,
@@ -2755,9 +2780,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[test]
     #[ignore = "requires a running Restate server; use `just agent-workbench-restate-e2e`"]
-    async fn live_restate_cron_runs_trigger_and_queued_turn_end_to_end() {
+    fn live_restate_cron_runs_trigger_and_queued_turn_end_to_end() {
+        run_async_test_on_large_multi_thread_stack("workbench-restate-cron-e2e", 4, || {
+            live_restate_cron_runs_trigger_and_queued_turn_end_to_end_inner()
+        });
+    }
+
+    async fn live_restate_cron_runs_trigger_and_queued_turn_end_to_end_inner() {
         let ingress_url = match std::env::var("RESTATE_INGRESS_URL") {
             Ok(value) => value,
             Err(_) => {
