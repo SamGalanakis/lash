@@ -15,8 +15,8 @@ categories = ["api-bindings", "data-structures"]
 
 [dependencies]
 base64 = { workspace = true }
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.24", optional = true }
-lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.24" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.25", optional = true }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.25" }
 schemars = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -27,5 +27,5 @@ default = []
 core-conversions = ["dep:lash-core"]
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.24", features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.25", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
