@@ -165,7 +165,7 @@
     padding: var(--space-2xl) var(--space-2xl) var(--space-lg);
     border-bottom: 1px solid var(--line);
   }
-  .trace-hero h1 {
+  .trace-hero h2 {
     margin: var(--space-sm) 0 var(--space-sm);
     font-family: var(--font-display);
     font-size: clamp(1.6rem, 3vw, 2.4rem);
@@ -946,7 +946,7 @@
       <header class="trace-hero">
         <div>
           <span class="eyebrow">root session <span class="slash">·</span> s1·a47e</span>
-          <h1>Audit auth-related code paths and recent migrations</h1>
+          <h2>Audit auth-related code paths and recent migrations</h2>
           <p>Root session of the run. Two parallel <span class="lichen">spawn_agent</span> children gather inventory, then a <span class="sodium">continue_as</span> AgentFrame switch carries the synthesis into frame <code>s4·e51a</code>.</p>
         </div>
         <div class="hero-meta">
@@ -1221,7 +1221,7 @@
       <header class="trace-hero">
         <div>
           <span class="eyebrow">subagent <span class="slash">·</span> s2·b9c1 <span class="slash">·</span> spawned from root</span>
-          <h1>auth_files — list session-token handlers</h1>
+          <h2>auth_files — list session-token handlers</h2>
           <p>Subagent spawned from <code>root</code> at e2. Same shape as the root view — full transcript, full controls, full minimap. Use the breadcrumb above to return.</p>
         </div>
         <div class="hero-meta">
@@ -1335,7 +1335,7 @@
       <header class="trace-hero">
         <div>
           <span class="eyebrow">subagent <span class="slash">·</span> s3·d23f <span class="slash">·</span> spawned from root</span>
-          <h1>db_migrations — summarise migrations since v3</h1>
+          <h2>db_migrations — summarise migrations since v3</h2>
           <p>Subagent that itself spawned a deeper child (<code>migration_v5</code>). Drill in further to see depth 2.</p>
         </div>
         <div class="hero-meta">
@@ -1471,7 +1471,7 @@
       <header class="trace-hero">
         <div>
           <span class="eyebrow">subagent <span class="slash">·</span> s3a·772b <span class="slash">·</span> depth 2</span>
-          <h1>migration_v5 — risk-flagged columns</h1>
+          <h2>migration_v5 — risk-flagged columns</h2>
           <p>Grandchild — spawned from <code>db_migrations</code>, which itself was spawned from <code>root</code>. The breadcrumb traces the whole way back.</p>
         </div>
         <div class="hero-meta">

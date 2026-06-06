@@ -188,6 +188,27 @@ impl RuntimeHandle {
         .await
     }
 
+    pub async fn cancel_queued_work_batch(
+        &self,
+        session_id: &str,
+        batch_id: &str,
+    ) -> Result<Option<crate::QueuedWorkBatch>, crate::RuntimeError> {
+        let observation = self.observe();
+        let store = observation
+            .queue_store
+            .clone()
+            .ok_or_else(super::session_api::queued_turn_input_store_required)?;
+        store
+            .cancel_queued_work_batch(session_id, batch_id)
+            .await
+            .map_err(|err| {
+                crate::RuntimeError::new(
+                    crate::RuntimeErrorCode::StoreCommitFailed,
+                    err.to_string(),
+                )
+            })
+    }
+
     pub fn try_into_runtime(self) -> Result<LashRuntime, Self> {
         match Arc::try_unwrap(self.runtime) {
             Ok(mutex) => Ok(mutex.into_inner()),

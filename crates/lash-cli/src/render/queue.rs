@@ -9,34 +9,40 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         return Vec::new();
     }
 
+    let mut after_current_step_previews = Vec::new();
+    let mut next_turn_previews = Vec::new();
+    for batch in app
+        .queued_work_snapshot()
+        .iter()
+        .filter(|batch| !app.queued_batch_preview_suppressed(batch))
+    {
+        let target = if app.turn_active()
+            && batch.delivery_policy == lash_core::DeliveryPolicy::EarliestSafeBoundary
+        {
+            &mut after_current_step_previews
+        } else {
+            &mut next_turn_previews
+        };
+        if let Some(turn) = app.prepared_turn_for_queued_batch(batch) {
+            target.push(turn.preview());
+        }
+    }
+
     let mut lines = Vec::new();
     let inner_width = width as usize;
-    let pending_previews: Vec<String> = app
-        .queues
-        .pending_steers
-        .iter()
-        .map(PreparedTurn::preview)
-        .collect();
-    let queued_previews: Vec<String> = app
-        .queues
-        .queued_turns
-        .iter()
-        .map(PreparedTurn::preview)
-        .collect();
-
-    if !pending_previews.is_empty() {
+    if !after_current_step_previews.is_empty() {
         push_queue_section(
             &mut lines,
             inner_width,
-            "◆ after next tool/result",
-            &pending_previews,
+            "◆ after current step",
+            &after_current_step_previews,
             &app.skills,
             Style::default().fg(theme::brand()),
             Style::default().fg(theme::text_muted()),
         );
     }
 
-    if !queued_previews.is_empty() {
+    if !next_turn_previews.is_empty() {
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
@@ -44,7 +50,7 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             &mut lines,
             inner_width,
             "◇ next full turn",
-            &queued_previews,
+            &next_turn_previews,
             &app.skills,
             Style::default().fg(theme::state_ok()),
             Style::default().fg(theme::text_subtle()),

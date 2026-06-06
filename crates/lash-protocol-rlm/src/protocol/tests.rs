@@ -130,6 +130,24 @@ fn execution_section_hides_sleep_and_signals_independently() {
 }
 
 #[test]
+fn execution_section_documents_foreground_signal_run_when_enabled() {
+    let surface = prompt_surface(
+        tool_resources(),
+        lashlang::LashlangAbilities::default()
+            .with_processes()
+            .with_process_signals(),
+    );
+    let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+
+    // Sending (`signal run`) is documented as foreground-legal; receiving
+    // (`wait signal`) stays process-only.
+    assert!(section.contains("signal run handle with payload"));
+    assert!(section.contains("foreground turn as well as inside a process body"));
+    assert!(section.contains("wait signal"));
+    assert!(section.contains("only valid inside a process body"));
+}
+
+#[test]
 fn execution_section_documents_unwrapped_process_await_for_finished_values() {
     let surface = prompt_surface(
         tool_resources(),
@@ -167,6 +185,7 @@ fn execution_section_hides_trigger_registry_language_when_disabled() {
     let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
 
     assert!(!section.contains("Trigger registry"));
+    assert!(!section.contains("trigger activations"));
 }
 
 #[test]

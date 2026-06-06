@@ -2,7 +2,8 @@ use lash_tui::{Frame, Line, Modifier, Rect, Span, Style, TermCapabilities};
 use lash_tui_extensions::{TuiRenderContext, TuiSurfaceScene, TuiSurfaceSlot};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, format_tokens};
+use crate::app::{App, CliRunState, format_tokens};
+use crate::chrome_ui::TurnStatusLabel;
 #[cfg(test)]
 use crate::chrome_ui::animated_lash_word;
 use crate::cli_support::{centered_rect, display_width, selection_ordered};
@@ -28,8 +29,6 @@ pub fn draw_with_capabilities(
 
     frame.clear(bg(theme::surface_base()));
 
-    sync_chrome_turn_status(app);
-
     // One layout pass for the whole frame; the `render::*_area` accessors each
     // recompute `chrome_layout`, so calling them per region would repeat that
     // work five times per draw.
@@ -40,6 +39,7 @@ pub fn draw_with_capabilities(
         queue: queue_area,
         footer: footer_area,
         input: input_area,
+        process: process_area,
         body: body_area,
     } = render::chrome_areas(app, area.width, area.height);
     let queue_lines = render::queue_preview_lines_snapshot(app, area.width);
@@ -83,9 +83,11 @@ pub fn draw_with_capabilities(
         draw_input(frame, app, input_area);
         draw_suggestions(frame, app, input_area);
     }
+    draw_process_dock(frame, app, process_area);
     draw_session_picker(frame, app, history);
     draw_tree(frame, app, history);
     draw_skill_picker(frame, app, history);
+    draw_process_overview(frame, app, body_area);
     draw_overlay_surface(frame, app, &surfaces, body_area, capabilities);
 }
 
@@ -575,19 +577,6 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             frame.write_line(area.x, area.y + written_rows as u16, line, area.width);
             written_rows += 1;
         }
-        skip_lines = skip_lines.saturating_sub(plan_lines.len());
-    }
-
-    if written_rows < viewport_height
-        && let Some(task_lines) = render::process_lines_snapshot(app, area.width)
-    {
-        for line in task_lines.iter().skip(skip_lines) {
-            if written_rows >= viewport_height {
-                break;
-            }
-            frame.write_line(area.x, area.y + written_rows as u16, line, area.width);
-            written_rows += 1;
-        }
     }
 
     if let Some((x, y, height)) = render::history_scroll_indicator(app, area) {
@@ -595,6 +584,16 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             frame.write_text(x, y + offset, "│", fg(theme::text_subtle()), 1);
         }
     }
+}
+
+fn draw_process_dock(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let Some(lines) = render::process_lines_snapshot(app, area.width) else {
+        return;
+    };
+    draw_lines_region(frame, area, &lines, bg(theme::surface_raised()));
 }
 
 fn apply_selection_highlight(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
@@ -638,31 +637,39 @@ fn apply_selection_highlight(frame: &mut Frame<'_>, app: &App, history_area: Rec
 /// indicator is off whenever a prompt is open — the prompt panel
 /// itself communicates the paused state.
 ///
-/// Callable from layout-query paths (e.g. tests) so the surface
-/// registry is in sync before `chrome_layout` reads footer heights.
+/// Publish the latest footer status snapshot to the already-mounted chrome
+/// surface.
 pub(crate) fn sync_chrome_turn_status(app: &App) {
-    use crate::chrome_ui::{
-        CHROME_UI_ID, TURN_STATUS_KEY, TurnStatusLabel, TurnStatusSnapshot, set_turn_status,
-        turn_status_surface_spec,
-    };
+    use crate::chrome_ui::{TurnStatusLabel, TurnStatusSnapshot, set_turn_status};
 
     let snapshot = if app.has_prompt() {
         None
     } else {
         let background = process_summary(app);
         Some(match app.live.turn.as_ref() {
-            Some(turn) => TurnStatusSnapshot {
-                label: match turn.status_text.as_str() {
-                    "error" => TurnStatusLabel::Error,
-                    "thinking" => TurnStatusLabel::Thinking,
-                    "responding" => TurnStatusLabel::Responding,
-                    status if status.contains("wait") => TurnStatusLabel::Waiting,
-                    _ => TurnStatusLabel::RunningTool,
-                },
+            Some(turn) if app.turn_active() => TurnStatusSnapshot {
+                label: turn_status_label_for_state(turn.run_state),
                 turn_started_at: Some(turn.turn_started_at),
                 detail: combine_status_detail(turn.status_detail.as_deref(), background),
             },
+            Some(turn)
+                if turn.run_state == CliRunState::Error
+                    && turn
+                        .transient_until
+                        .is_some_and(|until| until > std::time::Instant::now()) =>
+            {
+                TurnStatusSnapshot {
+                    label: TurnStatusLabel::Error,
+                    turn_started_at: None,
+                    detail: combine_status_detail(turn.status_detail.as_deref(), background),
+                }
+            }
             None => TurnStatusSnapshot {
+                label: TurnStatusLabel::Idle,
+                turn_started_at: None,
+                detail: background,
+            },
+            Some(_) => TurnStatusSnapshot {
                 label: TurnStatusLabel::Idle,
                 turn_started_at: None,
                 detail: background,
@@ -671,13 +678,17 @@ pub(crate) fn sync_chrome_turn_status(app: &App) {
     };
 
     set_turn_status(&app.chrome_state, snapshot.clone());
+}
 
-    let extensions = app.ui_extensions();
-    let mounted = extensions.surface_is_mounted(CHROME_UI_ID, TURN_STATUS_KEY);
-    match (snapshot.is_some(), mounted) {
-        (true, false) => extensions.mount_surface(CHROME_UI_ID, turn_status_surface_spec()),
-        (false, true) => extensions.unmount_surface(CHROME_UI_ID, TURN_STATUS_KEY),
-        _ => {}
+fn turn_status_label_for_state(state: CliRunState) -> TurnStatusLabel {
+    match state {
+        CliRunState::Idle => TurnStatusLabel::Idle,
+        CliRunState::Working => TurnStatusLabel::Working,
+        CliRunState::Thinking => TurnStatusLabel::Thinking,
+        CliRunState::Responding => TurnStatusLabel::Responding,
+        CliRunState::RunningTool => TurnStatusLabel::RunningTool,
+        CliRunState::Waiting => TurnStatusLabel::Waiting,
+        CliRunState::Error => TurnStatusLabel::Error,
     }
 }
 
@@ -707,7 +718,7 @@ fn process_summary(app: &App) -> Option<String> {
 }
 
 fn current_context_budget_tokens(app: &App) -> Option<i64> {
-    if !app.running {
+    if !app.turn_active() {
         return None;
     }
     let input = app.usage.last_response_usage.input_tokens.max(0);
@@ -960,13 +971,14 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
         return;
     };
     let width = 80u16.min(history_area.width.saturating_sub(4));
-    // Empty state still gets a visible row so the popup isn't a hollow box,
-    // plus a footer row with the dismissal hint.
-    let list_height = picker.items.len().clamp(1, 15) as u16;
-    let height = list_height + 3; // title + list + footer
-    if width < 4 || history_area.height < height {
+    if width < 4 || history_area.height < 5 {
         return;
     }
+    let filtered_indices = picker.filtered_indices();
+    let match_count = filtered_indices.len();
+    let max_list_height = history_area.height.saturating_sub(4).max(1) as usize;
+    let list_height = match_count.clamp(1, 15).min(max_list_height) as u16;
+    let height = list_height + 4; // title + search + list + footer
     draw_overlay_scrim(frame, history_area);
     let popup = centered_rect(history_area, width, height);
     frame.draw_box(
@@ -977,27 +989,53 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     frame.write_text(
         popup.x + 2,
         popup.y,
-        &format!("Sessions ({})", picker.items.len()),
+        &format!("Resume Session ({match_count}/{})", picker.items.len()),
         fg(theme::brand()).add_modifier(Modifier::Bold),
+        popup.width.saturating_sub(4),
+    );
+    let query_text = if picker.query.is_empty() {
+        "Search sessions".to_string()
+    } else {
+        format!("Search: {}", picker.query)
+    };
+    let query_style = if picker.query.is_empty() {
+        theme::text_faint_style()
+    } else {
+        fg(theme::text_primary())
+    };
+    frame.write_text(
+        popup.x + 2,
+        popup.y + 1,
+        &query_text,
+        query_style,
         popup.width.saturating_sub(4),
     );
 
     if picker.items.is_empty() {
         frame.write_text(
             popup.x + 2,
-            popup.y + 1,
-            "No sessions yet — type a message to begin",
+            popup.y + 2,
+            "No sessions yet",
+            theme::text_faint_style(),
+            popup.width.saturating_sub(4),
+        );
+    } else if match_count == 0 {
+        frame.write_text(
+            popup.x + 2,
+            popup.y + 2,
+            "No matching sessions",
             theme::text_faint_style(),
             popup.width.saturating_sub(4),
         );
     } else {
-        let scroll = picker.selected.saturating_sub(list_height as usize - 1);
-        let visible_items: Vec<_> = picker
-            .items
+        let selected = picker.selected.min(match_count - 1);
+        let scroll = selected.saturating_sub(list_height as usize - 1);
+        let visible_items = filtered_indices
             .iter()
             .skip(scroll)
             .take(list_height as usize)
-            .collect();
+            .map(|idx| &picker.items[*idx])
+            .collect::<Vec<_>>();
         let time_col = visible_items
             .iter()
             .map(|s| display_width(&s.relative_time()))
@@ -1011,8 +1049,8 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
             .unwrap_or(2)
             .max(2);
         for (row, session) in visible_items.iter().enumerate() {
-            let selected = scroll + row == picker.selected;
-            let prefix = if selected { "> " } else { "  " };
+            let row_selected = scroll + row == selected;
+            let prefix = if row_selected { "> " } else { "  " };
             let preview = session.first_message.replace('\n', " ");
             let cwd = session.cwd_label().unwrap_or_default();
             let line = format!(
@@ -1026,14 +1064,14 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
                     format!(" {cwd}")
                 },
             );
-            let style = if selected {
+            let style = if row_selected {
                 fg(theme::text_primary()).bg(theme::surface_raised())
             } else {
                 fg(theme::text_subtle())
             };
             frame.write_text(
                 popup.x + 1,
-                popup.y + 1 + row as u16,
+                popup.y + 2 + row as u16,
                 &line,
                 style,
                 popup.width.saturating_sub(2),
@@ -1044,7 +1082,7 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     // Dismissal hint in the bottom border row. The overlay is a centered
     // box drawn on top of history with no scrim; the user needs at least
     // one explicit signal that it's modal and how to close it.
-    let hint = "esc close · ↑↓ choose · enter open";
+    let hint = "type search · ↑↓ choose · enter open · esc close";
     let hint_width = display_width(hint) as u16;
     if popup.width > hint_width + 4 {
         frame.write_text(
@@ -1238,6 +1276,70 @@ fn draw_skill_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
     }
 }
 
+fn draw_process_overview(frame: &mut Frame<'_>, app: &App, body_area: Rect) {
+    let Some(overview) = app.process_overview_state() else {
+        return;
+    };
+    let width = 72u16.min(body_area.width.saturating_sub(4));
+    let row_height = overview.rows.len().max(1) as u16;
+    let height = row_height + 3;
+    if width < 24 || body_area.height < height {
+        return;
+    }
+
+    draw_overlay_scrim(frame, body_area);
+    let popup = centered_rect(body_area, width, height);
+    frame.draw_box(
+        popup,
+        fg(theme::border_faint()),
+        Some(bg(theme::surface_deep())),
+    );
+    frame.write_text(
+        popup.x + 2,
+        popup.y,
+        &overview.title,
+        fg(theme::brand()).add_modifier(Modifier::Bold),
+        popup.width.saturating_sub(4),
+    );
+
+    let label_width = overview
+        .rows
+        .iter()
+        .map(|(label, _)| display_width(label))
+        .max()
+        .unwrap_or(0)
+        .min(18) as u16;
+    for (row, (label, value)) in overview.rows.iter().enumerate() {
+        let y = popup.y + 1 + row as u16;
+        frame.write_text(
+            popup.x + 2,
+            y,
+            label,
+            theme::text_faint_style(),
+            label_width,
+        );
+        frame.write_text(
+            popup.x + 2 + label_width + 2,
+            y,
+            value,
+            fg(theme::text_primary()),
+            popup.width.saturating_sub(label_width + 6),
+        );
+    }
+
+    let hint = "esc close · delete cancel";
+    let hint_width = display_width(hint) as u16;
+    if popup.width > hint_width + 4 {
+        frame.write_text(
+            popup.x + popup.width - hint_width - 2,
+            popup.y + popup.height - 1,
+            hint,
+            theme::text_faint_style(),
+            hint_width,
+        );
+    }
+}
+
 fn draw_lines_region(frame: &mut Frame<'_>, area: Rect, lines: &[Line<'static>], style: Style) {
     frame.fill(area, ' ', style);
     for (idx, line) in lines.iter().enumerate().take(area.height as usize) {
@@ -1298,6 +1400,26 @@ mod tests {
     }
 
     #[test]
+    fn turn_status_label_uses_only_public_run_states() {
+        assert_eq!(
+            turn_status_label_for_state(CliRunState::Working),
+            TurnStatusLabel::Working
+        );
+        assert_eq!(
+            turn_status_label_for_state(CliRunState::RunningTool),
+            TurnStatusLabel::RunningTool
+        );
+        assert_eq!(
+            turn_status_label_for_state(CliRunState::Thinking),
+            TurnStatusLabel::Thinking
+        );
+        assert_eq!(
+            turn_status_label_for_state(CliRunState::Responding),
+            TurnStatusLabel::Responding
+        );
+    }
+
+    #[test]
     fn status_bar_shows_context_window_usage() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         app.model_variant = Some("high".into());
@@ -1327,7 +1449,7 @@ mod tests {
         // meter should stay off until real input accounting lands.
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         app.usage.context_window = Some(1_100_000);
-        app.running = true;
+        app.start_turn();
         app.usage.live_output_tokens_estimate = 36;
         // No `last_prompt_usage`, no `last_response_usage` — first turn.
 
@@ -1341,6 +1463,141 @@ mod tests {
             !top.contains("36"),
             "unexpected token count on top line: {top}"
         );
+    }
+
+    #[test]
+    fn stale_working_status_does_not_make_idle_cli_working() {
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
+        let (chrome_ext, chrome_state) = crate::chrome_ui::ChromeTuiExtension::new();
+        let ui_extensions =
+            Arc::new(TuiExtensions::new(vec![chrome_ext]).expect("chrome extension"));
+        app.set_ui_extensions(ui_extensions);
+        app.set_chrome_state(chrome_state);
+
+        app.handle_turn_activity(lash_core::TurnActivity::independent(
+            lash_core::TurnEvent::QueuedWorkStarted {
+                boundary: lash_core::runtime::QueuedWorkClaimBoundary::Idle,
+                batch_ids: Vec::new(),
+                causes: Vec::new(),
+            },
+        ));
+        assert!(!app.turn_active());
+        assert_eq!(app.run_state, CliRunState::Idle);
+
+        sync_chrome_turn_status(&app);
+        let snapshot = lash_tui::render_snapshot(80, 10, |frame| draw(frame, &mut app));
+        let visible = snapshot.visible_lines_trimmed().join("\n");
+
+        assert!(visible.contains("Idle"));
+        assert!(!visible.contains("Working"));
+    }
+
+    #[test]
+    fn session_picker_remains_visible_across_repeated_renders() {
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "current-session-id".into());
+        app.show_session_picker(vec![crate::session_log::SessionInfo {
+            filename: "previous.db".into(),
+            session_id: "previous-session-id".into(),
+            message_count: 3,
+            first_message: "previous task".into(),
+            modified: std::time::SystemTime::now(),
+            cwd: Some(std::path::PathBuf::from("/workspace/code/lash")),
+        }]);
+
+        let first = lash_tui::render_snapshot(96, 24, |frame| draw(frame, &mut app));
+        assert!(app.has_session_picker());
+        let first_lines = first.visible_lines_trimmed();
+        assert!(
+            first_lines
+                .iter()
+                .any(|line| line.contains("Resume Session (1/1)"))
+        );
+        assert!(
+            first_lines
+                .iter()
+                .any(|line| line.contains("previous task"))
+        );
+
+        app.dirty = false;
+        app.on_tick();
+        let second = lash_tui::render_snapshot(96, 24, |frame| draw(frame, &mut app));
+        assert!(app.has_session_picker());
+        let second_lines = second.visible_lines_trimmed();
+        assert!(
+            second_lines
+                .iter()
+                .any(|line| line.contains("Resume Session (1/1)"))
+        );
+        assert!(
+            second_lines
+                .iter()
+                .any(|line| line.contains("previous task"))
+        );
+
+        let compact = lash_tui::render_snapshot(96, 10, |frame| draw(frame, &mut app));
+        let compact_lines = compact.visible_lines_trimmed();
+        assert!(
+            compact_lines
+                .iter()
+                .any(|line| line.contains("Resume Session (1/1)")),
+            "session picker should shrink instead of disappearing in compact layouts"
+        );
+    }
+
+    #[test]
+    fn session_picker_filters_sessions_by_typed_query() {
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "current-session-id".into());
+        app.show_session_picker(vec![
+            crate::session_log::SessionInfo {
+                filename: "alpha.db".into(),
+                session_id: "alpha-session".into(),
+                message_count: 2,
+                first_message: "debug the resume picker".into(),
+                modified: std::time::SystemTime::now(),
+                cwd: Some(std::path::PathBuf::from("/workspace/code/lash")),
+            },
+            crate::session_log::SessionInfo {
+                filename: "beta.db".into(),
+                session_id: "beta-session".into(),
+                message_count: 4,
+                first_message: "write release notes".into(),
+                modified: std::time::SystemTime::now(),
+                cwd: Some(std::path::PathBuf::from("/tmp/elsewhere")),
+            },
+        ]);
+        for ch in "release".chars() {
+            app.session_picker_insert_query_char(ch);
+        }
+
+        let snapshot = lash_tui::render_snapshot(96, 24, |frame| draw(frame, &mut app));
+        let visible = snapshot.visible_lines_trimmed().join("\n");
+
+        assert!(visible.contains("Resume Session (1/2)"));
+        assert!(visible.contains("write release notes"));
+        assert!(!visible.contains("debug the resume picker"));
+    }
+
+    #[test]
+    fn idle_footer_stays_idle_when_background_processes_exist() {
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
+        let (chrome_ext, chrome_state) = crate::chrome_ui::ChromeTuiExtension::new();
+        let ui_extensions =
+            Arc::new(TuiExtensions::new(vec![chrome_ext]).expect("chrome extension"));
+        app.set_ui_extensions(ui_extensions);
+        app.set_chrome_state(chrome_state);
+        app.update_processes(vec![lash_core::ProcessHandleSummary::new(
+            "process-1",
+            lash_core::ProcessHandleDescriptor::new(Some("lashlang"), Some("responder")),
+            lash_core::ProcessLifecycleStatus::Running,
+        )]);
+        sync_chrome_turn_status(&app);
+
+        let snapshot = lash_tui::render_snapshot(80, 10, |frame| draw(frame, &mut app));
+        let visible = snapshot.visible_lines_trimmed().join("\n");
+
+        assert!(visible.contains("Idle"));
+        assert!(!visible.contains("Working"));
+        assert!(visible.contains("1 process running"));
     }
 
     #[test]
@@ -1362,6 +1619,40 @@ mod tests {
 
         assert!(visible.contains("lash · staging"));
         assert!(!visible.contains("autumn-falls"));
+    }
+
+    #[test]
+    fn process_dock_renders_below_input_and_overview_as_overlay() {
+        let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
+        app.update_processes(vec![
+            lash_core::ProcessHandleSummary::new(
+                "process-1",
+                lash_core::ProcessHandleDescriptor::new(Some("lashlang"), Some("responder")),
+                lash_core::ProcessLifecycleStatus::Running,
+            )
+            .with_definition(Some(lash_core::ProcessDefinitionSummary {
+                name: "responder".into(),
+            })),
+        ]);
+        app.select_next_process();
+
+        let areas = render::chrome_areas(&app, 80, 16);
+        let snapshot = lash_tui::render_snapshot(80, 16, |frame| draw(frame, &mut app));
+        assert!(areas.process.y > areas.input.y);
+        assert!(
+            snapshot
+                .visible_line_trimmed(areas.process.y)
+                .contains("Background")
+        );
+
+        let overview = app
+            .selected_process_overview_state()
+            .expect("process overview");
+        app.show_process_overview(overview);
+        let snapshot = lash_tui::render_snapshot(80, 16, |frame| draw(frame, &mut app));
+        let visible = snapshot.visible_lines_trimmed().join("\n");
+        assert!(visible.contains("Process responder"));
+        assert!(visible.contains("definition"));
     }
 
     #[test]

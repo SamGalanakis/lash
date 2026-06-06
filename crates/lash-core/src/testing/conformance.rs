@@ -1748,6 +1748,7 @@ where
         }
     }
     queued_work_source_keys_are_idempotent_and_list_ordered(make()).await;
+    queued_work_cancel_removes_only_unclaimed_batches(make()).await;
     queued_work_claims_respect_boundaries_renewal_and_abandon(make()).await;
     queued_work_respects_availability_limits_exclusivity_reclaim_and_sessions(make()).await;
     queued_work_join_groups_by_delivery_policy_and_merge_key(make()).await;
@@ -2079,6 +2080,95 @@ async fn queued_work_source_keys_are_idempotent_and_list_ordered(
         vec![first.batch_id.as_str(), second.batch_id.as_str()]
     );
     assert!(listed[0].enqueue_seq < listed[1].enqueue_seq);
+}
+
+async fn queued_work_cancel_removes_only_unclaimed_batches(store: Arc<dyn RuntimePersistence>) {
+    let cancellable = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "cancel me",
+            DeliveryPolicy::AfterCurrentTurnCommit,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue cancellable batch");
+    let cancelled = store
+        .cancel_queued_work_batch("root", &cancellable.batch_id)
+        .await
+        .expect("cancel unclaimed batch")
+        .expect("unclaimed batch is returned");
+    assert_eq!(cancelled.batch_id, cancellable.batch_id);
+    assert_eq!(queued_batch_text(&cancelled), Some("cancel me"));
+    assert!(
+        store
+            .list_queued_work("root")
+            .await
+            .expect("list after cancellation")
+            .is_empty(),
+        "cancelled batches must be removed from the durable queue"
+    );
+
+    let claimed = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "claimed",
+            DeliveryPolicy::AfterCurrentTurnCommit,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue claimed batch");
+    let claim = store
+        .claim_ready_queued_work("root", "owner", QueuedWorkClaimBoundary::Idle, 60_000, 1)
+        .await
+        .expect("claim batch")
+        .expect("claim exists");
+    assert_eq!(claim.batches[0].batch_id, claimed.batch_id);
+    assert!(
+        store
+            .list_pending_queued_work("root")
+            .await
+            .expect("list pending during active claim")
+            .is_empty(),
+        "active claims must disappear from user-editable queue snapshots"
+    );
+    assert_eq!(
+        store
+            .list_queued_work("root")
+            .await
+            .expect("raw durable list during active claim")
+            .len(),
+        1,
+        "claimed batches remain durable until their claim is completed"
+    );
+    assert!(
+        store
+            .cancel_queued_work_batch("root", &claimed.batch_id)
+            .await
+            .expect("cancel active claim")
+            .is_none(),
+        "actively claimed batches must not be cancelled"
+    );
+    store
+        .abandon_queued_work_claim(&claim)
+        .await
+        .expect("abandon claim");
+    assert_eq!(
+        store
+            .list_pending_queued_work("root")
+            .await
+            .expect("list pending after abandoned claim")
+            .len(),
+        1,
+        "abandoned claims become user-editable queue work again"
+    );
+    assert!(
+        store
+            .cancel_queued_work_batch("root", &claimed.batch_id)
+            .await
+            .expect("cancel abandoned claim")
+            .is_some(),
+        "abandoned batches become cancellable again"
+    );
 }
 
 async fn queued_work_claims_respect_boundaries_renewal_and_abandon(

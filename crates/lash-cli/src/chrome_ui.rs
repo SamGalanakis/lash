@@ -22,6 +22,7 @@ pub const TURN_STATUS_KEY: &str = "turn_status";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnStatusLabel {
     Idle,
+    Working,
     RunningTool,
     Thinking,
     Responding,
@@ -33,6 +34,7 @@ impl TurnStatusLabel {
     fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "Idle",
+            Self::Working => "Working",
             Self::RunningTool => "Running tool",
             Self::Thinking => "Thinking",
             Self::Responding => "Responding",

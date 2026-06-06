@@ -2,17 +2,21 @@ use super::*;
 use crate::assistant_text::push_assistant_text_block;
 #[cfg(test)]
 use lash_core::SessionEvent;
-use lash_core::{PluginRuntimeEvent, TurnActivity, TurnEvent};
+use lash_core::{AcceptedInjectedTurnInput, PluginRuntimeEvent, TurnActivity, TurnEvent};
 
 fn runtime_status_from_plugin_event(
     event: &PluginRuntimeEvent,
-) -> Option<(String, Option<String>, std::time::Duration)> {
+) -> Option<(CliRunState, Option<String>, std::time::Duration)> {
     match event {
-        PluginRuntimeEvent::Status { label, detail, .. } => Some((
-            label.clone(),
-            detail.clone(),
-            std::time::Duration::from_millis(8_000),
-        )),
+        PluginRuntimeEvent::Status { label, detail, .. } => {
+            let state = CliRunState::from_status_label(label);
+            let detail = match (state, detail.as_deref()) {
+                (CliRunState::RunningTool, Some(detail)) => Some(format!("{label} · {detail}")),
+                (CliRunState::RunningTool, None) => Some(label.clone()),
+                (_, _) => detail.clone(),
+            };
+            Some((state, detail, std::time::Duration::from_millis(8_000)))
+        }
         _ => None,
     }
 }
@@ -58,21 +62,25 @@ impl App {
         }
     }
 
-    fn accept_injected_turn_input(&mut self, messages: &[PluginMessage]) {
+    fn accept_injected_turn_input(&mut self, inputs: &[AcceptedInjectedTurnInput]) {
         self.finalize_live_markdown();
         let mut accepted_user_message = false;
-        for message in messages {
+        for input in inputs {
+            let message = &input.message;
             if !matches!(message.role, MessageRole::User) {
                 continue;
             }
             accepted_user_message = true;
-            if let Some(turn) = self.take_matching_pending_steer(&message.content) {
+            if let Some(turn) =
+                self.take_draft_presentation_for_input(input.id.as_deref(), &message.content)
+            {
                 self.push_prepared_user_input(&turn);
             } else {
                 self.push_user_input_history_text(message.content.clone());
             }
         }
         if accepted_user_message {
+            self.mark_live_turn_user_input_visible();
             self.keep_latest_user_block_visible();
         }
     }
@@ -84,7 +92,7 @@ impl App {
             match message.role {
                 MessageRole::User => {
                     committed_user_message = true;
-                    if let Some(turn) = self.take_matching_pending_steer(&message.content) {
+                    if let Some(turn) = self.take_matching_draft_presentation(&message.content) {
                         self.push_prepared_user_input(&turn);
                     } else {
                         self.push_user_input_history_text(message.content.clone());
@@ -100,6 +108,7 @@ impl App {
         if !messages.is_empty() {
             self.invalidate_height_cache();
             if committed_user_message {
+                self.mark_live_turn_user_input_visible();
                 self.keep_latest_user_block_visible();
             } else {
                 self.scroll_to_bottom();
@@ -215,9 +224,16 @@ impl App {
                 }
                 if let Some(activity) = activities.last() {
                     let detail = activity.result.detail_lines.first().cloned();
-                    self.set_status(activity.call.summary.clone(), detail, true);
+                    self.set_status(
+                        CliRunState::RunningTool,
+                        Some(match detail {
+                            Some(detail) => format!("{} · {detail}", activity.call.summary),
+                            None => activity.call.summary.clone(),
+                        }),
+                        true,
+                    );
                 } else if !is_batch_tool_name(&name) {
-                    self.set_status(name.clone(), None, true);
+                    self.set_status(CliRunState::RunningTool, Some(name.clone()), true);
                 }
                 for activity in activities {
                     self.push_activity_block(activity);
@@ -235,6 +251,7 @@ impl App {
                 self.finalize_live_markdown();
                 let title = live::live_tool_output_title(&name, &args);
                 self.live.tool_output.start(call_id, title);
+                self.set_status(CliRunState::RunningTool, Some(name), true);
                 self.invalidate_live_tool_output_cache();
             }
             TurnEvent::CodeBlockStarted { code, .. } => {
@@ -254,9 +271,9 @@ impl App {
                 self.finalize_live_markdown();
                 self.iteration = protocol_iteration + 1;
                 if let Some(detail) = self.pending_retry_status.take() {
-                    self.set_status("retrying", Some(detail), true);
+                    self.set_status(CliRunState::Waiting, Some(detail), true);
                 } else {
-                    self.set_status("thinking", None, true);
+                    self.set_status(CliRunState::Thinking, None, true);
                 }
                 self.usage.live_output_chars_estimate = 0;
                 self.usage.live_output_tokens_estimate = 0;
@@ -276,7 +293,7 @@ impl App {
                     format!("attempt {}/{} · {}", attempt, max_attempts, reason_short);
                 self.pending_retry_status = Some(retry_detail.clone());
                 self.set_status(
-                    "retrying",
+                    CliRunState::Waiting,
                     Some(format!("in {}s · {}", wait_seconds, retry_detail)),
                     true,
                 );
@@ -296,7 +313,7 @@ impl App {
                 } else {
                     self.manual_interrupt_requested = false;
                     self.set_transient_status(
-                        "error",
+                        CliRunState::Error,
                         Some(message.chars().take(96).collect()),
                         std::time::Duration::from_secs(8),
                     );
@@ -367,23 +384,28 @@ impl App {
                 }
             }
             TurnEvent::QueuedInputAccepted { inputs, .. } => {
-                let messages = inputs
-                    .iter()
-                    .map(|input| input.message.clone())
-                    .collect::<Vec<_>>();
-                self.accept_injected_turn_input(&messages);
+                self.accept_injected_turn_input(&inputs);
             }
             TurnEvent::QueuedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
             }
-            TurnEvent::QueuedWorkStarted { causes, .. } => {
-                if causes
-                    .iter()
-                    .any(|cause| cause.event_type == "process.wake")
-                {
-                    self.set_status("agent woken", None, true);
-                } else {
-                    self.set_status("queued work", None, true);
+            TurnEvent::QueuedWorkStarted {
+                batch_ids, causes, ..
+            } => {
+                self.remove_queued_work_batches(&batch_ids);
+                if self.turn_active() {
+                    if causes
+                        .iter()
+                        .any(|cause| cause.event_type == "process.wake")
+                    {
+                        self.set_status(CliRunState::Working, Some("agent wake".to_string()), true);
+                    } else {
+                        self.set_status(
+                            CliRunState::Working,
+                            Some("queued work".to_string()),
+                            true,
+                        );
+                    }
                 }
             }
             TurnEvent::CodeBlockCompleted { error, success, .. } => {
@@ -418,13 +440,9 @@ impl App {
         } else if let SessionEvent::Message { text, kind } = &event
             && kind == "tool_output"
         {
-            let current_status = self
-                .live
-                .turn
-                .as_ref()
-                .map(|turn| turn.status_text.as_str());
-            let stream_active =
-                self.running || current_status.is_some_and(|status| status.contains("shell"));
+            let current_status = self.live.turn.as_ref().map(|turn| turn.run_state);
+            let stream_active = self.turn_active()
+                || current_status.is_some_and(|status| status == CliRunState::RunningTool);
             if stream_active {
                 self.push_test_tool_output(text);
                 self.invalidate_live_tool_output_cache();

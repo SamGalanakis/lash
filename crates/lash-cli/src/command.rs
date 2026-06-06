@@ -80,7 +80,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/info",
-        aliases: &[],
+        aliases: &["/status"],
         usage: "/info",
         description: "Show current session/runtime info",
         argument_hint: None,
@@ -151,9 +151,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "/resume",
         aliases: &["/continue"],
-        usage: "/resume [name]",
-        description: "Browse or load a previous session",
-        argument_hint: Some("[name]"),
+        usage: "/resume [id-or-name]",
+        description: "Search sessions or resume by id/name",
+        argument_hint: Some("[id-or-name]"),
         argument_options: &[],
         takes_argument: true,
         runs_out_of_band: false,
@@ -387,7 +387,7 @@ pub fn parse(input: &str, _skills: &SkillCatalog) -> Option<Command> {
         "fork" => Some(Command::Fork),
         "tree" => Some(Command::Tree),
         "version" => Some(Command::Version),
-        "info" => Some(Command::Info),
+        "info" | "status" => Some(Command::Info),
         "model" => Some(Command::Model(
             arg.filter(|a| !a.is_empty()).map(|a| a.to_string()),
         )),
@@ -494,6 +494,7 @@ mod tests {
         assert!(matches!(parse("/retry", &skills), Some(Command::Retry)));
         assert!(matches!(parse("/version", &skills), Some(Command::Version)));
         assert!(matches!(parse("/info", &skills), Some(Command::Info)));
+        assert!(matches!(parse("/status", &skills), Some(Command::Info)));
         assert!(matches!(parse("/quit", &skills), Some(Command::Exit)));
         assert!(matches!(parse("/?", &skills), Some(Command::Help)));
         assert!(matches!(

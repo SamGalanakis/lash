@@ -150,10 +150,10 @@ impl RuntimePersistence for Store {
                     params![
                         entry.source.as_str(),
                         entry.model.as_str(),
-                        entry.usage.input_tokens as i64,
-                        entry.usage.output_tokens as i64,
-                        entry.usage.cached_input_tokens as i64,
-                        entry.usage.reasoning_tokens as i64,
+                        entry.usage.input_tokens,
+                        entry.usage.output_tokens,
+                        entry.usage.cached_input_tokens,
+                        entry.usage.reasoning_tokens,
                     ],
                 )
                 .await
@@ -584,6 +584,59 @@ impl RuntimePersistence for Store {
         Ok(())
     }
 
+    async fn cancel_queued_work_batch(
+        &self,
+        session_id: &str,
+        batch_id: &str,
+    ) -> Result<Option<QueuedWorkBatch>, StoreError> {
+        let conn = self.conn.lock().await;
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(turso_error)?;
+        let result = async {
+            let row = optional_row(
+                &conn,
+                "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                        slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                        claim_fencing_token
+                 FROM queued_work_batches
+                 WHERE session_id = ?1
+                   AND batch_id = ?2
+                   AND (claim_token IS NULL OR claim_expires_at_ms <= ?3)",
+                params![session_id, batch_id, current_epoch_ms() as i64],
+            )
+            .await
+            .map_err(turso_error)?
+            .map(|row| queued_batch_row_from_sql(&row).map_err(turso_error))
+            .transpose()?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            let batch = queued_work_batch_from_conn(&conn, row).await?;
+            conn.execute(
+                "DELETE FROM queued_work_batches
+                 WHERE session_id = ?1
+                   AND batch_id = ?2
+                   AND (claim_token IS NULL OR claim_expires_at_ms <= ?3)",
+                params![session_id, batch_id, current_epoch_ms() as i64],
+            )
+            .await
+            .map_err(turso_error)?;
+            Ok(Some(batch))
+        }
+        .await;
+        match result {
+            Ok(batch) => {
+                conn.execute("COMMIT", ()).await.map_err(turso_error)?;
+                Ok(batch)
+            }
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
+    }
+
     async fn list_queued_work(&self, session_id: &str) -> Result<Vec<QueuedWorkBatch>, StoreError> {
         let conn = self.conn.lock().await;
         let rows = collect_rows(
@@ -595,6 +648,35 @@ impl RuntimePersistence for Store {
              WHERE session_id = ?1
              ORDER BY enqueue_seq ASC",
             params![session_id],
+        )
+        .await
+        .map_err(turso_error)?
+        .into_iter()
+        .map(|row| queued_batch_row_from_sql(&row).map_err(turso_error))
+        .collect::<Result<Vec<_>, _>>()?;
+        let mut batches = Vec::new();
+        for row in rows {
+            batches.push(queued_work_batch_from_conn(&conn, row).await?);
+        }
+        Ok(batches)
+    }
+
+    async fn list_pending_queued_work(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<QueuedWorkBatch>, StoreError> {
+        let conn = self.conn.lock().await;
+        let now = current_epoch_ms();
+        let rows = collect_rows(
+            &conn,
+            "SELECT enqueue_seq, batch_id, session_id, source_key, delivery_policy,
+                    slot_policy, merge_key_json, available_at_ms, enqueued_at_ms,
+                    claim_fencing_token
+             FROM queued_work_batches
+             WHERE session_id = ?1
+               AND (claim_token IS NULL OR claim_expires_at_ms <= ?2)
+             ORDER BY enqueue_seq ASC",
+            params![session_id, now as i64],
         )
         .await
         .map_err(turso_error)?

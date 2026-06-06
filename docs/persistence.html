@@ -20,14 +20,55 @@
 <body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash</code>, <code>crates/lash-turso-store</code>, <code>examples/agent-service</code>.">
 <section class="opener">
     <h1 class="opener__title">session<span class="slash">/</span>persistence</h1>
-    <p class="opener__lede">Runtime state is persisted through <code>RuntimePersistence</code>. The default impl is <code>lash-turso-store</code>. Install a <code>SessionStoreFactory</code> on the core, or pass a store per session.</p>
+    <p class="opener__lede">Runtime state is persisted through the <code>RuntimePersistence</code> contract. There is no default store: install a <code>SessionStoreFactory</code> on the core, or pass a store per session, otherwise sessions stay in-process. <code>lash-turso-store</code> is the provided durable implementation; <code>lash-core</code> ships an in-memory one.</p>
   </section>
 
   <main class="body" id="content">
-<div class="section" id="contract">
+<div class="section" id="whats-persisted">
+          <div class="section-header">
+            <h2>What Gets Persisted</h2>
+            <p>The state every store holds per session, as the contract guarantees (column and table names below are the Turso store's layout):</p>
+          </div>
+          <div class="def-list-grid">
+            <article class="panel">
+              <h3>Graph nodes</h3>
+              <p>User inputs, assistant responses, tool calls, protocol events, prompt snapshots in <code>graph_nodes</code>, with a <code>tombstoned</code> flag for soft deletion.</p>
+            </article>
+            <article class="panel">
+              <h3>Session head</h3>
+              <p>Singleton row with head pointer, revision, current <code>AgentFrame</code> id, and frame records. Revision drives CAS.</p>
+            </article>
+            <article class="panel">
+              <h3>Checkpoint blobs</h3>
+              <p>Compressed snapshots of committed tool, plugin, current-frame execution, and prompt state, content-hashed and deduplicated across store reopens.</p>
+            </article>
+            <article class="panel">
+              <h3>Queued work</h3>
+              <p>Lease-claimed batches for queued turn input, process wakes, host events, and timers. Completed claim ids are cleared atomically with the runtime commit that consumed them.</p>
+            </article>
+            <article class="panel">
+              <h3>Turn commit stamps</h3>
+              <p>Idempotency rows keyed by session and turn id. Identical final commit retries return the recorded result; changed hashes are rejected.</p>
+            </article>
+            <article class="panel">
+              <h3>Usage deltas</h3>
+              <p>Per-turn <code>input_tokens</code>, <code>output_tokens</code>, <code>cached_input_tokens</code>, <code>reasoning_tokens</code>. Aggregated into the session usage ledger on <code>SessionReadView</code>.</p>
+            </article>
+            <article class="panel">
+              <h3>Metadata</h3>
+              <p>Session id, name, model, cwd, relation (<code>Root</code> or <code>Child</code>), and created-at. What the resume picker shows.</p>
+            </article>
+            <article class="panel">
+              <h3>Attachments</h3>
+              <p>Image / file blobs referenced from graph nodes via <code>BlobRef</code>. Shared with traces and exports.</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="section" id="contract">
           <div class="section-header">
             <h2>The Contract</h2>
-            <p>Runtime-facing trait. Most hosts use <code>lash-turso-store</code> rather than implementing it. The contract covers session graph/head commits, queued work, metadata, garbage collection, final turn commit idempotency, and the attachment write-ahead manifest inherited through <code>AttachmentManifest</code>. Stores do not execute or replay in-flight effects; durable workflow hosts own that through <code>EffectHost</code> history and timers.</p>
+            <p>Runtime-facing trait. The contract covers session graph/head commits, queued work, metadata, garbage collection, final turn commit idempotency, and the attachment write-ahead manifest inherited through <code>AttachmentManifest</code>. Stores do not execute or replay in-flight effects; durable workflow hosts own that through <code>EffectHost</code> history and timers. Most hosts wire a provided implementation (<code>TursoSessionStoreFactory</code> for durability, <code>InMemorySessionStoreFactory</code> for ephemeral runs) rather than implementing the trait themselves.</p>
           </div>
           <pre><code>#[async_trait]
 pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
@@ -141,47 +182,6 @@ let core = LashCore::builder()
           <p>Without a <code>store_factory</code>, session state is in-process only: turns succeed but nothing is written or resumable. You still provide explicit in-memory effect, artifact, and attachment facets with <code>InlineEffectHost</code>, <code>InMemoryLashlangArtifactStore</code>, and <code>InMemoryAttachmentStore</code>.</p>
         </div>
 
-        <div class="section" id="whats-persisted">
-          <div class="section-header">
-            <h2>What Gets Persisted</h2>
-            <p>Per-session Turso contents:</p>
-          </div>
-          <div class="def-list-grid">
-            <article class="panel">
-              <h3>Graph nodes</h3>
-              <p>User inputs, assistant responses, tool calls, protocol events, prompt snapshots in <code>graph_nodes</code>, with a <code>tombstoned</code> flag for soft deletion.</p>
-            </article>
-            <article class="panel">
-              <h3>Session head</h3>
-              <p>Singleton row with head pointer, revision, current <code>AgentFrame</code> id, and frame records. Revision drives CAS.</p>
-            </article>
-            <article class="panel">
-              <h3>Checkpoint blobs</h3>
-              <p>Compressed snapshots of committed tool, plugin, current-frame execution, and prompt state, content-hashed and deduplicated across store reopens.</p>
-            </article>
-            <article class="panel">
-              <h3>Queued work</h3>
-              <p>Lease-claimed batches for queued turn input, process wakes, host events, and timers. Completed claim ids are cleared atomically with the runtime commit that consumed them.</p>
-            </article>
-            <article class="panel">
-              <h3>Turn commit stamps</h3>
-              <p>Idempotency rows keyed by session and turn id. Identical final commit retries return the recorded result; changed hashes are rejected.</p>
-            </article>
-            <article class="panel">
-              <h3>Usage deltas</h3>
-              <p>Per-turn <code>input_tokens</code>, <code>output_tokens</code>, <code>cached_input_tokens</code>, <code>reasoning_tokens</code>. Aggregated into the session usage ledger on <code>SessionReadView</code>.</p>
-            </article>
-            <article class="panel">
-              <h3>Metadata</h3>
-              <p>Session id, name, model, cwd, relation (<code>Root</code> or <code>Child</code>), and created-at. What the resume picker shows.</p>
-            </article>
-            <article class="panel">
-              <h3>Attachments</h3>
-              <p>Image / file blobs referenced from graph nodes via <code>BlobRef</code>. Shared with traces and exports.</p>
-            </article>
-          </div>
-        </div>
-
         <div class="section" id="garbage-collection">
           <div class="section-header">
             <h2>Garbage Collection</h2>
@@ -202,7 +202,7 @@ let core = LashCore::builder()
         <div class="section" id="end-to-end">
           <div class="section-header">
             <h2>End-To-End Example</h2>
-            <p>The <code>agent-service</code> example: one Turso factory, sessions keyed by chat id, app database alongside.</p>
+            <p>The <code>agent-service</code> example: one session-store factory (Turso here), sessions keyed by chat id, app database alongside.</p>
           </div>
           <pre><code>// One factory at boot, shared across every chat.
 let store_factory = Arc::new(TursoSessionStoreFactory::new(

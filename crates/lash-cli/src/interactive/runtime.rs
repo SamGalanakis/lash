@@ -166,6 +166,19 @@ pub(super) async fn enqueue_prepared_turn(
         .map_err(|err| err.to_string())
 }
 
+pub(super) async fn refresh_queued_work_snapshot(
+    app: &mut App,
+    runtime: &Option<LashSession>,
+) -> Result<(), String> {
+    let Some(session) = runtime.as_ref() else {
+        app.clear_queued_work_snapshot();
+        return Ok(());
+    };
+    let queued = session.queued_work().await.map_err(|err| err.to_string())?;
+    app.set_queued_work_snapshot(queued);
+    Ok(())
+}
+
 /// Send a user message to the runtime: push display block and spawn turn run.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_user_message(
@@ -194,6 +207,7 @@ pub(super) async fn send_user_message(
         recorder.record_start_turn();
     }
     app.start_turn();
+    app.mark_live_turn_user_input_visible();
     app.resume_contextual_follow_output();
     app.keep_latest_user_block_visible();
 
@@ -202,8 +216,8 @@ pub(super) async fn send_user_message(
         runtime_present_before_take = runtime.is_some(),
         runtime_return_rx_present_before_take = runtime_return_rx.is_some(),
         cancel_token_present_before_take = cancel_token.is_some(),
-        queued_turns = app.queues.queued_turns.len(),
-        pending_steers = app.queues.pending_steers.len(),
+        queued_work = app.queued_work_snapshot().len(),
+        draft_presentations = app.queues.draft_presentations.len(),
         "send_user_message taking runtime for dispatch"
     );
 
@@ -259,7 +273,13 @@ pub(super) async fn send_queued_work(
     if let Some(recorder) = ui_trace {
         recorder.record_start_turn();
     }
+    let has_visible_user_input = prepared_turns
+        .iter()
+        .any(|turn| !turn.display_text.trim().is_empty());
     app.start_turn();
+    if has_visible_user_input {
+        app.mark_live_turn_user_input_visible();
+    }
     app.resume_contextual_follow_output();
     app.keep_latest_user_block_visible();
 

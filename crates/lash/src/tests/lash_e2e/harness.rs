@@ -78,12 +78,14 @@ pub(super) async fn run_turn_case_without_success_assertions(
         .stream(events.as_ref())
         .await?;
     session.process_control().await_all().await?;
+    let prompt_captures_snapshot = prompt_captures.lock().expect("prompt captures").clone();
+    let final_process_list = session.process_control().list_all().await?;
     let run = LashE2eRun {
         turn_output: Some(turn_output),
         streamed_events: events.snapshot().await,
         graph_snapshots: graph_store.graphs(),
-        prompt_captures: prompt_captures.lock().expect("prompt captures").clone(),
-        final_process_list: session.process_control().list_all().await?,
+        prompt_captures: prompt_captures_snapshot,
+        final_process_list,
     };
 
     if let Some(expected) = &case.expected_submitted_value {
@@ -204,12 +206,14 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
         })
     );
 
+    let prompt_captures_snapshot = prompt_captures.lock().expect("prompt captures").clone();
+    let final_process_list = session.process_control().list_all().await?;
     let run = LashE2eRun {
         turn_output: None,
         streamed_events: Vec::new(),
         graph_snapshots: graph_store.graphs(),
-        prompt_captures: prompt_captures.lock().expect("prompt captures").clone(),
-        final_process_list: session.process_control().list_all().await?,
+        prompt_captures: prompt_captures_snapshot,
+        final_process_list,
     };
     assert_eq!(run.prompt_captures.len(), 1);
     assert_all_processes_terminal(&run.final_process_list);

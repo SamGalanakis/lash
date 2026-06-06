@@ -440,7 +440,7 @@ impl LashSession {
             ))
         })?;
         store
-            .list_queued_work(observation.session_id())
+            .list_pending_queued_work(observation.session_id())
             .await
             .map_err(|err| {
                 EmbedError::Runtime(lash_core::RuntimeError::new(
@@ -448,6 +448,17 @@ impl LashSession {
                     err.to_string(),
                 ))
             })
+    }
+
+    pub async fn cancel_queued_work_batch(
+        &self,
+        batch_id: &str,
+    ) -> Result<Option<QueuedWorkBatch>> {
+        let session_id = self.session_id();
+        self.runtime
+            .cancel_queued_work_batch(&session_id, batch_id)
+            .await
+            .map_err(EmbedError::Runtime)
     }
 
     pub fn read_view(&self) -> SessionReadView {

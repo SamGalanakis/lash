@@ -9,23 +9,25 @@ const STREAMING_OUTPUT_MAX_LINES: usize = 48;
 const STREAMING_OUTPUT_LINE_CHAR_LIMIT: usize = 240;
 
 pub struct LiveTurnState {
-    pub status_text: String,
+    pub run_state: CliRunState,
     pub status_detail: Option<String>,
     pub phase_started_at: std::time::Instant,
     pub turn_started_at: std::time::Instant,
+    pub has_visible_user_input: bool,
     pub has_visible_output: bool,
     pub output_start_anchor_pending: bool,
     pub transient_until: Option<std::time::Instant>,
 }
 
 impl LiveTurnState {
-    pub(super) fn new(status_text: impl Into<String>, status_detail: Option<String>) -> Self {
+    pub(super) fn new(run_state: CliRunState, status_detail: Option<String>) -> Self {
         let now = std::time::Instant::now();
         Self {
-            status_text: status_text.into(),
+            run_state,
             status_detail,
             phase_started_at: now,
             turn_started_at: now,
+            has_visible_user_input: false,
             has_visible_output: false,
             output_start_anchor_pending: false,
             transient_until: None,
@@ -139,13 +141,15 @@ pub(super) fn estimate_tokens_from_char_count(chars: i64) -> i64 {
 
 impl App {
     pub(super) fn ensure_live_turn(&mut self) -> &mut LiveTurnState {
+        let run_state = self.run_state;
         self.live
             .turn
-            .get_or_insert_with(|| LiveTurnState::new("starting", None))
+            .get_or_insert_with(|| LiveTurnState::new(run_state, None))
     }
 
     pub fn start_turn(&mut self) {
-        self.running = true;
+        self.foreground_turn_active = true;
+        self.run_state = CliRunState::Working;
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
         self.iteration = 0;
@@ -154,13 +158,50 @@ impl App {
         self.clear_live_tool_output();
         self.usage.live_output_chars_estimate = 0;
         self.usage.live_output_tokens_estimate = 0;
-        self.live.turn = Some(LiveTurnState::new("starting", None));
+        self.live.turn = Some(LiveTurnState::new(CliRunState::Working, None));
         self.follow_mode = FollowOutputMode::Contextual;
+    }
+
+    pub(crate) fn mark_live_turn_user_input_visible(&mut self) {
+        if let Some(turn) = self.live.turn.as_mut() {
+            turn.has_visible_user_input = true;
+        }
+    }
+
+    pub(crate) fn active_turn_has_visible_user_input(&self) -> bool {
+        self.live
+            .turn
+            .as_ref()
+            .is_some_and(|turn| turn.has_visible_user_input)
+    }
+
+    pub(crate) fn turn_active(&self) -> bool {
+        self.foreground_turn_active
+    }
+
+    pub(crate) fn can_inject_into_active_turn(&self) -> bool {
+        self.foreground_turn_active
+            && self.run_state.is_injectable_runtime_phase()
+            && self.active_turn_has_visible_user_input()
+    }
+
+    pub(crate) fn route_turn_submission(&self, runtime_available: bool) -> TurnSubmissionRoute {
+        if !runtime_available {
+            return TurnSubmissionRoute::BlockedSessionSwitch;
+        }
+        if !self.foreground_turn_active {
+            return TurnSubmissionRoute::SendNow;
+        }
+        if self.can_inject_into_active_turn() {
+            TurnSubmissionRoute::InjectActiveTurn
+        } else {
+            TurnSubmissionRoute::QueueNextFullTurn
+        }
     }
 
     pub fn stop_turn(&mut self) {
         self.invalidate_live_reasoning_tail();
-        self.running = false;
+        self.foreground_turn_active = false;
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
         self.live.reasoning.clear();
@@ -174,27 +215,29 @@ impl App {
         if let Some(display) = self.queues.pending_option_prompt_response.take() {
             self.push_prompt_response_user_block(display);
         }
-        if self
+        let keep_transient = self
             .live
             .turn
             .as_ref()
             .and_then(|turn| turn.transient_until)
-            .is_none_or(|until| until <= std::time::Instant::now())
-        {
+            .is_some_and(|until| until > std::time::Instant::now());
+        if !keep_transient {
             self.live.turn = None;
+            self.run_state = CliRunState::Idle;
         }
+        self.dirty = true;
     }
 
     pub(super) fn set_status(
         &mut self,
-        header: impl Into<String>,
+        state: CliRunState,
         details: Option<String>,
         reset_timer: bool,
     ) {
-        let header = header.into();
+        self.run_state = state;
         let turn = self.ensure_live_turn();
-        let changed = turn.status_text != header || turn.status_detail != details;
-        turn.status_text = header;
+        let changed = turn.run_state != state || turn.status_detail != details;
+        turn.run_state = state;
         turn.status_detail = details;
         turn.transient_until = None;
         if changed || reset_timer {
@@ -204,23 +247,45 @@ impl App {
 
     pub(super) fn set_transient_status(
         &mut self,
-        header: impl Into<String>,
+        state: CliRunState,
         details: Option<String>,
         duration: std::time::Duration,
     ) {
-        let header = header.into();
+        self.run_state = state;
         let now = std::time::Instant::now();
         let turn = self.ensure_live_turn();
-        turn.status_text = header;
+        turn.run_state = state;
         turn.status_detail = details;
         turn.phase_started_at = now;
         turn.transient_until = Some(now + duration);
     }
 
     pub(super) fn clear_status(&mut self) {
+        self.foreground_turn_active = false;
         self.manual_interrupt_requested = false;
         self.pending_retry_status = None;
         self.live.turn = None;
+        self.run_state = CliRunState::Idle;
+    }
+
+    pub(crate) fn sync_foreground_turn_active(&mut self, active: bool) {
+        if self.foreground_turn_active == active {
+            return;
+        }
+        self.foreground_turn_active = active;
+        if !active && self.run_state.is_runtime_active() {
+            let keep_transient_error = self.live.turn.as_ref().is_some_and(|turn| {
+                turn.run_state == CliRunState::Error
+                    && turn
+                        .transient_until
+                        .is_some_and(|until| until > std::time::Instant::now())
+            });
+            if !keep_transient_error {
+                self.live.turn = None;
+                self.run_state = CliRunState::Idle;
+            }
+        }
+        self.dirty = true;
     }
 
     pub fn note_manual_interrupt_requested(&mut self) {
@@ -232,9 +297,9 @@ impl App {
             .live
             .turn
             .as_ref()
-            .is_some_and(|turn| turn.status_text == "thinking")
+            .is_some_and(|turn| turn.run_state == CliRunState::Thinking)
         {
-            self.set_status("responding", None, true);
+            self.set_status(CliRunState::Responding, None, true);
         }
     }
 

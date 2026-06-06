@@ -223,6 +223,17 @@ impl lash_core::RuntimePersistence for SnapshotStore {
         Ok(())
     }
 
+    async fn cancel_queued_work_batch(
+        &self,
+        _session_id: &str,
+        _batch_id: &str,
+    ) -> std::result::Result<
+        Option<lash_core::runtime::QueuedWorkBatch>,
+        lash_core::store::StoreError,
+    > {
+        Ok(None)
+    }
+
     async fn list_queued_work(
         &self,
         _session_id: &str,

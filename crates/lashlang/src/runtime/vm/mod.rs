@@ -728,11 +728,9 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 return Ok(Some(VmStep::Effect(VmEffect::WaitSignal)));
             }
             Instruction::ProcessSignalRun => {
-                if self.mode != VmMode::Process {
-                    return Err(RuntimeError::ProcessControlOutsideProcess {
-                        keyword: "signal run",
-                    });
-                }
+                // `signal run` (sending) is allowed from the foreground turn as
+                // well as inside a process body, mirroring `await` / `cancel`.
+                // Only `wait signal` (receiving) is gated to `VmMode::Process`.
                 return Ok(Some(VmStep::Effect(VmEffect::SignalRun)));
             }
             Instruction::ProcessYield => {

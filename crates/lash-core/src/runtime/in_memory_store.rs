@@ -429,6 +429,25 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
         Ok(())
     }
 
+    async fn cancel_queued_work_batch(
+        &self,
+        session_id: &str,
+        batch_id: &str,
+    ) -> Result<Option<crate::QueuedWorkBatch>, crate::store::StoreError> {
+        let now = current_epoch_ms();
+        let mut queued = self.queued_work.lock().expect("lock queued work");
+        let Some(index) = queued.iter().position(|entry| {
+            entry.batch.session_id == session_id && entry.batch.batch_id == batch_id
+        }) else {
+            return Ok(None);
+        };
+        let entry = &queued[index];
+        if entry.claim_token.is_some() && entry.claim_expires_at_ms > now {
+            return Ok(None);
+        }
+        Ok(Some(queued.remove(index).batch))
+    }
+
     async fn list_queued_work(
         &self,
         session_id: &str,
@@ -439,6 +458,26 @@ impl crate::store::RuntimePersistence for InMemorySessionStore {
             .expect("lock queued work")
             .iter()
             .filter(|entry| entry.batch.session_id == session_id)
+            .map(|entry| entry.batch.clone())
+            .collect::<Vec<_>>();
+        batches.sort_by_key(|batch| batch.enqueue_seq);
+        Ok(batches)
+    }
+
+    async fn list_pending_queued_work(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::QueuedWorkBatch>, crate::store::StoreError> {
+        let now = crate::current_epoch_ms();
+        let mut batches = self
+            .queued_work
+            .lock()
+            .expect("lock queued work")
+            .iter()
+            .filter(|entry| {
+                entry.batch.session_id == session_id
+                    && (entry.claim_token.is_none() || entry.claim_expires_at_ms <= now)
+            })
             .map(|entry| entry.batch.clone())
             .collect::<Vec<_>>();
         batches.sort_by_key(|batch| batch.enqueue_seq);

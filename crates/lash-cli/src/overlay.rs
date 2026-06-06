@@ -5,6 +5,12 @@ use lash_core::{Message, MessageRole, PartKind, SessionMessageTreeNode};
 use crate::prompt_model::{PromptRequest, PromptResponse, PromptSelectionMode};
 use crate::session_log::SessionInfo;
 
+#[derive(Debug)]
+pub struct ProcessOverviewState {
+    pub title: String,
+    pub rows: Vec<(String, String)>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PromptFocus {
     #[default]
@@ -245,6 +251,86 @@ impl<T> PickerState<T> {
         }
         let idx = self.selected.min(self.items.len() - 1);
         Some(self.items.remove(idx))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionPickerState {
+    pub items: Vec<SessionInfo>,
+    pub selected: usize,
+    pub query: String,
+}
+
+impl SessionPickerState {
+    pub fn new(items: Vec<SessionInfo>) -> Self {
+        Self {
+            items,
+            selected: 0,
+            query: String::new(),
+        }
+    }
+
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        let query = self.query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return (0..self.items.len()).collect();
+        }
+        let terms = query.split_whitespace().collect::<Vec<_>>();
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, session)| {
+                let cwd = session
+                    .cwd
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                let haystack = format!(
+                    "{} {} {} {} {}",
+                    session.filename,
+                    session.session_id,
+                    session.first_message,
+                    session.cwd_label().unwrap_or_default(),
+                    cwd
+                )
+                .to_ascii_lowercase();
+                terms
+                    .iter()
+                    .all(|term| haystack.contains(term))
+                    .then_some(idx)
+            })
+            .collect()
+    }
+
+    pub fn filtered_count(&self) -> usize {
+        self.filtered_indices().len()
+    }
+
+    pub fn up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn down(&mut self) {
+        let count = self.filtered_count();
+        if count > 0 {
+            self.selected = (self.selected + 1).min(count - 1);
+        }
+    }
+
+    pub fn push_query_char(&mut self, ch: char) {
+        self.query.push(ch);
+        self.selected = 0;
+    }
+
+    pub fn pop_query_char(&mut self) {
+        self.query.pop();
+        self.selected = 0;
+    }
+
+    pub fn selected_filename(&self) -> Option<String> {
+        let indices = self.filtered_indices();
+        let idx = *indices.get(self.selected.min(indices.len().saturating_sub(1)))?;
+        Some(self.items[idx].filename.clone())
     }
 }
 
@@ -543,8 +629,9 @@ pub fn tree_message_preview(message: &Message) -> String {
 
 #[derive(Debug)]
 pub enum OverlayState {
-    SessionPicker(PickerState<SessionInfo>),
+    SessionPicker(SessionPickerState),
     Tree(TreeState),
     SkillPicker(PickerState<(String, String)>),
+    ProcessOverview(ProcessOverviewState),
     Prompt(PromptState),
 }

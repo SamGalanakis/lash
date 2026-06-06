@@ -40,6 +40,108 @@ fn background_subagent_status_is_transient_and_freezes_duration() {
 }
 
 #[test]
+fn process_selection_tracks_visible_process_snapshot() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    let running = lash_core::ProcessHandleSummary::new(
+        "process-1",
+        lash_core::ProcessHandleDescriptor::new(Some("lashlang"), Some("responder")),
+        lash_core::ProcessLifecycleStatus::Running,
+    )
+    .with_definition(Some(lash_core::ProcessDefinitionSummary {
+        name: "responder".into(),
+    }));
+
+    app.update_processes(vec![running.clone()]);
+    assert!(app.select_next_process());
+    assert_eq!(
+        app.selected_process()
+            .map(|process| process.process_id.as_str()),
+        Some("process-1")
+    );
+    let overview = app
+        .selected_process_overview_state()
+        .expect("process overview");
+    assert_eq!(overview.title, "Process responder");
+    assert!(
+        overview
+            .rows
+            .iter()
+            .any(|(label, value)| { label == "definition" && value == "responder" })
+    );
+
+    app.update_processes(vec![running]);
+    assert_eq!(
+        app.selected_process()
+            .map(|process| process.process_id.as_str()),
+        Some("process-1")
+    );
+
+    app.update_processes(Vec::new());
+    assert!(app.selected_process().is_none());
+}
+
+#[test]
+fn selected_process_row_is_focusable_and_renders_definition() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.update_processes(vec![
+        lash_core::ProcessHandleSummary::new(
+            "process-1",
+            lash_core::ProcessHandleDescriptor::new(Some("lashlang"), Some("responder")),
+            lash_core::ProcessLifecycleStatus::Running,
+        )
+        .with_definition(Some(lash_core::ProcessDefinitionSummary {
+            name: "responder".into(),
+        })),
+    ]);
+    app.select_next_process();
+
+    let lines = crate::render::process_lines_snapshot(&app, 80).expect("process lines");
+    let text: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+
+    assert!(text.iter().any(|line| {
+        line.contains("▶") && line.contains("running · responder · responder")
+    }));
+}
+
+#[test]
+fn process_rows_are_input_chrome_not_history_content() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    let baseline_height = app.total_content_height(80, 20);
+    app.update_processes(vec![lash_core::ProcessHandleSummary::new(
+        "process-1",
+        lash_core::ProcessHandleDescriptor::new(Some("lashlang"), Some("responder")),
+        lash_core::ProcessLifecycleStatus::Running,
+    )]);
+
+    assert_eq!(crate::render::process_dock_height(&app, 80), 2);
+    assert_eq!(app.total_content_height(80, 20), baseline_height);
+
+    let areas = crate::render::chrome_areas(&app, 80, 24);
+    assert_eq!(areas.process.height, 2);
+    assert_eq!(areas.process.y, areas.input.y + areas.input.height);
+}
+
+#[test]
+fn stop_turn_marks_idle_redraw_dirty() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.start_turn();
+    app.dirty = false;
+
+    app.stop_turn();
+
+    assert_eq!(app.run_state, CliRunState::Idle);
+    assert!(app.dirty);
+}
+
+#[test]
 fn text_delta_accumulates_raw() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::TextDelta {
@@ -123,8 +225,8 @@ fn first_text_delta_switches_thinking_to_responding() {
         content: "hello".into(),
     });
     assert_eq!(
-        app.live.turn.as_ref().map(|turn| turn.status_text.as_str()),
-        Some("responding")
+        app.live.turn.as_ref().map(|turn| turn.run_state),
+        Some(CliRunState::Responding)
     );
     assert_eq!(
         app.live
@@ -144,8 +246,8 @@ fn llm_request_sets_plain_thinking_status() {
         tool_list: String::new(),
     });
     assert_eq!(
-        app.live.turn.as_ref().map(|turn| turn.status_text.as_str()),
-        Some("thinking")
+        app.live.turn.as_ref().map(|turn| turn.run_state),
+        Some(CliRunState::Thinking)
     );
     assert_eq!(
         app.live
@@ -443,11 +545,10 @@ fn rlm_budget_warning_uses_status_not_user_message() {
         "runtime budget warning must not be rendered as user input"
     );
     assert!(app.live.turn.as_ref().is_some_and(|turn| {
-        turn.status_text == "context budget"
-            && turn
-                .status_detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("choose frame switch path"))
+        turn.run_state == CliRunState::RunningTool
+            && turn.status_detail.as_deref().is_some_and(|detail| {
+                detail.contains("context budget") && detail.contains("choose frame switch path")
+            })
     }));
 }
 
@@ -517,7 +618,7 @@ fn cancelled_error_renders_as_system_message() {
         app.timeline.last(),
         Some(UiTimelineItem::SystemMessage(msg)) if msg == "Manually interrupted."
     ));
-    assert!(!app.running);
+    assert_eq!(app.run_state, CliRunState::Idle);
     assert!(app.live.turn.is_none());
 }
 
@@ -540,7 +641,7 @@ fn cancelled_error_without_manual_request_still_stops_immediately() {
         app.timeline.last(),
         Some(UiTimelineItem::SystemMessage(msg)) if msg == "Cancelled."
     ));
-    assert!(!app.running);
+    assert_eq!(app.run_state, CliRunState::Idle);
     assert!(app.live.turn.is_none());
 }
 
@@ -623,7 +724,7 @@ fn keep_latest_user_block_visible_keeps_short_prompt_bottom_aligned() {
     }
     app.timeline
         .push(UiTimelineItem::UserInput("short prompt".into()));
-    app.running = true;
+    app.start_turn();
     app.follow_mode = FollowOutputMode::Contextual;
 
     let width = 32usize;
@@ -668,7 +769,7 @@ fn dismiss_splash_removes_empty_state_before_history_content() {
 }
 
 #[test]
-fn refresh_follow_output_anchor_tracks_bottom_when_idle() {
+fn refresh_scroll_position_tracks_bottom_when_idle() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.timeline.truncate(0);
 
@@ -681,17 +782,17 @@ fn refresh_follow_output_anchor_tracks_bottom_when_idle() {
     let width = 80;
     app.follow_mode = FollowOutputMode::Bottom;
 
-    app.refresh_follow_output_anchor(width, 3);
+    app.refresh_scroll_position(width, 3);
     let small_bottom = app.total_content_height(width, 3).saturating_sub(3);
     assert_eq!(app.scroll_offset, small_bottom);
 
-    app.refresh_follow_output_anchor(width, 6);
+    app.refresh_scroll_position(width, 6);
     let large_bottom = app.total_content_height(width, 6).saturating_sub(6);
     assert_eq!(app.scroll_offset, large_bottom);
 }
 
 #[test]
-fn refresh_follow_output_anchor_reveals_output_start_once_then_follows_tail() {
+fn refresh_scroll_position_reveals_output_start_once_then_follows_tail() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.timeline.truncate(0);
 
@@ -710,7 +811,7 @@ fn refresh_follow_output_anchor_reveals_output_start_once_then_follows_tail() {
     let width = 80;
     let viewport_height = 3;
 
-    app.refresh_follow_output_anchor(width, viewport_height);
+    app.refresh_scroll_position(width, viewport_height);
     let first_anchor = app.scroll_offset;
     let max_scroll = app
         .total_content_height(width, viewport_height)
@@ -718,7 +819,7 @@ fn refresh_follow_output_anchor_reveals_output_start_once_then_follows_tail() {
     assert!(first_anchor < max_scroll);
     assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
 
-    app.refresh_follow_output_anchor(width, viewport_height);
+    app.refresh_scroll_position(width, viewport_height);
     assert_eq!(app.scroll_offset, max_scroll);
 }
 
@@ -729,7 +830,7 @@ fn resume_follow_output_reenables_bottom_following() {
     app.timeline.push(UiTimelineItem::UserInput("hello".into()));
     app.timeline
         .push(UiTimelineItem::AssistantText("world".into()));
-    app.follow_mode = FollowOutputMode::Paused;
+    app.follow_mode = FollowOutputMode::Manual;
     app.scroll_offset = 3;
 
     app.resume_follow_output();
@@ -753,12 +854,12 @@ fn scroll_up_from_follow_output_detaches_from_bottom_anchor() {
     let viewport_height = 5;
     app.follow_mode = FollowOutputMode::Bottom;
     app.ensure_height_cache_pub(width, viewport_height);
-    app.refresh_follow_output_anchor(width, viewport_height);
+    app.refresh_scroll_position(width, viewport_height);
 
     let bottom = app.scroll_offset;
     app.scroll_up(2);
 
-    assert_eq!(app.follow_mode, FollowOutputMode::Paused);
+    assert_eq!(app.follow_mode, FollowOutputMode::Manual);
     assert_eq!(app.scroll_offset, bottom.saturating_sub(2));
 }
 
@@ -782,11 +883,11 @@ fn scroll_down_to_bottom_reenables_tail_follow_instead_of_contextual_anchor() {
 
     let width = 24;
     let viewport_height = 5;
-    app.refresh_follow_output_anchor(width, viewport_height);
+    app.refresh_scroll_position(width, viewport_height);
     let contextual_anchor = app.scroll_offset;
 
     app.scroll_up(2);
-    assert_eq!(app.follow_mode, FollowOutputMode::Paused);
+    assert_eq!(app.follow_mode, FollowOutputMode::Manual);
 
     app.scroll_down(usize::MAX / 2, viewport_height, width);
     assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
@@ -799,19 +900,19 @@ fn scroll_down_to_bottom_reenables_tail_follow_instead_of_contextual_anchor() {
         "test requires contextual anchor above the tail"
     );
 
-    app.refresh_follow_output_anchor(width, viewport_height);
+    app.refresh_scroll_position(width, viewport_height);
 
     assert_eq!(app.scroll_offset, max_scroll);
 }
 
 #[test]
-fn text_delta_does_not_force_scroll_when_follow_output_is_paused() {
+fn text_delta_does_not_force_scroll_when_follow_output_is_manual() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.timeline.truncate(0);
     app.timeline
         .push(UiTimelineItem::UserInput("prompt".into()));
     app.start_turn();
-    app.follow_mode = FollowOutputMode::Paused;
+    app.follow_mode = FollowOutputMode::Manual;
     app.scroll_offset = 3;
 
     app.handle_session_event(SessionEvent::TextDelta {
@@ -819,7 +920,46 @@ fn text_delta_does_not_force_scroll_when_follow_output_is_paused() {
     });
 
     assert_eq!(app.scroll_offset, 3);
-    assert_eq!(app.follow_mode, FollowOutputMode::Paused);
+    assert_eq!(app.follow_mode, FollowOutputMode::Manual);
+}
+
+#[test]
+fn manual_scroll_keeps_explicit_offset_when_prior_block_height_changes() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.timeline.truncate(0);
+    app.timeline.push(UiTimelineItem::AssistantText(
+        (0..8)
+            .map(|idx| format!("old line {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ));
+    app.timeline.push(UiTimelineItem::AssistantText(
+        (0..8)
+            .map(|idx| format!("anchored line {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ));
+
+    let width = 80;
+    let viewport_height = 4;
+    app.follow_mode = FollowOutputMode::Bottom;
+    app.ensure_height_cache_pub(width, viewport_height);
+    app.refresh_scroll_position(width, viewport_height);
+
+    let target = app.height_cache_snapshot()[0] + 2;
+    let bottom = app.scroll_offset;
+    app.scroll_up(bottom.saturating_sub(target));
+    assert_eq!(app.follow_mode, FollowOutputMode::Manual);
+    assert_eq!(app.scroll_offset, target);
+
+    if let Some(UiTimelineItem::AssistantText(text)) = app.timeline.iter_mut().next() {
+        text.insert_str(0, "inserted line 0\ninserted line 1\ninserted line 2\n");
+    }
+    app.invalidate_height_cache_from(0);
+    app.refresh_scroll_position(width, viewport_height);
+
+    assert_eq!(app.scroll_offset, target);
+    assert_eq!(app.follow_mode, FollowOutputMode::Manual);
 }
 
 #[test]
@@ -840,7 +980,7 @@ fn text_delta_reveals_message_start_before_switching_to_tail_follow() {
 
     let width = 24;
     let viewport_height = 5;
-    app.refresh_follow_output_anchor(width, viewport_height);
+    app.refresh_scroll_position(width, viewport_height);
 
     let max_scroll = app
         .total_content_height(width, viewport_height)
@@ -858,24 +998,24 @@ fn text_delta_reveals_message_start_before_switching_to_tail_follow() {
     );
     assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
 
-    app.refresh_follow_output_anchor(width, viewport_height);
+    app.refresh_scroll_position(width, viewport_height);
     assert_eq!(app.scroll_offset, max_scroll);
 }
 
 #[test]
-fn refresh_follow_output_anchor_repositions_waiting_prompt_on_resize() {
+fn refresh_scroll_position_repositions_waiting_prompt_on_resize() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.timeline.push(UiTimelineItem::UserInput(
         "A long prompt that should stay visible while we are waiting for first token output".into(),
     ));
-    app.running = true;
+    app.start_turn();
     app.follow_mode = FollowOutputMode::Contextual;
 
     let width = 24;
-    app.refresh_follow_output_anchor(width, 3);
+    app.refresh_scroll_position(width, 3);
     let initial_offset = app.scroll_offset;
 
-    app.refresh_follow_output_anchor(width, 6);
+    app.refresh_scroll_position(width, 6);
     assert!(
         app.scroll_offset <= initial_offset,
         "larger viewport should not push the waiting prompt further down"

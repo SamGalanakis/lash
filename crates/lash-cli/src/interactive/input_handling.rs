@@ -12,14 +12,14 @@ use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiInputOutcome, T
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{App, PreparedTurn, UiTimelineItem};
+use crate::app::{App, PreparedTurn, TurnSubmissionRoute, UiTimelineItem};
 use crate::editor::SuggestionKind;
 use crate::event::AppEvent;
 use crate::input_items::insert_inline_marker;
 use crate::model_catalog::CachedModelCatalog;
 use crate::render;
 use crate::session_log::SessionLogger;
-use crate::turn_runner::RuntimeRunResult;
+use crate::turn_runner::{RuntimeRunResult, make_turn_input};
 use crate::ui_trace::UiTraceRecorder;
 use crate::{
     Args, apply_ui_host_effects, hash12, normalize_prepared_turn_for_dispatch, push_system_message,
@@ -32,12 +32,30 @@ use super::commands::{
 };
 use super::helpers::{
     TurnReplayPayload, is_copy_shortcut, key_chord_from_event, queued_turn_edit_matches,
-    record_queue_pending_steer, record_queue_turn, should_preserve_selection_for_key,
+    record_queue_current_turn_input, record_queue_turn, should_preserve_selection_for_key,
 };
 use super::runtime::{
     apply_pending_reconfigure, copy_selected_text_or_last_response, enqueue_prepared_turn,
-    make_injected_plugin_message,
+    make_injected_plugin_message, refresh_queued_work_snapshot, send_user_message,
 };
+
+pub(super) fn slash_command_blocked_while_working_message(command_text: &str) -> String {
+    let command = command_text
+        .split_whitespace()
+        .next()
+        .filter(|command| command.starts_with('/'))
+        .unwrap_or("slash command");
+    format!(
+        "Cannot run `{command}` while Lash is working. Wait for the current turn to finish or press Esc to interrupt it."
+    )
+}
+
+fn block_slash_command_while_working(app: &mut App, command_text: &str) {
+    push_system_message(
+        app,
+        slash_command_blocked_while_working_message(command_text),
+    );
+}
 
 async fn enqueue_prepared_turn_for_cli(
     queued: PreparedTurn,
@@ -46,6 +64,7 @@ async fn enqueue_prepared_turn_for_cli(
     runtime: &Option<LashSession>,
     delivery_policy: lash_core::DeliveryPolicy,
     slot_policy: lash_core::SlotPolicy,
+    show_preview: bool,
 ) -> bool {
     let Some(session) = runtime.as_ref() else {
         push_system_message(
@@ -57,8 +76,13 @@ async fn enqueue_prepared_turn_for_cli(
     };
     match enqueue_prepared_turn(session, &queued, delivery_policy, slot_policy).await {
         Ok(()) => {
-            record_queue_turn(ui_trace, &queued);
-            app.queue_turn(queued);
+            if show_preview {
+                record_queue_turn(ui_trace, &queued);
+            }
+            app.cache_draft_presentation(queued);
+            if show_preview && let Err(err) = refresh_queued_work_snapshot(app, runtime).await {
+                push_system_message(app, format!("Failed to refresh durable queue: {err}"));
+            }
             true
         }
         Err(err) => {
@@ -90,6 +114,98 @@ pub(super) fn handle_surface_input(
             app.dirty = true;
             true
         }
+    }
+}
+
+async fn restore_last_durable_full_turn(app: &mut App, runtime: &Option<LashSession>) {
+    let Some(batch) = app.full_turn_batches_for_editing().last().cloned() else {
+        return;
+    };
+    let Some(session) = runtime.as_ref() else {
+        push_system_message(
+            app,
+            "Cannot edit queued input while the session is switching.".to_string(),
+        );
+        return;
+    };
+    match session.cancel_queued_work_batch(&batch.batch_id).await {
+        Ok(Some(cancelled)) => {
+            if let Some(turn) = app.take_prepared_turn_for_queued_batch(&cancelled) {
+                app.restore_prepared_turn(turn);
+                app.update_suggestions();
+            } else {
+                push_system_message(app, "Queued input was cancelled.".to_string());
+            }
+        }
+        Ok(None) => {
+            push_system_message(
+                app,
+                "Queued input is already being processed; it was not restored.".to_string(),
+            );
+        }
+        Err(err) => push_system_message(app, format!("Failed to edit queued input: {err}")),
+    }
+    if let Err(err) = refresh_queued_work_snapshot(app, runtime).await {
+        push_system_message(app, format!("Failed to refresh durable queue: {err}"));
+    }
+}
+
+fn can_focus_process_dock(app: &App) -> bool {
+    app.input().trim().is_empty() && !app.has_suggestions() && !app.processes.is_empty()
+}
+
+fn process_dock_has_focus(app: &App) -> bool {
+    app.input().trim().is_empty() && app.selected_process().is_some()
+}
+
+fn show_selected_process_overview(app: &mut App) {
+    let Some(overview) = app.selected_process_overview_state() else {
+        return;
+    };
+    app.show_process_overview(overview);
+}
+
+async fn cancel_selected_process(app: &mut App, runtime: &Option<LashSession>) {
+    let Some(process) = app.selected_process().cloned() else {
+        return;
+    };
+    if process.status.is_terminal() {
+        push_system_message(
+            app,
+            format!(
+                "Process `{}` is already {}.",
+                process.label,
+                process.status.label()
+            ),
+        );
+        return;
+    }
+    let Some(session) = runtime.as_ref() else {
+        push_system_message(
+            app,
+            "Cannot cancel process while the session is switching.".to_string(),
+        );
+        return;
+    };
+    let process_control = session.control().processes();
+    match process_control.cancel(&process.process_id).await {
+        Ok(summary) => {
+            push_system_message(
+                app,
+                format!(
+                    "Process `{}` cancellation requested: {}.",
+                    process.label,
+                    summary.status.label()
+                ),
+            );
+            match process_control.list().await {
+                Ok(processes) => app.update_processes(processes),
+                Err(err) => {
+                    push_system_message(app, format!("Failed to refresh process list: {err}"));
+                }
+            }
+        }
+        Err(err) => push_system_message(app, format!("Failed to cancel process: {err}")),
     }
 }
 
@@ -483,6 +599,7 @@ enum ActiveModal {
     SkillPicker,
     SessionPicker,
     Tree,
+    ProcessOverview,
     Prompt,
 }
 
@@ -493,6 +610,8 @@ fn active_modal(app: &App) -> ActiveModal {
         ActiveModal::SessionPicker
     } else if app.has_tree() {
         ActiveModal::Tree
+    } else if app.has_process_overview() {
+        ActiveModal::ProcessOverview
     } else if app.has_prompt() {
         ActiveModal::Prompt
     } else {
@@ -515,7 +634,7 @@ pub(super) async fn dispatch_key_event(
     }
     ctx.app.dirty = true;
 
-    if let Some(result) = handle_global_shortcut_key(key, ctx) {
+    if let Some(result) = handle_global_shortcut_key(key, ctx).await? {
         return Ok(result);
     }
 
@@ -539,6 +658,17 @@ pub(super) async fn dispatch_key_event(
             return Ok(false);
         }
         ActiveModal::Tree => return handle_tree_key(key, ctx).await,
+        ActiveModal::ProcessOverview => {
+            match key.code {
+                KeyCode::Enter => ctx.app.dismiss_process_overview(),
+                KeyCode::Delete => {
+                    cancel_selected_process(ctx.app, ctx.runtime).await;
+                    ctx.app.dismiss_process_overview();
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
         ActiveModal::Prompt => {
             handle_prompt_key(key, ctx);
             return Ok(false);
@@ -582,7 +712,10 @@ pub(super) async fn dispatch_key_event(
 /// copy, Ctrl+C dismiss/quit, expand toggles, undo/redo, paste, Esc).
 /// Returns `Some(ret)` when the key was fully handled here, where `ret`
 /// is the `dispatch_key_event` return value; `None` to fall through.
-fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option<bool> {
+async fn handle_global_shortcut_key(
+    key: KeyEvent,
+    ctx: &mut SessionCtx<'_>,
+) -> anyhow::Result<Option<bool>> {
     let app = &mut *ctx.app;
     let terminal = &*ctx.terminal;
     let ui_trace = &mut *ctx.ui_trace;
@@ -612,7 +745,7 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
     if (app.selection.visible || app.has_input_selection()) && copy_shortcut {
         tracing::debug!("selection copy took precedence over generic key handling");
         copy_selected_text_or_last_response(app, terminal.size().ok());
-        return Some(false);
+        return Ok(Some(false));
     }
 
     // CTRL+C: dismiss prompt if active, else quit
@@ -629,9 +762,9 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
                 recorder.record_prompt_dismiss();
             }
             app.dismiss_prompt();
-            return Some(false);
+            return Ok(Some(false));
         }
-        return Some(true);
+        return Ok(Some(true));
     }
 
     // ALT+O: reliable full expand toggle across most terminals.
@@ -639,15 +772,12 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'o'))
     {
         app.toggle_full_expand();
-        return Some(false);
+        return Ok(Some(false));
     }
 
     if queued_turn_edit_matches(key) {
-        if let Some((turn, _was_pending)) = app.take_last_queued_turn() {
-            app.restore_prepared_turn(turn);
-            app.update_suggestions();
-        }
-        return Some(false);
+        restore_last_durable_full_turn(app, ctx.runtime).await;
+        return Ok(Some(false));
     }
 
     // CTRL+O: cycle expand (0↔1)
@@ -655,7 +785,7 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'o'))
     {
         app.cycle_expand();
-        return Some(false);
+        return Ok(Some(false));
     }
 
     // CTRL+SHIFT+Z: redo the most recently undone edit.
@@ -666,7 +796,7 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
         if app.editor_redo() {
             app.update_suggestions();
         }
-        return Some(false);
+        return Ok(Some(false));
     }
 
     // CTRL+Z: undo the most recent edit to the input draft.
@@ -677,7 +807,7 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
         if app.editor_undo() {
             app.update_suggestions();
         }
-        return Some(false);
+        return Ok(Some(false));
     }
 
     // ALT+Z: redo fallback for terminals that swallow CTRL+SHIFT+Z.
@@ -687,7 +817,7 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
         if app.editor_redo() {
             app.update_suggestions();
         }
-        return Some(false);
+        return Ok(Some(false));
     }
 
     // CTRL+Y / CTRL+SHIFT+C: copy current selection when present,
@@ -695,7 +825,7 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
     if copy_shortcut {
         tracing::debug!("copy shortcut matched without active selection precedence");
         copy_selected_text_or_last_response(app, terminal.size().ok());
-        return Some(false);
+        return Ok(Some(false));
     }
 
     // CTRL+SHIFT+V: always paste text from clipboard
@@ -709,7 +839,7 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
             app.insert_pasted_text(&text);
             app.update_suggestions();
         }
-        return Some(false);
+        return Ok(Some(false));
     }
 
     // CTRL+V: paste image from clipboard (no text fallback)
@@ -742,7 +872,7 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
                 let _ = app_tx.send(AppEvent::ClipboardImageReady { id: image_id, png });
             });
         }
-        return Some(false);
+        return Ok(Some(false));
     }
 
     // Escape dismisses the active modal (precedence resolved once via
@@ -758,8 +888,11 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
             ActiveModal::Tree => app.dismiss_tree(),
             ActiveModal::SkillPicker => app.dismiss_skill_picker(),
             ActiveModal::SessionPicker => app.dismiss_session_picker(),
+            ActiveModal::ProcessOverview => app.dismiss_process_overview(),
             ActiveModal::None => {
-                if app.running {
+                if app.selected_process().is_some() {
+                    app.clear_process_selection();
+                } else if app.turn_active() {
                     // Interrupt running session
                     app.note_manual_interrupt_requested();
                     if let Some(token) = cancel_token.take() {
@@ -769,10 +902,10 @@ fn handle_global_shortcut_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> Option
                 // When idle with no dialog: no-op
             }
         }
-        return Some(false);
+        return Ok(Some(false));
     }
 
-    None
+    Ok(None)
 }
 
 /// Skill-picker overlay navigation: up/down move the highlight, Enter
@@ -795,8 +928,16 @@ fn handle_skill_picker_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) {
 /// switches to the selected session.
 async fn handle_session_picker_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) {
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => ctx.app.session_picker_up(),
-        KeyCode::Down | KeyCode::Char('j') => ctx.app.session_picker_down(),
+        KeyCode::Up => ctx.app.session_picker_up(),
+        KeyCode::Down => ctx.app.session_picker_down(),
+        KeyCode::Backspace => ctx.app.session_picker_backspace_query(),
+        KeyCode::Char(ch)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            ctx.app.session_picker_insert_query_char(ch);
+        }
         KeyCode::Enter => {
             let Some(filename) = ctx.app.take_session_pick() else {
                 return;
@@ -989,6 +1130,12 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
             app.complete_suggestion();
             app.update_suggestions();
         }
+        KeyCode::Tab if can_focus_process_dock(app) => {
+            app.select_next_process();
+        }
+        KeyCode::BackTab if can_focus_process_dock(app) => {
+            app.select_previous_process();
+        }
         KeyCode::Tab => {
             let Some(queued) = app.try_take_prepared_turn() else {
                 push_system_message(
@@ -1004,12 +1151,12 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
             let is_host_slash_command = parsed_command.is_some();
             if queued.is_empty()
                 || shell_escape_command(&queued.display_text).is_some()
-                || (is_host_slash_command && !app.running)
+                || (is_host_slash_command && !app.turn_active())
             {
                 app.restore_prepared_turn(queued);
                 return Ok(false);
             }
-            if app.running {
+            if app.turn_active() {
                 if let Some(cmd) = parsed_command
                     && slash_command_runs_out_of_band_while_running(&cmd)
                 {
@@ -1052,10 +1199,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                     return Ok(false);
                 }
                 if is_host_slash_command {
-                    push_system_message(
-                        app,
-                        "Slash commands cannot be queued as model turns. Wait for the current turn to finish or use an out-of-band command.",
-                    );
+                    block_slash_command_while_working(app, &queued.display_text);
                     app.restore_prepared_turn(queued);
                     return Ok(false);
                 }
@@ -1066,6 +1210,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                     runtime,
                     lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
                     lash_core::SlotPolicy::Exclusive,
+                    true,
                 )
                 .await;
                 return Ok(false);
@@ -1086,6 +1231,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                 runtime,
                 lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
                 lash_core::SlotPolicy::Exclusive,
+                true,
             )
             .await;
         }
@@ -1118,7 +1264,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                 }
                 app.set_input(String::new());
                 app.update_suggestions();
-                if app.running {
+                if app.turn_active() {
                     if slash_command_runs_out_of_band_while_running(&cmd) {
                         if handle_parsed_slash_command(
                             cmd,
@@ -1155,10 +1301,9 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                         }
                         return Ok(false);
                     }
-                    push_system_message(
-                        app,
-                        "Slash commands cannot be queued as model turns. Wait for the current turn to finish or use an out-of-band command.",
-                    );
+                    block_slash_command_while_working(app, &command_text);
+                    app.set_input(command_text);
+                    app.update_suggestions();
                     return Ok(false);
                 }
                 if handle_parsed_slash_command(
@@ -1202,6 +1347,12 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
             app.complete_suggestion();
             app.update_suggestions();
         }
+        KeyCode::Enter if process_dock_has_focus(app) => {
+            show_selected_process_overview(app);
+        }
+        KeyCode::Delete if process_dock_has_focus(app) => {
+            cancel_selected_process(app, runtime).await;
+        }
         KeyCode::Enter => {
             // Shift+Enter or Alt+Enter → insert newline
             if key.modifiers.contains(KeyModifiers::SHIFT)
@@ -1229,7 +1380,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                 parse_slash_command(&queued.display_text, &app.skills, ui_extensions);
             let is_host_slash_command = parsed_command.is_some();
 
-            if app.running {
+            if app.turn_active() {
                 if let Some(cmd) = parsed_command
                     && slash_command_runs_out_of_band_while_running(&cmd)
                 {
@@ -1272,10 +1423,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                     return Ok(false);
                 }
                 if is_host_slash_command {
-                    push_system_message(
-                        app,
-                        "Slash commands cannot be queued as model turns. Wait for the current turn to finish or use an out-of-band command.",
-                    );
+                    block_slash_command_while_working(app, &queued.display_text);
                     app.restore_prepared_turn(queued);
                     return Ok(false);
                 }
@@ -1286,6 +1434,38 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                     );
                     app.restore_prepared_turn(queued);
                     return Ok(false);
+                }
+                match app.route_turn_submission(runtime.is_some()) {
+                    TurnSubmissionRoute::QueueNextFullTurn => {
+                        enqueue_prepared_turn_for_cli(
+                            queued,
+                            app,
+                            ui_trace,
+                            runtime,
+                            lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+                            lash_core::SlotPolicy::Exclusive,
+                            true,
+                        )
+                        .await;
+                        return Ok(false);
+                    }
+                    TurnSubmissionRoute::BlockedSessionSwitch => {
+                        push_system_message(
+                            app,
+                            "Cannot send this input while the session is switching.".to_string(),
+                        );
+                        app.restore_prepared_turn(queued);
+                        return Ok(false);
+                    }
+                    TurnSubmissionRoute::SendNow => {
+                        push_system_message(
+                            app,
+                            "Cannot start a new turn while the current turn is active.".to_string(),
+                        );
+                        app.restore_prepared_turn(queued);
+                        return Ok(false);
+                    }
+                    TurnSubmissionRoute::InjectActiveTurn => {}
                 }
                 let injection = lash_core::InjectedTurnInput {
                     id: Some(queued.draft_id.clone()),
@@ -1306,8 +1486,14 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                     .await
                 {
                     Ok(()) => {
-                        record_queue_pending_steer(ui_trace, &queued);
-                        app.queue_pending_steer(queued.clone());
+                        record_queue_current_turn_input(ui_trace, &queued);
+                        app.cache_draft_presentation(queued.clone());
+                        if let Err(err) = refresh_queued_work_snapshot(app, runtime).await {
+                            push_system_message(
+                                app,
+                                format!("Failed to refresh durable queue: {err}"),
+                            );
+                        }
                     }
                     Err(err) => {
                         push_system_message(
@@ -1431,8 +1617,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                 return Ok(true);
             }
 
-            // Regular user message: enqueue durably, then the idle dispatcher
-            // claims it at the next loop boundary.
+            // Regular user message.
             if let Err(e) =
                 apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
             {
@@ -1449,15 +1634,58 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                 &serde_json::to_vec(&desired_tool_state.tool_manifests())
                     .unwrap_or_else(|_| b"[]".to_vec()),
             );
-            enqueue_prepared_turn_for_cli(
-                queued,
-                app,
-                ui_trace,
-                runtime,
-                lash_core::DeliveryPolicy::EarliestSafeBoundary,
-                lash_core::SlotPolicy::Join,
-            )
-            .await;
+            match app.route_turn_submission(runtime.is_some()) {
+                TurnSubmissionRoute::SendNow => {
+                    let turn_input = make_turn_input(&queued);
+                    let current_tool_state = desired_tool_state.clone();
+                    send_user_message(
+                        queued.clone(),
+                        turn_input.clone(),
+                        app,
+                        ui_trace.as_mut(),
+                        logger,
+                        runtime,
+                        history,
+                        runtime_return_rx,
+                        cancel_token,
+                        active_stream_id,
+                        app_tx,
+                        &current_tool_state,
+                    )
+                    .await;
+                    *last_turn = Some(TurnReplayPayload {
+                        turn_input,
+                        prepared_turn: queued,
+                        execution_mode: current_execution_mode.clone(),
+                    });
+                }
+                TurnSubmissionRoute::QueueNextFullTurn => {
+                    enqueue_prepared_turn_for_cli(
+                        queued,
+                        app,
+                        ui_trace,
+                        runtime,
+                        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+                        lash_core::SlotPolicy::Exclusive,
+                        true,
+                    )
+                    .await;
+                }
+                TurnSubmissionRoute::InjectActiveTurn => {
+                    push_system_message(
+                        app,
+                        "Cannot inject into a turn from the idle input path.".to_string(),
+                    );
+                    app.restore_prepared_turn(queued);
+                }
+                TurnSubmissionRoute::BlockedSessionSwitch => {
+                    push_system_message(
+                        app,
+                        "Cannot send this input while the session is switching.".to_string(),
+                    );
+                    app.restore_prepared_turn(queued);
+                }
+            }
         }
         KeyCode::Backspace => {
             if let Some(recorder) = ui_trace.as_mut() {

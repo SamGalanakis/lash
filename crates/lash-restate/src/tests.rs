@@ -227,6 +227,16 @@ impl lash_core::RuntimePersistence for CommitRetryStore {
         self.inner.abandon_queued_work_claim(claim).await
     }
 
+    async fn cancel_queued_work_batch(
+        &self,
+        session_id: &str,
+        batch_id: &str,
+    ) -> Result<Option<lash_core::runtime::QueuedWorkBatch>, lash_core::StoreError> {
+        self.inner
+            .cancel_queued_work_batch(session_id, batch_id)
+            .await
+    }
+
     async fn list_queued_work(
         &self,
         session_id: &str,

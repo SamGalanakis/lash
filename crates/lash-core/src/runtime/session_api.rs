@@ -254,6 +254,22 @@ impl LashRuntime {
         .await
     }
 
+    pub async fn cancel_queued_work_batch(
+        &self,
+        session_id: &str,
+        batch_id: &str,
+    ) -> Result<Option<crate::QueuedWorkBatch>, RuntimeError> {
+        let store = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store())
+            .ok_or_else(queued_turn_input_store_required)?;
+        store
+            .cancel_queued_work_batch(session_id, batch_id)
+            .await
+            .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))
+    }
+
     /// The plugin session bound to the currently active runtime session, if any.
     pub fn plugin_session(&self) -> Option<Arc<crate::PluginSession>> {
         self.session.as_ref().map(|s| Arc::clone(s.plugins()))

@@ -140,7 +140,8 @@
       btn.className = "diagram-zoom";
       btn.setAttribute("aria-label", "Expand diagram");
       btn.title = "Expand";
-      btn.textContent = "⤢";
+      btn.innerHTML =
+        '<span class="diagram-zoom__glyph" aria-hidden="true">⤢</span><span>Expand</span>';
       btn.addEventListener("click", () => openDialog(d));
       d.appendChild(btn);
     });

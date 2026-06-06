@@ -393,6 +393,8 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
 /// the snapshot, tool catalog, and turn outcome via the builder
 /// methods; mutations (`create_session`, `close_session`)
 /// are recorded so tests can assert against them.
+pub type RecordedSessionTurn = (String, String, Option<String>, crate::EffectScope);
+
 pub struct MockSessionManager {
     pub snapshot: SessionSnapshot,
     pub tool_catalog: Vec<serde_json::Value>,
@@ -401,7 +403,7 @@ pub struct MockSessionManager {
     pub process_registry: Arc<crate::TestLocalProcessRegistry>,
     pub created: Mutex<Vec<SessionCreateRequest>>,
     pub closed: Mutex<Vec<String>>,
-    pub turns: Mutex<Vec<(String, String, Option<String>, crate::EffectScope)>>,
+    pub turns: Mutex<Vec<RecordedSessionTurn>>,
 }
 
 impl Default for MockSessionManager {

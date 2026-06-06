@@ -3,7 +3,7 @@ use super::prompt::prompt_content_lines_snapshot;
 use super::*;
 use crate::SkillCatalog;
 use crate::activity::ActivityState;
-use crate::app::timeline_from_read_view;
+use crate::app::{CliRunState, PreparedTurn, timeline_from_read_view};
 use crate::assistant_text::normalize_assistant_text;
 use crate::prompt_model::PromptRequest;
 use crate::theme;
@@ -655,7 +655,11 @@ fn input_box_shows_ui_command_argument_hint_inline() {
 fn queue_preview_highlights_slash_command_slash() {
     let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
     let turn = PreparedTurn::prepare("/retry later".into(), Vec::new(), &app.skills);
-    app.queue_turn(turn);
+    app.test_seed_queued_turn_snapshot(
+        turn,
+        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+        lash_core::SlotPolicy::Exclusive,
+    );
 
     let rendered = queue_preview_lines_snapshot(&app, 40);
     let item_line = rendered
@@ -730,7 +734,11 @@ fn queue_preview_highlights_multiple_detected_slash_commands() {
         Vec::new(),
         &app.skills,
     );
-    app.queue_turn(turn);
+    app.test_seed_queued_turn_snapshot(
+        turn,
+        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+        lash_core::SlotPolicy::Exclusive,
+    );
 
     let rendered = queue_preview_lines_snapshot(&app, 80);
     let slash_spans = rendered
@@ -759,12 +767,13 @@ fn shell_activity_renders_live_output_inline_under_tool() {
     ))]
     .into();
     let now = std::time::Instant::now();
-    app.running = true;
+    app.run_state = CliRunState::RunningTool;
     app.live.turn = Some(crate::app::LiveTurnState {
-        status_text: "shell".into(),
+        run_state: CliRunState::RunningTool,
         status_detail: None,
         phase_started_at: now,
         turn_started_at: now,
+        has_visible_user_input: true,
         has_visible_output: true,
         output_start_anchor_pending: false,
         transient_until: None,

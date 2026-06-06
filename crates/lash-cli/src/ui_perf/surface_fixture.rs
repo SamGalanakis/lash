@@ -36,7 +36,7 @@ impl UiPerfHarness {
     }
 
     pub(crate) fn reset_scroll(&mut self) {
-        self.app.follow_mode = FollowOutputMode::Paused;
+        self.app.follow_mode = FollowOutputMode::Manual;
         self.app.scroll_offset = 0;
         if let Some(state) = &self.surface_state {
             state.set_scroll(0);

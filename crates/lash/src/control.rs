@@ -56,6 +56,12 @@ impl SessionControl {
         }
     }
 
+    pub fn processes(&self) -> ProcessControl {
+        ProcessControl {
+            control: self.clone(),
+        }
+    }
+
     /// Run `f` against the locked runtime writer, then publish the resulting
     /// observation. The body is the canonical `lock → call → publish_from`
     /// stamp shared by nearly every mutating control method; publish happens

@@ -70,7 +70,7 @@ struct ClaimedEffect {
 
 enum PreparedEffect {
     ReplayOutcome {
-        outcome: RuntimeEffectOutcome,
+        outcome: Box<RuntimeEffectOutcome>,
         due_at_ms: Option<u64>,
     },
     ReplayError(RuntimeEffectControllerError),
@@ -293,7 +293,7 @@ impl TursoRuntimeEffectController {
                     })?;
                     let outcome = serde_json::from_str(&json).map_err(effect_decode_error)?;
                     Ok(PreparedEffect::ReplayOutcome {
-                        outcome,
+                        outcome: Box::new(outcome),
                         due_at_ms: existing_due_at_ms,
                     })
                 }
@@ -571,7 +571,7 @@ impl RuntimeEffectController for TursoRuntimeEffectController {
             match self.prepare_effect(&envelope).await? {
                 PreparedEffect::ReplayOutcome { outcome, due_at_ms } => {
                     sleep_until_due(due_at_ms).await;
-                    return Ok(outcome);
+                    return Ok(*outcome);
                 }
                 PreparedEffect::ReplayError(err) => return Err(err),
                 PreparedEffect::Claimed(claim) => {

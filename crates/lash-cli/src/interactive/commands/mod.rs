@@ -8,7 +8,6 @@ use super::runtime::send_queued_work;
 use super::runtime::sync_runtime_tool_surface;
 use super::*;
 use crate::SkillCatalog;
-use crate::app::PendingImage;
 use crate::turn_runner::make_turn_input;
 use lash_core::runtime::{QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
 
@@ -102,16 +101,6 @@ async fn handle_ui_command(
     }
 }
 
-pub(super) fn promote_pending_steers_to_queue(
-    app: &mut App,
-    ui_trace: &mut Option<UiTraceRecorder>,
-) {
-    while let Some(turn) = app.queues.pending_steers.pop_front() {
-        record_queue_turn(ui_trace, &turn);
-        app.queue_turn(turn);
-    }
-}
-
 fn current_epoch_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -129,6 +118,9 @@ fn ready_batches_for_idle_dispatch(batches: &[QueuedWorkBatch]) -> Vec<QueuedWor
     let Some(first) = ready.first() else {
         return Vec::new();
     };
+    if !batch_has_visible_turn_input(first) {
+        return Vec::new();
+    }
     let first_slot_policy = first.slot_policy;
     let first_delivery_policy = first.delivery_policy;
     let first_merge_key = first.merge_key.clone();
@@ -156,41 +148,21 @@ fn ready_batches_for_idle_dispatch(batches: &[QueuedWorkBatch]) -> Vec<QueuedWor
     selected
 }
 
-fn turn_input_display_text(input: &lash_core::TurnInput) -> String {
-    input
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            lash_core::InputItem::Text { text } => Some(text.as_str()),
-            lash_core::InputItem::ImageRef { .. } => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
+fn batch_has_visible_turn_input(batch: &QueuedWorkBatch) -> bool {
+    batch.items.iter().any(|item| match &item.payload {
+        QueuedWorkPayload::TurnInput { input } => turn_input_has_visible_content(input),
+        QueuedWorkPayload::ProcessWake { .. }
+        | QueuedWorkPayload::HostEvent { .. }
+        | QueuedWorkPayload::Timer { .. }
+        | QueuedWorkPayload::SessionCommand { .. } => false,
+    })
 }
 
-fn prepared_turn_from_queued_input(input: &lash_core::TurnInput) -> Option<PreparedTurn> {
-    let text = turn_input_display_text(input);
-    let images = input
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            lash_core::InputItem::ImageRef { id } => input.image_blobs.get(id),
-            lash_core::InputItem::Text { .. } => None,
-        })
-        .enumerate()
-        .map(|(idx, png_bytes)| PendingImage {
-            id: idx + 1,
-            png_bytes: png_bytes.clone(),
-        })
-        .collect::<Vec<_>>();
-    if text.trim().is_empty() && images.is_empty() {
-        return None;
-    }
-    Some(PreparedTurn::prepare_with_effective_text(
-        text.clone(),
-        text,
-        images,
-    ))
+fn turn_input_has_visible_content(input: &lash_core::TurnInput) -> bool {
+    input.items.iter().any(|item| match item {
+        lash_core::InputItem::Text { text } => !text.trim().is_empty(),
+        lash_core::InputItem::ImageRef { id } => input.image_blobs.contains_key(id),
+    })
 }
 
 fn display_turns_for_queued_batches(
@@ -199,29 +171,8 @@ fn display_turns_for_queued_batches(
 ) -> Vec<PreparedTurn> {
     let mut turns = Vec::new();
     for batch in batches {
-        let queue_draft_id = batch.source_key.as_deref().and_then(|source| {
-            source
-                .strip_prefix("host:")
-                .or_else(|| source.strip_prefix("injection:"))
-        });
-        for item in &batch.items {
-            let QueuedWorkPayload::TurnInput { input } = &item.payload else {
-                continue;
-            };
-            if let Some(draft_id) = queue_draft_id
-                && let Some(turn) = app.take_queued_turn_by_draft_id(draft_id)
-            {
-                turns.push(turn);
-                continue;
-            }
-            let content = turn_input_display_text(input);
-            if let Some(turn) = app.take_matching_queued_turn(&content) {
-                turns.push(turn);
-                continue;
-            }
-            if let Some(turn) = prepared_turn_from_queued_input(input) {
-                turns.push(turn);
-            }
+        if let Some(turn) = app.take_prepared_turn_for_queued_batch(batch) {
+            turns.push(turn);
         }
     }
     turns
@@ -281,6 +232,12 @@ pub(super) async fn dispatch_next_queued_turn(
         &serde_json::to_vec(&desired_tool_state.tool_manifests())
             .unwrap_or_else(|_| b"[]".to_vec()),
     );
+    let ready_batch_ids = ready_batches
+        .iter()
+        .map(|batch| batch.batch_id.clone())
+        .collect::<Vec<_>>();
+    app.suppress_queue_preview_batches(ready_batch_ids.iter().map(String::as_str));
+    app.remove_queued_work_batches(&ready_batch_ids);
     let display_turns = display_turns_for_queued_batches(app, &ready_batches);
     if let Some(first_turn) = display_turns.first().cloned() {
         *last_turn = Some(TurnReplayPayload {
@@ -536,5 +493,101 @@ async fn handle_slash_command(
             }
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash_core::runtime::{DeliveryPolicy, MergeKey, QueuedWorkItem};
+
+    fn queued_batch(
+        enqueue_seq: u64,
+        payload: QueuedWorkPayload,
+        slot_policy: SlotPolicy,
+    ) -> QueuedWorkBatch {
+        QueuedWorkBatch {
+            batch_id: format!("batch-{enqueue_seq}"),
+            session_id: "test-session".to_string(),
+            enqueue_seq,
+            source_key: Some(format!("source-{enqueue_seq}")),
+            delivery_policy: DeliveryPolicy::EarliestSafeBoundary,
+            slot_policy,
+            merge_key: MergeKey::Never,
+            available_at_ms: 0,
+            enqueued_at_ms: 0,
+            items: vec![QueuedWorkItem {
+                item_id: format!("batch-{enqueue_seq}:item:0"),
+                payload,
+            }],
+        }
+    }
+
+    fn process_wake_payload() -> QueuedWorkPayload {
+        serde_json::from_value(serde_json::json!({
+            "type": "process_wake",
+            "wake": {
+                "wake_id": "wake:test",
+                "target_session_id": "test-session",
+                "target_scope_id": "session:test-session",
+                "process_id": "process:test",
+                "sequence": 1,
+                "event_type": "process.wake",
+                "event_invocation": {
+                    "scope": {
+                        "session_id": "test-session"
+                    },
+                    "subject": {
+                        "type": "process_event",
+                        "process_id": "process:test",
+                        "sequence": 1,
+                        "event_type": "process.wake"
+                    }
+                },
+                "dedupe_key": "process:test:1",
+                "input": "wake payload",
+                "created_at_ms": 0
+            }
+        }))
+        .expect("process wake payload")
+    }
+
+    #[test]
+    fn idle_dispatch_does_not_claim_process_wake_as_foreground_turn() {
+        let batches = vec![
+            queued_batch(1, process_wake_payload(), SlotPolicy::Exclusive),
+            queued_batch(
+                2,
+                QueuedWorkPayload::turn_input(lash_core::TurnInput::text("user turn")),
+                SlotPolicy::Exclusive,
+            ),
+        ];
+
+        assert!(ready_batches_for_idle_dispatch(&batches).is_empty());
+    }
+
+    #[test]
+    fn idle_dispatch_claims_visible_turn_input_when_it_is_first_ready_batch() {
+        let batches = vec![queued_batch(
+            1,
+            QueuedWorkPayload::turn_input(lash_core::TurnInput::text("user turn")),
+            SlotPolicy::Exclusive,
+        )];
+
+        let ready = ready_batches_for_idle_dispatch(&batches);
+
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].batch_id, "batch-1");
+    }
+
+    #[test]
+    fn idle_dispatch_does_not_claim_empty_turn_input_as_foreground_turn() {
+        let batches = vec![queued_batch(
+            1,
+            QueuedWorkPayload::turn_input(lash_core::TurnInput::text("")),
+            SlotPolicy::Exclusive,
+        )];
+
+        assert!(ready_batches_for_idle_dispatch(&batches).is_empty());
     }
 }
