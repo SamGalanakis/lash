@@ -386,6 +386,7 @@ impl LashSession {
         QueuedTurnBuilder {
             runtime: self.runtime.clone(),
             cancel: CancellationToken::new(),
+            batch_ids: Vec::new(),
         }
     }
 

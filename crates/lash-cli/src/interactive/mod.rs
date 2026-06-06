@@ -34,8 +34,7 @@ use crate::ui_trace::{
 use crate::update;
 use crate::{Args, scratch_tui};
 use crate::{
-    apply_ui_host_effects, controls_text, hash12, help_text, info_text, push_system_message,
-    turn_has_visible_output, version_text,
+    apply_ui_host_effects, hash12, push_system_message, turn_has_visible_output, version_text,
 };
 
 use self::helpers::{
@@ -48,11 +47,8 @@ use self::commands::dispatch_next_queued_turn;
 pub(crate) use self::runtime::injected_image_part_indices;
 #[cfg(test)]
 pub(crate) use self::runtime::make_injected_plugin_message;
-use self::runtime::{
-    apply_pending_reconfigure, refresh_queued_work_snapshot, send_user_message,
-    sync_runtime_tool_surface,
-};
 pub(crate) use self::runtime::{generate_session_name, notify_desktop};
+use self::runtime::{refresh_queued_work_snapshot, send_user_message, sync_runtime_tool_surface};
 
 use self::input_handling::{
     SessionCtx, dispatch_key_event, handle_mouse_event, handle_surface_input,
@@ -95,6 +91,7 @@ pub(crate) async fn run_app(
 ) -> anyhow::Result<()> {
     let initial_session_id = session.session_id();
     let mut app = App::new(model, session_name, initial_session_id);
+    app.set_execution_mode_label(&initial_execution_mode);
     let (chrome_ext, chrome_state) = crate::chrome_ui::ChromeTuiExtension::new();
     let extra_ui_extensions: Vec<Arc<dyn lash_tui_extensions::TuiExtension>> = vec![
         Arc::new(lash_autoresearch::AutoresearchTuiExtension::default()),
@@ -122,14 +119,13 @@ pub(crate) async fn run_app(
     let mut history: Vec<Message> = Vec::new();
     let mut turn_counter: usize = 0;
     let mut runtime = Some(session);
-    let mut desired_tool_state = runtime
+    let mut active_tool_state = runtime
         .as_ref()
         .expect("session initialized")
         .control()
         .tools()
         .state()
         .await?;
-    let mut pending_reconfigure = false;
     let mut ui_trace = args.debug_ui_trace.as_ref().map(|path| {
         let (width, height) = terminal.size().unwrap_or((80, 24));
         UiTraceRecorder::new(
@@ -260,7 +256,7 @@ pub(crate) async fn run_app(
             &mut current_execution_mode,
             &provider,
             &mut current_model_variant,
-            &mut desired_tool_state,
+            &mut active_tool_state,
             model_catalog.as_ref(),
         )
         .await
@@ -269,7 +265,7 @@ pub(crate) async fn run_app(
         } else {
             let _ = app_tx.send(AppEvent::RequestUiSnapshot);
             toolset_hash = hash12(
-                &serde_json::to_vec(&desired_tool_state.tool_manifests())
+                &serde_json::to_vec(&active_tool_state.tool_manifests())
                     .unwrap_or_else(|_| b"[]".to_vec()),
             );
         }
@@ -279,49 +275,27 @@ pub(crate) async fn run_app(
             .map(str::trim)
             .filter(|prompt| !prompt.is_empty())
         {
-            if let Err(e) = apply_pending_reconfigure(
-                &mut desired_tool_state,
-                &mut pending_reconfigure,
+            let prepared = PreparedTurn::prepare(prompt.to_string(), Vec::new(), &app.skills);
+            let turn_input = make_turn_input(&prepared);
+            send_user_message(
+                prepared.clone(),
+                turn_input.clone(),
+                &mut app,
+                ui_trace.as_mut(),
+                logger,
                 &mut runtime,
+                &mut history,
+                &mut runtime_return_rx,
+                &mut cancel_token,
+                &mut active_stream_id,
+                &app_tx,
             )
-            .await
-            {
-                push_system_message(
-                    &mut app,
-                    format!(
-                        "Pending runtime reconfigure failed; startup prompt blocked: {}",
-                        e
-                    ),
-                );
-            } else {
-                toolset_hash = hash12(
-                    &serde_json::to_vec(&desired_tool_state.tool_manifests())
-                        .unwrap_or_else(|_| b"[]".to_vec()),
-                );
-                let prepared = PreparedTurn::prepare(prompt.to_string(), Vec::new(), &app.skills);
-                let turn_input = make_turn_input(&prepared);
-                let current_tool_state = desired_tool_state.clone();
-                send_user_message(
-                    prepared.clone(),
-                    turn_input.clone(),
-                    &mut app,
-                    ui_trace.as_mut(),
-                    logger,
-                    &mut runtime,
-                    &mut history,
-                    &mut runtime_return_rx,
-                    &mut cancel_token,
-                    &mut active_stream_id,
-                    &app_tx,
-                    &current_tool_state,
-                )
-                .await;
-                last_turn = Some(TurnReplayPayload {
-                    prepared_turn: prepared,
-                    turn_input,
-                    execution_mode: current_execution_mode.clone(),
-                });
-            }
+            .await;
+            last_turn = Some(TurnReplayPayload {
+                prepared_turn: prepared,
+                turn_input,
+                execution_mode: current_execution_mode.clone(),
+            });
         }
     }
 
@@ -366,10 +340,6 @@ pub(crate) async fn run_app(
                 &mut provider,
                 &mut current_model_variant,
                 &mut current_execution_mode,
-                &mut desired_tool_state,
-                &mut pending_reconfigure,
-                model_catalog.as_ref(),
-                &mut toolset_hash,
                 &app_tx,
                 &mut pending_clear_after_return,
             )
@@ -522,10 +492,6 @@ pub(crate) async fn run_app(
                             &mut provider,
                             &mut current_model_variant,
                             &mut current_execution_mode,
-                            &mut desired_tool_state,
-                            &mut pending_reconfigure,
-                            model_catalog.as_ref(),
-                            &mut toolset_hash,
                             &app_tx,
                             &mut pending_clear_after_return,
                         )
@@ -564,10 +530,6 @@ pub(crate) async fn run_app(
                         &mut provider,
                         &mut current_model_variant,
                         &mut current_execution_mode,
-                        &mut desired_tool_state,
-                        &mut pending_reconfigure,
-                        model_catalog.as_ref(),
-                        &mut toolset_hash,
                         &app_tx,
                         &mut pending_clear_after_return,
                     )
@@ -777,8 +739,7 @@ pub(crate) async fn run_app(
                     provider: &mut provider,
                     current_model_variant: &mut current_model_variant,
                     current_execution_mode: &mut current_execution_mode,
-                    desired_tool_state: &mut desired_tool_state,
-                    pending_reconfigure: &mut pending_reconfigure,
+                    active_tool_state: &mut active_tool_state,
                     model_catalog: model_catalog.as_ref(),
                     toolset_hash: &mut toolset_hash,
                     app_tx: &app_tx,

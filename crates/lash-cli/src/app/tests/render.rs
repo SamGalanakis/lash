@@ -188,7 +188,7 @@ fn text_delta_stays_in_live_assistant_until_committed() {
         content: "Draft answer".into(),
     });
 
-    assert!(matches!(app.timeline.last(), Some(UiTimelineItem::Splash)));
+    assert!(app.timeline.is_empty());
     assert_eq!(
         app.live_assistant_normalized_text().as_deref(),
         Some("Draft answer")
@@ -696,7 +696,7 @@ fn keep_latest_user_block_visible_shows_prompt_start_before_first_token() {
         .join("\n"),
     ));
     app.start_turn();
-    app.follow_mode = FollowOutputMode::Contextual;
+    app.follow_mode = FollowOutputMode::PinnedTurnStart;
 
     let width = 32usize;
     let viewport_height = 4usize;
@@ -725,7 +725,7 @@ fn keep_latest_user_block_visible_keeps_short_prompt_bottom_aligned() {
     app.timeline
         .push(UiTimelineItem::UserInput("short prompt".into()));
     app.start_turn();
-    app.follow_mode = FollowOutputMode::Contextual;
+    app.follow_mode = FollowOutputMode::PinnedTurnStart;
 
     let width = 32usize;
     let viewport_height = 4usize;
@@ -741,7 +741,7 @@ fn keep_latest_user_block_visible_keeps_short_prompt_bottom_aligned() {
 }
 
 #[test]
-fn splash_collapses_to_compact_scrollback_height_once_history_exists() {
+fn empty_state_is_not_persisted_in_scrollback_once_history_exists() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.timeline
         .push(UiTimelineItem::UserInput("short prompt".into()));
@@ -751,7 +751,8 @@ fn splash_collapses_to_compact_scrollback_height_once_history_exists() {
     app.ensure_height_cache_pub(width, viewport_height);
 
     let cache = app.height_cache_snapshot().to_vec();
-    assert_eq!(cache[0], SPLASH_SCROLLBACK_HEIGHT);
+    assert_eq!(app.timeline.len(), 1);
+    assert_eq!(cache[0], 1);
 }
 
 #[test]
@@ -780,7 +781,7 @@ fn refresh_scroll_position_tracks_bottom_when_idle() {
     ));
 
     let width = 80;
-    app.follow_mode = FollowOutputMode::Bottom;
+    app.follow_mode = FollowOutputMode::PinnedBottom;
 
     app.refresh_scroll_position(width, 3);
     let small_bottom = app.total_content_height(width, 3).saturating_sub(3);
@@ -802,7 +803,7 @@ fn refresh_scroll_position_reveals_output_start_once_then_follows_tail() {
         "Line 1\nLine 2\nLine 3\nLine 4\nLine 5".into(),
     ));
     app.start_turn();
-    app.follow_mode = FollowOutputMode::Contextual;
+    app.follow_mode = FollowOutputMode::PinnedTurnStart;
     if let Some(turn) = app.live.turn.as_mut() {
         turn.has_visible_output = true;
         turn.output_start_anchor_pending = true;
@@ -817,7 +818,7 @@ fn refresh_scroll_position_reveals_output_start_once_then_follows_tail() {
         .total_content_height(width, viewport_height)
         .saturating_sub(viewport_height);
     assert!(first_anchor < max_scroll);
-    assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
+    assert_eq!(app.follow_mode, FollowOutputMode::PinnedBottom);
 
     app.refresh_scroll_position(width, viewport_height);
     assert_eq!(app.scroll_offset, max_scroll);
@@ -835,7 +836,7 @@ fn resume_follow_output_reenables_bottom_following() {
 
     app.resume_follow_output();
 
-    assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
+    assert_eq!(app.follow_mode, FollowOutputMode::PinnedBottom);
     assert_eq!(app.scroll_offset, usize::MAX);
 }
 
@@ -852,7 +853,7 @@ fn scroll_up_from_follow_output_detaches_from_bottom_anchor() {
     ));
     let width = 24;
     let viewport_height = 5;
-    app.follow_mode = FollowOutputMode::Bottom;
+    app.follow_mode = FollowOutputMode::PinnedBottom;
     app.ensure_height_cache_pub(width, viewport_height);
     app.refresh_scroll_position(width, viewport_height);
 
@@ -872,7 +873,7 @@ fn scroll_down_to_bottom_reenables_tail_follow_instead_of_contextual_anchor() {
     app.timeline
         .push(UiTimelineItem::UserInput("prompt".into()));
     app.start_turn();
-    app.follow_mode = FollowOutputMode::Contextual;
+    app.follow_mode = FollowOutputMode::PinnedTurnStart;
 
     app.handle_session_event(SessionEvent::TextDelta {
         content: (0..20)
@@ -890,7 +891,7 @@ fn scroll_down_to_bottom_reenables_tail_follow_instead_of_contextual_anchor() {
     assert_eq!(app.follow_mode, FollowOutputMode::Manual);
 
     app.scroll_down(usize::MAX / 2, viewport_height, width);
-    assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
+    assert_eq!(app.follow_mode, FollowOutputMode::PinnedBottom);
 
     let max_scroll = app
         .total_content_height(width, viewport_height)
@@ -942,7 +943,7 @@ fn manual_scroll_keeps_explicit_offset_when_prior_block_height_changes() {
 
     let width = 80;
     let viewport_height = 4;
-    app.follow_mode = FollowOutputMode::Bottom;
+    app.follow_mode = FollowOutputMode::PinnedBottom;
     app.ensure_height_cache_pub(width, viewport_height);
     app.refresh_scroll_position(width, viewport_height);
 
@@ -969,7 +970,7 @@ fn text_delta_reveals_message_start_before_switching_to_tail_follow() {
     app.timeline
         .push(UiTimelineItem::UserInput("prompt".into()));
     app.start_turn();
-    app.follow_mode = FollowOutputMode::Contextual;
+    app.follow_mode = FollowOutputMode::PinnedTurnStart;
 
     app.handle_session_event(SessionEvent::TextDelta {
         content: (0..20)
@@ -996,7 +997,7 @@ fn text_delta_reveals_message_start_before_switching_to_tail_follow() {
         app.scroll_offset < max_scroll,
         "follow mode should anchor above the tail for tall streamed output"
     );
-    assert_eq!(app.follow_mode, FollowOutputMode::Bottom);
+    assert_eq!(app.follow_mode, FollowOutputMode::PinnedBottom);
 
     app.refresh_scroll_position(width, viewport_height);
     assert_eq!(app.scroll_offset, max_scroll);
@@ -1009,7 +1010,7 @@ fn refresh_scroll_position_repositions_waiting_prompt_on_resize() {
         "A long prompt that should stay visible while we are waiting for first token output".into(),
     ));
     app.start_turn();
-    app.follow_mode = FollowOutputMode::Contextual;
+    app.follow_mode = FollowOutputMode::PinnedTurnStart;
 
     let width = 24;
     app.refresh_scroll_position(width, 3);

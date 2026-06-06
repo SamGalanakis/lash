@@ -11,7 +11,7 @@ pub struct CommandSpec {
     pub argument_options: &'static [&'static str],
     pub takes_argument: bool,
     /// When true, the dispatch loop may invoke this command while a
-    /// turn is streaming instead of queueing it. Reserved for handlers
+    /// turn is streaming instead of blocking and restoring the draft. Reserved for handlers
     /// that don't mutate runtime / dynamic-tools / provider state.
     pub runs_out_of_band: bool,
 }
@@ -169,26 +169,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         runs_out_of_band: true,
     },
     CommandSpec {
-        name: "/tools",
-        aliases: &[],
-        usage: "/tools ...",
-        description: "Inspect or edit tool registry",
-        argument_hint: Some("..."),
-        argument_options: &[],
-        takes_argument: true,
-        runs_out_of_band: false,
-    },
-    CommandSpec {
-        name: "/reconfigure",
-        aliases: &[],
-        usage: "/reconfigure ...",
-        description: "Apply or inspect pending runtime reconfigure",
-        argument_hint: Some("..."),
-        argument_options: &[],
-        takes_argument: true,
-        runs_out_of_band: false,
-    },
-    CommandSpec {
         name: "/help",
         aliases: &["/?"],
         usage: "/help",
@@ -297,8 +277,11 @@ pub fn completion_inserts_space(cmd: &str, skills: &SkillCatalog) -> bool {
 }
 
 /// Whether the dispatch loop is allowed to fire `cmd` while a turn is
-/// streaming (instead of queueing it).
+/// streaming.
 pub fn runs_out_of_band_while_running(cmd: &Command) -> bool {
+    if matches!(cmd, Command::Resume(None)) {
+        return true;
+    }
     let name = match cmd {
         Command::Clear => "/clear",
         Command::Compact(_) => "/compact",
@@ -317,8 +300,6 @@ pub fn runs_out_of_band_while_running(cmd: &Command) -> bool {
         Command::Exit => "/exit",
         Command::Resume(_) => "/resume",
         Command::Skills => "/skills",
-        Command::Tools(_) => "/tools",
-        Command::Reconfigure(_) => "/reconfigure",
     };
     COMMANDS
         .iter()
@@ -346,8 +327,6 @@ pub enum Command {
     Exit,
     Resume(Option<String>),
     Skills,
-    Tools(Option<String>),
-    Reconfigure(Option<String>),
 }
 
 pub fn slash_skill_prompt(input: &str, skills: &SkillCatalog) -> Option<String> {
@@ -404,8 +383,6 @@ pub fn parse(input: &str, _skills: &SkillCatalog) -> Option<Command> {
         "exit" | "quit" => Some(Command::Exit),
         "resume" | "continue" => Some(Command::Resume(arg.map(|a| a.to_string()))),
         "skills" => Some(Command::Skills),
-        "tools" => Some(Command::Tools(arg.map(|a| a.to_string()))),
-        "reconfigure" => Some(Command::Reconfigure(arg.map(|a| a.to_string()))),
         _ => None,
     }
 }
@@ -513,30 +490,19 @@ mod tests {
             parse("/resume", &skills),
             Some(Command::Resume(None))
         ));
-        assert!(matches!(parse("/tools", &skills), Some(Command::Tools(_))));
         assert!(matches!(
             parse("/compact focus on X", &skills),
             Some(Command::Compact(Some(ref arg))) if arg == "focus on X"
         ));
-        assert!(matches!(
-            parse("/reconfigure apply", &skills),
-            Some(Command::Reconfigure(Some(_)))
-        ));
+        assert!(parse("/tools", &skills).is_none());
+        assert!(parse("/reconfigure apply", &skills).is_none());
         assert!(parse("/not-a-command", &skills).is_none());
     }
 
     #[test]
     fn completion_spacing_matches_argument_commands() {
         let skills = SkillCatalog::from_dirs(&crate::paths::default_skill_dirs());
-        for cmd in [
-            "/compact",
-            "/model",
-            "/variant",
-            "/mode",
-            "/resume",
-            "/tools",
-            "/reconfigure",
-        ] {
+        for cmd in ["/compact", "/model", "/variant", "/mode", "/resume"] {
             assert!(completion_inserts_space(cmd, &skills));
         }
 
@@ -555,6 +521,7 @@ mod tests {
             Command::Skills,
             Command::Controls,
             Command::Exit,
+            Command::Resume(None),
         ] {
             assert!(
                 runs_out_of_band_while_running(&cmd),
@@ -573,9 +540,7 @@ mod tests {
             Command::Model(None),
             Command::Variant(None),
             Command::Mode(None),
-            Command::Resume(None),
-            Command::Tools(None),
-            Command::Reconfigure(None),
+            Command::Resume(Some("session-id".to_string())),
             Command::ChangeProvider,
             Command::Logout,
             Command::Retry,

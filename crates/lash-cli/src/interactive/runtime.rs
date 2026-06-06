@@ -1,11 +1,9 @@
-use std::collections::HashMap;
-
 use lash::persistence::FileAttachmentStore;
 use lash::{InputItem, LashSession, TurnInput};
 use lash_core::session_model::{Part, PartKind, PruneState};
 use lash_core::{
     AttachmentCreateMeta, AttachmentStore, ImageMediaType, MediaType, Message, MessageRole,
-    PluginMessage, ToolState,
+    PluginMessage,
 };
 
 use super::helpers::TurnActivityBridge;
@@ -95,48 +93,6 @@ pub(crate) fn injected_image_part_indices(message: &PluginMessage) -> Vec<usize>
         .collect()
 }
 
-pub(super) fn parse_kv_args(raw: &str) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    for token in raw.split_whitespace() {
-        if let Some((k, v)) = token.split_once('=') {
-            out.insert(k.trim().to_string(), v.trim().to_string());
-        }
-    }
-    out
-}
-
-pub(super) async fn apply_pending_reconfigure(
-    desired_tool_state: &mut ToolState,
-    pending_reconfigure: &mut bool,
-    runtime: &mut Option<LashSession>,
-) -> Result<u64, String> {
-    if !*pending_reconfigure {
-        return Ok(desired_tool_state.generation());
-    }
-
-    let Some(session) = runtime.as_ref().cloned() else {
-        return Err("runtime session is unavailable while a turn is running".to_string());
-    };
-    let generation = session
-        .control()
-        .tools()
-        .advanced()
-        .apply_state(desired_tool_state.clone())
-        .await
-        .map_err(|err| err.to_string())?;
-
-    sync_runtime_tool_surface(runtime).await?;
-
-    *desired_tool_state = session
-        .control()
-        .tools()
-        .state()
-        .await
-        .map_err(|err| err.to_string())?;
-    *pending_reconfigure = false;
-    Ok(generation)
-}
-
 pub(super) async fn sync_runtime_tool_surface(
     runtime: &mut Option<LashSession>,
 ) -> Result<(), String> {
@@ -193,7 +149,6 @@ pub(super) async fn send_user_message(
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
     app_tx: &AppEventTx,
-    _tool_state: &ToolState,
 ) {
     let mut ui_trace = ui_trace;
     if !prepared_turn.display_text.is_empty() {
@@ -249,6 +204,7 @@ pub(super) async fn send_user_message(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_queued_work(
+    batch_ids: Vec<String>,
     prepared_turns: Vec<PreparedTurn>,
     app: &mut App,
     ui_trace: Option<&mut UiTraceRecorder>,
@@ -296,7 +252,7 @@ pub(super) async fn send_queued_work(
     );
 
     let sink = TurnActivityBridge::spawn(stream_id, app_tx.clone());
-    let (cancel, return_rx) = spawn_session_queued_turn(session, sink, stream_id);
+    let (cancel, return_rx) = spawn_session_queued_turn(session, batch_ids, sink, stream_id);
     *cancel_token = Some(cancel);
     *runtime_return_rx = Some(return_rx);
 }

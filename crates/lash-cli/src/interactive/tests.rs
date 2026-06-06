@@ -198,7 +198,7 @@ fn selection_is_cleared_for_plain_typing_keys() {
 }
 
 #[test]
-fn copy_shortcut_accepts_ctrl_c_even_when_shift_modifier_is_present() {
+fn copy_shortcut_accepts_ctrl_shift_c() {
     let key = crossterm::event::KeyEvent {
         code: crossterm::event::KeyCode::Char('c'),
         modifiers: crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
@@ -210,7 +210,7 @@ fn copy_shortcut_accepts_ctrl_c_even_when_shift_modifier_is_present() {
 }
 
 #[test]
-fn copy_shortcut_accepts_plain_ctrl_c_for_selected_text_precedence() {
+fn copy_shortcut_rejects_plain_ctrl_c() {
     let key = crossterm::event::KeyEvent {
         code: crossterm::event::KeyCode::Char('c'),
         modifiers: crossterm::event::KeyModifiers::CONTROL,
@@ -218,7 +218,7 @@ fn copy_shortcut_accepts_plain_ctrl_c_for_selected_text_precedence() {
         state: crossterm::event::KeyEventState::NONE,
     };
 
-    assert!(is_copy_shortcut(key));
+    assert!(!is_copy_shortcut(key));
 }
 
 #[test]

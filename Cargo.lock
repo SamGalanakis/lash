@@ -2735,6 +2735,7 @@ dependencies = [
  "lash-tui",
  "lash-tui-extensions",
  "lash-turso-store",
+ "portable-pty",
  "pulldown-cmark",
  "rand 0.9.4",
  "reqwest 0.13.3",

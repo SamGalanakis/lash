@@ -159,7 +159,7 @@ impl App {
         self.usage.live_output_chars_estimate = 0;
         self.usage.live_output_tokens_estimate = 0;
         self.live.turn = Some(LiveTurnState::new(CliRunState::Working, None));
-        self.follow_mode = FollowOutputMode::Contextual;
+        self.follow_mode = FollowOutputMode::PinnedTurnStart;
     }
 
     pub(crate) fn mark_live_turn_user_input_visible(&mut self) {
@@ -209,8 +209,8 @@ impl App {
         self.clear_live_tool_output();
         self.usage.live_output_chars_estimate = 0;
         self.usage.live_output_tokens_estimate = 0;
-        if self.follow_mode == FollowOutputMode::Contextual {
-            self.follow_mode = FollowOutputMode::Bottom;
+        if self.follow_mode == FollowOutputMode::PinnedTurnStart {
+            self.follow_mode = FollowOutputMode::PinnedBottom;
         }
         if let Some(display) = self.queues.pending_option_prompt_response.take() {
             self.push_prompt_response_user_block(display);
@@ -309,7 +309,7 @@ impl App {
         {
             turn.has_visible_output = true;
             turn.output_start_anchor_pending =
-                matches!(self.follow_mode, FollowOutputMode::Contextual);
+                matches!(self.follow_mode, FollowOutputMode::PinnedTurnStart);
         }
     }
 

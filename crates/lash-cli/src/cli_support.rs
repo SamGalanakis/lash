@@ -15,6 +15,7 @@ use crate::command;
 use crate::model_catalog::{
     CachedModelCatalog, FileModelCatalogStore, ModelsDevHttpSource, ResolvedModelSpec,
 };
+use crate::overlay::{DocumentRow, DocumentSection, DocumentState};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ModelSelection {
@@ -29,7 +30,6 @@ pub(crate) enum QueuedTurnEditBinding {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CopyBinding {
-    CtrlC,
     CtrlShiftC,
     CtrlY,
 }
@@ -37,7 +37,6 @@ pub(crate) enum CopyBinding {
 impl CopyBinding {
     pub(crate) fn display(self) -> &'static str {
         match self {
-            Self::CtrlC => "Ctrl+C",
             Self::CtrlShiftC => "Ctrl+Shift+C",
             Self::CtrlY => "Ctrl+Y",
         }
@@ -45,10 +44,6 @@ impl CopyBinding {
 
     pub(crate) fn matches(self, key: KeyEvent) -> bool {
         match self {
-            Self::CtrlC => {
-                key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
-            }
             Self::CtrlShiftC => {
                 key.modifiers.contains(KeyModifiers::CONTROL)
                     && key.modifiers.contains(KeyModifiers::SHIFT)
@@ -122,60 +117,85 @@ pub(crate) fn copy_binding_from_env(value: Option<&str>) -> CopyBinding {
     {
         Some("ctrl-shift-c") | Some("ctrl_shift_c") => CopyBinding::CtrlShiftC,
         Some("ctrl-y") | Some("ctrl_y") => CopyBinding::CtrlY,
-        Some("ctrl-c") | Some("ctrl_c") | None | Some("") => CopyBinding::CtrlC,
-        Some(_) => CopyBinding::CtrlC,
+        Some("ctrl-c") | Some("ctrl_c") | None | Some("") => CopyBinding::CtrlShiftC,
+        Some(_) => CopyBinding::CtrlShiftC,
     }
 }
 
-pub(crate) fn controls_text(ui_extensions: &TuiExtensions) -> String {
-    let mut lines = vec!["Controls:".to_string()];
-    lines.extend(render_shortcut_lines(ui_extensions, true));
-    lines.join("\n")
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ShortcutHelpRow {
+    pub(crate) keys: String,
+    pub(crate) description: String,
 }
 
-fn render_shortcut_lines(
+impl ShortcutHelpRow {
+    fn new(keys: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            keys: keys.into(),
+            description: description.into(),
+        }
+    }
+}
+
+pub(crate) fn controls_document(ui_extensions: &TuiExtensions) -> DocumentState {
+    DocumentState::new(
+        "Controls",
+        vec![DocumentSection::new(
+            "Keyboard",
+            shortcut_help_rows(ui_extensions, true)
+                .into_iter()
+                .map(|row| DocumentRow::Shortcut {
+                    keys: row.keys,
+                    description: row.description,
+                })
+                .collect(),
+        )],
+    )
+}
+
+pub(crate) fn shortcut_help_rows(
     ui_extensions: &TuiExtensions,
     spaced_history_arrows: bool,
-) -> Vec<String> {
+) -> Vec<ShortcutHelpRow> {
     let history_arrows = if spaced_history_arrows {
-        "  Up / Down          Input history"
+        "Up / Down"
     } else {
-        "  Up/Down            Input history"
+        "Up/Down"
     };
 
     let mut lines = vec![
-        "  Esc                Cancel session (while running)".to_string(),
-        "  Enter              Submit; inject at next checkpoint while running".to_string(),
-        "  Tab                Queue next turn; submit plain draft when idle".to_string(),
-        "  Up (empty draft)   Edit last queued turn".to_string(),
-        format!(
-            "  {:<18} Edit last queued turn",
-            queued_turn_edit_binding().display()
+        ShortcutHelpRow::new(
+            "Ctrl+C",
+            "Close popup/overlay, cancel turn, clear draft, or quit",
         ),
+        ShortcutHelpRow::new("Esc", "Close overlay or cancel running turn"),
+        ShortcutHelpRow::new("Enter", "Submit; early-inject while running"),
+        ShortcutHelpRow::new("Tab", "Queue for next turn; submit draft when idle"),
+        ShortcutHelpRow::new("PgUp / PgDn", "Scroll history or document overlay"),
+        ShortcutHelpRow::new("Ctrl+U", "Delete draft text to line start"),
+        ShortcutHelpRow::new("Ctrl+K", "Delete draft text to line end"),
+        ShortcutHelpRow::new("Up (empty draft)", "Edit last queued turn"),
+        ShortcutHelpRow::new(
+            queued_turn_edit_binding().display(),
+            "Edit last queued turn",
+        ),
+        ShortcutHelpRow::new("Shift+Enter", "Insert newline"),
+        ShortcutHelpRow::new("Ctrl+V", "Paste image as inline [Image #n]"),
+        ShortcutHelpRow::new("Ctrl+Shift+V", "Paste text only"),
+        ShortcutHelpRow::new(copy_binding().display(), "Copy selection or last response"),
     ];
 
     for shortcut in ui_extensions.shortcut_specs() {
-        lines.push(format!(
-            "  {:<18} {}",
+        lines.push(ShortcutHelpRow::new(
             shortcut.chord.display(),
-            shortcut.description
+            shortcut.description,
         ));
     }
 
     lines.extend([
-        "  Ctrl+U / Ctrl+D    Scroll half-page up / down".to_string(),
-        "  PgUp / PgDn        Scroll page up / down".to_string(),
-        "  Shift+Enter        Insert newline".to_string(),
-        "  Ctrl+V             Paste image as inline [Image #n]".to_string(),
-        "  Ctrl+Shift+V       Paste text only".to_string(),
-        format!(
-            "  {:<18} Copy selection or last response",
-            copy_binding().display()
-        ),
-        "  Ctrl+O             Cycle tool expansion (ghost ↔ compact)".to_string(),
-        "  Alt+O              Full expansion (code + stdout)".to_string(),
-        history_arrows.to_string(),
-        "  Ctrl+C             Quit".to_string(),
+        ShortcutHelpRow::new("Ctrl+O", "Cycle tool expansion"),
+        ShortcutHelpRow::new("Alt+O", "Full expansion"),
+        ShortcutHelpRow::new(history_arrows, "Input history"),
     ]);
 
     lines
@@ -607,8 +627,129 @@ pub(crate) fn info_text(
     lines.join("\n")
 }
 
-pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &TuiExtensions) -> String {
-    let mut lines = vec!["Commands:".to_string()];
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn info_document(
+    provider: &ProviderHandle,
+    configured_model: &str,
+    model_variant: Option<&str>,
+    execution_mode: &ModeId,
+    standard_context_approach: Option<&StandardContextApproach>,
+    context_window: Option<u64>,
+    tool_summary: Option<(usize, &str)>,
+    cwd: &str,
+    session_name: Option<&str>,
+    session_id: Option<&str>,
+    session_db_path: Option<&str>,
+) -> DocumentState {
+    let resolved_model =
+        crate::provider_metadata::provider_wire_model_id(provider.kind(), configured_model);
+    let mut model_rows = vec![
+        DocumentRow::KeyValue {
+            label: "configured".to_string(),
+            value: configured_model.to_string(),
+        },
+        DocumentRow::KeyValue {
+            label: "resolved".to_string(),
+            value: resolved_model,
+        },
+        DocumentRow::KeyValue {
+            label: "mode".to_string(),
+            value: execution_mode_label(execution_mode).to_string(),
+        },
+    ];
+    if let Some(variant) = model_variant {
+        model_rows.push(DocumentRow::KeyValue {
+            label: "variant".to_string(),
+            value: variant.to_string(),
+        });
+    }
+    if *execution_mode == ModeId::standard()
+        && let Some(standard_context_approach) = standard_context_approach
+    {
+        model_rows.push(DocumentRow::KeyValue {
+            label: "context approach".to_string(),
+            value: standard_context_approach_label(standard_context_approach).to_string(),
+        });
+    }
+    model_rows.push(DocumentRow::KeyValue {
+        label: "context window".to_string(),
+        value: context_window
+            .map(|window| window.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+    });
+
+    let tools_rows = match tool_summary {
+        Some((tool_count, toolset_hash)) => vec![
+            DocumentRow::KeyValue {
+                label: "count".to_string(),
+                value: tool_count.to_string(),
+            },
+            DocumentRow::KeyValue {
+                label: "hash".to_string(),
+                value: toolset_hash.to_string(),
+            },
+        ],
+        None => vec![DocumentRow::Text("session not started".to_string())],
+    };
+
+    DocumentState::new(
+        "Info",
+        vec![
+            DocumentSection::new(
+                "Runtime",
+                vec![
+                    DocumentRow::KeyValue {
+                        label: "lash-cli".to_string(),
+                        value: crate::APP_VERSION.to_string(),
+                    },
+                    DocumentRow::KeyValue {
+                        label: "lash-sansio".to_string(),
+                        value: lash_core::SANSIO_VERSION.to_string(),
+                    },
+                    DocumentRow::KeyValue {
+                        label: "provider".to_string(),
+                        value: format!(
+                            "{} ({})",
+                            provider_display_label(provider),
+                            provider.kind()
+                        ),
+                    },
+                ],
+            ),
+            DocumentSection::new("Model", model_rows),
+            DocumentSection::new(
+                "Session",
+                vec![
+                    DocumentRow::KeyValue {
+                        label: "name".to_string(),
+                        value: session_name.unwrap_or("(not started)").to_string(),
+                    },
+                    DocumentRow::KeyValue {
+                        label: "id".to_string(),
+                        value: session_id.unwrap_or("(not started)").to_string(),
+                    },
+                ],
+            ),
+            DocumentSection::new("Tools", tools_rows),
+            DocumentSection::new(
+                "Paths",
+                vec![
+                    DocumentRow::KeyValue {
+                        label: "cwd".to_string(),
+                        value: cwd.to_string(),
+                    },
+                    DocumentRow::KeyValue {
+                        label: "session db".to_string(),
+                        value: session_db_path.unwrap_or("(not started)").to_string(),
+                    },
+                ],
+            ),
+        ],
+    )
+}
+
+pub(crate) fn help_document(skills: &SkillCatalog, ui_extensions: &TuiExtensions) -> DocumentState {
+    let mut command_rows = Vec::new();
     for spec in command::catalog() {
         let aliases = if spec.aliases.is_empty() {
             String::new()
@@ -624,11 +765,10 @@ pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &TuiExtensions) ->
         } else {
             spec.description.to_string()
         };
-        lines.push(format!(
-            "  {:<18} {}",
-            format!("{}{}", spec.usage, aliases),
-            description
-        ));
+        command_rows.push(DocumentRow::Shortcut {
+            keys: format!("{}{}", spec.usage, aliases),
+            description,
+        });
     }
     for spec in ui_extensions.command_specs() {
         let aliases = if spec.aliases.is_empty() {
@@ -636,44 +776,45 @@ pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &TuiExtensions) ->
         } else {
             format!(", {}", spec.aliases.join(", "))
         };
-        lines.push(format!(
-            "  {:<18} {}",
-            format!("{}{}", spec.usage, aliases),
-            spec.description
+        command_rows.push(DocumentRow::Shortcut {
+            keys: format!("{}{}", spec.usage, aliases),
+            description: spec.description.to_string(),
+        });
+    }
+    command_rows.push(DocumentRow::Shortcut {
+        keys: "/<skill> [text]".to_string(),
+        description: "Invoke a loaded skill directly".to_string(),
+    });
+
+    let mut sections = vec![DocumentSection::new("Commands", command_rows)];
+    if !skills.is_empty() {
+        sections.push(DocumentSection::new(
+            "Installed Skills",
+            skills
+                .iter()
+                .map(|skill| DocumentRow::Shortcut {
+                    keys: format!("${}", skill.name),
+                    description: if skill.description.is_empty() {
+                        "Invoke skill".to_string()
+                    } else {
+                        skill.description.clone()
+                    },
+                })
+                .collect(),
         ));
     }
-    lines.push("  /<skill> [text]    Invoke a loaded skill directly".to_string());
+    sections.push(DocumentSection::new(
+        "Shortcuts",
+        shortcut_help_rows(ui_extensions, false)
+            .into_iter()
+            .map(|row| DocumentRow::Shortcut {
+                keys: row.keys,
+                description: row.description,
+            })
+            .collect(),
+    ));
 
-    if !skills.is_empty() {
-        lines.push(String::new());
-        lines.push("Installed skills:".to_string());
-        for skill in skills.iter() {
-            let desc = if skill.description.is_empty() {
-                String::new()
-            } else {
-                format!("  {}", skill.description)
-            };
-            lines.push(format!("  ${}{}", skill.name, desc));
-        }
-        lines
-            .push("  Use /skills to browse or `/<skill-name>` to invoke one directly.".to_string());
-    }
-
-    lines.extend([
-        String::new(),
-        "Dynamic Runtime:".to_string(),
-        "  /tools".to_string(),
-        "  /tools rm <name>".to_string(),
-        "  /tools update <name> key=value ...".to_string(),
-        "  /tools enable <name> | /tools disable <name>".to_string(),
-        "  /reconfigure status|apply|clear".to_string(),
-    ]);
-
-    lines.push(String::new());
-    lines.push("Shortcuts:".to_string());
-    lines.extend(render_shortcut_lines(ui_extensions, false));
-
-    lines.join("\n")
+    DocumentState::new("Help", sections)
 }
 
 pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<TuiHostEffect>) {
@@ -848,6 +989,8 @@ pub(crate) fn display_width(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
     use lash_core::SessionMeta;
 
@@ -975,6 +1118,68 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_rows_have_no_duplicate_default_keys() {
+        let rows = shortcut_help_rows(&TuiExtensions::default(), true);
+        let mut seen = HashSet::new();
+        let mut duplicates = Vec::new();
+        for row in &rows {
+            if !seen.insert(row.keys.as_str()) {
+                duplicates.push(row.keys.clone());
+            }
+        }
+
+        assert!(duplicates.is_empty(), "duplicate shortcuts: {duplicates:?}");
+        assert!(
+            rows.iter()
+                .any(|row| row.keys == "Ctrl+C" && row.description.contains("cancel"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.keys == "Ctrl+Shift+C" && row.description.contains("Copy"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.keys == "Ctrl+U" && row.description.contains("line start"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.keys == "Ctrl+K" && row.description.contains("line end"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.keys == "PgUp / PgDn" && row.description.contains("document"))
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.keys.contains("Ctrl+U") && row.description.contains("Scroll"))
+        );
+    }
+
+    #[test]
+    fn controls_document_uses_authoritative_shortcut_rows() {
+        let extensions = TuiExtensions::default();
+        let document = controls_document(&extensions);
+        assert_eq!(document.title, "Controls");
+        assert_eq!(document.sections.len(), 1);
+        assert_eq!(document.sections[0].title, "Keyboard");
+
+        let document_rows = document.sections[0]
+            .rows
+            .iter()
+            .map(|row| match row {
+                DocumentRow::Shortcut { keys, description } => ShortcutHelpRow {
+                    keys: keys.clone(),
+                    description: description.clone(),
+                },
+                other => panic!("unexpected controls row: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(document_rows, shortcut_help_rows(&extensions, true));
+    }
+
+    #[test]
     fn info_text_includes_session_id_and_db_path() {
         let provider = ProviderHandle::new(
             lash_provider_openai::OpenAiCompatibleProvider::new(
@@ -999,5 +1204,85 @@ mod tests {
         assert!(text.contains("session: demo-session"));
         assert!(text.contains("session id: sess-123"));
         assert!(text.contains("session db: /tmp/demo/session.db"));
+    }
+
+    #[test]
+    fn info_document_groups_diagnostics_and_keeps_plain_text_paths_complete() {
+        let provider = ProviderHandle::new(
+            lash_provider_openai::OpenAiCompatibleProvider::new(
+                "test",
+                "https://openrouter.ai/api/v1",
+            )
+            .into_components(),
+        );
+        let cwd = "/tmp/demo/workspace-with-a-long-directory-name";
+        let session_db =
+            "/tmp/demo/workspace-with-a-long-directory-name/.lash/session/store/session.db";
+        let document = info_document(
+            &provider,
+            "google/gemini-3-flash-preview",
+            Some("medium"),
+            &ModeId::standard(),
+            Some(&StandardContextApproach::RollingHistory(Default::default())),
+            Some(123_000),
+            Some((7, "abcd1234")),
+            cwd,
+            Some("demo-session"),
+            Some("sess-123"),
+            Some(session_db),
+        );
+
+        let section_titles = document
+            .sections
+            .iter()
+            .map(|section| section.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            section_titles,
+            ["Runtime", "Model", "Session", "Tools", "Paths"]
+        );
+        let paths = document
+            .sections
+            .iter()
+            .find(|section| section.title == "Paths")
+            .expect("paths section");
+        assert!(paths.rows.iter().any(|row| matches!(
+            row,
+            DocumentRow::KeyValue { label, value }
+                if label == "cwd" && value == cwd
+        )));
+        assert!(paths.rows.iter().any(|row| matches!(
+            row,
+            DocumentRow::KeyValue { label, value }
+                if label == "session db" && value == session_db
+        )));
+
+        let rendered = crate::render::document_lines_snapshot(&document, 28)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains('…'), "{rendered}");
+        assert!(!rendered.contains(session_db), "{rendered}");
+
+        let text = info_text(
+            &provider,
+            "google/gemini-3-flash-preview",
+            Some("medium"),
+            &ModeId::standard(),
+            Some(&StandardContextApproach::RollingHistory(Default::default())),
+            Some(123_000),
+            Some((7, "abcd1234")),
+            cwd,
+            Some("demo-session"),
+            Some("sess-123"),
+            Some(session_db),
+        );
+        assert!(text.contains(session_db));
     }
 }

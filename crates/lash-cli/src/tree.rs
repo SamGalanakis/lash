@@ -1,6 +1,6 @@
 use lash::LashSession;
 use lash_core::runtime::RuntimeSessionState;
-use lash_core::{Message, MessageRole, SessionMessageTreeNode, ToolState};
+use lash_core::{Message, MessageRole, SessionMessageTreeNode};
 
 use crate::app::{App, timeline_from_read_view};
 use crate::overlay::TreeSelection;
@@ -18,7 +18,6 @@ pub async fn switch_to_tree_selection(
     app: &mut App,
     history: &mut Vec<Message>,
     selection: TreeSelection,
-    _tool_state: &ToolState,
 ) -> Result<(), String> {
     let target_leaf = if matches!(selection.message.role, MessageRole::User) {
         selection.parent_node_id.clone()

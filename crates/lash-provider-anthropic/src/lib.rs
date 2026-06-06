@@ -385,6 +385,19 @@ mod tests {
                         json!({ "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT }),
                     )),
                     Scenario::NonStreamingToolUse => ProviderWire::body(tool_use_message()),
+                    Scenario::StreamingTextAssembly => {
+                        ProviderWire::body(Value::Null).with_text_stream(
+                            vec![
+                                json!({ "type": "message_start", "message": { "usage": { "input_tokens": U::BASE_INPUT, "output_tokens": U::BASE_OUTPUT } } }).to_string(),
+                                json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text" } }).to_string(),
+                                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "hello " } }).to_string(),
+                                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "world" } }).to_string(),
+                                json!({ "type": "content_block_stop", "index": 0 }).to_string(),
+                                json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" } }).to_string(),
+                            ],
+                            "hello world",
+                        )
+                    }
                     Scenario::StreamingToolArgumentMerge => {
                         let events = tool_use_message();
                         ProviderWire::body(events.clone()).with_tool_call_stream(

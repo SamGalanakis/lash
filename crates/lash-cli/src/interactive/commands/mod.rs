@@ -1,6 +1,5 @@
 mod provider;
 mod session;
-mod tools;
 
 pub(crate) use session::switch_to_session_identifier;
 
@@ -9,6 +8,7 @@ use super::runtime::sync_runtime_tool_surface;
 use super::*;
 use crate::SkillCatalog;
 use crate::turn_runner::make_turn_input;
+use crate::{controls_document, help_document, info_document};
 use lash_core::runtime::{QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
 
 #[derive(Clone)]
@@ -43,8 +43,7 @@ pub(super) struct SlashCommandCtx<'a> {
     pub(super) provider: &'a mut ProviderHandle,
     pub(super) current_model_variant: &'a mut Option<String>,
     pub(super) current_execution_mode: &'a mut ModeId,
-    pub(super) desired_tool_state: &'a mut ToolState,
-    pub(super) pending_reconfigure: &'a mut bool,
+    pub(super) active_tool_state: &'a mut ToolState,
     pub(super) model_catalog: &'a CachedModelCatalog,
     pub(super) toolset_hash: &'a mut String,
     pub(super) app_tx: &'a crate::event::AppEventTx,
@@ -199,10 +198,6 @@ pub(super) async fn dispatch_next_queued_turn(
     _provider: &mut ProviderHandle,
     _current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ModeId,
-    desired_tool_state: &mut ToolState,
-    pending_reconfigure: &mut bool,
-    _model_catalog: &CachedModelCatalog,
-    toolset_hash: &mut String,
     app_tx: &crate::event::AppEventTx,
     _pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<bool> {
@@ -216,22 +211,6 @@ pub(super) async fn dispatch_next_queued_turn(
         return Ok(false);
     }
 
-    if let Err(e) =
-        apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
-    {
-        push_system_message(
-            app,
-            format!(
-                "Pending runtime reconfigure failed; queued message not sent: {}",
-                e
-            ),
-        );
-        return Ok(false);
-    }
-    *toolset_hash = hash12(
-        &serde_json::to_vec(&desired_tool_state.tool_manifests())
-            .unwrap_or_else(|_| b"[]".to_vec()),
-    );
     let ready_batch_ids = ready_batches
         .iter()
         .map(|batch| batch.batch_id.clone())
@@ -247,6 +226,7 @@ pub(super) async fn dispatch_next_queued_turn(
         });
     }
     send_queued_work(
+        ready_batch_ids,
         display_turns,
         app,
         ui_trace.as_mut(),
@@ -297,8 +277,7 @@ async fn handle_slash_command(
         provider,
         current_model_variant,
         current_execution_mode,
-        desired_tool_state,
-        pending_reconfigure,
+        active_tool_state,
         model_catalog,
         toolset_hash,
         app_tx,
@@ -319,7 +298,7 @@ async fn handle_slash_command(
                 provider,
                 current_model_variant,
                 current_execution_mode,
-                desired_tool_state,
+                active_tool_state,
                 pending_clear_after_return,
             )
             .await
@@ -329,6 +308,15 @@ async fn handle_slash_command(
             Ok(false)
         }
         command::Command::Info => {
+            if let Some(session) = runtime.as_ref()
+                && let Ok(state) = session.control().tools().state().await
+            {
+                *active_tool_state = state;
+                *toolset_hash = hash12(
+                    &serde_json::to_vec(&active_tool_state.tool_manifests())
+                        .unwrap_or_else(|_| b"[]".to_vec()),
+                );
+            }
             let model = app.model.clone();
             let context_window = app.usage.context_window;
             let cwd = app.cwd.clone();
@@ -336,22 +324,19 @@ async fn handle_slash_command(
             let standard_context_approach = (current_execution_mode == &ModeId::standard())
                 .then(lash_standard_plugins::StandardContextApproach::default);
             let session_db_path = logger.db_path().to_string_lossy().to_string();
-            push_system_message(
-                app,
-                info_text(
-                    provider,
-                    &model,
-                    current_model_variant.as_deref(),
-                    current_execution_mode,
-                    standard_context_approach.as_ref(),
-                    context_window,
-                    Some((desired_tool_state.len(), toolset_hash)),
-                    &cwd,
-                    Some(&session_name),
-                    Some(&logger.session_id),
-                    Some(&session_db_path),
-                ),
-            );
+            app.show_document(info_document(
+                provider,
+                &model,
+                current_model_variant.as_deref(),
+                current_execution_mode,
+                standard_context_approach.as_ref(),
+                context_window,
+                Some((active_tool_state.len(), toolset_hash)),
+                &cwd,
+                Some(&session_name),
+                Some(&logger.session_id),
+                Some(&session_db_path),
+            ));
             Ok(false)
         }
         command::Command::Model(new_model) => {
@@ -396,15 +381,13 @@ async fn handle_slash_command(
                 cancel_token,
                 active_stream_id,
                 current_execution_mode,
-                desired_tool_state,
-                pending_reconfigure,
                 toolset_hash,
                 app_tx,
             )
             .await
         }
         command::Command::Controls => {
-            push_system_message(app, controls_text(app.ui_extensions()));
+            app.show_document(controls_document(app.ui_extensions()));
             Ok(false)
         }
         command::Command::Fork => {
@@ -420,8 +403,7 @@ async fn handle_slash_command(
         }
         command::Command::Tree => session::handle_tree(app, runtime).await,
         command::Command::Help => {
-            let help = help_text(&app.skills, app.ui_extensions());
-            push_system_message(app, help);
+            app.show_document(help_document(&app.skills, app.ui_extensions()));
             Ok(false)
         }
         command::Command::Resume(name) => {
@@ -437,30 +419,8 @@ async fn handle_slash_command(
                 provider,
                 current_model_variant,
                 current_execution_mode,
-                desired_tool_state,
+                active_tool_state,
                 model_catalog,
-                toolset_hash,
-            )
-            .await
-        }
-        command::Command::Tools(raw) => {
-            tools::handle_tools(
-                raw,
-                app,
-                runtime,
-                desired_tool_state,
-                pending_reconfigure,
-                current_execution_mode.clone(),
-            )
-            .await
-        }
-        command::Command::Reconfigure(raw) => {
-            tools::handle_reconfigure(
-                raw,
-                app,
-                runtime,
-                desired_tool_state,
-                pending_reconfigure,
                 toolset_hash,
             )
             .await

@@ -713,8 +713,8 @@ mod tests {
     }
 
     #[test]
-    fn copy_binding_defaults_to_ctrl_c() {
-        assert_eq!(copy_binding_from_env(None), CopyBinding::CtrlC);
+    fn copy_binding_defaults_to_ctrl_shift_c() {
+        assert_eq!(copy_binding_from_env(None), CopyBinding::CtrlShiftC);
     }
 
     #[test]
@@ -724,6 +724,10 @@ mod tests {
             CopyBinding::CtrlShiftC
         );
         assert_eq!(copy_binding_from_env(Some("ctrl-y")), CopyBinding::CtrlY);
+        assert_eq!(
+            copy_binding_from_env(Some("ctrl-c")),
+            CopyBinding::CtrlShiftC
+        );
     }
 
     #[test]

@@ -280,6 +280,15 @@ mod tests {
                             }] }
                         }]
                     })),
+                    Scenario::StreamingTextAssembly => {
+                        ProviderWire::body(json!({})).with_text_stream(
+                            vec![
+                                r#"{"response":{"candidates":[{"content":{"parts":[{"text":"hello "}]}}]}}"#.to_string(),
+                                r#"{"response":{"candidates":[{"content":{"parts":[{"text":"world"}]},"finishReason":"STOP"}]}}"#.to_string(),
+                            ],
+                            "hello world",
+                        )
+                    }
                     Scenario::StreamingToolArgumentMerge => return None,
                     Scenario::UsageCacheHit => ProviderWire::body(json!({
                         "candidates": [{
@@ -340,10 +349,32 @@ mod tests {
                 GoogleOAuthProvider::terminal_reason_from_value(body, parts)
             }
 
-            fn assemble_stream(&self, _sse_events: &[String]) -> StreamAssembly {
-                // Unused: Google opts out of both streaming scenarios (tool-arg
-                // chunk assembly and incremental usage merge).
-                StreamAssembly::default()
+            fn assemble_stream(&self, sse_events: &[String]) -> StreamAssembly {
+                let mut full = String::new();
+                let mut text_deltas = Vec::new();
+                let mut usage = LlmUsage::default();
+                let mut tool_calls = Vec::new();
+                let mut finish_event = None;
+                for raw in sse_events {
+                    GoogleOAuthProvider::process_sse_event(
+                        raw,
+                        &mut full,
+                        &mut text_deltas,
+                        &mut usage,
+                        Some(&mut tool_calls),
+                        &mut finish_event,
+                    )
+                    .expect("google sse event parses");
+                }
+                let mut parts = text_deltas
+                    .into_iter()
+                    .map(|text| LlmOutputPart::Text {
+                        text,
+                        response_meta: None,
+                    })
+                    .collect::<Vec<_>>();
+                parts.extend(tool_calls);
+                StreamAssembly { parts, usage }
             }
         }
 

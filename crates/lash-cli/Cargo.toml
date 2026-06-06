@@ -76,6 +76,7 @@ dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.24", default-features = false, features = ["testing"] }
+portable-pty = "0.9"
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

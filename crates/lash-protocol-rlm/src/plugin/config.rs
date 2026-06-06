@@ -14,6 +14,12 @@ pub struct RlmProtocolPluginConfig {
     pub max_output_chars: usize,
     #[serde(default = "default_continue_as_soft_warn_tokens")]
     pub continue_as_soft_warn_tokens: Option<usize>,
+    /// In the "Bound Variables" prompt section, render a variable's value
+    /// inline (so the model can read it directly) when its compact JSON form
+    /// fits within this many characters; larger values fall back to a
+    /// type + size hint. Set to 0 to always use hints.
+    #[serde(default = "default_bound_variables_inline_char_limit")]
+    pub bound_variables_inline_char_limit: usize,
 }
 
 fn default_max_output_chars() -> usize {
@@ -22,6 +28,10 @@ fn default_max_output_chars() -> usize {
 
 fn default_continue_as_soft_warn_tokens() -> Option<usize> {
     Some(100_000)
+}
+
+fn default_bound_variables_inline_char_limit() -> usize {
+    1_024
 }
 
 impl Default for RlmProtocolPluginConfig {
@@ -33,6 +43,7 @@ impl Default for RlmProtocolPluginConfig {
             lashlang_language_features: lashlang::LashlangLanguageFeatures::default(),
             max_output_chars: default_max_output_chars(),
             continue_as_soft_warn_tokens: default_continue_as_soft_warn_tokens(),
+            bound_variables_inline_char_limit: default_bound_variables_inline_char_limit(),
         }
     }
 }
@@ -40,6 +51,11 @@ impl Default for RlmProtocolPluginConfig {
 impl RlmProtocolPluginConfig {
     pub fn with_lashlang_abilities(mut self, abilities: lashlang::LashlangAbilities) -> Self {
         self.lashlang_abilities = abilities;
+        self
+    }
+
+    pub fn with_bound_variables_inline_char_limit(mut self, limit: usize) -> Self {
+        self.bound_variables_inline_char_limit = limit;
         self
     }
 

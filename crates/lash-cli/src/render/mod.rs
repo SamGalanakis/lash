@@ -26,6 +26,7 @@ use crate::diff::render_inline_diff;
 use crate::editor::EditorState;
 use crate::input_items::image_marker_ranges;
 use crate::markdown;
+use crate::overlay::{DocumentRow, DocumentState};
 use crate::text_display;
 use crate::text_layout;
 use crate::theme;
@@ -688,6 +689,98 @@ fn wrap_line(
     }
     result.push((line_start, text.len()));
     result
+}
+
+pub(crate) fn document_lines_snapshot(
+    document: &DocumentState,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let width = width.max(1);
+    for (section_idx, section) in document.sections.iter().enumerate() {
+        if section_idx > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            section.title.clone(),
+            Style::default()
+                .fg(theme::brand())
+                .add_modifier(Modifier::Bold),
+        )));
+        for row in &section.rows {
+            match row {
+                DocumentRow::Text(text) => {
+                    for (start, end) in wrap_line(text, 0, 0, width) {
+                        lines.push(Line::from(Span::styled(
+                            text[start..end].to_string(),
+                            Style::default().fg(theme::text_muted()),
+                        )));
+                    }
+                }
+                DocumentRow::KeyValue { label, value } => {
+                    push_document_key_value(&mut lines, label, value, width);
+                }
+                DocumentRow::Shortcut { keys, description } => {
+                    push_document_shortcut(&mut lines, keys, description, width);
+                }
+            }
+        }
+    }
+    lines
+}
+
+pub(crate) fn document_max_scroll(
+    document: &DocumentState,
+    width: usize,
+    visible_height: usize,
+) -> usize {
+    document_lines_snapshot(document, width)
+        .len()
+        .saturating_sub(visible_height)
+}
+
+fn push_document_key_value(lines: &mut Vec<Line<'static>>, label: &str, value: &str, width: usize) {
+    let label_width = 16usize.min(width.saturating_sub(1));
+    let visible_label = truncate_to_display_width(label, label_width);
+    let value_width = width.saturating_sub(label_width + 1).max(1);
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{visible_label:<label_width$}"),
+            theme::text_faint_style(),
+        ),
+        Span::styled(" ", theme::text_faint_style()),
+        Span::styled(
+            truncate_with_forced_ellipsis(value, value_width),
+            Style::default().fg(theme::text_muted()),
+        ),
+    ]));
+}
+
+fn push_document_shortcut(
+    lines: &mut Vec<Line<'static>>,
+    keys: &str,
+    description: &str,
+    width: usize,
+) {
+    let key_width = 20usize.min(width.saturating_sub(1));
+    let visible_keys = truncate_to_display_width(keys, key_width);
+    let desc_width = width.saturating_sub(key_width + 1).max(1);
+    let segments = wrap_line(description, 0, 0, desc_width);
+    for (idx, (start, end)) in segments.into_iter().enumerate() {
+        let key = if idx == 0 {
+            format!("{visible_keys:<key_width$}")
+        } else {
+            " ".repeat(key_width)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(key, theme::help_key()),
+            Span::styled(" ", theme::text_faint_style()),
+            Span::styled(
+                description[start..end].to_string(),
+                Style::default().fg(theme::text_muted()),
+            ),
+        ]));
+    }
 }
 
 fn input_visual_lines(input: &str, width: usize) -> usize {

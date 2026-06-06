@@ -20,6 +20,7 @@ pub(super) fn register_rlm_protocol_plugin(
     projection_resolver: Arc<dyn ProjectionResolver>,
     last_prompt_usage: SharedPromptUsage,
 ) -> Result<(), PluginError> {
+    let bound_variables_inline_char_limit = config.bound_variables_inline_char_limit;
     let runtime_state = Arc::new(
         RlmRuntimeState::new(config.clone(), projection_resolver)
             .map_err(|err| PluginError::Session(err.to_string()))?,
@@ -43,7 +44,7 @@ pub(super) fn register_rlm_protocol_plugin(
         Box::pin(async move { normalize_projected_tool_args(ctx) })
     }));
 
-    register_bound_variables_prompt_contributor(reg);
+    register_bound_variables_prompt_contributor(reg, bound_variables_inline_char_limit);
     register_projected_bindings_prompt_contributor(reg, Arc::clone(&protocol_session));
 
     // Per-turn `prompt_usage` is captured here and passed to the projector via a
@@ -66,8 +67,11 @@ pub(super) fn register_rlm_protocol_plugin(
     Ok(())
 }
 
-fn register_bound_variables_prompt_contributor(reg: &mut PluginRegistrar) {
-    let bound_vars_cache = Arc::new(BoundVariablesCache::new());
+fn register_bound_variables_prompt_contributor(
+    reg: &mut PluginRegistrar,
+    inline_char_limit: usize,
+) {
+    let bound_vars_cache = Arc::new(BoundVariablesCache::new(inline_char_limit));
     let bound_vars_hook: lash_core::plugin::PromptContributor = Arc::new(move |ctx| {
         let cache = Arc::clone(&bound_vars_cache);
         Box::pin(async move { Ok(cache.contributions(&ctx)) })

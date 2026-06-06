@@ -2,9 +2,9 @@ use super::*;
 
 impl App {
     pub fn clear(&mut self) {
-        self.timeline = vec![UiTimelineItem::Splash].into();
+        self.timeline = Vec::new().into();
         self.scroll_offset = 0;
-        self.follow_mode = FollowOutputMode::Bottom;
+        self.follow_mode = FollowOutputMode::PinnedBottom;
         self.live.assistant.clear();
         self.live.reasoning.clear();
         self.clear_status();
@@ -120,7 +120,7 @@ impl App {
         }
         self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_scroll);
         if self.scroll_offset >= max_scroll {
-            self.follow_mode = FollowOutputMode::Bottom;
+            self.follow_mode = FollowOutputMode::PinnedBottom;
         } else {
             self.follow_mode = FollowOutputMode::Manual;
         }
@@ -135,13 +135,13 @@ impl App {
     }
 
     pub fn resume_follow_output(&mut self) {
-        self.follow_mode = FollowOutputMode::Bottom;
+        self.follow_mode = FollowOutputMode::PinnedBottom;
         self.scroll_offset = usize::MAX;
         self.dirty = true;
     }
 
     pub fn resume_contextual_follow_output(&mut self) {
-        self.follow_mode = FollowOutputMode::Contextual;
+        self.follow_mode = FollowOutputMode::PinnedTurnStart;
         self.scroll_offset = usize::MAX;
         self.dirty = true;
     }
@@ -157,7 +157,7 @@ impl App {
     }
 
     pub fn keep_latest_user_block_visible(&mut self) {
-        if self.follow_mode != FollowOutputMode::Contextual {
+        if self.follow_mode != FollowOutputMode::PinnedTurnStart {
             return;
         }
 
@@ -210,8 +210,8 @@ impl App {
 
         match self.follow_mode {
             FollowOutputMode::Manual => return self.scroll_offset.min(max_scroll),
-            FollowOutputMode::Bottom => return max_scroll,
-            FollowOutputMode::Contextual => {}
+            FollowOutputMode::PinnedBottom => return max_scroll,
+            FollowOutputMode::PinnedTurnStart => {}
         }
 
         if !self.turn_active() {
@@ -238,7 +238,7 @@ impl App {
             if let Some(turn) = self.live.turn.as_mut() {
                 turn.output_start_anchor_pending = false;
             }
-            self.follow_mode = FollowOutputMode::Bottom;
+            self.follow_mode = FollowOutputMode::PinnedBottom;
 
             let Some(output_start) = self.latest_turn_output_start_offset() else {
                 return max_scroll;
