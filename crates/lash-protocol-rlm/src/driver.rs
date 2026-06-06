@@ -18,7 +18,10 @@ use crate::rlm_support::decode_rlm_options;
 
 use history::{RlmHistoryRenderInput, build_rlm_history_messages_from_turn};
 #[cfg(test)]
-use history::{append_entry_image_blocks, build_rlm_history_messages, render_history_prompt};
+use history::{
+    RlmHistoryTestRenderInput, append_entry_image_blocks, build_rlm_history_messages,
+    render_history_prompt,
+};
 
 /// Cell shared between the RLM protocol plugin's turn-prepare hook (writer)
 /// and the projector (reader). The plugin's hook captures `prompt_usage`
@@ -581,13 +584,15 @@ mod tests {
         let mut attachments = Vec::new();
 
         let messages = build_rlm_history_messages(
-            &projection,
-            1000,
-            1,
-            rlm_finalization_prompt(&RlmTermination::default()),
-            None,
-            None,
-            None,
+            RlmHistoryTestRenderInput {
+                projection: &projection,
+                max_output_chars: 1000,
+                protocol_iteration: 1,
+                finalization: rlm_finalization_prompt(&RlmTermination::default()),
+                required_output: None,
+                final_answer_format: None,
+                budget_suffix: None,
+            },
             &mut attachments,
         );
         let history = projector.format_history(&projection);
@@ -711,13 +716,15 @@ mod tests {
         let mut attachments = Vec::new();
 
         let messages = build_rlm_history_messages(
-            &projection,
-            1000,
-            2,
-            rlm_finalization_prompt(&RlmTermination::default()),
-            None,
-            None,
-            None,
+            RlmHistoryTestRenderInput {
+                projection: &projection,
+                max_output_chars: 1000,
+                protocol_iteration: 2,
+                finalization: rlm_finalization_prompt(&RlmTermination::default()),
+                required_output: None,
+                final_answer_format: None,
+                budget_suffix: None,
+            },
             &mut attachments,
         );
 
@@ -764,14 +771,17 @@ mod tests {
             "required": ["action"]
         });
 
+        let schema_contract = render_value_schema_contract(&schema);
         let messages = build_rlm_history_messages(
-            &projection,
-            1000,
-            1,
-            "Call submit",
-            Some(&render_value_schema_contract(&schema)),
-            None,
-            None,
+            RlmHistoryTestRenderInput {
+                projection: &projection,
+                max_output_chars: 1000,
+                protocol_iteration: 1,
+                finalization: "Call submit",
+                required_output: Some(&schema_contract),
+                final_answer_format: None,
+                budget_suffix: None,
+            },
             &mut attachments,
         );
 

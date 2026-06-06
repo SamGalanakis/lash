@@ -3868,17 +3868,13 @@ async fn process_mode_falling_off_end_finishes_null() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn foreground_rejects_programmatic_process_controls() {
+    // `signal run` (sending) is intentionally NOT in this list: it is allowed
+    // from the foreground turn, like `await` / `cancel`. Only the receiving
+    // side, `wait signal`, plus the run-completion controls, are process-only.
     for (keyword, stmt) in [
         ("yield", Expr::Yield(Box::new(Expr::String("event".into())))),
         ("wake", Expr::Wake(Box::new(Expr::String("event".into())))),
         ("wait signal", Expr::WaitSignal),
-        (
-            "signal run",
-            Expr::SignalRun {
-                run: Box::new(Expr::Null),
-                payload: Box::new(Expr::Null),
-            },
-        ),
         (
             "finish",
             Expr::Finish(Some(Box::new(Expr::String("done".into())))),
@@ -3893,6 +3889,22 @@ async fn foreground_rejects_programmatic_process_controls() {
             .expect_err("foreground mode should reject process controls");
         assert_eq!(err, RuntimeError::ProcessControlOutsideProcess { keyword });
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn foreground_allows_signal_run() {
+    let program = Program::block(vec![Expr::SignalRun {
+        run: Box::new(Expr::String("handle".into())),
+        payload: Box::new(Expr::String("ping".into())),
+    }]);
+    let mut state = State::new();
+    let host = RecordingProcessHost::default();
+    execute_program(&program, &mut state, &host)
+        .await
+        .expect("foreground signal run should be allowed");
+    let signals = host.signals.lock().expect("signals lock");
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0].payload, Value::String("ping".into()));
 }
 
 #[tokio::test(flavor = "current_thread")]

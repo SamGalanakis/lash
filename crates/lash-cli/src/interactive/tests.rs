@@ -98,22 +98,6 @@ fn late_submitted_value_after_reconciliation_is_not_rendered_again() {
 }
 
 #[test]
-fn promote_pending_steers_to_queue_preserves_order() {
-    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.queue_pending_steer(PreparedTurn::new("after tool 1".into(), Vec::new()));
-    app.queue_pending_steer(PreparedTurn::new("after tool 2".into(), Vec::new()));
-
-    let mut ui_trace = None;
-    promote_pending_steers_to_queue(&mut app, &mut ui_trace);
-
-    assert!(app.queues.pending_steers.is_empty());
-    let queued: Vec<String> = std::iter::from_fn(|| app.take_next_queued_turn())
-        .map(|(turn, _)| turn.display_text)
-        .collect();
-    assert_eq!(queued, vec!["after tool 1", "after tool 2"]);
-}
-
-#[test]
 fn enter_on_command_suggestion_resolves_selected_slash_command() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.set_input("/in".into());
@@ -162,17 +146,26 @@ fn enter_on_skill_suggestion_stays_text_completion() {
 }
 
 #[test]
-fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
+fn active_turn_slash_command_block_message_is_command_not_queue_language() {
+    let message =
+        super::input_handling::slash_command_blocked_while_working_message("/resume previous");
+
+    assert!(message.contains("Cannot run `/resume` while Lash is working"));
+    assert!(!message.to_ascii_lowercase().contains("queue"));
+}
+
+#[test]
+fn manual_interrupt_keeps_durable_queue_snapshot_out_of_history() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.timeline.push(UiTimelineItem::UserInput(
         "(I want future migrations to work though!)".into(),
     ));
-    app.queue_pending_steer(PreparedTurn::new("next queued thing".into(), Vec::new()));
+    app.test_seed_queued_turn_snapshot(
+        PreparedTurn::new("next queued thing".into(), Vec::new()),
+        lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+        lash_core::SlotPolicy::Exclusive,
+    );
 
-    let mut ui_trace = None;
-    promote_pending_steers_to_queue(&mut app, &mut ui_trace);
-
-    assert!(app.queues.pending_steers.is_empty());
     assert!(app.has_queued_messages());
     assert!(matches!(
         app.timeline.last(),

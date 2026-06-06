@@ -1869,12 +1869,9 @@ impl<'module> Linker<'module> {
                     "process signals",
                     scope.span,
                 )?;
-                if !scope.process_body {
-                    return Err(LinkError::ProcessLifecycleOutsideProcess {
-                        keyword: "signal run",
-                        span: scope.span,
-                    });
-                }
+                // `signal run` (sending) is a control-plane op like `await` /
+                // `cancel`, valid from the foreground turn as well as inside a
+                // process body. Only `wait signal` (receiving) is process-only.
                 (
                     Expr::SignalRun {
                         run: Box::new(self.lower_expr(run, scope)?.0),
@@ -3284,6 +3281,16 @@ mod tests {
             ),
             "{err}"
         );
+    }
+
+    #[test]
+    fn linked_module_accepts_top_level_signal_run() {
+        // `signal run` (sending) mirrors `await` / `cancel`: legal from the
+        // foreground turn, unlike the process-only `wait signal`.
+        let program =
+            crate::parse("signal run \"handle\" with \"ping\"").expect("parse signal run");
+
+        LinkedModule::link(program, full_surface()).expect("top-level signal run should link");
     }
 
     #[test]

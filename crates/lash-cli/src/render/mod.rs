@@ -18,8 +18,8 @@ use crate::activity::{
     patch_file_subject, patch_status_title,
 };
 use crate::app::{
-    App, PreparedTurn, PromptState, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT,
-    UiTimelineItem, preview_text_lines,
+    App, PromptState, SPLASH_CONTENT_HEIGHT, SPLASH_SCROLLBACK_HEIGHT, UiTimelineItem,
+    preview_text_lines,
 };
 use crate::assistant_text;
 use crate::diff::render_inline_diff;
@@ -98,8 +98,10 @@ pub fn plan_dock_trailing_height(app: &App) -> usize {
     }
 }
 
-pub fn process_trailing_height(app: &App) -> usize {
-    usize::from(!app.processes.is_empty()) + app.processes.len()
+pub fn process_dock_height(app: &App, frame_width: u16) -> u16 {
+    process_lines_snapshot(app, frame_width)
+        .map(|lines| lines.len() as u16)
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -109,6 +111,7 @@ struct ChromeLayout {
     queue_height: u16,
     footer_height: u16,
     input_height: u16,
+    process_height: u16,
 }
 
 fn chrome_layout(app: &App, frame_width: u16, frame_height: u16) -> ChromeLayout {
@@ -122,16 +125,25 @@ fn chrome_layout(app: &App, frame_width: u16, frame_height: u16) -> ChromeLayout
         .saturating_sub(1 + queue_height + footer_height)
         .saturating_sub(MIN_HISTORY_HEIGHT);
     let dock_height = surfaces.stack_height(TuiSurfaceSlot::Dock, dock_available);
-    let reserved_height = 1 + dock_height + queue_height + footer_height;
+    let input_desired = desired_input_height(app, frame_width);
+    let process_desired = process_dock_height(app, frame_width);
+    let process_available = frame_height
+        .saturating_sub(1 + dock_height + queue_height + footer_height)
+        .saturating_sub(input_desired)
+        .saturating_sub(MIN_HISTORY_HEIGHT);
+    let process_height = process_desired.min(process_available);
+    let reserved_height = 1 + dock_height + queue_height + footer_height + process_height;
     let input_height = input_height(app, frame_width, frame_height, reserved_height);
-    let history_height =
-        frame_height.saturating_sub(1 + dock_height + queue_height + footer_height + input_height);
+    let history_height = frame_height.saturating_sub(
+        1 + dock_height + queue_height + footer_height + input_height + process_height,
+    );
     ChromeLayout {
         history_height,
         dock_height,
         queue_height,
         footer_height,
         input_height,
+        process_height,
     }
 }
 
@@ -145,6 +157,7 @@ pub struct ChromeAreas {
     pub queue: Rect,
     pub footer: Rect,
     pub input: Rect,
+    pub process: Rect,
     pub body: Rect,
 }
 
@@ -158,6 +171,7 @@ pub fn chrome_areas(app: &App, frame_width: u16, frame_height: u16) -> ChromeAre
     let queue_y = dock_y + layout.dock_height;
     let footer_y = queue_y + layout.queue_height;
     let input_y = footer_y + layout.footer_height;
+    let process_y = input_y + layout.input_height;
     ChromeAreas {
         status: Rect::new(0, 0, frame_width, 1),
         history: Rect::new(0, history_y, frame_width, layout.history_height),
@@ -165,6 +179,7 @@ pub fn chrome_areas(app: &App, frame_width: u16, frame_height: u16) -> ChromeAre
         queue: Rect::new(0, queue_y, frame_width, layout.queue_height),
         footer: Rect::new(0, footer_y, frame_width, layout.footer_height),
         input: Rect::new(0, input_y, frame_width, layout.input_height),
+        process: Rect::new(0, process_y, frame_width, layout.process_height),
         body: Rect::new(0, 1, frame_width, frame_height.saturating_sub(1)),
     }
 }
@@ -270,13 +285,14 @@ pub fn process_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'
         theme::text_faint_style().add_modifier(Modifier::Dim),
     )]));
     for task in &app.processes {
+        let selected = app.selected_process_id.as_deref() == Some(task.process_id.as_str());
         let state = match task.status.terminal_state() {
             None => "running",
             Some(lash_core::ProcessTerminalState::Completed) => "success",
             Some(lash_core::ProcessTerminalState::Failed) => "error",
             Some(lash_core::ProcessTerminalState::Cancelled) => "cancelled",
         };
-        let producer = task.kind.as_str();
+        let producer = task.definition.as_deref().unwrap_or(task.kind.as_str());
         let elapsed_duration = task
             .status_duration
             .unwrap_or_else(|| task.first_seen.elapsed());
@@ -289,13 +305,21 @@ pub fn process_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'
             Some(lash_core::ProcessTerminalState::Failed)
             | Some(lash_core::ProcessTerminalState::Cancelled) => theme::tool_failure(),
         };
+        let glyph = if selected { "  ▶ " } else { "  ◆ " };
+        let label_style = if selected {
+            Style::default()
+                .fg(theme::text_primary())
+                .add_modifier(Modifier::Bold)
+        } else {
+            Style::default().fg(theme::text_muted())
+        };
         lines.push(Line::from(vec![
-            Span::styled("  ◆ ", theme::text_faint_style()),
+            Span::styled(glyph, theme::turn_status_slash()),
             Span::styled(state.to_string(), state_style),
             Span::styled(" · ", theme::text_faint_style()),
             Span::styled(producer.to_string(), theme::text_subtle_style()),
             Span::styled(" · ", theme::text_faint_style()),
-            Span::styled(task.label.clone(), Style::default().fg(theme::text_muted())),
+            Span::styled(task.label.clone(), label_style),
             Span::styled(" · ", theme::text_faint_style()),
             Span::styled(elapsed, theme::text_faint_style()),
         ]));
@@ -1087,7 +1111,7 @@ fn render_block_into(
             // the transcript and lives at L2 alongside full artifacts
             // and shell output.
             let is_live_tail =
-                idx + 1 == blocks.len() && app.running && !app.has_live_markdown_output();
+                idx + 1 == blocks.len() && app.turn_active() && !app.has_live_markdown_output();
             let should_expand = expand_level >= 2 || is_live_tail;
             if should_expand {
                 lines.extend(assistant_text::render_assistant_reasoning_block(

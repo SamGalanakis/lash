@@ -402,4 +402,13 @@ impl RuntimeExecutionContext<'_> {
     ) -> ToolInvocationReply {
         self.cancel_process_handle(call_id, handle).await
     }
+
+    pub async fn signal_tool_handle(
+        &self,
+        call_id: String,
+        handle: serde_json::Value,
+        payload: serde_json::Value,
+    ) -> ToolInvocationReply {
+        self.signal_process_handle(call_id, handle, payload).await
+    }
 }

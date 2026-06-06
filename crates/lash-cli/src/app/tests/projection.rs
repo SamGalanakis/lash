@@ -23,7 +23,7 @@ fn finish_turn_from_read_view_rebuilds_current_turn_from_authoritative_state() {
     let events = events_from_messages(&messages);
     app.finish_turn_from_read_view(&test_read_view(&events, &messages, &[]));
 
-    assert!(!app.running);
+    assert_eq!(app.run_state, CliRunState::Idle);
     assert!(app.timeline.iter().any(|block| {
         matches!(block, UiTimelineItem::SystemMessage(text) if text == "Local note")
     }));
@@ -40,6 +40,42 @@ fn finish_turn_from_read_view_rebuilds_current_turn_from_authoritative_state() {
         last_block,
         "I looked at the actual librarian prompt, the graph tool constraints.\n\n## What exists now"
     );
+}
+
+#[test]
+fn finish_turn_from_read_view_preserves_local_system_messages_inside_active_turn() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    let turn = PreparedTurn::new("Keep going".into(), Vec::new());
+    app.push_prepared_user_input(&turn);
+    app.start_turn();
+    app.timeline.push(UiTimelineItem::SystemMessage(
+        "Session info\nruntime: rlm".into(),
+    ));
+    app.handle_session_event(SessionEvent::TextDelta {
+        content: "Runtime answer".into(),
+    });
+
+    let messages = vec![
+        text_message("u1", MessageRole::User, "Keep going"),
+        text_message("a1", MessageRole::Assistant, "Runtime answer"),
+    ];
+    let events = events_from_messages(&messages);
+    app.finish_turn_from_read_view(&test_read_view(&events, &messages, &[]));
+
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|block| matches!(
+                block,
+                UiTimelineItem::SystemMessage(message)
+                    if message == "Session info\nruntime: rlm"
+            ))
+            .count(),
+        1
+    );
+    assert!(app.timeline.iter().any(|block| {
+        matches!(block, UiTimelineItem::AssistantText(text) if text == "Runtime answer")
+    }));
 }
 
 #[test]
@@ -635,6 +671,46 @@ fn finish_turn_from_read_view_uses_authoritative_transcript_even_when_streamed_t
 }
 
 #[test]
+fn finish_interrupted_turn_from_read_view_preserves_local_system_messages() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.timeline.push(UiTimelineItem::SystemMessage(
+        "Session info\nruntime: rlm".into(),
+    ));
+    let turn = PreparedTurn::new("Keep working".into(), Vec::new());
+    app.push_prepared_user_input(&turn);
+    app.start_turn();
+    app.handle_session_event(SessionEvent::TextDelta {
+        content: "Partial answer".into(),
+    });
+
+    let messages = vec![text_message("u1", MessageRole::User, "Keep working")];
+    let events = events_from_messages(&messages);
+    let ui_state = app.ui_projection_state();
+    app.finish_interrupted_turn_from_read_view(
+        &test_read_view(&events, &messages, &[]),
+        &ui_state,
+        "Cancelled.",
+    );
+
+    assert_eq!(app.run_state, CliRunState::Idle);
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|block| matches!(
+                block,
+                UiTimelineItem::SystemMessage(message)
+                    if message == "Session info\nruntime: rlm"
+            ))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        app.timeline.last(),
+        Some(UiTimelineItem::SystemMessage(message)) if message == "Cancelled."
+    ));
+}
+
+#[test]
 fn interrupted_read_view_preserves_partial_assistant_text() {
     let blocks = interrupted_blocks_from_test_read_view(
         &[],
@@ -802,7 +878,7 @@ fn interrupted_read_view_hides_rlm_execution_result_user_message() {
 fn ui_projection_state_omits_transient_live_turn() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
-    app.set_status("retrying", Some("in 5s".into()), true);
+    app.set_status(CliRunState::Waiting, Some("in 5s".into()), true);
     if let Some(turn) = app.live.turn.as_mut() {
         turn.has_visible_output = true;
     }

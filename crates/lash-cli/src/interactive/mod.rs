@@ -40,15 +40,18 @@ use crate::{
 
 use self::helpers::{
     TurnReplayPayload, UiSnapshotWorker, cleared_session_state, drain_aux_trace_ops,
-    log_runtime_transition, record_queue_turn,
+    log_runtime_transition,
 };
 
-use self::commands::{dispatch_next_queued_turn, promote_pending_steers_to_queue};
+use self::commands::dispatch_next_queued_turn;
 #[cfg(test)]
 pub(crate) use self::runtime::injected_image_part_indices;
 #[cfg(test)]
 pub(crate) use self::runtime::make_injected_plugin_message;
-use self::runtime::{apply_pending_reconfigure, send_user_message, sync_runtime_tool_surface};
+use self::runtime::{
+    apply_pending_reconfigure, refresh_queued_work_snapshot, send_user_message,
+    sync_runtime_tool_surface,
+};
 pub(crate) use self::runtime::{generate_session_name, notify_desktop};
 
 use self::input_handling::{
@@ -242,6 +245,9 @@ pub(crate) async fn run_app(
     if let Some(message) = startup_system_message {
         push_system_message(&mut app, message);
     }
+    if let Err(err) = refresh_queued_work_snapshot(&mut app, &runtime).await {
+        push_system_message(&mut app, format!("Failed to load durable queue: {err}"));
+    }
 
     if let Some(filename) = args.resume.as_deref() {
         if let Err(err) = resume::load_resumed_session(
@@ -336,9 +342,11 @@ pub(crate) async fn run_app(
             active_stream_id,
         );
 
-        if !app.running && runtime.is_some() && runtime_return_rx.is_none() {
-            tracing::debug!("dispatching queued turn from idle-ready trigger");
-            if dispatch_next_queued_turn(
+        if !app.turn_active()
+            && app.has_queued_messages()
+            && runtime.is_some()
+            && runtime_return_rx.is_none()
+            && dispatch_next_queued_turn(
                 &mut app,
                 &mut ui_trace,
                 &mut terminal,
@@ -366,9 +374,9 @@ pub(crate) async fn run_app(
                 &mut pending_clear_after_return,
             )
             .await?
-            {
-                continue;
-            }
+        {
+            tracing::debug!("dispatched queued turn from idle-ready trigger");
+            continue;
         }
 
         // Check if runtime turn completed — reclaim runtime + updated history
@@ -468,7 +476,7 @@ pub(crate) async fn run_app(
                         messages = read_view.messages().len(),
                         blocks = app.timeline.len(),
                         had_live_turn = app.live.turn.is_some(),
-                        running = app.running,
+                        run_state = ?app.run_state,
                         "reconciling completed runtime turn"
                     );
                     if interrupted {
@@ -487,15 +495,11 @@ pub(crate) async fn run_app(
                         } else {
                             "Cancelled.".to_string()
                         };
-                        app.stop_turn();
-                        app.timeline = app::interrupted_blocks_from_read_view(
+                        app.finish_interrupted_turn_from_read_view(
                             &read_view,
                             &ui_projection_state,
                             interrupted_message.clone(),
                         );
-                        app.invalidate_height_cache();
-                        app.scroll_to_bottom();
-                        promote_pending_steers_to_queue(&mut app, &mut ui_trace);
                         runtime_return_rx = None;
                         cancel_token = None;
                         dispatch_next_queued_turn(
@@ -587,22 +591,21 @@ pub(crate) async fn run_app(
             }
         }
 
+        app.sync_foreground_turn_active(runtime_return_rx.is_some());
+
         // Draw only when dirty
         if app.dirty {
             let render_started = std::time::Instant::now();
             // Pre-compute height cache before immutable borrow in draw
             let (width, height) = terminal.size()?;
+            scratch_tui::sync_chrome_turn_status(&app);
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.set_size(width, height);
             }
             let vh = render::history_viewport_height(&app, width, height);
             let vw = width as usize;
             app.ensure_height_cache_pub(vw, vh);
-            app.refresh_follow_output_anchor(vw, vh);
-            // Clamp scroll_offset (especially for scroll_to_bottom's usize::MAX)
-            let total = app.total_content_height(vw, vh);
-            let max_scroll = total.saturating_sub(vh);
-            app.scroll_offset = app.scroll_offset.min(max_scroll);
+            app.refresh_scroll_position(vw, vh);
 
             app.history_area = render::history_area(&app, width, height);
             let capabilities = terminal.capabilities();
@@ -836,6 +839,12 @@ pub(crate) async fn run_app(
                     &mut app,
                 );
                 if last_ui_sync.elapsed() >= std::time::Duration::from_millis(250) {
+                    if let Err(err) = refresh_queued_work_snapshot(&mut app, &runtime).await {
+                        push_system_message(
+                            &mut app,
+                            format!("Failed to refresh durable queue: {err}"),
+                        );
+                    }
                     let _ = app_tx.send(AppEvent::RequestUiSnapshot);
                     last_ui_sync = tokio::time::Instant::now();
                 }

@@ -46,6 +46,28 @@ pub(super) struct RlmHistoryRenderInput<'a> {
     pub(super) budget_suffix: Option<&'a str>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct CurrentIterationMessageInput<'a> {
+    pub(super) saw_history: bool,
+    pub(super) protocol_iteration: usize,
+    pub(super) turn_causes: &'a [lash_core::TurnCause],
+    pub(super) finalization: &'a str,
+    pub(super) required_output: Option<&'a str>,
+    pub(super) final_answer_format: Option<&'a str>,
+    pub(super) budget_suffix: Option<&'a str>,
+}
+
+#[cfg(test)]
+pub(super) struct RlmHistoryTestRenderInput<'a> {
+    pub(super) projection: &'a lash_core::ChronologicalProjection,
+    pub(super) max_output_chars: usize,
+    pub(super) protocol_iteration: usize,
+    pub(super) finalization: &'a str,
+    pub(super) required_output: Option<&'a str>,
+    pub(super) final_answer_format: Option<&'a str>,
+    pub(super) budget_suffix: Option<&'a str>,
+}
+
 pub(super) fn build_rlm_history_messages_from_turn(
     input: RlmHistoryRenderInput<'_>,
     attachments: &mut Vec<LlmAttachment>,
@@ -74,34 +96,30 @@ pub(super) fn build_rlm_history_messages_from_turn(
     });
     append_current_iteration_message(
         &mut messages,
-        saw_history,
-        input.protocol_iteration,
-        input.turn_causes,
-        input.finalization,
-        input.required_output,
-        input.final_answer_format,
-        input.budget_suffix,
+        CurrentIterationMessageInput {
+            saw_history,
+            protocol_iteration: input.protocol_iteration,
+            turn_causes: input.turn_causes,
+            finalization: input.finalization,
+            required_output: input.required_output,
+            final_answer_format: input.final_answer_format,
+            budget_suffix: input.budget_suffix,
+        },
     );
     messages
 }
 
 #[cfg(test)]
 pub(super) fn build_rlm_history_messages(
-    projection: &lash_core::ChronologicalProjection,
-    max_output_chars: usize,
-    protocol_iteration: usize,
-    finalization: &str,
-    required_output: Option<&str>,
-    final_answer_format: Option<&str>,
-    budget_suffix: Option<&str>,
+    input: RlmHistoryTestRenderInput<'_>,
     attachments: &mut Vec<LlmAttachment>,
 ) -> Vec<LlmMessage> {
     let mut messages = Vec::new();
 
-    if !projection.entries().is_empty() {
-        for entry in projection.entries() {
+    if !input.projection.entries().is_empty() {
+        for entry in input.projection.entries() {
             let mut blocks = vec![text_block(
-                render_history_entry(entry, max_output_chars),
+                render_history_entry(entry, input.max_output_chars),
                 false,
             )];
             append_entry_image_blocks(entry, attachments, &mut blocks);
@@ -110,28 +128,24 @@ pub(super) fn build_rlm_history_messages(
     }
     append_current_iteration_message(
         &mut messages,
-        !projection.entries().is_empty(),
-        protocol_iteration,
-        &[],
-        finalization,
-        required_output,
-        final_answer_format,
-        budget_suffix,
+        CurrentIterationMessageInput {
+            saw_history: !input.projection.entries().is_empty(),
+            protocol_iteration: input.protocol_iteration,
+            turn_causes: &[],
+            finalization: input.finalization,
+            required_output: input.required_output,
+            final_answer_format: input.final_answer_format,
+            budget_suffix: input.budget_suffix,
+        },
     );
     messages
 }
 
 fn append_current_iteration_message(
     messages: &mut Vec<LlmMessage>,
-    saw_history: bool,
-    protocol_iteration: usize,
-    turn_causes: &[lash_core::TurnCause],
-    finalization: &str,
-    required_output: Option<&str>,
-    final_answer_format: Option<&str>,
-    budget_suffix: Option<&str>,
+    input: CurrentIterationMessageInput<'_>,
 ) {
-    if !saw_history {
+    if !input.saw_history {
         messages.push(LlmMessage::new(
             LlmRole::User,
             vec![text_block(
@@ -142,22 +156,25 @@ fn append_current_iteration_message(
     } else {
         mark_last_history_text_cache_breakpoint(messages);
     }
-    let mut current_prompt = format!("\n\n\n=== CURRENT ITERATION: {protocol_iteration} ===");
-    if let Some(turn_events) = lash_core::render_turn_causes_prompt(turn_causes) {
+    let mut current_prompt = format!(
+        "\n\n\n=== CURRENT ITERATION: {} ===",
+        input.protocol_iteration
+    );
+    if let Some(turn_events) = lash_core::render_turn_causes_prompt(input.turn_causes) {
         current_prompt.push_str("\n\n");
         current_prompt.push_str(&turn_events);
     }
     current_prompt.push_str("\n\n\n=== FINALIZATION ===\n\n");
-    current_prompt.push_str(finalization);
-    if let Some(block) = required_output {
+    current_prompt.push_str(input.finalization);
+    if let Some(block) = input.required_output {
         current_prompt.push_str("\n\n=== REQUIRED OUTPUT ===\n\n");
         current_prompt.push_str(block);
     }
-    if let Some(guidance) = final_answer_format {
+    if let Some(guidance) = input.final_answer_format {
         current_prompt.push_str("\n\n=== FINAL ANSWER FORMAT ===\n\n");
         current_prompt.push_str(guidance);
     }
-    if let Some(suffix) = budget_suffix {
+    if let Some(suffix) = input.budget_suffix {
         current_prompt.push_str("\n\n=== CONTEXT BUDGET ===\n\n");
         current_prompt.push_str(suffix);
     }

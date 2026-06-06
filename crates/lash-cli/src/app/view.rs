@@ -11,8 +11,8 @@ impl App {
         self.editor.pending_images.clear();
         self.editor.pending_large_pastes.clear();
         self.clear_live_tool_output();
-        self.queues.pending_steers.clear();
-        self.queues.queued_turns.clear();
+        self.queues.draft_presentations.clear();
+        self.clear_queued_work_snapshot();
         self.overlay = None;
         self.activity_state.reset();
         self.usage.token_usage = TokenUsage::default();
@@ -24,6 +24,7 @@ impl App {
         self.clear_mode_indicators();
         self.plan_dock = None;
         self.processes.clear();
+        self.selected_process_id = None;
         self.invalidate_height_cache();
     }
 
@@ -81,7 +82,7 @@ impl App {
                     self.render_cache.width,
                     self.render_cache.viewport_height,
                 );
-                self.scroll_offset = self.follow_output_anchor_offset(
+                self.scroll_offset = self.follow_scroll_offset(
                     self.render_cache.width,
                     self.render_cache.viewport_height,
                 );
@@ -91,68 +92,39 @@ impl App {
             return;
         }
 
-        if self.render_cache.width > 0 {
-            let w = self.render_cache.width;
-            let vh = self.render_cache.viewport_height;
-            self.ensure_height_cache(w, vh);
-        }
-
-        let anchor = if self.render_cache.width == 0 || self.render_cache.heights.is_empty() {
-            None
-        } else {
-            let cache = &self.render_cache.heights;
-            let idx = cache.partition_point(|&cum| cum <= self.scroll_offset);
-            if idx >= self.timeline.len() {
-                None
-            } else {
-                let block_start = if idx == 0 { 0 } else { cache[idx - 1] };
-                let skip = self.scroll_offset - block_start;
-                Some((idx, skip))
-            }
-        };
-
         self.expand_level = level;
         self.invalidate_height_cache();
-
-        if let Some((anchor_idx, anchor_skip)) = anchor {
-            let w = self.render_cache.width;
-            let vh = self.render_cache.viewport_height;
-            self.ensure_height_cache(w, vh);
-
-            let new_block_start = if anchor_idx == 0 {
-                0
-            } else {
-                self.render_cache.heights[anchor_idx - 1]
-            };
-            let new_block_height = self.render_cache.heights[anchor_idx] - new_block_start;
-            let clamped_skip = anchor_skip.min(new_block_height.saturating_sub(1));
-            self.scroll_offset = new_block_start + clamped_skip;
-        }
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
         if self.follows_output() {
             if self.render_cache.width > 0 && self.render_cache.viewport_height > 0 {
-                self.scroll_offset = self.follow_output_anchor_offset(
+                self.scroll_offset = self.follow_scroll_offset(
                     self.render_cache.width,
                     self.render_cache.viewport_height,
                 );
             } else {
                 self.scroll_offset = 0;
             }
-            self.follow_mode = FollowOutputMode::Paused;
         }
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-        self.follow_mode = FollowOutputMode::Paused;
+        self.follow_mode = FollowOutputMode::Manual;
+        self.dirty = true;
     }
 
     pub fn scroll_down(&mut self, amount: usize, viewport_height: usize, viewport_width: usize) {
         let total = self.total_content_height(viewport_width, viewport_height);
         let max_scroll = total.saturating_sub(viewport_height);
+        if self.follows_output() {
+            self.scroll_offset = self.follow_scroll_offset(viewport_width, viewport_height);
+        }
         self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_scroll);
         if self.scroll_offset >= max_scroll {
             self.follow_mode = FollowOutputMode::Bottom;
+        } else {
+            self.follow_mode = FollowOutputMode::Manual;
         }
+        self.dirty = true;
     }
 
     pub fn scroll_to_bottom(&mut self) {
@@ -165,18 +137,23 @@ impl App {
     pub fn resume_follow_output(&mut self) {
         self.follow_mode = FollowOutputMode::Bottom;
         self.scroll_offset = usize::MAX;
+        self.dirty = true;
     }
 
     pub fn resume_contextual_follow_output(&mut self) {
         self.follow_mode = FollowOutputMode::Contextual;
         self.scroll_offset = usize::MAX;
+        self.dirty = true;
     }
 
-    pub fn refresh_follow_output_anchor(&mut self, viewport_width: usize, viewport_height: usize) {
-        if !self.follows_output() {
+    pub fn refresh_scroll_position(&mut self, viewport_width: usize, viewport_height: usize) {
+        let total = self.total_content_height(viewport_width, viewport_height);
+        let max_scroll = total.saturating_sub(viewport_height);
+        if self.follow_mode == FollowOutputMode::Manual {
+            self.scroll_offset = self.scroll_offset.min(max_scroll);
             return;
         }
-        self.scroll_offset = self.follow_output_anchor_offset(viewport_width, viewport_height);
+        self.scroll_offset = self.follow_scroll_offset(viewport_width, viewport_height);
     }
 
     pub fn keep_latest_user_block_visible(&mut self) {
@@ -227,21 +204,17 @@ impl App {
         };
     }
 
-    fn follow_output_anchor_offset(
-        &mut self,
-        viewport_width: usize,
-        viewport_height: usize,
-    ) -> usize {
+    fn follow_scroll_offset(&mut self, viewport_width: usize, viewport_height: usize) -> usize {
         let total_height = self.total_content_height(viewport_width, viewport_height);
         let max_scroll = total_height.saturating_sub(viewport_height);
 
         match self.follow_mode {
-            FollowOutputMode::Paused => return self.scroll_offset.min(max_scroll),
+            FollowOutputMode::Manual => return self.scroll_offset.min(max_scroll),
             FollowOutputMode::Bottom => return max_scroll,
             FollowOutputMode::Contextual => {}
         }
 
-        if !self.running {
+        if !self.turn_active() {
             return max_scroll;
         }
 
@@ -344,7 +317,7 @@ impl App {
     }
 
     fn follows_output(&self) -> bool {
-        self.follow_mode != FollowOutputMode::Paused
+        self.follow_mode != FollowOutputMode::Manual
     }
 
     fn block_start_offset(&self, idx: usize) -> usize {
@@ -432,6 +405,5 @@ impl App {
             + self.live_reasoning_height()
             + self.live_assistant_height()
             + crate::render::plan_dock_trailing_height(self)
-            + crate::render::process_trailing_height(self)
     }
 }

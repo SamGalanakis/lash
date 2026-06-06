@@ -35,7 +35,7 @@ impl App {
     }
 
     pub(super) fn live_reasoning_tail_index(&self) -> Option<usize> {
-        self.running
+        self.turn_active()
             .then(|| self.timeline.len().checked_sub(1))
             .flatten()
             .filter(|&idx| {

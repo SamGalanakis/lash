@@ -41,17 +41,14 @@ pub(crate) enum ProcessWorkRunnerSetup {
     External { driver: ProcessWorkDriver },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) enum ProcessWorkSource {
+    #[default]
     None,
-    Inline { registry: Arc<dyn ProcessRegistry> },
+    Inline {
+        registry: Arc<dyn ProcessRegistry>,
+    },
     External(ProcessWorkDriver),
-}
-
-impl Default for ProcessWorkSource {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl ProcessWorkSource {

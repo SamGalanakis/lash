@@ -117,7 +117,11 @@ impl UiHarness {
 
     pub(crate) fn queue_turn(&mut self, text: impl Into<String>) -> PreparedTurn {
         let turn = PreparedTurn::new(text.into(), Vec::new());
-        self.app.queue_turn(turn.clone());
+        self.app.test_seed_queued_turn_snapshot(
+            turn.clone(),
+            lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
+            lash_core::SlotPolicy::Exclusive,
+        );
         turn
     }
 
@@ -287,9 +291,12 @@ mod tests {
     #[test]
     fn ui_harness_renders_queue_preview_sections_end_to_end() {
         let mut harness = UiHarness::new(72, 18);
-        harness
-            .app
-            .queue_pending_steer(PreparedTurn::new("after tool do this".into(), Vec::new()));
+        harness.start_turn();
+        harness.app.test_seed_queued_turn_snapshot(
+            PreparedTurn::new("after tool do this".into(), Vec::new()),
+            lash_core::DeliveryPolicy::EarliestSafeBoundary,
+            lash_core::SlotPolicy::Join,
+        );
         harness.queue_turn("queued follow-up one");
         harness.queue_turn("queued follow-up two");
         harness.queue_turn("queued follow-up three");
@@ -297,11 +304,8 @@ mod tests {
         let screen = harness.render();
         let lines = screen.non_empty_visible_lines();
 
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("after next tool/result"))
-        );
+        assert!(!lines.iter().any(|line| line.contains("this turn")));
+        assert!(lines.iter().any(|line| line.contains("after current step")));
         assert!(lines.iter().any(|line| line.contains("after tool do this")));
         assert!(lines.iter().any(|line| line.contains("next full turn · 3")));
         assert!(
@@ -319,7 +323,7 @@ mod tests {
         harness.start_turn();
         harness
             .app
-            .queue_pending_steer(PreparedTurn::new("follow up now".into(), Vec::new()));
+            .cache_draft_presentation(PreparedTurn::new("follow up now".into(), Vec::new()));
         harness.dispatch_event(SessionEvent::InjectedTurnInputAccepted {
             inputs: vec![lash_core::AcceptedInjectedTurnInput {
                 id: None,

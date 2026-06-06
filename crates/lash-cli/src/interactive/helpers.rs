@@ -241,14 +241,14 @@ pub(super) fn log_runtime_transition(
 ) {
     tracing::debug!(
         phase,
-        app_running = app.running,
+        run_state = ?app.run_state,
         runtime_present = runtime.is_some(),
         runtime_return_rx_present,
         cancel_token_present,
-        queued_turns = app.queues.queued_turns.len(),
-        pending_steers = app.queues.pending_steers.len(),
+        queued_work = app.queued_work_snapshot().len(),
+        draft_presentations = app.queues.draft_presentations.len(),
         active_stream_id,
-        live_turn = app.live.turn.as_ref().map(|turn| turn.status_text.as_str()),
+        live_turn = ?app.live.turn.as_ref().map(|turn| turn.run_state),
         "interactive runtime transition"
     );
 }
@@ -262,12 +262,12 @@ pub(super) fn record_queue_turn(ui_trace: &mut Option<UiTraceRecorder>, turn: &P
     }
 }
 
-pub(super) fn record_queue_pending_steer(
+pub(super) fn record_queue_current_turn_input(
     ui_trace: &mut Option<UiTraceRecorder>,
     turn: &PreparedTurn,
 ) {
     if let Some(recorder) = ui_trace.as_mut() {
-        recorder.record_queue_pending_steer(turn);
+        recorder.record_queue_current_turn_input(turn);
     }
 }
 

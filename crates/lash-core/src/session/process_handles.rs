@@ -171,6 +171,42 @@ impl RuntimeExecutionContext<'_> {
         Self::recorded_process_reply(call_id, "await_process", args, output, started)
     }
 
+    pub(super) async fn signal_process_handle(
+        &self,
+        call_id: String,
+        handle: serde_json::Value,
+        payload: serde_json::Value,
+    ) -> ToolInvocationReply {
+        let started = std::time::Instant::now();
+        let args = json!({ "handle": handle.clone(), "payload": payload.clone() });
+        let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                return Self::recorded_process_error(call_id, "signal_process", args, err, started);
+            }
+        };
+        let signal_id = format!("lashlang-{call_id}");
+        let output = match self
+            .dispatch
+            .processes
+            .signal(
+                &self.session_id,
+                &handle_id,
+                signal_id,
+                payload,
+                self.process_scope(self.parent_invocation.clone()),
+            )
+            .await
+        {
+            Ok(event) => ToolCallOutput::success(json!({
+                "process_id": event.process_id,
+                "sequence": event.sequence,
+            })),
+            Err(err) => ToolInvocationReply::error(json!(format!("signal failed: {err}"))).output,
+        };
+        Self::recorded_process_reply(call_id, "signal_process", args, output, started)
+    }
+
     pub(super) async fn cancel_process_handle(
         &self,
         call_id: String,
@@ -392,6 +428,95 @@ mod tests {
         let record = awaited.record.expect("await record");
         assert_eq!(record.call_id.as_deref(), Some("await-async-call-1"));
         assert_eq!(record.tool, "await_process");
+    }
+
+    #[tokio::test]
+    async fn process_handle_signal_appends_event_from_foreground() {
+        let provider: Arc<dyn ToolProvider> = Arc::new(PrepareRecordingTool {
+            prepares: Arc::new(AtomicUsize::new(0)),
+        });
+        let plugins = PluginHost::empty()
+            .build_session("root", None)
+            .expect("plugin session");
+        let surface = Arc::new(crate::ToolSurface::from_tools(
+            provider.tool_manifests(),
+            BTreeMap::new(),
+        ));
+        let host = Arc::new(crate::testing::MockSessionManager::default());
+        host.process_registry
+            .register_process(
+                ProcessRegistration::new(
+                    "target-process",
+                    ProcessInput::External {
+                        metadata: serde_json::Value::Null,
+                    },
+                )
+                .with_extra_event_types(crate::lashlang_process_event_types()),
+            )
+            .await
+            .expect("register target process");
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        let dispatch = Arc::new(ToolDispatchContext {
+            plugins,
+            tools: provider,
+            surface,
+            sessions: host.clone(),
+            session_lifecycle: host.clone(),
+            session_graph: host.clone(),
+            processes: host.clone(),
+            process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController,
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
+            parent_invocation: None,
+            session_id: "session".to_string(),
+            agent_frame_id: String::new(),
+            event_tx,
+            checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
+            host_event_outcomes: crate::tool_dispatch::ToolHostEventOutcomeBuffer::default(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
+        });
+        let context = RuntimeExecutionContext::new(
+            "session".to_string(),
+            dispatch,
+            Default::default(),
+            Default::default(),
+            Arc::new(lashlang::InMemoryLashlangArtifactStore::new()),
+            Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(crate::ChronologicalProjection::default()),
+            None,
+            crate::TurnContext::default(),
+        );
+
+        let handle = json!({ "__handle__": "process", "id": "target-process" });
+        let signalled = context
+            .signal_process_handle("signal-1".to_string(), handle, json!({ "kind": "ping" }))
+            .await;
+
+        assert!(
+            signalled.output.is_success(),
+            "{:?}",
+            signalled.output.value_for_projection()
+        );
+        let record = signalled.record.expect("signal record");
+        assert_eq!(record.call_id.as_deref(), Some("signal-1"));
+        assert_eq!(record.tool, "signal_process");
+        let events = host
+            .process_registry
+            .events_after("target-process", 0)
+            .await
+            .expect("list events");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "process.signal"
+                    && event.payload.get("kind") == Some(&json!("ping"))),
+            "expected appended process.signal event, got {events:?}"
+        );
     }
 
     #[tokio::test]

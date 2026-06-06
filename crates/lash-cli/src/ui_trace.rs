@@ -77,7 +77,7 @@ pub(crate) enum UiTraceOp {
     StartTurn,
     UserTurn { text: String },
     QueueTurn { text: String },
-    QueuePendingSteer { text: String },
+    QueueCurrentTurnInput { text: String },
     SlashCommand { text: String },
     SystemMessage { text: String },
     InputInsertText { text: String },
@@ -304,10 +304,7 @@ pub(crate) fn render_screen_snapshot_with_perf(
     let viewport_height = render::history_viewport_height(app, width, height);
     let viewport_width = width as usize;
     app.ensure_height_cache_pub(viewport_width, viewport_height);
-    app.refresh_follow_output_anchor(viewport_width, viewport_height);
-    let total = app.total_content_height(viewport_width, viewport_height);
-    let max_scroll = total.saturating_sub(viewport_height);
-    app.scroll_offset = app.scroll_offset.min(max_scroll);
+    app.refresh_scroll_position(viewport_width, viewport_height);
     app.history_area = render::history_area(app, width, height);
     lash_tui::render_snapshot_with_perf(width, height, previous, |frame| {
         scratch_tui::draw(frame, app);
@@ -384,8 +381,8 @@ impl UiTraceRecorder {
         });
     }
 
-    pub(crate) fn record_queue_pending_steer(&mut self, turn: &PreparedTurn) {
-        self.fixture.ops.push(UiTraceOp::QueuePendingSteer {
+    pub(crate) fn record_queue_current_turn_input(&mut self, turn: &PreparedTurn) {
+        self.fixture.ops.push(UiTraceOp::QueueCurrentTurnInput {
             text: turn.display_text.clone(),
         });
     }

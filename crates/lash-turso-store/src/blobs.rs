@@ -264,10 +264,10 @@ impl Store {
                     params![
                         entry.source.clone(),
                         entry.model.clone(),
-                        entry.usage.input_tokens as i64,
-                        entry.usage.output_tokens as i64,
-                        entry.usage.cached_input_tokens as i64,
-                        entry.usage.reasoning_tokens as i64,
+                        entry.usage.input_tokens,
+                        entry.usage.output_tokens,
+                        entry.usage.cached_input_tokens,
+                        entry.usage.reasoning_tokens,
                     ],
                 )
                 .await?;

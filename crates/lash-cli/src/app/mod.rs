@@ -6,9 +6,10 @@ mod queues;
 mod runtime_events;
 mod view;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use lash_core::runtime::{DeliveryPolicy, QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
 use lash_core::{
     Message, MessageRole, PartKind, PluginMessage, ProcessHandleSummary, ProcessLifecycleStatus,
     PromptUsage, TokenUsage, ToolCallRecord,
@@ -22,7 +23,7 @@ use crate::activity::{
     is_batch_tool_name,
 };
 use crate::editor::EditorState;
-use crate::overlay::{OverlayState, PickerState};
+use crate::overlay::{OverlayState, PickerState, ProcessOverviewState};
 use crate::repo_status::RepoStatus;
 use crate::skill_prompt::append_skill_blocks;
 use crate::stream_markdown::LiveMarkdown;
@@ -30,11 +31,13 @@ use crate::stream_markdown::LiveMarkdown;
 use self::cache::BlockRenderCacheEntry;
 pub(super) use self::live::{LiveToolOutput, LiveTurnState};
 pub(crate) use self::projection::{
-    UiTimeline, UiTimelineItem, interrupted_assistant_tail, interrupted_blocks_from_read_view,
-    preview_text_lines, timeline_from_read_view,
+    UiTimeline, UiTimelineItem, interrupted_assistant_tail, preview_text_lines,
+    timeline_from_read_view,
 };
 #[cfg(test)]
-pub(crate) use self::projection::{smart_truncate_preview_line, strip_ansi_escape_sequences};
+pub(crate) use self::projection::{
+    interrupted_blocks_from_read_view, smart_truncate_preview_line, strip_ansi_escape_sequences,
+};
 
 fn user_turn_start_indices(blocks: &[UiTimelineItem]) -> Vec<usize> {
     blocks
@@ -99,6 +102,7 @@ pub struct ProcessView {
     pub process_id: String,
     pub kind: String,
     pub label: String,
+    pub definition: Option<String>,
     pub status: ProcessLifecycleStatus,
     pub first_seen: std::time::Instant,
     pub status_duration: Option<std::time::Duration>,
@@ -120,10 +124,12 @@ impl ProcessView {
             .descriptor
             .label
             .unwrap_or_else(|| summary.process_id.clone());
+        let definition = summary.definition.map(|definition| definition.name);
         Self {
             process_id: summary.process_id,
             kind,
             label,
+            definition,
             status: summary.status,
             first_seen,
             status_duration,
@@ -144,9 +150,54 @@ pub use crate::overlay::PromptState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FollowOutputMode {
-    Paused,
+    Manual,
     Bottom,
     Contextual,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliRunState {
+    #[default]
+    Idle,
+    Working,
+    Thinking,
+    Responding,
+    RunningTool,
+    Waiting,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TurnSubmissionRoute {
+    SendNow,
+    InjectActiveTurn,
+    QueueNextFullTurn,
+    BlockedSessionSwitch,
+}
+
+impl CliRunState {
+    pub fn is_runtime_active(self) -> bool {
+        matches!(
+            self,
+            Self::Working | Self::Thinking | Self::Responding | Self::RunningTool | Self::Waiting
+        )
+    }
+
+    pub fn is_injectable_runtime_phase(self) -> bool {
+        self.is_runtime_active()
+    }
+
+    pub fn from_status_label(label: &str) -> Self {
+        match label {
+            "error" => Self::Error,
+            "thinking" => Self::Thinking,
+            "responding" => Self::Responding,
+            "retrying" => Self::Waiting,
+            status if status.contains("wait") => Self::Waiting,
+            _ => Self::RunningTool,
+        }
+    }
 }
 
 fn expand_large_paste_placeholders(text: &str, large_pastes: &[LargePaste]) -> String {
@@ -476,10 +527,15 @@ impl Default for LiveTurnView {
 /// Queued and steering turns waiting to dispatch.
 #[derive(Default)]
 pub struct Queues {
-    /// Priority follow-ups entered with Enter while a turn is running.
-    pub pending_steers: std::collections::VecDeque<PreparedTurn>,
-    /// FIFO drafts explicitly queued for later turns.
-    pub queued_turns: std::collections::VecDeque<PreparedTurn>,
+    /// Presentation-only metadata for durable queued batches. The durable
+    /// queue owns ordering and lifecycle; this cache only preserves draft text,
+    /// images, and paste placeholders the runtime cannot reconstruct.
+    pub draft_presentations: HashMap<String, PreparedTurn>,
+    /// Latest durable queued-work snapshot loaded from `LashSession`.
+    pub queued_work_snapshot: Vec<QueuedWorkBatch>,
+    /// Batch ids that have already been claimed for dispatch locally but may
+    /// still appear in durable queue snapshots until the runtime commits them.
+    pub suppressed_preview_batch_ids: HashSet<String>,
     /// Most recent selection-style prompt response, held briefly so the next
     /// tool result can render it inline if it exposes a question-panel
     /// artifact.
@@ -490,7 +546,8 @@ pub struct App {
     pub timeline: UiTimeline,
     pub scroll_offset: usize,
     pub expand_level: u8,
-    pub running: bool,
+    foreground_turn_active: bool,
+    pub run_state: CliRunState,
     pub model: String,
     pub iteration: usize,
     /// Spinner frame counter
@@ -508,7 +565,7 @@ pub struct App {
     pub editor: EditorState,
     /// Loaded skills registry.
     pub skills: SkillCatalog,
-    /// Queued and steering turns waiting to dispatch.
+    /// Durable queue snapshot and draft presentation metadata.
     pub queues: Queues,
     /// Active overlay/picker/dialog state.
     pub overlay: Option<OverlayState>,
@@ -533,6 +590,8 @@ pub struct App {
     pub plan_dock: Option<PlanDockState>,
     /// Snapshot of processes registered for this session.
     pub processes: Vec<ProcessView>,
+    /// Focused background process row in the trailing process dock.
+    pub selected_process_id: Option<String>,
     /// UI extension registry used for slash-command completion and host actions.
     ui_extensions: Arc<TuiExtensions>,
     /// Shared state for the lash-cli chrome UI extension. The scratch-tui
@@ -563,9 +622,31 @@ impl App {
         UiProjectionState::from_app(self)
     }
 
+    fn local_system_messages(&self) -> Vec<String> {
+        self.timeline
+            .iter()
+            .filter_map(|block| match block {
+                UiTimelineItem::SystemMessage(message) => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn append_missing_system_messages(timeline: &mut UiTimeline, messages: Vec<String>) {
+        for message in messages {
+            if timeline.iter().any(|block| {
+                matches!(block, UiTimelineItem::SystemMessage(existing) if existing == &message)
+            }) {
+                continue;
+            }
+            timeline.push(UiTimelineItem::SystemMessage(message));
+        }
+    }
+
     pub fn finish_turn_from_read_view(&mut self, read_view: &lash_core::SessionReadView) {
         let current_turn_starts = user_turn_start_indices(self.timeline.items());
         let current_turn_start = current_turn_starts.last().copied();
+        let local_system_messages = self.local_system_messages();
 
         self.stop_turn();
         let ui_state = UiProjectionState::from_app(self);
@@ -593,12 +674,29 @@ impl App {
                 self.timeline = projected_timeline;
             }
         }
+        Self::append_missing_system_messages(&mut self.timeline, local_system_messages);
+        self.invalidate_height_cache();
+        self.scroll_to_bottom();
+    }
+
+    pub fn finish_interrupted_turn_from_read_view(
+        &mut self,
+        read_view: &lash_core::SessionReadView,
+        ui_state: &UiProjectionState,
+        status_message: impl Into<String>,
+    ) {
+        let local_system_messages = self.local_system_messages();
+        self.stop_turn();
+        let mut projected_timeline = timeline_from_read_view(read_view, ui_state);
+        Self::append_missing_system_messages(&mut projected_timeline, local_system_messages);
+        projected_timeline.push_system_message_if_new(status_message.into());
+        self.timeline = projected_timeline;
         self.invalidate_height_cache();
         self.scroll_to_bottom();
     }
 
     pub fn on_tick(&mut self) {
-        if self.running {
+        if self.turn_active() {
             self.tick += 1;
             self.dirty = true;
         }
@@ -624,6 +722,9 @@ impl App {
                 .is_some_and(|until| until <= std::time::Instant::now())
         }) {
             self.live.turn = None;
+            if !self.foreground_turn_active {
+                self.run_state = CliRunState::Idle;
+            }
             self.dirty = true;
             return;
         }
@@ -654,7 +755,8 @@ impl App {
             timeline: vec![UiTimelineItem::Splash].into(),
             scroll_offset: 0,
             expand_level: 1,
-            running: false,
+            foreground_turn_active: false,
+            run_state: CliRunState::Idle,
             model,
             iteration: 0,
             tick: 0,
@@ -677,6 +779,7 @@ impl App {
             plugin_mode_indicators: BTreeMap::new(),
             plan_dock: None,
             processes: Vec::new(),
+            selected_process_id: None,
             ui_extensions: Arc::new(TuiExtensions::default()),
             chrome_state: Arc::new(Mutex::new(crate::chrome_ui::ChromeUiState::default())),
             cwd,
@@ -705,6 +808,7 @@ impl App {
     /// Get the current input text and reset input state.
     pub fn take_input(&mut self) -> String {
         let text = self.editor.take_input();
+        self.clear_process_selection();
         self.follow_mode = FollowOutputMode::Bottom;
         text
     }
@@ -756,6 +860,10 @@ impl App {
 
     pub fn set_ui_extensions(&mut self, ui_extensions: Arc<TuiExtensions>) {
         self.ui_extensions = ui_extensions;
+        self.ui_extensions.mount_surface(
+            crate::chrome_ui::CHROME_UI_ID,
+            crate::chrome_ui::turn_status_surface_spec(),
+        );
     }
 
     pub fn set_chrome_state(&mut self, state: Arc<Mutex<crate::chrome_ui::ChromeUiState>>) {
@@ -822,11 +930,82 @@ impl App {
             ));
         }
         next.retain(ProcessView::is_visible);
+        if let Some(selected) = self.selected_process_id.as_deref()
+            && !next.iter().any(|process| process.process_id == selected)
+        {
+            self.selected_process_id = None;
+            self.dirty = true;
+        }
         if self.processes != next {
             self.processes = next;
             self.invalidate_height_cache();
             self.dirty = true;
         }
+    }
+
+    pub fn selected_process(&self) -> Option<&ProcessView> {
+        let selected = self.selected_process_id.as_deref()?;
+        self.processes
+            .iter()
+            .find(|process| process.process_id == selected)
+    }
+
+    pub fn clear_process_selection(&mut self) {
+        if self.selected_process_id.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    pub fn select_next_process(&mut self) -> bool {
+        self.select_process_with_delta(1)
+    }
+
+    pub fn select_previous_process(&mut self) -> bool {
+        self.select_process_with_delta(-1)
+    }
+
+    fn select_process_with_delta(&mut self, delta: isize) -> bool {
+        if self.processes.is_empty() {
+            self.clear_process_selection();
+            return false;
+        }
+        let current = self.selected_process_id.as_deref().and_then(|selected| {
+            self.processes
+                .iter()
+                .position(|process| process.process_id == selected)
+        });
+        let len = self.processes.len() as isize;
+        let next = match current {
+            Some(index) => (index as isize + delta).rem_euclid(len) as usize,
+            None if delta < 0 => self.processes.len() - 1,
+            None => 0,
+        };
+        self.selected_process_id = Some(self.processes[next].process_id.clone());
+        self.dirty = true;
+        true
+    }
+
+    pub fn selected_process_overview_state(&self) -> Option<ProcessOverviewState> {
+        let process = self.selected_process()?;
+        let elapsed_duration = process
+            .status_duration
+            .unwrap_or_else(|| process.first_seen.elapsed());
+        let elapsed =
+            crate::util::format_duration_ms_if_visible(elapsed_duration.as_millis() as u64)
+                .unwrap_or_else(|| "0:00".to_string());
+        let mut rows = vec![
+            ("id".to_string(), process.process_id.clone()),
+            ("kind".to_string(), process.kind.clone()),
+            ("status".to_string(), process.status.label().to_string()),
+            ("elapsed".to_string(), elapsed),
+        ];
+        if let Some(definition) = process.definition.as_deref() {
+            rows.insert(2, ("definition".to_string(), definition.to_string()));
+        }
+        Some(ProcessOverviewState {
+            title: format!("Process {}", process.label),
+            rows,
+        })
     }
 
     pub fn set_model_variant(&mut self, model_variant: Option<String>) {

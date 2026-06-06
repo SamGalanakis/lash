@@ -10,8 +10,8 @@ use lash_core::{
 };
 use lash_plugin_tool_output_budget::{ToolOutputBudgetConfig, project_observation_text};
 use lashlang::{
-    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ProcessStart, ProjectedFuture,
-    Record as FlowRecord, Sleep, Value as FlowValue,
+    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ProcessSignal, ProcessStart,
+    ProjectedFuture, Record as FlowRecord, Sleep, Value as FlowValue,
 };
 use serde_json::Value;
 
@@ -256,6 +256,19 @@ impl HostBridge<'_> {
         self.consume_reply("cancel_handle", reply)
     }
 
+    async fn signal_run(&self, signal: ProcessSignal) -> Result<FlowValue, ExecutionHostError> {
+        let handle = handle_to_json(&signal.run).await?;
+        let payload = handle_to_json(&signal.payload).await?;
+        let reply = self
+            .ctx
+            .signal_tool_handle(uuid::Uuid::new_v4().to_string(), handle, payload)
+            .await;
+        self.consume_reply("signal_run", reply)?;
+        // `signal run` evaluates to null in the language; the appended event is
+        // recorded as a tool call but not surfaced as the expression value.
+        Ok(FlowValue::Null)
+    }
+
     async fn print(&self, value: FlowValue) -> Result<(), ExecutionHostError> {
         let attachment_store = self.ctx.attachment_store();
         let images = collect_printed_images(&value, attachment_store.as_ref()).await?;
@@ -317,9 +330,10 @@ impl ExecutionHost for HostBridge<'_> {
             AbilityOp::ProcessEvent(_) => Err(ExecutionHostError::new(
                 "process events are only available inside lashlang process bodies",
             )),
-            AbilityOp::WaitSignal | AbilityOp::SignalRun(_) => Err(ExecutionHostError::new(
-                "process lifecycle primitives are only available inside lashlang process bodies",
+            AbilityOp::WaitSignal => Err(ExecutionHostError::new(
+                "`wait signal` is only available inside lashlang process bodies",
             )),
+            AbilityOp::SignalRun(signal) => self.signal_run(signal).await.map(AbilityResult::Value),
             AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                 Ok(AbilityResult::Value(value))
             }

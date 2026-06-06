@@ -741,19 +741,21 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<TuiHostEffect>) 
                 }
             }
             TuiHostEffect::QueueTurn { input } => {
-                app.queue_turn(PreparedTurn::prepare(input, Vec::new(), &app.skills));
-                app.dirty = true;
+                let _ = input;
+                push_system_message(
+                    app,
+                    "Queue requests from UI surfaces require a live runtime queue.".to_string(),
+                );
             }
             TuiHostEffect::QueuePreparedTurn {
                 display_text,
                 effective_text,
             } => {
-                app.queue_turn(PreparedTurn::prepare_with_effective_text(
-                    display_text,
-                    effective_text,
-                    Vec::new(),
-                ));
-                app.dirty = true;
+                let _ = (display_text, effective_text);
+                push_system_message(
+                    app,
+                    "Queue requests from UI surfaces require a live runtime queue.".to_string(),
+                );
             }
             TuiHostEffect::MountSurface { .. }
             | TuiHostEffect::UpdateSurface { .. }

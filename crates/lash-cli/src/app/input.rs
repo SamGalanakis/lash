@@ -4,27 +4,23 @@ impl App {
     /// Navigate input history with up arrow.
     /// In multi-line mode, if cursor is not on the first line, moves cursor up instead.
     pub fn history_up(&mut self) {
-        if self.editor.input.is_empty()
-            && self.editor.input_history_idx.is_none()
-            && let Some((turn, _was_pending)) = self.take_last_queued_turn()
-        {
-            self.restore_prepared_turn(turn);
-            return;
-        }
         self.editor.history_up();
     }
 
     /// Insert a character at cursor position.
     pub fn insert_char(&mut self, c: char) {
+        self.clear_process_selection();
         self.editor.insert_char(c);
     }
 
     /// Insert literal text at the cursor position.
     pub fn insert_text(&mut self, text: &str) {
+        self.clear_process_selection();
         self.editor.insert_text(text);
     }
 
     pub fn insert_pasted_text(&mut self, text: &str) {
+        self.clear_process_selection();
         self.editor.insert_pasted_text(text);
     }
 
@@ -103,6 +99,7 @@ impl App {
     pub fn session_picker_up(&mut self) {
         if let Some(OverlayState::SessionPicker(state)) = &mut self.overlay {
             state.up();
+            self.dirty = true;
         }
     }
 
@@ -110,15 +107,20 @@ impl App {
     pub fn session_picker_down(&mut self) {
         if let Some(OverlayState::SessionPicker(state)) = &mut self.overlay {
             state.down();
+            self.dirty = true;
         }
     }
 
     /// Get the selected session filename, clearing the picker.
     pub fn take_session_pick(&mut self) -> Option<String> {
         match self.overlay.take() {
-            Some(OverlayState::SessionPicker(mut state)) => {
-                state.take_selected().map(|s| s.filename)
-            }
+            Some(OverlayState::SessionPicker(state)) => match state.selected_filename() {
+                Some(filename) => Some(filename),
+                None => {
+                    self.overlay = Some(OverlayState::SessionPicker(state));
+                    None
+                }
+            },
             other => {
                 self.overlay = other;
                 None
@@ -130,6 +132,7 @@ impl App {
     pub fn dismiss_session_picker(&mut self) {
         if matches!(self.overlay, Some(OverlayState::SessionPicker(_))) {
             self.overlay = None;
+            self.dirty = true;
         }
     }
 
@@ -213,6 +216,29 @@ impl App {
     pub fn dismiss_skill_picker(&mut self) {
         if matches!(self.overlay, Some(OverlayState::SkillPicker(_))) {
             self.overlay = None;
+        }
+    }
+
+    pub fn has_process_overview(&self) -> bool {
+        matches!(self.overlay, Some(OverlayState::ProcessOverview(_)))
+    }
+
+    pub fn show_process_overview(&mut self, state: crate::overlay::ProcessOverviewState) {
+        self.overlay = Some(OverlayState::ProcessOverview(state));
+        self.dirty = true;
+    }
+
+    pub fn process_overview_state(&self) -> Option<&crate::overlay::ProcessOverviewState> {
+        match &self.overlay {
+            Some(OverlayState::ProcessOverview(state)) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn dismiss_process_overview(&mut self) {
+        if matches!(self.overlay, Some(OverlayState::ProcessOverview(_))) {
+            self.overlay = None;
+            self.dirty = true;
         }
     }
 
@@ -345,13 +371,30 @@ impl App {
     }
 
     pub fn show_session_picker(&mut self, items: Vec<crate::session_log::SessionInfo>) {
-        self.overlay = Some(OverlayState::SessionPicker(PickerState::new(items)));
+        self.overlay = Some(OverlayState::SessionPicker(
+            crate::overlay::SessionPickerState::new(items),
+        ));
+        self.dirty = true;
     }
 
-    pub fn session_picker_state(&self) -> Option<&PickerState<crate::session_log::SessionInfo>> {
+    pub fn session_picker_state(&self) -> Option<&crate::overlay::SessionPickerState> {
         match &self.overlay {
             Some(OverlayState::SessionPicker(state)) => Some(state),
             _ => None,
+        }
+    }
+
+    pub fn session_picker_insert_query_char(&mut self, ch: char) {
+        if let Some(OverlayState::SessionPicker(state)) = &mut self.overlay {
+            state.push_query_char(ch);
+            self.dirty = true;
+        }
+    }
+
+    pub fn session_picker_backspace_query(&mut self) {
+        if let Some(OverlayState::SessionPicker(state)) = &mut self.overlay {
+            state.pop_query_char();
+            self.dirty = true;
         }
     }
 

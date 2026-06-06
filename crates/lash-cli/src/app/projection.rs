@@ -130,6 +130,7 @@ pub(crate) fn timeline_from_read_view(
     timeline
 }
 
+#[cfg(test)]
 pub(crate) fn interrupted_blocks_from_read_view(
     read_view: &lash_core::SessionReadView,
     ui_state: &UiProjectionState,

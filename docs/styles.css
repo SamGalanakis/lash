@@ -1521,19 +1521,27 @@ body.docs-page .cover__top     { display: none; }
   top: var(--space-sm);
   right: var(--space-sm);
   z-index: 2;
-  background: var(--bg-elev);
-  border: 1px solid var(--rule);
-  color: var(--ink-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  background: var(--bg-faint);
+  border: 1px solid var(--rule-strong);
+  color: var(--ink-mid);
   font-family: var(--font-mono);
-  font-size: 0.74rem;
-  letter-spacing: 0.06em;
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   padding: var(--space-2xs) var(--space-sm);
   cursor: pointer;
   border-radius: 2px;
   transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
 }
+.diagram-zoom__glyph {
+  font-size: 0.95rem;
+  line-height: 1;
+}
 .diagram-zoom:hover {
-  background: var(--bg-faint);
+  background: var(--bg-tint);
   color: var(--sodium);
   border-color: var(--sodium);
 }
@@ -1591,7 +1599,7 @@ body.docs-page .cover__top     { display: none; }
   appearance: none;
   border: 1px solid var(--rule-strong);
   background: transparent;
-  color: var(--ink-dim);
+  color: var(--ink-mid);
   padding: var(--space-2xs) var(--space-sm);
   font-family: var(--font-mono);
   font-size: 0.78rem;
