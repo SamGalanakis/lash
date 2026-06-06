@@ -21,8 +21,8 @@ default = ["testing"]
 testing = ["lash-llm-transport/testing"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.25" }
-lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.25" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.26" }
+lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.26" }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream", "rustls"] }
