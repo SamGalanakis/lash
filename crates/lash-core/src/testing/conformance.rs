@@ -26,10 +26,10 @@ use crate::{
 };
 use crate::{
     LashSchema, ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventSemanticsSpec,
-    ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessLeaseCompletion,
-    ProcessProvenance, ProcessRegistration, ProcessRegistry, ProcessScope, ProcessScopeId,
-    ProcessTerminalState, ProcessValueSelector, ProcessWakeDedupeKey, ProcessWakeDelivery,
-    ProcessWakeSpec,
+    ProcessEventType, ProcessExternalRef, ProcessHandleDescriptor, ProcessInput,
+    ProcessLeaseCompletion, ProcessProvenance, ProcessRegistration, ProcessRegistry, ProcessScope,
+    ProcessScopeId, ProcessTerminalState, ProcessValueSelector, ProcessWakeDedupeKey,
+    ProcessWakeDelivery, ProcessWakeSpec,
 };
 
 /// A pair of [`ProcessRegistry`] handles opened against the same durable
@@ -426,7 +426,29 @@ pub async fn process_registry<F>(make: F)
 where
     F: Fn() -> Arc<dyn ProcessRegistry>,
 {
+    process_registry_with_expected_durability(make, crate::DurabilityTier::Inline).await;
+}
+
+/// Run the full [`ProcessRegistry`] suite plus durable reopen checks.
+pub async fn process_registry_reopenable<F>(make: F)
+where
+    F: Fn() -> ReopenableProcessRegistry,
+{
+    process_registry_with_expected_durability(|| make().open, crate::DurabilityTier::Durable).await;
+    process_registry_survives_reopen(make()).await;
+}
+
+/// Run the full [`ProcessRegistry`] conformance suite against a backend with an
+/// explicit expected durability tier.
+pub async fn process_registry_with_expected_durability<F>(
+    make: F,
+    expected_tier: crate::DurabilityTier,
+) where
+    F: Fn() -> Arc<dyn ProcessRegistry>,
+{
+    process_registry_reports_declared_durability(make(), expected_tier).await;
     registration_is_idempotent_and_hash_conflicts_fail(make()).await;
+    external_refs_and_handle_grant_membership_round_trip(make()).await;
     validates_custom_events_and_materializes_wakes(make()).await;
     custom_wake_events_preserve_typed_provenance_and_replay(make()).await;
     event_streams_filter_order_and_wait_without_leaking_old_events(make()).await;
@@ -446,15 +468,6 @@ where
     renewed_process_lease_survives_original_expiry(make()).await;
     completed_lease_releases_and_reclaim_bumps_fencing(make()).await;
     stale_lease_completion_cannot_release_live_lease(make()).await;
-}
-
-/// Run the full [`ProcessRegistry`] suite plus durable reopen checks.
-pub async fn process_registry_reopenable<F>(make: F)
-where
-    F: Fn() -> ReopenableProcessRegistry,
-{
-    process_registry(|| make().open).await;
-    process_registry_survives_reopen(make()).await;
 }
 
 fn registration(id: &str) -> ProcessRegistration {
@@ -522,6 +535,101 @@ async fn registration_is_idempotent_and_hash_conflicts_fail(registry: Arc<dyn Pr
             .await
             .is_err(),
         "a different registration under the same id must fail with a hash conflict"
+    );
+}
+
+async fn process_registry_reports_declared_durability(
+    registry: Arc<dyn ProcessRegistry>,
+    expected_tier: crate::DurabilityTier,
+) {
+    assert_eq!(
+        registry.durability_tier(),
+        expected_tier,
+        "process registry conformance must pin the backend's declared durability tier"
+    );
+}
+
+async fn external_refs_and_handle_grant_membership_round_trip(registry: Arc<dyn ProcessRegistry>) {
+    assert!(
+        registry
+            .set_external_ref(
+                "missing-process",
+                ProcessExternalRef {
+                    backend: "test".to_string(),
+                    id: "missing".to_string(),
+                    metadata: None,
+                },
+            )
+            .await
+            .is_err(),
+        "setting an external ref for an unknown process must fail"
+    );
+
+    registry
+        .register_process(registration("proc-external-ref"))
+        .await
+        .expect("register process");
+    let external_ref = ProcessExternalRef {
+        backend: "worker".to_string(),
+        id: "job-123".to_string(),
+        metadata: Some(serde_json::json!({ "queue": "critical" })),
+    };
+    let updated = registry
+        .set_external_ref("proc-external-ref", external_ref.clone())
+        .await
+        .expect("set external ref");
+    assert_eq!(updated.external_ref, Some(external_ref.clone()));
+    assert_eq!(
+        registry
+            .get_process("proc-external-ref")
+            .await
+            .expect("process after external ref")
+            .external_ref,
+        Some(external_ref),
+        "external ref must persist on the process record"
+    );
+
+    let owner = ProcessScope::new("grant-owner");
+    assert!(
+        !registry
+            .has_handle_grant(&owner, "proc-external-ref")
+            .await
+            .expect("missing grant check"),
+        "has_handle_grant must be false before grant_handle"
+    );
+    registry
+        .grant_handle(
+            &owner,
+            "proc-external-ref",
+            ProcessHandleDescriptor::new(Some("test"), Some("external ref")),
+        )
+        .await
+        .expect("grant handle");
+    assert!(
+        registry
+            .has_handle_grant(&owner, "proc-external-ref")
+            .await
+            .expect("present grant check"),
+        "has_handle_grant must be true after grant_handle"
+    );
+    registry
+        .revoke_handle(&owner, "proc-external-ref")
+        .await
+        .expect("revoke handle");
+    assert!(
+        !registry
+            .has_handle_grant(&owner, "proc-external-ref")
+            .await
+            .expect("revoked grant check"),
+        "has_handle_grant must be false after revoke_handle"
+    );
+    assert!(
+        registry
+            .list_handle_grants(&owner)
+            .await
+            .expect("list grants after revoke")
+            .is_empty(),
+        "revoked handles must disappear from list_handle_grants"
     );
 }
 
@@ -1689,12 +1797,21 @@ pub enum AttachmentManifestConformance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimePersistenceConformance {
     pub attachment_manifest: AttachmentManifestConformance,
+    pub durability_tier: crate::DurabilityTier,
 }
 
 impl RuntimePersistenceConformance {
-    pub const fn noop_attachment_manifest() -> Self {
+    pub const fn persistent_attachment_manifest(durability_tier: crate::DurabilityTier) -> Self {
+        Self {
+            attachment_manifest: AttachmentManifestConformance::Persistent,
+            durability_tier,
+        }
+    }
+
+    pub const fn noop_attachment_manifest(durability_tier: crate::DurabilityTier) -> Self {
         Self {
             attachment_manifest: AttachmentManifestConformance::Noop,
+            durability_tier,
         }
     }
 }
@@ -1703,6 +1820,7 @@ impl Default for RuntimePersistenceConformance {
     fn default() -> Self {
         Self {
             attachment_manifest: AttachmentManifestConformance::Persistent,
+            durability_tier: crate::DurabilityTier::Durable,
         }
     }
 }
@@ -1720,7 +1838,13 @@ pub async fn runtime_persistence<F>(make: F)
 where
     F: Fn() -> Arc<dyn RuntimePersistence>,
 {
-    runtime_persistence_with_options(make, RuntimePersistenceConformance::default()).await;
+    runtime_persistence_with_options(
+        make,
+        RuntimePersistenceConformance::persistent_attachment_manifest(
+            crate::DurabilityTier::Inline,
+        ),
+    )
+    .await;
 }
 
 /// Run the full [`RuntimePersistence`] suite plus durable reopen checks.
@@ -1728,7 +1852,13 @@ pub async fn runtime_persistence_reopenable<F>(make: F)
 where
     F: Fn() -> ReopenableRuntimePersistence,
 {
-    runtime_persistence(|| make().open).await;
+    runtime_persistence_with_options(
+        || make().open,
+        RuntimePersistenceConformance::persistent_attachment_manifest(
+            crate::DurabilityTier::Durable,
+        ),
+    )
+    .await;
     runtime_persistence_survives_reopen(make()).await;
 }
 
@@ -1736,9 +1866,11 @@ pub async fn runtime_persistence_with_options<F>(make: F, options: RuntimePersis
 where
     F: Fn() -> Arc<dyn RuntimePersistence>,
 {
+    runtime_persistence_reports_declared_durability(make(), options.durability_tier).await;
     commit_increments_head_and_round_trips_agent_frames(make()).await;
     commit_rejects_a_different_session_id(make()).await;
     load_hydrates_checkpoint_and_usage(make()).await;
+    active_path_read_scope_selects_only_requested_ancestry(make()).await;
     match options.attachment_manifest {
         AttachmentManifestConformance::Persistent => {
             attachment_manifest_records_intent_and_commit_stamps(make()).await;
@@ -1749,6 +1881,7 @@ where
     }
     queued_work_source_keys_are_idempotent_and_list_ordered(make()).await;
     queued_work_cancel_removes_only_unclaimed_batches(make()).await;
+    queued_work_exact_claim_uses_selected_batch_ids(make()).await;
     queued_work_claims_respect_boundaries_renewal_and_abandon(make()).await;
     queued_work_respects_availability_limits_exclusivity_reclaim_and_sessions(make()).await;
     queued_work_join_groups_by_delivery_policy_and_merge_key(make()).await;
@@ -1945,6 +2078,98 @@ async fn load_hydrates_checkpoint_and_usage(store: Arc<dyn RuntimePersistence>) 
     assert_eq!(checkpoint.plugin_snapshot_revision, Some(12));
     assert_eq!(read.token_ledger.len(), 1);
     assert_eq!(read.token_ledger[0].usage.input_tokens, 11);
+}
+
+async fn runtime_persistence_reports_declared_durability(
+    store: Arc<dyn RuntimePersistence>,
+    expected_tier: crate::DurabilityTier,
+) {
+    assert_eq!(
+        store.durability_tier(),
+        expected_tier,
+        "runtime persistence conformance must pin the backend's declared durability tier"
+    );
+}
+
+async fn active_path_read_scope_selects_only_requested_ancestry(
+    store: Arc<dyn RuntimePersistence>,
+) {
+    let graph = crate::SessionGraph::from_nodes(
+        vec![
+            sample_session_node("root-node", None),
+            sample_session_node("left-node", Some("root-node")),
+            sample_session_node("left-leaf", Some("left-node")),
+            sample_session_node("right-leaf", Some("root-node")),
+        ],
+        Some("left-leaf".to_string()),
+    );
+    let state = RuntimeSessionState {
+        session_id: "branchy".to_string(),
+        session_graph: graph,
+        graph_replace_required: true,
+        ..RuntimeSessionState::default()
+    };
+    store
+        .commit_runtime_state(RuntimeCommit::persisted_state(&state, &[]))
+        .await
+        .expect("commit branchy graph");
+
+    let full = store
+        .load_session(SessionReadScope::FullGraph)
+        .await
+        .expect("load full graph")
+        .expect("full graph exists");
+    assert_eq!(
+        full.graph
+            .nodes
+            .iter()
+            .map(|node| node.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["root-node", "left-node", "left-leaf", "right-leaf"],
+        "FullGraph must retain every non-tombstoned branch"
+    );
+
+    let persisted_leaf_path = store
+        .load_session(SessionReadScope::ActivePath { leaf_node_id: None })
+        .await
+        .expect("load persisted active path")
+        .expect("active path exists");
+    assert_eq!(
+        persisted_leaf_path
+            .graph
+            .nodes
+            .iter()
+            .map(|node| node.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["root-node", "left-node", "left-leaf"],
+        "ActivePath with no explicit leaf must use the persisted leaf and hide sibling branches"
+    );
+    assert_eq!(
+        persisted_leaf_path.graph.leaf_node_id.as_deref(),
+        Some("left-leaf")
+    );
+
+    let explicit_right_path = store
+        .load_session(SessionReadScope::ActivePath {
+            leaf_node_id: Some("right-leaf".to_string()),
+        })
+        .await
+        .expect("load explicit active path")
+        .expect("explicit active path exists");
+    assert_eq!(
+        explicit_right_path
+            .graph
+            .nodes
+            .iter()
+            .map(|node| node.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["root-node", "right-leaf"],
+        "ActivePath with an explicit leaf must select that ancestry, not the persisted leaf"
+    );
+    assert_eq!(
+        explicit_right_path.graph.leaf_node_id.as_deref(),
+        Some("right-leaf")
+    );
 }
 
 async fn attachment_manifest_records_intent_and_commit_stamps(store: Arc<dyn RuntimePersistence>) {
@@ -2168,6 +2393,82 @@ async fn queued_work_cancel_removes_only_unclaimed_batches(store: Arc<dyn Runtim
             .expect("cancel abandoned claim")
             .is_some(),
         "abandoned batches become cancellable again"
+    );
+}
+
+async fn queued_work_exact_claim_uses_selected_batch_ids(store: Arc<dyn RuntimePersistence>) {
+    let first = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "first",
+            DeliveryPolicy::AfterCurrentTurnCommit,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue first batch");
+    let second = store
+        .enqueue_queued_work(queued_draft(
+            "root",
+            "second",
+            DeliveryPolicy::AfterCurrentTurnCommit,
+            SlotPolicy::Exclusive,
+        ))
+        .await
+        .expect("enqueue second batch");
+
+    assert!(
+        store
+            .claim_ready_queued_work_by_batch_ids(
+                "root",
+                "owner",
+                QueuedWorkClaimBoundary::Idle,
+                60_000,
+                std::slice::from_ref(&second.batch_id),
+            )
+            .await
+            .expect("claim out-of-order exact batch")
+            .is_none(),
+        "exact claims must not skip earlier durable queue work"
+    );
+    assert_eq!(
+        store
+            .list_pending_queued_work("root")
+            .await
+            .expect("list after rejected exact claim")
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.batch_id.as_str(), second.batch_id.as_str()]
+    );
+
+    let claim = store
+        .claim_ready_queued_work_by_batch_ids(
+            "root",
+            "owner",
+            QueuedWorkClaimBoundary::Idle,
+            60_000,
+            std::slice::from_ref(&first.batch_id),
+        )
+        .await
+        .expect("claim first exact batch")
+        .expect("first exact claim exists");
+    assert_eq!(
+        claim
+            .batches
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.batch_id.as_str()]
+    );
+    assert_eq!(
+        store
+            .list_pending_queued_work("root")
+            .await
+            .expect("list pending after exact claim")
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![second.batch_id.as_str()]
     );
 }
 

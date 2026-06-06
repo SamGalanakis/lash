@@ -233,9 +233,38 @@ fn materialize_test_provider_spec(spec: &ProviderSpec) -> Result<ProviderHandle,
         .and_then(serde_json::Value::as_str)
         .unwrap_or("rlm-subagent-smoke");
     match scenario {
+        "standard-echo" => Ok(standard_echo_provider().into_handle()),
         "rlm-subagent-smoke" => Ok(rlm_subagent_smoke_provider().into_handle()),
         other => Err(format!("unknown CLI test provider scenario `{other}`")),
     }
+}
+
+#[cfg(feature = "test-provider")]
+fn standard_echo_provider() -> lash_core::testing::TestProvider {
+    lash_core::testing::TestProvider::builder()
+        .kind("test")
+        .serialize_config(|| {
+            serde_json::json!({
+                "scenario": "standard-echo",
+            })
+        })
+        .complete(|request| async move {
+            let prompt = if request_contains_text(&request, "hello from pty") {
+                "hello from pty"
+            } else {
+                "interactive prompt"
+            };
+            let response = format!("test-provider echo: {prompt}");
+            Ok(lash_core::LlmResponse {
+                full_text: response.clone(),
+                parts: vec![lash_core::llm::types::LlmOutputPart::Text {
+                    text: response,
+                    response_meta: None,
+                }],
+                ..Default::default()
+            })
+        })
+        .build()
 }
 
 #[cfg(feature = "test-provider")]
@@ -275,16 +304,19 @@ submit result.value
 }
 
 #[cfg(feature = "test-provider")]
-fn request_contains_subagent_prompt(request: &lash_core::LlmRequest) -> bool {
+fn request_contains_text(request: &lash_core::LlmRequest, needle: &str) -> bool {
     request.messages.iter().any(|message| {
         message.blocks.iter().any(|part| match part {
-            lash_core::llm::types::LlmContentBlock::Text { text, .. } => {
-                text.contains("Subagent capability: explore. Depth: 1/5.")
-                    || text.contains("Submit `{ value: \\\"subagent-ok\\\" }` exactly.")
-            }
+            lash_core::llm::types::LlmContentBlock::Text { text, .. } => text.contains(needle),
             _ => false,
         })
     })
+}
+
+#[cfg(feature = "test-provider")]
+fn request_contains_subagent_prompt(request: &lash_core::LlmRequest) -> bool {
+    request_contains_text(request, "Subagent capability: explore. Depth: 1/5.")
+        || request_contains_text(request, "Submit `{ value: \\\"subagent-ok\\\" }` exactly.")
 }
 
 #[cfg(test)]

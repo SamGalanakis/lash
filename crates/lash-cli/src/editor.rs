@@ -695,6 +695,39 @@ impl EditorState {
         }
     }
 
+    pub fn kill_to_line_start(&mut self) {
+        if self.has_selection() {
+            self.record_undo(UndoAction::Delete);
+            self.delete_selection();
+            return;
+        }
+        let before = &self.input[..self.cursor_pos];
+        let line_start = before.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+        if line_start == self.cursor_pos {
+            return;
+        }
+        self.record_undo(UndoAction::Delete);
+        self.remove_range_internal(line_start..self.cursor_pos);
+    }
+
+    pub fn kill_to_line_end(&mut self) {
+        if self.has_selection() {
+            self.record_undo(UndoAction::Delete);
+            self.delete_selection();
+            return;
+        }
+        let after = &self.input[self.cursor_pos..];
+        let line_end = after
+            .find('\n')
+            .map(|idx| self.cursor_pos + idx)
+            .unwrap_or(self.input.len());
+        if line_end == self.cursor_pos {
+            return;
+        }
+        self.record_undo(UndoAction::Delete);
+        self.remove_range_internal(self.cursor_pos..line_end);
+    }
+
     pub fn move_cursor_left(&mut self) {
         if let Some(range) = self.selected_range() {
             self.cursor_pos = range.start;
@@ -1309,5 +1342,37 @@ mod tests {
         assert_eq!(editor.input, "before  after");
         assert!(editor.pending_images.is_empty());
         assert!(!editor.has_selection());
+    }
+
+    #[test]
+    fn kill_to_line_start_removes_text_before_cursor() {
+        let mut editor = EditorState {
+            input: "alpha beta\ngamma delta".into(),
+            cursor_pos: "alpha beta\ngamma".len(),
+            ..Default::default()
+        };
+
+        editor.kill_to_line_start();
+
+        assert_eq!(editor.input, "alpha beta\n delta");
+        assert_eq!(editor.cursor_pos, "alpha beta\n".len());
+        assert!(editor.undo());
+        assert_eq!(editor.input, "alpha beta\ngamma delta");
+    }
+
+    #[test]
+    fn kill_to_line_end_removes_text_after_cursor() {
+        let mut editor = EditorState {
+            input: "alpha beta\ngamma delta".into(),
+            cursor_pos: "alpha beta\ngamma".len(),
+            ..Default::default()
+        };
+
+        editor.kill_to_line_end();
+
+        assert_eq!(editor.input, "alpha beta\ngamma");
+        assert_eq!(editor.cursor_pos, "alpha beta\ngamma".len());
+        assert!(editor.undo());
+        assert_eq!(editor.input, "alpha beta\ngamma delta");
     }
 }

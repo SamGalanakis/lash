@@ -14,7 +14,7 @@ use crate::turn_runner::RuntimeRunResult;
 use crate::{SkillCatalog, hash12, push_system_message};
 
 use super::super::helpers::TurnReplayPayload;
-use super::super::runtime::{apply_pending_reconfigure, send_user_message};
+use super::super::runtime::send_user_message;
 
 #[allow(clippy::too_many_arguments)]
 async fn activate_opened_session(
@@ -26,7 +26,7 @@ async fn activate_opened_session(
     turn_counter: &mut usize,
     current_execution_mode: &mut ModeId,
     current_model_variant: &mut Option<String>,
-    desired_tool_state: &mut ToolState,
+    active_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
     provider: &ProviderHandle,
 ) -> Result<(), String> {
@@ -42,7 +42,7 @@ async fn activate_opened_session(
         current_execution_mode,
         provider,
         current_model_variant,
-        desired_tool_state,
+        active_tool_state,
         model_catalog,
     )
     .await?;
@@ -55,7 +55,7 @@ async fn activate_opened_session(
         .refresh_tool_surface("interactive session open", None, "interactive-session-open")
         .await
         .map_err(|err| err.to_string())?;
-    *desired_tool_state = session
+    *active_tool_state = session
         .control()
         .tools()
         .state()
@@ -105,7 +105,7 @@ pub(super) async fn handle_clear(
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ModeId,
-    desired_tool_state: &mut ToolState,
+    active_tool_state: &mut ToolState,
     pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<bool> {
     *active_stream_id = active_stream_id.wrapping_add(1);
@@ -147,12 +147,13 @@ pub(super) async fn handle_clear(
         *current_model_variant = rt.policy_snapshot().model.variant;
     }
     app.session_name = opened.bootstrap.session_name();
-    *desired_tool_state = session.control().tools().state().await?;
+    *active_tool_state = session.control().tools().state().await?;
     history.clear();
     *turn_counter = 0;
     *last_turn = None;
     app.clear();
     app.set_model_variant(current_model_variant.clone());
+    app.set_execution_mode_label(current_execution_mode);
     app.timeline.push(UiTimelineItem::SystemMessage(format!(
         "Started new session: {}",
         app.session_name
@@ -172,21 +173,10 @@ pub(super) async fn handle_retry(
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
     current_execution_mode: &mut ModeId,
-    desired_tool_state: &mut ToolState,
-    pending_reconfigure: &mut bool,
     toolset_hash: &mut String,
     app_tx: &crate::event::AppEventTx,
 ) -> anyhow::Result<bool> {
     if let Some(previous) = last_turn.clone() {
-        if let Err(e) =
-            apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
-        {
-            push_system_message(
-                app,
-                format!("Pending runtime reconfigure failed; retry blocked: {}", e),
-            );
-            return Ok(false);
-        }
         let definitions = match runtime.as_ref() {
             Some(session) => session
                 .control()
@@ -199,7 +189,7 @@ pub(super) async fn handle_retry(
         *toolset_hash =
             hash12(&serde_json::to_vec(&definitions).unwrap_or_else(|_| b"[]".to_vec()));
         *current_execution_mode = previous.execution_mode;
-        let current_tool_state = desired_tool_state.clone();
+        app.set_execution_mode_label(current_execution_mode);
         send_user_message(
             previous.prepared_turn.clone(),
             previous.turn_input.clone(),
@@ -212,7 +202,6 @@ pub(super) async fn handle_retry(
             cancel_token,
             active_stream_id,
             app_tx,
-            &current_tool_state,
         )
         .await;
     } else {
@@ -332,7 +321,7 @@ pub(crate) async fn switch_to_session_identifier(
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ModeId,
-    desired_tool_state: &mut ToolState,
+    active_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
 ) -> anyhow::Result<()> {
@@ -360,15 +349,14 @@ pub(crate) async fn switch_to_session_identifier(
         turn_counter,
         current_execution_mode,
         current_model_variant,
-        desired_tool_state,
+        active_tool_state,
         model_catalog,
         provider,
     )
     .await
     .map_err(anyhow::Error::msg)?;
     *toolset_hash = hash12(
-        &serde_json::to_vec(&desired_tool_state.tool_manifests())
-            .unwrap_or_else(|_| b"[]".to_vec()),
+        &serde_json::to_vec(&active_tool_state.tool_manifests()).unwrap_or_else(|_| b"[]".to_vec()),
     );
     Ok(())
 }
@@ -386,7 +374,7 @@ pub(super) async fn handle_resume(
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ModeId,
-    desired_tool_state: &mut ToolState,
+    active_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
 ) -> anyhow::Result<bool> {
@@ -402,7 +390,7 @@ pub(super) async fn handle_resume(
             provider,
             current_model_variant,
             current_execution_mode,
-            desired_tool_state,
+            active_tool_state,
             model_catalog,
             toolset_hash,
         )

@@ -1151,6 +1151,15 @@ mod tests {
                             "name": "lookup", "arguments": "{\"q\":\"x\"}", "status": "completed"
                         }]
                     })),
+                    Scenario::StreamingTextAssembly => {
+                        ProviderWire::body(json!({})).with_text_stream(
+                            vec![
+                                r#"{"type":"response.output_text.delta","item_id":"msg_1","delta":"hello "}"#.to_string(),
+                                r#"{"type":"response.output_text.delta","item_id":"msg_1","delta":"world"}"#.to_string(),
+                            ],
+                            "hello world",
+                        )
+                    }
                     Scenario::StreamingToolArgumentMerge => {
                         ProviderWire::body(json!({})).with_tool_call_stream(
                             vec![

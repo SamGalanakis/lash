@@ -209,10 +209,14 @@ impl App {
         })
     }
 
-    pub fn full_turn_batches_for_editing(&self) -> impl Iterator<Item = &QueuedWorkBatch> {
+    pub fn visible_turn_batches_for_editing(&self) -> impl Iterator<Item = &QueuedWorkBatch> {
         self.queues.queued_work_snapshot.iter().filter(|batch| {
-            batch.delivery_policy == DeliveryPolicy::AfterCurrentTurnCommit
+            !self.queued_batch_preview_suppressed(batch)
                 && batch.slot_policy == SlotPolicy::Exclusive
+                && matches!(
+                    batch.delivery_policy,
+                    DeliveryPolicy::EarliestSafeBoundary | DeliveryPolicy::AfterCurrentTurnCommit
+                )
                 && batch
                     .items
                     .iter()

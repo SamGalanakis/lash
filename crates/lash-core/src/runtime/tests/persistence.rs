@@ -10,7 +10,9 @@ async fn recording_store_satisfies_runtime_persistence_conformance() {
             std::sync::Arc::new(RecordingStore::default())
                 as std::sync::Arc<dyn crate::RuntimePersistence>
         },
-        crate::testing::conformance::RuntimePersistenceConformance::noop_attachment_manifest(),
+        crate::testing::conformance::RuntimePersistenceConformance::noop_attachment_manifest(
+            crate::DurabilityTier::Inline,
+        ),
     )
     .await;
 }

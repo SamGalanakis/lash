@@ -139,7 +139,7 @@ async fn apply_graph_resume_state(
     execution_mode: &mut ModeId,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    desired_tool_state: &mut ToolState,
+    active_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
     let mut graph = graph;
@@ -173,7 +173,7 @@ async fn apply_graph_resume_state(
             .restore_state(tool_state)
             .await;
         if let Ok(state) = session.control().tools().state().await {
-            *desired_tool_state = state;
+            *active_tool_state = state;
         }
     }
 
@@ -247,7 +247,7 @@ pub async fn load_resumed_session(
     execution_mode: &mut ModeId,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    desired_tool_state: &mut ToolState,
+    active_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
     let filename = session_log::filename_for_session_identifier(identifier)
@@ -284,12 +284,13 @@ pub async fn load_resumed_session(
         execution_mode,
         provider,
         current_model_variant,
-        desired_tool_state,
+        active_tool_state,
         model_catalog,
     )
     .await?;
     app.stop_turn();
     app.live.tool_output = loaded.live_tool_output;
+    app.set_execution_mode_label(execution_mode);
     app.invalidate_height_cache();
     app.resume_follow_output();
     Ok(())
@@ -305,7 +306,7 @@ pub async fn restore_session_state(
     execution_mode: &mut ModeId,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    desired_tool_state: &mut ToolState,
+    active_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
     let db_path = session_log::sessions_dir().join(session_filename);
@@ -343,7 +344,7 @@ pub async fn restore_session_state(
             execution_mode,
             provider,
             current_model_variant,
-            desired_tool_state,
+            active_tool_state,
             model_catalog,
         )
         .await;
@@ -457,7 +458,7 @@ mod tests {
             )
             .into_components(),
         );
-        let mut desired_tool_state = ToolState::default();
+        let mut active_tool_state = ToolState::default();
         let model_catalog = build_model_catalog();
 
         let mut app = App::new(
@@ -480,7 +481,7 @@ mod tests {
             &mut execution_mode,
             &provider,
             &mut current_model_variant,
-            &mut desired_tool_state,
+            &mut active_tool_state,
             &model_catalog,
         )
         .await

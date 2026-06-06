@@ -29,6 +29,10 @@ struct SeedProbeState {
     captured_child_prompt: Arc<Mutex<Option<String>>>,
 }
 
+fn prompt_advertises_bound_variable(prompt: &str, name: &str) -> bool {
+    prompt.contains(&format!("- `{name}`:")) || prompt.contains(&format!("- `{name}` ="))
+}
+
 #[test]
 fn static_capability_policy_fields_distinguish_inherit_set_and_clear() {
     let current = SessionPolicy {
@@ -400,7 +404,7 @@ submit result
         })
     );
     assert!(
-        prompt.contains("- `chunk`:"),
+        prompt_advertises_bound_variable(&prompt, "chunk"),
         "child prompt did not advertise seeded `chunk` variable:\n{prompt}"
     );
 }
@@ -458,7 +462,7 @@ submit result
         })
     );
     assert!(
-        prompt.contains("- `chunk`:"),
+        prompt_advertises_bound_variable(&prompt, "chunk"),
         "child prompt did not advertise seeded `chunk` variable:\n{prompt}"
     );
 }
@@ -492,7 +496,7 @@ submit result
         })
     );
     assert!(
-        prompt.contains("- `chunk`:"),
+        prompt_advertises_bound_variable(&prompt, "chunk"),
         "child prompt did not advertise seeded `chunk` variable:\n{prompt}"
     );
 }
@@ -525,7 +529,7 @@ submit result
         })
     );
     assert!(
-        prompt.contains("- `chunk`:"),
+        prompt_advertises_bound_variable(&prompt, "chunk"),
         "child prompt did not advertise seeded `chunk` variable:\n{prompt}"
     );
 }
@@ -654,7 +658,7 @@ submit result
         })
     );
     assert!(
-        prompt.contains("- `chunk`:"),
+        prompt_advertises_bound_variable(&prompt, "chunk"),
         "child prompt did not advertise projected-derived seeded `chunk` variable:\n{prompt}"
     );
 }
@@ -678,7 +682,7 @@ async fn complete_seed_probe_request(
 ) -> Result<LlmResponse, lash_core::llm::transport::LlmTransportError> {
     let prompt = request_text(&request);
     let is_child = prompt.contains("Subagent capability: default. Depth: 1/5.")
-        || prompt.contains("- `chunk`:");
+        || prompt_advertises_bound_variable(&prompt, "chunk");
     if is_child {
         *state.captured_child_prompt.lock().expect("captured prompt") = Some(prompt);
         Ok(LlmResponse {

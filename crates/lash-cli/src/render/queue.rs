@@ -34,10 +34,12 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         push_queue_section(
             &mut lines,
             inner_width,
-            "◆ after current step",
+            "◆ Will send in this turn",
             &after_current_step_previews,
             &app.skills,
-            Style::default().fg(theme::brand()),
+            Style::default()
+                .fg(theme::brand())
+                .add_modifier(Modifier::Bold),
             Style::default().fg(theme::text_muted()),
         );
     }
@@ -49,10 +51,12 @@ fn queue_preview_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         push_queue_section(
             &mut lines,
             inner_width,
-            "◇ next full turn",
+            "◇ Queued for next turn",
             &next_turn_previews,
             &app.skills,
-            Style::default().fg(theme::state_ok()),
+            Style::default()
+                .fg(theme::state_ok())
+                .add_modifier(Modifier::Bold),
             Style::default().fg(theme::text_subtle()),
         );
     }

@@ -28,6 +28,14 @@ impl App {
         self.editor.clear_selection();
     }
 
+    pub fn clear_draft(&mut self) {
+        self.editor
+            .restore_turn(String::new(), Vec::new(), Vec::new());
+        self.update_suggestions();
+        self.clear_process_selection();
+        self.dirty = true;
+    }
+
     pub fn has_input_selection(&self) -> bool {
         self.editor.has_selection()
     }
@@ -80,6 +88,15 @@ impl App {
         self.editor.has_suggestions()
     }
 
+    pub fn dismiss_suggestions(&mut self) {
+        if self.editor.has_suggestions() {
+            self.editor.suggestions.clear();
+            self.editor.suggestion_idx = 0;
+            self.editor.suggestion_kind = SuggestionKind::None;
+            self.dirty = true;
+        }
+    }
+
     /// Accept the selected suggestion.
     pub fn complete_suggestion(&mut self) {
         self.editor
@@ -93,6 +110,43 @@ impl App {
     /// Whether the session picker is active.
     pub fn has_session_picker(&self) -> bool {
         matches!(&self.overlay, Some(OverlayState::SessionPicker(state)) if !state.items.is_empty())
+    }
+
+    pub fn has_document(&self) -> bool {
+        matches!(self.overlay, Some(OverlayState::Document(_)))
+    }
+
+    pub fn show_document(&mut self, document: crate::overlay::DocumentState) {
+        self.overlay = Some(OverlayState::Document(document));
+        self.dirty = true;
+    }
+
+    pub fn document_state(&self) -> Option<&crate::overlay::DocumentState> {
+        match &self.overlay {
+            Some(OverlayState::Document(state)) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn dismiss_document(&mut self) {
+        if matches!(self.overlay, Some(OverlayState::Document(_))) {
+            self.overlay = None;
+            self.dirty = true;
+        }
+    }
+
+    pub fn document_scroll_up(&mut self, amount: usize) {
+        if let Some(OverlayState::Document(state)) = &mut self.overlay {
+            state.scroll_up(amount);
+            self.dirty = true;
+        }
+    }
+
+    pub fn document_scroll_down(&mut self, amount: usize, max_scroll: usize) {
+        if let Some(OverlayState::Document(state)) = &mut self.overlay {
+            state.scroll_down(amount, max_scroll);
+            self.dirty = true;
+        }
     }
 
     /// Move session picker selection up.

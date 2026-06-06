@@ -244,11 +244,17 @@ impl TurnStream {
 pub struct QueuedTurnBuilder {
     pub(crate) runtime: RuntimeHandle,
     pub(crate) cancel: CancellationToken,
+    pub(crate) batch_ids: Vec<String>,
 }
 
 impl QueuedTurnBuilder {
     pub fn cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    pub fn batch_ids(mut self, batch_ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.batch_ids = batch_ids.into_iter().map(Into::into).collect();
         self
     }
 
@@ -281,8 +287,19 @@ impl QueuedTurnBuilder {
     }
 
     pub async fn stream(self, events: &dyn TurnActivitySink) -> Result<Option<TurnResult>> {
-        stream_next_queued_prepared_turn(&self.runtime, TurnSinks::turn(events), None, self.cancel)
-            .await
+        let Self {
+            runtime,
+            cancel,
+            batch_ids,
+        } = self;
+        stream_next_queued_prepared_turn(
+            &runtime,
+            TurnSinks::turn(events),
+            None,
+            cancel,
+            &batch_ids,
+        )
+        .await
     }
 
     pub async fn stream_with_effect_scope(
@@ -290,11 +307,17 @@ impl QueuedTurnBuilder {
         events: &dyn TurnActivitySink,
         scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<Option<TurnResult>> {
+        let Self {
+            runtime,
+            cancel,
+            batch_ids,
+        } = self;
         stream_next_queued_prepared_turn(
-            &self.runtime,
+            &runtime,
             TurnSinks::turn(events),
             Some(scoped_effect_controller),
-            self.cancel,
+            cancel,
+            &batch_ids,
         )
         .await
     }
@@ -305,12 +328,14 @@ pub(crate) async fn stream_next_queued_prepared_turn(
     sinks: TurnSinks<'_>,
     scoped_effect_controller: Option<ScopedEffectController<'_>>,
     cancel: CancellationToken,
+    batch_ids: &[String],
 ) -> Result<Option<TurnResult>> {
     let turn = Box::pin(stream_next_queued_prepared_assembled(
         runtime,
         sinks,
         scoped_effect_controller,
         cancel,
+        batch_ids,
     ))
     .await?;
     Ok(turn.map(TurnResult::from_assembled))
@@ -321,12 +346,16 @@ pub(crate) async fn stream_next_queued_prepared_assembled(
     sinks: TurnSinks<'_>,
     scoped_effect_controller: Option<ScopedEffectController<'_>>,
     cancel: CancellationToken,
+    batch_ids: &[String],
 ) -> Result<Option<AssembledTurn>> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
-    let turn = writer
-        .stream_next_queued_work(turn_options(sinks, scoped_effect_controller, cancel))
-        .await?;
+    let opts = turn_options(sinks, scoped_effect_controller, cancel);
+    let turn = if batch_ids.is_empty() {
+        writer.stream_next_queued_work(opts).await?
+    } else {
+        writer.stream_selected_queued_work(opts, batch_ids).await?
+    };
     runtime.publish_from(&writer);
     Ok(turn)
 }

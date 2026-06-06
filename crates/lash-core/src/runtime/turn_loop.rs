@@ -441,6 +441,22 @@ impl LashRuntime {
         &mut self,
         opts: TurnOptions<'_>,
     ) -> Result<Option<AssembledTurn>, RuntimeError> {
+        self.stream_queued_work(opts, None).await
+    }
+
+    pub async fn stream_selected_queued_work(
+        &mut self,
+        opts: TurnOptions<'_>,
+        batch_ids: &[String],
+    ) -> Result<Option<AssembledTurn>, RuntimeError> {
+        self.stream_queued_work(opts, Some(batch_ids)).await
+    }
+
+    async fn stream_queued_work(
+        &mut self,
+        opts: TurnOptions<'_>,
+        selected_batch_ids: Option<&[String]>,
+    ) -> Result<Option<AssembledTurn>, RuntimeError> {
         if self.drain_next_session_command().await?.is_some() {
             return Ok(None);
         }
@@ -451,18 +467,28 @@ impl LashRuntime {
         else {
             return Ok(None);
         };
-        let claim = store
-            .claim_ready_queued_work(
-                &self.state.session_id,
-                &self.runtime_scope_id,
-                crate::QueuedWorkClaimBoundary::Idle,
-                crate::QUEUED_WORK_CLAIM_TTL_MS,
-                64,
-            )
-            .await
-            .map_err(|err| {
-                RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
-            })?;
+        let claim = if let Some(batch_ids) = selected_batch_ids {
+            store
+                .claim_ready_queued_work_by_batch_ids(
+                    &self.state.session_id,
+                    &self.runtime_scope_id,
+                    crate::QueuedWorkClaimBoundary::Idle,
+                    crate::QUEUED_WORK_CLAIM_TTL_MS,
+                    batch_ids,
+                )
+                .await
+        } else {
+            store
+                .claim_ready_queued_work(
+                    &self.state.session_id,
+                    &self.runtime_scope_id,
+                    crate::QueuedWorkClaimBoundary::Idle,
+                    crate::QUEUED_WORK_CLAIM_TTL_MS,
+                    64,
+                )
+                .await
+        }
+        .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
         let Some(claim) = claim else {
             return Ok(None);
         };

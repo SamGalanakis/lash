@@ -304,10 +304,17 @@ mod tests {
         let screen = harness.render();
         let lines = screen.non_empty_visible_lines();
 
-        assert!(!lines.iter().any(|line| line.contains("this turn")));
-        assert!(lines.iter().any(|line| line.contains("after current step")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Will send in this turn"))
+        );
         assert!(lines.iter().any(|line| line.contains("after tool do this")));
-        assert!(lines.iter().any(|line| line.contains("next full turn · 3")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Queued for next turn · 3"))
+        );
         assert!(
             lines
                 .iter()

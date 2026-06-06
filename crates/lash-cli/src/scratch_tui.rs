@@ -1,6 +1,6 @@
 use lash_tui::{Frame, Line, Modifier, Rect, Span, Style, TermCapabilities};
 use lash_tui_extensions::{TuiRenderContext, TuiSurfaceScene, TuiSurfaceSlot};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, CliRunState, format_tokens};
 use crate::chrome_ui::TurnStatusLabel;
@@ -88,6 +88,7 @@ pub fn draw_with_capabilities(
     draw_tree(frame, app, history);
     draw_skill_picker(frame, app, history);
     draw_process_overview(frame, app, body_area);
+    draw_document_overlay(frame, app, body_area);
     draw_overlay_surface(frame, app, &surfaces, body_area, capabilities);
 }
 
@@ -383,7 +384,7 @@ fn draw_status_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn build_status_slots(app: &App) -> (Vec<StatusSlot>, Vec<StatusSlot>) {
     let sep_style = theme::text_faint_style();
 
-    // LEFT side: brand · model · variant
+    // LEFT side: brand · model · execution mode · variant
     let mut left = Vec::new();
     left.push(StatusSlot {
         spans: vec![
@@ -404,6 +405,15 @@ fn build_status_slots(app: &App) -> (Vec<StatusSlot>, Vec<StatusSlot>) {
                 Span::styled(app.model.clone(), theme::text_subtle_style()),
             ],
             priority: 80,
+        });
+    }
+    if !app.execution_mode_label.is_empty() {
+        left.push(StatusSlot {
+            spans: vec![
+                Span::styled(" · ", sep_style),
+                Span::styled(app.execution_mode_label.clone(), theme::text_subtle_style()),
+            ],
+            priority: 70,
         });
     }
     if let Some(variant) = app
@@ -449,6 +459,7 @@ fn status_bar_context_spans(app: &App) -> Option<StatusSlot> {
         }
         return Some(StatusSlot {
             spans: vec![
+                Span::styled("ctx ", theme::text_faint_style()),
                 Span::styled(format_tokens(total), theme::text_subtle_style()),
                 Span::raw(" "),
             ],
@@ -484,6 +495,7 @@ fn status_bar_context_spans(app: &App) -> Option<StatusSlot> {
     // this scale.
     Some(StatusSlot {
         spans: vec![
+            Span::styled("ctx ", theme::text_faint_style()),
             Span::styled(format_tokens(used), theme::text_subtle_style()),
             Span::styled(" · ", theme::text_faint_style()),
             Span::styled(format!("{pct:.0}%"), theme::text_subtle_style()),
@@ -584,6 +596,68 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             frame.write_text(x, y + offset, "│", fg(theme::text_subtle()), 1);
         }
     }
+
+    if written_rows == 0
+        && app.live_tool_output_anchor_block_index().is_none()
+        && !app.live.reasoning.has_renderable_output()
+        && !app.live.assistant.has_renderable_output()
+        && app.plan_dock.as_ref().is_none_or(|plan| plan.is_empty())
+    {
+        draw_empty_history_state(frame, app, area);
+    }
+}
+
+fn draw_empty_history_state(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 || app.overlay.is_some() || app.has_suggestions() {
+        return;
+    }
+    if area.width < 54 || area.height < 12 {
+        let text = "Type a message or / for commands";
+        let width = display_width(text) as u16;
+        if area.width > width {
+            frame.write_text(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height / 2,
+                text,
+                theme::text_faint_style(),
+                width,
+            );
+        }
+        return;
+    }
+
+    let logo: &[(&str, &str)] = &[
+        ("██       ████   ██████  ", "  ██"),
+        ("██      ██  ██  ██     ", "█  ██"),
+        ("██      ██████  ██████", "██████"),
+        ("██      ██  ██      █", " ██  ██"),
+        ("██████  ██  ██  ████", "  ██  ██"),
+    ];
+    let content_width = 30u16;
+    let start_x = area.x + area.width.saturating_sub(content_width) / 2;
+    let start_y = area.y + area.height.saturating_sub(7) / 2;
+    for (row, &(before, after)) in logo.iter().enumerate() {
+        frame.write_line(
+            start_x,
+            start_y + row as u16,
+            &Line::from(vec![
+                Span::styled(before.to_string(), theme::assistant_text()),
+                Span::styled("██", Style::default().fg(theme::brand())),
+                Span::styled(after.to_string(), theme::assistant_text()),
+            ]),
+            content_width,
+        );
+    }
+    frame.write_line(
+        start_x,
+        start_y + 5,
+        &Line::from(vec![
+            Span::styled("──────────", Style::default().fg(theme::brand())),
+            Span::styled("──────────", Style::default().fg(theme::border_dim())),
+            Span::styled("──────────", Style::default().fg(theme::border_faint())),
+        ]),
+        content_width,
+    );
 }
 
 fn draw_process_dock(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -710,9 +784,9 @@ fn process_summary(app: &App) -> Option<String> {
     match running {
         0 => None,
         running => Some(format!(
-            "{} process{} running",
+            "{} process{}",
             running,
-            if running == 1 { "" } else { "s" }
+            if running == 1 { "" } else { "es" }
         )),
     }
 }
@@ -857,7 +931,17 @@ fn draw_suggestions(frame: &mut Frame<'_>, app: &App, input_area: Rect) {
         .max()
         .unwrap_or(8)
         .max(8);
-    let width = input_area.width.min(72);
+    let content_width = app
+        .suggestions()
+        .iter()
+        .take(max_visible)
+        .map(|s| {
+            3 + name_col + usize::from(!s.description.is_empty()) + display_width(&s.description)
+        })
+        .max()
+        .unwrap_or(20)
+        .max(20);
+    let width = (content_width as u16 + 2).min(input_area.width).min(72);
     let height = max_visible as u16 + 2;
     if width < 4 || input_area.y < height {
         return;
@@ -903,7 +987,17 @@ fn build_suggestion_line<'a>(
     selected: bool,
 ) -> Line<'a> {
     let mut spans: Vec<Span<'a>> = Vec::new();
-    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        if selected { "▶ " } else { "  " },
+        if selected {
+            Style::default()
+                .fg(theme::brand())
+                .bg(theme::surface_raised())
+                .add_modifier(Modifier::Bold)
+        } else {
+            base_style
+        },
+    ));
 
     // Bold the matched chars on top of `base_style`. Selected rows already
     // read at full strength, so we only add bold; on unselected rows we also
@@ -994,9 +1088,9 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
         popup.width.saturating_sub(4),
     );
     let query_text = if picker.query.is_empty() {
-        "Search sessions".to_string()
+        "Search: type to filter".to_string()
     } else {
-        format!("Search: {}", picker.query)
+        format!("Search: {}█", picker.query)
     };
     let query_style = if picker.query.is_empty() {
         theme::text_faint_style()
@@ -1050,9 +1144,19 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
             .max(2);
         for (row, session) in visible_items.iter().enumerate() {
             let row_selected = scroll + row == selected;
-            let prefix = if row_selected { "> " } else { "  " };
-            let preview = session.first_message.replace('\n', " ");
+            let prefix = if row_selected { "▶ " } else { "  " };
+            let preview = if session.message_count == 0 {
+                "No messages yet".to_string()
+            } else {
+                session.first_message.replace('\n', " ")
+            };
             let cwd = session.cwd_label().unwrap_or_default();
+            let reserved = 2 + time_col + 1 + count_col + 1 + cwd.len() + 1;
+            let preview_width = popup
+                .width
+                .saturating_sub(2)
+                .saturating_sub(reserved as u16) as usize;
+            let preview = truncate_display_forced(&preview, preview_width.max(8));
             let line = format!(
                 "{prefix}{:<time_col$} {:>count_col$} {}{}",
                 session.relative_time(),
@@ -1065,7 +1169,11 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
                 },
             );
             let style = if row_selected {
-                fg(theme::text_primary()).bg(theme::surface_raised())
+                fg(theme::text_primary())
+                    .bg(theme::surface_raised())
+                    .add_modifier(Modifier::Bold)
+            } else if session.message_count == 0 && picker.showing_empty_sessions {
+                theme::text_faint_style()
             } else {
                 fg(theme::text_subtle())
             };
@@ -1093,6 +1201,31 @@ fn draw_session_picker(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
             hint_width,
         );
     }
+}
+
+fn truncate_display_forced(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if display_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let target = max_width - 1;
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > target {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out.push('…');
+    out
 }
 
 fn draw_tree(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
@@ -1340,6 +1473,94 @@ fn draw_process_overview(frame: &mut Frame<'_>, app: &App, body_area: Rect) {
     }
 }
 
+fn draw_document_overlay(frame: &mut Frame<'_>, app: &App, body_area: Rect) {
+    let Some(document) = app.document_state() else {
+        return;
+    };
+    let width = 92u16.min(body_area.width.saturating_sub(4));
+    let height = body_area.height.saturating_sub(2).min(24);
+    if width < 32 || height < 8 {
+        return;
+    }
+
+    draw_overlay_scrim(frame, body_area);
+    let popup = centered_rect(body_area, width, height);
+    frame.draw_box(
+        popup,
+        fg(theme::border_faint()),
+        Some(bg(theme::surface_deep())),
+    );
+    frame.write_text(
+        popup.x + 2,
+        popup.y,
+        &document.title,
+        fg(theme::brand()).add_modifier(Modifier::Bold),
+        popup.width.saturating_sub(4),
+    );
+
+    let content_area = Rect::new(
+        popup.x + 2,
+        popup.y + 1,
+        popup.width.saturating_sub(4),
+        popup.height.saturating_sub(3),
+    );
+    let lines = render::document_lines_snapshot(document, content_area.width as usize);
+    let max_scroll = lines.len().saturating_sub(content_area.height as usize);
+    let scroll = document.scroll_offset.min(max_scroll);
+    for (row, line) in lines
+        .iter()
+        .skip(scroll)
+        .take(content_area.height as usize)
+        .enumerate()
+    {
+        frame.write_line(
+            content_area.x,
+            content_area.y + row as u16,
+            line,
+            content_area.width,
+        );
+    }
+
+    if max_scroll > 0 {
+        let track_height = content_area.height as usize;
+        let thumb_height =
+            ((track_height * track_height).div_ceil(lines.len())).clamp(1, track_height) as u16;
+        let travel = content_area.height.saturating_sub(thumb_height);
+        let y = content_area.y
+            + if travel == 0 {
+                0
+            } else {
+                ((scroll * travel as usize) / max_scroll) as u16
+            };
+        for offset in 0..thumb_height {
+            frame.write_text(
+                popup.x + popup.width.saturating_sub(2),
+                y + offset,
+                "│",
+                fg(theme::text_subtle()),
+                1,
+            );
+        }
+    }
+
+    let hint = document
+        .footer_hints
+        .iter()
+        .map(|hint| format!("{} {}", hint.key, hint.description))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let hint_width = display_width(&hint) as u16;
+    if popup.width > hint_width + 4 {
+        frame.write_text(
+            popup.x + popup.width - hint_width - 2,
+            popup.y + popup.height - 1,
+            &hint,
+            theme::text_faint_style(),
+            hint_width,
+        );
+    }
+}
+
 fn draw_lines_region(frame: &mut Frame<'_>, area: Rect, lines: &[Line<'static>], style: Style) {
     frame.fill(area, ' ', style);
     for (idx, line) in lines.iter().enumerate().take(area.height as usize) {
@@ -1433,11 +1654,11 @@ mod tests {
 
         let snapshot = lash_tui::render_snapshot(80, 4, |frame| draw(frame, &mut app));
         let top = snapshot.visible_line_trimmed(0);
-        assert!(top.contains("lash · gpt-5.4 · high"));
+        assert!(top.contains("lash · gpt-5.4 · standard · high"));
         // Context meter: tokens used + integer percent, separated by a
         // middle dot. The old representation was `7.0k / 1.1M (0.6%)`,
         // which gave three renderings of the same number.
-        assert!(top.contains("7.0k · 1%"));
+        assert!(top.contains("ctx 7.0k · 1%"));
     }
 
     #[test]
@@ -1597,7 +1818,7 @@ mod tests {
 
         assert!(visible.contains("Idle"));
         assert!(!visible.contains("Working"));
-        assert!(visible.contains("1 process running"));
+        assert!(visible.contains("1 process"));
     }
 
     #[test]

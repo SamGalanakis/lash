@@ -62,8 +62,8 @@ pub fn format_budget_suffix(
 /// cache hits when the defaults `Arc` identity is unchanged between LLM
 /// iterations. Saves the JSON-shape inference + the
 /// `format!()`/`String::push_str` walk per iteration.
-#[derive(Default)]
 pub struct BoundVariablesCache {
+    inline_char_limit: usize,
     inner: Mutex<Option<CachedBoundVariables>>,
 }
 
@@ -74,8 +74,11 @@ struct CachedBoundVariables {
 }
 
 impl BoundVariablesCache {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(inline_char_limit: usize) -> Self {
+        Self {
+            inline_char_limit,
+            inner: Mutex::new(None),
+        }
     }
 
     pub fn contributions(&self, ctx: &PromptHookContext) -> Vec<PromptContribution> {
@@ -88,7 +91,7 @@ impl BoundVariablesCache {
         {
             return vec![cached.rendered.clone()];
         }
-        let rendered = render_bound_variables(&globals, history_len);
+        let rendered = render_bound_variables(&globals, history_len, self.inline_char_limit);
         if let Ok(mut guard) = self.inner.lock() {
             *guard = Some(CachedBoundVariables {
                 globals,
@@ -103,20 +106,30 @@ impl BoundVariablesCache {
 fn render_bound_variables(
     globals: &Arc<serde_json::Map<String, serde_json::Value>>,
     history_len: usize,
+    inline_char_limit: usize,
 ) -> PromptContribution {
     let mut lines = vec![
         "These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
-        "Type and size hints help you plan before inspecting a value.".to_string(),
+        "Small values are shown inline so you can read them directly; larger ones show only their type and size — `print` such a variable (or the part you need) to see its contents.".to_string(),
     ];
     let mut entries = globals.iter().collect::<Vec<_>>();
     entries.sort_by(|left, right| left.0.cmp(right.0));
 
+    // Decide per variable: render its value inline when small, otherwise fall
+    // back to a type + size hint. Only register a schema definition for the
+    // hinted (large) ones — an inline value already shows its structure, so the
+    // type would be redundant.
     let mut registry = SchemaRegistry::default();
-    let mut variable_types = Vec::new();
+    let mut rows: Vec<(&str, Option<String>, Option<JsonShape>)> = Vec::new();
     for (name, value) in entries {
-        let shape = infer_json_shape(value);
-        registry.register_root(name, &shape);
-        variable_types.push((name.as_str(), shape));
+        match render_inline_value(value, inline_char_limit) {
+            Some(inline) => rows.push((name.as_str(), Some(inline), None)),
+            None => {
+                let shape = infer_json_shape(value);
+                registry.register_root(name, &shape);
+                rows.push((name.as_str(), None, Some(shape)));
+            }
+        }
     }
 
     lines.push(String::new());
@@ -124,7 +137,15 @@ fn render_bound_variables(
     lines.push(format!(
         "- `history`: `list<HistoryItem>`, Readonly: true, projected binding, {history_len} entries"
     ));
-    for (name, shape) in &variable_types {
+    for (name, inline, shape) in &rows {
+        if let Some(inline) = inline {
+            // Value shown explicitly; no type/size hint needed.
+            lines.push(format!("- `{name}` = {inline}"));
+            continue;
+        }
+        let shape = shape
+            .as_ref()
+            .expect("hinted variable has an inferred shape");
         let value = globals
             .get(*name)
             .expect("bound variable should still exist while rendering prompt contribution");
@@ -154,6 +175,18 @@ fn render_bound_variables(
     }
 
     PromptContribution::guidance("Bound Variables", lines.join("\n"))
+}
+
+/// Render a variable's value inline as compact JSON when it fits within
+/// `limit` characters, so the model can read it directly without a `print`.
+/// Returns `None` (use a type/size hint instead) for `0` limits or values too
+/// large to embed each turn.
+fn render_inline_value(value: &serde_json::Value, limit: usize) -> Option<String> {
+    if limit == 0 {
+        return None;
+    }
+    let compact = serde_json::to_string(value).ok()?;
+    (compact.chars().count() <= limit).then_some(compact)
 }
 
 fn render_value_size_hint(value: &serde_json::Value) -> Option<String> {
@@ -472,4 +505,45 @@ fn singularize_segment(segment: &str) -> String {
         return segment[..segment.len() - 1].to_string();
     }
     segment.to_string()
+}
+
+#[cfg(test)]
+mod bound_variable_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn globals(value: serde_json::Value) -> Arc<serde_json::Map<String, serde_json::Value>> {
+        Arc::new(value.as_object().expect("object").clone())
+    }
+
+    #[test]
+    fn small_values_render_inline_without_type_or_size() {
+        let g = globals(json!({ "inventory": ["lantern", "sword"], "count": 3 }));
+        let rendered = render_bound_variables(&g, 0, 1024);
+        let s = &rendered.content;
+        assert!(s.contains("- `inventory` = [\"lantern\",\"sword\"]"), "{s}");
+        assert!(s.contains("- `count` = 3"), "{s}");
+        // Inline values carry no redundant type/size hint.
+        assert!(!s.contains("`inventory`:"), "{s}");
+        assert!(!s.contains("projected binding, len="), "{s}");
+    }
+
+    #[test]
+    fn large_values_fall_back_to_type_and_size_hint() {
+        let big: Vec<String> = (0..500).map(|i| format!("item-{i}")).collect();
+        let g = globals(json!({ "big": big }));
+        let rendered = render_bound_variables(&g, 0, 64);
+        let s = &rendered.content;
+        assert!(s.contains("- `big`:"), "{s}");
+        assert!(s.contains("len=500"), "{s}");
+    }
+
+    #[test]
+    fn zero_limit_always_hints() {
+        let g = globals(json!({ "x": [1, 2, 3] }));
+        let rendered = render_bound_variables(&g, 0, 0);
+        let s = &rendered.content;
+        assert!(s.contains("- `x`:"), "{s}");
+        assert!(s.contains("len=3"), "{s}");
+    }
 }

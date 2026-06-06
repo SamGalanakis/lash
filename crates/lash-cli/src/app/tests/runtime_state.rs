@@ -661,8 +661,8 @@ fn idle_earliest_boundary_preview_is_next_full_turn_not_this_turn() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(!preview.contains("this turn"));
-    assert!(preview.contains("next full turn"));
+    assert!(!preview.contains("Will send in this turn"));
+    assert!(preview.contains("Queued for next turn"));
     assert!(preview.contains("follow up now"));
 }
 

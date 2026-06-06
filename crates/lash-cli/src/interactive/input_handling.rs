@@ -22,7 +22,7 @@ use crate::session_log::SessionLogger;
 use crate::turn_runner::{RuntimeRunResult, make_turn_input};
 use crate::ui_trace::UiTraceRecorder;
 use crate::{
-    Args, apply_ui_host_effects, hash12, normalize_prepared_turn_for_dispatch, push_system_message,
+    Args, apply_ui_host_effects, normalize_prepared_turn_for_dispatch, push_system_message,
     shell_escape_command,
 };
 
@@ -35,8 +35,8 @@ use super::helpers::{
     record_queue_current_turn_input, record_queue_turn, should_preserve_selection_for_key,
 };
 use super::runtime::{
-    apply_pending_reconfigure, copy_selected_text_or_last_response, enqueue_prepared_turn,
-    make_injected_plugin_message, refresh_queued_work_snapshot, send_user_message,
+    copy_selected_text_or_last_response, enqueue_prepared_turn, make_injected_plugin_message,
+    refresh_queued_work_snapshot, send_user_message,
 };
 
 pub(super) fn slash_command_blocked_while_working_message(command_text: &str) -> String {
@@ -118,7 +118,11 @@ pub(super) fn handle_surface_input(
 }
 
 async fn restore_last_durable_full_turn(app: &mut App, runtime: &Option<LashSession>) {
-    let Some(batch) = app.full_turn_batches_for_editing().last().cloned() else {
+    let Some(batch) = app
+        .visible_turn_batches_for_editing()
+        .max_by_key(|batch| batch.enqueue_seq)
+        .cloned()
+    else {
         return;
     };
     let Some(session) = runtime.as_ref() else {
@@ -257,10 +261,9 @@ pub(super) fn selected_slash_command_suggestion(
         .map(|command| (command_text, command))
 }
 
-/// An always-on scroll keypress, resolved to a direction and amount. These
-/// keys (Ctrl+U/D, PageUp/Down, and bare Up/Down in a review-only prompt)
-/// scroll either the prompt review pane or the history viewport in every
-/// mode, so they are classified before modal routing.
+/// A scroll keypress, resolved to a direction and amount. PageUp/PageDown
+/// scroll the focused document/prompt overlay first, then history when no
+/// modal owns focus. Bare Up/Down scroll a review-only prompt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScrollInputAction {
     PromptUp(usize),
@@ -274,16 +277,7 @@ fn classify_always_on_scroll_key(
     app: &App,
     viewport_height: usize,
 ) -> Option<ScrollInputAction> {
-    let half_page = viewport_height / 2;
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
     if app.has_prompt() {
-        if ctrl && key.code == KeyCode::Char('u') {
-            return Some(ScrollInputAction::PromptUp(half_page));
-        }
-        if ctrl && key.code == KeyCode::Char('d') {
-            return Some(ScrollInputAction::PromptDown(half_page));
-        }
         if key.code == KeyCode::PageUp {
             return Some(ScrollInputAction::PromptUp(viewport_height));
         }
@@ -300,12 +294,6 @@ fn classify_always_on_scroll_key(
         }
     }
 
-    if ctrl && key.code == KeyCode::Char('u') {
-        return Some(ScrollInputAction::HistoryUp(half_page));
-    }
-    if ctrl && key.code == KeyCode::Char('d') {
-        return Some(ScrollInputAction::HistoryDown(half_page));
-    }
     if key.code == KeyCode::PageUp {
         return Some(ScrollInputAction::HistoryUp(viewport_height));
     }
@@ -581,8 +569,7 @@ pub(super) struct SessionCtx<'a> {
     pub provider: &'a mut ProviderHandle,
     pub current_model_variant: &'a mut Option<String>,
     pub current_execution_mode: &'a mut ModeId,
-    pub desired_tool_state: &'a mut ToolState,
-    pub pending_reconfigure: &'a mut bool,
+    pub active_tool_state: &'a mut ToolState,
     pub model_catalog: &'a CachedModelCatalog,
     pub toolset_hash: &'a mut String,
     pub app_tx: &'a crate::event::AppEventTx,
@@ -596,6 +583,7 @@ pub(super) struct SessionCtx<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActiveModal {
     None,
+    Document,
     SkillPicker,
     SessionPicker,
     Tree,
@@ -604,7 +592,9 @@ enum ActiveModal {
 }
 
 fn active_modal(app: &App) -> ActiveModal {
-    if app.has_skill_picker() {
+    if app.has_document() {
+        ActiveModal::Document
+    } else if app.has_skill_picker() {
         ActiveModal::SkillPicker
     } else if app.has_session_picker() {
         ActiveModal::SessionPicker
@@ -621,9 +611,8 @@ fn active_modal(app: &App) -> ActiveModal {
 
 /// Route a key press to the handler for the active mode. Order matters and
 /// mirrors the historical fall-through: global shortcuts win first, then
-/// always-on scrolling, then the modal overlays (skill/session pickers,
-/// tree, prompt), surface/shortcut routing, and finally the default input
-/// dispatch.
+/// focused modal overlays, then history scrolling, surface/shortcut routing,
+/// and finally the default input dispatch.
 pub(super) async fn dispatch_key_event(
     key: KeyEvent,
     ctx: &mut SessionCtx<'_>,
@@ -638,17 +627,11 @@ pub(super) async fn dispatch_key_event(
         return Ok(result);
     }
 
-    // ── Always-on scroll keys (work in all states) ──
-    {
-        let (width, height) = ctx.terminal.size()?;
-        let vh = render::history_viewport_height(ctx.app, width, height);
-        if let Some(action) = classify_always_on_scroll_key(key, ctx.app, vh) {
-            apply_scroll_input_action(ctx.app, ctx.terminal, ctx.ui_trace, action);
+    match active_modal(ctx.app) {
+        ActiveModal::Document => {
+            handle_document_key(key, ctx)?;
             return Ok(false);
         }
-    }
-
-    match active_modal(ctx.app) {
         ActiveModal::SkillPicker => {
             handle_skill_picker_key(key, ctx);
             return Ok(false);
@@ -674,6 +657,13 @@ pub(super) async fn dispatch_key_event(
             return Ok(false);
         }
         ActiveModal::None => {}
+    }
+
+    let (width, height) = ctx.terminal.size()?;
+    let vh = render::history_viewport_height(ctx.app, width, height);
+    if let Some(action) = classify_always_on_scroll_key(key, ctx.app, vh) {
+        apply_scroll_input_action(ctx.app, ctx.terminal, ctx.ui_trace, action);
+        return Ok(false);
     }
 
     if let Some(event) = normalize_event(&TermEvent::Key(key))
@@ -748,20 +738,29 @@ async fn handle_global_shortcut_key(
         return Ok(Some(false));
     }
 
-    // CTRL+C: dismiss prompt if active, else quit
+    // CTRL+C: close transient UI, cancel active work, clear draft, then
+    // quit only from an idle empty state.
     if !key.modifiers.contains(KeyModifiers::SHIFT)
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
     {
-        tracing::debug!(
-            has_prompt = app.has_prompt(),
-            "handling Ctrl+C as dismiss/quit"
-        );
-        if app.has_prompt() {
-            if let Some(recorder) = ui_trace.as_mut() {
-                recorder.record_prompt_dismiss();
+        tracing::debug!("handling Ctrl+C as cancel/dismiss/quit");
+        if app.has_suggestions() {
+            app.dismiss_suggestions();
+            return Ok(Some(false));
+        }
+        if dismiss_active_modal(app, ui_trace) {
+            return Ok(Some(false));
+        }
+        if app.turn_active() {
+            app.note_manual_interrupt_requested();
+            if let Some(token) = cancel_token.take() {
+                token.cancel();
             }
-            app.dismiss_prompt();
+            return Ok(Some(false));
+        }
+        if !app.input().is_empty() || app.has_pending_input_payload() {
+            app.clear_draft();
             return Ok(Some(false));
         }
         return Ok(Some(true));
@@ -879,6 +878,7 @@ async fn handle_global_shortcut_key(
     // `active_modal`), otherwise interrupts a running turn.
     if key.code == KeyCode::Esc {
         match active_modal(app) {
+            ActiveModal::Document => app.dismiss_document(),
             ActiveModal::Prompt => {
                 if let Some(recorder) = ui_trace.as_mut() {
                     recorder.record_prompt_dismiss();
@@ -906,6 +906,53 @@ async fn handle_global_shortcut_key(
     }
 
     Ok(None)
+}
+
+fn dismiss_active_modal(app: &mut App, ui_trace: &mut Option<UiTraceRecorder>) -> bool {
+    match active_modal(app) {
+        ActiveModal::Document => app.dismiss_document(),
+        ActiveModal::Prompt => {
+            if let Some(recorder) = ui_trace.as_mut() {
+                recorder.record_prompt_dismiss();
+            }
+            app.dismiss_prompt();
+        }
+        ActiveModal::Tree => app.dismiss_tree(),
+        ActiveModal::SkillPicker => app.dismiss_skill_picker(),
+        ActiveModal::SessionPicker => app.dismiss_session_picker(),
+        ActiveModal::ProcessOverview => app.dismiss_process_overview(),
+        ActiveModal::None => return false,
+    }
+    true
+}
+
+fn handle_document_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyhow::Result<()> {
+    let (width, height) = ctx.terminal.size()?;
+    let body_height = height.saturating_sub(1).max(1);
+    let viewport_height = body_height.saturating_sub(4).max(1) as usize;
+    let inner_width = width.saturating_sub(8).max(1) as usize;
+    match key.code {
+        KeyCode::PageUp => ctx.app.document_scroll_up(viewport_height),
+        KeyCode::PageDown => {
+            let max_scroll = ctx
+                .app
+                .document_state()
+                .map(|document| render::document_max_scroll(document, inner_width, viewport_height))
+                .unwrap_or(0);
+            ctx.app.document_scroll_down(viewport_height, max_scroll);
+        }
+        KeyCode::Home => ctx.app.document_scroll_up(usize::MAX),
+        KeyCode::End => {
+            let max_scroll = ctx
+                .app
+                .document_state()
+                .map(|document| render::document_max_scroll(document, inner_width, viewport_height))
+                .unwrap_or(0);
+            ctx.app.document_scroll_down(usize::MAX, max_scroll);
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Skill-picker overlay navigation: up/down move the highlight, Enter
@@ -942,6 +989,14 @@ async fn handle_session_picker_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) {
             let Some(filename) = ctx.app.take_session_pick() else {
                 return;
             };
+            if ctx.app.turn_active() {
+                ctx.app.note_manual_interrupt_requested();
+                if let Some(token) = ctx.cancel_token.take() {
+                    token.cancel();
+                }
+                *ctx.runtime_return_rx = None;
+                *ctx.active_stream_id = (*ctx.active_stream_id).wrapping_add(1);
+            }
             match switch_to_session_identifier(
                 &filename,
                 ctx.app,
@@ -953,13 +1008,14 @@ async fn handle_session_picker_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) {
                 ctx.provider,
                 ctx.current_model_variant,
                 ctx.current_execution_mode,
-                ctx.desired_tool_state,
+                ctx.active_tool_state,
                 ctx.model_catalog,
                 ctx.toolset_hash,
             )
             .await
             {
                 Ok(()) => {
+                    *ctx.last_turn = None;
                     ctx.app.dirty = true;
                 }
                 Err(err) => {
@@ -1001,7 +1057,6 @@ async fn handle_tree_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyhow::Res
             let Some(selection) = ctx.app.take_tree_pick() else {
                 return Ok(false);
             };
-            let current_tool_state = ctx.desired_tool_state.clone();
             let Some(rt) = ctx.runtime.as_ref() else {
                 push_system_message(
                     ctx.app,
@@ -1015,7 +1070,6 @@ async fn handle_tree_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyhow::Res
                 ctx.app,
                 ctx.history,
                 selection,
-                &current_tool_state,
             )
             .await
             {
@@ -1038,7 +1092,27 @@ fn handle_prompt_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) {
     let app = &mut *ctx.app;
     let ui_trace = &mut *ctx.ui_trace;
     let editing_text = app.is_prompt_text_entry();
+    let viewport_height = ctx
+        .terminal
+        .size()
+        .map(|(width, height)| render::history_viewport_height(app, width, height))
+        .unwrap_or(12)
+        .max(1);
     match key.code {
+        KeyCode::PageUp => {
+            app.prompt_scroll_up(viewport_height);
+        }
+        KeyCode::PageDown => {
+            let max_scroll = viewport_metrics(app, ctx.terminal).prompt_max_scroll;
+            app.prompt_scroll_down(viewport_height, max_scroll);
+        }
+        KeyCode::Up if !editing_text && !app.prompt_has_options() => {
+            app.prompt_scroll_up(1);
+        }
+        KeyCode::Down if !editing_text && !app.prompt_has_options() => {
+            let max_scroll = viewport_metrics(app, ctx.terminal).prompt_max_scroll;
+            app.prompt_scroll_down(1, max_scroll);
+        }
         KeyCode::Tab if app.prompt_supports_note() => {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_prompt_toggle_note_focus();
@@ -1114,8 +1188,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
     let provider = &mut *ctx.provider;
     let current_model_variant = &mut *ctx.current_model_variant;
     let current_execution_mode = &mut *ctx.current_execution_mode;
-    let desired_tool_state = &mut *ctx.desired_tool_state;
-    let pending_reconfigure = &mut *ctx.pending_reconfigure;
+    let active_tool_state = &mut *ctx.active_tool_state;
     let model_catalog = ctx.model_catalog;
     let toolset_hash = &mut *ctx.toolset_hash;
     let app_tx = ctx.app_tx;
@@ -1149,10 +1222,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
             let parsed_command =
                 parse_slash_command(&queued.display_text, &app.skills, ui_extensions);
             let is_host_slash_command = parsed_command.is_some();
-            if queued.is_empty()
-                || shell_escape_command(&queued.display_text).is_some()
-                || (is_host_slash_command && !app.turn_active())
-            {
+            if queued.is_empty() || shell_escape_command(&queued.display_text).is_some() {
                 app.restore_prepared_turn(queued);
                 return Ok(false);
             }
@@ -1184,8 +1254,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                             provider: &mut *provider,
                             current_model_variant: &mut *current_model_variant,
                             current_execution_mode: &mut *current_execution_mode,
-                            desired_tool_state: &mut *desired_tool_state,
-                            pending_reconfigure: &mut *pending_reconfigure,
+                            active_tool_state: &mut *active_tool_state,
                             model_catalog,
                             toolset_hash: &mut *toolset_hash,
                             app_tx,
@@ -1218,22 +1287,71 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
             if runtime.is_none() {
                 push_system_message(
                     app,
-                    "Cannot queue this input while the session is switching.".to_string(),
+                    "Cannot send this input while the session is switching.".to_string(),
                 );
                 app.restore_prepared_turn(queued);
                 return Ok(false);
             }
 
-            enqueue_prepared_turn_for_cli(
-                queued,
+            if let Some(cmd) = parsed_command {
+                if let Some(recorder) = ui_trace.as_mut() {
+                    recorder.record_slash_command(queued.display_text.clone());
+                }
+                if handle_parsed_slash_command(
+                    cmd,
+                    SlashCommandCtx {
+                        terminal: &mut *terminal,
+                        app: &mut *app,
+                        logger: &mut *logger,
+                        args,
+                        paused,
+                        ui_extensions,
+                        runtime_factory,
+                        lash_config,
+                        runtime: &mut *runtime,
+                        history: &mut *history,
+                        turn_counter: &mut *turn_counter,
+                        last_turn: &mut *last_turn,
+                        runtime_return_rx: &mut *runtime_return_rx,
+                        cancel_token: &mut *cancel_token,
+                        active_stream_id: &mut *active_stream_id,
+                        provider: &mut *provider,
+                        current_model_variant: &mut *current_model_variant,
+                        current_execution_mode: &mut *current_execution_mode,
+                        active_tool_state: &mut *active_tool_state,
+                        model_catalog,
+                        toolset_hash: &mut *toolset_hash,
+                        app_tx,
+                        pending_clear_after_return: &mut *pending_clear_after_return,
+                    },
+                )
+                .await?
+                {
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+
+            let turn_input = make_turn_input(&queued);
+            send_user_message(
+                queued.clone(),
+                turn_input.clone(),
                 app,
-                ui_trace,
+                ui_trace.as_mut(),
+                logger,
                 runtime,
-                lash_core::DeliveryPolicy::AfterCurrentTurnCommit,
-                lash_core::SlotPolicy::Exclusive,
-                true,
+                history,
+                runtime_return_rx,
+                cancel_token,
+                active_stream_id,
+                app_tx,
             )
             .await;
+            *last_turn = Some(TurnReplayPayload {
+                turn_input,
+                prepared_turn: queued,
+                execution_mode: current_execution_mode.clone(),
+            });
         }
         // Up/Down: navigate suggestions when popup is visible
         KeyCode::Up if app.has_suggestions() => {
@@ -1287,8 +1405,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                                 provider: &mut *provider,
                                 current_model_variant: &mut *current_model_variant,
                                 current_execution_mode: &mut *current_execution_mode,
-                                desired_tool_state: &mut *desired_tool_state,
-                                pending_reconfigure: &mut *pending_reconfigure,
+                                active_tool_state: &mut *active_tool_state,
                                 model_catalog,
                                 toolset_hash: &mut *toolset_hash,
                                 app_tx,
@@ -1327,8 +1444,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                         provider: &mut *provider,
                         current_model_variant: &mut *current_model_variant,
                         current_execution_mode: &mut *current_execution_mode,
-                        desired_tool_state: &mut *desired_tool_state,
-                        pending_reconfigure: &mut *pending_reconfigure,
+                        active_tool_state: &mut *active_tool_state,
                         model_catalog,
                         toolset_hash: &mut *toolset_hash,
                         app_tx,
@@ -1352,6 +1468,14 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
         }
         KeyCode::Delete if process_dock_has_focus(app) => {
             cancel_selected_process(app, runtime).await;
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.editor.kill_to_line_start();
+            app.update_suggestions();
+        }
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.editor.kill_to_line_end();
+            app.update_suggestions();
         }
         KeyCode::Enter => {
             // Shift+Enter or Alt+Enter → insert newline
@@ -1408,8 +1532,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                             provider: &mut *provider,
                             current_model_variant: &mut *current_model_variant,
                             current_execution_mode: &mut *current_execution_mode,
-                            desired_tool_state: &mut *desired_tool_state,
-                            pending_reconfigure: &mut *pending_reconfigure,
+                            active_tool_state: &mut *active_tool_state,
                             model_catalog,
                             toolset_hash: &mut *toolset_hash,
                             app_tx,
@@ -1597,8 +1720,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                         provider: &mut *provider,
                         current_model_variant: &mut *current_model_variant,
                         current_execution_mode: &mut *current_execution_mode,
-                        desired_tool_state: &mut *desired_tool_state,
-                        pending_reconfigure: &mut *pending_reconfigure,
+                        active_tool_state: &mut *active_tool_state,
                         model_catalog,
                         toolset_hash: &mut *toolset_hash,
                         app_tx,
@@ -1618,26 +1740,9 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
             }
 
             // Regular user message.
-            if let Err(e) =
-                apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
-            {
-                push_system_message(
-                    app,
-                    format!(
-                        "Pending runtime reconfigure failed; message not sent: {}",
-                        e
-                    ),
-                );
-                return Ok(false);
-            }
-            *toolset_hash = hash12(
-                &serde_json::to_vec(&desired_tool_state.tool_manifests())
-                    .unwrap_or_else(|_| b"[]".to_vec()),
-            );
             match app.route_turn_submission(runtime.is_some()) {
                 TurnSubmissionRoute::SendNow => {
                     let turn_input = make_turn_input(&queued);
-                    let current_tool_state = desired_tool_state.clone();
                     send_user_message(
                         queued.clone(),
                         turn_input.clone(),
@@ -1650,7 +1755,6 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                         cancel_token,
                         active_stream_id,
                         app_tx,
-                        &current_tool_state,
                     )
                     .await;
                     *last_turn = Some(TurnReplayPayload {

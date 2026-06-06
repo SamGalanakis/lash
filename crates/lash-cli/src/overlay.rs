@@ -5,6 +5,73 @@ use lash_core::{Message, MessageRole, PartKind, SessionMessageTreeNode};
 use crate::prompt_model::{PromptRequest, PromptResponse, PromptSelectionMode};
 use crate::session_log::SessionInfo;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentState {
+    pub title: String,
+    pub sections: Vec<DocumentSection>,
+    pub scroll_offset: usize,
+    pub footer_hints: Vec<DocumentHint>,
+}
+
+impl DocumentState {
+    pub fn new(title: impl Into<String>, sections: Vec<DocumentSection>) -> Self {
+        Self {
+            title: title.into(),
+            sections,
+            scroll_offset: 0,
+            footer_hints: vec![
+                DocumentHint::new("PgUp/PgDn", "scroll"),
+                DocumentHint::new("Esc", "close"),
+            ],
+        }
+    }
+
+    pub fn scroll_up(&mut self, amount: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+    }
+
+    pub fn scroll_down(&mut self, amount: usize, max_scroll: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_scroll);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentSection {
+    pub title: String,
+    pub rows: Vec<DocumentRow>,
+}
+
+impl DocumentSection {
+    pub fn new(title: impl Into<String>, rows: Vec<DocumentRow>) -> Self {
+        Self {
+            title: title.into(),
+            rows,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DocumentRow {
+    Text(String),
+    KeyValue { label: String, value: String },
+    Shortcut { keys: String, description: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentHint {
+    pub key: String,
+    pub description: String,
+}
+
+impl DocumentHint {
+    pub fn new(key: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            description: description.into(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ProcessOverviewState {
     pub title: String,
@@ -259,14 +326,27 @@ pub struct SessionPickerState {
     pub items: Vec<SessionInfo>,
     pub selected: usize,
     pub query: String,
+    pub showing_empty_sessions: bool,
 }
 
 impl SessionPickerState {
     pub fn new(items: Vec<SessionInfo>) -> Self {
+        let has_non_empty = items.iter().any(|session| session.message_count > 0);
+        let items = if has_non_empty {
+            items
+                .into_iter()
+                .filter(|session| session.message_count > 0)
+                .collect()
+        } else {
+            items
+        };
+        let showing_empty_sessions =
+            !items.is_empty() && items.iter().all(|session| session.message_count == 0);
         Self {
             items,
             selected: 0,
             query: String::new(),
+            showing_empty_sessions,
         }
     }
 
@@ -629,6 +709,7 @@ pub fn tree_message_preview(message: &Message) -> String {
 
 #[derive(Debug)]
 pub enum OverlayState {
+    Document(DocumentState),
     SessionPicker(SessionPickerState),
     Tree(TreeState),
     SkillPicker(PickerState<(String, String)>),

@@ -874,6 +874,49 @@ pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
         max_batches: usize,
     ) -> Result<Option<crate::QueuedWorkClaim>, StoreError>;
 
+    /// Claim a specific ready batch set selected from the durable queue.
+    ///
+    /// This is the host-facing counterpart to [`claim_ready_queued_work`]:
+    /// callers that project queued work into a UI can claim the exact batch ids
+    /// they rendered instead of reconstructing authority from local draft state.
+    /// The default implementation preserves the ordered queue contract by
+    /// claiming the next ready group and returning it only when the durable ids
+    /// match exactly.
+    async fn claim_ready_queued_work_by_batch_ids(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        boundary: crate::QueuedWorkClaimBoundary,
+        lease_ttl_ms: u64,
+        batch_ids: &[String],
+    ) -> Result<Option<crate::QueuedWorkClaim>, StoreError> {
+        if batch_ids.is_empty() {
+            return Ok(None);
+        }
+        let Some(claim) = self
+            .claim_ready_queued_work(
+                session_id,
+                owner_id,
+                boundary,
+                lease_ttl_ms,
+                batch_ids.len(),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let claimed_ids = claim
+            .batches
+            .iter()
+            .map(|batch| batch.batch_id.as_str())
+            .collect::<Vec<_>>();
+        if claimed_ids == batch_ids.iter().map(String::as_str).collect::<Vec<_>>() {
+            return Ok(Some(claim));
+        }
+        self.abandon_queued_work_claim(&claim).await?;
+        Ok(None)
+    }
+
     async fn renew_queued_work_claim(
         &self,
         claim: &crate::QueuedWorkClaim,

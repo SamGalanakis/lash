@@ -37,37 +37,30 @@ impl Store {
         let Some(leaf_node_id) = leaf_node_id else {
             return Ok(lash_core::SessionGraph::default());
         };
-        let rows = collect_rows(
-            conn,
-            "WITH RECURSIVE active(node_id, node_json, parent_node_id, depth) AS (
-                SELECT
-                    node_id,
-                    node_json,
-                    json_extract(node_json, '$.parent_node_id'),
-                    0
-                FROM graph_nodes
-                WHERE node_id = ?1 AND tombstoned = 0
-              UNION ALL
-                SELECT
-                    g.node_id,
-                    g.node_json,
-                    json_extract(g.node_json, '$.parent_node_id'),
-                    active.depth + 1
-                FROM graph_nodes g
-                JOIN active ON g.node_id = active.parent_node_id
-                WHERE g.tombstoned = 0
-            )
-            SELECT node_json FROM active ORDER BY depth DESC",
-            params![leaf_node_id.as_str()],
-        )
-        .await?;
         let mut nodes = Vec::new();
-        for row in rows {
-            let node_json = row_string(&row, 0)?;
-            if let Ok(node) = serde_json::from_str::<lash_core::SessionNodeRecord>(&node_json) {
-                nodes.push(node);
+        let mut seen = std::collections::HashSet::new();
+        let mut current = Some(leaf_node_id.clone());
+        while let Some(node_id) = current {
+            if !seen.insert(node_id.clone()) {
+                break;
             }
+            let Some(row) = optional_row(
+                conn,
+                "SELECT node_json FROM graph_nodes WHERE node_id = ?1 AND tombstoned = 0",
+                params![node_id.as_str()],
+            )
+            .await?
+            else {
+                break;
+            };
+            let node_json = row_string(&row, 0)?;
+            let Ok(node) = serde_json::from_str::<lash_core::SessionNodeRecord>(&node_json) else {
+                break;
+            };
+            current = node.parent_node_id.clone();
+            nodes.push(node);
         }
+        nodes.reverse();
         Ok(lash_core::SessionGraph::from_nodes(
             nodes,
             Some(leaf_node_id),

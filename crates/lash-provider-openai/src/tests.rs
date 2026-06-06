@@ -980,6 +980,15 @@ mod conformance {
                         "finish_reason": "tool_calls"
                     }]
                 })),
+                Scenario::StreamingTextAssembly => ProviderWire::body(json!({})).with_text_stream(
+                    vec![
+                        r#"{"choices":[{"delta":{"content":"hello "}}]}"#.to_string(),
+                        r#"{"choices":[{"delta":{"content":"world"}}]}"#.to_string(),
+                        r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#.to_string(),
+                        "[DONE]".to_string(),
+                    ],
+                    "hello world",
+                ),
                 Scenario::StreamingToolArgumentMerge => {
                     ProviderWire::body(json!({})).with_tool_call_stream(
                         vec![

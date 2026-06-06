@@ -31,6 +31,9 @@ pub enum Scenario {
     /// A non-streaming response that ended by emitting a tool call. Terminal
     /// reason: `ToolUse`, and normalized parts contain the tool call.
     NonStreamingToolUse,
+    /// A streamed response whose assistant text arrives across multiple chunks
+    /// and must assemble into one visible assistant text stream.
+    StreamingTextAssembly,
     /// A streamed response whose tool-call arguments arrive split across
     /// multiple chunks and must reassemble into one valid `input_json`.
     StreamingToolArgumentMerge,
@@ -56,6 +59,7 @@ impl Scenario {
         Scenario::PlainTextStop,
         Scenario::OutputCapped,
         Scenario::NonStreamingToolUse,
+        Scenario::StreamingTextAssembly,
         Scenario::StreamingToolArgumentMerge,
         Scenario::ContentFilter,
         Scenario::UsageCacheHit,
@@ -138,6 +142,11 @@ pub struct ProviderWire {
     /// the call's arguments arrive across >=2 chunks. `None` for non-streaming
     /// scenarios.
     pub tool_call_sse: Option<Vec<String>>,
+    /// For `Scenario::StreamingTextAssembly`: the SSE event strings
+    /// (provider's own format) that stream assistant text across >=2 chunks.
+    pub text_sse: Option<Vec<String>>,
+    /// The expected concatenated assistant text for `StreamingTextAssembly`.
+    pub expected_stream_text: Option<String>,
     /// The expected reassembled tool-call `input_json` (canonical, e.g.
     /// `{"q":"x"}`) for `Scenario::StreamingToolArgumentMerge`. The provider
     /// states what its fixtures encode so the suite can compare regardless of
@@ -160,6 +169,8 @@ impl ProviderWire {
         Self {
             body,
             tool_call_sse: None,
+            text_sse: None,
+            expected_stream_text: None,
             expected_tool_input_json: None,
             expected_tool_name: None,
             expected_reasoning_text: None,
@@ -176,6 +187,12 @@ impl ProviderWire {
         self.tool_call_sse = Some(sse);
         self.expected_tool_name = Some(tool_name.into());
         self.expected_tool_input_json = Some(expected_input_json);
+        self
+    }
+
+    pub fn with_text_stream(mut self, sse: Vec<String>, expected_text: impl Into<String>) -> Self {
+        self.text_sse = Some(sse);
+        self.expected_stream_text = Some(expected_text.into());
         self
     }
 
@@ -304,6 +321,38 @@ fn check_scenario(n: &dyn ProviderNormalizer, scenario: Scenario, wire: Provider
             assert!(
                 parts.iter().any(is_tool_call),
                 "[{who}] {scenario:?}: non-streaming parts must contain a tool call, got {parts:?}"
+            );
+        }
+        Scenario::StreamingTextAssembly => {
+            let sse = wire
+                .text_sse
+                .as_ref()
+                .unwrap_or_else(|| panic!("[{who}] {scenario:?}: must supply text_sse"));
+            assert!(
+                sse.len() >= 2,
+                "[{who}] {scenario:?}: text SSE must split assistant text across ≥2 chunks to be \
+                 a meaningful assembly test, got {} chunk(s)",
+                sse.len()
+            );
+            let assembled = n.assemble_stream(sse);
+            let text = assembled
+                .parts
+                .iter()
+                .filter_map(as_text)
+                .collect::<String>();
+            let expected = wire.expected_stream_text.as_ref().unwrap_or_else(|| {
+                panic!("[{who}] {scenario:?}: must supply expected_stream_text")
+            });
+            assert_eq!(
+                &text, expected,
+                "[{who}] {scenario:?}: streamed assistant text must assemble in order from deltas, \
+                 got parts {:?}",
+                assembled.parts
+            );
+            assert!(
+                assembled.parts.iter().all(|part| !is_tool_call(part)),
+                "[{who}] {scenario:?}: plain text streaming must not synthesize tool calls, got {:?}",
+                assembled.parts
             );
         }
         Scenario::StreamingToolArgumentMerge => {
@@ -480,6 +529,13 @@ fn as_tool_call(part: &LlmOutputPart) -> Option<(String, String)> {
             input_json,
             ..
         } => Some((tool_name.clone(), input_json.clone())),
+        _ => None,
+    }
+}
+
+fn as_text(part: &LlmOutputPart) -> Option<&str> {
+    match part {
+        LlmOutputPart::Text { text, .. } => Some(text.as_str()),
         _ => None,
     }
 }

@@ -150,9 +150,9 @@ pub use crate::overlay::PromptState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FollowOutputMode {
+    PinnedBottom,
+    PinnedTurnStart,
     Manual,
-    Bottom,
-    Contextual,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -575,6 +575,8 @@ pub struct App {
     pub usage: UsageState,
     /// Active model-native variant for the current model, if any.
     pub model_variant: Option<String>,
+    /// Display-facing execution mode for the active runtime.
+    pub execution_mode_label: String,
     /// Unique session name (e.g. "alpine-canyon").
     pub session_name: String,
     /// Live session id (UUID) for the active runtime. Updated on resume
@@ -752,7 +754,7 @@ impl App {
             }
         };
         Self {
-            timeline: vec![UiTimelineItem::Splash].into(),
+            timeline: Vec::new().into(),
             scroll_offset: 0,
             expand_level: 1,
             foreground_turn_active: false,
@@ -762,7 +764,7 @@ impl App {
             tick: 0,
             live: LiveTurnView::default(),
             dirty: true,
-            follow_mode: FollowOutputMode::Bottom,
+            follow_mode: FollowOutputMode::PinnedBottom,
             render_cache: RenderCache::default(),
             editor: EditorState::default(),
             skills: SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
@@ -771,6 +773,7 @@ impl App {
             focused: true,
             usage: UsageState::default(),
             model_variant: None,
+            execution_mode_label: "standard".to_string(),
             session_name,
             session_id,
             repo_status: std::env::current_dir()
@@ -809,7 +812,7 @@ impl App {
     pub fn take_input(&mut self) -> String {
         let text = self.editor.take_input();
         self.clear_process_selection();
-        self.follow_mode = FollowOutputMode::Bottom;
+        self.follow_mode = FollowOutputMode::PinnedBottom;
         text
     }
 
@@ -1010,6 +1013,11 @@ impl App {
 
     pub fn set_model_variant(&mut self, model_variant: Option<String>) {
         self.model_variant = model_variant;
+        self.dirty = true;
+    }
+
+    pub fn set_execution_mode_label(&mut self, mode: &lash::ModeId) {
+        self.execution_mode_label = crate::execution_mode_label(mode).to_string();
         self.dirty = true;
     }
 }

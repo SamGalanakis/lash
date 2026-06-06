@@ -67,6 +67,7 @@ where
 
 pub(crate) fn spawn_session_queued_turn<S>(
     session: LashSession,
+    batch_ids: Vec<String>,
     sink: S,
     stream_id: u64,
 ) -> (CancellationToken, oneshot::Receiver<RuntimeRunResult>)
@@ -83,6 +84,7 @@ where
         tracing::debug!(stream_id, "queued runtime turn task spawned");
         let result = match task_session
             .next_queued_turn()
+            .batch_ids(batch_ids)
             .cancel(task_cancel)
             .stream(&sink)
             .await

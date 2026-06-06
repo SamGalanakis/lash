@@ -62,9 +62,7 @@
                 <tr><td><code>/retry</code></td><td>—</td><td><code>/retry</code></td><td>Replay the previous turn payload</td></tr>
                 <tr><td><code>/resume</code></td><td><code>/continue</code></td><td><code>/resume [name]</code></td><td>Browse or load a previous session (interactive picker if no arg)</td></tr>
                 <tr><td><code>/skills</code></td><td>—</td><td><code>/skills</code></td><td>Browse loaded skills</td></tr>
-                <tr><td><code>/tools</code></td><td>—</td><td><code>/tools ...</code></td><td>Inspect or edit the tool registry</td></tr>
-                <tr><td><code>/reconfigure</code></td><td>—</td><td><code>/reconfigure ...</code></td><td>Apply or inspect pending runtime reconfigure</td></tr>
-                <tr><td><code>/help</code></td><td><code>/?</code></td><td><code>/help</code></td><td>Show commands and shortcuts</td></tr>
+                <tr><td><code>/help</code></td><td><code>/?</code></td><td><code>/help</code></td><td>Open the commands and shortcuts overlay</td></tr>
                 <tr><td><code>/exit</code></td><td><code>/quit</code></td><td><code>/exit</code></td><td>Quit</td></tr>
               </tbody>
             </table>
@@ -80,16 +78,17 @@
             <article class="panel">
               <h3>History navigation</h3>
               <dl class="def-list">
-                <dt><kbd>Ctrl+U</kbd> / <kbd>Ctrl+D</kbd></dt><dd>Scroll history up / down half a page.</dd>
-                <dt><kbd>PageUp</kbd> / <kbd>PageDown</kbd></dt><dd>Scroll history a full page.</dd>
+                <dt><kbd>PageUp</kbd> / <kbd>PageDown</kbd></dt><dd>Scroll history or the active document overlay.</dd>
                 <dt><kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Cycle the input-draft history when not navigating a suggestion popup.</dd>
               </dl>
             </article>
             <article class="panel">
               <h3>Prompt editing</h3>
               <dl class="def-list">
-                <dt><kbd>Enter</kbd></dt><dd>Submit the prompt, or pick from a picker.</dd>
-                <dt><kbd>Tab</kbd></dt><dd>Accept an autocomplete suggestion when the popup is open; otherwise queue the next turn (or submit a plain draft when idle).</dd>
+                <dt><kbd>Enter</kbd></dt><dd>Submit immediately when idle; while a turn is active, inject at the earliest safe runtime boundary.</dd>
+                <dt><kbd>Tab</kbd></dt><dd>Accept an autocomplete suggestion when the popup is open; with a draft, submit immediately when idle or queue a next-turn draft while active.</dd>
+                <dt><kbd>Ctrl+U</kbd></dt><dd>Delete draft text from the cursor to the start of the line.</dd>
+                <dt><kbd>Ctrl+K</kbd></dt><dd>Delete draft text from the cursor to the end of the line.</dd>
                 <dt><kbd>Ctrl+←</kbd> / <kbd>Ctrl+→</kbd></dt><dd>Move the cursor by word.</dd>
                 <dt><kbd>Home</kbd> / <kbd>End</kbd></dt><dd>Jump to the start / end of the prompt.</dd>
               </dl>
@@ -97,9 +96,9 @@
             <article class="panel">
               <h3>Selection &amp; clipboard</h3>
               <dl class="def-list">
-                <dt><kbd>Ctrl+C</kbd></dt><dd>Copy the current selection (or the last assistant response if no selection). Configure via <code>LASH_COPY_BINDING</code> if the default conflicts with your terminal.</dd>
-                <dt><kbd>Esc</kbd></dt><dd>Close pickers and cancel modal flows.</dd>
-                <dt><kbd>Ctrl+C</kbd> (idle)</dt><dd>Quit <code>lash</code> when no selection is active.</dd>
+                <dt><kbd>Ctrl+Shift+C</kbd></dt><dd>Copy the current selection or the last assistant response. Configure via <code>LASH_COPY_BINDING</code> if the default conflicts with your terminal.</dd>
+                <dt><kbd>Ctrl+C</kbd></dt><dd>Close a popup or overlay, cancel the active turn, clear a non-empty draft, or quit from an idle empty prompt.</dd>
+                <dt><kbd>Esc</kbd></dt><dd>Close overlays, pickers, and modal flows.</dd>
               </dl>
             </article>
             <article class="panel">
@@ -143,7 +142,7 @@
               <h3>Session</h3>
               <dl class="def-list">
                 <dt><code>--resume &lt;id_or_name&gt;</code></dt><dd>Resume by session id, name, or legacy <code>.db</code> filename.</dd>
-                <dt><code>--resume-prompt &lt;prompt&gt;</code></dt><dd>Queue and send a prompt right after resume.</dd>
+                <dt><code>--resume-prompt &lt;prompt&gt;</code></dt><dd>Send a prompt right after resume.</dd>
               </dl>
             </article>
             <article class="panel">
