@@ -26,10 +26,10 @@ pub use projection::{
     rlm_session_projection_extension,
 };
 pub use projection::{
-    RlmHistoryProjection, RlmSeed, decode_rlm_protocol_event, project_rlm_globals_from_events,
-    rlm_history_projection, rlm_protocol_event, rlm_seed_initial_nodes,
+    RlmHistoryProjection, RlmSeed, decode_rlm_protocol_event, rlm_history_projection,
+    rlm_protocol_event, rlm_seed_initial_nodes,
 };
 pub use protocol::{
     RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence, rlm_execution_section_for_surface,
 };
-pub use rlm_support::{BoundVariablesCache, format_budget_suffix};
+pub use rlm_support::format_budget_suffix;

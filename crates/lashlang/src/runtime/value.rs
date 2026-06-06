@@ -23,7 +23,8 @@ use super::record::{Symbol, intern_symbol, symbol_name};
 use super::{
     Name, Record, RuntimeError, RuntimeJson, execute_contains_direct, from_json,
     is_truthy as value_truthy, materialize_projected_async, read_field_ref_direct,
-    read_index_ref_direct, stringify_value_async, value_len, value_type_name, write_number,
+    read_index_ref_direct, stringify_value_async, value_contains_projected, value_len,
+    value_type_name, write_number,
 };
 
 /// Marker key that wraps a Type literal at its outermost level so a host-side
@@ -187,6 +188,10 @@ impl Value {
             Self::Record(record) => Some(record.as_ref()),
             _ => None,
         }
+    }
+
+    pub fn contains_projected(&self) -> bool {
+        value_contains_projected(self)
     }
 }
 
@@ -798,5 +803,50 @@ impl fmt::Display for Value {
                 serde_json::to_string(&RuntimeJson(self)).unwrap_or_default()
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn projected(name: &str) -> Value {
+        Value::Projected(ProjectedValue::scalar(name, Value::String("host".into())))
+    }
+
+    #[test]
+    fn contains_projected_returns_true_for_direct_projected_values() {
+        assert!(projected("input").contains_projected());
+    }
+
+    #[test]
+    fn contains_projected_returns_true_for_nested_projected_values() {
+        let mut record = Record::new();
+        record.insert("title".to_string(), Value::String("local".into()));
+        record.insert(
+            "items".to_string(),
+            Value::List(vec![Value::Number(1.0), projected("input.items")].into()),
+        );
+
+        assert!(Value::Record(Arc::new(record)).contains_projected());
+    }
+
+    #[test]
+    fn contains_projected_returns_false_for_ordinary_values() {
+        let mut record = Record::new();
+        record.insert("ok".to_string(), Value::Bool(true));
+        record.insert(
+            "items".to_string(),
+            Value::List(
+                vec![
+                    Value::Null,
+                    Value::Number(2.0),
+                    Value::String("plain".into()),
+                ]
+                .into(),
+            ),
+        );
+
+        assert!(!Value::Record(Arc::new(record)).contains_projected());
     }
 }

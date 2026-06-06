@@ -85,26 +85,27 @@
                 <tr><td><code>PromptTemplate</code></td><td>The layout: built-in execution instructions, slots, and sections.</td></tr>
                 <tr><td>RLM execution section</td><td><code>print</code> / <code>submit</code>, one-fence turn shape, Lashlang syntax, host-surface operations, builtins, common patterns, optional process / trigger syntax.</td></tr>
                 <tr><td>Showcased tools</td><td>Compact contracts for tools available through Lashlang module operations.</td></tr>
-                <tr><td><code>Bound Variables</code></td><td>Live RLM globals and <code>history</code>, listed with type and size hints.</td></tr>
-                <tr><td><code>Host Projected Variables</code></td><td>Session and per-turn projected names supplied through <code>RlmProjectedBindings</code>.</td></tr>
+                <tr><td><code>Bound Variables</code></td><td>Live typed Lashlang globals and <code>history</code>. Ordinary values show inline when small or as type and size hints when large; read-only host values do not get value previews.</td></tr>
+                <tr><td><code>Host Variables</code></td><td>Session and per-turn read-only host values available in Lashlang scope.</td></tr>
                 <tr><td>Plugin prompt hooks</td><td>Core, session, and turn prompt contributions filtered through the effective tool surface.</td></tr>
               </tbody>
             </table>
           </div>
-          <p>The variable sections are advertisements, not the data transport. Execution receives real projected bindings separately, immediately before Lash runs the fenced code.</p>
+          <p>The variable sections are advertisements, not the data transport. Bound Variables are read from the live Lashlang namespace before prompt construction. Execution receives read-only host values separately, immediately before Lash runs the fenced code. Lashlang's <code>__lashlang_snapshot_projected__</code> marker is private snapshot wire format for persistence and restore, not an RLM prompt/rendering contract.</p>
           <pre><code>### Bound Variables
 
 These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.
-Type and size hints help you plan before inspecting a value.
+Small values are shown inline so you can read them directly; larger ones show only their type and size - `print` such a variable (or the part you need) to see its contents.
 
 Available variables:
-- `history`: `list&lt;HistoryItem&gt;`, Readonly: true, projected binding, 3 entries
-- `task`: `Task`, Readonly: true, projected binding, keys=4
+- `history`: `list&lt;HistoryItem&gt;`, read-only, 3 entries
+- `task` = {"goal":"ship docs","status":"draft"}
+- `large_result`: `list&lt;LargeResultItem&gt;`, len=400
 
-### Host Projected Variables
+### Host Variables
 
-Host-projected variables:
-- `board`: projected host value, Readonly: true, projected binding</code></pre>
+Host variables:
+- `board`: read-only host value</code></pre>
         </div>
 
         <div class="section" id="history-projection">
@@ -129,7 +130,7 @@ print { status: result.status, tail: slice(result.stderr, -1200, null) }
 
 history[1].output[0] (1250 chars, full: history[1].output[0]):
 { "status": 101, "tail": "..." }</code></pre>
-          <p>The same <code>history</code> name is available inside Lashlang as a read-only projected binding. If a rendered preview says <code>full: history[1].output[0]</code>, the model can recover the untruncated value by reading or printing that path.</p>
+          <p>The same <code>history</code> name is available inside Lashlang as a read-only value. If a rendered preview says <code>full: history[1].output[0]</code>, the model can recover the untruncated value by reading or printing that path.</p>
           <dl class="def-list">
             <dt>Messages</dt>
             <dd>Rendered as <code>history[N].content</code>, with attachments exposed under <code>history[N].attachments[M]</code>.</dd>
@@ -166,7 +167,7 @@ print {
   board_cells: len(board.cells)
 }
 ```</code></pre>
-          <p>Projected names cannot be reassigned. A write like <code>history = []</code> or <code>board = {}</code> fails with a read-only projected binding error; copy the fields you need into a new local variable instead.</p>
+          <p>Read-only host values cannot be reassigned. A write like <code>history = []</code> or <code>board = {}</code> fails; copy the fields you need into a new local variable instead.</p>
         </div>
 
         <div class="section" id="execution-loop">
@@ -177,7 +178,7 @@ print {
           <div class="listing">
             <div class="listing__row"><div class="listing__label">1. prompt</div><div class="listing__body"><p>The runtime renders the system prompt, projects chronological history, appends the current iteration tail, and sends the provider request.</p></div></div>
             <div class="listing__row"><div class="listing__label">2. code</div><div class="listing__body"><p>The model emits prose plus one closed <code>lashlang</code> block. Stream masking keeps raw code out of normal assistant prose surfaces.</p></div></div>
-            <div class="listing__row"><div class="listing__label">3. execute</div><div class="listing__body"><p>The executor resolves projected bindings, links the code against the effective <code>LashlangSurface</code>, and runs it in the current VM state.</p></div></div>
+            <div class="listing__row"><div class="listing__label">3. execute</div><div class="listing__body"><p>The executor resolves host values, links the code against the effective <code>LashlangSurface</code>, and runs it in the current VM state.</p></div></div>
             <div class="listing__row"><div class="listing__label">4. observe</div><div class="listing__body"><p><code>print</code> output, operation results, diagnostics, and images become the next iteration's history context.</p></div></div>
             <div class="listing__row"><div class="listing__label">5. finish</div><div class="listing__body"><p><code>submit</code> finishes the turn as <code>TurnFinish::SubmittedValue</code> or rendered prose. <code>control.continue_as(...)</code> ends the current trajectory and opens a fresh AgentFrame with explicit seed state.</p></div></div>
           </div>

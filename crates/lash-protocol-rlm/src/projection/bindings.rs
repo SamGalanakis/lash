@@ -297,17 +297,15 @@ impl RlmProjectionExtension {
         }
         names.sort();
         let mut lines = vec![
-            "These host-projected variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
+            "These read-only host values are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
             String::new(),
-            "Host-projected variables:".to_string(),
+            "Host variables:".to_string(),
         ];
         for name in names {
-            lines.push(format!(
-                "- `{name}`: projected host value, Readonly: true, projected binding"
-            ));
+            lines.push(format!("- `{name}`: read-only host value"));
         }
         vec![PromptContribution::environment(
-            "Host Projected Variables",
+            "Host Variables",
             lines.join("\n"),
         )]
     }
@@ -555,7 +553,7 @@ mod tests {
             .pop()
             .expect("prompt contribution");
         assert!(contribution.content.contains("`current_file`"));
-        assert!(contribution.content.contains("Readonly: true"));
+        assert!(contribution.content.contains("read-only host value"));
     }
 
     #[test]

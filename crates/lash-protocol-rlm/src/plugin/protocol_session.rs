@@ -236,7 +236,7 @@ mod tests {
         let contributions = session.projected_binding_prompt_contributions().await;
         assert_eq!(contributions.len(), 1);
         assert!(contributions[0].content.contains("`current_query`"));
-        assert!(contributions[0].content.contains("Readonly: true"));
+        assert!(contributions[0].content.contains("read-only host value"));
     }
 
     #[test]

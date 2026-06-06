@@ -42,6 +42,20 @@ impl RlmRuntimeState {
         RlmProjectionExtension::prompt_contributions_for(&bindings)
     }
 
+    /// Live top-level variables for the "Bound Variables" prompt section: the
+    /// model's own scratch variables and any seeded computed globals, read from
+    /// the live execution namespace (not reconstructed from events). Excludes
+    /// host-owned values; those render type-only in their own section.
+    pub(super) async fn bound_variable_values(&self) -> serde_json::Map<String, serde_json::Value> {
+        let exclude = self.protected_projected_binding_names().await;
+        self.execution
+            .lock()
+            .await
+            .as_ref()
+            .map(|execution| execution.bound_variable_values(&exclude))
+            .unwrap_or_default()
+    }
+
     async fn protected_projected_binding_names(&self) -> BTreeSet<String> {
         self.session_projected_bindings
             .lock()

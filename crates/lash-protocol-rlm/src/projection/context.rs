@@ -30,33 +30,6 @@ pub fn decode_rlm_protocol_event(event: &lash_core::ProtocolEvent) -> Option<Rlm
         .flatten()
 }
 
-pub fn project_rlm_globals_from_events<'a>(
-    events: impl IntoIterator<Item = &'a lash_core::SessionEventRecord>,
-) -> serde_json::Map<String, serde_json::Value> {
-    let mut globals = serde_json::Map::new();
-    for event in events {
-        if let lash_core::SessionEventRecord::Protocol(event) = event
-            && let Some(event) = decode_rlm_protocol_event(event)
-        {
-            match event {
-                RlmProtocolEvent::RlmGlobalsPatch(patch) => {
-                    lash_rlm_types::apply_globals_patch(&mut globals, &patch);
-                }
-                RlmProtocolEvent::RlmSeed(seed) => {
-                    lash_rlm_types::apply_globals_patch(
-                        &mut globals,
-                        &lash_rlm_types::RlmGlobalsPatchPluginBody {
-                            set_default: seed.globals,
-                        },
-                    );
-                }
-                RlmProtocolEvent::RlmTrajectoryEntry(_) | RlmProtocolEvent::RlmDiagnostic(_) => {}
-            }
-        }
-    }
-    globals
-}
-
 #[derive(Clone, Debug)]
 pub struct RlmHistoryProjection {
     history: Vec<RlmHistoryItem>,

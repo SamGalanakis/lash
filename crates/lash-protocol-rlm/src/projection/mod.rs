@@ -8,8 +8,7 @@ pub use bindings::{
     rlm_session_projection_extension,
 };
 pub use context::{
-    RlmHistoryProjection, decode_rlm_protocol_event, project_rlm_globals_from_events,
-    rlm_history_projection, rlm_protocol_event,
+    RlmHistoryProjection, decode_rlm_protocol_event, rlm_history_projection, rlm_protocol_event,
 };
 pub use transport::{RlmSeed, rlm_seed_initial_nodes};
 

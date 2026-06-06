@@ -372,7 +372,7 @@ fn render_language_section(
     }
     bullets.push("- Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string());
     bullets.push("- Bare expressions are valid statements in normal blocks.".to_string());
-    bullets.push("- The **Bound Variables** section lists names already in scope — use them directly in lashlang, don't recreate them. It shows each variable's value inline when small, or just its type and size when large; `print` a variable (or the part you need) to see contents it only summarizes.".to_string());
+    bullets.push("- The **Bound Variables** section lists live lashlang globals already in scope, plus `history` — use them directly in lashlang, don't recreate them. It shows ordinary variable values inline when small, or just type and size when large. Read-only host values may be listed separately under **Host Variables** without value previews. `print` a variable (or the part you need) to see contents it only summarizes.".to_string());
     format!("### Language\n\n{}", bullets.join("\n"))
 }
 
@@ -414,7 +414,7 @@ if empty(first) {
 
 fn render_decomposition_section(has_operations: bool, processes: bool) -> String {
     let mut section = String::from(
-        "### Working with context\n\nYour turn's REPL trace is your working memory — keep it decision-sized and current. Two kinds of values need different handling: large transient artifacts (files, search results, long pages, raw tool dumps) stay in variables — `print` only the fields or slices you need, not the whole thing; small durable state you consult each turn (a map, plan, or checklist) should stay visible — it shows inline under **Bound Variables** when small, and you can `print` it whole when you need to reason over all of it.\n\nChoose the lightest mechanism that preserves progress:\n\n- Current variables already hold what you need → reason inline in lashlang.",
+        "### Working with context\n\nYour turn's REPL trace is your working memory — keep it decision-sized and current. Two kinds of values need different handling: large transient artifacts (files, search results, long pages, raw tool dumps) stay in variables — `print` only the fields or slices you need, not the whole thing; small durable state you consult each turn (a map, plan, or checklist) should stay visible — ordinary live globals show inline under **Bound Variables** when small, and you can `print` them whole when you need to reason over all of them.\n\nChoose the lightest mechanism that preserves progress:\n\n- Current variables already hold what you need → reason inline in lashlang.",
     );
     if has_operations {
         if processes {

@@ -10,8 +10,10 @@ use super::protocol_session::RlmProtocolSession;
 use super::runtime_state::{RlmCodeExecutor, RlmRuntimeState};
 use super::tool_args::normalize_projected_tool_args;
 use crate::driver::SharedPromptUsage;
-use crate::projection::{ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectionExtension};
-use crate::rlm_support::BoundVariablesCache;
+use crate::projection::{
+    ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectionExtension, rlm_history_projection,
+};
+use crate::rlm_support::render_bound_variables;
 use crate::stream_mask;
 
 pub(super) fn register_rlm_protocol_plugin(
@@ -44,7 +46,11 @@ pub(super) fn register_rlm_protocol_plugin(
         Box::pin(async move { normalize_projected_tool_args(ctx) })
     }));
 
-    register_bound_variables_prompt_contributor(reg, bound_variables_inline_char_limit);
+    register_bound_variables_prompt_contributor(
+        reg,
+        Arc::clone(&runtime_state),
+        bound_variables_inline_char_limit,
+    );
     register_projected_bindings_prompt_contributor(reg, Arc::clone(&protocol_session));
 
     // Per-turn `prompt_usage` is captured here and passed to the projector via a
@@ -69,12 +75,20 @@ pub(super) fn register_rlm_protocol_plugin(
 
 fn register_bound_variables_prompt_contributor(
     reg: &mut PluginRegistrar,
+    runtime_state: Arc<RlmRuntimeState>,
     inline_char_limit: usize,
 ) {
-    let bound_vars_cache = Arc::new(BoundVariablesCache::new(inline_char_limit));
     let bound_vars_hook: lash_core::plugin::PromptContributor = Arc::new(move |ctx| {
-        let cache = Arc::clone(&bound_vars_cache);
-        Box::pin(async move { Ok(cache.contributions(&ctx)) })
+        let runtime_state = Arc::clone(&runtime_state);
+        Box::pin(async move {
+            let globals = runtime_state.bound_variable_values().await;
+            let history_len = rlm_history_projection(&ctx.state.chronological_projection()).len();
+            Ok(vec![render_bound_variables(
+                &globals,
+                history_len,
+                inline_char_limit,
+            )])
+        })
     });
     reg.prompt().contribute(bound_vars_hook);
 }

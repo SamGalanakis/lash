@@ -1,12 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
 
 use lash_core::PromptContribution;
 use lash_core::PromptUsage;
-use lash_core::plugin::PromptHookContext;
 use lash_rlm_types::{RlmCreateExtras, RlmTermination};
-
-use crate::projection::{project_rlm_globals_from_events, rlm_history_projection};
 
 pub(crate) fn decode_rlm_options(
     options: &lash_core::ProtocolTurnOptions,
@@ -58,53 +54,13 @@ pub fn format_budget_suffix(
     Some(content)
 }
 
-/// Memoizes the rendered "Bound Variables" `PromptContribution`. The
-/// cache hits when the defaults `Arc` identity is unchanged between LLM
-/// iterations. Saves the JSON-shape inference + the
-/// `format!()`/`String::push_str` walk per iteration.
-pub struct BoundVariablesCache {
-    inline_char_limit: usize,
-    inner: Mutex<Option<CachedBoundVariables>>,
-}
-
-struct CachedBoundVariables {
-    globals: Arc<serde_json::Map<String, serde_json::Value>>,
-    history_len: usize,
-    rendered: PromptContribution,
-}
-
-impl BoundVariablesCache {
-    pub fn new(inline_char_limit: usize) -> Self {
-        Self {
-            inline_char_limit,
-            inner: Mutex::new(None),
-        }
-    }
-
-    pub fn contributions(&self, ctx: &PromptHookContext) -> Vec<PromptContribution> {
-        let globals = Arc::new(project_rlm_globals_from_events(ctx.state.active_events()));
-        let history_len = rlm_history_projection(&ctx.state.chronological_projection()).len();
-        if let Ok(guard) = self.inner.lock()
-            && let Some(cached) = guard.as_ref()
-            && cached.globals.as_ref() == globals.as_ref()
-            && cached.history_len == history_len
-        {
-            return vec![cached.rendered.clone()];
-        }
-        let rendered = render_bound_variables(&globals, history_len, self.inline_char_limit);
-        if let Ok(mut guard) = self.inner.lock() {
-            *guard = Some(CachedBoundVariables {
-                globals,
-                history_len,
-                rendered: rendered.clone(),
-            });
-        }
-        vec![rendered]
-    }
-}
-
-fn render_bound_variables(
-    globals: &Arc<serde_json::Map<String, serde_json::Value>>,
+/// Render the "Bound Variables" prompt section from the live execution
+/// namespace: the model's own scratch variables and any seeded computed
+/// globals, shown the same way (value inline when small, type + size hint when
+/// large). Projected/lazy values are excluded by the caller; host-projected
+/// bindings render type-only in their own section.
+pub(crate) fn render_bound_variables(
+    globals: &serde_json::Map<String, serde_json::Value>,
     history_len: usize,
     inline_char_limit: usize,
 ) -> PromptContribution {
@@ -135,7 +91,7 @@ fn render_bound_variables(
     lines.push(String::new());
     lines.push("Available variables:".to_string());
     lines.push(format!(
-        "- `history`: `list<HistoryItem>`, Readonly: true, projected binding, {history_len} entries"
+        "- `history`: `list<HistoryItem>`, read-only, {history_len} entries"
     ));
     for (name, inline, shape) in &rows {
         if let Some(inline) = inline {
@@ -151,13 +107,9 @@ fn render_bound_variables(
             .expect("bound variable should still exist while rendering prompt contribution");
         let type_text = render_shape_inline(shape, &registry);
         if let Some(size_hint) = render_value_size_hint(value) {
-            lines.push(format!(
-                "- `{name}`: `{type_text}`, Readonly: true, projected binding, {size_hint}"
-            ));
+            lines.push(format!("- `{name}`: `{type_text}`, {size_hint}"));
         } else {
-            lines.push(format!(
-                "- `{name}`: `{type_text}`, Readonly: true, projected binding"
-            ));
+            lines.push(format!("- `{name}`: `{type_text}`"));
         }
     }
 
@@ -512,8 +464,8 @@ mod bound_variable_tests {
     use super::*;
     use serde_json::json;
 
-    fn globals(value: serde_json::Value) -> Arc<serde_json::Map<String, serde_json::Value>> {
-        Arc::new(value.as_object().expect("object").clone())
+    fn globals(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        value.as_object().expect("object").clone()
     }
 
     #[test]
@@ -525,7 +477,7 @@ mod bound_variable_tests {
         assert!(s.contains("- `count` = 3"), "{s}");
         // Inline values carry no redundant type/size hint.
         assert!(!s.contains("`inventory`:"), "{s}");
-        assert!(!s.contains("projected binding, len="), "{s}");
+        assert!(!s.contains("len="), "{s}");
     }
 
     #[test]

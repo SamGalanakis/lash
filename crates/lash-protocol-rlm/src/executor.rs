@@ -1093,14 +1093,46 @@ mod tests {
             .expect("vars string");
         assert!(!vars.contains("rendered tool text"));
         assert!(!vars.contains("materialized tool text"));
-        assert!(vars.contains("__lashlang_snapshot_projected__"));
-        assert!(vars.contains("search.matches[0].text"));
 
         let restored = restore_runtime(vars).expect("restore runtime");
         assert!(matches!(
             restored.snapshot().globals.get("m"),
             Some(FlowValue::Projected(_))
         ));
+    }
+
+    #[test]
+    fn bound_variables_prompt_renders_live_globals_after_execution() {
+        block_on(async {
+            let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities(
+                lashlang::LashlangAbilities::default(),
+            );
+            let (state, response) = execute_code(
+                state,
+                ctx,
+                ExecRequest {
+                    code: "scratch_note = \"after execution\"".to_string(),
+                    accept_finish: true,
+                },
+                RlmProjectedBindings::default(),
+                Arc::new(ProjectionRegistry::new()),
+            )
+            .await
+            .expect("execute");
+            assert_eq!(response.error, None);
+
+            let globals = state.bound_variable_values(&BTreeSet::new());
+            let rendered = crate::rlm_support::render_bound_variables(&globals, 0, 1024);
+
+            assert!(
+                rendered
+                    .content
+                    .contains("- `scratch_note` = \"after execution\""),
+                "{}",
+                rendered.content
+            );
+        });
     }
 
     #[test]
