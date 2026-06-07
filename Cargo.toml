@@ -85,7 +85,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0-alpha.33"
+version = "0.1.0-alpha.34"
 license = "MIT"
 edition = "2024"
 authors = ["Samuel Galanakis"]
@@ -128,47 +128,47 @@ uuid = "1"
 
 # Internal crates — single source of truth for the lockstep workspace version.
 # A release bump only edits these lines (not every crate manifest).
-lash = { package = "lash-runtime", path = "crates/lash", version = "=0.1.0-alpha.33" }
-lash-autoresearch = { path = "crates/lash-autoresearch", version = "=0.1.0-alpha.33" }
-lash-cli = { path = "crates/lash-cli", version = "=0.1.0-alpha.33" }
-lash-core = { path = "crates/lash-core", version = "=0.1.0-alpha.33" }
-lash-export = { path = "crates/lash-export", version = "=0.1.0-alpha.33" }
-lash-file-index = { path = "crates/lash-file-index", version = "=0.1.0-alpha.33" }
-lash-llm-tools = { path = "crates/lash-llm-tools", version = "=0.1.0-alpha.33" }
-lash-llm-transport = { path = "crates/lash-llm-transport", version = "=0.1.0-alpha.33" }
-lash-local-store = { path = "crates/lash-local-store", version = "=0.1.0-alpha.33" }
-lash-openai-schema = { path = "crates/lash-openai-schema", version = "=0.1.0-alpha.33" }
-lash-plugin-mcp = { path = "crates/lash-plugin-mcp", version = "=0.1.0-alpha.33" }
-lash-plugin-observational-memory = { path = "crates/lash-plugin-observational-memory", version = "=0.1.0-alpha.33" }
-lash-plugin-plan-mode = { path = "crates/lash-plugin-plan-mode", version = "=0.1.0-alpha.33" }
-lash-plugin-process-controls = { path = "crates/lash-plugin-process-controls", version = "=0.1.0-alpha.33" }
-lash-plugin-rolling-history = { path = "crates/lash-plugin-rolling-history", version = "=0.1.0-alpha.33" }
-lash-plugin-tool-discovery = { path = "crates/lash-plugin-tool-discovery", version = "=0.1.0-alpha.33" }
-lash-plugin-tool-output-budget = { path = "crates/lash-plugin-tool-output-budget", version = "=0.1.0-alpha.33" }
-lash-protocol-rlm = { path = "crates/lash-protocol-rlm", version = "=0.1.0-alpha.33" }
-lash-protocol-standard = { path = "crates/lash-protocol-standard", version = "=0.1.0-alpha.33" }
-lash-provider-anthropic = { path = "crates/lash-provider-anthropic", version = "=0.1.0-alpha.33" }
-lash-provider-auth = { path = "crates/lash-provider-auth", version = "=0.1.0-alpha.33" }
-lash-provider-codex = { path = "crates/lash-provider-codex", version = "=0.1.0-alpha.33" }
-lash-provider-google = { path = "crates/lash-provider-google", version = "=0.1.0-alpha.33" }
-lash-provider-openai = { path = "crates/lash-provider-openai", version = "=0.1.0-alpha.33" }
-lash-remote-protocol = { path = "crates/lash-remote-protocol", version = "=0.1.0-alpha.33" }
-lash-restate = { path = "crates/lash-restate", version = "=0.1.0-alpha.33" }
-lash-rlm-types = { path = "crates/lash-rlm-types", version = "=0.1.0-alpha.33" }
-lash-sansio = { path = "crates/lash-sansio", version = "=0.1.0-alpha.33" }
-lash-standard-plugins = { path = "crates/lash-standard-plugins", version = "=0.1.0-alpha.33" }
-lash-subagents = { path = "crates/lash-subagents", version = "=0.1.0-alpha.33" }
-lash-tool-apply-patch = { path = "crates/lash-tool-apply-patch", version = "=0.1.0-alpha.33" }
-lash-tool-files = { path = "crates/lash-tool-files", version = "=0.1.0-alpha.33" }
-lash-tool-search = { path = "crates/lash-tool-search", version = "=0.1.0-alpha.33" }
-lash-tool-shell = { path = "crates/lash-tool-shell", version = "=0.1.0-alpha.33" }
-lash-tool-support = { path = "crates/lash-tool-support", version = "=0.1.0-alpha.33" }
-lash-tool-web = { path = "crates/lash-tool-web", version = "=0.1.0-alpha.33" }
-lash-trace = { path = "crates/lash-trace", version = "=0.1.0-alpha.33" }
-lash-tui = { path = "crates/lash-tui", version = "=0.1.0-alpha.33" }
-lash-tui-extensions = { path = "crates/lash-tui-extensions", version = "=0.1.0-alpha.33" }
-lash-turso-store = { path = "crates/lash-turso-store", version = "=0.1.0-alpha.33" }
-lashlang = { path = "crates/lashlang", version = "=0.1.0-alpha.33" }
+lash = { package = "lash-runtime", path = "crates/lash", version = "=0.1.0-alpha.34" }
+lash-autoresearch = { path = "crates/lash-autoresearch", version = "=0.1.0-alpha.34" }
+lash-cli = { path = "crates/lash-cli", version = "=0.1.0-alpha.34" }
+lash-core = { path = "crates/lash-core", version = "=0.1.0-alpha.34" }
+lash-export = { path = "crates/lash-export", version = "=0.1.0-alpha.34" }
+lash-file-index = { path = "crates/lash-file-index", version = "=0.1.0-alpha.34" }
+lash-llm-tools = { path = "crates/lash-llm-tools", version = "=0.1.0-alpha.34" }
+lash-llm-transport = { path = "crates/lash-llm-transport", version = "=0.1.0-alpha.34" }
+lash-local-store = { path = "crates/lash-local-store", version = "=0.1.0-alpha.34" }
+lash-openai-schema = { path = "crates/lash-openai-schema", version = "=0.1.0-alpha.34" }
+lash-plugin-mcp = { path = "crates/lash-plugin-mcp", version = "=0.1.0-alpha.34" }
+lash-plugin-observational-memory = { path = "crates/lash-plugin-observational-memory", version = "=0.1.0-alpha.34" }
+lash-plugin-plan-mode = { path = "crates/lash-plugin-plan-mode", version = "=0.1.0-alpha.34" }
+lash-plugin-process-controls = { path = "crates/lash-plugin-process-controls", version = "=0.1.0-alpha.34" }
+lash-plugin-rolling-history = { path = "crates/lash-plugin-rolling-history", version = "=0.1.0-alpha.34" }
+lash-plugin-tool-discovery = { path = "crates/lash-plugin-tool-discovery", version = "=0.1.0-alpha.34" }
+lash-plugin-tool-output-budget = { path = "crates/lash-plugin-tool-output-budget", version = "=0.1.0-alpha.34" }
+lash-protocol-rlm = { path = "crates/lash-protocol-rlm", version = "=0.1.0-alpha.34" }
+lash-protocol-standard = { path = "crates/lash-protocol-standard", version = "=0.1.0-alpha.34" }
+lash-provider-anthropic = { path = "crates/lash-provider-anthropic", version = "=0.1.0-alpha.34" }
+lash-provider-auth = { path = "crates/lash-provider-auth", version = "=0.1.0-alpha.34" }
+lash-provider-codex = { path = "crates/lash-provider-codex", version = "=0.1.0-alpha.34" }
+lash-provider-google = { path = "crates/lash-provider-google", version = "=0.1.0-alpha.34" }
+lash-provider-openai = { path = "crates/lash-provider-openai", version = "=0.1.0-alpha.34" }
+lash-remote-protocol = { path = "crates/lash-remote-protocol", version = "=0.1.0-alpha.34" }
+lash-restate = { path = "crates/lash-restate", version = "=0.1.0-alpha.34" }
+lash-rlm-types = { path = "crates/lash-rlm-types", version = "=0.1.0-alpha.34" }
+lash-sansio = { path = "crates/lash-sansio", version = "=0.1.0-alpha.34" }
+lash-standard-plugins = { path = "crates/lash-standard-plugins", version = "=0.1.0-alpha.34" }
+lash-subagents = { path = "crates/lash-subagents", version = "=0.1.0-alpha.34" }
+lash-tool-apply-patch = { path = "crates/lash-tool-apply-patch", version = "=0.1.0-alpha.34" }
+lash-tool-files = { path = "crates/lash-tool-files", version = "=0.1.0-alpha.34" }
+lash-tool-search = { path = "crates/lash-tool-search", version = "=0.1.0-alpha.34" }
+lash-tool-shell = { path = "crates/lash-tool-shell", version = "=0.1.0-alpha.34" }
+lash-tool-support = { path = "crates/lash-tool-support", version = "=0.1.0-alpha.34" }
+lash-tool-web = { path = "crates/lash-tool-web", version = "=0.1.0-alpha.34" }
+lash-trace = { path = "crates/lash-trace", version = "=0.1.0-alpha.34" }
+lash-tui = { path = "crates/lash-tui", version = "=0.1.0-alpha.34" }
+lash-tui-extensions = { path = "crates/lash-tui-extensions", version = "=0.1.0-alpha.34" }
+lash-turso-store = { path = "crates/lash-turso-store", version = "=0.1.0-alpha.34" }
+lashlang = { path = "crates/lashlang", version = "=0.1.0-alpha.34" }
 [profile.release]
 lto = "thin"
 strip = true
