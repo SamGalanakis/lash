@@ -372,7 +372,7 @@ fn render_language_section(
     }
     bullets.push("- Control flow: statement `if`/`for`/`while`; `break` exits the nearest loop; `continue` skips to the nearest loop's next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. Prefer bounded `while` loops where possible and bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string());
     bullets.push("- Bare expressions are valid statements in normal blocks.".to_string());
-    bullets.push("- The **Bound Variables** section lists values already in scope, plus `history` — use them directly in lashlang, don't recreate them. Small values show inline; large values show only type and size. Other available objects may be listed separately under **Host Variables** without value previews. `print` a variable (or the part you need) to see contents it only summarizes.".to_string());
+    bullets.push("- The **Bound Variables** section lists values already in scope, plus `history` — use them directly in lashlang, don't recreate them. Small values show inline; large values show only type and size. Other available read-only values may be listed separately without value previews. `print` a variable (or the part you need) to see contents it only summarizes.".to_string());
     format!("### Language\n\n{}", bullets.join("\n"))
 }
 

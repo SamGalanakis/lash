@@ -33,7 +33,7 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "tool:continue_as",
         "continue_as",
-        "Tail-call into a fresh RLM AgentFrame inside the current session with a clean window.\n\nThe new frame inherits **nothing** implicitly — no globals, host values, or message history. Pass everything it needs via `seed: { name: value, ... }`. Seed values that come from read-only host values stay read-only in the new frame; other values become regular RLM globals. Computed expressions default to regular globals.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `control.continue_as(...)` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the new frame must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, host values) the new frame needs in scope; leave bulky raw output behind.\n- `continue_as` only changes the active AgentFrame. It does not start, transfer, list, cancel, or otherwise manage processes.",
+        "Tail-call into a fresh RLM AgentFrame inside the current session with a clean window.\n\nThe new frame inherits **nothing** implicitly — no variables or message history. Pass everything it needs via `seed: { name: value, ... }`. Seed values copied from read-only values stay read-only in the new frame; computed expressions become writable variables.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `control.continue_as(...)` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the new frame must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, read-only values) the new frame needs in scope; leave bulky raw output behind.\n- `continue_as` only changes the active AgentFrame. It does not start, transfer, list, cancel, or otherwise manage processes.",
         continue_as_input_schema(),
         continue_as_output_schema(),
     )
@@ -52,21 +52,21 @@ fn continue_as_output_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "ok": { "type": "boolean" },
             "frame_id": { "type": "string" },
             "task": { "type": "string" },
             "seed_keys": {
                 "type": "array",
                 "items": { "type": "string" }
             },
-            "projected_count": { "type": "integer", "minimum": 0 },
-            "global_count": { "type": "integer", "minimum": 0 }
+            "seed_count": { "type": "integer", "minimum": 0 }
         },
         "required": [
+            "ok",
             "frame_id",
             "task",
             "seed_keys",
-            "projected_count",
-            "global_count"
+            "seed_count"
         ],
         "additionalProperties": false
     })
@@ -94,6 +94,14 @@ pub fn continue_as_input_schema() -> Value {
 fn continue_as_switch_frame(args: &Value) -> Result<ContinueAsResult, String> {
     let task = required_string(args, "task")?;
     let seed = RlmSeed::from_tool_args(args).map_err(|err| format!("continue_as {err}"))?;
+    let mut seed_keys = seed
+        .globals
+        .keys()
+        .cloned()
+        .chain(seed.projected.entries.iter().map(|(name, _)| name.clone()))
+        .collect::<Vec<_>>();
+    seed_keys.sort();
+    let seed_count = seed_keys.len();
     let frame_id = uuid::Uuid::new_v4().to_string();
     let initial_nodes = crate::rlm_seed_initial_nodes(seed);
     let initial_nodes = initial_nodes
@@ -109,6 +117,8 @@ fn continue_as_switch_frame(args: &Value) -> Result<ContinueAsResult, String> {
             "ok": true,
             "frame_id": frame_id.clone(),
             "task": task.clone(),
+            "seed_keys": seed_keys,
+            "seed_count": seed_count,
         }),
         control: ToolControl::SwitchAgentFrame {
             frame_id,
@@ -166,17 +176,13 @@ mod tests {
 
         assert_eq!(
             definition.contract.output_schema["required"],
-            json!([
-                "frame_id",
-                "task",
-                "seed_keys",
-                "projected_count",
-                "global_count"
-            ])
+            json!(["ok", "frame_id", "task", "seed_keys", "seed_count"])
         );
         let rendered = definition.compact_contract().render_signature();
         assert!(rendered.contains("frame_id"), "{rendered}");
         assert!(!rendered.contains("handle_count"), "{rendered}");
+        assert!(!rendered.contains("projected_count"), "{rendered}");
+        assert!(!rendered.contains("global_count"), "{rendered}");
     }
 
     #[derive(Default)]
@@ -417,6 +423,10 @@ mod tests {
         assert!(result.is_success(), "{:?}", result.value_for_projection());
         let value = result.value_for_projection();
         assert!(value.get("frame_id").and_then(Value::as_str).is_some());
+        assert_eq!(value.get("seed_keys"), Some(&json!(["query", "x"])));
+        assert_eq!(value.get("seed_count"), Some(&json!(2)));
+        assert!(value.get("projected_count").is_none());
+        assert!(value.get("global_count").is_none());
         let Some(ToolControl::SwitchAgentFrame {
             frame_id,
             initial_nodes,
@@ -477,6 +487,11 @@ mod tests {
         });
         let result = run_continue_as(&provider, manager.clone(), &args).await;
         assert!(result.is_success(), "{:?}", result.value_for_projection());
+        let value = result.value_for_projection();
+        assert_eq!(value.get("seed_keys"), Some(&json!(["glob", "proj"])));
+        assert_eq!(value.get("seed_count"), Some(&json!(2)));
+        assert!(value.get("projected_count").is_none());
+        assert!(value.get("global_count").is_none());
 
         let Some(ToolControl::SwitchAgentFrame { initial_nodes, .. }) =
             result.as_output().control.as_ref()

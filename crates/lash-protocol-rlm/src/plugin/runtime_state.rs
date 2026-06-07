@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lash_core::plugin::{CodeExecutorPlugin, ProtocolSessionContext};
-use lash_core::{SessionError, SessionEventRecord};
+use lash_core::{PromptContribution, SessionError, SessionEventRecord};
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmProtocolEvent};
 
 use super::RlmProtocolPluginConfig;
@@ -10,6 +10,7 @@ use crate::executor::{RlmExecutionState, execute_code};
 use crate::projection::{
     ProjectionResolver, RlmProjectedBindings, RlmProjectionExtension, decode_rlm_protocol_event,
 };
+use crate::rlm_support::{BoundVariableRenderCache, render_bound_variables};
 
 pub(super) struct RlmRuntimeState {
     config: RlmProtocolPluginConfig,
@@ -17,6 +18,7 @@ pub(super) struct RlmRuntimeState {
     session_projected_bindings: tokio::sync::Mutex<RlmProjectedBindings>,
     execution: tokio::sync::Mutex<Option<RlmExecutionState>>,
     active_agent_frame_id: tokio::sync::Mutex<Option<String>>,
+    bound_variable_render_cache: tokio::sync::Mutex<BoundVariableRenderCache>,
 }
 
 impl RlmRuntimeState {
@@ -32,6 +34,9 @@ impl RlmRuntimeState {
             projection_resolver,
             session_projected_bindings: tokio::sync::Mutex::new(RlmProjectedBindings::new()),
             active_agent_frame_id: tokio::sync::Mutex::new(None),
+            bound_variable_render_cache: tokio::sync::Mutex::new(
+                BoundVariableRenderCache::default(),
+            ),
         })
     }
 
@@ -42,11 +47,25 @@ impl RlmRuntimeState {
         RlmProjectionExtension::prompt_contributions_for(&bindings)
     }
 
+    pub(super) async fn bound_variables_prompt_contribution(
+        &self,
+        history_len: usize,
+    ) -> PromptContribution {
+        let globals = self.bound_variable_values().await;
+        let mut cache = self.bound_variable_render_cache.lock().await;
+        render_bound_variables(
+            &mut cache,
+            &globals,
+            history_len,
+            self.config.bound_variables_inline_char_limit,
+        )
+    }
+
     /// Live top-level variables for the "Bound Variables" prompt section: the
     /// model's own scratch variables and any seeded computed globals, read from
     /// the live execution namespace (not reconstructed from events). Excludes
-    /// host-owned values; those render type-only in their own section.
-    pub(super) async fn bound_variable_values(&self) -> serde_json::Map<String, serde_json::Value> {
+    /// read-only values; those render type-only in their own section.
+    async fn bound_variable_values(&self) -> serde_json::Map<String, serde_json::Value> {
         let exclude = self.protected_projected_binding_names().await;
         self.execution
             .lock()
@@ -120,6 +139,7 @@ impl RlmRuntimeState {
         if active_agent_frame_id.as_deref() != Some(state.current_agent_frame_id.as_str()) {
             *execution = RlmExecutionState::new(self.config.observe_projection.clone())?;
             *self.session_projected_bindings.lock().await = RlmProjectedBindings::new();
+            *self.bound_variable_render_cache.lock().await = BoundVariableRenderCache::default();
             *active_agent_frame_id = Some(state.current_agent_frame_id.clone());
         }
         let protected_names = self.protected_projected_binding_names().await;
