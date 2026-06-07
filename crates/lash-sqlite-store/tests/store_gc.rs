@@ -100,7 +100,7 @@ async fn auto_gc_runs_after_commit_without_reentrant_locking() {
 }
 
 #[test]
-fn turso_factory_uses_deterministic_safe_session_paths() {
+fn sqlite_factory_uses_deterministic_safe_session_paths() {
     let root = unique_temp_dir("paths");
     let factory = SqliteSessionStoreFactory::new(&root);
 
@@ -120,7 +120,7 @@ fn turso_factory_uses_deterministic_safe_session_paths() {
 }
 
 #[tokio::test]
-async fn turso_factory_creates_metadata_once_and_preserves_on_reopen() {
+async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
     let root = unique_temp_dir("metadata");
     let factory = SqliteSessionStoreFactory::new(&root);
     let request = SessionStoreCreateRequest {
@@ -180,7 +180,7 @@ async fn turso_factory_creates_metadata_once_and_preserves_on_reopen() {
 }
 
 #[tokio::test]
-async fn turso_factory_is_explicitly_usable_as_session_store_factory() {
+async fn sqlite_factory_is_explicitly_usable_as_session_store_factory() {
     let root = unique_temp_dir("explicit");
     let factory: std::sync::Arc<dyn SessionStoreFactory> =
         std::sync::Arc::new(SqliteSessionStoreFactory::new(&root));
@@ -205,7 +205,7 @@ async fn turso_factory_is_explicitly_usable_as_session_store_factory() {
 }
 
 #[tokio::test]
-async fn turso_factory_delete_session_removes_database_and_sidecars_idempotently() {
+async fn sqlite_factory_delete_session_removes_database_and_sidecars_idempotently() {
     let root = unique_temp_dir("delete-session");
     let factory = SqliteSessionStoreFactory::new(&root);
     let request = SessionStoreCreateRequest {

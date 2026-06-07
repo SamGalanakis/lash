@@ -3100,13 +3100,13 @@ mod tests {
     }
 
     #[test]
-    fn persisted_trigger_route_fires_after_reopening_turso_artifact_store() {
+    fn persisted_trigger_route_fires_after_reopening_sqlite_artifact_store() {
         run_async_test_on_large_stack("workbench-persisted-trigger-test", || {
-            persisted_trigger_route_fires_after_reopening_turso_artifact_store_inner()
+            persisted_trigger_route_fires_after_reopening_sqlite_artifact_store_inner()
         });
     }
 
-    async fn persisted_trigger_route_fires_after_reopening_turso_artifact_store_inner() {
+    async fn persisted_trigger_route_fires_after_reopening_sqlite_artifact_store_inner() {
         let data_dir =
             std::env::temp_dir().join(format!("agent-workbench-trigger-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");

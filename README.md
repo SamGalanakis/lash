@@ -16,7 +16,7 @@ Every completed turn lands as one semantic `RuntimeCommit` against a `SessionGra
 
 ### Sans-IO state machine for workflow integration
 
-`lash-core::EffectHost` is the host integration boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process control, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross a scoped controller with a typed `RuntimeInvocation`: scoped session/turn coordinates, a subject, optional causal parent, `replay.key`, and ref-only attachment specs. The default `InlineEffectHost` runs in process and reopens only the last committed state after a local crash. Workflow adapters create handler-scoped `ScopedEffectController`s for stable `EffectScope`s; Restate recovery reruns the handler with the same turn id, replays effects from Restate history, and lets Lash retry the final idempotent commit. Process handles are explicit persistence support: install a deployment-level `ProcessRegistry` such as `lash-sqlite-store::TursoProcessRegistry` when the host wants background process control; otherwise process start/list/await/cancel/transfer/cleanup fail loudly. Host-facing process commands stay on `ProcessControl`; optional process observation attaches through trace sinks such as `TraceLashlangGraphStore`.
+`lash-core::EffectHost` is the host integration boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process control, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross a scoped controller with a typed `RuntimeInvocation`: scoped session/turn coordinates, a subject, optional causal parent, `replay.key`, and ref-only attachment specs. The default `InlineEffectHost` runs in process and reopens only the last committed state after a local crash. Workflow adapters create handler-scoped `ScopedEffectController`s for stable `EffectScope`s; Restate recovery reruns the handler with the same turn id, replays effects from Restate history, and lets Lash retry the final idempotent commit. Process handles are explicit persistence support: install a deployment-level `ProcessRegistry` such as `lash-sqlite-store::SqliteProcessRegistry` when the host wants background process control; otherwise process start/list/await/cancel/transfer/cleanup fail loudly. Host-facing process commands stay on `ProcessControl`; optional process observation attaches through trace sinks such as `TraceLashlangGraphStore`.
 
 ### Two execution modes, one commit unit
 
@@ -113,7 +113,7 @@ Hosts that expose Lash through HTTP, queues, callbacks, or workflow handlers sho
 
 Two runnable apps under `examples/` drive the `lash` facade end-to-end — full hosts with a browser UI, real persistence, and optional durable execution. The docs walk through both at <https://lash.run/examples.html>.
 
-`examples/agent-service` is a localhost SQLite-backed chat app: RLM protocol, typed session plugin activation, app-owned board tools, semantic streaming, per-chat model selection, Turso runtime persistence, and optional Restate-backed turns.
+`examples/agent-service` is a localhost SQLite-backed chat app: RLM protocol, typed session plugin activation, app-owned board tools, semantic streaming, per-chat model selection, SQLite runtime persistence, and optional Restate-backed turns.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... cargo run -p agent-service

@@ -46,7 +46,7 @@ jobs:
       - name: Test lash core
         run: cargo test -p lash-core --locked
 
-      - name: Test Turso store
+      - name: Test SQLite store
         run: cargo test -p lash-sqlite-store --locked
 
       - name: Test lash facade

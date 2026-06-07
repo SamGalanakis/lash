@@ -60,10 +60,10 @@
       </div>
           <pre><code>use std::sync::Arc;
 use lash::{LashCore, ModeId, ModePreset};
-use lash_sqlite_store::{TursoSessionStoreFactory, Store};
+use lash_sqlite_store::{SqliteSessionStoreFactory, Store};
 
 let data_dir = std::path::PathBuf::from("./.lash-data");
-let store_factory = Arc::new(TursoSessionStoreFactory::new(data_dir.join("sessions")));
+let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
 let artifact_store = Arc::new(Store::open(&amp;data_dir.join("artifacts.db"))?);
 
 let core = LashCore::builder()
@@ -163,7 +163,7 @@ if let Some(process_report) = report.process {
         <p>The <code>agent-service</code> example keeps app storage and runtime storage separate: chat rows in one database, Lash sessions in the runtime store.</p>
       </div>
           <pre><code>// One factory at boot, shared across every chat.
-let store_factory = Arc::new(TursoSessionStoreFactory::new(
+let store_factory = Arc::new(SqliteSessionStoreFactory::new(
     data_dir.join("lash-sessions"),
 ));
 let artifact_store = Arc::new(lash_sqlite_store::Store::open(

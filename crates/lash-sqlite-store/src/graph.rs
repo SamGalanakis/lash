@@ -1,16 +1,16 @@
 //! Session-graph persistence and garbage collection on [`Store`].
 //!
-//! Ported from the turso store. The public async surface
+//! Ported from the prior store. The public async surface
 //! (`replace_session_graph`, `append_session_graph_nodes`, `load_session_graph`,
-//! `gc_unreachable`) keeps the exact turso signatures. The shared
+//! `gc_unreachable`) keeps the exact the prior store signatures. The shared
 //! `*_from_conn` helpers are **synchronous** and take a `&rusqlite::Connection`
 //! so `lifecycle::load_picker_info` (and any future caller already on the
 //! connection thread) can reuse them inside a `conn.call` closure — this is the
-//! load-bearing change from turso, which had them `async`.
+//! load-bearing change from the prior store, which had them `async`.
 //!
 //! Read paths go through `self.conn.call(...)`; the graph-mutating and GC paths
 //! go through `self.conn.write(...)` so `BEGIN IMMEDIATE` takes the write lock
-//! up front, replacing the turso `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`
+//! up front, replacing the prior store `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`
 //! ceremony.
 
 use super::*;

@@ -4,10 +4,10 @@
 //! consumers but bridge to the async [`SqliteConnection`] underneath:
 //!
 //! * [`lashlang::LashlangArtifactStore`] is itself an `#[async_trait]`, so its
-//!   methods `.await` the connection wrapper directly (matching the turso
+//!   methods `.await` the connection wrapper directly (matching the the prior store
 //!   store's async surface byte-for-byte).
 //! * [`AttachmentManifest`] is a *synchronous* trait. Its bodies therefore wrap
-//!   the async store work in [`block_on_store`], exactly as the turso store did.
+//!   the async store work in [`block_on_store`], exactly as the prior store did.
 //!
 //! Every DB body is a synchronous rusqlite closure handed to `conn.call`
 //! (reads) or `conn.write` (read-then-write); only the wrapper call is awaited.
@@ -73,7 +73,7 @@ impl lashlang::LashlangArtifactStore for Store {
         let artifact_ref = module_ref.as_str().to_string();
         // `Option<Option<Vec<u8>>>`: the outer `None` means no `artifact_refs`
         // row exists (return `Ok(None)`); the inner `None` means the row points
-        // at a missing blob (a hard error, matching the turso store).
+        // at a missing blob (a hard error, matching the prior store).
         let resolved = self
             .conn
             .call(move |conn| {

@@ -1,7 +1,6 @@
 //! The shared async connection wrapper over [`tokio_rusqlite::Connection`].
 //!
-//! Every module in this crate talks to SQLite through [`SqliteConnection`].
-//! It is the tokio-rusqlite analogue of the turso store's `tokio::sync::Mutex<turso::Connection>`:
+//! Every module in this crate talks to SQLite through [`SqliteConnection`]:
 //! a single cheaply-clonable handle whose database operations all run on the
 //! connection's own background thread via [`tokio_rusqlite::Connection::call`].
 //!
@@ -11,7 +10,7 @@
 //! consistent:
 //!
 //! * **WAL + busy-timeout setup.** Real SQLite WAL (the entire point of the
-//!   turso→rusqlite swap) needs `PRAGMA journal_mode=WAL` plus a generous
+//!   rusqlite swap) needs `PRAGMA journal_mode=WAL` plus a generous
 //!   `busy_timeout` so contending processes wait instead of failing. [`open`]
 //!   and [`open_in_memory`] apply these once on the connection thread.
 //!
@@ -41,13 +40,13 @@ pub(crate) enum TxOutcome<T> {
     Rollback(T),
 }
 
-/// Busy timeout applied to every connection. Matches the turso store's
+/// Busy timeout applied to every connection. Matches the prior store's
 /// 15-second window so cross-process writers wait rather than fail fast.
 pub(crate) const BUSY_TIMEOUT_MS: u32 = 15_000;
 
 /// PRAGMAs applied on the connection thread immediately after open. WAL is the
 /// reason this crate exists: it uses the `-wal`/`-shm` sidecars and supports
-/// multi-process readers + a single writer, which turso's single-file mvcc mode
+/// multi-process readers + a single writer, which the prior store's single-file mvcc mode
 /// did not give us across processes.
 fn open_pragmas() -> String {
     // The `journal_mode=WAL` conversion is applied separately via

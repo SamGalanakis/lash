@@ -54,9 +54,9 @@ let core = LashCore::rlm()
     .build()?;</code></pre>
           <pre><code>use std::sync::Arc;
 use lash::persistence::FileAttachmentStore;
-use lash_sqlite_store::{TursoSessionStoreFactory, Store};
+use lash_sqlite_store::{SqliteSessionStoreFactory, Store};
 
-let store_factory = Arc::new(TursoSessionStoreFactory::new(data_dir.join("sessions")));
+let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
 let artifact_store = Arc::new(Store::open(&amp;data_dir.join("artifacts.db"))?);
 
 let core = LashCore::rlm()

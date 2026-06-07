@@ -21,7 +21,7 @@
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">agent<span class="slash">/</span>service</h1>
-    <p class="opener__lede">The runnable browser example in <code>examples/agent-service</code> shows the app-facing <code>lash</code> API in a realistic host: Axum routes, OpenRouter, RLM mode, typed session plugin activation, app-owned tools, semantic streaming, per-chat model selection, Turso runtime stores, separate product persistence, and optional Restate-backed turns.</p>
+    <p class="opener__lede">The runnable browser example in <code>examples/agent-service</code> shows the app-facing <code>lash</code> API in a realistic host: Axum routes, OpenRouter, RLM mode, typed session plugin activation, app-owned tools, semantic streaming, per-chat model selection, SQLite runtime stores, separate product persistence, and optional Restate-backed turns.</p>
   </section>
 
   <main class="body" id="content">
@@ -60,7 +60,7 @@
         <div class="section" id="core-wiring">
           <div class="section-header">
             <h2>Core Wiring</h2>
-            <p>Build one core for the process. The example installs RLM explicitly and wires the Turso session factory, Lashlang artifact store, file attachment store, and effect host on the normal builder.</p>
+            <p>Build one core for the process. The example installs RLM explicitly and wires the SQLite session factory, Lashlang artifact store, file attachment store, and effect host on the normal builder.</p>
           </div>
           <pre><code>let provider = ProviderHandle::new(
     OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)

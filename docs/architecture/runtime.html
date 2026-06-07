@@ -39,7 +39,7 @@ flowchart TD
   Runtime --> Env["RuntimeEnvironment<br/>providers, tools, tasks, traces"]
   Runtime --> Manager["RuntimeSessionServices<br/>host capability set"]
   Runtime --> Persistence["RuntimePersistence trait"]
-  Persistence --> Turso["lash-sqlite-store<br/>Turso + blobs"]
+  Persistence --> SQLite["lash-sqlite-store<br/>SQLite + blobs"]
   Manager --> Session["Session"]
   Session --> Machine["lash-sansio TurnMachine"]
   Session --> Plugins["SessionPlugin hooks"]

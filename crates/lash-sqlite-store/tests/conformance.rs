@@ -119,7 +119,7 @@ fn failing_executor() -> RuntimeEffectLocalExecutor<'static> {
 }
 
 #[tokio::test]
-async fn turso_process_registry_satisfies_conformance() {
+async fn sqlite_process_registry_satisfies_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
     lash_core::testing::conformance::process_registry_reopenable(|| {
         let path = fresh_db_path(&dirs, "processes.db");
@@ -132,7 +132,7 @@ async fn turso_process_registry_satisfies_conformance() {
 }
 
 #[tokio::test]
-async fn turso_store_satisfies_runtime_persistence_conformance() {
+async fn sqlite_store_satisfies_runtime_persistence_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
     lash_core::testing::conformance::runtime_persistence_reopenable(|| {
         let path = fresh_db_path(&dirs, "session.db");
@@ -145,7 +145,7 @@ async fn turso_store_satisfies_runtime_persistence_conformance() {
 }
 
 #[tokio::test]
-async fn turso_store_schema_excludes_embedded_turn_replay_tables() {
+async fn sqlite_store_schema_excludes_embedded_turn_replay_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("schema.db");
     drop(Store::open(&path).await.expect("open store"));
@@ -175,7 +175,7 @@ fn raw_count(conn: &rusqlite::Connection, sql: &str, name: &str) -> i64 {
 }
 
 #[tokio::test]
-async fn turso_store_satisfies_lashlang_artifact_store_conformance() {
+async fn sqlite_store_satisfies_lashlang_artifact_store_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
     lash_core::testing::conformance::lashlang_artifact_store_reopenable(
         || {
@@ -191,7 +191,7 @@ async fn turso_store_satisfies_lashlang_artifact_store_conformance() {
 }
 
 #[tokio::test]
-async fn turso_effect_host_satisfies_scope_conformance() {
+async fn sqlite_effect_host_satisfies_scope_conformance() {
     lash_core::testing::conformance::effect_host(|| {
         Arc::new(sync_await(async {
             SqliteEffectHost::memory().await.expect("effect host")
@@ -201,7 +201,7 @@ async fn turso_effect_host_satisfies_scope_conformance() {
 }
 
 #[tokio::test]
-async fn turso_effect_controller_satisfies_replay_conformance() {
+async fn sqlite_effect_controller_satisfies_replay_conformance() {
     let controller = SqliteRuntimeEffectController::memory(EffectScope::turn(
         "effect-conformance-session",
         "effect-conformance-turn",
@@ -217,7 +217,7 @@ async fn turso_effect_controller_satisfies_replay_conformance() {
 }
 
 #[tokio::test]
-async fn turso_effect_controller_replays_without_local_executor() {
+async fn sqlite_effect_controller_replays_without_local_executor() {
     let controller = SqliteRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
         .await
         .expect("controller");
@@ -237,7 +237,7 @@ async fn turso_effect_controller_replays_without_local_executor() {
 }
 
 #[tokio::test]
-async fn turso_effect_controller_rejects_envelope_hash_conflict() {
+async fn sqlite_effect_controller_rejects_envelope_hash_conflict() {
     let controller = SqliteRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
         .await
         .expect("controller");
@@ -256,11 +256,11 @@ async fn turso_effect_controller_rejects_envelope_hash_conflict() {
         )
         .await
         .expect_err("same replay key with changed envelope must fail");
-    assert_eq!(err.code, "turso_effect_replay_hash_conflict");
+    assert_eq!(err.code, "sqlite_effect_replay_hash_conflict");
 }
 
 #[tokio::test]
-async fn turso_effect_controller_reclaims_stale_in_progress_lease() {
+async fn sqlite_effect_controller_reclaims_stale_in_progress_lease() {
     let controller = SqliteRuntimeEffectController::memory_with_options(
         EffectScope::turn("session", "turn"),
         SqliteEffectReplayOptions {
@@ -301,7 +301,7 @@ async fn turso_effect_controller_reclaims_stale_in_progress_lease() {
         .await
         .expect("first task joins")
         .expect_err("stale owner must not finalize after lease loss");
-    assert_eq!(first_err.code, "turso_effect_replay_lease_lost");
+    assert_eq!(first_err.code, "sqlite_effect_replay_lease_lost");
 
     controller.start_replay();
     let replayed = controller
@@ -312,7 +312,7 @@ async fn turso_effect_controller_reclaims_stale_in_progress_lease() {
 }
 
 #[tokio::test]
-async fn turso_sleep_replay_returns_after_recorded_due_time() {
+async fn sqlite_sleep_replay_returns_after_recorded_due_time() {
     let controller = SqliteRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
         .await
         .expect("controller");

@@ -2,8 +2,8 @@
 //! [`SqliteConnection`].
 //!
 //! The `SCHEMA` / `PROCESS_SCHEMA` / `EFFECT_SCHEMA` strings are plain SQLite
-//! and are copied verbatim from the turso store. The only thing that changes in
-//! the rusqlite port is the *open path*: turso's `Builder::new_local` +
+//! and are copied verbatim from the prior store. The only thing that changes in
+//! the rusqlite port is the *open path*: the prior store's `Builder::new_local` +
 //! `experimental_multiprocess_wal` + `PRAGMA journal_mode='mvcc'` is replaced by
 //! [`SqliteConnection::open`], which applies real `journal_mode=WAL` and a
 //! 15-second `busy_timeout` (see `conn.rs`).
@@ -229,9 +229,9 @@ pub(crate) async fn apply_pragmas(
     backing: StoreBacking,
 ) -> rusqlite::Result<()> {
     // WAL + busy_timeout are already applied in `SqliteConnection::open` /
-    // `open_in_memory`. The remaining tuning PRAGMAs match the turso store. The
+    // `open_in_memory`. The remaining tuning PRAGMAs match the prior store. The
     // `backing` argument is retained so the lifecycle call sites read the same
-    // as the turso port; WAL is only meaningful for file-backed databases.
+    // as the prior store port; WAL is only meaningful for file-backed databases.
     let _ = backing;
     conn.call(|c| {
         c.execute_batch(

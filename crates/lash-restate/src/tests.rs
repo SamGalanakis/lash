@@ -127,7 +127,7 @@ fn process_registry() -> Arc<dyn ProcessRegistry> {
     Arc::new(sync_await(async {
         lash_sqlite_store::SqliteProcessRegistry::memory()
             .await
-            .expect("turso registry")
+            .expect("sqlite registry")
     }))
 }
 
@@ -1535,7 +1535,7 @@ fn process_wake_event_type() -> lash_core::ProcessEventType {
 }
 
 #[tokio::test]
-async fn turso_process_recovery_reopens_registry_worker_grants_wakes_and_cancel() {
+async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel() {
     let temp = tempfile::tempdir().expect("tempdir");
     let process_db = temp.path().join("processes.db");
     let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
@@ -1750,13 +1750,13 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
 /// that registry must drive it to completion via the recovery sweep — the same
 /// durable re-execution guarantee a turn-started process has (invariant 3).
 ///
-/// Mirrors `turso_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`
+/// Mirrors `sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`
 /// but the process is started by a trigger/host event (a `LashlangProcess` row
 /// with host-event provenance), not by a live turn's tool call. It also pins
 /// the lease single-owner / fencing contract: an active lease fences a
 /// competing owner and a superseded (stale) writer is rejected (invariant 4).
 #[tokio::test]
-async fn turso_trigger_started_process_recovered_after_worker_registry_reopen() {
+async fn sqlite_trigger_started_process_recovered_after_worker_registry_reopen() {
     let temp = tempfile::tempdir().expect("tempdir");
     let process_db = temp.path().join("processes.db");
     let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(

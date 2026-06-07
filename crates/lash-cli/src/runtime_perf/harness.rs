@@ -500,7 +500,7 @@ pub(crate) async fn build_runtime_with_store(
     })
 }
 
-pub(crate) async fn build_runtime_with_turso_store(
+pub(crate) async fn build_runtime_with_sqlite_store(
     scenario: RuntimePerfScenario,
     root: PathBuf,
 ) -> anyhow::Result<BenchmarkRuntime> {

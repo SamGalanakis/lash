@@ -1,9 +1,9 @@
 //! [`Store`] open/memory lifecycle plus session head/meta accessors.
 //!
 //! This is one of the two reference modules (with `blobs.rs`) establishing the
-//! turso→tokio-rusqlite translation pattern every other module follows:
+//! tokio-rusqlite translation pattern every other module follows:
 //!
-//! * The async public methods keep the *exact* turso signatures.
+//! * The async public methods keep the *exact* the prior store signatures.
 //! * A read goes through `self.conn.call(move |c| { ... })`, where the closure
 //!   is a *synchronous* rusqlite body returning `rusqlite::Result<T>`.
 //! * A read-then-write goes through `self.conn.write(move |tx| { ... })`.

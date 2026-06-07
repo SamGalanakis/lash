@@ -101,7 +101,7 @@ impl RuntimePerfScenario {
             "embed_rlm" => Some(Self::EmbedRlm),
             "scoped_effect_controller" => Some(Self::ScopedEffectController),
             "store_reopen" => Some(Self::StoreReopen),
-            "turso_store_reopen" => Some(Self::SqliteStoreReopen),
+            "sqlite_store_reopen" => Some(Self::SqliteStoreReopen),
             "turn_checkpoint" => Some(Self::TurnCheckpoint),
             _ => None,
         }
@@ -129,7 +129,7 @@ impl RuntimePerfScenario {
             Self::EmbedRlm => "embed_rlm",
             Self::ScopedEffectController => "scoped_effect_controller",
             Self::StoreReopen => "store_reopen",
-            Self::SqliteStoreReopen => "turso_store_reopen",
+            Self::SqliteStoreReopen => "sqlite_store_reopen",
             Self::TurnCheckpoint => "turn_checkpoint",
         }
     }

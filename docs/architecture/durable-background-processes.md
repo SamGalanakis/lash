@@ -59,7 +59,7 @@ holding its `ProcessLease`.
 lash's thesis is that **the runtime is the durable end** for committed session
 state and process control records, while the active effect host owns in-flight
 effect replay. Restate supplies durable handler history and timers for turn
-effects; Turso supplies the committed session store and process registry.
+effects; SQLite supplies the committed session store and process registry.
 Process execution follows that split: **lash owns the process durability logic;
 the host supplies the backend.**
 
@@ -121,7 +121,7 @@ It:
   unleased processes and (re-)runs them.**
 
 **3. Host supplies the backend; lash owns the durability logic** — exactly as
-with turns. The host wires the Turso registry and runs the worker (under
+with turns. The host wires the SQLite registry and runs the worker (under
 Restate, the worker handler is a workflow Restate re-invokes). The host does not
 re-implement recovery, leasing, or idempotency per deployment.
 
@@ -138,7 +138,7 @@ A generalization of code that already existed for turns — not a new subsystem:
   `schema_version`, `process_id`, `owner_id`, `lease_token`, `fencing_token`,
   `claimed_at_epoch_ms`, `expires_at_epoch_ms`, plus `ProcessLeaseCompletion`.
   The owner / lease-token / fencing-token triple is the distributed
-  single-owner contract. Implemented on `TursoProcessRegistry` (durable,
+  single-owner contract. Implemented on `SqliteProcessRegistry` (durable,
   fencing CAS) and `TestLocalProcessRegistry` (in-memory).
 - **`ProcessRegistry::list_non_terminal()`** — the worklist query: the
   non-terminal rows *are* the durable work queue, alongside the claim / renew /
@@ -286,7 +286,7 @@ terminal are carried as request config / tool-access, not lost.
 - `crates/lash-subagents/src/rlm.rs` — `agents.spawn` emitting
   `ProcessInput::SessionTurn`.
 - `crates/lash-restate/src/tests.rs` —
-  `turso_trigger_started_process_recovered_after_worker_registry_reopen` and
-  `turso_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`.
+  `sqlite_trigger_started_process_recovered_after_worker_registry_reopen` and
+  `sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel`.
 - `crates/lash-core/src/testing/conformance.rs` — process-lease single-owner /
   fencing conformance suite.

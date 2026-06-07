@@ -1,8 +1,8 @@
 //! SQLite-backed [`ProcessRegistry`] (`SqliteProcessRegistry`).
 //!
-//! Ported from the turso store, preserving the public async surface byte-for-byte
+//! Ported from the prior store, preserving the public async surface byte-for-byte
 //! (the type name keeps the `Sqlite` prefix so the path-rename swap keeps
-//! compiling). The turso version ran every op directly on `&turso::Connection`
+//! compiling). The prior implementation ran every op directly on `&rusqlite::Connection`
 //! with `.await`; here every DB body is a *synchronous* rusqlite closure handed
 //! to [`SqliteConnection::call`] (reads) or [`SqliteConnection::write_flow`]
 //! (read-then-write).
@@ -16,7 +16,7 @@
 //! such method therefore runs its synchronous body returning
 //! `Result<T, PluginError>` and maps it to a [`TxOutcome`]: `Ok` ⇒
 //! `Commit(Ok(value))`, `Err` ⇒ `Rollback(Err(error))`. That preserves the
-//! turso behaviour of rolling back on every error while still carrying the
+//! prior behaviour of rolling back on every error while still carrying the
 //! `PluginError` back to the caller. The outer `rusqlite::Error` channel only
 //! carries genuine SQLite/connection failures, mapped via `process_sqlite_error`.
 //!

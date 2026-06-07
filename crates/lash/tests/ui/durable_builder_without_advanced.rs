@@ -23,7 +23,7 @@ async fn durable_core_without_advanced(
         .lashlang_artifact_store(Arc::new(
             lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
                 .await
-                .expect("turso artifact store"),
+                .expect("sqlite artifact store"),
         ))
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
         .residency(lash::durability::Residency::ActivePathOnly)

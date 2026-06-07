@@ -1,10 +1,10 @@
-//! SQLite-backed runtime effect replay host (tokio-rusqlite port of the turso
+//! SQLite-backed runtime effect replay host (tokio-rusqlite port of the the prior store
 //! store's `effect_replay`).
 //!
-//! The public surface is identical to the turso version — same type names
+//! The public surface is identical to the prior implementation — same type names
 //! (`SqliteEffectHost`, `SqliteRuntimeEffectController`, `SqliteEffectReplayOptions`),
 //! same async signatures — so consumers swap backends with a path rename only.
-//! The only mechanical change is the database layer: turso ran every op directly
+//! The only mechanical change is the database layer: the prior store ran every op directly
 //! on `&Connection` with `.await`; here every database body is a *synchronous*
 //! rusqlite closure handed to the shared [`SqliteConnection`] wrapper. The
 //! claim/finalize paths run inside `conn.write` (`BEGIN IMMEDIATE`) so the
@@ -204,7 +204,7 @@ impl SqliteRuntimeEffectController {
             .replay_key()
             .ok_or_else(|| {
                 RuntimeEffectControllerError::new(
-                    "turso_effect_replay_key_missing",
+                    "sqlite_effect_replay_key_missing",
                     "runtime effect envelope requires replay.key",
                 )
             })?
@@ -223,7 +223,7 @@ impl SqliteRuntimeEffectController {
         // `conn.write`. The closure returns a `rusqlite::Result` carrying our
         // own outcome `Result<PreparedEffect, RuntimeEffectControllerError>`:
         // the SQL committing is independent of whether the recorded effect was
-        // a success, a failure, or a fresh claim — exactly the turso behaviour
+        // a success, a failure, or a fresh claim — exactly the prior behaviour
         // (commit on `Ok(_)` for any `PreparedEffect` variant). Only a real
         // SQLite error rolls back.
         let outcome: Result<PreparedEffect, RuntimeEffectControllerError> = self
@@ -261,7 +261,7 @@ impl SqliteRuntimeEffectController {
                 else {
                     if replay_mode {
                         return Ok(Err(RuntimeEffectControllerError::new(
-                            "turso_effect_replay_missing",
+                            "sqlite_effect_replay_missing",
                             format!(
                                 "no recorded runtime effect for scope `{scope_id}` and replay key `{replay_key}`"
                             ),
@@ -299,7 +299,7 @@ impl SqliteRuntimeEffectController {
 
                 if existing_hash != envelope_hash {
                     return Ok(Err(RuntimeEffectControllerError::new(
-                        "turso_effect_replay_hash_conflict",
+                        "sqlite_effect_replay_hash_conflict",
                         format!(
                             "runtime effect replay key `{replay_key}` in scope `{scope_id}` was reused with a different envelope hash"
                         ),
@@ -313,7 +313,7 @@ impl SqliteRuntimeEffectController {
                     STATUS_COMPLETED => {
                         let Some(json) = outcome_json else {
                             return Ok(Err(RuntimeEffectControllerError::new(
-                                "turso_effect_replay_corrupt_row",
+                                "sqlite_effect_replay_corrupt_row",
                                 "completed runtime effect row is missing outcome_json",
                             )));
                         };
@@ -329,7 +329,7 @@ impl SqliteRuntimeEffectController {
                     STATUS_FAILED => {
                         let Some(json) = error_json else {
                             return Ok(Err(RuntimeEffectControllerError::new(
-                                "turso_effect_replay_corrupt_row",
+                                "sqlite_effect_replay_corrupt_row",
                                 "failed runtime effect row is missing error_json",
                             )));
                         };
@@ -372,7 +372,7 @@ impl SqliteRuntimeEffectController {
                         })))
                     }
                     other => Ok(Err(RuntimeEffectControllerError::new(
-                        "turso_effect_replay_corrupt_row",
+                        "sqlite_effect_replay_corrupt_row",
                         format!("unknown runtime effect replay status `{other}`"),
                     ))),
                 }
@@ -437,7 +437,7 @@ impl SqliteRuntimeEffectController {
                 )?;
                 if changed != 1 {
                     return Ok(Err(RuntimeEffectControllerError::new(
-                        "turso_effect_replay_lease_lost",
+                        "sqlite_effect_replay_lease_lost",
                         format!(
                             "runtime effect replay lease was lost before finalizing scope `{scope_id}` replay key `{replay_key}`"
                         ),
@@ -679,19 +679,19 @@ async fn sleep_until_retry(retry_at_ms: u64) {
 }
 
 fn effect_sqlite_error(err: rusqlite::Error) -> RuntimeEffectControllerError {
-    RuntimeEffectControllerError::new("turso_effect_replay_store", err.to_string())
+    RuntimeEffectControllerError::new("sqlite_effect_replay_store", err.to_string())
 }
 
 fn effect_encode_error(err: serde_json::Error) -> RuntimeEffectControllerError {
     RuntimeEffectControllerError::new(
-        "turso_effect_replay_encode",
+        "sqlite_effect_replay_encode",
         format!("failed to encode runtime effect replay row: {err}"),
     )
 }
 
 fn effect_decode_error(err: serde_json::Error) -> RuntimeEffectControllerError {
     RuntimeEffectControllerError::new(
-        "turso_effect_replay_decode",
+        "sqlite_effect_replay_decode",
         format!("failed to decode runtime effect replay row: {err}"),
     )
 }

@@ -1,7 +1,7 @@
 //! The [`RuntimePersistence`] trait implementation for [`Store`].
 //!
-//! This is the tokio-rusqlite port of the turso store's `persistence.rs`. The
-//! public surface is byte-for-byte the turso async trait: identical method
+//! This is the tokio-rusqlite port of the prior store's `persistence.rs`. The
+//! public surface is byte-for-byte the prior store async trait: identical method
 //! names and signatures, so consumers swap backends with a path rename only.
 //!
 //! The translation rules (see `conn.rs`, `lifecycle.rs`, `blobs.rs`):

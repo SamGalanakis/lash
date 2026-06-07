@@ -11,7 +11,7 @@
 //! with identical async signatures, so a consumer swaps backends by renaming
 //! the crate path only. The difference is the engine underneath: tokio-rusqlite
 //! over a statically-linked SQLite with real WAL (`-wal`/`-shm` sidecars,
-//! multi-process readers + single writer) instead of turso's experimental mvcc.
+//! multi-process readers + single writer) instead of the prior store's experimental mvcc.
 //!
 //! ## Why this is "the durable backend" not just "an option"
 //!
@@ -89,7 +89,7 @@ use schema::{
 /// The struct name and every public method match `lash_sqlite_store::Store`
 /// exactly so consumers swap backends with a path rename. Internally it holds a
 /// single cloneable [`SqliteConnection`] (a tokio-rusqlite handle to one
-/// database thread) rather than turso's `tokio::sync::Mutex<turso::Connection>`.
+/// database thread) rather than the prior store's `tokio::sync::Mutex<rusqlite::Connection>`.
 pub struct Store {
     conn: SqliteConnection,
     artifact_cache: Mutex<BTreeMap<lashlang::ModuleRef, Arc<lashlang::ModuleArtifact>>>,
