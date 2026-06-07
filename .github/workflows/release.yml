@@ -53,6 +53,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Required: lash-tool-search depends (non-optionally) on fff-search, whose
+      # build.rs needs zig. Every other CI/release compile job installs this;
+      # the publish verify-build and the test gate need it too.
+      - name: Install Zig
+        uses: ./.github/actions/setup-ci-zig
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
