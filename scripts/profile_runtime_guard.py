@@ -20,10 +20,12 @@ from typing import Any
 
 
 DEFAULT_SCENARIOS = [
+    "rlm_globals",
     "rlm_large_tool_surface",
     "rlm_process_handles",
     "tool_discovery_search",
     "turn_checkpoint",
+    "turso_store_reopen",
 ]
 DEFAULT_STACKS = ["64k", "128k", "256k", "320k", "512k", "1m", "8m"]
 
@@ -51,8 +53,8 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help=(
-            "Scenario to track. Defaults to rlm_large_tool_surface, "
-            "rlm_process_handles, and turn_checkpoint. May be repeated."
+            "Scenario to track. Defaults to the critical RLM prompt, tool surface, "
+            "process, discovery, checkpoint, and durable-store surfaces. May be repeated."
         ),
     )
     parser.add_argument(

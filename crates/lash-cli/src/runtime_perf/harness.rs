@@ -11,9 +11,11 @@ use lash::{
 use lash_core::SessionEventRecord;
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ACTIVE_STATE_PLUGIN_TYPE as OM_ACTIVE_STATE_PLUGIN_TYPE;
+use lash_protocol_rlm::RlmTurnInputExt;
 use lash_provider_openai::OpenAiCompatibleProvider;
 use lash_rlm_types::{RlmProtocolEvent, RlmTrajectoryEntry};
 use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
+use tokio_util::sync::CancellationToken;
 
 use super::openai_compat::OpenAiCompatBenchServer;
 use super::providers::{
@@ -459,11 +461,10 @@ pub(crate) async fn build_runtime_with_store(
         .provider(provider)
         .model(benchmark_model_spec())
         .plugins(plugin_stack);
-    // RlmGlobals profiles live per-turn projected bindings. Store-backed turns
-    // reject live mode extensions because they cannot be checkpointed/resumed,
-    // and a durable process registry now requires a durable store factory. This
-    // scenario does not exercise process handles, so leave the registry absent
-    // instead of making the scenario unrunnable.
+    // RlmGlobals carries per-turn host values that are intentionally live-only.
+    // Store-backed turns reject those extensions because they cannot be
+    // checkpointed/resumed, and this scenario does not exercise process handles,
+    // so leave the durable process registry absent as well.
     if !matches!(scenario, RuntimePerfScenario::RlmGlobals) {
         builder =
             builder.process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default()));
@@ -471,8 +472,9 @@ pub(crate) async fn build_runtime_with_store(
     if scenario.execution_mode() == ModeId::rlm() {
         builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);
     }
-    // RlmGlobals profiles live per-turn projected bindings. Store-backed turns
-    // reject live mode extensions because they cannot be checkpointed/resumed.
+    // RlmGlobals carries per-turn host values that are intentionally live-only.
+    // Store-backed turns reject those extensions because they cannot be
+    // checkpointed/resumed.
     if !matches!(scenario, RuntimePerfScenario::RlmGlobals) {
         builder = builder.store_factory(Arc::new(RuntimePerfStoreFactory {
             store: Arc::clone(&store),
@@ -640,6 +642,25 @@ pub(crate) async fn seed_runtime_state(
             .map_err(|err| anyhow::anyhow!("seed OM reflection node: {err}"))?;
     }
 
+    if matches!(scenario, RuntimePerfScenario::RlmGlobals) {
+        seed_rlm_live_globals(runtime).await?;
+    }
+
+    Ok(())
+}
+
+async fn seed_rlm_live_globals(runtime: &mut BenchmarkRuntime) -> anyhow::Result<()> {
+    let turn_input =
+        lash::TurnInput::text("Seed current working variables, then submit the benchmark marker.")
+            .rlm_project(rlm_perf_projected_bindings(
+                RuntimePerfScenario::RlmGlobals,
+                0,
+            )?)?;
+    let turn = runtime
+        .run_turn(turn_input, CancellationToken::new())
+        .await?;
+    validate_runtime_perf_turn(RuntimePerfScenario::RlmGlobals, 0, &turn)?;
+    runtime.await_background_work().await?;
     Ok(())
 }
 

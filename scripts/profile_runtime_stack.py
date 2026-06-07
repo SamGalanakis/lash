@@ -39,6 +39,7 @@ DEFAULT_STACKS = [
 DEFAULT_SCENARIOS = [
     "standard",
     "rlm",
+    "rlm_globals",
     "rlm_tool_calls",
     "rlm_process_handles",
     "rlm_large_tool_surface",

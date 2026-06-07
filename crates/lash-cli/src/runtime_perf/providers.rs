@@ -789,10 +789,33 @@ fn benchmark_stream_profile_for_request(
             }
         }
         RuntimePerfScenario::Rlm
-        | RuntimePerfScenario::RlmGlobals
         | RuntimePerfScenario::RlmLargeToolSurface
         | RuntimePerfScenario::EmbedRlm => {
             let text = "```lashlang\nsubmit \"runtime perf benchmark ok\"\n```".to_string();
+            text_profile(text)
+        }
+        RuntimePerfScenario::RlmGlobals => {
+            let text = r#"```lashlang
+live_record = {
+  status: "ready",
+  turn: input.turn,
+  goal: input.goal,
+  nested: {
+    path: input.path,
+    labels: ["runtime", "rlm", "globals"],
+    counters: { first: 1, second: 2, third: 3 }
+  }
+}
+live_list = [
+  { name: "alpha", count: 1 },
+  { name: "beta", count: 2 },
+  { name: "gamma", count: 3 }
+]
+live_message = "runtime perf benchmark ok"
+host_snapshot = { benchmark: benchmark, input: input, chat: chat }
+submit live_message
+```"#
+                .to_string();
             text_profile(text)
         }
         RuntimePerfScenario::RlmToolCalls => {
