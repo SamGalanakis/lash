@@ -13,7 +13,7 @@ use super::view_model::{
 
 pub fn render(session: &LoadedSession) -> String {
     let stats = compute_stats(session);
-    let mut ctx = RenderCtx::new(&stats);
+    let mut ctx = RenderCtx::new();
 
     let mut out = String::with_capacity(64 * 1024);
     let title = session
@@ -365,7 +365,7 @@ fn write_footer(out: &mut String, stats: &SessionStats) {
 
 // ─── body / spine + transcript ──────────────────────────────────────────────
 
-fn write_body(out: &mut String, session: &LoadedSession, ctx: &mut RenderCtx<'_>) {
+fn write_body(out: &mut String, session: &LoadedSession, ctx: &mut RenderCtx) {
     let entries_html = render_entries(session, ctx);
 
     out.push_str("<div class=\"body\" id=\"body\">\n");

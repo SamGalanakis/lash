@@ -373,7 +373,6 @@ fn projection_from_events(
     lash_core::ChronologicalProjection::from_turn_view(
         events,
         &lash_core::MessageSequence::default(),
-        &[],
     )
 }
 
@@ -418,25 +417,11 @@ mod tests {
                 } else {
                     vec![output.to_string()]
                 },
-                tool_call_ids: Vec::new(),
                 images: Vec::new(),
                 error: None,
                 final_output: None,
             },
         )))
-    }
-
-    fn tool_event() -> SessionEventRecord {
-        SessionEventRecord::Tool(lash_core::ToolEvent::Invocation {
-            stable_key: "call_1".to_string(),
-            record: lash_core::ToolCallRecord {
-                call_id: Some("call_1".to_string()),
-                tool: "lookup".to_string(),
-                args: serde_json::json!({"q": "first"}),
-                output: lash_core::ToolCallOutput::success(serde_json::json!({"answer": "done"})),
-                duration_ms: 4,
-            },
-        })
     }
 
     fn projector(max_output_chars: usize) -> RlmContextProjector {
@@ -475,19 +460,14 @@ mod tests {
     }
 
     #[test]
-    fn chronological_history_keeps_tool_call_indexes() {
+    fn chronological_history_excludes_hidden_tool_events() {
         let projector = projector(1000);
-        let events = [
-            user_event("u1", "first"),
-            tool_event(),
-            step_event(0, "x = 1", "1"),
-        ];
+        let events = [user_event("u1", "first"), step_event(0, "x = 1", "1")];
         let history = projector.format_history(&projection_from_events(&events));
 
         assert!(history.contains("--- history[0] · user message"));
-        assert!(history.contains("--- history[1] · tool_call · lookup · ok · 4 ms ---"));
-        assert!(history.contains("--- history[2] · rlm step · protocol_iteration 0 ---"));
-        assert!(!history.contains("full: history[1].result"));
+        assert!(history.contains("--- history[1] · rlm step · protocol_iteration 0 ---"));
+        assert!(!history.contains("tool_call"));
     }
 
     #[test]
@@ -670,7 +650,6 @@ mod tests {
                 reasoning: String::new(),
                 code: "print img".to_string(),
                 output: vec![r#"{"type":"image","id":"img"}"#.to_string()],
-                tool_call_ids: Vec::new(),
                 images: vec![lash_core::AttachmentRef {
                     id: lash_core::AttachmentId::new("img-ref"),
                     media_type: lash_core::MediaType::Image(lash_core::ImageMediaType::Png),

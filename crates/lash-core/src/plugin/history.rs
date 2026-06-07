@@ -37,7 +37,6 @@ pub struct HistoryRewriteMetadata {
 #[derive(Clone, Debug)]
 pub struct HistoryState {
     pub messages: Vec<crate::Message>,
-    pub tool_calls: Vec<crate::ToolCallRecord>,
     pub metadata: HistoryRewriteMetadata,
 }
 
@@ -46,7 +45,6 @@ impl HistoryState {
         let read_view = snapshot.read_view();
         Self {
             messages: read_view.messages().to_vec(),
-            tool_calls: read_view.tool_calls().to_vec(),
             metadata: HistoryRewriteMetadata::default(),
         }
     }
@@ -150,7 +148,6 @@ impl SessionReadView {
         meta: SessionReadMeta,
         base_graph: Arc<crate::SessionGraph>,
         messages: crate::MessageSequence,
-        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
         active_events: Arc<Vec<crate::SessionEventRecord>>,
     ) -> Self {
         Self(Arc::new(SessionReadState {
@@ -162,7 +159,6 @@ impl SessionReadView {
             read_model: crate::session_graph::SessionReadModel {
                 active_events,
                 messages: messages.shared(),
-                tool_calls,
                 prompt_render_cache: Arc::new(crate::BaseRenderCache::new()),
             },
             chronological_projection: OnceLock::new(),
@@ -214,7 +210,6 @@ impl SessionReadView {
         protocol_turn_options: crate::ProtocolTurnOptions,
         base_graph: Arc<crate::SessionGraph>,
         messages: crate::MessageSequence,
-        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
     ) -> Self {
         let active_events = base_graph
             .read_model_for_agent_frame(
@@ -232,7 +227,6 @@ impl SessionReadView {
                 .with_protocol_turn_options(protocol_turn_options),
             base_graph,
             messages,
-            tool_calls,
             active_events,
         )
     }
@@ -242,10 +236,7 @@ impl SessionReadView {
             SessionReadGraph::Owned(graph) => graph,
             SessionReadGraph::Derived { cache, base_graph } => cache.get_or_init(|| {
                 let mut graph = (**base_graph).clone();
-                graph.replace_active_read_state(
-                    self.0.read_model.messages.as_slice(),
-                    self.0.read_model.tool_calls.as_slice(),
-                );
+                graph.replace_active_read_state(self.0.read_model.messages.as_slice());
                 graph
             }),
         }
@@ -265,10 +256,6 @@ impl SessionReadView {
 
     pub fn messages(&self) -> &[crate::Message] {
         self.0.read_model.messages.as_slice()
-    }
-
-    pub fn tool_calls(&self) -> &[crate::ToolCallRecord] {
-        self.0.read_model.tool_calls.as_slice()
     }
 
     pub fn active_events(&self) -> &[crate::SessionEventRecord] {

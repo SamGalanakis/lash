@@ -674,7 +674,7 @@ mod fork_tests {
         messages: Vec<lash_core::Message>,
         _iteration: usize,
     ) -> lash_core::SessionGraph {
-        lash_core::SessionGraph::from_active_read_state(&messages, &[])
+        lash_core::SessionGraph::from_active_read_state(&messages)
     }
 
     fn persisted_checkpoint(iteration: usize) -> lash_core::store::HydratedSessionCheckpoint {
@@ -714,10 +714,8 @@ mod fork_tests {
                 graph,
                 config: lash_core::PersistedSessionConfig {
                     provider_id: dummy_provider().kind().to_string(),
-                    model: lash_core::ModelSpec::from_token_limits(
-                        "gpt-test", None, 1024, None,
-                    )
-                    .expect("valid model spec"),
+                    model: lash_core::ModelSpec::from_token_limits("gpt-test", None, 1024, None)
+                        .expect("valid model spec"),
                 },
                 checkpoint_ref: Some(checkpoint_ref),
                 token_ledger: Vec::new(),

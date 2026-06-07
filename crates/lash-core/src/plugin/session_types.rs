@@ -66,33 +66,14 @@ impl SessionSnapshot {
         crate::SessionReadView::from_snapshot(self)
     }
 
-    pub fn replace_active_read_state(
-        &mut self,
-        messages: &[crate::Message],
-        tool_calls: &[crate::ToolCallRecord],
-    ) {
+    pub fn replace_active_read_state(&mut self, messages: &[crate::Message]) {
         self.session_graph
-            .replace_active_read_state_for_agent_frame(
-                &self.current_agent_frame_id,
-                messages,
-                tool_calls,
-            );
+            .replace_active_read_state_for_agent_frame(&self.current_agent_frame_id, messages);
     }
 
-    pub fn replace_active_tool_calls(&mut self, tool_calls: &[crate::ToolCallRecord]) {
-        self.session_graph.replace_active_tool_calls(tool_calls);
-    }
-
-    pub fn append_active_read_delta(
-        &mut self,
-        messages: &[crate::Message],
-        tool_calls: &[crate::ToolCallRecord],
-    ) {
-        self.session_graph.append_active_read_delta_for_agent_frame(
-            &self.current_agent_frame_id,
-            messages,
-            tool_calls,
-        );
+    pub fn append_active_read_delta(&mut self, messages: &[crate::Message]) {
+        self.session_graph
+            .append_active_read_delta_for_agent_frame(&self.current_agent_frame_id, messages);
     }
 }
 

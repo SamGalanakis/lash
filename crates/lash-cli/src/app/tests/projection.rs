@@ -345,7 +345,6 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
         reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"hi\"\n```".to_string(),
         code: "submit \"hi\"".to_string(),
         output: Vec::new(),
-        tool_call_ids: Vec::new(),
         images: Vec::new(),
         error: None,
         final_output: None,
@@ -376,7 +375,6 @@ fn rlm_trajectory_final_output_projects_as_assistant_text() {
         reasoning: "I'll reply directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
         code: "submit \"Hi!\"".to_string(),
         output: Vec::new(),
-        tool_call_ids: Vec::new(),
         images: Vec::new(),
         error: None,
         final_output: Some(serde_json::json!("Hi!")),
@@ -411,7 +409,6 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
         reasoning: "I'll answer directly.\n\n```lashlang\nsubmit \"Hi!\"\n```".to_string(),
         code: "submit \"Hi!\"".to_string(),
         output: Vec::new(),
-        tool_call_ids: Vec::new(),
         images: Vec::new(),
         error: None,
         final_output: Some(serde_json::json!("Hi!")),
@@ -470,7 +467,6 @@ fn finish_turn_replaces_live_submitted_value_with_projection() {
                 .to_string(),
         code: "submit \"Current system time: Fri May 15 11:35:52 PM CEST 2026\"".to_string(),
         output: Vec::new(),
-        tool_call_ids: Vec::new(),
         images: Vec::new(),
         error: None,
         final_output: Some(serde_json::json!(
@@ -514,24 +510,13 @@ fn submitted_value_turn_event_projects_as_assistant_text() {
 }
 
 #[test]
-fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
-    let record = ToolCallRecord {
-        call_id: Some("call-date-utc".to_string()),
-        tool: "exec_command".to_string(),
-        args: serde_json::json!({ "cmd": "date -u" }),
-        output: lash_core::ToolCallOutput::success(serde_json::json!({
-            "output": "2026-04-25 20:05:57 UTC\n",
-            "exit_code": 0
-        })),
-        duration_ms: 12,
-    };
+fn rlm_trajectory_projects_reasoning_and_code_without_hidden_tool_calls() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
         protocol_iteration: 0,
         reasoning: "I'll inspect the environment.".to_string(),
         code: "now = await shell.exec({ cmd: \"date -u\" })?\nprint now".to_string(),
         output: vec!["2026-04-25 20:05:57 UTC".to_string()],
-        tool_call_ids: vec!["call-date-utc".to_string()],
         images: Vec::new(),
         error: None,
         final_output: None,
@@ -543,37 +528,19 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
     )];
 
     let blocks =
-        timeline_items_from_test_read_view(&events, &[], &[record], &UiProjectionState::default());
+        timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
-    assert_eq!(
-        variants,
-        vec!["AssistantReasoning", "LashlangCode", "Activity"]
-    );
-    assert!(matches!(
-        blocks.get(2),
-        Some(UiTimelineItem::Activity(activity)) if activity.call.tool_name == "exec_command"
-    ));
+    assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
 }
 
 #[test]
-fn rlm_trajectory_owns_matching_raw_tool_call_projection() {
-    let record = ToolCallRecord {
-        call_id: Some("call-date".to_string()),
-        tool: "exec_command".to_string(),
-        args: serde_json::json!({ "cmd": "date" }),
-        output: lash_core::ToolCallOutput::success(serde_json::json!({
-            "output": "Mon May 11 01:51:25 PM CEST 2026\n",
-            "exit_code": 0
-        })),
-        duration_ms: 5,
-    };
+fn rlm_trajectory_final_output_does_not_inline_hidden_tool_call_projection() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
         protocol_iteration: 0,
         reasoning: "I'll check the system time.".to_string(),
         code: "now = await shell.exec({ cmd: \"date\" })?\nsubmit trim(now.output)".to_string(),
         output: Vec::new(),
-        tool_call_ids: vec!["call-date".to_string()],
         images: Vec::new(),
         error: None,
         final_output: Some(serde_json::json!("Mon May 11 01:51:25 PM CEST 2026")),
@@ -585,56 +552,32 @@ fn rlm_trajectory_owns_matching_raw_tool_call_projection() {
     )];
 
     let blocks =
-        timeline_items_from_test_read_view(&events, &[], &[record], &UiProjectionState::default());
+        timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
     assert_eq!(
         variants,
-        vec![
-            "AssistantReasoning",
-            "LashlangCode",
-            "Activity",
-            "AssistantText"
-        ]
+        vec!["AssistantReasoning", "LashlangCode", "AssistantText"]
     );
     assert_eq!(
         blocks
             .iter()
             .filter(|block| matches!(block, UiTimelineItem::Activity(_)))
             .count(),
-        1
+        0
     );
 }
 
 #[test]
-fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
-    let first_record = ToolCallRecord {
-        call_id: Some("call-date-utc".to_string()),
-        tool: "exec_command".to_string(),
-        args: serde_json::json!({ "cmd": "date -u" }),
-        output: lash_core::ToolCallOutput::success(
-            serde_json::json!({ "output": "time\n", "exit_code": 0 }),
-        ),
-        duration_ms: 3,
-    };
+fn rlm_trajectory_steps_project_chronologically_without_hidden_tool_results() {
     let first = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
         protocol_iteration: 0,
         reasoning: "First check the time.".to_string(),
         code: "now = await shell.exec({ cmd: \"date -u\" })?\nprint now".to_string(),
         output: vec!["time".to_string()],
-        tool_call_ids: vec!["call-date-utc".to_string()],
         images: Vec::new(),
         error: None,
         final_output: None,
-    };
-    let second_record = ToolCallRecord {
-        call_id: Some("call-ls".to_string()),
-        tool: "ls".to_string(),
-        args: serde_json::json!({ "path": "." }),
-        output: lash_core::ToolCallOutput::success(
-            serde_json::json!({ "entries": ["Cargo.toml"] }),
-        ),
-        duration_ms: 4,
     };
     let second = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_1".to_string(),
@@ -642,7 +585,6 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
         reasoning: "Then check files.".to_string(),
         code: "files = await tools.ls({ path: \".\" })?\nprint files".to_string(),
         output: vec!["files".to_string()],
-        tool_call_ids: vec!["call-ls".to_string()],
         images: Vec::new(),
         error: None,
         final_output: None,
@@ -661,7 +603,7 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
     let blocks = timeline_items_from_test_read_view(
         &events,
         &[assistant],
-        &[first_record, second_record],
+        &[],
         &UiProjectionState::default(),
     );
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
@@ -670,10 +612,8 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
         vec![
             "AssistantReasoning",
             "LashlangCode",
-            "Activity",
             "AssistantReasoning",
             "LashlangCode",
-            "Activity",
             "AssistantText",
         ]
     );

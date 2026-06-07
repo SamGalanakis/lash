@@ -603,28 +603,23 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
     assert_eq!(tool_call_ids.len(), 1);
     assert_eq!(completed_graph_key, started_graph_key);
     let read_view = result.state.read_view();
-    let active_matches = read_view
-        .tool_calls()
-        .iter()
-        .filter(|record| record.call_id.as_ref() == tool_call_ids.first())
-        .count();
-    assert_eq!(active_matches, 1);
-    let graph_matches = read_view
-        .materialized_session_graph()
-        .active_path_nodes()
-        .into_iter()
-        .filter_map(|node| node.event())
-        .filter(|event| {
-            matches!(
-                event,
-                lash_core::SessionEventRecord::Tool(lash_core::ToolEvent::Invocation {
-                    record,
-                    ..
-                }) if record.call_id.as_ref() == tool_call_ids.first()
-            )
-        })
-        .count();
-    assert_eq!(graph_matches, 1);
+    assert!(
+        read_view.messages().iter().all(|message| message
+            .parts
+            .iter()
+            .all(|part| part.tool_call_id.as_ref() != tool_call_ids.first())),
+        "live RLM tool calls should not be persisted as message history"
+    );
+    assert_eq!(
+        read_view
+            .materialized_session_graph()
+            .active_path_nodes()
+            .into_iter()
+            .filter_map(|node| node.event())
+            .filter(|event| matches!(event, lash_core::SessionEventRecord::Conversation(_)))
+            .count(),
+        read_view.messages().len()
+    );
     let TurnEvent::SubmittedValue { value } = &events[terminal_output].event else {
         unreachable!();
     };

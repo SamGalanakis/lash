@@ -1244,7 +1244,7 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
     assert!(tool_keys.iter().any(|key| key.ends_with(":call-1")));
     assert!(tool_keys.iter().any(|key| key.ends_with(":call-2")));
     assert!(
-        active_tool_calls(&turn.state)
+        turn.tool_calls
             .iter()
             .any(|record| record.tool == "echo_tool" && record.output.is_success())
     );

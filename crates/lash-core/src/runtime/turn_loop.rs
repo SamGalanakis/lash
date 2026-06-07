@@ -214,11 +214,7 @@ impl LashRuntime {
         }
         let turn_usage_delta = merge_usage_delta_entries(turn_usage_delta);
 
-        turn_pipeline.finalize_turn_read_state(
-            new_messages,
-            &assembler.tool_calls,
-            cancel_state.is_cancelled(),
-        );
+        turn_pipeline.finalize_turn_read_state(new_messages, cancel_state.is_cancelled());
         turn_pipeline.append_tool_host_events(&tool_host_events);
         if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
             turn_pipeline.state_mut().token_usage = assembler.token_usage.clone();

@@ -2,6 +2,7 @@
 //! reasoning, code, images, and small id/title formatting helpers.
 
 use super::*;
+use crate::html::escaping::escape_breaks;
 
 pub(crate) fn render_part(out: &mut String, part: &Part) {
     match &part.prune_state {
@@ -42,10 +43,8 @@ pub(crate) fn render_part(out: &mut String, part: &Part) {
         PartKind::Output => render_code(out, "output", &part.content, Some("output")),
         PartKind::Error => render_code(out, "error", &part.content, Some("error")),
         PartKind::Image => render_image_part(out, part),
-        // Skip tool_call parts entirely — the separate ChronologicalPayload::ToolCall
-        // entry carries the canonical record with args+result+duration.
-        PartKind::ToolCall => {}
-        PartKind::ToolResult => {}
+        PartKind::ToolCall => render_tool_protocol_part(out, part, "tool_call"),
+        PartKind::ToolResult => render_tool_protocol_part(out, part, "tool_result"),
         PartKind::Reasoning => render_reasoning(out, &part.content),
     }
 }
@@ -129,20 +128,6 @@ pub(crate) fn pick_display_title(session: &LoadedSession, name: &str, id: &str) 
         "lash session".to_string()
     } else {
         name_trim.to_string()
-    }
-}
-
-pub(crate) fn call_id_short(call_id: &str) -> String {
-    // Strip a `call_` prefix the LLM SDKs add, then keep first 8 chars.
-    let trimmed = call_id
-        .strip_prefix("call_")
-        .or_else(|| call_id.strip_prefix("toolu_"))
-        .unwrap_or(call_id);
-    let head: String = trimmed.chars().take(8).collect();
-    if trimmed.chars().count() > 8 {
-        format!("{head}…")
-    } else {
-        head
     }
 }
 
@@ -246,4 +231,13 @@ fn render_image_part(out: &mut String, part: &Part) {
     );
 }
 
-// ─── tool call entry ────────────────────────────────────────────────────────
+fn render_tool_protocol_part(out: &mut String, part: &Part, label: &str) {
+    let name = part.tool_name.as_deref().unwrap_or("unknown");
+    let call_id = part.tool_call_id.as_deref().unwrap_or("no-call-id");
+    let mut body = format!("{label}: {name}\ncall_id: {call_id}");
+    if !part.content.trim().is_empty() {
+        body.push_str("\n\n");
+        body.push_str(&part.content);
+    }
+    render_code(out, "code", &body, Some(label));
+}

@@ -1,8 +1,8 @@
 //! Render persisted lash sessions into human-viewable formats.
 //!
 //! This crate is independent of `lash-cli`. It reads a session's Turso
-//! store, projects the `SessionGraph` into messages + tool calls, and
-//! writes a self-contained HTML (or JSON) document.
+//! store, projects the `SessionGraph` into committed messages and protocol
+//! events, and writes a self-contained HTML (or JSON) document.
 
 use std::fs;
 use std::path::{Path, PathBuf};

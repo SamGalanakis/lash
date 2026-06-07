@@ -158,10 +158,6 @@ pub(crate) fn active_conversation_messages(state: &impl ReadModelState) -> Vec<M
     state.read_model().messages.as_ref().clone()
 }
 
-pub(crate) fn active_tool_calls(state: &impl ReadModelState) -> Vec<ToolCallRecord> {
-    state.read_model().tool_calls.as_ref().clone()
-}
-
 pub(crate) fn append_message(state: &mut impl ReadModelStateMut, message: Message) {
     state.append_message(message);
 }

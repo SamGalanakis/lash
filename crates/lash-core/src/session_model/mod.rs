@@ -14,9 +14,9 @@ pub use lash_sansio::format_tool_output_content;
 pub use lash_sansio::session_model::{
     ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO, Message, MessageRole, Part, PartKind,
     PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
-    PruneState, SessionEvent, TokenUsage, ToolEvent, TurnTerminationPolicyState,
-    default_prompt_template, make_error_envelope, make_error_event, reassign_part_ids,
-    render_prompt, render_transcript_prompt, shared_parts,
+    PruneState, SessionEvent, TokenUsage, TurnTerminationPolicyState, default_prompt_template,
+    make_error_envelope, make_error_event, reassign_part_ids, render_prompt,
+    render_transcript_prompt, shared_parts,
 };
 
 pub fn fresh_message_id() -> String {

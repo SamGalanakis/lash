@@ -2,20 +2,15 @@ use lash_core::session_model::{Message, PartKind};
 
 use crate::trace::LlmCallUsage;
 
-use super::stats::SessionStats;
-
-pub(crate) struct RenderCtx<'a> {
+pub(crate) struct RenderCtx {
     next_index: usize,
-    pub(crate) stats: &'a SessionStats,
 }
 
-impl<'a> RenderCtx<'a> {
-    pub(crate) fn new(stats: &'a SessionStats) -> Self {
-        Self {
-            next_index: 0,
-            stats,
-        }
+impl RenderCtx {
+    pub(crate) fn new() -> Self {
+        Self { next_index: 0 }
     }
+
     pub(crate) fn next_id(&mut self) -> String {
         let n = self.next_index;
         self.next_index += 1;
@@ -144,62 +139,6 @@ pub(crate) fn truncate(s: &str, max_chars: usize) -> String {
     }
     let head: String = s.chars().take(max_chars.saturating_sub(1)).collect();
     format!("{head}…")
-}
-
-pub(crate) fn summarize_args(value: &serde_json::Value) -> String {
-    use serde_json::Value;
-    match value {
-        Value::String(s) => format!("\"{}\"", truncate(s, 160)),
-        Value::Null => "—".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::Array(arr) => {
-            let preview: Vec<String> = arr.iter().take(3).map(|v| short_value(v, 40)).collect();
-            let more = if arr.len() > 3 {
-                format!(", … +{}", arr.len() - 3)
-            } else {
-                String::new()
-            };
-            format!("[{}{}]", preview.join(", "), more)
-        }
-        Value::Object(map) => {
-            // Priority keys to surface first — action-shaped keys (the
-            // WHAT) outrank location keys (the WHERE) so a grep call shows
-            // its query instead of its path. Tools without an action key
-            // fall through to path naturally.
-            const PRIORITY: &[&str] = &[
-                "query", "q", "command", "cmd", "shell", "url", "uri", "prompt", "path", "file",
-                "filename", "filepath", "name", "title", "id", "key",
-            ];
-            for k in PRIORITY {
-                if let Some(v) = map.get(*k) {
-                    return format!("{}={}", k, short_value(v, 160));
-                }
-            }
-            // fall back to first key=value
-            if let Some((k, v)) = map.iter().next() {
-                if map.len() == 1 {
-                    return format!("{}={}", k, short_value(v, 160));
-                }
-                let extra = map.len() - 1;
-                return format!("{}={} +{} more", k, short_value(v, 100), extra);
-            }
-            "(empty)".to_string()
-        }
-    }
-}
-
-fn short_value(v: &serde_json::Value, max_chars: usize) -> String {
-    use serde_json::Value;
-    let raw = match v {
-        Value::String(s) => format!("\"{s}\""),
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::Array(a) => format!("[…{} items]", a.len()),
-        Value::Object(o) => format!("{{…{} keys}}", o.len()),
-    };
-    truncate(&raw.replace('\n', " "), max_chars)
 }
 
 pub(crate) fn json_byte_size(value: &serde_json::Value) -> usize {

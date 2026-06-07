@@ -129,13 +129,6 @@ impl TurnBoundary {
         }
     }
 
-    pub(super) fn record_tool_calls<I>(&mut self, records: I)
-    where
-        I: IntoIterator<Item = ToolCallRecord>,
-    {
-        self.draft_mut().record_tool_calls(records);
-    }
-
     pub(super) fn read_view(
         &self,
         policy: crate::SessionPolicy,
@@ -154,11 +147,10 @@ impl TurnBoundary {
     pub(super) fn finalize_turn_read_state(
         &mut self,
         new_messages: MessageSequence,
-        tool_calls: &[ToolCallRecord],
         cancelled: bool,
     ) {
         self.draft_mut()
-            .finalize_turn_read_state(new_messages, tool_calls, cancelled);
+            .finalize_turn_read_state(new_messages, cancelled);
     }
 
     pub(super) async fn prepared_checkpoint(
@@ -294,7 +286,7 @@ impl TurnBoundary {
             .into_iter()
             .filter_map(|event| match event {
                 SessionEventRecord::Protocol(event) => Some(event),
-                SessionEventRecord::Conversation(_) | SessionEventRecord::Tool(_) => None,
+                SessionEventRecord::Conversation(_) => None,
             })
             .collect::<Vec<_>>();
         self.draft_mut()
@@ -684,10 +676,11 @@ mod tests {
 
     #[test]
     fn agent_frame_switch_keeps_session_and_tags_initial_nodes_to_new_frame() {
-        let graph = SessionGraph::from_active_read_state(
-            &[text_message("u0", MessageRole::User, "old frame")],
-            &[],
-        );
+        let graph = SessionGraph::from_active_read_state(&[text_message(
+            "u0",
+            MessageRole::User,
+            "old frame",
+        )]);
         let mut state = state_with_graph(graph);
         state.ensure_agent_frame_initialized();
         let previous_frame_id = state.current_agent_frame_id.clone();
@@ -743,10 +736,8 @@ mod tests {
 
     #[tokio::test]
     async fn prepared_checkpoint_writes_only_explicit_progress_graph_tail() {
-        let mut graph = SessionGraph::from_active_read_state(
-            &[text_message("u0", MessageRole::User, "old")],
-            &[],
-        );
+        let mut graph =
+            SessionGraph::from_active_read_state(&[text_message("u0", MessageRole::User, "old")]);
         let base_graph = graph.clone();
         graph.append_message(text_message("a0", MessageRole::Assistant, "new"));
         let state = state_with_graph(base_graph.clone());
@@ -791,10 +782,8 @@ mod tests {
 
     #[tokio::test]
     async fn prepared_checkpoint_propagates_store_errors() {
-        let graph = SessionGraph::from_active_read_state(
-            &[text_message("u0", MessageRole::User, "hello")],
-            &[],
-        );
+        let graph =
+            SessionGraph::from_active_read_state(&[text_message("u0", MessageRole::User, "hello")]);
         let state = state_with_graph(graph);
         let store = RecordingStore::default();
         store
@@ -831,7 +820,7 @@ mod tests {
     async fn progress_boundary_uses_typed_messages_without_duplicate_conversation_nodes() {
         let user = text_message("u0", MessageRole::User, "hello");
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
-        let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user), &[]);
+        let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user));
         let base_graph = graph.clone();
         let mut pipeline = TurnBoundary::from_state(state_with_graph(graph));
         let event_delta = vec![
@@ -882,10 +871,7 @@ mod tests {
                 .iter()
                 .filter(|node| matches!(
                     node.event(),
-                    Some(
-                        crate::SessionEventRecord::Conversation(_)
-                            | crate::SessionEventRecord::Tool(_)
-                    )
+                    Some(crate::SessionEventRecord::Conversation(_))
                 ))
                 .all(|node| !node.node_id.starts_with("plugin:"))
         );
@@ -895,7 +881,7 @@ mod tests {
     async fn progress_boundary_logs_and_continues_on_store_failure() {
         let user = text_message("u0", MessageRole::User, "hello");
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
-        let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user), &[]);
+        let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user));
         let mut pipeline = TurnBoundary::from_state(state_with_graph(graph));
         let protocol_event =
             crate::ProtocolEvent::typed("test_protocol", serde_json::json!({"step": "started"}))
@@ -934,10 +920,8 @@ mod tests {
 
     #[tokio::test]
     async fn final_commit_merges_usage_and_updates_persisted_graph_count() {
-        let graph = SessionGraph::from_active_read_state(
-            &[text_message("u0", MessageRole::User, "hello")],
-            &[],
-        );
+        let graph =
+            SessionGraph::from_active_read_state(&[text_message("u0", MessageRole::User, "hello")]);
         let usage = vec![
             usage_entry("child", "gpt", 5),
             usage_entry("turn", "gpt", 17),
@@ -972,10 +956,8 @@ mod tests {
 
     #[tokio::test]
     async fn no_store_final_commit_discards_snapshots_without_touching_graph_or_usage() {
-        let graph = SessionGraph::from_active_read_state(
-            &[text_message("u0", MessageRole::User, "hello")],
-            &[],
-        );
+        let graph =
+            SessionGraph::from_active_read_state(&[text_message("u0", MessageRole::User, "hello")]);
         let usage = vec![usage_entry("turn", "model", 5)];
         let mut state = state_with_graph(graph.clone());
         state.token_ledger = usage.clone();

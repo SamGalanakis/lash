@@ -464,15 +464,10 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
         .expect("turn");
 
     assert_eq!(turn.assistant_output.safe_text, "done");
-    assert_eq!(active_tool_calls(&turn.state).len(), 1);
+    assert_eq!(turn.tool_calls.len(), 1);
+    assert_eq!(turn.tool_calls[0].call_id.as_deref(), Some("tool-1"));
     assert_eq!(
-        active_tool_calls(&turn.state)[0].call_id.as_deref(),
-        Some("tool-1")
-    );
-    assert_eq!(
-        active_tool_calls(&turn.state)[0]
-            .output
-            .value_for_projection(),
+        turn.tool_calls[0].output.value_for_projection(),
         serde_json::json!({
             "payload": "raw:sample"
         })

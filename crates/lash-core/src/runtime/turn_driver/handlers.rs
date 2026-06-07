@@ -154,14 +154,6 @@ impl RuntimeTurnDriver<'_> {
                 self.emit_tool_call_trace(machine.protocol_iteration(), &record);
             }
         }
-        self.turn_pipeline
-            .record_tool_calls(results.iter().map(|outcome| ToolCallRecord {
-                call_id: Some(outcome.call_id.clone()),
-                tool: outcome.tool_name.clone(),
-                args: outcome.args.clone(),
-                output: outcome.output.clone(),
-                duration_ms: outcome.duration_ms,
-            }));
         machine.handle_response(Response::ToolResults { id, results });
         Ok(())
     }
@@ -322,8 +314,6 @@ impl RuntimeTurnDriver<'_> {
                     );
                 }
             }
-            self.turn_pipeline
-                .record_tool_calls(output.tool_calls.iter().cloned());
         } else if let Err(error) = &result
             && self.host.core.tracing.trace_sink.is_some()
         {
