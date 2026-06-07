@@ -69,7 +69,8 @@ fn open_pragmas() -> String {
 /// We therefore retry the conversion ourselves with a short backoff until the
 /// busy-timeout budget is exhausted.
 fn set_wal_journal_mode(c: &Connection) -> rusqlite::Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64);
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64);
     let mut backoff = std::time::Duration::from_millis(1);
     loop {
         match c.pragma_update(None, "journal_mode", "WAL") {

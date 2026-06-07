@@ -1530,7 +1530,10 @@ fn draw_document_overlay(frame: &mut Frame<'_>, app: &App, body_area: Rect) {
             + if travel == 0 {
                 0
             } else {
-                ((scroll * travel as usize) / max_scroll) as u16
+                scroll
+                    .saturating_mul(travel as usize)
+                    .checked_div(max_scroll)
+                    .unwrap_or(0) as u16
             };
         for offset in 0..thumb_height {
             frame.write_text(

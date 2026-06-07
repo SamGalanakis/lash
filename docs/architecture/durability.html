@@ -296,7 +296,7 @@ flowchart LR
                 <tr><td><code>standard_checkpoint_after_tool_control_finish_preserves_terminal_outcome</code></td><td>A tool that authored a terminal value via tool-control finishes the same way on replay.</td></tr>
                 <tr><td><code>rlm_checkpoint_redrives_pending_exec_code_with_driver_state</code></td><td>RLM pending <code>ExecCode</code> re-runs with the same driver state and projected-binding snapshot context intact.</td></tr>
                 <tr><td><code>rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes</code></td><td>RLM exec results carrying parallel tool outcomes preserve success / failure / cancellation structure across restore.</td></tr>
-                <tr><td><code>rlm_exec_result_stores_tool_call_ids_without_replayed_tool_events</code></td><td>RLM exec outcomes carry tool call ids without leaking replayed <code>ToolCallStarted</code> events to the activity log.</td></tr>
+                <tr><td><code>rlm_exec_result_does_not_store_tool_call_ids_or_replay_tool_events</code></td><td>RLM exec outcomes preserve live tool provenance without persisting tool call ids into trajectory history or leaking replayed <code>ToolCallStarted</code> events to the activity log.</td></tr>
               </tbody>
             </table>
           </div>

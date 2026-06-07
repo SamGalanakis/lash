@@ -9,8 +9,8 @@ use lash_core::store::SessionHead;
 use lash_core::{
     AttachmentStore, PersistedSessionConfig, RuntimePersistence, SessionGraph, SessionPolicy,
 };
-use lash_standard_plugins::StandardContextApproach;
 use lash_sqlite_store::Store;
+use lash_standard_plugins::StandardContextApproach;
 
 use crate::session_log::{self, SessionLogger, SessionStart};
 
@@ -315,8 +315,9 @@ impl CliSessionOpener {
         let store: Arc<dyn RuntimePersistence> = bootstrap.store();
         let artifact_store = Arc::new(Store::open(&bootstrap.artifacts_db_file()).await?)
             as Arc<dyn lash::persistence::LashlangArtifactStore>;
-        let effect_host =
-            Arc::new(lash_sqlite_store::SqliteEffectHost::open(&bootstrap.effects_db_file()).await?);
+        let effect_host = Arc::new(
+            lash_sqlite_store::SqliteEffectHost::open(&bootstrap.effects_db_file()).await?,
+        );
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&bootstrap.processes_db_file()).await?,
         );

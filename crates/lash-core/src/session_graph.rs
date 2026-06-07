@@ -471,7 +471,6 @@ impl SessionGraphCache {
                 messages.push(message);
                 self.prompt_render_cache = Arc::new(BaseRenderCache::new());
             }
-            return;
         }
     }
 
@@ -1100,7 +1099,6 @@ fn push_active_read_node(
         if !message.is_transient() && active_message_ids.insert(message.id.clone()) {
             active_messages.push(message);
         }
-        return;
     }
 }
 

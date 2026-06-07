@@ -77,7 +77,9 @@ mod queued_work;
 mod schema;
 
 use conn::TxOutcome;
-pub use effect_replay::{SqliteEffectHost, SqliteEffectReplayOptions, SqliteRuntimeEffectController};
+pub use effect_replay::{
+    SqliteEffectHost, SqliteEffectReplayOptions, SqliteRuntimeEffectController,
+};
 use leases::*;
 use queued_work::*;
 use schema::{

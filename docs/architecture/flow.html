@@ -132,7 +132,7 @@ flowchart LR
 flowchart LR
   Store["Store<br/>SQLite + blobs + session_head"] --> State["PersistedSessionRead"]
   State --> Graph["SessionGraph<br/>nodes + leaf_node_id"]
-  Graph --> ReadModel["internal SessionReadModel cache<br/>active_events, messages, tool_calls"]
+  Graph --> ReadModel["internal SessionReadModel cache<br/>active_events, messages"]
   ReadModel --> View["SessionReadView"]
   View --> Chrono["ChronologicalProjection"]
   Chrono --> Timeline["lash-cli UiTimeline"]

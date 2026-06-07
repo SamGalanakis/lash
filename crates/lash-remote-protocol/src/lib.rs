@@ -747,7 +747,7 @@ pub struct RemoteTurnIssue {
     pub raw: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RemotePromptLayer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<RemotePromptTemplate>,
@@ -762,15 +762,6 @@ impl RemotePromptLayer {
 
     pub fn is_empty(&self) -> bool {
         self.template.is_none() && self.slots.is_empty()
-    }
-}
-
-impl Default for RemotePromptLayer {
-    fn default() -> Self {
-        Self {
-            template: None,
-            slots: HashMap::new(),
-        }
     }
 }
 

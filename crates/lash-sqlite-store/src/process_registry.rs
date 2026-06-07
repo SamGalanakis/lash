@@ -524,8 +524,8 @@ impl ProcessRegistry for SqliteProcessRegistry {
                         let mut removed = Vec::new();
                         for row in rows {
                             let (process_id, record_json) = row.map_err(process_sqlite_error)?;
-                            let record: ProcessRecord = serde_json::from_str(&record_json)
-                                .map_err(process_decode_error)?;
+                            let record: ProcessRecord =
+                                serde_json::from_str(&record_json).map_err(process_decode_error)?;
                             removed.push((process_id, record));
                         }
                         removed
@@ -536,7 +536,7 @@ impl ProcessRegistry for SqliteProcessRegistry {
                             "DELETE FROM process_handle_grants WHERE session_id = ?1",
                             params![session_id],
                         )
-                        .map_err(process_sqlite_error)? as usize;
+                        .map_err(process_sqlite_error)?;
                     let mut cancel_process_ids = Vec::new();
                     let mut preserved_process_ids = Vec::new();
                     for (process_id, record) in removed {
@@ -714,24 +714,23 @@ impl ProcessRegistry for SqliteProcessRegistry {
             let process_id = process_id.to_string();
             self.conn
                 .call(move |conn| {
-                    Ok((|| -> Result<
-                        std::collections::HashSet<u64>,
-                        lash_core::PluginError,
-                    > {
-                        let mut stmt = conn
-                            .prepare(
-                                "SELECT sequence FROM process_wake_acks WHERE process_id = ?1",
-                            )
-                            .map_err(process_sqlite_error)?;
-                        let rows = stmt
-                            .query_map(params![process_id], |row| row.get::<_, i64>(0))
-                            .map_err(process_sqlite_error)?;
-                        let mut set = std::collections::HashSet::new();
-                        for row in rows {
-                            set.insert(row.map_err(process_sqlite_error)? as u64);
-                        }
-                        Ok(set)
-                    })())
+                    Ok(
+                        (|| -> Result<std::collections::HashSet<u64>, lash_core::PluginError> {
+                            let mut stmt = conn
+                                .prepare(
+                                    "SELECT sequence FROM process_wake_acks WHERE process_id = ?1",
+                                )
+                                .map_err(process_sqlite_error)?;
+                            let rows = stmt
+                                .query_map(params![process_id], |row| row.get::<_, i64>(0))
+                                .map_err(process_sqlite_error)?;
+                            let mut set = std::collections::HashSet::new();
+                            for row in rows {
+                                set.insert(row.map_err(process_sqlite_error)? as u64);
+                            }
+                            Ok(set)
+                        })(),
+                    )
                 })
                 .await
                 .map_err(process_sqlite_error)??

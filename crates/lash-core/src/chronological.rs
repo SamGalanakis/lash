@@ -185,20 +185,17 @@ fn visit_transcript<'a>(
     messages: &'a [Message],
     mut visit: impl FnMut(BorrowedChronologicalEntry<'a>),
 ) {
-    let active_messages = messages
+    for (index, message) in messages
         .iter()
         .filter(|message| !message.is_transient())
-        .collect::<Vec<_>>();
-
-    let mut index = 0;
-    for message in active_messages {
+        .enumerate()
+    {
         visit(BorrowedChronologicalEntry {
             index,
             payload: BorrowedChronologicalPayload::Message(
                 BorrowedChronologicalMessage::from_message(message),
             ),
         });
-        index += 1;
     }
 }
 

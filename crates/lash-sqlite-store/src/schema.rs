@@ -249,7 +249,13 @@ pub(crate) async fn ensure_schema(conn: &SqliteConnection) -> rusqlite::Result<(
 }
 
 pub(crate) async fn ensure_process_schema(conn: &SqliteConnection) -> rusqlite::Result<()> {
-    ensure_versioned_schema(conn, "process registry", PROCESS_SCHEMA, PROCESS_SCHEMA_VERSION).await
+    ensure_versioned_schema(
+        conn,
+        "process registry",
+        PROCESS_SCHEMA,
+        PROCESS_SCHEMA_VERSION,
+    )
+    .await
 }
 
 pub(crate) async fn ensure_effect_schema(conn: &SqliteConnection) -> rusqlite::Result<()> {

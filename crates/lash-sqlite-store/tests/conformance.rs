@@ -17,8 +17,8 @@ use lash_core::{
     RuntimeInvocation, RuntimePersistence,
 };
 use lash_sqlite_store::{
-    Store, SqliteEffectHost, SqliteEffectReplayOptions, SqliteProcessRegistry,
-    SqliteRuntimeEffectController,
+    SqliteEffectHost, SqliteEffectReplayOptions, SqliteProcessRegistry,
+    SqliteRuntimeEffectController, Store,
 };
 use tempfile::TempDir;
 

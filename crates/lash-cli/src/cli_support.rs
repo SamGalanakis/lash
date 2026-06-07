@@ -3,10 +3,10 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lash::ModeId;
 use lash::provider::ProviderHandle;
-use lash_standard_plugins::{StandardContextApproach, StandardContextApproachKind};
-use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiHostEffect};
 #[cfg(test)]
 use lash_sqlite_store::Store;
+use lash_standard_plugins::{StandardContextApproach, StandardContextApproachKind};
+use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiHostEffect};
 use sha2::{Digest, Sha256};
 
 use crate::SkillCatalog;

@@ -107,9 +107,8 @@ impl Store {
             .conn
             .write(move |tx| {
                 tx.execute("DELETE FROM graph_nodes", [])?;
-                let mut stmt = tx.prepare(
-                    "INSERT INTO graph_nodes (node_id, node_json) VALUES (?1, ?2)",
-                )?;
+                let mut stmt =
+                    tx.prepare("INSERT INTO graph_nodes (node_id, node_json) VALUES (?1, ?2)")?;
                 for node in &nodes {
                     let node_json = encode_json(node);
                     stmt.execute(params![node.node_id, node_json])?;
@@ -130,9 +129,8 @@ impl Store {
         let result = self
             .conn
             .write(move |tx| {
-                let mut stmt = tx.prepare(
-                    "INSERT INTO graph_nodes (node_id, node_json) VALUES (?1, ?2)",
-                )?;
+                let mut stmt =
+                    tx.prepare("INSERT INTO graph_nodes (node_id, node_json) VALUES (?1, ?2)")?;
                 for node in &nodes {
                     let node_json = encode_json(node);
                     stmt.execute(params![node.node_id, node_json])?;
