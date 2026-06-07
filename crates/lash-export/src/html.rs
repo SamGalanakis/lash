@@ -11,11 +11,6 @@
 //! offline the page falls back to system mono and stays fully readable.
 //! All CSS and JS are inlined — drop the file anywhere.
 //!
-//! Tool calls are rendered from the chronological projection only. Assistant
-//! `Message` parts that describe tool calls are suppressed because the
-//! projection's tool-call payloads are the canonical view (args + result +
-//! duration + status).
-
 mod assets;
 mod entries;
 mod escaping;
@@ -44,7 +39,7 @@ mod tests {
     use crate::LoadedSession;
     use crate::trace::{LlmCallUsage, LlmPromptSnapshot, RequestMessage};
     use lash_core::session_model::{Part, PartKind, PruneState, shared_parts};
-    use lash_core::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
+    use lash_core::{ChronologicalEntry, ChronologicalPayload};
     use std::path::PathBuf;
 
     fn prompt_snapshot(protocol_iteration: u64, text: &str) -> LlmPromptSnapshot {
@@ -100,7 +95,6 @@ mod tests {
             reasoning: "thinking".to_string(),
             code: "x = 1".to_string(),
             output: vec!["1".to_string()],
-            tool_call_ids: Vec::new(),
             images: Vec::new(),
             error: None,
             final_output: None,
@@ -114,7 +108,7 @@ mod tests {
     }
 
     #[test]
-    fn html_export_renders_chronological_tool_and_rlm_step() {
+    fn html_export_renders_chronological_message_and_rlm_step() {
         let session = LoadedSession {
             meta: None,
             chronological: vec![
@@ -124,15 +118,7 @@ mod tests {
                 },
                 ChronologicalEntry {
                     index: 1,
-                    payload: ChronologicalPayload::ToolCall(ToolCallRecord {
-                        call_id: Some("call_1".to_string()),
-                        tool: "lookup".to_string(),
-                        args: serde_json::json!({"q": "x"}),
-                        output: lash_core::ToolCallOutput::success(
-                            serde_json::json!({"answer": "y"}),
-                        ),
-                        duration_ms: 4,
-                    }),
+                    payload: ChronologicalPayload::Message(user_message("m1", "lookup result")),
                 },
             ],
             trace_path: PathBuf::from("session.trace.jsonl"),
@@ -143,7 +129,7 @@ mod tests {
         let rendered = render(&session);
         assert!(rendered.contains("RLM step 0"));
         assert!(rendered.contains("x = 1"));
-        assert!(rendered.contains("lookup"));
+        assert!(rendered.contains("lookup result"));
         assert!(rendered.contains("chronological entries"));
     }
 
@@ -191,10 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_calls_are_deduped_between_message_part_and_chronological_entry() {
-        // The chronological projection emits both an assistant Message
-        // containing a ToolCall part and a separate ToolCall entry. The
-        // canonical record (with result + duration) should render once.
+    fn assistant_tool_call_message_part_renders_without_detached_tool_record() {
         let tool_part = Part {
             id: "m0.p0".to_string(),
             kind: PartKind::ToolCall,
@@ -215,79 +198,45 @@ mod tests {
         };
         let session = LoadedSession {
             meta: None,
-            chronological: vec![
-                ChronologicalEntry {
-                    index: 0,
-                    payload: ChronologicalPayload::Message(assistant_msg),
-                },
-                ChronologicalEntry {
-                    index: 1,
-                    payload: ChronologicalPayload::ToolCall(ToolCallRecord {
-                        call_id: Some("call_1".to_string()),
-                        tool: "lookup".to_string(),
-                        args: serde_json::json!({"q": "x"}),
-                        output: lash_core::ToolCallOutput::success(
-                            serde_json::json!({"answer": "y"}),
-                        ),
-                        duration_ms: 4,
-                    }),
-                },
-            ],
+            chronological: vec![ChronologicalEntry {
+                index: 0,
+                payload: ChronologicalPayload::Message(assistant_msg),
+            }],
             trace_path: PathBuf::from("session.trace.jsonl"),
             context_window_tokens: None,
             llm_prompts: Vec::new(),
         };
 
         let rendered = render(&session);
-        // A single canonical record should appear: count occurrences of the
-        // tool name in entry-tag positions.
-        let count = rendered.matches("entry-tag entry-tag--tool").count();
-        assert_eq!(
-            count, 1,
-            "expected exactly one tool-call entry, got {count}\n{rendered}"
+        assert!(rendered.contains("lookup"));
+        assert!(rendered.contains("call_1"));
+        assert!(
+            !rendered.contains("answer"),
+            "detached tool result should not render"
         );
-        // And the result must be present (only the canonical entry has it).
-        // The JSON highlighter wraps strings in spans and escapes quotes,
-        // so look for the bare key text — proves the result block rendered.
-        assert!(rendered.contains("answer"), "result missing");
     }
 
     #[test]
-    fn rlm_step_renders_inline_expandable_tool_calls() {
-        let record = ToolCallRecord {
-            call_id: Some("call_1".to_string()),
-            tool: "lookup".to_string(),
-            args: serde_json::json!({"q": "x"}),
-            output: lash_core::ToolCallOutput::success(serde_json::json!({"answer": "y"})),
-            duration_ms: 4,
-        };
+    fn rlm_step_does_not_render_inline_hidden_tool_calls() {
         let session = LoadedSession {
             meta: None,
-            chronological: vec![
-                ChronologicalEntry {
-                    index: 0,
-                    payload: ChronologicalPayload::ToolCall(record),
-                },
-                ChronologicalEntry {
-                    index: 1,
-                    payload: rlm_payload(RlmTrajectoryEntry {
-                        code: "data = await tools.lookup({ q: \"x\" })?".to_string(),
-                        output: Vec::new(),
-                        tool_call_ids: vec!["call_1".to_string()],
-                        ..rlm_step(0, "rlm_step_0")
-                    }),
-                },
-            ],
+            chronological: vec![ChronologicalEntry {
+                index: 0,
+                payload: rlm_payload(RlmTrajectoryEntry {
+                    code: "data = await tools.lookup({ q: \"x\" })?".to_string(),
+                    output: Vec::new(),
+                    ..rlm_step(0, "rlm_step_0")
+                }),
+            }],
             trace_path: PathBuf::from("session.trace.jsonl"),
             context_window_tokens: None,
             llm_prompts: Vec::new(),
         };
 
         let rendered = render(&session);
-        assert!(rendered.contains("rlm-tool-list"));
-        assert!(rendered.contains("tool calls"));
         assert!(rendered.contains("lookup"));
-        assert!(rendered.contains("answer"));
+        assert!(!rendered.contains("rlm-tool-list"));
+        assert!(!rendered.contains("entry--tool"));
     }
 
     #[test]

@@ -59,8 +59,6 @@ pub struct SansIoSessionState {
     pub session_id: String,
     #[serde(default)]
     pub messages: Vec<crate::Message>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default)]
     pub protocol_iteration: usize,
     #[serde(default)]
@@ -86,7 +84,6 @@ pub fn apply_completed_turn(
     turn: CompletedTurn,
 ) -> SansIoSessionState {
     state.messages = turn.messages;
-    state.tool_calls = turn.tool_calls;
     state.protocol_iteration = turn.protocol_iteration;
     state.token_usage = turn.token_usage;
     state.last_prompt_usage = turn.last_prompt_usage;

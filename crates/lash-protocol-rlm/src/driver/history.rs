@@ -3,8 +3,8 @@
 //!
 //! Contract:
 //! - **Message roles.** Each prior step is a chat message, not one packed
-//!   blob. User messages and tool calls render as `User`; prior RLM steps and
-//!   protocol events render as `Assistant` (see `borrowed_history_entry_llm_role`).
+//!   blob. User messages render as `User`; prior RLM steps and protocol events
+//!   render as `Assistant` (see `borrowed_history_entry_llm_role`).
 //! - **Cache fence.** The last history message is marked with a
 //!   `cache_breakpoint` (`mark_last_history_text_cache_breakpoint`) so the
 //!   provider can reuse the stable history prefix across iterations. Only the
@@ -22,7 +22,8 @@
 //!   not here — history carries the trajectory, not current globals.
 
 use std::collections::HashSet;
-use std::{fmt::Write as _, sync::Arc};
+use std::fmt::Write as _;
+use std::sync::Arc;
 
 use lash_core::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole};
 use lash_core::{BorrowedChronologicalEntry, BorrowedChronologicalPayload, head_tail_truncate};
@@ -79,7 +80,7 @@ pub(super) fn build_rlm_history_messages_from_turn(
         .iter()
         .map(|cause| cause.id.as_str())
         .collect::<HashSet<_>>();
-    lash_core::visit_turn_view(input.events, input.turn_messages, &[], |entry| {
+    lash_core::visit_turn_view(input.events, input.turn_messages, |entry| {
         if borrowed_entry_is_active_cause(entry, &active_cause_ids) {
             return;
         }
@@ -213,7 +214,6 @@ fn history_entry_llm_role(entry: &ChronologicalEntry) -> LlmRole {
             lash_core::MessageRole::System => LlmRole::System,
             lash_core::MessageRole::Event => LlmRole::User,
         },
-        ChronologicalPayload::ToolCall(_) => LlmRole::User,
         ChronologicalPayload::ProtocolEvent(_) => LlmRole::Assistant,
     }
 }
@@ -226,7 +226,6 @@ fn borrowed_history_entry_llm_role(entry: BorrowedChronologicalEntry<'_>) -> Llm
             lash_core::MessageRole::System => LlmRole::System,
             lash_core::MessageRole::Event => LlmRole::User,
         },
-        BorrowedChronologicalPayload::ToolCall(_) => LlmRole::User,
         BorrowedChronologicalPayload::ProtocolEvent(_) => LlmRole::Assistant,
     }
 }
@@ -283,28 +282,6 @@ fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: us
             attachments,
             max_output_chars,
         ),
-        RlmHistoryItem::ToolCall {
-            id: _,
-            tool,
-            args,
-            output,
-            duration_ms,
-        } => append_history_tool_call(
-            &mut rendered,
-            HistoryToolCallRender {
-                index,
-                tool,
-                args,
-                result: output.value_for_projection(),
-                status: match output.status() {
-                    lash_core::ToolCallStatus::Success => "ok",
-                    lash_core::ToolCallStatus::Failure => "error",
-                    lash_core::ToolCallStatus::Cancelled => "cancelled",
-                },
-                duration_ms: *duration_ms,
-                max_output_chars,
-            },
-        ),
         RlmHistoryItem::RlmStep {
             id: _,
             protocol_iteration,
@@ -360,22 +337,6 @@ fn render_history_entry(entry: &ChronologicalEntry, max_output_chars: usize) -> 
                 max_output_chars,
             );
         }
-        ChronologicalPayload::ToolCall(record) => append_history_tool_call(
-            &mut rendered,
-            HistoryToolCallRender {
-                index: entry.index,
-                tool: &record.tool,
-                args: &record.args,
-                result: record.output.value_for_projection(),
-                status: match record.output.status() {
-                    lash_core::ToolCallStatus::Success => "ok",
-                    lash_core::ToolCallStatus::Failure => "error",
-                    lash_core::ToolCallStatus::Cancelled => "cancelled",
-                },
-                duration_ms: record.duration_ms,
-                max_output_chars,
-            },
-        ),
         ChronologicalPayload::ProtocolEvent(event) => {
             let Some(lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step)) =
                 decode_rlm_protocol_event(event)
@@ -443,22 +404,6 @@ fn render_borrowed_history_entry(
                 max_output_chars,
             );
         }
-        BorrowedChronologicalPayload::ToolCall(record) => append_history_tool_call(
-            &mut rendered,
-            HistoryToolCallRender {
-                index: entry.index,
-                tool: &record.tool,
-                args: &record.args,
-                result: record.output.value_for_projection(),
-                status: match record.output.status() {
-                    lash_core::ToolCallStatus::Success => "ok",
-                    lash_core::ToolCallStatus::Failure => "error",
-                    lash_core::ToolCallStatus::Cancelled => "cancelled",
-                },
-                duration_ms: record.duration_ms,
-                max_output_chars,
-            },
-        ),
         BorrowedChronologicalPayload::ProtocolEvent(event) => {
             let Some(lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(step)) =
                 decode_rlm_protocol_event(event)
@@ -496,46 +441,6 @@ fn render_borrowed_history_entry(
     rendered
 }
 
-struct HistoryToolCallRender<'a> {
-    index: usize,
-    tool: &'a str,
-    args: &'a serde_json::Value,
-    result: serde_json::Value,
-    status: &'static str,
-    duration_ms: u64,
-    max_output_chars: usize,
-}
-
-fn append_history_tool_call(out: &mut String, call: HistoryToolCallRender<'_>) {
-    let HistoryToolCallRender {
-        index,
-        tool,
-        args,
-        result,
-        status,
-        duration_ms,
-        max_output_chars,
-    } = call;
-    let args = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
-    let result = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-    let (args_preview, args_raw_len) = head_tail_truncate(&args, max_output_chars);
-    let (result_preview, result_raw_len) = head_tail_truncate(&result, max_output_chars);
-    let args_ref = truncated_ref(
-        args_raw_len,
-        max_output_chars,
-        &format!("history[{index}].args"),
-    );
-    let result_ref = truncated_ref(
-        result_raw_len,
-        max_output_chars,
-        &format!("history[{index}].result"),
-    );
-    let _ = write!(
-        out,
-        "--- history[{index}] · tool_call · {tool} · {status} · {duration_ms} ms ---\n\nArguments ({args_raw_len} chars{args_ref}):\n{args_preview}\n\nResult ({result_raw_len} chars{result_ref}):\n{result_preview}"
-    );
-}
-
 #[cfg(test)]
 pub(super) fn append_entry_image_blocks(
     entry: &lash_core::ChronologicalEntry,
@@ -564,7 +469,6 @@ pub(super) fn append_entry_image_blocks(
                 }
             }
         }
-        lash_core::ChronologicalPayload::ToolCall(_) => {}
     }
 }
 
@@ -595,7 +499,6 @@ fn append_borrowed_entry_image_blocks(
                 }
             }
         }
-        BorrowedChronologicalPayload::ToolCall(_) => {}
     }
 }
 

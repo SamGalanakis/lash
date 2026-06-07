@@ -1,24 +1,21 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
+use lash_core::ChronologicalPayload;
 use lash_core::session_model::{Message, MessageRole, Part, PartKind, PruneState};
-use lash_core::{ChronologicalPayload, ToolCallRecord};
 use lash_rlm_types::RlmTrajectoryEntry;
 
-use crate::LoadedSession;
-use crate::trace::LlmPromptSnapshot;
-
 use super::chronological_rlm_step;
-use super::escaping::{escape, escape_attr, escape_breaks, json_highlight};
+use super::escaping::{escape, escape_attr, json_highlight};
 use super::prompt::{
     CoalesceState, PromptAnchor, compute_coalesce_states, compute_prompt_insertions,
     render_system_prompt, render_system_prompt_banner, write_usage_chart_bar,
 };
 use super::view_model::{
-    RenderCtx, format_count, format_duration, format_tokens, json_byte_size, message_matches_text,
-    one_line_summary, pretty_json, strip_first_lashlang_fence, submit_value_text, summarize_args,
-    truncate,
+    RenderCtx, format_count, json_byte_size, message_matches_text, one_line_summary, pretty_json,
+    strip_first_lashlang_fence, submit_value_text, truncate,
 };
+use crate::LoadedSession;
 
 pub(crate) struct EntriesHtml {
     pub(crate) entries: String,
@@ -26,7 +23,7 @@ pub(crate) struct EntriesHtml {
     pub(crate) usage_chart: String,
 }
 
-pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHtml {
+pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx) -> EntriesHtml {
     let mut entries = String::with_capacity(32 * 1024);
     let mut spine = String::with_capacity(2 * 1024);
     let mut usage_chart = String::with_capacity(2 * 1024);
@@ -35,23 +32,9 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
     let mut last_hash: Option<String> = None;
     let mut first_seen: HashMap<String, PromptAnchor> = HashMap::new();
 
-    // Build fan-out index: any LLM call caused by a tool call is rendered as a child of that tool entry, NOT as a peer
-    // in the chronological flow. This collapses tournament_rerank-style
-    // batches under their parent tool.
-    let mut fanout_index: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut fanout_consumed: HashSet<usize> = HashSet::new();
-    for (idx, prompt) in session.llm_prompts.iter().enumerate() {
-        if let Some(tcid) = tool_call_id_from_cause(&prompt.caused_by) {
-            fanout_index.entry(tcid.clone()).or_default().push(idx);
-            fanout_consumed.insert(idx);
-        }
-    }
-
     // Coalesce runs of consecutive identical-system-hash main-flow prompts
     // into one banner instead of N stub rows.
-    let main_indices: Vec<usize> = (0..session.llm_prompts.len())
-        .filter(|i| !fanout_consumed.contains(i))
-        .collect();
+    let main_indices: Vec<usize> = (0..session.llm_prompts.len()).collect();
     let coalesce: HashMap<usize, CoalesceState> = compute_coalesce_states(
         &session.llm_prompts,
         &main_indices,
@@ -78,42 +61,16 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
                 }
                 last_final_output = None;
             }
-            ChronologicalPayload::ToolCall(_) => {}
         }
     }
 
-    let tool_call_map = session
-        .chronological
-        .iter()
-        .filter_map(|entry| match &entry.payload {
-            ChronologicalPayload::ToolCall(record) => record
-                .call_id
-                .as_ref()
-                .map(|call_id| (call_id.clone(), record)),
-            ChronologicalPayload::Message(_) | ChronologicalPayload::ProtocolEvent(_) => None,
-        })
-        .collect::<HashMap<_, _>>();
-    let rlm_owned_tool_call_ids = session
-        .chronological
-        .iter()
-        .filter_map(|entry| match &entry.payload {
-            ChronologicalPayload::ProtocolEvent(event) => chronological_rlm_step(event),
-            ChronologicalPayload::Message(_) | ChronologicalPayload::ToolCall(_) => None,
-        })
-        .flat_map(|step| rlm_step_tool_call_ids(&step))
-        .collect::<HashSet<_>>();
-
     let emit_prompt = |entries: &mut String,
                        spine: &mut String,
-                       ctx: &mut RenderCtx<'_>,
+                       ctx: &mut RenderCtx,
                        last_hash: &mut Option<String>,
                        first_seen: &mut HashMap<String, PromptAnchor>,
                        usage_chart: &mut String,
                        prompt_idx: usize| {
-        if fanout_consumed.contains(&prompt_idx) {
-            // Rendered under its parent tool call below, not in the main flow.
-            return;
-        }
         let prompt = &session.llm_prompts[prompt_idx];
         match coalesce.get(&prompt_idx) {
             Some(CoalesceState::BannerStart {
@@ -195,45 +152,11 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
                 }
                 render_message(&mut entries, &mut spine, ctx, message);
             }
-            ChronologicalPayload::ToolCall(record) => {
-                if record
-                    .call_id
-                    .as_ref()
-                    .is_some_and(|call_id| rlm_owned_tool_call_ids.contains(call_id))
-                {
-                    continue;
-                }
-                render_tool_call_entry(&mut entries, &mut spine, ctx, record, None);
-                if let Some(call_id) = record.call_id.as_deref()
-                    && let Some(children) = fanout_index.get(call_id)
-                {
-                    render_tool_fanout(
-                        &mut entries,
-                        &mut spine,
-                        ctx,
-                        record,
-                        &session.llm_prompts,
-                        children,
-                        session.context_window_tokens,
-                    );
-                }
-            }
             ChronologicalPayload::ProtocolEvent(event) => {
                 let Some(step) = chronological_rlm_step(event) else {
                     continue;
                 };
-                render_rlm_step_with_fanout(
-                    &mut entries,
-                    &mut spine,
-                    ctx,
-                    RlmStepFanoutInput {
-                        step: &step,
-                        tool_call_map: &tool_call_map,
-                        fanout_index: &fanout_index,
-                        prompts: &session.llm_prompts,
-                        context_window_tokens: session.context_window_tokens,
-                    },
-                );
+                render_rlm_step(&mut entries, &mut spine, ctx, &step);
             }
         }
     }
@@ -257,159 +180,10 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
     }
 }
 
-fn tool_call_id_from_cause(caused_by: &Option<lash_core::CausalRef>) -> Option<&String> {
-    match caused_by {
-        Some(lash_core::CausalRef::ToolCall { call_id, .. }) => Some(call_id),
-        _ => None,
-    }
-}
-
-fn render_tool_fanout(
-    out: &mut String,
-    spine: &mut String,
-    ctx: &mut RenderCtx<'_>,
-    record: &ToolCallRecord,
-    prompts: &[LlmPromptSnapshot],
-    children: &[usize],
-    context_window_tokens: Option<u64>,
-) {
-    if children.is_empty() {
-        return;
-    }
-    let id = ctx.next_id();
-    let n = children.len();
-    let mut input = 0i64;
-    let mut output = 0i64;
-    let mut cached = 0i64;
-    let mut reasoning = 0i64;
-    let mut ok = 0usize;
-    let mut errs = 0usize;
-    for &idx in children {
-        let p = &prompts[idx];
-        if let Some(u) = &p.usage {
-            input += u.input_tokens.max(0);
-            output += u.output_tokens.max(0);
-            cached += u.cached_input_tokens.max(0);
-            reasoning += u.reasoning_tokens.max(0);
-            ok += 1;
-        } else {
-            errs += 1;
-        }
-    }
-    let parent_attr = record
-        .call_id
-        .as_deref()
-        .map(|p| format!(" data-parent=\"{}\"", escape_attr(p)))
-        .unwrap_or_default();
-    let _ = writeln!(
-        out,
-        "    <article class=\"entry entry--child entry--fanout\" id=\"{id}\" data-role=\"llm_call\" data-kind=\"tool_fanout\" data-tool=\"{tool}\"{parent_attr}>",
-        tool = escape_attr(&record.tool),
-    );
-    out.push_str("      <div class=\"entry-rail\"><span class=\"entry-glyph\">├─</span></div>\n");
-    out.push_str("      <div class=\"entry-body\">\n");
-    out.push_str("        <details class=\"tool-fanout\">\n");
-    let _ = writeln!(
-        out,
-        "          <summary class=\"tool-fanout-summary\"><span class=\"entry-tag entry-tag--system\">fan-out</span><span><span class=\"tool-fanout-count\">{n}</span> direct llm calls · {in_k} in / {out_k} out · reasoning {r_k} · {ok}/{n} ok</span></summary>",
-        in_k = format_tokens(input),
-        out_k = format_tokens(output),
-        r_k = format_tokens(reasoning),
-    );
-    let _ = ok; // consumed in summary above
-    let _ = errs;
-    let _ = cached;
-    out.push_str("          <div class=\"tool-fanout-children\">\n");
-    let mut inner_usage = String::new();
-    let mut inner_spine = String::new();
-    let mut inner_last_hash: Option<String> = None;
-    let mut inner_first_seen: HashMap<String, PromptAnchor> = HashMap::new();
-    for &idx in children {
-        let prompt = &prompts[idx];
-        let anchor = inner_first_seen.get(&prompt.system_hash).cloned();
-        let child_id = render_system_prompt(
-            out,
-            &mut inner_spine,
-            ctx,
-            prompt,
-            context_window_tokens,
-            inner_last_hash.as_deref(),
-            anchor.as_ref(),
-        );
-        write_usage_chart_bar(&mut inner_usage, &child_id, prompt, context_window_tokens);
-        inner_first_seen
-            .entry(prompt.system_hash.clone())
-            .or_insert(PromptAnchor {
-                entry_id: child_id,
-                iter_label: prompt
-                    .protocol_iteration
-                    .map(|i| format!("iter {i}"))
-                    .unwrap_or_else(|| "fan-out".to_string()),
-            });
-        inner_last_hash = Some(prompt.system_hash.clone());
-    }
-    out.push_str("          </div>\n");
-    out.push_str("        </details>\n");
-    out.push_str("      </div>\n");
-    out.push_str("    </article>\n");
-    // The fan-out summary tick replaces N peer ticks — one summary tick on
-    // the spine per fan-out (instead of 25 noisy ones).
-    let _ = writeln!(
-        spine,
-        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"llm_call\" title=\"{tool} fan-out · {n} direct calls\"></a>",
-        tool = escape_attr(&record.tool),
-    );
-}
-
-/// Wraps render_rlm_step so its inline tool calls also receive fan-out
-/// children (RLM mode invokes tools from inside a lashlang block; if any
-/// of those tools issue direct_completion calls, those should fold under
-/// the inline tool entry, not appear as flat peers).
-struct RlmStepFanoutInput<'a> {
-    step: &'a RlmTrajectoryEntry,
-    tool_call_map: &'a HashMap<String, &'a ToolCallRecord>,
-    fanout_index: &'a HashMap<String, Vec<usize>>,
-    prompts: &'a [LlmPromptSnapshot],
-    context_window_tokens: Option<u64>,
-}
-
-fn render_rlm_step_with_fanout(
-    out: &mut String,
-    spine: &mut String,
-    ctx: &mut RenderCtx<'_>,
-    input: RlmStepFanoutInput<'_>,
-) {
-    let RlmStepFanoutInput {
-        step,
-        tool_call_map,
-        fanout_index,
-        prompts,
-        context_window_tokens,
-    } = input;
-    render_rlm_step(out, spine, ctx, step, tool_call_map);
-    // After the RLM step's body, render fan-outs for any of its inline
-    // tool calls that have direct_completion children.
-    for call_id in &rlm_step_tool_call_ids(step) {
-        if let Some(record) = tool_call_map.get(call_id)
-            && let Some(children) = fanout_index.get(call_id)
-        {
-            render_tool_fanout(
-                out,
-                spine,
-                ctx,
-                record,
-                prompts,
-                children,
-                context_window_tokens,
-            );
-        }
-    }
-}
-
 pub(crate) fn render_message(
     out: &mut String,
     spine: &mut String,
-    ctx: &mut RenderCtx<'_>,
+    ctx: &mut RenderCtx,
     message: &Message,
 ) {
     let id = ctx.next_id();
@@ -566,189 +340,20 @@ fn build_search_text_message(message: &Message, user_text: Option<&str>) -> Stri
 }
 
 mod leaf;
-pub(crate) use leaf::{call_id_short, pick_display_title};
+pub(crate) use leaf::pick_display_title;
 use leaf::{render_code, render_part, render_prose, render_reasoning};
 
-pub(crate) fn render_tool_call_entry(
-    out: &mut String,
-    spine: &mut String,
-    ctx: &mut RenderCtx<'_>,
-    record: &ToolCallRecord,
-    parent: Option<&str>,
-) {
-    let id = ctx.next_id();
-    let (status_key, status_label) = match record.output.status() {
-        lash_core::ToolCallStatus::Success => ("ok", "ok"),
-        lash_core::ToolCallStatus::Failure => ("err", "error"),
-        lash_core::ToolCallStatus::Cancelled => ("cancelled", "cancelled"),
-    };
-    let glyph = match record.output.status() {
-        lash_core::ToolCallStatus::Success => "•",
-        lash_core::ToolCallStatus::Failure => "×",
-        lash_core::ToolCallStatus::Cancelled => "◌",
-    };
-    let summary = summarize_args(&record.args);
-    let result_size = json_byte_size(&record.output.value_for_projection());
-    let args_size = json_byte_size(&record.args);
-
-    let dur = format_duration(record.duration_ms);
-    let parent_attr = parent
-        .map(|p| format!(" data-parent=\"{}\"", escape_attr(p)))
-        .unwrap_or_default();
-    let parent_class = if parent.is_some() {
-        " entry--child"
-    } else {
-        ""
-    };
-
-    let mut search = String::new();
-    search.push_str(&record.tool.to_lowercase());
-    search.push('\n');
-    search.push_str(&summary.to_lowercase());
-    search.push('\n');
-    search.push_str(&pretty_json(&record.args).to_lowercase());
-    search.push('\n');
-    search.push_str(&pretty_json(&record.output.value_for_projection()).to_lowercase());
-
-    let _ = writeln!(
-        out,
-        "    <article class=\"entry entry--tool entry--{status_key}{parent_class}\" id=\"{id}\" data-role=\"tool\" data-kind=\"tool_call\" data-tool=\"{tool}\" data-status=\"{status_key}\" data-search=\"{search}\"{parent_attr}>",
-        tool = escape_attr(&record.tool),
-        search = escape_attr(&search),
-    );
-    out.push_str("      <div class=\"entry-rail\">\n");
-    let _ = writeln!(
-        out,
-        "        <a class=\"entry-num\" href=\"#{id}\" title=\"permalink\">{id}</a>"
-    );
-    let _ = writeln!(out, "        <span class=\"entry-glyph\">{glyph}</span>");
-    out.push_str("      </div>\n");
-    // Auto-open errors always; auto-open small calls only when the session
-    // is short. A 500-call trace at ~5kb each becomes a 200k-pixel document
-    // if everything's open by default — collapse-first, expand-on-demand
-    // is the right default for sessions of that scale.
-    let busy_session =
-        ctx.stats.tool_calls_ok + ctx.stats.tool_calls_err + ctx.stats.tool_calls_cancelled > 30;
-    let auto_open =
-        !record.output.is_success() || (!busy_session && (args_size + result_size) <= 4096);
-    let open_attr = if auto_open { " open" } else { "" };
-
-    // The whole header row IS the summary — click anywhere on it to expand.
-    out.push_str("      <div class=\"entry-body\">\n");
-    let _ = writeln!(
-        out,
-        "        <details class=\"entry-content tool-details\"{open_attr}>"
-    );
-    out.push_str("          <summary class=\"entry-head\">\n");
-    let _ = writeln!(
-        out,
-        "            <span class=\"entry-tag entry-tag--tool\">{}</span>",
-        escape(&record.tool)
-    );
-    let _ = writeln!(
-        out,
-        "            <span class=\"entry-headline\">{}</span>",
-        escape(&summary)
-    );
-    let _ = writeln!(
-        out,
-        "            <span class=\"entry-meta entry-meta--{status_key}\">{status_label} · {dur}</span>"
-    );
-    let _ = writeln!(
-        out,
-        "            <span class=\"entry-meta\">{}</span>",
-        format_count(result_size as u64)
-    );
-    if let Some(call_id) = record.call_id.as_deref() {
-        let short = call_id_short(call_id);
-        let _ = writeln!(
-            out,
-            "            <span class=\"entry-callid\" title=\"call_id: {full}\">{short}</span>",
-            full = escape_attr(call_id),
-            short = escape(&short),
-        );
-    }
-    out.push_str("          </summary>\n");
-
-    render_tool_call_payload(out, record);
-
-    out.push_str("        </details>\n");
-    out.push_str("      </div>\n");
-    out.push_str("    </article>\n");
-
-    let _ = writeln!(
-        spine,
-        "    <a class=\"spine-tick spine-tick--{status_key}\" href=\"#{id}\" data-spine=\"tool\" data-status=\"{status_key}\" title=\"{tool} · {status_label} · {dur}\"></a>",
-        tool = escape_attr(&record.tool),
-    );
-}
-
-fn render_tool_call_payload(out: &mut String, record: &ToolCallRecord) {
-    let args_size = json_byte_size(&record.args);
-    let result_size = json_byte_size(&record.output.value_for_projection());
-    let args_str = pretty_json(&record.args);
-    let result_str = pretty_json(&record.output.value_for_projection());
-
-    out.push_str("          <div class=\"kv\">\n");
-    out.push_str("            <div class=\"kv-head\"><span class=\"kv-tag\">arguments</span>");
-    let _ = writeln!(
-        out,
-        "<span class=\"kv-size\">{}</span><button class=\"code-copy\" data-copy>copy</button></div>",
-        format_count(args_size as u64)
-    );
-    let _ = writeln!(
-        out,
-        "            <pre class=\"json\">{}</pre>",
-        json_highlight(&args_str)
-    );
-    out.push_str("          </div>\n");
-
-    out.push_str("          <div class=\"kv\">\n");
-    out.push_str("            <div class=\"kv-head\"><span class=\"kv-tag\">result</span>");
-    let _ = writeln!(
-        out,
-        "<span class=\"kv-size\">{}</span><button class=\"code-copy\" data-copy>copy</button></div>",
-        format_count(result_size as u64)
-    );
-    let result_class = if record.output.is_success() {
-        "json"
-    } else {
-        "json json--err"
-    };
-    let _ = writeln!(
-        out,
-        "            <pre class=\"{result_class}\">{}</pre>",
-        json_highlight(&result_str)
-    );
-    out.push_str("          </div>\n");
-}
-
 // ─── RLM step ───────────────────────────────────────────────────────────────
-
-/// Tool-call ids owned by an RLM step. The protocol no longer threads a
-/// per-step list of owned tool-call ids (`RlmTrajectoryEntry::tool_call_ids`
-/// was removed); tool calls now live in the chronological stream and render in
-/// the main flow. Kept as a single helper so the rendering paths share one
-/// definition and re-acquire nesting trivially if the protocol restores it.
-fn rlm_step_tool_call_ids(_step: &RlmTrajectoryEntry) -> Vec<String> {
-    Vec::new()
-}
 
 pub(crate) fn render_rlm_step(
     out: &mut String,
     spine: &mut String,
-    ctx: &mut RenderCtx<'_>,
+    ctx: &mut RenderCtx,
     step: &RlmTrajectoryEntry,
-    tool_call_map: &HashMap<String, &ToolCallRecord>,
 ) {
     let id = ctx.next_id();
     let has_err = step.error.is_some();
     let status_key = if has_err { "err" } else { "ok" };
-    let nested_call_ids = rlm_step_tool_call_ids(step);
-    let nested_calls = nested_call_ids
-        .iter()
-        .filter(|call_id| tool_call_map.contains_key(*call_id))
-        .count();
     let reasoning = strip_first_lashlang_fence(&step.reasoning);
     let has_reasoning_body = !reasoning.trim().is_empty();
     let output_preview = if has_reasoning_body {
@@ -808,13 +413,6 @@ pub(crate) fn render_rlm_step(
     if has_err {
         out.push_str("          <span class=\"entry-meta entry-meta--err\">error</span>\n");
     }
-    if nested_calls > 0 {
-        let _ = writeln!(
-            out,
-            "          <span class=\"entry-meta\">{} calls</span>",
-            nested_calls
-        );
-    }
     let _ = writeln!(
         out,
         "          <span class=\"entry-meta\">{}</span>",
@@ -844,113 +442,15 @@ pub(crate) fn render_rlm_step(
             json_highlight(&pretty),
         );
     }
-    render_inline_rlm_tool_calls(out, step, tool_call_map);
-
     out.push_str("        </div>\n");
     out.push_str("      </div>\n");
     out.push_str("    </article>\n");
 
     let _ = writeln!(
         spine,
-        "    <a class=\"spine-tick spine-tick--rlm\" href=\"#{id}\" data-spine=\"rlm\" data-status=\"{status_key}\" title=\"RLM step {it}{nested}\"></a>",
+        "    <a class=\"spine-tick spine-tick--rlm\" href=\"#{id}\" data-spine=\"rlm\" data-status=\"{status_key}\" title=\"RLM step {it}\"></a>",
         it = step.protocol_iteration,
-        nested = if nested_calls > 0 {
-            format!(" · {nested_calls} calls")
-        } else {
-            String::new()
-        },
     );
-
-    // Render nested tool calls as child entries.
-    for call_id in &nested_call_ids {
-        if let Some(record) = tool_call_map.get(call_id) {
-            render_tool_call_entry(out, spine, ctx, record, Some(&id));
-        }
-    }
-}
-
-fn render_inline_rlm_tool_calls(
-    out: &mut String,
-    step: &RlmTrajectoryEntry,
-    tool_call_map: &HashMap<String, &ToolCallRecord>,
-) {
-    let records = rlm_step_tool_call_ids(step)
-        .iter()
-        .filter_map(|call_id| tool_call_map.get(call_id).copied())
-        .collect::<Vec<_>>();
-    if records.is_empty() {
-        return;
-    }
-    let has_error = records.iter().any(|record| !record.output.is_success());
-    let open_attr = if has_error { " open" } else { "" };
-    let total_ms: u64 = records.iter().map(|record| record.duration_ms).sum();
-    let _ = writeln!(
-        out,
-        "          <details class=\"rlm-tool-list\"{open_attr}>"
-    );
-    let _ = writeln!(
-        out,
-        "            <summary class=\"code-bar\"><span class=\"code-tag\">tool calls</span><span class=\"code-size\">{} · {}</span></summary>",
-        records.len(),
-        format_duration(total_ms),
-    );
-    out.push_str("            <div class=\"rlm-tool-stack\">\n");
-    for (idx, record) in records.iter().enumerate() {
-        render_inline_tool_call(out, idx + 1, record);
-    }
-    out.push_str("            </div>\n");
-    out.push_str("          </details>\n");
-}
-
-fn render_inline_tool_call(out: &mut String, ordinal: usize, record: &ToolCallRecord) {
-    let (status_key, status_label) = match record.output.status() {
-        lash_core::ToolCallStatus::Success => ("ok", "ok"),
-        lash_core::ToolCallStatus::Failure => ("err", "error"),
-        lash_core::ToolCallStatus::Cancelled => ("cancelled", "cancelled"),
-    };
-    let summary = summarize_args(&record.args);
-    let result_size = json_byte_size(&record.output.value_for_projection());
-    let open_attr = match record.output.status() {
-        lash_core::ToolCallStatus::Success => "",
-        lash_core::ToolCallStatus::Failure | lash_core::ToolCallStatus::Cancelled => " open",
-    };
-    let _ = writeln!(
-        out,
-        "              <details class=\"tool-details rlm-tool-details rlm-tool-details--{status_key}\"{open_attr}>"
-    );
-    out.push_str("                <summary class=\"tool-summary\">\n");
-    let _ = writeln!(
-        out,
-        "                  <span class=\"entry-tag entry-tag--tool\">{}</span>",
-        escape(&record.tool)
-    );
-    let _ = writeln!(
-        out,
-        "                  <span class=\"entry-headline\">#{ordinal} · {}</span>",
-        escape(&summary)
-    );
-    let _ = writeln!(
-        out,
-        "                  <span class=\"entry-meta entry-meta--{status_key}\">{status_label} · {}</span>",
-        format_duration(record.duration_ms)
-    );
-    let _ = writeln!(
-        out,
-        "                  <span class=\"entry-meta\">{}</span>",
-        format_count(result_size as u64)
-    );
-    if let Some(call_id) = record.call_id.as_deref() {
-        let short = call_id_short(call_id);
-        let _ = writeln!(
-            out,
-            "                  <span class=\"entry-callid\" title=\"call_id: {full}\">{short}</span>",
-            full = escape_attr(call_id),
-            short = escape(&short),
-        );
-    }
-    out.push_str("                </summary>\n");
-    render_tool_call_payload(out, record);
-    out.push_str("              </details>\n");
 }
 
 // ─── system prompt (per-LLM-call snapshot from trace) ───────────────────────

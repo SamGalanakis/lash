@@ -1,24 +1,20 @@
 //! Default rolling-history plugin.
 //!
 //! Owns the compaction strategy that used to live in
-//! `crates/lash/src/session_model/context.rs`: per-turn pruning (tool results,
-//! old images) and summary insertion, plus persistent history rewrites
-//! for manual compaction, overflow recovery, and window-shrink events.
+//! `crates/lash/src/session_model/context.rs`: per-turn pruning of old
+//! images and summary insertion, plus persistent history rewrites for
+//! manual compaction, overflow recovery, and window-shrink events.
 //!
 //! Registered as a default plugin by
 //! the first-party default tool bundles from `lash-standard-plugins`,
 //! so standard lash sessions pick it up automatically.
 
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 
 use lash_core::PreparedContext;
-use lash_core::plugin::ToolResultProjectionContext;
 use lash_core::plugin::{
     HistoryError, HistoryRewriter, HistoryState, PluginError, PluginFactory, PluginOptions,
     PluginRegistrar, PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
@@ -27,22 +23,9 @@ use lash_core::plugin::{
 };
 use lash_core::{
     InputItem, Message, MessageOrigin, MessageRole, Part, PartKind, PromptUsage, SessionSnapshot,
-    ToolCallRecord, TurnInput,
-};
-use lash_plugin_tool_output_budget::{
-    DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES, DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES,
-    ToolOutputBudgetConfig, ToolOutputBudgetMode, TruncationDirection, TruncationUnit,
-    WindowedTruncation, project_tool_result_text, truncate_windowed,
+    TurnInput,
 };
 
-fn tool_spill_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join("lash-tool-output")
-}
-
-const TOOL_RESULT_MAX_LINES: usize = DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES;
-const TOOL_RESULT_MAX_BYTES: usize = DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES;
-const PRUNE_MINIMUM_TOKENS: usize = 20_000;
-const PRUNE_PROTECT_TOKENS: usize = 40_000;
 const PRUNE_RECENT_USER_TURNS: usize = 2;
 const COMPACTION_BUFFER_TOKENS: usize = 20_000;
 const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
@@ -52,7 +35,6 @@ const PRUNE_CONTEXT_THRESHOLD: f64 = 0.6;
 pub(crate) const ROLLING_HISTORY_PLUGIN_ID: &str = "rolling_history";
 const COMPACTION_SUMMARY_TITLE: &str = "Compaction summary:";
 const COMPACTION_PROMPT: &str = "Provide a detailed summary of the conversation above so a later session can continue the work without the full history.\n\nUse this template:\n---\n## Goal\n[What is the user trying to accomplish?]\n\n## Instructions\n- [Relevant instructions or constraints]\n\n## Discoveries\n[Important findings, failures, or decisions]\n\n## Accomplished\n[What is done, what is in progress, what remains]\n\n## Relevant files / directories\n[List important files or directories]\n---";
-const PRUNE_PROTECTED_TOOLS: &[&str] = &["skill"];
 const PRUNED_IMAGE_PLACEHOLDER: &str = "[Image omitted from older context]";
 const COMPACTED_IMAGE_PLACEHOLDER: &str = "[Image omitted during compaction]";
 
@@ -94,311 +76,6 @@ fn leading_system_prefix_len(msgs: &[Message]) -> usize {
 
 fn approx_token_count(text: &str) -> usize {
     text.len().div_ceil(4)
-}
-
-fn strip_ansi_escapes(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        if bytes[idx] == 0x1b {
-            idx += 1;
-            if idx < bytes.len() && bytes[idx] == b'[' {
-                idx += 1;
-                while idx < bytes.len() {
-                    let byte = bytes[idx];
-                    idx += 1;
-                    if (byte as char).is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-                continue;
-            }
-            continue;
-        }
-        if let Some(ch) = text[idx..].chars().next() {
-            out.push(ch);
-            idx += ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    out
-}
-
-fn tool_result_truncation_direction(tool_name: &str) -> TruncationDirection {
-    match tool_name {
-        "exec_command" | "write_stdin" => TruncationDirection::Tail,
-        _ => TruncationDirection::Head,
-    }
-}
-
-/// Truncate a tool-result preview using the one canonical windowed
-/// truncation core (shared with the tool-output-budget projector). This
-/// crate always budgets in bytes against the shared default caps and
-/// supplies its own retained-output hint.
-fn truncate_tool_result_preview(
-    text: &str,
-    direction: TruncationDirection,
-    output_path: Option<&Path>,
-) -> String {
-    let retained_hint = match output_path {
-        Some(path) => retained_output_hint(path),
-        None => "The tool output was truncated. No separate full-output file was written for this result.".to_string(),
-    };
-    truncate_windowed(
-        text,
-        &WindowedTruncation {
-            max_lines: TOOL_RESULT_MAX_LINES,
-            max_bytes: TOOL_RESULT_MAX_BYTES,
-            direction,
-            unit: TruncationUnit::Bytes,
-            hint: &retained_hint,
-        },
-    )
-}
-
-fn tool_result_needs_truncation(text: &str) -> bool {
-    text.lines().count() > TOOL_RESULT_MAX_LINES || text.len() > TOOL_RESULT_MAX_BYTES
-}
-
-fn retained_output_hint(path: &Path) -> String {
-    format!(
-        "Full output saved to: {}\nUse `read_file` with `offset`/`limit` or `grep` to inspect specific sections instead of reading the whole file at once.",
-        path.display()
-    )
-}
-
-fn normalize_tool_result_content(record: &ToolCallRecord) -> String {
-    let rendered = lash_core::session_model::format_tool_output_content(&record.output);
-    match record.tool.as_str() {
-        // `batch` is rendered via the structured projector (see
-        // `render_structured_tool_result`) and never reaches this path.
-        "exec_command" | "write_stdin" => strip_ansi_escapes(&rendered),
-        _ => rendered,
-    }
-}
-
-fn tool_output_file_name(record: &ToolCallRecord) -> String {
-    let mut hasher = Sha256::new();
-    if let Some(call_id) = &record.call_id {
-        hasher.update(call_id.as_bytes());
-    } else {
-        hasher.update(record.tool.as_bytes());
-        hasher.update(record.args.to_string().as_bytes());
-        hasher.update(record.output.value_for_projection().to_string().as_bytes());
-    }
-    let digest = format!("{:x}", hasher.finalize());
-    let stem = record
-        .call_id
-        .as_deref()
-        .unwrap_or(&record.tool)
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("{stem}-{}.txt", &digest[..12])
-}
-
-fn spill_tool_output_to_dir(
-    base_dir: &Path,
-    record: &ToolCallRecord,
-    full_output: &str,
-) -> Option<PathBuf> {
-    let dir = base_dir.join("tool-output");
-    if fs::create_dir_all(&dir).is_err() {
-        return None;
-    }
-    let path = dir.join(tool_output_file_name(record));
-    let needs_write = match fs::read_to_string(&path) {
-        Ok(existing) => existing != full_output,
-        Err(_) => true,
-    };
-    if needs_write && fs::write(&path, full_output).is_err() {
-        return None;
-    }
-    Some(path)
-}
-
-fn existing_tool_output_path(record: &ToolCallRecord) -> Option<PathBuf> {
-    record
-        .output
-        .value_for_projection()
-        .get("full_output_path")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-}
-
-/// Budget config mirroring this crate's shared truncation caps, used to
-/// drive the tool-output-budget structured projector for `batch` results.
-fn tool_result_budget_config() -> ToolOutputBudgetConfig {
-    ToolOutputBudgetConfig {
-        mode: ToolOutputBudgetMode::Bytes,
-        limit: TOOL_RESULT_MAX_BYTES,
-        max_lines: TOOL_RESULT_MAX_LINES,
-    }
-}
-
-/// `true` for tool results whose structure must be preserved through the
-/// budget plugin's structure-aware projector rather than flattened to an
-/// opaque string and tail-truncated.
-fn uses_structured_projection(record: &ToolCallRecord) -> bool {
-    record.tool == "batch"
-}
-
-/// Render a structured (`batch`) tool result via the one canonical
-/// projector, which recurses into each child with the correct per-child
-/// truncation direction instead of cutting the flattened JSON mid-value.
-fn render_structured_tool_result(record: &ToolCallRecord) -> String {
-    project_tool_result_text(
-        &tool_result_budget_config(),
-        ToolResultProjectionContext {
-            session_id: String::new(),
-            call_id: record.call_id.clone().unwrap_or_default(),
-            tool_name: record.tool.clone(),
-            args: record.args.clone(),
-            output: record.output.clone(),
-            duration_ms: record.duration_ms,
-        },
-    )
-}
-
-fn render_tool_result_preview(record: &ToolCallRecord) -> String {
-    if uses_structured_projection(record) {
-        return render_structured_tool_result(record);
-    }
-    let normalized = normalize_tool_result_content(record);
-    truncate_tool_result_preview(
-        &normalized,
-        tool_result_truncation_direction(&record.tool),
-        None,
-    )
-}
-
-fn render_tool_result_preview_for_session(record: &ToolCallRecord) -> String {
-    if uses_structured_projection(record) {
-        return render_structured_tool_result(record);
-    }
-    let normalized = normalize_tool_result_content(record);
-    let existing_output_path = existing_tool_output_path(record);
-    if tool_result_needs_truncation(&normalized) {
-        let output_path = existing_output_path
-            .or_else(|| spill_tool_output_to_dir(&tool_spill_dir(), record, &normalized));
-        return truncate_tool_result_preview(
-            &normalized,
-            tool_result_truncation_direction(&record.tool),
-            output_path.as_deref(),
-        );
-    }
-
-    match existing_output_path {
-        Some(path) => format!("{normalized}\n\n{}", retained_output_hint(&path)),
-        None => normalized,
-    }
-}
-
-fn tool_record_map(tool_calls: &[ToolCallRecord]) -> HashMap<String, ToolCallRecord> {
-    tool_calls
-        .iter()
-        .filter_map(|record| {
-            record
-                .call_id
-                .as_ref()
-                .map(|call_id| (call_id.clone(), record.clone()))
-        })
-        .collect()
-}
-
-fn hydrate_tool_result_parts(
-    messages: &mut [Message],
-    tool_calls: &HashMap<String, ToolCallRecord>,
-) {
-    for message in messages {
-        for part in std::sync::Arc::make_mut(&mut message.parts).iter_mut() {
-            if !matches!(part.kind, PartKind::ToolResult) {
-                continue;
-            }
-            if matches!(part.prune_state, lash_core::PruneState::Cleared) {
-                continue;
-            }
-            if !matches!(part.prune_state, lash_core::PruneState::Intact) {
-                continue;
-            }
-            let Some(call_id) = part.tool_call_id.as_deref() else {
-                continue;
-            };
-            let Some(record) = tool_calls.get(call_id) else {
-                continue;
-            };
-            part.content = render_tool_result_preview_for_session(record);
-        }
-    }
-}
-
-fn prune_old_tool_results(
-    messages: &mut [Message],
-    tool_calls: &HashMap<String, ToolCallRecord>,
-) -> bool {
-    let mut total = 0usize;
-    let mut pruned = 0usize;
-    let mut to_prune = Vec::new();
-    let mut recent_user_turns = 0usize;
-
-    'scan: for msg_idx in (0..messages.len()).rev() {
-        if is_compaction_summary_message(&messages[msg_idx]) {
-            break;
-        }
-        if messages[msg_idx].role == MessageRole::User {
-            recent_user_turns += 1;
-        }
-        if recent_user_turns < PRUNE_RECENT_USER_TURNS {
-            continue;
-        }
-        for part_idx in (0..messages[msg_idx].parts.len()).rev() {
-            let part = &messages[msg_idx].parts[part_idx];
-            if !matches!(part.kind, PartKind::ToolResult) {
-                continue;
-            }
-            if matches!(part.prune_state, lash_core::PruneState::Cleared) {
-                break 'scan;
-            }
-            if !matches!(part.prune_state, lash_core::PruneState::Intact) {
-                continue;
-            }
-            let Some(call_id) = part.tool_call_id.as_deref() else {
-                continue;
-            };
-            let Some(record) = tool_calls.get(call_id) else {
-                continue;
-            };
-            if PRUNE_PROTECTED_TOOLS.contains(&record.tool.as_str()) {
-                continue;
-            }
-            let estimate = approx_token_count(&render_tool_result_preview(record));
-            total += estimate;
-            if total > PRUNE_PROTECT_TOKENS {
-                pruned += estimate;
-                to_prune.push((msg_idx, part_idx));
-            }
-        }
-    }
-
-    if pruned <= PRUNE_MINIMUM_TOKENS {
-        return false;
-    }
-
-    for (msg_idx, part_idx) in to_prune {
-        let parts = std::sync::Arc::make_mut(&mut messages[msg_idx].parts);
-        parts[part_idx].prune_state = lash_core::PruneState::Cleared;
-        parts[part_idx].content.clear();
-    }
-    true
 }
 
 fn strip_image_attachment(part: &mut Part, placeholder: &str) -> bool {
@@ -522,14 +199,6 @@ fn compaction_needed(
     usage.context_budget_tokens >= usable
 }
 
-fn referenced_tool_call_ids(messages: &[Message]) -> HashSet<String> {
-    messages
-        .iter()
-        .flat_map(|message| message.parts.iter())
-        .filter_map(|part| part.tool_call_id.clone())
-        .collect()
-}
-
 fn compaction_turn_id(parent_turn_id: &str) -> String {
     format!("{parent_turn_id}:rolling-history-compaction")
 }
@@ -553,20 +222,7 @@ async fn summarize_compaction_prefix(
     snapshot.execution_state_snapshot = None;
     snapshot.last_prompt_usage = None;
     let previous_summary = extract_previous_summary(&messages);
-    let referenced = referenced_tool_call_ids(&messages);
-    let read_view = state.read_view();
-    let tool_calls = read_view
-        .tool_calls()
-        .iter()
-        .filter(|record| {
-            record
-                .call_id
-                .as_ref()
-                .is_some_and(|call_id| referenced.contains(call_id))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    snapshot.replace_active_read_state(&messages, &tool_calls);
+    snapshot.replace_active_read_state(&messages);
 
     let compaction_session_id = format!("{session_id}-compaction");
     let mut policy = snapshot.policy.clone();
@@ -761,18 +417,15 @@ impl TurnContextTransform for RollingTurnTransform {
         let max_context_tokens = ctx.max_context_tokens;
         let session_lifecycle = Arc::clone(&ctx.session_lifecycle);
 
-        let tool_calls = tool_record_map(state.tool_calls());
         let needs_pruning = pruning_needed(prompt_usage, max_context_tokens);
         let needs_compaction = compaction_needed(prompt_usage, max_context_tokens);
-        if tool_calls.is_empty() && !needs_pruning && !needs_compaction {
+        if !needs_pruning && !needs_compaction {
             return Ok(input);
         }
 
         let messages = input.messages.make_mut();
-        hydrate_tool_result_parts(messages, &tool_calls);
 
         if needs_pruning {
-            prune_old_tool_results(messages, &tool_calls);
             prune_old_images(messages);
         }
 
@@ -882,7 +535,6 @@ mod tests {
     use super::*;
     use lash_core::SessionPolicy;
     use serde_json::json;
-    use tempfile::tempdir;
 
     fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
         Message {
@@ -935,127 +587,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn spilled_tool_output_is_written_and_referenced() {
-        let temp = tempdir().expect("tempdir");
-        let record = ToolCallRecord {
-            call_id: Some("call-123".to_string()),
-            tool: "exec_command".to_string(),
-            args: json!({"cmd":"cat giant.log"}),
-            output: lash_core::ToolCallOutput::success(json!(format!(
-                "{}\nend",
-                "line\n".repeat(2_500)
-            ))),
-            duration_ms: 5,
-        };
-
-        let normalized = normalize_tool_result_content(&record);
-        let path = spill_tool_output_to_dir(temp.path(), &record, &normalized).expect("spill path");
-        let preview = truncate_tool_result_preview(
-            &normalized,
-            tool_result_truncation_direction(&record.tool),
-            Some(&path),
-        );
-
-        assert!(path.exists());
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("written output"),
-            normalized
-        );
-        assert!(preview.contains(path.to_string_lossy().as_ref()));
-        assert!(preview.contains("Full output saved to:"));
-    }
-
-    #[test]
-    fn render_tool_result_preview_for_session_reuses_existing_output_path() {
-        let record = ToolCallRecord {
-            call_id: Some("call-123".to_string()),
-            tool: "exec_command".to_string(),
-            args: json!({"cmd":"cat giant.log"}),
-            output: lash_core::ToolCallOutput::success(json!({
-                "output": format!("{}\nend", "line\n".repeat(2_500)),
-                "full_output_path": "/tmp/existing-shell-output.log",
-            })),
-            duration_ms: 5,
-        };
-
-        let preview = render_tool_result_preview_for_session(&record);
-        assert!(preview.contains("Full output saved to: /tmp/existing-shell-output.log"));
-    }
-
-    #[test]
-    fn batch_result_preview_preserves_structure_not_flattened_tail() {
-        // A batch result must be rendered through the structured projector
-        // (valid JSON with per-child results) rather than flattened to an
-        // opaque string and tail-truncated, which would cut JSON
-        // mid-structure and lose the leading children.
-        let record = ToolCallRecord {
-            call_id: Some("batch-1".to_string()),
-            tool: "batch".to_string(),
-            args: json!({}),
-            output: lash_core::ToolCallOutput::success(json!({
-                "results": [
-                    {"tool": "read_file", "success": true, "duration_ms": 1, "result": "child A payload"},
-                    {"tool": "grep", "success": false, "duration_ms": 1, "error": "boom"}
-                ]
-            })),
-            duration_ms: 2,
-        };
-
-        let preview = render_tool_result_preview_for_session(&record);
-        let value: serde_json::Value =
-            serde_json::from_str(&preview).expect("batch preview must be valid JSON");
-        let results = value
-            .get("results")
-            .and_then(|v| v.as_array())
-            .expect("results array");
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].get("result"), Some(&json!("child A payload")));
-        assert_eq!(results[1].get("error"), Some(&json!("boom")));
-    }
-
-    #[test]
-    fn truncation_matches_tool_output_budget_for_identical_input() {
-        // Both plugins must produce byte-for-byte identical truncation for
-        // identical input + identical caps + identical hint, proving they
-        // share the one canonical `truncate_windowed` implementation.
-        let text = format!("{}\nend", "0123456789abcdef".repeat(2_000));
-        let hint = retained_output_hint(Path::new("/tmp/full-output.txt"));
-
-        for direction in [TruncationDirection::Head, TruncationDirection::Tail] {
-            let via_rolling_history = truncate_tool_result_preview(
-                &text,
-                direction,
-                Some(Path::new("/tmp/full-output.txt")),
-            );
-            let via_budget = truncate_windowed(
-                &text,
-                &WindowedTruncation {
-                    max_lines: TOOL_RESULT_MAX_LINES,
-                    max_bytes: TOOL_RESULT_MAX_BYTES,
-                    direction,
-                    unit: TruncationUnit::Bytes,
-                    hint: &hint,
-                },
-            );
-            assert_eq!(via_rolling_history, via_budget);
-            assert!(via_rolling_history.contains("bytes truncated"));
-        }
-    }
-
-    #[test]
-    fn over_long_single_line_is_truncated_not_dropped() {
-        // Regression: a single line bigger than the whole byte budget used
-        // to be dropped (empty preview); it must now be cut at a char
-        // boundary so content is not silently lost.
-        let text = "x".repeat(TOOL_RESULT_MAX_BYTES * 4);
-        let preview = truncate_tool_result_preview(&text, TruncationDirection::Head, None);
-        let head = preview.split("\n\n...").next().expect("preview head");
-        assert!(!head.is_empty());
-        assert!(head.chars().all(|c| c == 'x'));
-        assert!(head.len() <= TOOL_RESULT_MAX_BYTES);
-    }
-
     use lash_core::testing::{MockSessionManager, mock_assembled_turn as empty_turn};
 
     fn mock_manager() -> MockSessionManager {
@@ -1093,88 +624,6 @@ mod tests {
                 ))
             }),
         }
-    }
-
-    #[tokio::test]
-    async fn rolling_turn_transform_clears_old_tool_outputs() {
-        let tool_calls = (0..18)
-            .map(|idx| ToolCallRecord {
-                call_id: Some(format!("call-{idx}")),
-                tool: "exec_command".to_string(),
-                args: json!({"cmd": format!("echo {idx}")}),
-                output: lash_core::ToolCallOutput::success(json!(format!(
-                    "{}\n{}",
-                    (0..600)
-                        .map(|_| "line".repeat(64))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    idx
-                ))),
-                duration_ms: 1,
-            })
-            .collect::<Vec<_>>();
-        let mut messages = vec![text_message("u0", MessageRole::User, "older")];
-        messages.push(Message {
-            id: "a1".to_string(),
-            role: MessageRole::Assistant,
-            parts: Arc::new(
-                tool_calls
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, record)| Part {
-                        id: format!("a1.p{idx}"),
-                        kind: PartKind::ToolResult,
-                        content: String::new(),
-                        attachment: None,
-                        tool_call_id: record.call_id.clone(),
-                        tool_name: Some(record.tool.clone()),
-                        tool_replay: None,
-                        prune_state: lash_core::PruneState::Intact,
-                        reasoning_meta: None,
-                        response_meta: None,
-                    })
-                    .collect(),
-            ),
-            origin: None,
-        });
-        messages.push(text_message("u2", MessageRole::User, "recent"));
-        messages.push(text_message("u3", MessageRole::User, "latest"));
-
-        let mut state = SessionSnapshot {
-            policy: SessionPolicy::default(),
-            ..Default::default()
-        };
-        state.replace_active_read_state(&messages, &tool_calls);
-        let transform = RollingTurnTransform::new(RollingHistoryConfig);
-        let manager = Arc::new(mock_manager());
-        let ctx = build_turn_ctx(
-            "root",
-            state,
-            Some(PromptUsage {
-                prompt_context_tokens: 130_000,
-                input_tokens: 130_000,
-                cached_input_tokens: 0,
-                context_budget_tokens: 130_000,
-            }),
-            Some(200_000),
-            manager,
-        );
-        let prepared = PreparedContext {
-            messages: messages.into(),
-            ..Default::default()
-        };
-        let built = transform
-            .transform(&ctx, prepared)
-            .await
-            .expect("transform")
-            .messages;
-
-        let cleared = built
-            .iter()
-            .flat_map(|message| message.parts.iter())
-            .filter(|part| matches!(part.prune_state, lash_core::PruneState::Cleared))
-            .count();
-        assert!(cleared > 0);
     }
 
     #[tokio::test]

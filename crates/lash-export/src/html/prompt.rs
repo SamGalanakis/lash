@@ -129,19 +129,12 @@ pub(crate) fn compute_prompt_insertions(
             initial_user_anchor_protocol_iteration = Some(0);
         }
 
-        let mut run_start: Option<usize> = None;
         for (i, entry) in chronological.iter().enumerate() {
             match &entry.payload {
-                ChronologicalPayload::ToolCall(_) => {
-                    if run_start.is_none() {
-                        run_start = Some(i);
-                    }
-                }
                 ChronologicalPayload::ProtocolEvent(event) => {
                     let Some(step) = chronological_rlm_step(event) else {
                         continue;
                     };
-                    let begin = run_start.unwrap_or(i);
                     let protocol_iteration = step.protocol_iteration as u64;
                     if initial_user_anchor_protocol_iteration == Some(protocol_iteration) {
                         initial_user_anchor_protocol_iteration = None;
@@ -150,18 +143,16 @@ pub(crate) fn compute_prompt_insertions(
                             if consumed[pi] {
                                 continue;
                             }
-                            before_index[begin].push(pi);
+                            before_index[i].push(pi);
                             consumed[pi] = true;
                             break;
                         }
                     }
-                    run_start = None;
                 }
                 ChronologicalPayload::Message(_) => {
                     // Non-RLM messages (the initial user prompt or a
                     // trailing assistant message) don't open a new
                     // iteration — they sit between or after RLM runs.
-                    run_start = None;
                 }
             }
         }
@@ -197,7 +188,7 @@ pub(crate) fn compute_prompt_insertions(
 pub(crate) fn render_system_prompt_banner(
     out: &mut String,
     spine: &mut String,
-    ctx: &mut RenderCtx<'_>,
+    ctx: &mut RenderCtx,
     prompt: &LlmPromptSnapshot,
     run_count: usize,
     anchor: Option<&PromptAnchor>,
@@ -256,7 +247,7 @@ pub(crate) fn render_system_prompt_banner(
 pub(crate) fn render_system_prompt(
     out: &mut String,
     spine: &mut String,
-    ctx: &mut RenderCtx<'_>,
+    ctx: &mut RenderCtx,
     prompt: &LlmPromptSnapshot,
     context_window_tokens: Option<u64>,
     prev_hash: Option<&str>,

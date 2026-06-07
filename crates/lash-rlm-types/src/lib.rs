@@ -1,4 +1,4 @@
-use lash_sansio::{AttachmentRef, ToolCallOutput, TurnProtocol};
+use lash_sansio::{AttachmentRef, TurnProtocol};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct RlmTrajectoryEntry {
@@ -69,13 +69,6 @@ pub enum RlmHistoryItem {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<RlmAttachmentRef>,
-    },
-    ToolCall {
-        id: String,
-        tool: String,
-        args: serde_json::Value,
-        output: ToolCallOutput,
-        duration_ms: u64,
     },
     RlmStep {
         id: String,

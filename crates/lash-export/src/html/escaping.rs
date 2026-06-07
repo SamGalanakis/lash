@@ -129,8 +129,8 @@ fn matches_at(bytes: &[u8], i: usize, needle: &[u8]) -> bool {
 //
 // A *view* is a chain of sessions joined by `continue_as` AgentFrame switches — the
 // root and every subagent are heads of their own views. Inside a view,
-// AgentFrames are inlined behind a AgentFrame switch divider; subagents
-// become drill-in cards that switch the page to the subagent's view.
+// AgentFrames are inlined behind an AgentFrame switch divider; subagents
+// are navigable sibling views in the lineage.
 
 pub(crate) fn js_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")

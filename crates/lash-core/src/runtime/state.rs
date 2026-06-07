@@ -6,7 +6,7 @@
 use lash_sansio::PromptUsage;
 
 use crate::session_model::{Message, SessionPolicy, TokenUsage, plugin_message_to_message};
-use crate::{PersistedTurnState, SessionSnapshot, ToolCallRecord};
+use crate::{PersistedTurnState, SessionSnapshot};
 
 use super::usage::TokenLedgerEntry;
 
@@ -168,41 +168,15 @@ impl RuntimeSessionState {
         )
     }
 
-    pub fn replace_active_read_state(
-        &mut self,
-        messages: &[Message],
-        tool_calls: &[ToolCallRecord],
-    ) {
+    pub fn replace_active_read_state(&mut self, messages: &[Message]) {
         self.session_graph
-            .replace_active_read_state_for_agent_frame(
-                &self.current_agent_frame_id,
-                messages,
-                tool_calls,
-            );
+            .replace_active_read_state_for_agent_frame(&self.current_agent_frame_id, messages);
         self.graph_replace_required = false;
     }
 
-    pub fn replace_active_tool_calls(&mut self, tool_calls: &[ToolCallRecord]) {
-        let messages = self.read_model().messages;
+    pub fn append_active_read_delta(&mut self, messages: &[Message]) {
         self.session_graph
-            .replace_active_read_state_for_agent_frame(
-                &self.current_agent_frame_id,
-                messages.as_slice(),
-                tool_calls,
-            );
-        self.graph_replace_required = false;
-    }
-
-    pub fn append_active_read_delta(
-        &mut self,
-        messages: &[Message],
-        tool_calls: &[ToolCallRecord],
-    ) {
-        self.session_graph.append_active_read_delta_for_agent_frame(
-            &self.current_agent_frame_id,
-            messages,
-            tool_calls,
-        );
+            .append_active_read_delta_for_agent_frame(&self.current_agent_frame_id, messages);
     }
 
     pub fn append_active_conversation_messages(&mut self, messages: &[Message]) {

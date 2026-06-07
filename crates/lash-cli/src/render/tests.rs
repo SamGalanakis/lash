@@ -20,7 +20,7 @@ use std::sync::mpsc;
 fn timeline_items_from_test_read_view(
     events: &[lash_core::SessionEventRecord],
     messages: &[lash_core::Message],
-    tool_calls: &[lash_core::ToolCallRecord],
+    _tool_calls: &[lash_core::ToolCallRecord],
     ui_state: &crate::app::UiProjectionState,
 ) -> Vec<crate::app::UiTimelineItem> {
     let mut graph = lash_core::SessionGraph::default();
@@ -28,12 +28,6 @@ fn timeline_items_from_test_read_view(
         match event {
             lash_core::SessionEventRecord::Conversation(record) => {
                 graph.append_message(record.to_message());
-            }
-            lash_core::SessionEventRecord::Tool(lash_core::ToolEvent::Invocation {
-                record,
-                ..
-            }) => {
-                graph.append_active_read_delta(&[], std::slice::from_ref(record));
             }
             lash_core::SessionEventRecord::Protocol(event) => {
                 graph.append_protocol_event(event.clone());
@@ -52,7 +46,7 @@ fn timeline_items_from_test_read_view(
         .filter(|message| !event_message_ids.contains(message.id.as_str()))
         .cloned()
         .collect::<Vec<_>>();
-    graph.append_active_read_delta(&missing_messages, tool_calls);
+    graph.append_active_read_delta(&missing_messages);
     let state = lash_core::SessionSnapshot {
         session_graph: graph,
         ..lash_core::SessionSnapshot::default()

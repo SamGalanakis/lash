@@ -94,7 +94,6 @@ pub(crate) fn run_activity_projection_once(workload: UiPerfWorkload) -> UiPerfRu
 
 pub(crate) fn build_projection_read_view(turn_count: usize) -> SessionReadView {
     let mut graph = lash_core::SessionGraph::default();
-    let mut tool_calls = Vec::new();
 
     for turn in 0..turn_count {
         let user = text_message(
@@ -111,27 +110,7 @@ pub(crate) fn build_projection_read_view(turn_count: usize) -> SessionReadView {
         );
         graph.append_message(assistant);
 
-        if turn % 3 == 0 {
-            tool_calls.push(tool_record(
-                format!("call-read-{turn}"),
-                "read_file",
-                json!({ "path": format!("crates/lash-cli/src/app/projection-{turn}.rs") }),
-                ToolCallOutput::success(
-                    json!({ "path": "projection.rs", "content": "fn main() {}" }),
-                ),
-                3,
-            ));
-        }
-
         if turn % 5 == 0 {
-            let call_id = format!("call-rlm-{turn}");
-            tool_calls.push(tool_record(
-                call_id.clone(),
-                "exec_command",
-                json!({ "cmd": "date -u" }),
-                ToolCallOutput::success(json!({ "output": "time\n", "exit_code": 0 })),
-                5,
-            ));
             graph.append_protocol_event(lash_protocol_rlm::rlm_protocol_event(
                 lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(
                     lash_rlm_types::RlmTrajectoryEntry {
@@ -143,7 +122,6 @@ pub(crate) fn build_projection_read_view(turn_count: usize) -> SessionReadView {
                         code: "now = await shell.exec({ cmd: \"date -u\" })?\nprint now"
                             .to_string(),
                         output: vec!["time".to_string()],
-                        tool_call_ids: vec![call_id],
                         images: Vec::new(),
                         error: None,
                         final_output: (turn % 10 == 0).then(|| json!("RLM final output")),
@@ -153,7 +131,6 @@ pub(crate) fn build_projection_read_view(turn_count: usize) -> SessionReadView {
         }
     }
 
-    graph.append_active_read_delta(&[], &tool_calls);
     let state = SessionSnapshot {
         session_graph: graph,
         ..SessionSnapshot::default()

@@ -24,7 +24,6 @@ enum CurrentSnapshot {
     ReadModel {
         meta: RuntimeSessionState,
         messages: Arc<Vec<Message>>,
-        tool_calls: Arc<Vec<ToolCallRecord>>,
     },
 }
 
@@ -32,13 +31,9 @@ impl CurrentSnapshot {
     fn to_runtime_state(&self) -> RuntimeSessionState {
         match self {
             Self::Owned(snapshot) => snapshot.clone(),
-            Self::ReadModel {
-                meta,
-                messages,
-                tool_calls,
-            } => {
+            Self::ReadModel { meta, messages } => {
                 let mut snapshot = meta.clone();
-                snapshot.replace_active_read_state(messages.as_slice(), tool_calls.as_slice());
+                snapshot.replace_active_read_state(messages.as_slice());
                 snapshot
             }
         }
@@ -164,7 +159,6 @@ impl CurrentSessionCapability {
                 CurrentSnapshot::ReadModel {
                     meta: Self::snapshot_meta_without_graph(runtime),
                     messages: read_model.messages,
-                    tool_calls: read_model.tool_calls,
                 }
             },
             policy: runtime.policy.clone(),

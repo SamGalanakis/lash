@@ -1,9 +1,7 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::session_graph::tool_call_record_active_read_key;
 use crate::session_model::SessionEventRecord;
-use crate::{MessageSequence, SessionReadView, ToolCallRecord};
+use crate::{MessageSequence, SessionReadView};
 
 use super::RuntimeSessionState;
 use super::turn_graph_editor::TurnGraphEditor;
@@ -75,13 +73,6 @@ impl TurnCommitDraft {
         }));
     }
 
-    pub(super) fn record_tool_calls<I>(&mut self, records: I)
-    where
-        I: IntoIterator<Item = ToolCallRecord>,
-    {
-        self.graph.record_tool_calls(records);
-    }
-
     pub(super) fn read_view(
         &self,
         policy: crate::SessionPolicy,
@@ -96,14 +87,12 @@ impl TurnCommitDraft {
             protocol_turn_options,
             self.graph.base_graph(),
             messages,
-            self.graph.tool_calls_arc(),
         )
     }
 
     pub(super) fn finalize_turn_read_state(
         &mut self,
         new_messages: MessageSequence,
-        tool_calls: &[ToolCallRecord],
         cancelled: bool,
     ) {
         let projected_messages =
@@ -117,21 +106,14 @@ impl TurnCommitDraft {
         };
 
         if let Some(appended_messages) = appended_messages {
-            if tool_calls.is_empty() {
-                self.graph
-                    .append_active_conversation_messages(&appended_messages);
-            } else {
-                self.graph
-                    .append_active_read_delta(&appended_messages, tool_calls);
-            }
+            self.graph
+                .append_active_conversation_messages(&appended_messages);
             return;
         }
 
-        let mut next_tool_calls = self.graph.graph_tool_calls().to_vec();
-        append_unique_tool_calls(&mut next_tool_calls, tool_calls);
         let projected_messages = projected_messages.unwrap_or_else(|| new_messages.shared());
         self.graph
-            .replace_active_read_state(projected_messages.as_slice(), &next_tool_calls);
+            .replace_active_read_state(projected_messages.as_slice());
     }
 
     pub(super) fn into_final_state(mut self) -> RuntimeSessionState {
@@ -169,22 +151,8 @@ impl TurnCommitDraft {
                 .append_active_conversation_messages(&appended_messages);
         } else {
             let read_messages = messages.shared();
-            let tool_calls = self.graph.tool_calls_arc();
             self.graph
-                .replace_active_read_state(read_messages.as_slice(), tool_calls.as_slice());
+                .replace_active_read_state(read_messages.as_slice());
         }
     }
-}
-
-fn append_unique_tool_calls(out: &mut Vec<ToolCallRecord>, records: &[ToolCallRecord]) {
-    let mut seen = out
-        .iter()
-        .map(tool_call_record_active_read_key)
-        .collect::<HashSet<_>>();
-    out.extend(
-        records
-            .iter()
-            .filter(|record| seen.insert(tool_call_record_active_read_key(record)))
-            .cloned(),
-    );
 }

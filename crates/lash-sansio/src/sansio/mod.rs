@@ -19,7 +19,7 @@ use crate::llm::types::{
 use crate::session_model::message::MessageOrigin;
 use crate::session_model::{
     Message, MessageRole, MessageSequence, Part, PartKind, PruneState, SessionEvent,
-    SessionEventRecord, TokenUsage, ToolEvent, TurnTerminationPolicyState, make_error_event,
+    SessionEventRecord, TokenUsage, TurnTerminationPolicyState, make_error_event,
     reassign_part_ids, render_prompt,
 };
 use crate::{
@@ -1131,11 +1131,6 @@ impl<M: TurnProtocol> TurnMachine<M> {
                 Arc::make_mut(&mut self.events)
                     .push(SessionEventRecord::Conversation(record.clone()));
                 self.messages.push(record.to_message());
-            }
-            SessionEventRecord::Tool(ToolEvent::Invocation { stable_key, record }) => {
-                Arc::make_mut(&mut self.events).push(SessionEventRecord::Tool(
-                    ToolEvent::Invocation { stable_key, record },
-                ));
             }
             SessionEventRecord::Protocol(protocol_event) => {
                 Arc::make_mut(&mut self.events).push(SessionEventRecord::Protocol(protocol_event));

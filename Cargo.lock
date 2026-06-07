@@ -2559,11 +2559,8 @@ version = "0.1.0-alpha.33"
 dependencies = [
  "async-trait",
  "lash-core",
- "lash-plugin-tool-output-budget",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "tempfile",
  "tokio",
 ]
 

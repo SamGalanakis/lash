@@ -155,7 +155,6 @@ async fn apply_graph_resume_state(
         ..lash_core::SessionSnapshot::default()
     });
     let messages = read_view.messages().to_vec();
-    let _tool_calls = read_view.tool_calls().to_vec();
     *history = messages.clone();
 
     if let Some(tool_state) = checkpoint
@@ -397,7 +396,7 @@ mod tests {
         lash_core::store::HydratedSessionCheckpoint,
     ) {
         (
-            lash_core::SessionGraph::from_active_read_state(&messages, &[]),
+            lash_core::SessionGraph::from_active_read_state(&messages),
             lash_core::store::HydratedSessionCheckpoint {
                 turn_state: lash_core::PersistedTurnState {
                     turn_index: iteration,

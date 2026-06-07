@@ -5,8 +5,6 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Result;
-#[cfg(test)]
-use lash_core::ToolCallRecord;
 use lash_core::session_model::Message;
 #[cfg(test)]
 use lash_core::session_model::{MessageRole, PartKind};
@@ -372,7 +370,6 @@ pub async fn load_session(filename: &str) -> Result<LoadedSession> {
     tracing::debug!(
         session_file = filename,
         messages = read_view.messages().len(),
-        tool_calls = read_view.tool_calls().len(),
         blocks = blocks.len(),
         plugin_mode_indicators = plugin_mode_indicators.len(),
         graph_nodes = read_view.materialized_session_graph().nodes.len(),
@@ -414,13 +411,8 @@ mod tests {
         f();
     }
 
-    async fn persist_root_snapshot(
-        store: &Store,
-        messages: Vec<Message>,
-        tool_calls: Vec<ToolCallRecord>,
-        token_usage: TokenUsage,
-    ) {
-        let graph = lash_core::SessionGraph::from_active_read_state(&messages, &tool_calls);
+    async fn persist_root_snapshot(store: &Store, messages: Vec<Message>, token_usage: TokenUsage) {
+        let graph = lash_core::SessionGraph::from_active_read_state(&messages);
         let checkpoint_ref = store
             .put_checkpoint(&lash_core::store::HydratedSessionCheckpoint {
                 turn_state: lash_core::PersistedTurnState {
@@ -522,7 +514,6 @@ mod tests {
                 persist_root_snapshot(
                     &store,
                     messages.clone(),
-                    Vec::new(),
                     TokenUsage {
                         input_tokens: 12,
                         output_tokens: 7,
@@ -558,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn load_session_projects_activity_blocks_from_session_graph() {
+    fn load_session_does_not_hydrate_activity_blocks_from_detached_tool_history() {
         with_temp_lash_home("lash-session-load-activity-blocks", || {
             block_on(async {
                 let filename = new_session_filename();
@@ -578,32 +569,19 @@ mod tests {
                     tool_result_message("m1", "call-shell", "exec_command"),
                     text_message(MessageRole::Assistant, "m2", "Done"),
                 ];
-                let tool_calls = vec![ToolCallRecord {
-                    call_id: Some("call-shell".to_string()),
-                    tool: "exec_command".to_string(),
-                    args: serde_json::json!({"cmd":"git status --short"}),
-                    output: lash_core::ToolCallOutput::success(serde_json::json!({
-                        "stdout":"",
-                        "stderr":"",
-                        "exit_code":0
-                    })),
-                    duration_ms: 42,
-                }];
-                persist_root_snapshot(&store, messages, tool_calls, TokenUsage::default()).await;
+                persist_root_snapshot(&store, messages, TokenUsage::default()).await;
 
                 let loaded = load_session(&filename).await.unwrap();
-                // blocks[0] = TurnStart, [1] = UserInput, [2] = Activity, [3] = AssistantText
+                // blocks[0] = TurnStart, [1] = UserInput, [2] = AssistantText.
+                // Detached tool invocation records are no longer persisted,
+                // so a bare tool-result protocol message is not enough to
+                // synthesize an activity block on resume.
                 assert!(matches!(
                     loaded.blocks.first(),
                     Some(UiTimelineItem::TurnStart(_))
                 ));
                 assert!(matches!(
                     loaded.blocks.get(2),
-                    Some(UiTimelineItem::Activity(activity))
-                        if activity.call.summary == "git status --short"
-                ));
-                assert!(matches!(
-                    loaded.blocks.get(3),
                     Some(UiTimelineItem::AssistantText(text)) if text == "Done"
                 ));
             });
@@ -631,7 +609,7 @@ mod tests {
                     text_message(MessageRole::User, "m0", "Hi"),
                     text_message(MessageRole::Assistant, "m1", assistant),
                 ];
-                persist_root_snapshot(&store, messages, Vec::new(), TokenUsage::default()).await;
+                persist_root_snapshot(&store, messages, TokenUsage::default()).await;
 
                 let loaded = load_session(&filename).await.unwrap();
                 // blocks[0] = TurnStart, [1] = UserInput, [2] = AssistantText
@@ -663,7 +641,6 @@ mod tests {
                 persist_root_snapshot(
                     &parent_store,
                     vec![text_message(MessageRole::User, "m0", "hello there")],
-                    Vec::new(),
                     TokenUsage::default(),
                 )
                 .await;
@@ -685,7 +662,6 @@ mod tests {
                 persist_root_snapshot(
                     &child_store,
                     vec![text_message(MessageRole::User, "m0", "child prompt")],
-                    Vec::new(),
                     TokenUsage::default(),
                 )
                 .await;

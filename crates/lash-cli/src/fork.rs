@@ -674,7 +674,7 @@ mod fork_tests {
         messages: Vec<lash_core::Message>,
         _iteration: usize,
     ) -> lash_core::SessionGraph {
-        lash_core::SessionGraph::from_active_read_state(&messages, &[])
+        lash_core::SessionGraph::from_active_read_state(&messages)
     }
 
     fn persisted_checkpoint(iteration: usize) -> lash_core::store::HydratedSessionCheckpoint {

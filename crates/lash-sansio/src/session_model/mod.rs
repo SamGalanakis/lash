@@ -14,16 +14,15 @@ pub use prompt::{
 
 use std::sync::Arc;
 
+use crate::MessageOrigin;
 use crate::ToolDefinition;
 use crate::llm::types::LlmToolSpec;
 use crate::plugin::{CheckpointKind, PluginMessage, PluginRuntimeEvent};
-use crate::{MessageOrigin, ToolCallRecord};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum SessionEventRecord<PE = ()> {
     Conversation(ConversationRecord),
-    Tool(ToolEvent),
     Protocol(PE),
 }
 
@@ -61,14 +60,6 @@ impl ConversationRecord {
             origin: self.origin.clone(),
         }
     }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum ToolEvent {
-    Invocation {
-        stable_key: String,
-        record: ToolCallRecord,
-    },
 }
 
 /// Token usage statistics from an LLM call.
