@@ -1123,7 +1123,9 @@ mod tests {
             assert_eq!(response.error, None);
 
             let globals = state.bound_variable_values(&BTreeSet::new());
-            let rendered = crate::rlm_support::render_bound_variables(&globals, 0, 1024);
+            let mut cache = crate::rlm_support::BoundVariableRenderCache::default();
+            let rendered =
+                crate::rlm_support::render_bound_variables(&mut cache, &globals, 0, 1024);
 
             assert!(
                 rendered

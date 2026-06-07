@@ -373,6 +373,8 @@ def main() -> int:
 
     if args.fail_on_regression and payload.get("comparison", {}).get("failed"):
         return 1
+    if stack_rc != 0:
+        return stack_rc
     return 0
 
 

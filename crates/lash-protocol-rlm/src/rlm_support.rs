@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 
 use lash_core::PromptContribution;
 use lash_core::PromptUsage;
@@ -57,9 +59,74 @@ pub fn format_budget_suffix(
 /// Render the "Bound Variables" prompt section from the live execution
 /// namespace: the model's own scratch variables and any seeded computed
 /// globals, shown the same way (value inline when small, type + size hint when
-/// large). Projected/lazy values are excluded by the caller; host-projected
-/// bindings render type-only in their own section.
+/// large). Read-only values are excluded by the caller and render in their own
+/// section without value previews.
+#[derive(Debug, Default)]
+pub(crate) struct BoundVariableRenderCache {
+    next_ordinal: usize,
+    entries: BTreeMap<String, BoundVariableRenderCacheEntry>,
+}
+
+impl BoundVariableRenderCache {
+    fn order_rows(&mut self, mut rows: Vec<BoundVariableRow>) -> Vec<BoundVariableRow> {
+        let live_names = rows
+            .iter()
+            .map(|row| row.name.clone())
+            .collect::<BTreeSet<_>>();
+        self.entries.retain(|name, _| live_names.contains(name));
+
+        for row in &mut rows {
+            row.fingerprint = row_fingerprint(row);
+            if let Some(entry) = self.entries.get(&row.name) {
+                row.ordinal = entry.ordinal;
+                row.unchanged = entry.fingerprint == row.fingerprint;
+            } else {
+                row.ordinal = self.next_ordinal;
+                self.next_ordinal += 1;
+                row.unchanged = false;
+            }
+        }
+
+        for row in &rows {
+            self.entries.insert(
+                row.name.clone(),
+                BoundVariableRenderCacheEntry {
+                    ordinal: row.ordinal,
+                    fingerprint: row.fingerprint,
+                },
+            );
+        }
+
+        rows.sort_by(|left, right| {
+            right
+                .unchanged
+                .cmp(&left.unchanged)
+                .then_with(|| left.ordinal.cmp(&right.ordinal))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        rows
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BoundVariableRenderCacheEntry {
+    ordinal: usize,
+    fingerprint: u64,
+}
+
+#[derive(Clone, Debug)]
+struct BoundVariableRow {
+    name: String,
+    inline: Option<String>,
+    shape: Option<JsonShape>,
+    size_hint: Option<String>,
+    ordinal: usize,
+    fingerprint: u64,
+    unchanged: bool,
+}
+
 pub(crate) fn render_bound_variables(
+    cache: &mut BoundVariableRenderCache,
     globals: &serde_json::Map<String, serde_json::Value>,
     history_len: usize,
     inline_char_limit: usize,
@@ -68,48 +135,41 @@ pub(crate) fn render_bound_variables(
         "These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
         "Small values are shown inline so you can read them directly; larger ones show only their type and size — `print` such a variable (or the part you need) to see its contents.".to_string(),
     ];
-    let mut entries = globals.iter().collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.0.cmp(right.0));
-
     // Decide per variable: render its value inline when small, otherwise fall
     // back to a type + size hint. Only register a schema definition for the
-    // hinted (large) ones — an inline value already shows its structure, so the
-    // type would be redundant.
+    // hinted (large) ones: inline values already show their structure.
+    let mut rows = globals
+        .iter()
+        .map(|(name, value)| build_bound_variable_row(name, value, inline_char_limit))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    let rows = cache.order_rows(rows);
+
     let mut registry = SchemaRegistry::default();
-    let mut rows: Vec<(&str, Option<String>, Option<JsonShape>)> = Vec::new();
-    for (name, value) in entries {
-        match render_inline_value(value, inline_char_limit) {
-            Some(inline) => rows.push((name.as_str(), Some(inline), None)),
-            None => {
-                let shape = infer_json_shape(value);
-                registry.register_root(name, &shape);
-                rows.push((name.as_str(), None, Some(shape)));
-            }
+    for row in &rows {
+        if let Some(shape) = &row.shape {
+            registry.register_root(&row.name, shape);
         }
     }
 
     lines.push(String::new());
     lines.push("Available variables:".to_string());
-    lines.push(format!(
-        "- `history`: `list<HistoryItem>`, read-only, {history_len} entries"
-    ));
-    for (name, inline, shape) in &rows {
-        if let Some(inline) = inline {
+    lines.push("- `history`: `list<HistoryItem>`, read-only".to_string());
+    for row in &rows {
+        if let Some(inline) = &row.inline {
             // Value shown explicitly; no type/size hint needed.
-            lines.push(format!("- `{name}` = {inline}"));
+            lines.push(format!("- `{}` = {inline}", row.name));
             continue;
         }
-        let shape = shape
+        let shape = row
+            .shape
             .as_ref()
             .expect("hinted variable has an inferred shape");
-        let value = globals
-            .get(*name)
-            .expect("bound variable should still exist while rendering prompt contribution");
         let type_text = render_shape_inline(shape, &registry);
-        if let Some(size_hint) = render_value_size_hint(value) {
-            lines.push(format!("- `{name}`: `{type_text}`, {size_hint}"));
+        if let Some(size_hint) = &row.size_hint {
+            lines.push(format!("- `{}`: `{type_text}`, {size_hint}", row.name));
         } else {
-            lines.push(format!("- `{name}`: `{type_text}`"));
+            lines.push(format!("- `{}`: `{type_text}`", row.name));
         }
     }
 
@@ -126,7 +186,65 @@ pub(crate) fn render_bound_variables(
         lines.push("```".to_string());
     }
 
+    lines.push(String::new());
+    lines.push("Runtime notes:".to_string());
+    lines.push(format!(
+        "- `history` currently has {history_len} {}",
+        history_count_unit(history_len)
+    ));
+
     PromptContribution::guidance("Bound Variables", lines.join("\n"))
+}
+
+fn build_bound_variable_row(
+    name: &str,
+    value: &serde_json::Value,
+    inline_char_limit: usize,
+) -> BoundVariableRow {
+    match render_inline_value(value, inline_char_limit) {
+        Some(inline) => BoundVariableRow {
+            name: name.to_string(),
+            inline: Some(inline),
+            shape: None,
+            size_hint: None,
+            ordinal: 0,
+            fingerprint: 0,
+            unchanged: false,
+        },
+        None => BoundVariableRow {
+            name: name.to_string(),
+            inline: None,
+            shape: Some(infer_json_shape(value)),
+            size_hint: render_value_size_hint(value),
+            ordinal: 0,
+            fingerprint: 0,
+            unchanged: false,
+        },
+    }
+}
+
+fn row_fingerprint(row: &BoundVariableRow) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    row.name.hash(&mut hasher);
+    match (&row.inline, &row.shape) {
+        (Some(inline), _) => {
+            "inline".hash(&mut hasher);
+            inline.hash(&mut hasher);
+        }
+        (None, Some(shape)) => {
+            "hint".hash(&mut hasher);
+            shape.hash(&mut hasher);
+            row.size_hint.hash(&mut hasher);
+        }
+        (None, None) => {
+            "empty".hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn history_count_unit(count: usize) -> &'static str {
+    if count == 1 { "entry" } else { "entries" }
 }
 
 /// Render a variable's value inline as compact JSON when it fits within
@@ -159,7 +277,7 @@ fn render_value_size_hint(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum JsonShape {
     Any,
     Null,
@@ -468,10 +586,22 @@ mod bound_variable_tests {
         value.as_object().expect("object").clone()
     }
 
+    fn render_with_cache(
+        cache: &mut BoundVariableRenderCache,
+        value: serde_json::Value,
+        history_len: usize,
+        inline_char_limit: usize,
+    ) -> String {
+        render_bound_variables(cache, &globals(value), history_len, inline_char_limit)
+            .content
+            .to_string()
+    }
+
     #[test]
     fn small_values_render_inline_without_type_or_size() {
         let g = globals(json!({ "inventory": ["lantern", "sword"], "count": 3 }));
-        let rendered = render_bound_variables(&g, 0, 1024);
+        let mut cache = BoundVariableRenderCache::default();
+        let rendered = render_bound_variables(&mut cache, &g, 0, 1024);
         let s = &rendered.content;
         assert!(s.contains("- `inventory` = [\"lantern\",\"sword\"]"), "{s}");
         assert!(s.contains("- `count` = 3"), "{s}");
@@ -484,7 +614,8 @@ mod bound_variable_tests {
     fn large_values_fall_back_to_type_and_size_hint() {
         let big: Vec<String> = (0..500).map(|i| format!("item-{i}")).collect();
         let g = globals(json!({ "big": big }));
-        let rendered = render_bound_variables(&g, 0, 64);
+        let mut cache = BoundVariableRenderCache::default();
+        let rendered = render_bound_variables(&mut cache, &g, 0, 64);
         let s = &rendered.content;
         assert!(s.contains("- `big`:"), "{s}");
         assert!(s.contains("len=500"), "{s}");
@@ -493,9 +624,121 @@ mod bound_variable_tests {
     #[test]
     fn zero_limit_always_hints() {
         let g = globals(json!({ "x": [1, 2, 3] }));
-        let rendered = render_bound_variables(&g, 0, 0);
+        let mut cache = BoundVariableRenderCache::default();
+        let rendered = render_bound_variables(&mut cache, &g, 0, 0);
         let s = &rendered.content;
         assert!(s.contains("- `x`:"), "{s}");
         assert!(s.contains("len=3"), "{s}");
+    }
+
+    #[test]
+    fn history_len_renders_in_tail_runtime_notes() {
+        let mut cache = BoundVariableRenderCache::default();
+        let s = render_with_cache(&mut cache, json!({ "task": "ship" }), 7, 1024);
+
+        assert!(
+            s.contains("- `history`: `list<HistoryItem>`, read-only"),
+            "{s}"
+        );
+        assert!(
+            !s.contains("- `history`: `list<HistoryItem>`, read-only, 7 entries"),
+            "{s}"
+        );
+
+        let task_idx = s.find("- `task` = \"ship\"").expect("task row");
+        let notes_idx = s.find("Runtime notes:").expect("runtime notes");
+        let history_len_idx = s
+            .find("- `history` currently has 7 entries")
+            .expect("history len note");
+        assert!(task_idx < notes_idx, "{s}");
+        assert!(notes_idx < history_len_idx, "{s}");
+    }
+
+    #[test]
+    fn unchanged_rows_stay_before_changed_rows() {
+        let mut cache = BoundVariableRenderCache::default();
+        let _ = render_with_cache(
+            &mut cache,
+            json!({ "a": "old", "b": "steady", "c": "steady" }),
+            0,
+            1024,
+        );
+
+        let s = render_with_cache(
+            &mut cache,
+            json!({ "a": "new", "b": "steady", "c": "steady" }),
+            0,
+            1024,
+        );
+
+        let b_idx = s.find("- `b` = \"steady\"").expect("b row");
+        let c_idx = s.find("- `c` = \"steady\"").expect("c row");
+        let a_idx = s.find("- `a` = \"new\"").expect("a row");
+        assert!(b_idx < c_idx, "{s}");
+        assert!(c_idx < a_idx, "{s}");
+    }
+
+    #[test]
+    fn new_rows_append_after_unchanged_rows() {
+        let mut cache = BoundVariableRenderCache::default();
+        let _ = render_with_cache(&mut cache, json!({ "b": 1 }), 0, 1024);
+
+        let s = render_with_cache(&mut cache, json!({ "a": 2, "b": 1 }), 0, 1024);
+
+        let b_idx = s.find("- `b` = 1").expect("b row");
+        let a_idx = s.find("- `a` = 2").expect("a row");
+        assert!(b_idx < a_idx, "{s}");
+    }
+
+    #[test]
+    fn new_rows_do_not_rename_unchanged_row_schema() {
+        let mut cache = BoundVariableRenderCache::default();
+        let _ = render_with_cache(&mut cache, json!({ "z": { "id": 1 } }), 0, 0);
+
+        let s = render_with_cache(
+            &mut cache,
+            json!({ "a": { "id": 2 }, "z": { "id": 1 } }),
+            0,
+            0,
+        );
+
+        let z_idx = s.find("- `z`: `Z`, keys=1").expect("z row");
+        let a_idx = s.find("- `a`: `Z`, keys=1").expect("a row");
+        assert!(z_idx < a_idx, "{s}");
+    }
+
+    #[test]
+    fn summarized_shape_or_count_changes_update_row_hash() {
+        let mut cache = BoundVariableRenderCache::default();
+        let _ = render_with_cache(
+            &mut cache,
+            json!({ "big": [1, 2, 3], "steady": "same" }),
+            0,
+            0,
+        );
+
+        let s = render_with_cache(
+            &mut cache,
+            json!({ "big": [1, 2, 3, 4], "steady": "same" }),
+            0,
+            0,
+        );
+
+        let steady_idx = s.find("- `steady`: `str`").expect("steady row");
+        let big_idx = s.find("- `big`: `list[int]`, len=4").expect("big row");
+        assert!(steady_idx < big_idx, "{s}");
+    }
+
+    #[test]
+    fn removed_rows_do_not_keep_stale_order_slots() {
+        let mut cache = BoundVariableRenderCache::default();
+        let _ = render_with_cache(&mut cache, json!({ "a": 1, "b": 2 }), 0, 1024);
+        let _ = render_with_cache(&mut cache, json!({ "b": 2 }), 0, 1024);
+
+        let s = render_with_cache(&mut cache, json!({ "a": 1, "b": 2 }), 0, 1024);
+
+        let b_idx = s.find("- `b` = 2").expect("b row");
+        let a_idx = s.find("- `a` = 1").expect("a row");
+        assert!(b_idx < a_idx, "{s}");
     }
 }

@@ -113,9 +113,9 @@ impl RlmExecutionState {
     /// way.
     ///
     /// Excludes the reserved `history` binding, the supplied `exclude` names
-    /// (read-only host values, which get their own type-only section), and any
-    /// value that contains host-owned data. Those are never materialized for a
-    /// value preview here.
+    /// (read-only values, which get their own type-only section), and any
+    /// value that contains read-only projected data. Those are never
+    /// materialized for a value preview here.
     pub(crate) fn bound_variable_values(
         &self,
         exclude: &BTreeSet<String>,

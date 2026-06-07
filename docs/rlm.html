@@ -85,27 +85,30 @@
                 <tr><td><code>PromptTemplate</code></td><td>The layout: built-in execution instructions, slots, and sections.</td></tr>
                 <tr><td>RLM execution section</td><td><code>print</code> / <code>submit</code>, one-fence turn shape, Lashlang syntax, host-surface operations, builtins, common patterns, optional process / trigger syntax.</td></tr>
                 <tr><td>Showcased tools</td><td>Compact contracts for tools available through Lashlang module operations.</td></tr>
-                <tr><td><code>Bound Variables</code></td><td>Live typed Lashlang globals and <code>history</code>. Ordinary values show inline when small or as type and size hints when large; read-only host values do not get value previews.</td></tr>
-                <tr><td><code>Host Variables</code></td><td>Session and per-turn read-only host values available in Lashlang scope.</td></tr>
+                <tr><td><code>Bound Variables</code></td><td>Live typed Lashlang globals and <code>history</code>. Ordinary values show inline when small or as type and size hints when large; read-only values do not get value previews.</td></tr>
+                <tr><td><code>Read-Only Variables</code></td><td>Session and per-turn values available in Lashlang scope without inline previews.</td></tr>
                 <tr><td>Plugin prompt hooks</td><td>Core, session, and turn prompt contributions filtered through the effective tool surface.</td></tr>
               </tbody>
             </table>
           </div>
-          <p>The variable sections are advertisements, not the data transport. Bound Variables are read from the live Lashlang namespace before prompt construction. Execution receives read-only host values separately, immediately before Lash runs the fenced code. Lashlang's <code>__lashlang_snapshot_projected__</code> marker is private snapshot wire format for persistence and restore, not an RLM prompt/rendering contract.</p>
+          <p>The variable sections are advertisements, not the data transport. Bound Variables are read from the live Lashlang namespace before prompt construction. Execution receives read-only variables separately, immediately before Lash runs the fenced code. Lashlang's <code>__lashlang_snapshot_projected__</code> marker is private snapshot wire format for persistence and restore, not an RLM prompt/rendering contract.</p>
           <pre><code>### Bound Variables
 
 These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.
 Small values are shown inline so you can read them directly; larger ones show only their type and size - `print` such a variable (or the part you need) to see its contents.
 
 Available variables:
-- `history`: `list&lt;HistoryItem&gt;`, read-only, 3 entries
+- `history`: `list&lt;HistoryItem&gt;`, read-only
 - `task` = {"goal":"ship docs","status":"draft"}
 - `large_result`: `list&lt;LargeResultItem&gt;`, len=400
 
-### Host Variables
+Runtime notes:
+- `history` currently has 3 entries
 
-Host variables:
-- `board`: read-only host value</code></pre>
+### Read-Only Variables
+
+Read-only variables:
+- `board`: read-only value</code></pre>
         </div>
 
         <div class="section" id="history-projection">
@@ -167,7 +170,7 @@ print {
   board_cells: len(board.cells)
 }
 ```</code></pre>
-          <p>Read-only host values cannot be reassigned. A write like <code>history = []</code> or <code>board = {}</code> fails; copy the fields you need into a new local variable instead.</p>
+          <p>Read-only variables cannot be reassigned. A write like <code>history = []</code> or <code>board = {}</code> fails; copy the fields you need into a new local variable instead.</p>
         </div>
 
         <div class="section" id="execution-loop">
