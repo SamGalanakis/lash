@@ -381,13 +381,8 @@ mod tests {
     use lash_core::{SessionCreateRequest, SessionSnapshot, ToolCall};
 
     fn model_spec(model: &str, variant: Option<&str>) -> lash_core::ModelSpec {
-        lash_core::ModelSpec::from_token_limits(
-            model,
-            variant.map(str::to_string),
-            200_000,
-            None,
-        )
-        .expect("valid test model spec")
+        lash_core::ModelSpec::from_token_limits(model, variant.map(str::to_string), 200_000, None)
+            .expect("valid test model spec")
     }
 
     #[derive(Default)]

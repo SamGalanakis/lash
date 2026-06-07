@@ -18,7 +18,7 @@ use anyhow::{Context, Result, anyhow};
 use lash_core::{
     ChronologicalEntry, ChronologicalPayload, SessionGraph, SessionMeta, ToolCallStatus,
 };
-use lash_turso_store::Store;
+use lash_sqlite_store::Store;
 
 use crate::trace::{LlmPromptSnapshot, load_prompts_from_trace};
 

@@ -25,7 +25,7 @@ lashlang = { workspace = true }
 lash-plugin-process-controls = { workspace = true }
 lash-provider-openai = { workspace = true }
 lash-restate = { workspace = true }
-lash-turso-store = { workspace = true }
+lash-sqlite-store = { workspace = true }
 lash-subagents = { workspace = true }
 lash-tool-web = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "http2"] }

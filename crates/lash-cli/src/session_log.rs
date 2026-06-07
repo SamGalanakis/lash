@@ -11,7 +11,7 @@ use lash_core::session_model::Message;
 #[cfg(test)]
 use lash_core::session_model::{MessageRole, PartKind};
 use lash_core::{SessionSnapshot, TokenUsage};
-use lash_turso_store::Store;
+use lash_sqlite_store::Store;
 
 use crate::app::{
     LiveToolOutput, PreparedTurn, UiTimeline, UiTimelineItem, timeline_from_read_view,
@@ -448,10 +448,8 @@ mod tests {
                 graph,
                 config: lash_core::PersistedSessionConfig {
                     provider_id: "openai_generic".to_string(),
-                    model: lash_core::ModelSpec::from_token_limits(
-                        "gpt-test", None, 200_000, None,
-                    )
-                    .expect("valid model spec"),
+                    model: lash_core::ModelSpec::from_token_limits("gpt-test", None, 200_000, None)
+                        .expect("valid model spec"),
                 },
                 checkpoint_ref: Some(checkpoint_ref),
                 token_ledger: Vec::new(),

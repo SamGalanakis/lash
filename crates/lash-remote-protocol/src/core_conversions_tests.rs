@@ -98,9 +98,9 @@ fn turn_input_rejects_non_remote_safe_fields() {
     ));
 
     let mut input = lash_core::TurnInput::text("model");
-    input.turn_context.set_model(
-        lash_core::ModelSpec::from_token_limits("m", None, 100, None).expect("model"),
-    );
+    input
+        .turn_context
+        .set_model(lash_core::ModelSpec::from_token_limits("m", None, 100, None).expect("model"));
     assert!(matches!(
         RemoteTurnInput::try_from(input),
         Err(RemoteProtocolError::NonRemoteSafeTurnInput(message))

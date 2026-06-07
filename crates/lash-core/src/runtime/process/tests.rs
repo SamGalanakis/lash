@@ -200,7 +200,7 @@ fn selector_extracts_payload_pointer_const_template_and_present() {
 
 // Contract invariants (registration idempotency, event/wake materialization,
 // ack suppression, terminal/await, handle grants, session deletion) live in the
-// backend-agnostic conformance suite so the in-memory and Turso registries are
+// backend-agnostic conformance suite so the in-memory and Sqlite registries are
 // held to one spec. See `crate::testing::conformance`.
 #[tokio::test]
 async fn test_local_process_registry_satisfies_conformance() {

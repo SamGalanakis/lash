@@ -45,7 +45,7 @@ crates/lash-trace/src/otel.rs
 crates/lash-core/src/runtime/process/model.rs
 crates/lash-cli/src/app/mod.rs
 crates/lashlang/src/trigger.rs
-crates/lash-turso-store/src/process_registry.rs
+crates/lash-sqlite-store/src/process_registry.rs
 crates/lash-core/src/store.rs
 crates/lash-cli/src/runtime_perf/providers.rs
 crates/lash-core/src/runtime/turn_boundary.rs

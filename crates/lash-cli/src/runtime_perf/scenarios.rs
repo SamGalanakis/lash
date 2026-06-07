@@ -25,7 +25,7 @@ pub(crate) enum RuntimePerfScenario {
     EmbedRlm,
     ScopedEffectController,
     StoreReopen,
-    TursoStoreReopen,
+    SqliteStoreReopen,
     TurnCheckpoint,
 }
 
@@ -51,7 +51,7 @@ impl RuntimePerfScenario {
         Self::EmbedRlm,
         Self::ScopedEffectController,
         Self::StoreReopen,
-        Self::TursoStoreReopen,
+        Self::SqliteStoreReopen,
         Self::TurnCheckpoint,
     ];
     pub(crate) const KNOWN: [Self; 22] = [
@@ -75,7 +75,7 @@ impl RuntimePerfScenario {
         Self::EmbedRlm,
         Self::ScopedEffectController,
         Self::StoreReopen,
-        Self::TursoStoreReopen,
+        Self::SqliteStoreReopen,
         Self::TurnCheckpoint,
     ];
 
@@ -101,7 +101,7 @@ impl RuntimePerfScenario {
             "embed_rlm" => Some(Self::EmbedRlm),
             "scoped_effect_controller" => Some(Self::ScopedEffectController),
             "store_reopen" => Some(Self::StoreReopen),
-            "turso_store_reopen" => Some(Self::TursoStoreReopen),
+            "turso_store_reopen" => Some(Self::SqliteStoreReopen),
             "turn_checkpoint" => Some(Self::TurnCheckpoint),
             _ => None,
         }
@@ -129,7 +129,7 @@ impl RuntimePerfScenario {
             Self::EmbedRlm => "embed_rlm",
             Self::ScopedEffectController => "scoped_effect_controller",
             Self::StoreReopen => "store_reopen",
-            Self::TursoStoreReopen => "turso_store_reopen",
+            Self::SqliteStoreReopen => "turso_store_reopen",
             Self::TurnCheckpoint => "turn_checkpoint",
         }
     }
@@ -149,7 +149,7 @@ impl RuntimePerfScenario {
             | Self::EmbedStandard
             | Self::ScopedEffectController
             | Self::StoreReopen
-            | Self::TursoStoreReopen
+            | Self::SqliteStoreReopen
             | Self::TurnCheckpoint => ModeId::standard(),
             Self::Rlm
             | Self::RlmToolCalls

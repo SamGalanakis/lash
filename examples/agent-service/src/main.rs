@@ -84,13 +84,13 @@ async fn main() -> anyhow_like::Result<()> {
             })
             .into_components(),
     );
-    let store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         data_dir.join("lash-sessions"),
     ));
     // Deployment-level Lashlang artifact store (compiled module cache), shared
     // across the session tree and durable in SQLite.
     let artifact_store = Arc::new(
-        lash_turso_store::Store::open(&data_dir.join("artifacts.db"))
+        lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
             .await
             .map_err(|err| err.to_string())?,
     ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
@@ -120,7 +120,7 @@ async fn main() -> anyhow_like::Result<()> {
         ]))))
         .trace_level(TraceLevel::Extended);
     let process_registry = Arc::new(
-        lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+        lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
             .await
             .map_err(|err| err.to_string())?,
     ) as Arc<dyn lash::process::ProcessRegistry>;

@@ -10,7 +10,7 @@ use lash_core::store::HydratedSessionCheckpoint;
 use lash_core::{
     PersistedSessionConfig, PersistedTurnState, PromptUsage, ProviderHandle, TokenUsage, ToolState,
 };
-use lash_turso_store::Store;
+use lash_sqlite_store::Store;
 
 use crate::app::{App, UiTimelineItem};
 use crate::model_catalog::CachedModelCatalog;
@@ -378,10 +378,8 @@ mod tests {
                 graph,
                 config: lash_core::PersistedSessionConfig {
                     provider_id: "openai_generic".to_string(),
-                    model: lash_core::ModelSpec::from_token_limits(
-                        "gpt-5", None, 200_000, None,
-                    )
-                    .expect("valid model spec"),
+                    model: lash_core::ModelSpec::from_token_limits("gpt-5", None, 200_000, None)
+                        .expect("valid model spec"),
                 },
                 checkpoint_ref: Some(checkpoint_ref),
                 token_ledger: Vec::new(),

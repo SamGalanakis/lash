@@ -21,7 +21,7 @@ pub const LASHLANG_VM_ABI_VERSION: &str = "lashlang-vm-abi-v1";
 /// flag: each runtime trait reports the tier of the concrete implementation
 /// behind it, and the runtime validates that wiring is internally consistent.
 /// `Inline` covers in-memory / build-time wiring; `Durable` covers a
-/// crash-recoverable store or effect host (e.g. Turso-backed persistence or a
+/// crash-recoverable store or effect host (e.g. Sqlite-backed persistence or a
 /// Restate-backed effect host).
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,

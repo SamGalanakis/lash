@@ -125,7 +125,7 @@ where
 
 fn process_registry() -> Arc<dyn ProcessRegistry> {
     Arc::new(sync_await(async {
-        lash_turso_store::TursoProcessRegistry::memory()
+        lash_sqlite_store::SqliteProcessRegistry::memory()
             .await
             .expect("turso registry")
     }))
@@ -775,12 +775,12 @@ async fn restate_handler_replay_retries_final_lash_commit_idempotently() {
     host.providers.provider_resolver = Arc::new(lash_core::SingleProviderResolver::new(provider));
     host.durability.attachment_store = Arc::new(DurableMemoryAttachmentStore::default());
     host.durability.lashlang_artifact_store = Arc::new(
-        lash_turso_store::Store::open(&dir.path().join("artifacts.db"))
+        lash_sqlite_store::Store::open(&dir.path().join("artifacts.db"))
             .await
             .expect("open artifact store"),
     );
     let store = Arc::new(
-        lash_turso_store::Store::open(&dir.path().join("session.db"))
+        lash_sqlite_store::Store::open(&dir.path().join("session.db"))
             .await
             .expect("open session store"),
     );
@@ -820,27 +820,15 @@ async fn restate_handler_replay_retries_final_lash_commit_idempotently() {
     ));
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
 
-    let db = turso::Builder::new_local(&dir.path().join("session.db").to_string_lossy())
-        .build()
-        .await
-        .expect("open raw session turso store");
-    let conn = db.connect().expect("connect raw session turso store");
-    let mut rows = conn
-        .query(
+    let conn = rusqlite::Connection::open(dir.path().join("session.db"))
+        .expect("open raw session sqlite store");
+    let rows: i64 = conn
+        .query_row(
             "SELECT COUNT(*) FROM runtime_turn_commits WHERE session_id = ?1 AND turn_id = ?2",
-            turso::params![session_id, turn_id],
+            rusqlite::params![session_id, turn_id],
+            |row| row.get(0),
         )
-        .await
         .expect("count turn commit stamps");
-    let row = rows
-        .next()
-        .await
-        .expect("read turn commit count")
-        .expect("turn commit count row");
-    let rows = match row.get_value(0).expect("turn commit count value") {
-        turso::Value::Integer(value) => value,
-        other => panic!("expected integer turn commit count, got {other:?}"),
-    };
     assert_eq!(rows, 1);
 }
 
@@ -1550,11 +1538,11 @@ fn process_wake_event_type() -> lash_core::ProcessEventType {
 async fn turso_process_recovery_reopens_registry_worker_grants_wakes_and_cancel() {
     let temp = tempfile::tempdir().expect("tempdir");
     let process_db = temp.path().join("processes.db");
-    let store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         temp.path().join("sessions"),
     )) as Arc<dyn lash_core::SessionStoreFactory>;
     let registry_a = Arc::new(
-        lash_turso_store::TursoProcessRegistry::open(&process_db)
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
             .await
             .expect("open registry"),
     ) as Arc<dyn ProcessRegistry>;
@@ -1619,7 +1607,7 @@ async fn turso_process_recovery_reopens_registry_worker_grants_wakes_and_cancel(
     drop(registry_a);
 
     let registry_b = Arc::new(
-        lash_turso_store::TursoProcessRegistry::open(&process_db)
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
             .await
             .expect("reopen registry"),
     ) as Arc<dyn ProcessRegistry>;
@@ -1644,13 +1632,8 @@ async fn turso_process_recovery_reopens_registry_worker_grants_wakes_and_cancel(
             session_id: "root".to_string(),
             relation: lash_core::SessionRelation::default(),
             policy: lash_core::SessionPolicy {
-                model: lash_core::ModelSpec::from_token_limits(
-                    "mock-model",
-                    None,
-                    200_000,
-                    None,
-                )
-                .expect("model spec"),
+                model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
+                    .expect("model spec"),
                 ..lash_core::SessionPolicy::default()
             },
         })
@@ -1776,7 +1759,7 @@ async fn trigger_lashlang_registration(process_id: &str, resource: &str) -> Proc
 async fn turso_trigger_started_process_recovered_after_worker_registry_reopen() {
     let temp = tempfile::tempdir().expect("tempdir");
     let process_db = temp.path().join("processes.db");
-    let store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         temp.path().join("sessions"),
     )) as Arc<dyn lash_core::SessionStoreFactory>;
 
@@ -1784,7 +1767,7 @@ async fn turso_trigger_started_process_recovered_after_worker_registry_reopen() 
     // the durable row exists and is non-terminal. We register it directly to
     // model exactly that mid-flight crash state.
     let registry_a = Arc::new(
-        lash_turso_store::TursoProcessRegistry::open(&process_db)
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
             .await
             .expect("open registry"),
     ) as Arc<dyn ProcessRegistry>;
@@ -1806,7 +1789,7 @@ async fn turso_trigger_started_process_recovered_after_worker_registry_reopen() 
     // runs the process on the worker's wired controller, and writes its
     // terminal outcome — idempotent by process_id.
     let registry_b = Arc::new(
-        lash_turso_store::TursoProcessRegistry::open(&process_db)
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
             .await
             .expect("reopen registry"),
     ) as Arc<dyn ProcessRegistry>;

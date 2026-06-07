@@ -394,15 +394,10 @@ fn render_node_entries(
             ChronologicalPayload::Message(_) | ChronologicalPayload::ProtocolEvent(_) => None,
         })
         .collect::<HashMap<_, _>>();
-    let rlm_owned_tool_call_ids = session
-        .chronological
-        .iter()
-        .filter_map(|entry| match &entry.payload {
-            ChronologicalPayload::ProtocolEvent(event) => chronological_rlm_step(event),
-            ChronologicalPayload::Message(_) | ChronologicalPayload::ToolCall(_) => None,
-        })
-        .flat_map(|step| step.tool_call_ids)
-        .collect::<HashSet<_>>();
+    // RLM steps no longer carry an owned tool-call-id list
+    // (`RlmTrajectoryEntry::tool_call_ids` was removed); tool calls render in
+    // the main chronological flow, so no call ids are owned by steps here.
+    let rlm_owned_tool_call_ids: HashSet<String> = HashSet::new();
 
     for (i, entry) in session.chronological.iter().enumerate() {
         for &prompt_idx in &insertions.before_index[i] {

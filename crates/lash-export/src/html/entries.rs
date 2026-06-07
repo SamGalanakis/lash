@@ -100,7 +100,7 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
             ChronologicalPayload::ProtocolEvent(event) => chronological_rlm_step(event),
             ChronologicalPayload::Message(_) | ChronologicalPayload::ToolCall(_) => None,
         })
-        .flat_map(|step| step.tool_call_ids)
+        .flat_map(|step| rlm_step_tool_call_ids(&step))
         .collect::<HashSet<_>>();
 
     let emit_prompt = |entries: &mut String,
@@ -389,7 +389,7 @@ fn render_rlm_step_with_fanout(
     render_rlm_step(out, spine, ctx, step, tool_call_map);
     // After the RLM step's body, render fan-outs for any of its inline
     // tool calls that have direct_completion children.
-    for call_id in &step.tool_call_ids {
+    for call_id in &rlm_step_tool_call_ids(step) {
         if let Some(record) = tool_call_map.get(call_id)
             && let Some(children) = fanout_index.get(call_id)
         {
@@ -725,6 +725,15 @@ fn render_tool_call_payload(out: &mut String, record: &ToolCallRecord) {
 
 // ─── RLM step ───────────────────────────────────────────────────────────────
 
+/// Tool-call ids owned by an RLM step. The protocol no longer threads a
+/// per-step list of owned tool-call ids (`RlmTrajectoryEntry::tool_call_ids`
+/// was removed); tool calls now live in the chronological stream and render in
+/// the main flow. Kept as a single helper so the rendering paths share one
+/// definition and re-acquire nesting trivially if the protocol restores it.
+fn rlm_step_tool_call_ids(_step: &RlmTrajectoryEntry) -> Vec<String> {
+    Vec::new()
+}
+
 pub(crate) fn render_rlm_step(
     out: &mut String,
     spine: &mut String,
@@ -735,8 +744,8 @@ pub(crate) fn render_rlm_step(
     let id = ctx.next_id();
     let has_err = step.error.is_some();
     let status_key = if has_err { "err" } else { "ok" };
-    let nested_calls = step
-        .tool_call_ids
+    let nested_call_ids = rlm_step_tool_call_ids(step);
+    let nested_calls = nested_call_ids
         .iter()
         .filter(|call_id| tool_call_map.contains_key(*call_id))
         .count();
@@ -853,7 +862,7 @@ pub(crate) fn render_rlm_step(
     );
 
     // Render nested tool calls as child entries.
-    for call_id in &step.tool_call_ids {
+    for call_id in &nested_call_ids {
         if let Some(record) = tool_call_map.get(call_id) {
             render_tool_call_entry(out, spine, ctx, record, Some(&id));
         }
@@ -865,8 +874,7 @@ fn render_inline_rlm_tool_calls(
     step: &RlmTrajectoryEntry,
     tool_call_map: &HashMap<String, &ToolCallRecord>,
 ) {
-    let records = step
-        .tool_call_ids
+    let records = rlm_step_tool_call_ids(step)
         .iter()
         .filter_map(|call_id| tool_call_map.get(call_id).copied())
         .collect::<Vec<_>>();

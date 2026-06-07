@@ -15,8 +15,6 @@ pub struct RlmTrajectoryEntry {
     #[serde(default, alias = "observations")]
     pub output: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_call_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<AttachmentRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -87,8 +85,6 @@ pub enum RlmHistoryItem {
         code: String,
         #[serde(default, alias = "observations")]
         output: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tool_call_ids: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<RlmImageRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

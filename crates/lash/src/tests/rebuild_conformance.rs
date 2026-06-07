@@ -42,12 +42,12 @@ fn fresh_sqlite_session_backend(
         SCENARIO.fetch_add(1, Ordering::SeqCst)
     ));
     std::fs::create_dir_all(&dir).expect("create scenario dir");
-    let store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         dir.join("sessions"),
     )) as Arc<dyn lash_core::SessionStoreFactory>;
     let process_db = dir.join("processes.db");
     let registry = Arc::new(sync_await(async move {
-        lash_turso_store::TursoProcessRegistry::open(&process_db)
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
             .await
             .expect("open process registry")
     })) as Arc<dyn lash_core::ProcessRegistry>;
@@ -97,7 +97,7 @@ fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
             )) as Arc<dyn lash_core::AttachmentStore>;
             let artifact_db = dir.join("artifacts.db");
             let artifact = Arc::new(sync_await(async move {
-                lash_turso_store::Store::open(&artifact_db)
+                lash_sqlite_store::Store::open(&artifact_db)
                     .await
                     .expect("open durable artifact store")
             })) as Arc<dyn lash_core::LashlangArtifactStore>;

@@ -8,7 +8,7 @@ publish = false
 [dependencies]
 lash-core = { workspace = true }
 lash-protocol-rlm = { workspace = true }
-lash-turso-store = { workspace = true }
+lash-sqlite-store = { workspace = true }
 lash-rlm-types = { workspace = true }
 anyhow = { workspace = true }
 pulldown-cmark = { workspace = true }

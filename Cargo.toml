@@ -9,7 +9,7 @@ members = [
     "crates/lash-remote-protocol",
     "crates/lash-llm-transport",
     "crates/lash-provider-auth",
-    "crates/lash-turso-store",
+    "crates/lash-sqlite-store",
     "crates/lash-restate",
     "crates/lash",
     "crates/lash-protocol-rlm",
@@ -64,7 +64,7 @@ default-members = [
     "crates/lash-provider-anthropic",
     "crates/lash-provider-codex",
     "crates/lash-provider-google",
-    "crates/lash-turso-store",
+    "crates/lash-sqlite-store",
     "crates/lash-tool-support",
     "crates/lash-tool-apply-patch",
     "crates/lash-tool-files",
@@ -167,7 +167,7 @@ lash-tool-web = { path = "crates/lash-tool-web", version = "=0.1.0-alpha.33" }
 lash-trace = { path = "crates/lash-trace", version = "=0.1.0-alpha.33" }
 lash-tui = { path = "crates/lash-tui", version = "=0.1.0-alpha.33" }
 lash-tui-extensions = { path = "crates/lash-tui-extensions", version = "=0.1.0-alpha.33" }
-lash-turso-store = { path = "crates/lash-turso-store", version = "=0.1.0-alpha.33" }
+lash-sqlite-store = { path = "crates/lash-sqlite-store", version = "=0.1.0-alpha.33" }
 lashlang = { path = "crates/lashlang", version = "=0.1.0-alpha.33" }
 [profile.release]
 lto = "thin"

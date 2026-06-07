@@ -418,7 +418,6 @@ mod tests {
                 } else {
                     vec![output.to_string()]
                 },
-                tool_call_ids: Vec::new(),
                 images: Vec::new(),
                 error: None,
                 final_output: None,
@@ -670,7 +669,6 @@ mod tests {
                 reasoning: String::new(),
                 code: "print img".to_string(),
                 output: vec![r#"{"type":"image","id":"img"}"#.to_string()],
-                tool_call_ids: Vec::new(),
                 images: vec![lash_core::AttachmentRef {
                     id: lash_core::AttachmentId::new("img-ref"),
                     media_type: lash_core::MediaType::Image(lash_core::ImageMediaType::Png),

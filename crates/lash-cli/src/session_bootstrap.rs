@@ -10,7 +10,7 @@ use lash_core::{
     AttachmentStore, PersistedSessionConfig, RuntimePersistence, SessionGraph, SessionPolicy,
 };
 use lash_standard_plugins::StandardContextApproach;
-use lash_turso_store::Store;
+use lash_sqlite_store::Store;
 
 use crate::session_log::{self, SessionLogger, SessionStart};
 
@@ -316,9 +316,9 @@ impl CliSessionOpener {
         let artifact_store = Arc::new(Store::open(&bootstrap.artifacts_db_file()).await?)
             as Arc<dyn lash::persistence::LashlangArtifactStore>;
         let effect_host =
-            Arc::new(lash_turso_store::TursoEffectHost::open(&bootstrap.effects_db_file()).await?);
+            Arc::new(lash_sqlite_store::SqliteEffectHost::open(&bootstrap.effects_db_file()).await?);
         let process_registry = Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(&bootstrap.processes_db_file()).await?,
+            lash_sqlite_store::SqliteProcessRegistry::open(&bootstrap.processes_db_file()).await?,
         );
         let core_builder = LashCore::builder()
             .install_mode(ModePreset::standard())
@@ -326,7 +326,7 @@ impl CliSessionOpener {
             .default_mode(host_config.execution_mode.clone())
             .provider(self.provider.clone())
             .model(policy.model.clone())
-            .child_store_factory(Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+            .child_store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
                 bootstrap.sessions_dir().to_path_buf(),
             )))
             .plugins(self.plugin_stack.clone())

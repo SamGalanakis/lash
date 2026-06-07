@@ -208,10 +208,13 @@ fn rlm_owned_tool_call_ids(projection: &lash_core::ChronologicalProjection) -> H
             | lash_core::ChronologicalPayload::ToolCall(_) => None,
         })
         .flat_map(|event| match event {
-            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry) => entry.tool_call_ids,
-            lash_rlm_types::RlmProtocolEvent::RlmGlobalsPatch(_)
+            // `RlmTrajectoryEntry::tool_call_ids` was removed from the protocol
+            // type; RLM steps no longer own tool-call ids. Tool calls render in
+            // the main chronological flow, so no ids are owned here.
+            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(_)
+            | lash_rlm_types::RlmProtocolEvent::RlmGlobalsPatch(_)
             | lash_rlm_types::RlmProtocolEvent::RlmSeed(_)
-            | lash_rlm_types::RlmProtocolEvent::RlmDiagnostic(_) => Vec::new(),
+            | lash_rlm_types::RlmProtocolEvent::RlmDiagnostic(_) => Vec::<String>::new(),
         })
         .collect()
 }
@@ -220,17 +223,15 @@ fn append_rlm_trajectory_items(
     timeline: &mut UiTimeline,
     entry: &lash_rlm_types::RlmTrajectoryEntry,
     tool_calls: &HashMap<&str, ToolCallRecord>,
-    activity_state: &mut ActivityState,
+    _activity_state: &mut ActivityState,
 ) {
     if let Some(reasoning) = rlm_reasoning_display_text(&entry.reasoning) {
         let _ = push_assistant_reasoning_item(timeline, &reasoning);
     }
     timeline.push(UiTimelineItem::LashlangCode(entry.code.clone()));
-    for call_id in &entry.tool_call_ids {
-        if let Some(record) = tool_calls.get(call_id.as_str()) {
-            append_tool_call_record_items(timeline, record, activity_state);
-        }
-    }
+    // RLM steps no longer carry owned tool-call ids; tool-call records render
+    // from the chronological stream rather than nested under the step.
+    let _ = tool_calls;
     // Mirror the live path (`CodeBlockCompleted`): a failed block keeps its
     // code on screen with the error rendered after it, so scrollback shows the
     // same thing the turn did.

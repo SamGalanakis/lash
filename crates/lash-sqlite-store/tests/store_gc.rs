@@ -4,9 +4,9 @@ use lash_core::{
     SessionHead, SessionPolicy, SessionStoreCreateRequest, SessionStoreFactory, TokenUsage,
     ToolState,
 };
-use lash_turso_store::{
+use lash_sqlite_store::{
     BlobArtifactDescriptor, BuiltinBlobProfile, Store, StoreGcPolicy, StoreOptions,
-    TursoSessionStoreFactory,
+    SqliteSessionStoreFactory,
 };
 
 fn model_spec(id: &str) -> ModelSpec {
@@ -102,7 +102,7 @@ async fn auto_gc_runs_after_commit_without_reentrant_locking() {
 #[test]
 fn turso_factory_uses_deterministic_safe_session_paths() {
     let root = unique_temp_dir("paths");
-    let factory = TursoSessionStoreFactory::new(&root);
+    let factory = SqliteSessionStoreFactory::new(&root);
 
     let first = factory.path_for_session("../weird/session");
     let second = factory.path_for_session("../weird/session");
@@ -122,7 +122,7 @@ fn turso_factory_uses_deterministic_safe_session_paths() {
 #[tokio::test]
 async fn turso_factory_creates_metadata_once_and_preserves_on_reopen() {
     let root = unique_temp_dir("metadata");
-    let factory = TursoSessionStoreFactory::new(&root);
+    let factory = SqliteSessionStoreFactory::new(&root);
     let request = SessionStoreCreateRequest {
         session_id: "chat/alpha".to_string(),
         relation: lash_core::SessionRelation::Child {
@@ -183,7 +183,7 @@ async fn turso_factory_creates_metadata_once_and_preserves_on_reopen() {
 async fn turso_factory_is_explicitly_usable_as_session_store_factory() {
     let root = unique_temp_dir("explicit");
     let factory: std::sync::Arc<dyn SessionStoreFactory> =
-        std::sync::Arc::new(TursoSessionStoreFactory::new(&root));
+        std::sync::Arc::new(SqliteSessionStoreFactory::new(&root));
     let request = SessionStoreCreateRequest {
         session_id: "explicit".to_string(),
         relation: lash_core::SessionRelation::Root,
@@ -207,7 +207,7 @@ async fn turso_factory_is_explicitly_usable_as_session_store_factory() {
 #[tokio::test]
 async fn turso_factory_delete_session_removes_database_and_sidecars_idempotently() {
     let root = unique_temp_dir("delete-session");
-    let factory = TursoSessionStoreFactory::new(&root);
+    let factory = SqliteSessionStoreFactory::new(&root);
     let request = SessionStoreCreateRequest {
         session_id: "delete/me".to_string(),
         relation: lash_core::SessionRelation::Root,
@@ -240,7 +240,7 @@ async fn turso_factory_delete_session_removes_database_and_sidecars_idempotently
 
 fn unique_temp_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "lash-turso-store-{name}-{}-{}",
+        "lash-sqlite-store-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

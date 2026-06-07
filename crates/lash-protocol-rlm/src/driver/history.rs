@@ -311,7 +311,6 @@ fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: us
             reasoning,
             code,
             output,
-            tool_call_ids: _,
             images,
             error,
             final_output,

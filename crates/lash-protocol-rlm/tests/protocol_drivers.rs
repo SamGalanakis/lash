@@ -1198,21 +1198,13 @@ fn rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes()
     );
     let trajectory = machine_trajectory(&restored);
     let entry = trajectory.last().expect("rlm trajectory entry");
-    assert_eq!(
-        entry.tool_call_ids,
-        vec![
-            "fanout-ok".to_string(),
-            "fanout-fail".to_string(),
-            "fanout-cancel".to_string()
-        ]
-    );
     assert_eq!(entry.output, vec!["fanout done".to_string()]);
     let (_, checkpoint) = find_checkpoint(&effects).expect("after-work checkpoint");
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
 }
 
 #[test]
-fn rlm_exec_result_stores_tool_call_ids_without_replayed_tool_events() {
+fn rlm_exec_result_omits_inner_tool_call_ids_without_replayed_tool_events() {
     let config = test_config(TestProtocol::Rlm);
     let msgs = vec![user_message("run a tool")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -1269,7 +1261,12 @@ fn rlm_exec_result_stores_tool_call_ids_without_replayed_tool_events() {
     );
     let trajectory = machine_trajectory(&machine);
     let entry = trajectory.last().expect("rlm trajectory entry");
-    assert_eq!(entry.tool_call_ids, vec!["rlm-call-1".to_string()]);
+    assert!(
+        serde_json::to_value(entry)
+            .expect("trajectory entry serializes")
+            .get("tool_call_ids")
+            .is_none()
+    );
 }
 
 #[test]

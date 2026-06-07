@@ -4,7 +4,6 @@ use serde_json::Value;
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct RlmDriverState {
     pub(super) reasoning: String,
-    pub(super) tool_call_ids: Vec<String>,
     pub(super) images: Vec<AttachmentRef>,
     /// One entry per `print` from the executed lashlang block (plus any
     /// raw stdout-style emission). Replaces the old split between a

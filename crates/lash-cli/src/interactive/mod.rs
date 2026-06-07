@@ -15,7 +15,7 @@ use lash_core::session_model::Message;
 use lash_core::{TokenUsage, ToolState};
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiSlashInvocation};
-use lash_turso_store::Store;
+use lash_sqlite_store::Store;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{self, App, PreparedTurn, UiTimelineItem};

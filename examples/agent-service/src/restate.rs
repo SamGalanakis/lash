@@ -452,7 +452,7 @@ mod restate_tests {
             AppDb::open(&data_dir.join("app.db")).expect("open app db"),
         ));
         let process_registry = Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
                 .await
                 .expect("open process registry"),
         ) as Arc<dyn lash_core::ProcessRegistry>;
@@ -480,11 +480,11 @@ submit "done via Restate E2E"
             })
             .build()
             .into_handle();
-        let store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+        let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let artifact_store = Arc::new(
-            lash_turso_store::Store::open(&data_dir.join("artifacts.db"))
+            lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
                 .await
                 .expect("open artifact store"),
         ) as Arc<dyn lash::persistence::LashlangArtifactStore>;

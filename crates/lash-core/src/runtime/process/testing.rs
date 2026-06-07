@@ -541,7 +541,7 @@ impl ProcessRegistry for TestLocalProcessRegistry {
         }
         // The fencing token increases monotonically even across completion: a
         // released lease retains its `fencing_token` so a re-claim never reuses
-        // a stale writer's token (mirrors `TursoProcessRegistry`).
+        // a stale writer's token (mirrors `SqliteProcessRegistry`).
         let fencing_token = leases
             .get(process_id)
             .map_or(0, |current| current.fencing_token)

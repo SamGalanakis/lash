@@ -172,7 +172,7 @@ impl RuntimeEffectController for WorkflowEffectController {
         <div class="section">
           <div class="section-header">
             <h2>Processes</h2>
-            <p>A process is durable background work named by a <code>ProcessRecord</code>. Process support is opt-in: a deployment installs a <code>ProcessRegistry</code> (such as <code>lash-turso-store::TursoProcessRegistry</code>), and that registry's presence is what derives the Lashlang process/lifecycle abilities for newly built sessions. Without a registry, start/await/cancel/transfer/list all fail clearly rather than degrading silently.</p>
+            <p>A process is durable background work named by a <code>ProcessRecord</code>. Process support is opt-in: a deployment installs a <code>ProcessRegistry</code> (such as <code>lash-sqlite-store::TursoProcessRegistry</code>), and that registry's presence is what derives the Lashlang process/lifecycle abilities for newly built sessions. Without a registry, start/await/cancel/transfer/list all fail clearly rather than degrading silently.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Process lifecycle</div>

@@ -364,7 +364,7 @@ pub(crate) async fn run_once(
 
     let build_before_alloc = allocator_stats();
     let build_started = Instant::now();
-    let turso_root = if matches!(scenario, RuntimePerfScenario::TursoStoreReopen) {
+    let turso_root = if matches!(scenario, RuntimePerfScenario::SqliteStoreReopen) {
         Some(make_temp_bench_dir("lash-runtime-perf-turso-store")?)
     } else {
         None
@@ -443,7 +443,7 @@ pub(crate) async fn run_once(
                 },
             );
         }
-        if matches!(scenario, RuntimePerfScenario::TursoStoreReopen) && turn_index > 0 {
+        if matches!(scenario, RuntimePerfScenario::SqliteStoreReopen) && turn_index > 0 {
             let reopen_before_alloc = allocator_stats();
             let reopen_before_memory = process_memory_sample();
             let reopen_started = Instant::now();

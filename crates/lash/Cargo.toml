@@ -43,8 +43,8 @@ testing = ["lash-core/testing"]
 [dev-dependencies]
 lash-core = { workspace = true, features = ["testing"] }
 lash-subagents = { workspace = true }
-lash-turso-store = { workspace = true }
+lash-sqlite-store = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
-turso = { version = "0.7.0-pre.5", default-features = false }
+rusqlite = { version = "0.37", features = ["bundled"] }
 trybuild = "1"
