@@ -14,13 +14,13 @@ keywords = ["lash", "agent", "tools", "llm", "subagent"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.26", default-features = false }
-lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.26" }
-lashlang = { path = "../lashlang", version = "=0.1.0-alpha.26" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.27", default-features = false }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.27" }
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.27" }
 async-trait = { workspace = true }
 jsonschema = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.26", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.27", default-features = false, features = ["testing"] }
 tokio = { workspace = true, features = ["full"] }
