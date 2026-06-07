@@ -20,14 +20,14 @@ chrono = { workspace = true, features = ["clock"] }
 chrono-tz = { workspace = true }
 croner = { workspace = true }
 dotenvy = "0.15"
-lash = { package = "lash-runtime", path = "../../crates/lash", version = "=0.1.0-alpha.27" }
-lashlang = { path = "../../crates/lashlang", version = "=0.1.0-alpha.27" }
-lash-plugin-process-controls = { path = "../../crates/lash-plugin-process-controls", version = "=0.1.0-alpha.27" }
-lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.27" }
-lash-restate = { path = "../../crates/lash-restate", version = "=0.1.0-alpha.27" }
-lash-turso-store = { path = "../../crates/lash-turso-store", version = "=0.1.0-alpha.27" }
-lash-subagents = { path = "../../crates/lash-subagents", version = "=0.1.0-alpha.27" }
-lash-tool-web = { path = "../../crates/lash-tool-web", version = "=0.1.0-alpha.27" }
+lash = { package = "lash-runtime", path = "../../crates/lash", version = "=0.1.0-alpha.28" }
+lashlang = { path = "../../crates/lashlang", version = "=0.1.0-alpha.28" }
+lash-plugin-process-controls = { path = "../../crates/lash-plugin-process-controls", version = "=0.1.0-alpha.28" }
+lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.28" }
+lash-restate = { path = "../../crates/lash-restate", version = "=0.1.0-alpha.28" }
+lash-turso-store = { path = "../../crates/lash-turso-store", version = "=0.1.0-alpha.28" }
+lash-subagents = { path = "../../crates/lash-subagents", version = "=0.1.0-alpha.28" }
+lash-tool-web = { path = "../../crates/lash-tool-web", version = "=0.1.0-alpha.28" }
 reqwest = { workspace = true, features = ["json", "rustls", "http2"] }
 restate-sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -37,5 +37,5 @@ tokio-stream = "0.1"
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-lash-core = { path = "../../crates/lash-core", version = "=0.1.0-alpha.27", features = ["testing"] }
-lash = { package = "lash-runtime", path = "../../crates/lash", version = "=0.1.0-alpha.27", features = ["testing"] }
+lash-core = { path = "../../crates/lash-core", version = "=0.1.0-alpha.28", features = ["testing"] }
+lash = { package = "lash-runtime", path = "../../crates/lash", version = "=0.1.0-alpha.28", features = ["testing"] }

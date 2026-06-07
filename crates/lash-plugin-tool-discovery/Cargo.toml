@@ -18,8 +18,8 @@ default = []
 semantic-tool-search = ["dep:model2vec-rs"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.27" }
-lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.27" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.28" }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.28" }
 async-trait = { workspace = true }
 model2vec-rs = { version = "0.1.4", optional = true }
 serde_json = { workspace = true }
@@ -27,5 +27,5 @@ schemars = { workspace = true }
 strsim = "0.11"
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.27", features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.28", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
