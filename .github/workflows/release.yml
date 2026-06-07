@@ -77,8 +77,6 @@ jobs:
         run: cargo publish --workspace --no-verify --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   build-release-assets:
     name: Build (${{ matrix.asset_name }})
