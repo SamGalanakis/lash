@@ -6,10 +6,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.27" }
-lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.27" }
-lash-turso-store = { path = "../lash-turso-store", version = "=0.1.0-alpha.27" }
-lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.27" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.28" }
+lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.28" }
+lash-turso-store = { path = "../lash-turso-store", version = "=0.1.0-alpha.28" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.28" }
 anyhow = { workspace = true }
 pulldown-cmark = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

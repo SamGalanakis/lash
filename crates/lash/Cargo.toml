@@ -21,14 +21,14 @@ path = "src/lib.rs"
 
 [dependencies]
 async-trait = { workspace = true }
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.27" }
-lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.27" }
-lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.27" }
-lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.27" }
-lash-local-store = { path = "../lash-local-store", version = "=0.1.0-alpha.27" }
-lash-plugin-tool-output-budget = { path = "../lash-plugin-tool-output-budget", version = "=0.1.0-alpha.27" }
-lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.27" }
-lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.27" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.28" }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.28" }
+lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.28" }
+lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.28" }
+lash-local-store = { path = "../lash-local-store", version = "=0.1.0-alpha.28" }
+lash-plugin-tool-output-budget = { path = "../lash-plugin-tool-output-budget", version = "=0.1.0-alpha.28" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.28" }
+lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.28" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -40,9 +40,9 @@ tokio-util = { workspace = true }
 testing = ["lash-core/testing"]
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.27", features = ["testing"] }
-lash-subagents = { path = "../lash-subagents", version = "=0.1.0-alpha.27" }
-lash-turso-store = { path = "../lash-turso-store", version = "=0.1.0-alpha.27" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.28", features = ["testing"] }
+lash-subagents = { path = "../lash-subagents", version = "=0.1.0-alpha.28" }
+lash-turso-store = { path = "../lash-turso-store", version = "=0.1.0-alpha.28" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 turso = { version = "0.7.0-pre.5", default-features = false }
