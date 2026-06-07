@@ -21,7 +21,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=10">
+<link rel="stylesheet" href="./styles.css?v=11">
 <script src="./theme.js"></script>
 <script>
   // Hero scene config. The cover fills the first viewport behind the
@@ -40,7 +40,7 @@
 </script>
 <script src="./scene.js?v=6" defer data-scene></script>
 <script src="./diagram.js?v=3" defer></script>
-<script src="./docs.js?v=5" defer></script>
+<script src="./docs.js?v=6" defer></script>
 <script src="./syntax.js" defer></script>
 <script src="./channel.js" defer></script>
 </head>
@@ -419,33 +419,8 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
       </div>
       <div class="stanza__body">
         <h2 class="stanza__title">read on</h2>
-        <p class="stanza__lede">Six doc tracks, in the order most people want them.</p>
-        <div class="listing">
-          <a class="listing__row" href="./quickstart.html">
-            <div class="listing__label">quickstart</div>
-            <div class="listing__body"><p>Add the crate, pick a provider, run one turn. The shortest working path.</p></div>
-          </a>
-          <a class="listing__row" href="./embedding.html">
-            <div class="listing__label">lash api</div>
-            <div class="listing__body"><p>Cores, sessions, turns, and the builder surface for wiring providers, modes, and plugins.</p></div>
-          </a>
-          <a class="listing__row" href="./rlm.html">
-            <div class="listing__label">rlm</div>
-            <div class="listing__body"><p>The protocol contract: prompt construction, history projection, bound variables, and Lashlang execution.</p></div>
-          </a>
-          <a class="listing__row" href="./plugins.html">
-            <div class="listing__label">plugins</div>
-            <div class="listing__body"><p>The seams every host composes: tools, prompts, planning, memory, subagents.</p></div>
-          </a>
-          <a class="listing__row" href="./persistence.html">
-            <div class="listing__label">persistence</div>
-            <div class="listing__body"><p>The durable session graph and the atomic per-turn commit that settles it.</p></div>
-          </a>
-          <a class="listing__row" href="./architecture/index.html">
-            <div class="listing__label">architecture</div>
-            <div class="listing__body"><p>The system crate by crate: boundaries, the turn machine, the executor, the language.</p></div>
-          </a>
-        </div>
+        <p class="stanza__lede">Seven doc tracks, grouped by the job you are trying to do.</p>
+        <div class="listing" data-docs-landing></div>
       </div>
     </section>
   </main>

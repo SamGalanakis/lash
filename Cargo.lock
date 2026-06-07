@@ -3131,6 +3131,7 @@ dependencies = [
  "lash-plugin-tool-output-budget",
  "lash-protocol-rlm",
  "lash-protocol-standard",
+ "lash-remote-protocol",
  "lash-rlm-types",
  "lash-subagents",
  "lash-tool-support",

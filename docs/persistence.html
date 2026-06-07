@@ -12,149 +12,51 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=10">
+<link rel="stylesheet" href="./styles.css?v=11">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=5" defer></script>
+<script src="./docs.js?v=6" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash</code>, <code>crates/lash-turso-store</code>, <code>examples/agent-service</code>.">
 <section class="opener">
     <h1 class="opener__title">session<span class="slash">/</span>persistence</h1>
-    <p class="opener__lede">Runtime state is persisted through the <code>RuntimePersistence</code> contract. There is no default store: install a <code>SessionStoreFactory</code> on the core, or pass a store per session, otherwise sessions stay in-process. <code>lash-turso-store</code> is the provided durable implementation; <code>lash-core</code> ships an in-memory one.</p>
+    <p class="opener__lede">Persist sessions by installing a <code>SessionStoreFactory</code> on the core or passing a store per session. Without one, sessions are in-process only. This page is the app-facing guide; effect replay and workflow durability live in the architecture docs.</p>
   </section>
 
   <main class="body" id="content">
-<div class="section" id="whats-persisted">
-          <div class="section-header">
-            <h2>What Gets Persisted</h2>
-            <p>The state every store holds per session, as the contract guarantees (column and table names below are the Turso store's layout):</p>
-          </div>
-          <div class="def-list-grid">
-            <article class="panel">
-              <h3>Graph nodes</h3>
-              <p>User inputs, assistant responses, tool calls, protocol events, prompt snapshots in <code>graph_nodes</code>, with a <code>tombstoned</code> flag for soft deletion.</p>
-            </article>
-            <article class="panel">
-              <h3>Session head</h3>
-              <p>Singleton row with head pointer, revision, current <code>AgentFrame</code> id, and frame records. Revision drives CAS.</p>
-            </article>
-            <article class="panel">
-              <h3>Checkpoint blobs</h3>
-              <p>Compressed snapshots of committed tool, plugin, current-frame execution, and prompt state, content-hashed and deduplicated across store reopens.</p>
-            </article>
-            <article class="panel">
-              <h3>Queued work</h3>
-              <p>Lease-claimed batches for queued turn input, process wakes, host events, and timers. Completed claim ids are cleared atomically with the runtime commit that consumed them.</p>
-            </article>
-            <article class="panel">
-              <h3>Turn commit stamps</h3>
-              <p>Idempotency rows keyed by session and turn id. Identical final commit retries return the recorded result; changed hashes are rejected.</p>
-            </article>
-            <article class="panel">
-              <h3>Usage deltas</h3>
-              <p>Per-turn <code>input_tokens</code>, <code>output_tokens</code>, <code>cached_input_tokens</code>, <code>reasoning_tokens</code>. Aggregated into the session usage ledger on <code>SessionReadView</code>.</p>
-            </article>
-            <article class="panel">
-              <h3>Metadata</h3>
-              <p>Session id, name, model, cwd, relation (<code>Root</code> or <code>Child</code>), and created-at. What the resume picker shows.</p>
-            </article>
-            <article class="panel">
-              <h3>Attachments</h3>
-              <p>Image / file blobs referenced from graph nodes via <code>BlobRef</code>. Shared with traces and exports.</p>
-            </article>
-          </div>
+    <div class="section" id="what-this-is">
+      <div class="section-header">
+        <h2>What This Is</h2>
+        <p>Session persistence stores committed runtime state for a session id: transcript graph, AgentFrame records, plugin/tool snapshots, usage deltas, queued work, metadata, and attachment references.</p>
+      </div>
+      <aside class="contract">
+        <strong>Contract</strong>
+        <p>Stores persist committed runtime state. They do not replay in-flight provider calls or tool effects. For that, install a durable <code>EffectHost</code> and read <a href="./architecture/durability.html">Durability and replay</a>.</p>
+      </aside>
+    </div>
+
+    <div class="section" id="when-to-use-it">
+      <div class="section-header">
+        <h2>When To Use It</h2>
+        <p>Use a session store whenever a session id should survive process restarts, multi-request web handlers, queued work, or background/process wakes.</p>
+      </div>
+      <div class="listing">
+        <div class="listing__row">
+          <div class="listing__label">use when</div>
+          <div class="listing__body"><p>Chats resume, users can reload, app servers restart, background process wakes enqueue turns, or child sessions should have durable state.</p></div>
         </div>
-
-        <div class="section" id="contract">
-          <div class="section-header">
-            <h2>The Contract</h2>
-            <p>Runtime-facing trait. The contract covers session graph/head commits, queued work, metadata, garbage collection, final turn commit idempotency, and the attachment write-ahead manifest inherited through <code>AttachmentManifest</code>. Stores do not execute or replay in-flight effects; durable workflow hosts own that through <code>EffectHost</code> history and timers. Most hosts wire a provided implementation (<code>TursoSessionStoreFactory</code> for durability, <code>InMemorySessionStoreFactory</code> for ephemeral runs) rather than implementing the trait themselves.</p>
-          </div>
-          <pre><code>#[async_trait]
-pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
-    fn durability_tier(&amp;self) -&gt; DurabilityTier { DurabilityTier::Inline }
-    async fn load_session(&amp;self, scope: SessionReadScope)
-        -&gt; Result&lt;Option&lt;PersistedSessionRead&gt;, StoreError&gt;;
-    async fn load_node(&amp;self, node_id: &amp;str)
-        -&gt; Result&lt;Option&lt;SessionNodeRecord&gt;, StoreError&gt;;
-    async fn commit_runtime_state(&amp;self, commit: RuntimeCommit)
-        -&gt; Result&lt;RuntimeCommitResult, StoreError&gt;;
-    async fn enqueue_queued_work(&amp;self, batch: QueuedWorkBatchDraft)
-        -&gt; Result&lt;QueuedWorkBatch, StoreError&gt;;
-    async fn claim_ready_queued_work(
-        &amp;self,
-        session_id: &amp;str,
-        owner_id: &amp;str,
-        boundary: QueuedWorkClaimBoundary,
-        lease_ttl_ms: u64,
-        max_batches: usize,
-    ) -&gt; Result&lt;Option&lt;QueuedWorkClaim&gt;, StoreError&gt;;
-    async fn renew_queued_work_claim(
-        &amp;self,
-        claim: &amp;QueuedWorkClaim,
-        lease_ttl_ms: u64,
-    ) -&gt; Result&lt;QueuedWorkClaim, StoreError&gt;;
-    async fn abandon_queued_work_claim(&amp;self, claim: &amp;QueuedWorkClaim)
-        -&gt; Result&lt;(), StoreError&gt;;
-    async fn list_queued_work(&amp;self, session_id: &amp;str)
-        -&gt; Result&lt;Vec&lt;QueuedWorkBatch&gt;, StoreError&gt;;
-    async fn save_session_meta(&amp;self, meta: SessionMeta) -&gt; Result&lt;(), StoreError&gt;;
-    async fn load_session_meta(&amp;self) -&gt; Result&lt;Option&lt;SessionMeta&gt;, StoreError&gt;;
-    async fn tombstone_nodes(&amp;self, ids: &amp;[String]) -&gt; Result&lt;(), StoreError&gt;;
-    async fn vacuum(&amp;self) -&gt; Result&lt;VacuumReport, StoreError&gt;;
-    async fn gc_unreachable(&amp;self) -&gt; Result&lt;GcReport, StoreError&gt;;
-}
-
-pub struct RuntimeCommit {
-    pub session_id: String,
-    pub expected_head_revision: Option&lt;u64&gt;,
-    pub config: PersistedSessionConfig,
-    pub agent_frames: Vec&lt;AgentFrameRecord&gt;,
-    pub current_agent_frame_id: AgentFrameId,
-    pub graph: GraphCommitDelta,
-    pub checkpoint: HydratedSessionCheckpoint,
-    pub usage_deltas: Vec&lt;TokenLedgerEntry&gt;,
-    pub turn_commit: Option&lt;RuntimeTurnCommitStamp&gt;,
-    pub completed_queue_claims: Vec&lt;QueuedWorkCompletion&gt;,
-    pub committed_attachment_ids: Vec&lt;AttachmentId&gt;,
-}</code></pre>
-          <p><code>SessionStoreFactory</code> produces one store per session, keyed by session id, relation, and policy:</p>
-          <pre><code>pub trait SessionStoreFactory: Send + Sync {
-    fn create_store(
-        &amp;self,
-        request: &amp;SessionStoreCreateRequest,
-    ) -&gt; Result&lt;Arc&lt;dyn RuntimePersistence&gt;, String&gt;;
-    fn delete_session(&amp;self, session_id: &amp;str) -&gt; Result&lt;(), String&gt;;
-}</code></pre>
+        <div class="listing__row">
+          <div class="listing__label">avoid when</div>
+          <div class="listing__body"><p>You are running throwaway tests or local single-process demos where every session can reset on restart.</p></div>
         </div>
+      </div>
+    </div>
 
-        <div class="section" id="cas-conflicts">
-          <div class="section-header">
-            <h2>Concurrent Writes And CAS</h2>
-            <p>Each <code>RuntimeCommit</code> carries <code>expected_head_revision: Option&lt;u64&gt;</code>. The store checks it against the row's current revision in the same SQL transaction; on mismatch the transaction rolls back. No retry, no partial state.</p>
-          </div>
-          <p>At most one turn per session commits at a time. Concurrent turns from two processes (or two tasks) on the same session id race for the head; the loser surfaces <code>store_commit_failed</code>.</p>
-          <pre><code>match session.turn(input).run().await {
-    Ok(turn) =&gt; persist(turn),
-    Err(err) if err.code == "store_commit_failed" =&gt; {
-        // Another writer raced us. Re-open the session to read the new
-        // head, then decide whether to retry, surface to the user, or
-        // merge intent.
-        let session = core.session(chat_id).open().await?;
-        retry_or_surface(err, session);
-    }
-    Err(other) =&gt; bail!(other),
-}</code></pre>
-          <p>Conflicts surface as a turn-level <code>Err</code> with <code>RuntimeError { code: "store_commit_failed", .. }</code> — not a <code>TurnStop</code> variant. The next read is identical to the read before the failed call. Hosts expecting concurrent access (multi-tab UIs, agent fleets) should serialize at their own layer or re-open against the refreshed head.</p>
-          <p>In-memory sessions (no <code>store_factory</code>) enforce the same CAS against an in-process counter.</p>
-          <p>For per-effect durability under an external workflow runtime, install a durable <code>EffectHost</code>. Local stores reopen the last committed state after a crash. Restate-style hosts use workflow history and timers to replay in-flight effects, then rely on <code>RuntimeTurnCommitStamp</code> so a repeated final commit is idempotent. See <a href="./architecture/durability.html">Architecture → Durability</a>.</p>
-        </div>
-
-        <div class="section" id="wiring">
-          <div class="section-header">
-            <h2>Wiring It Up</h2>
-            <p>Install one session-store factory plus the explicit runtime facets on the core; every session inherits them.</p>
-          </div>
+    <div class="section" id="minimal-example">
+      <div class="section-header">
+        <h2>Minimal Example</h2>
+        <p>Install one session-store factory plus explicit artifact and attachment stores on the core; every session inherits them.</p>
+      </div>
           <pre><code>use std::sync::Arc;
 use lash::{LashCore, ModeId, ModePreset};
 use lash_turso_store::{TursoSessionStoreFactory, Store};
@@ -173,20 +75,75 @@ let core = LashCore::builder()
     .lashlang_artifact_store(artifact_store)
     .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(data_dir.join("attachments"))))
     .build()?;</code></pre>
-          <p>Per-session override (e.g. tests with an isolated store):</p>
+    </div>
+
+    <div class="section" id="wiring">
+      <div class="section-header">
+        <h2>Wiring It Up</h2>
+        <p>Use the core-level factory for app servers. Use a per-session override only for tests or hosts that already own a concrete store.</p>
+      </div>
+      <p>Per-session override:</p>
           <pre><code>let session = core
     .session(chat_id)
     .store(Arc::new(my_custom_persistence))
     .open()
     .await?;</code></pre>
-          <p>Without a <code>store_factory</code>, session state is in-process only: turns succeed but nothing is written or resumable. You still provide explicit in-memory effect, artifact, and attachment facets with <code>InlineEffectHost</code>, <code>InMemoryLashlangArtifactStore</code>, and <code>InMemoryAttachmentStore</code>.</p>
-        </div>
+      <p>Without <code>.store_factory(...)</code> or <code>.store(...)</code>, turns still succeed but state stays in memory. You still provide explicit in-memory effect, artifact, and attachment facets.</p>
+    </div>
 
-        <div class="section" id="garbage-collection">
-          <div class="section-header">
-            <h2>Garbage Collection</h2>
-            <p>Two reclamation ops on <code>RuntimePersistence</code>. Safe to run from a process or CLI command.</p>
-          </div>
+    <div class="section" id="delete-sessions">
+      <div class="section-header">
+        <h2>Delete Sessions</h2>
+        <p>Use <code>LashCore::delete_session(...)</code> when an app-level delete should remove factory-backed runtime state for a session id.</p>
+      </div>
+      <pre><code>let report = core.delete_session(chat_id).await?;
+
+if let Some(process_report) = report.process {
+    audit_process_cleanup(process_report)?;
+}</code></pre>
+      <p>Deletion requires a core-level <code>SessionStoreFactory</code>; per-session stores cannot be rediscovered from a bare id. If a <code>ProcessRegistry</code> is installed, Lash first asks the process service to cancel and revoke session-owned process state, then deletes the session store state. Durable hosts can call <code>delete_session_with_effect_scope(...)</code> to run that process cleanup through their workflow-backed effect controller.</p>
+      <aside class="gotcha">
+        <strong>Gotcha</strong>
+        <p>Deleting runtime state is separate from deleting product rows such as chats, accounts, permissions, or UI attachments. Keep the app transaction and the Lash runtime deletion coordinated at the host layer.</p>
+      </aside>
+    </div>
+
+    <div class="section" id="whats-persisted">
+      <div class="section-header">
+        <h2>What Gets Persisted</h2>
+        <p>Think in product terms first. The exact SQL layout belongs to the store implementation.</p>
+      </div>
+      <div class="listing">
+        <div class="listing__row"><div class="listing__label">graph</div><div class="listing__body"><p>User inputs, assistant responses, tool calls, protocol events, prompt snapshots, and frame boundaries.</p></div></div>
+        <div class="listing__row"><div class="listing__label">head</div><div class="listing__body"><p>Current revision, current AgentFrame id, session policy, model/provider identity, and metadata for resume UIs.</p></div></div>
+        <div class="listing__row"><div class="listing__label">snapshots</div><div class="listing__body"><p>Plugin state, tool state, current RLM execution state, prompt state, and Lashlang artifacts needed for resume.</p></div></div>
+        <div class="listing__row"><div class="listing__label">queued work</div><div class="listing__body"><p>Queued turn input, process wakes, host events, timers, leases, and completed claim ids cleared with the consuming commit.</p></div></div>
+        <div class="listing__row"><div class="listing__label">usage</div><div class="listing__body"><p>Per-turn token deltas that aggregate into <code>session.usage_report()</code>.</p></div></div>
+      </div>
+    </div>
+
+    <div class="section" id="cas-conflicts">
+      <div class="section-header">
+        <h2>Concurrent Writes And CAS</h2>
+        <p>At most one turn per session commits at a time. Stores check the expected head revision in the same transaction as the commit; mismatch rolls back with no partial state.</p>
+      </div>
+      <p>Concurrent turns from two workers on the same session id race for the head. The loser receives a turn-level error such as <code>store_commit_failed</code>; it is not a <code>TurnStop</code> variant.</p>
+      <pre><code>match session.turn(input).run().await {
+    Ok(turn) =&gt; persist(turn),
+    Err(err) if err.code == "store_commit_failed" =&gt; {
+        let session = core.session(chat_id).open().await?;
+        retry_or_surface(err, session);
+    }
+    Err(other) =&gt; bail!(other),
+}</code></pre>
+      <p>Hosts expecting concurrent access should serialize at their layer or re-open the session after conflict and decide how to merge intent.</p>
+    </div>
+
+    <div class="section" id="garbage-collection">
+      <div class="section-header">
+        <h2>Garbage Collection</h2>
+        <p>Run reclamation from a process, maintenance route, or CLI command after pruning branches or deleting sessions.</p>
+      </div>
           <div class="two-col">
             <article class="panel">
               <h3><code>gc_unreachable()</code></h3>
@@ -197,13 +154,13 @@ let core = LashCore::builder()
               <p>Removes tombstoned graph-node rows already detached by gc, returns a <code>VacuumReport</code>. Run after <code>gc_unreachable</code> to reclaim file size.</p>
             </article>
           </div>
-        </div>
+    </div>
 
-        <div class="section" id="end-to-end">
-          <div class="section-header">
-            <h2>End-To-End Example</h2>
-            <p>The <code>agent-service</code> example: one session-store factory (Turso here), sessions keyed by chat id, app database alongside.</p>
-          </div>
+    <div class="section" id="end-to-end">
+      <div class="section-header">
+        <h2>End-To-End Example</h2>
+        <p>The <code>agent-service</code> example keeps product storage and runtime storage separate: app chat rows in one database, Lash sessions in the runtime store.</p>
+      </div>
           <pre><code>// One factory at boot, shared across every chat.
 let store_factory = Arc::new(TursoSessionStoreFactory::new(
     data_dir.join("lash-sessions"),
@@ -227,15 +184,21 @@ let core = LashCore::builder()
 
 // Per request: open a session keyed by the app's chat id.
 let session = core.session(chat_id).rlm().open().await?;</code></pre>
-          <p>Full source: the <code>examples/agent-service</code> example (process bootstrap, session opening, and product persistence).</p>
-        </div>
+      <p>Full source: <code>examples/agent-service</code>.</p>
+    </div>
+
+    <div class="section" id="where-next">
+      <div class="section-header">
+        <h2>Where Next</h2>
+        <p>This page owns app-facing persistence. Replay and store internals are intentionally elsewhere.</p>
+      </div>
+      <div data-related="embedding-advanced.html architecture/durability.html architecture/reference.html example-agent-service.html tracing.html"></div>
+    </div>
   </main>
 
   <section class="pager" aria-label="chapter navigation">
   <div class="pager__rail">read on &middot;</div>
   <div class="pager__main">
-    <a class="pager__prev" href="./plugins.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>plugins</strong></a>
-    <a class="pager__next" href="./tracing.html"><span>next</span><strong>tracing</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
 </section>
 </body>

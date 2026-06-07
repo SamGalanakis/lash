@@ -795,7 +795,24 @@ fn benchmark_stream_profile_for_request(
             text_profile(text)
         }
         RuntimePerfScenario::RlmGlobals => {
+            // Mix of small (inline) and large (degraded preview) globals so the
+            // benchmark exercises both branches of `render_bound_variables`:
+            // small values render in full, while `big_map`/`big_notes`/`big_text`
+            // exceed the inline budget and go through the keys / head-tail
+            // truncation path that runs on every prompt build.
             let text = r#"```lashlang
+big_map = {}
+for i in range(24) {
+  big_map[format("room_{}", i)] = { exits: ["north", "south", "east"], items: [format("item_{}", i)] }
+}
+big_notes = []
+for i in range(45) {
+  big_notes = push(big_notes, format("note {}: long observation about world state, plan, and next steps", i))
+}
+big_text = "Loud Room: "
+for i in range(40) {
+  big_text = format("{}echo step {} dampens the acoustics; ", big_text, i)
+}
 live_record = {
   status: "ready",
   turn: input.turn,

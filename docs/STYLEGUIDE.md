@@ -29,6 +29,17 @@ All HTML pages link the same stylesheet. Root-level docs pages use
 - **Audience**: engineers reading TUI design docs in dim contexts (long working
   sessions, often at night). Dark theme is correct here — don't second-guess it.
 
+### Links and emphasis
+
+- Use links for navigational terms and cross-references. If a phrase names
+  another docs page, API reference, crate, example, or architecture chapter, make
+  it an `<a>`, not just `<strong>`.
+- Use `<strong>` only for local emphasis, table/list labels, warnings, and
+  contrast inside the same paragraph. Strong text is intentionally neutral;
+  prose links carry the sodium color and underline.
+- Pager links are generated from `docs.js`'s `TOC`; keep the taxonomy there as
+  the canonical reading order instead of hand-maintaining previous/next labels.
+
 ---
 
 ## Tokens

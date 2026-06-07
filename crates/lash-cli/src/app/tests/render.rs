@@ -107,8 +107,23 @@ fn selected_process_row_is_focusable_and_renders_definition() {
         .collect();
 
     assert!(text.iter().any(|line| {
-        line.contains("▶") && line.contains("running · responder · responder")
+        line.contains("▶ SELECTED") && line.contains("running · responder · responder")
     }));
+    let selected_row = lines
+        .iter()
+        .find(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.as_ref().contains("SELECTED"))
+        })
+        .expect("selected process row");
+    assert!(
+        selected_row
+            .spans
+            .iter()
+            .any(|span| span.style.bg == Some(crate::theme::SELECTION_BG)),
+        "selected process row should carry a visible background highlight"
+    );
 }
 
 #[test]

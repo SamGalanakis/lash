@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
+<title>remote protocol · lash docs</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css?v=11">
+<script src="./theme.js"></script>
+<script src="./docs.js?v=6" defer></script>
+<script src="./syntax.js" defer></script>
+</head>
+<body class="docs-page" data-cover-source="<code>crates/lash-remote-protocol</code>, <code>crates/lash/src/lib.rs</code>.">
+<section class="opener">
+  <h1 class="opener__title">remote<span class="slash">/</span>protocol</h1>
+  <p class="opener__lede">Use the remote protocol when Lash crosses a service boundary. The <code>lash-remote-protocol</code> crate defines versioned, serde-compatible DTOs for turns, LLM calls, activities, prompt layers, and remote tool grants; the facade reexports the DTO surface as <code>lash::remote</code>.</p>
+</section>
+
+<main class="body" id="content">
+  <div class="section" id="what-this-is">
+    <div class="section-header">
+      <h2>What This Is</h2>
+      <p>A stable data contract for hosts that wrap Lash behind HTTP, queues, callbacks, workflow handlers, or another process. It is not a server implementation and it does not own auth, tenant routing, billing, rate limits, or storage.</p>
+    </div>
+    <aside class="contract">
+      <strong>Contract</strong>
+      <p>Every top-level remote envelope carries <code>protocol_version</code>. Current code uses <code>REMOTE_PROTOCOL_VERSION == 2</code>; call <code>validate()</code> or <code>ensure_protocol_version(...)</code> before executing a received envelope.</p>
+    </aside>
+  </div>
+
+  <div class="section" id="when-to-use-it">
+    <div class="section-header">
+      <h2>When To Use It</h2>
+      <p>The DTOs are for product-owned service edges. If your app calls Lash in-process, use the normal facade in <a href="./embedding.html">API basics</a> instead.</p>
+    </div>
+    <div class="listing">
+      <div class="listing__row">
+        <div class="listing__label">use when</div>
+        <div class="listing__body"><p>A web service, worker, workflow activity, queue consumer, remote provider, or remote tool executor must exchange Lash-owned fields with another process.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">avoid when</div>
+        <div class="listing__body"><p>The caller already has a <code>LashCore</code> and <code>LashSession</code> in memory. Do not serialize and deserialize just to call local turns.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="minimal-example">
+    <div class="section-header">
+      <h2>Minimal Example</h2>
+      <p>Wrap Lash's DTO in your product envelope. Product-specific fields belong in the wrapper or in <code>metadata</code>, not as local forks of Lash sub-objects.</p>
+    </div>
+<pre data-lang="rust"><code>use lash::remote::{
+    RemoteInputItem, RemoteTurnInput, RemoteTurnRequest, REMOTE_PROTOCOL_VERSION,
+};
+
+let request = RemoteTurnRequest {
+    protocol_version: REMOTE_PROTOCOL_VERSION,
+    session_id: chat_id.clone(),
+    turn_id: turn_id.clone(),
+    idempotency_key: Some(idempotency_key.clone()),
+    input: RemoteTurnInput {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        items: vec![RemoteInputItem::Text {
+            text: "Summarize this task.".to_string(),
+        }],
+        image_blobs_base64: Default::default(),
+        protocol_turn_options: None,
+        trace_turn_id: Some(trace_turn_id.clone()),
+        prompt_layer: None,
+    },
+    tool_grants: Vec::new(),
+    model_intent: None,
+    activity_cursor: None,
+    metadata: Default::default(),
+};
+
+request.validate()?;</code></pre>
+  </div>
+
+  <div class="section" id="contract-map">
+    <div class="section-header">
+      <h2>Contract Map</h2>
+      <p>Use the smallest envelope that matches the boundary you are crossing.</p>
+    </div>
+    <div class="listing">
+      <div class="listing__row">
+        <div class="listing__label">turn ingress</div>
+        <div class="listing__body"><p><code>RemoteTurnRequest</code> carries <code>session_id</code>, <code>turn_id</code>, optional idempotency key, <code>RemoteTurnInput</code>, remote tool grants, optional model intent, activity cursor, and metadata.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">turn result</div>
+        <div class="listing__body"><p><code>RemoteTurnResult</code> carries status, <code>RemoteTurnOutcome</code>, safe/raw assistant output, usage, execution summary, tool-call summaries, issues, collected activities, and metadata.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">llm transport</div>
+        <div class="listing__body"><p><code>RemoteLlmRequest</code> and <code>RemoteLlmResponse</code> mirror the provider-facing request/response shape: messages, attachments, tools, tool choice, output spec, generation options, request metadata, usage, diagnostics, terminal reason, and provider metadata.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">activity stream</div>
+        <div class="listing__body"><p><code>RemoteTurnActivity</code> wraps semantic turn events with monotonically assigned <code>sequence</code>, event id, correlation id, and one flattened <code>RemoteTurnEvent</code>.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">prompt layer</div>
+        <div class="listing__body"><p><code>RemotePromptLayer</code>, prompt templates, slots, contributions, and gates let a service pass prompt overrides without inventing a parallel prompt schema.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="remote-tools">
+    <div class="section-header">
+      <h2>Remote Tools</h2>
+      <p>Remote tool grants expose callable host operations through Lash's normal tool surface while execution happens elsewhere.</p>
+    </div>
+    <div class="listing">
+      <div class="listing__row">
+        <div class="listing__label">grant</div>
+        <div class="listing__body"><p><code>RemoteToolGrant</code> defines the advertised name, schemas, projection overrides, output contract, examples, availability, activation, scheduling, retry policy, required agent surface, and executor.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">executor</div>
+        <div class="listing__body"><p><code>RemoteToolExecutor</code> supports <code>Http</code>, <code>CallbackRef</code>, and <code>QueueRef</code>. HTTP endpoints must start with <code>http://</code> or <code>https://</code>; timeouts must be greater than zero when present.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">call path</div>
+        <div class="listing__body"><p>The grant's <code>agent_surface.module_path</code> plus <code>operation</code> forms the remote call path. Duplicate call paths are rejected by <code>RemoteToolGrant::validate_all(...)</code>.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">provider helper</div>
+        <div class="listing__body"><p>When using the <code>lash-remote-protocol</code> crate directly with its <code>core-conversions</code> feature, <code>RemoteToolProvider&lt;T&gt;</code> adapts grants into a normal <code>ToolProvider</code> and dispatches through your <code>RemoteToolTransport</code>.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="validation">
+    <div class="section-header">
+      <h2>Validation Rules</h2>
+      <p>The DTOs validate protocol and shape, not business authorization. Keep product checks in your service layer.</p>
+    </div>
+    <div class="listing">
+      <div class="listing__row"><div class="listing__label">version</div><div class="listing__body"><p>Top-level envelopes reject unsupported <code>protocol_version</code>; nested turn input/activity versions must match the parent envelope where applicable.</p></div></div>
+      <div class="listing__row"><div class="listing__label">required ids</div><div class="listing__body"><p>Remote turn requests/results require non-empty <code>session_id</code> and <code>turn_id</code>. LLM requests/responses require non-empty <code>request_id</code>. Model intents require non-empty <code>model</code>.</p></div></div>
+      <div class="listing__row"><div class="listing__label">messages</div><div class="listing__body"><p>LLM messages must contain at least one content block. Tool-call blocks require <code>call_id</code> and <code>tool_name</code>; tool-result blocks require <code>call_id</code>.</p></div></div>
+      <div class="listing__row"><div class="listing__label">attachments</div><div class="listing__body"><p>Attachments require a non-empty MIME type. Attachment references require non-empty <code>id</code> and <code>mime</code>. Image blobs require non-empty ids and base64 payloads.</p></div></div>
+      <div class="listing__row"><div class="listing__label">generation</div><div class="listing__body"><p><code>RemoteGenerationOptions.output_token_cap</code> must be greater than zero when present. Temperature and top-p are strings so provider-specific precision can round-trip.</p></div></div>
+    </div>
+    <aside class="gotcha">
+      <strong>Gotcha</strong>
+      <p>Validation cannot prove that an <code>ImageAttachment.attachment_index</code> points at an existing attachment or that a remote caller is authorized for a session. Check those at the boundary that has the attachment list and product identity.</p>
+    </aside>
+  </div>
+
+  <div class="section" id="core-conversions">
+    <div class="section-header">
+      <h2>Core Conversions</h2>
+      <p>The standalone crate has an optional <code>core-conversions</code> feature for adapters that already depend on <code>lash-core</code>. The facade's <code>lash::remote</code> reexport is for DTOs; import <code>lash-remote-protocol</code> directly when you need conversion helpers.</p>
+    </div>
+    <div class="listing">
+      <div class="listing__row">
+        <div class="listing__label">turns</div>
+        <div class="listing__body"><p>Conversions cover remote-safe <code>TurnInput</code> fields and <code>RemoteTurnResult::from_core(...)</code> for completed turns plus collected activities.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">llm</div>
+        <div class="listing__body"><p><code>RemoteLlmRequest::from_core(...)</code>, request conversion, and response conversion preserve messages, attachments, tools, output specs, terminal reasons, usage, replay metadata, and provider metadata where the core types carry them.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">streaming</div>
+        <div class="listing__body"><p><code>RemoteTurnActivitySink&lt;W&gt;</code> serializes remote activities as newline-delimited JSON and records sink write errors for the host to inspect.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="where-next">
+    <div class="section-header">
+      <h2>Where Next</h2>
+      <p>This page owns the remote DTO contract. Use the facade guides for local embedding behavior and the provider docs for transport normalization.</p>
+    </div>
+    <div data-related="embedding.html embedding-turns.html plugins-tools.html architecture/providers.html architecture/reference.html architecture/deps.html"></div>
+  </div>
+</main>
+
+<section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+  </div>
+</section>
+</body>
+</html>

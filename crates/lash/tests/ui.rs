@@ -9,4 +9,5 @@ fn model_selection_requires_model_and_variant_together() {
     t.pass("tests/ui/durable_builder_without_advanced.rs");
     t.pass("tests/ui/facade_boundary_types_are_public.rs");
     t.pass("tests/ui/prompt_types_are_public.rs");
+    t.pass("tests/ui/remote_protocol_types_are_public.rs");
 }

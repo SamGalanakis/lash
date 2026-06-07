@@ -140,6 +140,10 @@ pub mod messages {
     pub use lash_core::MessageRole;
 }
 
+pub mod remote {
+    pub use lash_remote_protocol::*;
+}
+
 pub mod process {
     pub use crate::control::ProcessControl;
     pub use lash_core::{

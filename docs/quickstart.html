@@ -12,82 +12,69 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=10">
+<link rel="stylesheet" href="./styles.css?v=11">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=5" defer></script>
+<script src="./docs.js?v=6" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash</code> &middot; <code>crates/lash-providers-builtin</code>">
 
 <section class="opener">
   <h1 class="opener__title">quick<span class="slash">/</span>start</h1>
-  <p class="opener__lede">The shortest path to a working <em>Lash</em> turn. Add the crate, pick a provider, open a session, run one turn. Tools, modes, plugins, persistence, and tracing all layer on after that.</p>
+  <p class="opener__lede">The shortest path to a working Lash turn: add the crate, configure a provider, build a core, open a session, run one turn, and read the settled assistant message.</p>
 </section>
 
 <main class="body" id="content">
 
-  <section class="stanza">
-    <div class="stanza__rail">
-      <div class="knot">
-        <span class="knot__bead" aria-hidden="true"></span>
-        <p class="knot__id">§ 01</p>
-        <p class="knot__name">depend on it</p>
+  <div class="section" id="what-this-is">
+    <div class="section-header">
+      <h2>What This Is</h2>
+      <p>A minimal embedded-agent program. It uses the app-facing <code>lash-runtime</code> facade, one provider handle, the default standard mode, and in-memory runtime facets.</p>
+    </div>
+    <p><code>lash-runtime</code> is published under that crate name because <code>lash</code> is owned by another project on crates.io. The Rust library import is still <code>use lash::...</code>.</p>
+    <aside class="callout callout--contract">
+      <strong>Contract</strong>
+      <p><code>LashCore</code> is shared app configuration. <code>LashSession</code> is one durable work identity. <code>TurnBuilder::run()</code> returns the committed result plus collected semantic activity.</p>
+    </aside>
+  </div>
+
+  <div class="section" id="when-to-use-it">
+    <div class="section-header">
+      <h2>When To Use It</h2>
+      <p>Use this path when you want the smallest complete host before adding tools, streaming, RLM, persistence, background work, or tracing.</p>
+    </div>
+    <div class="listing">
+      <div class="listing__row">
+        <div class="listing__label">use when</div>
+        <div class="listing__body"><p>You are proving provider wiring, writing a first integration test, or adding Lash to an app backend for the first time.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">avoid when</div>
+        <div class="listing__body"><p>You need resumable sessions or multi-process workers immediately. Start with <a href="./persistence.html">Persistence</a> and <a href="./embedding-advanced.html#durable-workflows">Durable workflows</a> instead.</p></div>
       </div>
     </div>
-    <div class="stanza__body">
-      <h2 class="stanza__title" data-id="§ 01 · depend on it">add the crates</h2>
-      <p class="stanza__lede">The <code>lash-runtime</code> crate is the user-facing facade (published on crates.io as <code>lash-runtime</code> because <code>lash</code> is owned by another project; the library is still imported as <code>use lash::...</code>). Pull in whatever provider crate you actually use and pass a configured <code>ProviderHandle</code> when opening sessions.</p>
-      <p>During the alpha series, versions carry an <code>-alpha.N</code> suffix, so the dep needs the explicit pre-release tag.</p>
+  </div>
+
+  <div class="section" id="add-the-crates">
+    <div class="section-header">
+      <h2>Add The Crates</h2>
+      <p>Pin the alpha pre-release explicitly and add the provider crate you actually use.</p>
+    </div>
 <pre data-lang="cargo.toml"><code>[dependencies]
 lash-runtime         = "=0.1.0-alpha.21"
 lash-provider-openai = "=0.1.0-alpha.21"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }</code></pre>
-      <p>For ordinary projects the bundled facade and provider crates cover the common ground. Drop down to <code>lash-core</code> only when you need runtime-host plumbing — custom <code>PluginHost</code> instances or an explicitly installed deployment-level <code>lash::process::ProcessRegistry</code> such as <code>lash-turso-store::TursoProcessRegistry</code> for background process handles.</p>
-    </div>
-  </section>
+    <p>For ordinary projects the facade and provider crates are enough. Drop down to <code>lash-core</code> only for custom runtime hosts, explicit process registries, store implementations, or diagnostics that need internal state.</p>
+  </div>
 
-  <section class="stanza">
-    <div class="stanza__rail">
-      <div class="knot">
-        <span class="knot__bead" aria-hidden="true"></span>
-        <p class="knot__id">§ 02</p>
-        <p class="knot__name">read the shape</p>
-      </div>
+  <div class="section" id="minimal-example">
+    <div class="section-header">
+      <h2>Minimal Example</h2>
+      <p>Build one core, open one session, run one turn, print the committed assistant prose.</p>
     </div>
-    <div class="stanza__body">
-      <h2 class="stanza__title" data-id="§ 02 · read the shape">core concepts</h2>
-      <p class="stanza__lede">The minimal example below names <code>LashCore</code>, <code>LashSession</code>, <code>TurnInput</code>, <code>TurnBuilder</code>, and <code>ProviderHandle</code>. <code>SessionSpec</code> and <code>PluginStack</code> are the next two types you'll meet in the <a href="./embedding.html">Lash API guide</a>. Skim them before reading the code — the rest follows from how they compose.</p>
-      <dl class="defs">
-        <dt>LashCore</dt>
-        <dd>Cloneable shared configuration: provider, model, installed modes, tools, plugins, effect host, and runtime stores. One per app, cloned freely.</dd>
-        <dt>SessionSpec</dt>
-        <dd>Reusable session configuration overlay for provider, model, mode, prompt layer, max context tokens, and max turns. The ergonomic builder methods update the same spec.</dd>
-        <dt>PluginStack</dt>
-        <dd>Mutable list of plugin factories. <code>LashCore::standard()</code> and <code>LashCore::rlm()</code> start with runtime plugin defaults; all builders still require explicit effect, artifact, and attachment facets.</dd>
-        <dt>LashSession</dt>
-        <dd>One logical conversation or task, opened from a <code>LashCore</code> by a stable session id.</dd>
-        <dt>TurnInput</dt>
-        <dd>Semantic input to a turn — text plus image references. Use <code>TurnInput::text(...)</code> for the common case.</dd>
-        <dt>TurnBuilder</dt>
-        <dd>Per-turn configuration returned by <code>session.turn(input)</code>. Call <code>.run()</code> for a collected result, <code>.stream(&amp;sink)</code> for live events.</dd>
-        <dt>ProviderHandle</dt>
-        <dd>A live transport adapter supplied by the host. Session persistence stores only the provider id and rebinds it to the host's active handle when a session opens.</dd>
-      </dl>
-    </div>
-  </section>
+    <p>This example uses an OpenAI-compatible provider through OpenRouter. Substitute the provider crate, base URL, model id, and API key for your deployment.</p>
 
-  <section class="stanza">
-    <div class="stanza__rail">
-      <div class="knot">
-        <span class="knot__bead" aria-hidden="true"></span>
-        <p class="knot__id">§ 03</p>
-        <p class="knot__name">run one turn</p>
-      </div>
-    </div>
-    <div class="stanza__body">
-      <h2 class="stanza__title" data-id="§ 03 · run one turn">hello, turn</h2>
-      <p class="stanza__lede">The smallest meaningful program: build a core, open a session, run one turn, print the settled assistant prose.</p>
 <pre data-lang="rust"><code>use std::sync::Arc;
 
 use lash::{provider::ProviderHandle, LashCore, TurnInput};
@@ -123,21 +110,13 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     println!("{prose}");
     Ok(())
 }</code></pre>
-      <p>That's the whole flow: <code>LashCore</code> for shared configuration, <code>LashSession</code> for one logical conversation, <code>TurnBuilder::run()</code> for a single collected turn. Nothing more is required.</p>
-    </div>
-  </section>
+  </div>
 
-  <section class="stanza">
-    <div class="stanza__rail">
-      <div class="knot">
-        <span class="knot__bead" aria-hidden="true"></span>
-        <p class="knot__id">§ 04</p>
-        <p class="knot__name">what comes next</p>
-      </div>
+  <div class="section" id="common-tasks">
+    <div class="section-header">
+      <h2>Common Tasks</h2>
+      <p>The quickstart intentionally leaves most host features out. Add them one at a time.</p>
     </div>
-    <div class="stanza__body">
-      <h2 class="stanza__title" data-id="§ 04 · what comes next">what's not here yet</h2>
-      <p class="stanza__lede">The example above has no persistence, no host tools, only the default runtime plugin stack, no tracing, and no live streaming. Each is a small additional step — pick what you need and read on.</p>
       <div class="listing">
         <div class="listing__row">
           <div class="listing__label">live streaming</div>
@@ -176,19 +155,41 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
           </div>
         </div>
       </div>
+  </div>
+
+  <div class="section" id="failure-modes">
+    <div class="section-header">
+      <h2>Failure Modes</h2>
+      <p>Most first-run failures are missing host facets, provider configuration, or context/model metadata.</p>
     </div>
-  </section>
+    <div class="listing">
+      <div class="listing__row">
+        <div class="listing__label">builder error</div>
+        <div class="listing__body"><p><code>build()</code> requires explicit effect, Lashlang artifact, and attachment stores. Use in-memory facets for local tests; use file/Turso stores when sessions must survive restarts.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">provider error</div>
+        <div class="listing__body"><p>Check API key, base URL, model id, and token limits. Provider failures surface as turn errors or <code>TurnStop::ProviderError</code> depending on where the failure occurs.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">no persistence</div>
+        <div class="listing__body"><p>Without <code>.store_factory(...)</code> or a per-session <code>.store(...)</code>, the session is in-process only. A restart starts from empty state for that id.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="where-next">
+    <div class="section-header">
+      <h2>Where Next</h2>
+      <p>Choose the next page by the job you are adding to this minimal host.</p>
+    </div>
+    <div data-related="tasks.html embedding.html embedding-turns.html persistence.html rlm.html plugins.html tracing.html"></div>
+  </div>
 </main>
 
 <section class="pager" aria-label="next chapter">
   <div class="pager__rail">read on &middot;</div>
   <div class="pager__main">
-    <span></span>
-    <a class="pager__next" href="./embedding.html">
-      <span>next &middot; § 02</span>
-      <strong>lash api</strong>
-      <span class="arrow" aria-hidden="true">→</span>
-    </a>
   </div>
 </section>
 

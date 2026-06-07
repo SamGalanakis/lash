@@ -42,6 +42,7 @@ Attach a `TraceSink` for structured turn, tool, LLM, prompt, stream, and usage r
 
 - `lash-sansio` — pure turn machine, prompt model, messages, effects, responses, checkpoints, tool contracts, and canonical tool-call output; no Lashlang dependency.
 - `lash-core` — async runtime internals, plugin host, protocol build input, providers, persistence, session graph, child-session orchestration, built-in tools, and Lashlang host-surface construction.
+- `lash-remote-protocol` — runtime-neutral canonical DTOs for wrapping Lash behind a service boundary: remote turn requests/results, LLM requests/responses, prompt patches, activity streams, and transport-neutral tool grants.
 - `lash` — app-facing facade for runtime construction, sessions, turn streaming, provider / mode / plugin wiring, host integrations.
 - `lash-protocol-standard` / `lash-protocol-rlm` — protocol plugins.
 - `lash-standard-plugins`, `lash-subagents`, `lash-plugin-*`, `lash-provider-*` — first-party tool, plugin, and provider crates.
@@ -103,6 +104,10 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 See [`docs/quickstart.html`](https://lash.run/quickstart.html) for the full walkthrough, and [`docs/embedding.html`](https://lash.run/embedding.html) for the complete facade API — session specs, plugin stacks, turn streaming, persistence, subagents, MCP wiring, and durable-workflow integration.
+
+### Remote service boundary
+
+Hosts that expose Lash through HTTP, queues, callbacks, or workflow handlers should use the canonical remote DTOs from `lash::remote` or `lash-remote-protocol`. Wrap `RemoteTurnRequest` and `RemoteTurnResult` with product-owned auth, billing, routing, persistence, and tenant metadata; do not redefine Lash sub-DTOs in downstream services. Product-specific data belongs in the host wrapper or the DTO `metadata` maps, while Lash-owned fields such as prompt patches, tool grants, activities, LLM calls, usage, and terminal outcomes stay in the protocol crate.
 
 ## Examples
 

@@ -67,62 +67,37 @@ pub(crate) struct BoundVariableRenderCache {
     entries: BTreeMap<String, BoundVariableRenderCacheEntry>,
 }
 
-impl BoundVariableRenderCache {
-    fn order_rows(&mut self, mut rows: Vec<BoundVariableRow>) -> Vec<BoundVariableRow> {
-        let live_names = rows
-            .iter()
-            .map(|row| row.name.clone())
-            .collect::<BTreeSet<_>>();
-        self.entries.retain(|name, _| live_names.contains(name));
-
-        for row in &mut rows {
-            row.fingerprint = row_fingerprint(row);
-            if let Some(entry) = self.entries.get(&row.name) {
-                row.ordinal = entry.ordinal;
-                row.unchanged = entry.fingerprint == row.fingerprint;
-            } else {
-                row.ordinal = self.next_ordinal;
-                self.next_ordinal += 1;
-                row.unchanged = false;
-            }
-        }
-
-        for row in &rows {
-            self.entries.insert(
-                row.name.clone(),
-                BoundVariableRenderCacheEntry {
-                    ordinal: row.ordinal,
-                    fingerprint: row.fingerprint,
-                },
-            );
-        }
-
-        rows.sort_by(|left, right| {
-            right
-                .unchanged
-                .cmp(&left.unchanged)
-                .then_with(|| left.ordinal.cmp(&right.ordinal))
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        rows
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct BoundVariableRenderCacheEntry {
     ordinal: usize,
-    fingerprint: u64,
+    /// Cheap structural hash of the variable's value. When it matches, the
+    /// expensive rebuild (serialize / shape inference / preview) is skipped and
+    /// the cached `shape` + `line` are reused.
+    value_hash: u64,
+    shape: Option<JsonShape>,
+    line: String,
 }
 
-#[derive(Clone, Debug)]
-struct BoundVariableRow {
-    name: String,
+/// The expensive-to-compute parts of a variable's rendering.
+struct BuiltRow {
     inline: Option<String>,
     shape: Option<JsonShape>,
     size_hint: Option<String>,
+    preview: Option<String>,
+}
+
+/// One variable resolved for this render pass — either reused from the cache
+/// (`cached_line` set) or freshly built.
+struct WorkRow {
+    name: String,
     ordinal: usize,
-    fingerprint: u64,
     unchanged: bool,
+    value_hash: u64,
+    shape: Option<JsonShape>,
+    inline: Option<String>,
+    size_hint: Option<String>,
+    preview: Option<String>,
+    cached_line: Option<String>,
 }
 
 pub(crate) fn render_bound_variables(
@@ -133,18 +108,68 @@ pub(crate) fn render_bound_variables(
 ) -> PromptContribution {
     let mut lines = vec![
         "These variables are already bound in lashlang. Access them directly in fenced `lashlang` code; do not recreate them manually.".to_string(),
-        "Small values are shown inline so you can read them directly; larger ones show only their type and size — `print` such a variable (or the part you need) to see its contents.".to_string(),
+        "Small values are shown in full; larger ones show their type, size, and a truncated preview (record keys, or the head and tail of a list/string) — `print` such a variable (or the part you need) to see the rest.".to_string(),
     ];
-    // Decide per variable: render its value inline when small, otherwise fall
-    // back to a type + size hint. Only register a schema definition for the
-    // hinted (large) ones: inline values already show their structure.
-    let mut rows = globals
-        .iter()
-        .map(|(name, value)| build_bound_variable_row(name, value, inline_char_limit))
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| left.name.cmp(&right.name));
-    let rows = cache.order_rows(rows);
 
+    // Drop cache slots for variables that no longer exist.
+    cache.entries.retain(|name, _| globals.contains_key(name));
+
+    // Reuse the cached build for an unchanged variable (detected by a cheap
+    // structural value hash); only rebuild changed/new ones. Rebuilding —
+    // serialize, shape inference, preview — is the expensive part, so this is
+    // the win for globals that are stable across prompt builds.
+    let mut next_ordinal = cache.next_ordinal;
+    let mut rows: Vec<WorkRow> = Vec::with_capacity(globals.len());
+    for (name, value) in globals {
+        let hash = value_hash(value);
+        match cache.entries.get(name) {
+            Some(entry) if entry.value_hash == hash => rows.push(WorkRow {
+                name: name.clone(),
+                ordinal: entry.ordinal,
+                unchanged: true,
+                value_hash: hash,
+                shape: entry.shape.clone(),
+                inline: None,
+                size_hint: None,
+                preview: None,
+                cached_line: Some(entry.line.clone()),
+            }),
+            existing => {
+                let ordinal = existing.map(|entry| entry.ordinal).unwrap_or_else(|| {
+                    let ordinal = next_ordinal;
+                    next_ordinal += 1;
+                    ordinal
+                });
+                let built = build_bound_variable_row(value, inline_char_limit);
+                rows.push(WorkRow {
+                    name: name.clone(),
+                    ordinal,
+                    unchanged: false,
+                    value_hash: hash,
+                    shape: built.shape,
+                    inline: built.inline,
+                    size_hint: built.size_hint,
+                    preview: built.preview,
+                    cached_line: None,
+                });
+            }
+        }
+    }
+    cache.next_ordinal = next_ordinal;
+
+    // Stable order: unchanged rows first (so their schema names stay fixed and
+    // the prompt prefix stays cacheable for the provider), then by first-seen
+    // ordinal. This ordering is what makes reusing a cached line safe.
+    rows.sort_by(|left, right| {
+        right
+            .unchanged
+            .cmp(&left.unchanged)
+            .then_with(|| left.ordinal.cmp(&right.ordinal))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    // Rebuild the schema registry from every row's shape in stable order so
+    // names are deterministic and match those baked into cached lines.
     let mut registry = SchemaRegistry::default();
     for row in &rows {
         if let Some(shape) = &row.shape {
@@ -156,21 +181,19 @@ pub(crate) fn render_bound_variables(
     lines.push("Available variables:".to_string());
     lines.push("- `history`: `list<HistoryItem>`, read-only".to_string());
     for row in &rows {
-        if let Some(inline) = &row.inline {
-            // Value shown explicitly; no type/size hint needed.
-            lines.push(format!("- `{}` = {inline}", row.name));
-            continue;
+        let line = render_row_line(row, &registry);
+        if row.cached_line.is_none() {
+            cache.entries.insert(
+                row.name.clone(),
+                BoundVariableRenderCacheEntry {
+                    ordinal: row.ordinal,
+                    value_hash: row.value_hash,
+                    shape: row.shape.clone(),
+                    line: line.clone(),
+                },
+            );
         }
-        let shape = row
-            .shape
-            .as_ref()
-            .expect("hinted variable has an inferred shape");
-        let type_text = render_shape_inline(shape, &registry);
-        if let Some(size_hint) = &row.size_hint {
-            lines.push(format!("- `{}`: `{type_text}`, {size_hint}", row.name));
-        } else {
-            lines.push(format!("- `{}`: `{type_text}`", row.name));
-        }
+        lines.push(line);
     }
 
     if !registry.definitions.is_empty() {
@@ -196,51 +219,95 @@ pub(crate) fn render_bound_variables(
     PromptContribution::guidance("Bound Variables", lines.join("\n"))
 }
 
-fn build_bound_variable_row(
-    name: &str,
-    value: &serde_json::Value,
-    inline_char_limit: usize,
-) -> BoundVariableRow {
+fn render_row_line(row: &WorkRow, registry: &SchemaRegistry) -> String {
+    if let Some(cached) = &row.cached_line {
+        return cached.clone();
+    }
+    if let Some(inline) = &row.inline {
+        // Value shown explicitly; no type/size hint needed.
+        return format!("- `{}` = {inline}", row.name);
+    }
+    let shape = row
+        .shape
+        .as_ref()
+        .expect("hinted variable has an inferred shape");
+    let type_text = render_shape_inline(shape, registry);
+    let mut line = match &row.size_hint {
+        Some(size_hint) => format!("- `{}`: `{type_text}`, {size_hint}", row.name),
+        None => format!("- `{}`: `{type_text}`", row.name),
+    };
+    if let Some(preview) = &row.preview {
+        line.push_str(&format!(" ≈ {preview}"));
+    }
+    line
+}
+
+fn build_bound_variable_row(value: &serde_json::Value, inline_char_limit: usize) -> BuiltRow {
     match render_inline_value(value, inline_char_limit) {
-        Some(inline) => BoundVariableRow {
-            name: name.to_string(),
+        Some(inline) => BuiltRow {
             inline: Some(inline),
             shape: None,
             size_hint: None,
-            ordinal: 0,
-            fingerprint: 0,
-            unchanged: false,
+            preview: None,
         },
-        None => BoundVariableRow {
-            name: name.to_string(),
+        None => BuiltRow {
             inline: None,
             shape: Some(infer_json_shape(value)),
             size_hint: render_value_size_hint(value),
-            ordinal: 0,
-            fingerprint: 0,
-            unchanged: false,
+            preview: render_degraded_preview(value, inline_char_limit),
         },
     }
 }
 
-fn row_fingerprint(row: &BoundVariableRow) -> u64 {
+/// Cheap structural hash of a JSON value for change detection. Walks the value
+/// but allocates nothing — unlike serializing it or inferring its shape, which
+/// is exactly the work this lets us skip when the value is unchanged.
+fn value_hash(value: &serde_json::Value) -> u64 {
     let mut hasher = DefaultHasher::new();
-    row.name.hash(&mut hasher);
-    match (&row.inline, &row.shape) {
-        (Some(inline), _) => {
-            "inline".hash(&mut hasher);
-            inline.hash(&mut hasher);
+    hash_json_value(value, &mut hasher);
+    hasher.finish()
+}
+
+fn hash_json_value<H: Hasher>(value: &serde_json::Value, hasher: &mut H) {
+    match value {
+        serde_json::Value::Null => 0u8.hash(hasher),
+        serde_json::Value::Bool(flag) => {
+            1u8.hash(hasher);
+            flag.hash(hasher);
         }
-        (None, Some(shape)) => {
-            "hint".hash(&mut hasher);
-            shape.hash(&mut hasher);
-            row.size_hint.hash(&mut hasher);
+        serde_json::Value::Number(number) => {
+            2u8.hash(hasher);
+            if let Some(int) = number.as_i64() {
+                0u8.hash(hasher);
+                int.hash(hasher);
+            } else if let Some(uint) = number.as_u64() {
+                1u8.hash(hasher);
+                uint.hash(hasher);
+            } else {
+                2u8.hash(hasher);
+                number.as_f64().unwrap_or(0.0).to_bits().hash(hasher);
+            }
         }
-        (None, None) => {
-            "empty".hash(&mut hasher);
+        serde_json::Value::String(text) => {
+            3u8.hash(hasher);
+            text.hash(hasher);
+        }
+        serde_json::Value::Array(items) => {
+            4u8.hash(hasher);
+            items.len().hash(hasher);
+            for item in items {
+                hash_json_value(item, hasher);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            5u8.hash(hasher);
+            map.len().hash(hasher);
+            for (key, val) in map {
+                key.hash(hasher);
+                hash_json_value(val, hasher);
+            }
         }
     }
-    hasher.finish()
 }
 
 fn history_count_unit(count: usize) -> &'static str {
@@ -275,6 +342,114 @@ fn render_value_size_hint(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Array(values) => Some(format!("len={}", values.len())),
         serde_json::Value::Object(map) => Some(format!("keys={}", map.len())),
     }
+}
+
+/// A bounded, shape-aware preview of a value too large to render in full.
+///
+/// General degradation, top level only — nested values are flattened to clipped
+/// JSON, never recursed into, so cost and complexity stay predictable:
+/// - record  -> its keys (`{ a, b, …(+N more) }`)
+/// - list    -> head and tail elements (`[a, b, …(+N more)…, y, z]`)
+/// - string  -> head and tail (`"abc…xyz"`)
+///
+/// Returns `None` for scalars (which always render in full) and for a `0`
+/// budget (preview disabled, type + size hint only).
+fn render_degraded_preview(value: &serde_json::Value, budget: usize) -> Option<String> {
+    if budget == 0 {
+        return None;
+    }
+    match value {
+        serde_json::Value::Object(map) => Some(preview_object_keys(map, budget)),
+        serde_json::Value::Array(items) => Some(preview_array(items, budget)),
+        serde_json::Value::String(text) => Some(preview_string(text, budget)),
+        _ => None,
+    }
+}
+
+/// `{ key_a, key_b, …(+N more) }` — keys only.
+fn preview_object_keys(map: &serde_json::Map<String, serde_json::Value>, budget: usize) -> String {
+    let total = map.len();
+    let mut shown: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for (idx, key) in map.keys().enumerate() {
+        let token = clip(key, ELEMENT_CLIP);
+        let cost = token.chars().count() + 2; // ", "
+        if used + cost > budget && !shown.is_empty() {
+            return format!("{{ {}, …(+{} more) }}", shown.join(", "), total - idx);
+        }
+        used += cost;
+        shown.push(token);
+    }
+    format!("{{ {} }}", shown.join(", "))
+}
+
+/// `[a, b, …(+N more)…, y, z]` — middle truncation keeping head and tail.
+fn preview_array(items: &[serde_json::Value], budget: usize) -> String {
+    let rendered: Vec<String> = items
+        .iter()
+        .map(|item| clip(&compact(item), ELEMENT_CLIP))
+        .collect();
+    let joined = format!("[{}]", rendered.join(", "));
+    if joined.chars().count() <= budget {
+        return joined;
+    }
+    let half = budget / 2;
+    let take_fitting = |iter: &mut dyn Iterator<Item = &String>| -> Vec<String> {
+        let mut out = Vec::new();
+        let mut used = 0usize;
+        for item in iter {
+            let cost = item.chars().count() + 2;
+            if used + cost > half && !out.is_empty() {
+                break;
+            }
+            used += cost;
+            out.push(item.clone());
+        }
+        out
+    };
+    let head = take_fitting(&mut rendered.iter());
+    let mut tail = take_fitting(&mut rendered.iter().rev());
+    tail.reverse();
+    let shown = head.len() + tail.len();
+    if shown >= rendered.len() {
+        return format!("[{}]", rendered.join(", "));
+    }
+    format!(
+        "[{}, …(+{} more)…, {}]",
+        head.join(", "),
+        rendered.len() - shown,
+        tail.join(", ")
+    )
+}
+
+/// `"head…tail"` — head and tail of a long string.
+fn preview_string(text: &str, budget: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= budget {
+        return format!("{text:?}");
+    }
+    let keep = (budget.saturating_sub(3) / 2).max(1);
+    let head: String = chars[..keep].iter().collect();
+    let tail: String = chars[chars.len() - keep..].iter().collect();
+    format!("\"{head}…{tail}\"")
+}
+
+/// Per-element/key char cap inside a preview. Keeps a single nested value from
+/// dominating the budget (the anti-hairiness rule: clip nested, never recurse).
+const ELEMENT_CLIP: usize = 80;
+
+fn compact(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+/// Clip a string to at most `max` chars, marking truncation with `…`.
+fn clip(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return text.to_string();
+    }
+    let head: String = chars[..max.saturating_sub(1)].iter().collect();
+    format!("{head}…")
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -629,6 +804,41 @@ mod bound_variable_tests {
         let s = &rendered.content;
         assert!(s.contains("- `x`:"), "{s}");
         assert!(s.contains("len=3"), "{s}");
+        // Budget 0 disables the preview: type + size hint only, no `≈`.
+        assert!(!s.contains('≈'), "{s}");
+    }
+
+    #[test]
+    fn large_record_degrades_to_keys_preview() {
+        let rooms = serde_json::Value::Object(
+            (0..30)
+                .map(|i| (format!("room_{i:02}"), json!({ "exits": ["n", "s"] })))
+                .collect(),
+        );
+        let g = globals(json!({ "map": rooms }));
+        let mut cache = BoundVariableRenderCache::default();
+        let s = render_bound_variables(&mut cache, &g, 0, 80)
+            .content
+            .to_string();
+        assert!(s.contains("`map`:"), "{s}"); // type still shown
+        assert!(s.contains("keys=30"), "{s}"); // size still shown
+        assert!(s.contains("≈ {"), "{s}"); // preview present
+        assert!(s.contains("room_00"), "{s}"); // some keys shown
+        assert!(s.contains("more)"), "{s}"); // and the rest elided
+    }
+
+    #[test]
+    fn large_list_degrades_to_head_and_tail() {
+        let items: Vec<_> = (0..40).map(|i| json!(format!("note-{i:02}"))).collect();
+        let g = globals(json!({ "notes": items }));
+        let mut cache = BoundVariableRenderCache::default();
+        let s = render_bound_variables(&mut cache, &g, 0, 80)
+            .content
+            .to_string();
+        assert!(s.contains("len=40"), "{s}");
+        assert!(s.contains("note-00"), "{s}"); // head retained
+        assert!(s.contains("note-39"), "{s}"); // tail retained
+        assert!(s.contains("more)…"), "{s}"); // middle elided
     }
 
     #[test]

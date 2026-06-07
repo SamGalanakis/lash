@@ -12,15 +12,15 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=10">
+<link rel="stylesheet" href="./styles.css?v=11">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=5" defer></script>
+<script src="./docs.js?v=6" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">lash<span class="slash">/</span>advanced</h1>
-    <p class="opener__lede">Storage boundaries, session lifecycle, durable workflows, subagents, MCP servers, the advanced runtime surface, and a complete example.</p>
+    <p class="opener__lede">Storage boundaries, session lifecycle, process work, durable workflows, subagents, MCP servers, the advanced runtime surface, and a complete example.</p>
   </section>
 
   <main class="body" id="content">
@@ -101,6 +101,40 @@ let core = LashCore::rlm()
           <p>Plugin background work — tasks tracked via <code>ToolContext::processes()</code>, post-turn observation summaries, MCP warm-ups — continues past turn return. To drain it before returning (one-shot processes that need observations persisted before exit):</p>
           <pre><code>session.process_control().await_all().await?;</code></pre>
           <p>Exposed by the CLI as <code>--await-background-work</code> on <code>lash --print</code>. Embedders rarely need it outside short-lived processes.</p>
+        </div>
+
+        <div class="section" id="process-work">
+          <div class="section-header">
+            <h2>Process Work</h2>
+            <p>Lashlang <code>process</code> blocks need a process registry. The registry records process intent, handles, wakes, events, and cancellation; a process work runner consumes those records and executes the background work.</p>
+          </div>
+          <div class="listing">
+            <div class="listing__row">
+              <div class="listing__label">inline runner</div>
+              <div class="listing__body"><p>Call <code>.process_registry(...)</code> and wire a <code>SessionStoreFactory</code>. The facade builds the default inline <code>DurableProcessWorkerConfig</code> at <code>build()</code> and lazily starts the process runner on first <code>session(...).open().await?</code>. Without a store factory the build fails, because the worker must rebuild a session runtime for each process.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">external runner</div>
+              <div class="listing__body"><p>Call <code>.process_work_driver(...)</code> when a deployment worker, queue, or workflow runtime owns process execution. The driver's registry becomes the core process registry and Lash does not spawn the inline runner.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">observability</div>
+              <div class="listing__body"><p>Use <code>core.process_registry()</code> for registry-level integrations, <code>core.process_observer()</code> for non-terminal work snapshots, and <code>session.process_control()</code> for app-facing await/cancel/list operations.</p></div>
+            </div>
+          </div>
+          <pre><code>let core = LashCore::rlm()
+    .provider(provider)
+    .model(model)
+    .store_factory(store_factory)
+    .process_registry(process_registry)
+    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+    .lashlang_artifact_store(artifact_store)
+    .attachment_store(attachment_store)
+    .build()?;</code></pre>
+          <aside class="gotcha">
+            <strong>Gotcha</strong>
+            <p>A process registry enables Lashlang process/lifecycle abilities for sessions built from the core. It does not make in-flight effects durable by itself; durable replay still comes from the active <code>EffectHost</code> and scoped controller.</p>
+          </aside>
         </div>
 
         <div class="section" id="durable-workflows">
@@ -245,8 +279,6 @@ mcp.detach_server("old-tool").await?;</code></pre>
   <section class="pager" aria-label="chapter navigation">
   <div class="pager__rail">read on &middot;</div>
   <div class="pager__main">
-    <a class="pager__prev" href="./embedding-prompts.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>lash api · prompts</strong></a>
-    <a class="pager__next" href="./rlm.html"><span>next</span><strong>rlm · protocol</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
 </section>
 </body>

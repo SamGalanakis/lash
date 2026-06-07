@@ -22,6 +22,7 @@ path = "src/lib.rs"
 [dependencies]
 async-trait = { workspace = true }
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.28" }
+lash-remote-protocol = { path = "../lash-remote-protocol", version = "=0.1.0-alpha.28" }
 lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.28" }
 lash-protocol-rlm = { path = "../lash-protocol-rlm", version = "=0.1.0-alpha.28" }
 lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.28" }
