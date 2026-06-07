@@ -14,8 +14,8 @@ keywords = ["lash", "agent", "tools", "web", "llm"]
 categories = ["asynchronous", "web-programming"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.28", default-features = false }
-lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.28" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.29", default-features = false }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.29" }
 async-trait = { workspace = true }
 reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
 serde_json = { workspace = true }

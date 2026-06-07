@@ -12,7 +12,7 @@ description = "Restate durable execution adapter for Lash runtime effects"
 
 [dependencies]
 async-trait = { workspace = true }
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.28" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.29" }
 reqwest = { workspace = true, features = ["json", "rustls", "http2"] }
 restate-sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -27,9 +27,9 @@ uuid = { workspace = true, features = ["v4"] }
 bytes = { workspace = true }
 http = "1"
 http-body-util = "0.1"
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.28", features = ["testing"] }
-lashlang = { path = "../lashlang", version = "=0.1.0-alpha.28" }
-lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.28" }
-lash-turso-store = { path = "../lash-turso-store", version = "=0.1.0-alpha.28" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.29", features = ["testing"] }
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.29" }
+lash-protocol-standard = { path = "../lash-protocol-standard", version = "=0.1.0-alpha.29" }
+lash-turso-store = { path = "../lash-turso-store", version = "=0.1.0-alpha.29" }
 tempfile = { workspace = true }
 turso = { version = "0.7.0-pre.5", default-features = false }
