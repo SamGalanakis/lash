@@ -18,6 +18,7 @@
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash</code>, <code>crates/lash-turso-store</code>, <code>examples/agent-service</code>.">
+  <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">session<span class="slash">/</span>persistence</h1>
     <p class="opener__lede">Persist sessions by installing a <code>SessionStoreFactory</code> on the core or passing a store per session. Without one, sessions are in-process only. This page is the app-facing guide; effect replay and workflow durability live in the architecture docs.</p>
@@ -35,19 +36,19 @@
       </aside>
     </div>
 
-    <div class="section" id="when-to-use-it">
+    <div class="section" id="persistence-scope">
       <div class="section-header">
-        <h2>When To Use It</h2>
-        <p>Use a session store whenever a session id should survive process restarts, multi-request web handlers, queued work, or background/process wakes.</p>
+        <h2>Persistence Scope</h2>
+        <p>A session store makes a session id reopenable. It is separate from app tables and separate from in-flight workflow replay.</p>
       </div>
       <div class="listing">
         <div class="listing__row">
-          <div class="listing__label">use when</div>
-          <div class="listing__body"><p>Chats resume, users can reload, app servers restart, background process wakes enqueue turns, or child sessions should have durable state.</p></div>
+          <div class="listing__label">factory-backed</div>
+          <div class="listing__body"><p>Use <code>.store_factory(...)</code> when sessions reopen across requests, process restarts, queued work, process wakes, or managed child sessions.</p></div>
         </div>
         <div class="listing__row">
-          <div class="listing__label">avoid when</div>
-          <div class="listing__body"><p>You are running throwaway tests or local single-process demos where every session can reset on restart.</p></div>
+          <div class="listing__label">in-memory</div>
+          <div class="listing__body"><p>Omit a session store for throwaway tests and local single-process demos where every session can reset on restart.</p></div>
         </div>
       </div>
     </div>
@@ -104,14 +105,14 @@ if let Some(process_report) = report.process {
       <p>Deletion requires a core-level <code>SessionStoreFactory</code>; per-session stores cannot be rediscovered from a bare id. If a <code>ProcessRegistry</code> is installed, Lash first asks the process service to cancel and revoke session-owned process state, then deletes the session store state. Durable hosts can call <code>delete_session_with_effect_scope(...)</code> to run that process cleanup through their workflow-backed effect controller.</p>
       <aside class="gotcha">
         <strong>Gotcha</strong>
-        <p>Deleting runtime state is separate from deleting product rows such as chats, accounts, permissions, or UI attachments. Keep the app transaction and the Lash runtime deletion coordinated at the host layer.</p>
+        <p>Deleting runtime state is separate from deleting app rows such as chats, accounts, permissions, or UI attachments. Keep the app transaction and the Lash runtime deletion coordinated at the host layer.</p>
       </aside>
     </div>
 
     <div class="section" id="whats-persisted">
       <div class="section-header">
         <h2>What Gets Persisted</h2>
-        <p>Think in product terms first. The exact SQL layout belongs to the store implementation.</p>
+        <p>Think in runtime concepts first. The exact SQL layout belongs to the store implementation.</p>
       </div>
       <div class="listing">
         <div class="listing__row"><div class="listing__label">graph</div><div class="listing__body"><p>User inputs, assistant responses, tool calls, protocol events, prompt snapshots, and frame boundaries.</p></div></div>
@@ -159,7 +160,7 @@ if let Some(process_report) = report.process {
     <div class="section" id="end-to-end">
       <div class="section-header">
         <h2>End-To-End Example</h2>
-        <p>The <code>agent-service</code> example keeps product storage and runtime storage separate: app chat rows in one database, Lash sessions in the runtime store.</p>
+        <p>The <code>agent-service</code> example keeps app storage and runtime storage separate: chat rows in one database, Lash sessions in the runtime store.</p>
       </div>
           <pre><code>// One factory at boot, shared across every chat.
 let store_factory = Arc::new(TursoSessionStoreFactory::new(

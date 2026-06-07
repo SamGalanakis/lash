@@ -442,6 +442,20 @@
     }
 
     const out = [];
+    // The groups live inside a native <details> disclosure. On desktop
+    // (>=981px) the CSS hides the <summary> and forces the panel open, so
+    // it reads exactly like the old always-on sticky sidebar. On narrow
+    // viewports (<=980px) the disclosure is collapsed by default so the
+    // reader hits the <h1> immediately instead of scrolling past the
+    // whole multi-group nav. `open` is reconciled live by syncDisclosure().
+    out.push('<details class="toc-disclosure">');
+    out.push(
+      '<summary class="toc-disclosure__summary">' +
+        `<span class="toc-disclosure__caret" aria-hidden="true">${CARET_SVG}</span>` +
+        '<span class="toc-disclosure__label">Contents</span>' +
+      '</summary>'
+    );
+    out.push('<div class="toc-disclosure__panel">');
     for (const group of TOC) {
       const containsActive = containsHref(group, cur);
       const groupActive = containsActive;
@@ -480,7 +494,38 @@
       }
       out.push(`</nav>`);
     }
+    out.push('</div>'); // .toc-disclosure__panel
+    out.push('</details>');
     host.innerHTML = out.join("\n");
+
+    // ── reconcile the disclosure's open state with the viewport ──
+    //    Desktop: always open (CSS also hides the summary + forces the
+    //    panel visible, so `open` is belt-and-braces but keeps the DOM
+    //    honest). Mobile: closed by default so content is reachable; the
+    //    reader toggles it via the "Contents" summary or the floating
+    //    "back to contents" button. A matchMedia listener keeps this
+    //    correct across live resize without rebuilding the TOC.
+    const disclosure = host.querySelector(".toc-disclosure");
+    if (disclosure) {
+      const mq = window.matchMedia("(max-width: 980px)");
+      const syncDisclosure = (isNarrow) => {
+        // Desktop: force-open (the CSS also hides the summary + always
+        // lays out the panel, so the sidebar matches the old layout).
+        // Mobile: collapse to content-first. This fires only when the
+        // match state actually flips across 980px (initial sync + the
+        // 'change' listener), so a reader who opened the disclosure on
+        // mobile isn't slammed shut by ordinary scroll/resize ticks.
+        disclosure.open = !isNarrow;
+        // redraw the spine: the panel's height changes as it opens/closes
+        drawSpineSnake();
+      };
+      syncDisclosure(mq.matches);
+      // addEventListener('change', …) is the modern MediaQueryList API;
+      // it only fires when the match state actually flips across 980px.
+      mq.addEventListener("change", (e) => syncDisclosure(e.matches));
+      // Toggling the native disclosure (mobile) shifts panel height too.
+      disclosure.addEventListener("toggle", () => drawSpineSnake());
+    }
 
     // wire title toggles — the whole title row is the toggle button
     host.querySelectorAll("button.toc__group-title").forEach((btn) => {
@@ -715,7 +760,21 @@
         '<span class="arrow" aria-hidden="true">↑</span>' +
         '<span>contents</span>';
       btn.addEventListener("click", () => {
-        window.scrollTo({ top: 0, behavior: "smooth" });
+        // On mobile the TOC is a collapsed <details> disclosure — a plain
+        // scroll-to-top would just land on a closed "Contents" summary.
+        // Open it (and bring it into view) so the reader actually sees the
+        // nav. On desktop there's no collapsed disclosure, so this is a
+        // no-op and we fall back to the original scroll-to-top.
+        const disclosure = toc.querySelector(".toc-disclosure");
+        const narrow = window.matchMedia("(max-width: 980px)").matches;
+        if (disclosure && narrow && !disclosure.open) {
+          disclosure.open = true;
+        }
+        if (narrow) {
+          toc.scrollIntoView({ behavior: "smooth", block: "start" });
+        } else {
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        }
       });
       document.body.appendChild(btn);
     }

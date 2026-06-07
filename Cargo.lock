@@ -3070,10 +3070,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-providers-builtin"
-version = "0.1.0-alpha.29"
-
-[[package]]
 name = "lash-remote-protocol"
 version = "0.1.0-alpha.29"
 dependencies = [

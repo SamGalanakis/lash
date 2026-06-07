@@ -18,6 +18,7 @@
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash-plugin-plan-mode</code>, <code>crates/lash</code>.">
+  <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">writing<span class="slash">/</span>plugins</h1>
     <p class="opener__lede">Write a plugin when host behavior needs to join the Lash runtime: tools, prompt contributions, tool-surface policy, turn hooks, runtime events, plugin state, or typed per-turn input.</p>
@@ -39,19 +40,19 @@
       </dl>
     </div>
 
-    <div class="section" id="when-to-use-it">
+    <div class="section" id="runtime-boundary">
       <div class="section-header">
-        <h2>When To Use It</h2>
-        <p>Use a plugin when behavior belongs to the runtime surface rather than the app route handler.</p>
+        <h2>Runtime Boundary</h2>
+        <p>A plugin is for behavior that should appear in the runtime surface. Keep ordinary host routing outside it.</p>
       </div>
       <div class="listing">
         <div class="listing__row">
-          <div class="listing__label">use when</div>
+          <div class="listing__label">inside plugin</div>
           <div class="listing__body"><p>You need reusable tools, prompt contributions, stateful turn hooks, custom tool visibility, typed plugin input, or session-local state that resumes with Lash.</p></div>
         </div>
         <div class="listing__row">
-          <div class="listing__label">avoid when</div>
-          <div class="listing__body"><p>The behavior is pure product routing, auth, frontend persistence, or app database work that does not need to appear in model context or runtime hooks.</p></div>
+          <div class="listing__label">outside plugin</div>
+          <div class="listing__body"><p>Keep auth, HTTP routing, frontend persistence, and app database work in the host unless it needs to appear in model context or runtime hooks.</p></div>
         </div>
       </div>
     </div>
