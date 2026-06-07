@@ -601,7 +601,6 @@ pub(crate) fn model_spec_for_chat_selection(
         selection.model_variant.clone(),
         DEFAULT_CONTEXT_WINDOW_TOKENS,
         None,
-        None,
     )
     .map_err(AppError::bad_request)
 }

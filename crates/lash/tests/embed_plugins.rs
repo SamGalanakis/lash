@@ -206,7 +206,7 @@ fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
         .install_mode(ModePreset::standard())
         .provider(provider)
         .model(
-            lash::ModelSpec::from_token_limits("mock-model", None, 16_000, None, None)
+            lash::ModelSpec::from_token_limits("mock-model", None, 16_000, None)
                 .expect("valid model spec"),
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))

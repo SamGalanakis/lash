@@ -9,7 +9,7 @@ async fn main() -> lash::Result<()> {
         .install_mode(ModePreset::rlm())
         .default_mode(ModeId::standard())
         .model(
-            lash::ModelSpec::from_token_limits("example-model", None, 200_000, None, None)
+            lash::ModelSpec::from_token_limits("example-model", None, 200_000, None)
                 .expect("valid model spec"),
         )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))

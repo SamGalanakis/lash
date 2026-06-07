@@ -379,7 +379,7 @@ mod tests {
                 config: lash_core::PersistedSessionConfig {
                     provider_id: "openai_generic".to_string(),
                     model: lash_core::ModelSpec::from_token_limits(
-                        "gpt-5", None, 200_000, None, None,
+                        "gpt-5", None, 200_000, None,
                     )
                     .expect("valid model spec"),
                 },

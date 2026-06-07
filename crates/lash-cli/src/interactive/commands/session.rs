@@ -76,7 +76,6 @@ fn fallback_policy_for_session_switch(
         current_model_variant.clone(),
         app.usage.context_window.unwrap_or(1) as usize,
         None,
-        None,
     )
     .unwrap_or_else(|_| lash_core::ModelSpec::default());
     SessionPolicy {

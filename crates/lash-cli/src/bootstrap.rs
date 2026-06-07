@@ -650,13 +650,6 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         active_provider.clone(),
         trace_path,
         trace_level,
-        Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(
-                &crate::paths::lash_home().join("processes.db"),
-            )
-            .await
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-        ),
     );
     let opened_session = runtime_factory
         .open(

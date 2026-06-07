@@ -342,7 +342,9 @@ pub(crate) fn interrupted_assistant_tail(blocks: &[UiTimelineItem], text: &str) 
 }
 
 fn append_live_projection_items(timeline: &mut UiTimeline, ui_state: &UiProjectionState) {
-    if let Some(text) = ui_state.live_reasoning_text.as_deref() {
+    if let Some(text) = ui_state.live_reasoning_text.as_deref()
+        && !reasoning_already_committed(timeline.items(), text)
+    {
         let _ = push_assistant_reasoning_item(timeline, text);
     }
     if let Some(text) = ui_state.live_assistant_text.as_deref()
@@ -350,6 +352,29 @@ fn append_live_projection_items(timeline: &mut UiTimeline, ui_state: &UiProjecti
     {
         let _ = push_assistant_text_item(timeline, &tail);
     }
+}
+
+/// Whether the live reasoning tail is already represented by a reasoning block
+/// committed to history. The durable-commit and the live-buffer clear are not
+/// synchronized, so after a turn commits its reasoning to history the live
+/// buffer can still hold the same text — appending it would render the
+/// reasoning twice (visible in full under Alt+O). During streaming the
+/// committed copy doesn't exist yet, so the live tail still renders.
+fn reasoning_already_committed(items: &[UiTimelineItem], live_text: &str) -> bool {
+    let live = normalize_assistant_text(live_text);
+    if live.is_empty() {
+        return false;
+    }
+    items.iter().any(|item| {
+        matches!(
+            item,
+            UiTimelineItem::AssistantReasoning(existing)
+                if {
+                    let existing = normalize_assistant_text(existing);
+                    existing == live || existing.contains(&live)
+                }
+        )
+    })
 }
 
 pub(crate) fn preview_text_lines(text: &str) -> Vec<String> {

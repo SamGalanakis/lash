@@ -495,7 +495,7 @@ submit "done via Restate E2E"
             .default_mode(ModeId::rlm())
             .provider(provider)
             .model(
-                lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+                lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
                     .expect("valid mock model spec"),
             )
             .store_factory(store_factory)

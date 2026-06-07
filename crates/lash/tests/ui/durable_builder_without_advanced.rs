@@ -6,7 +6,7 @@ async fn durable_core_without_advanced(
     provider: lash::provider::ProviderHandle,
     data_dir: &Path,
 ) -> lash::Result<lash::LashCore> {
-    let model = lash::ModelSpec::from_token_limits("compile-only", None, 4096, None, None)
+    let model = lash::ModelSpec::from_token_limits("compile-only", None, 4096, None)
         .expect("valid model metadata");
 
     LashCore::builder()

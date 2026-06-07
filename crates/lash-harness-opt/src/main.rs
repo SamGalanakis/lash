@@ -403,7 +403,6 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             self.variant.clone(),
             self.max_context_tokens,
             None,
-            None,
         )
         .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
         let core_builder = LashCore::rlm()

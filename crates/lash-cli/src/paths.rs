@@ -54,14 +54,6 @@ pub fn attachments_dir() -> PathBuf {
     lash_home().join("attachments")
 }
 
-pub fn artifacts_db_file() -> PathBuf {
-    lash_home().join("artifacts.db")
-}
-
-pub fn effects_db_file() -> PathBuf {
-    lash_home().join("effects.db")
-}
-
 /// Path to the CLI's model catalog cache.
 pub fn model_catalog_cache_file() -> PathBuf {
     lash_cache_dir().join("models.json")

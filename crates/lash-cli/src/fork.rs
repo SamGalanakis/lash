@@ -615,7 +615,6 @@ pub async fn fork_current_session(
             _model_variant.map(str::to_string),
             usize::try_from(_context_window).context("fork context window does not fit usize")?,
             None,
-            None,
         )
         .map_err(anyhow::Error::msg)?;
         SessionHead {
@@ -716,7 +715,7 @@ mod fork_tests {
                 config: lash_core::PersistedSessionConfig {
                     provider_id: dummy_provider().kind().to_string(),
                     model: lash_core::ModelSpec::from_token_limits(
-                        "gpt-test", None, 1024, None, None,
+                        "gpt-test", None, 1024, None,
                     )
                     .expect("valid model spec"),
                 },

@@ -132,7 +132,6 @@ async fn async_main() -> AnyhowResult<()> {
         Some(model_variant.clone()),
         DEFAULT_CONTEXT_WINDOW_TOKENS,
         None,
-        None,
     )
     .map_err(|err| anyhow!("invalid OPENROUTER_MODEL metadata: {err}"))?;
     let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
@@ -1218,7 +1217,6 @@ fn model_spec_for_request(
         model_variant,
         DEFAULT_CONTEXT_WINDOW_TOKENS,
         None,
-        None,
     )
     .map_err(AppError::bad_request)
 }
@@ -1245,7 +1243,6 @@ fn model_spec_from_selection(selection: ModelSelection) -> lash::ModelSpec {
         selection.model,
         selection.model_variant,
         DEFAULT_CONTEXT_WINDOW_TOKENS,
-        None,
         None,
     )
     .expect("workbench model selection should use a valid token limit")
@@ -2033,7 +2030,7 @@ mod tests {
             .complete_error("transient done test should not call the provider")
             .build()
             .into_handle();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
             .expect("model spec");
         let (event_tx, _) = broadcast::channel(16);
         let mut events = event_tx.subscribe();
@@ -2116,7 +2113,7 @@ mod tests {
             })
             .build()
             .into_handle();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
             .expect("model spec");
         let session_id = WorkbenchSessionIds::fresh().current();
         let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
@@ -2193,7 +2190,7 @@ mod tests {
             .complete_error("dynamic inbox surface test should not call the provider")
             .build()
             .into_handle();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
             .expect("model spec");
         let session_ids = WorkbenchSessionIds::fresh();
         let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
@@ -2295,7 +2292,7 @@ mod tests {
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let provider = trigger_registration_provider();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
             .expect("model spec");
         let session_ids = WorkbenchSessionIds::fresh();
         let session_id = session_ids.current();
@@ -2465,7 +2462,7 @@ mod tests {
             .complete(|_| async { Ok(trigger_registration_response()) })
             .build()
             .into_handle();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
             .expect("model spec");
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
         let (event_tx, _) = broadcast::channel(1024);
@@ -2634,7 +2631,7 @@ mod tests {
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let provider = trigger_registration_provider();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
             .expect("model spec");
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
         let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
@@ -2942,7 +2939,6 @@ mod tests {
             Some("high".to_string()),
             4096,
             None,
-            None,
         )
         .expect("model spec");
         let process_deployment = lash_restate::RestateProcessDeployment::new(
@@ -3198,7 +3194,7 @@ mod tests {
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     ) -> LashCore {
         let provider = trigger_registration_provider();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None, None)
+        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
             .expect("model spec");
         LashCore::builder()
             .install_mode(ModePreset::rlm_with_config(

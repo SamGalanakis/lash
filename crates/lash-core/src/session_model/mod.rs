@@ -420,7 +420,7 @@ mod tests {
     fn session_policy_serializes_provider_id_without_provider_handle() {
         let policy = SessionPolicy {
             provider_id: "mock-provider".to_string(),
-            model: ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+            model: ModelSpec::from_token_limits("mock-model", None, 200_000, None)
                 .expect("valid test model"),
             ..SessionPolicy::default()
         };

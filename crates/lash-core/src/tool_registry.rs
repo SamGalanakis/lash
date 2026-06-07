@@ -412,6 +412,12 @@ pub struct ToolRegistry {
     state: Arc<RwLock<ToolRegistryState>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceReconcilePolicy {
+    RejectExternalConflicts,
+    OverlayReplacingConflicts,
+}
+
 impl ToolRegistry {
     pub fn from_tool_provider(provider: Arc<dyn ToolProvider>) -> Result<Self, ReconfigureError> {
         let registry = Self::empty();
@@ -558,75 +564,20 @@ impl ToolRegistry {
         &self,
         source: Arc<dyn ToolSourceExecutor>,
     ) -> Result<u64, ReconfigureError> {
-        let source_id = source.id().to_string();
-        let advertised_tools = source
-            .advertised_tools()
-            .into_iter()
-            .map(|manifest| manifest_with_compact_contract(source.as_ref(), manifest))
-            .collect::<Vec<_>>();
-        validate_unique_manifests(&advertised_tools)?;
-
-        let mut state = self
-            .state
-            .write()
-            .expect("tool registry state lock poisoned");
-        let previous_overrides = state
-            .tools
-            .iter()
-            .map(|(name, entry)| (name.clone(), entry.manifest.availability_override))
-            .collect::<BTreeMap<_, _>>();
-        let same_source_names = state
-            .tools
-            .iter()
-            .filter_map(|(name, entry)| (entry.source_id == source_id).then_some(name.clone()))
-            .collect::<BTreeSet<_>>();
-        for manifest in &advertised_tools {
-            if let Some(existing) = state.tools.get(&manifest.name)
-                && existing.source_id != source_id
-            {
-                return Err(ReconfigureError::Validation(format!(
-                    "duplicate tool name `{}` from source `{}` conflicts with source `{}`",
-                    manifest.name, source_id, existing.source_id
-                )));
-            }
-            if let Some((existing_name, existing)) = state
-                .tools
-                .iter()
-                .find(|(_, entry)| entry.source_id != source_id && entry.manifest.id == manifest.id)
-            {
-                return Err(ReconfigureError::Validation(format!(
-                    "duplicate tool id `{}` from source `{}` conflicts with tool `{}` from source `{}`",
-                    manifest.id, source_id, existing_name, existing.source_id
-                )));
-            }
-        }
-        state.tools.retain(|name, entry| {
-            entry.source_id != source_id || !same_source_names.contains(name)
-        });
-
-        for mut manifest in advertised_tools {
-            let name = manifest.name.clone();
-            manifest.availability_override = previous_overrides
-                .get(&name)
-                .copied()
-                .flatten()
-                .or(manifest.availability_override);
-            state
-                .tools
-                .insert(name, ToolRegistryEntry::new(manifest, source_id.clone()));
-        }
-
-        self.sources
-            .write()
-            .expect("tool source lock poisoned")
-            .insert(source_id, source);
-        state.generation += 1;
-        Ok(state.generation)
+        self.reconcile_source(source, SourceReconcilePolicy::RejectExternalConflicts)
     }
 
     fn upsert_overlay_source(
         &self,
         source: Arc<dyn ToolSourceExecutor>,
+    ) -> Result<u64, ReconfigureError> {
+        self.reconcile_source(source, SourceReconcilePolicy::OverlayReplacingConflicts)
+    }
+
+    fn reconcile_source(
+        &self,
+        source: Arc<dyn ToolSourceExecutor>,
+        policy: SourceReconcilePolicy,
     ) -> Result<u64, ReconfigureError> {
         let source_id = source.id().to_string();
         let advertised_tools = source
@@ -648,16 +599,50 @@ impl ToolRegistry {
             .state
             .write()
             .expect("tool registry state lock poisoned");
+        let same_source_names = state
+            .tools
+            .iter()
+            .filter_map(|(name, entry)| (entry.source_id == source_id).then_some(name.clone()))
+            .collect::<BTreeSet<_>>();
         let previous_overrides = state
             .tools
             .iter()
             .map(|(name, entry)| (name.clone(), entry.manifest.availability_override))
             .collect::<BTreeMap<_, _>>();
-        state.tools.retain(|name, entry| {
-            entry.source_id != source_id
-                && !advertised_names.contains(name)
-                && !advertised_ids.contains(&entry.manifest.id)
-        });
+        match policy {
+            SourceReconcilePolicy::RejectExternalConflicts => {
+                for manifest in &advertised_tools {
+                    if let Some(existing) = state.tools.get(&manifest.name)
+                        && existing.source_id != source_id
+                    {
+                        return Err(ReconfigureError::Validation(format!(
+                            "duplicate tool name `{}` from source `{}` conflicts with source `{}`",
+                            manifest.name, source_id, existing.source_id
+                        )));
+                    }
+                    if let Some((existing_name, existing)) =
+                        state.tools.iter().find(|(_, entry)| {
+                            entry.source_id != source_id && entry.manifest.id == manifest.id
+                        })
+                    {
+                        return Err(ReconfigureError::Validation(format!(
+                            "duplicate tool id `{}` from source `{}` conflicts with tool `{}` from source `{}`",
+                            manifest.id, source_id, existing_name, existing.source_id
+                        )));
+                    }
+                }
+                state.tools.retain(|name, entry| {
+                    entry.source_id != source_id || !same_source_names.contains(name)
+                });
+            }
+            SourceReconcilePolicy::OverlayReplacingConflicts => {
+                state.tools.retain(|name, entry| {
+                    entry.source_id != source_id
+                        && !advertised_names.contains(name)
+                        && !advertised_ids.contains(&entry.manifest.id)
+                });
+            }
+        }
         for mut manifest in advertised_tools {
             let name = manifest.name.clone();
             manifest.availability_override = previous_overrides

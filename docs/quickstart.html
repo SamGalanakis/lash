@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
 <link rel="stylesheet" href="./styles.css?v=11">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=6" defer></script>
+<script src="./docs.js?v=7" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash</code> &middot; <code>crates/lash-providers-builtin</code>">
@@ -66,8 +66,8 @@
       <p>Pin the alpha pre-release explicitly and add the provider crate you actually use.</p>
     </div>
 <pre data-lang="cargo.toml"><code>[dependencies]
-lash-runtime         = "=0.1.0-alpha.30"
-lash-provider-openai = "=0.1.0-alpha.30"
+lash-runtime         = "=0.1.0-alpha.33"
+lash-provider-openai = "=0.1.0-alpha.33"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }</code></pre>
     <p>For ordinary projects the facade and provider crates are enough. Drop down to <code>lash-core</code> only for custom runtime hosts, explicit process registries, store implementations, or diagnostics that need internal state.</p>

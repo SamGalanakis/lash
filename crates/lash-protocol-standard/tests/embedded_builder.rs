@@ -7,7 +7,7 @@ use lash_core::{
 use lash_turso_store::Store;
 
 fn test_model_spec() -> ModelSpec {
-    ModelSpec::from_token_limits("gpt-5.4-mini", None, 200_000, None, None)
+    ModelSpec::from_token_limits("gpt-5.4-mini", None, 200_000, None)
         .expect("valid test model spec")
 }
 
