@@ -12,73 +12,61 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=10">
+<link rel="stylesheet" href="./styles.css?v=11">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=5" defer></script>
+<script src="./docs.js?v=6" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash-plugin-plan-mode</code>, <code>crates/lash</code>.">
 <section class="opener">
     <h1 class="opener__title">writing<span class="slash">/</span>plugins</h1>
-    <p class="opener__lede">The three traits you implement (<code>PluginFactory</code>, <code>SessionPlugin</code>, <code>ToolProvider</code>), the default stack, a minimal worked example, and the registrar hook namespaces. Companion pages cover the tool surface and the runtime contract.</p>
+    <p class="opener__lede">Write a plugin when host behavior needs to join the Lash runtime: tools, prompt contributions, tool-surface policy, turn hooks, runtime events, plugin state, or typed per-turn input.</p>
   </section>
 
   <main class="body" id="content">
-<div class="section" id="three-traits">
-          <div class="section-header">
-            <h2>Three Traits, Two Lifetimes</h2>
-            <p>A plugin lives at two timescales: the <strong>factory</strong> exists for the lifetime of the <code>LashCore</code> and is shared across every session built from it; the <strong>session plugin</strong> exists for one <code>LashSession</code>. The factory is asked to build a fresh session plugin every time a session opens. Both must be cheap to construct.</p>
-          </div>
-          <div class="def-list-grid">
-            <article class="panel">
-              <h3><code>PluginFactory</code></h3>
-              <p>Per-core. Owns expensive, shared state. Builds a <code>SessionPlugin</code> on demand. Don't do I/O in <code>build()</code> — it runs on the hot path for every new session, every subagent, every fork, every compaction child.</p>
-              <pre><code>pub trait PluginFactory: Send + Sync {
-    fn id(&amp;self) -&gt; &amp;'static str;
-    fn build(
-        &amp;self,
-        ctx: &amp;PluginSessionContext,
-    ) -&gt; Result&lt;Arc&lt;dyn SessionPlugin&gt;, PluginError&gt;;
-}</code></pre>
-            </article>
-            <article class="panel">
-              <h3><code>SessionPlugin</code></h3>
-              <p>Per-session. Wires hooks into a <code>PluginRegistrar</code> during <code>register()</code>, then participates in the session for its lifetime. Optionally implements <code>snapshot</code> / <code>restore</code> for durability across resume.</p>
-              <pre><code>pub trait SessionPlugin: Send + Sync {
-    fn id(&amp;self) -&gt; &amp;'static str;
-    fn register(
-        &amp;self,
-        reg: &amp;mut PluginRegistrar,
-    ) -&gt; Result&lt;(), PluginError&gt;;
-    // …snapshot / restore / session_ready hooks
-}</code></pre>
-            </article>
-            <article class="panel">
-              <h3><code>ToolProvider</code></h3>
-              <p>If your plugin exposes tools, implement this on a struct and hand it to <code>reg.tools().provider(...)</code>. <code>tool_manifests()</code> advertises cheap prompt/search metadata, <code>resolve_contract()</code> loads the full contract for a named tool, and <code>execute()</code> is async and runs the actual tool work. Cache manifest and contract construction when the surface is large.</p>
-              <pre><code>pub trait ToolProvider: Send + Sync + 'static {
-    fn tool_manifests(&amp;self) -&gt; Vec&lt;ToolManifest&gt;;
-    fn resolve_contract(&amp;self, name: &amp;str) -&gt; Option&lt;Arc&lt;ToolContract&gt;&gt;;
-    async fn execute(&amp;self, call: ToolCall&lt;'_&gt;) -&gt; ToolResult;
-}</code></pre>
-            </article>
-          </div>
-        </div>
+    <div class="section" id="what-this-is">
+      <div class="section-header">
+        <h2>What This Is</h2>
+        <p>A plugin is a per-core factory that builds per-session behavior. It can register tools, prompts, hook closures, output transforms, runtime actions, protocol pieces, and durable plugin state.</p>
+      </div>
+      <dl class="def-list">
+        <dt><code>PluginFactory</code></dt>
+        <dd>Per-core. Owns shared state and cheaply builds a fresh <code>SessionPlugin</code> whenever a session opens.</dd>
+        <dt><code>SessionPlugin</code></dt>
+        <dd>Per-session. Registers hooks through <code>PluginRegistrar</code> and optionally participates in snapshot/restore.</dd>
+        <dt><code>ToolProvider</code></dt>
+        <dd>Optional. Advertises cheap manifests, resolves full contracts, prepares calls, and executes tool work.</dd>
+      </dl>
+    </div>
 
-        <div class="section" id="default-stack">
-          <div class="section-header">
-            <h2>Default Stack</h2>
-            <p><code>PluginStack</code> is the app-facing plugin list. The preset constructors include the runtime defaults; the raw builder stays explicit for hosts that want to own every factory.</p>
-          </div>
-          <div class="two-col">
-            <article class="panel">
-              <h3>Start From Runtime Defaults</h3>
-              <pre><code>use std::sync::Arc;
+    <div class="section" id="when-to-use-it">
+      <div class="section-header">
+        <h2>When To Use It</h2>
+        <p>Use a plugin when behavior belongs to the runtime surface rather than the app route handler.</p>
+      </div>
+      <div class="listing">
+        <div class="listing__row">
+          <div class="listing__label">use when</div>
+          <div class="listing__body"><p>You need reusable tools, prompt contributions, stateful turn hooks, custom tool visibility, typed plugin input, or session-local state that resumes with Lash.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">avoid when</div>
+          <div class="listing__body"><p>The behavior is pure product routing, auth, frontend persistence, or app database work that does not need to appear in model context or runtime hooks.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section" id="minimal-example">
+      <div class="section-header">
+        <h2>Minimal Example</h2>
+        <p>Start from the runtime defaults and append one plugin factory. Preset builders include the default runtime stack; raw builders stay explicit.</p>
+      </div>
+<pre data-lang="rust"><code>use std::sync::Arc;
 use lash::{plugins::PluginFactory, LashCore};
 
 let core = LashCore::rlm()
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None, None).expect("valid model metadata"))
+    .model(lash::ModelSpec::from_token_limits(model_id, None, 200_000, None, None)?)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
     .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
@@ -86,68 +74,37 @@ let core = LashCore::rlm()
         plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
     })
     .build()?;</code></pre>
-            </article>
-            <article class="panel">
-              <h3>Replace Or Remove</h3>
-              <pre><code>use std::sync::Arc;
-use lash::{
-    plugins::{runtime_plugin_stack, ToolOutputBudgetPluginFactory}, LashCore, ModeId, ModePreset,
-};
+      <p>Use <code>.plugin(...)</code> to append one factory, <code>.plugins(...)</code> to replace the full stack, and <code>.configure_plugins(...)</code> to mutate the current stack.</p>
+    </div>
 
-let plugins = runtime_plugin_stack().configure(|plugins| {
-    plugins.replace(Arc::new(ToolOutputBudgetPluginFactory::new(config)));
-    plugins.remove("some_optional_plugin");
-});
-
-let core = LashCore::builder()
-    .install_mode(ModePreset::rlm())
-    .default_mode(ModeId::rlm())
-    .provider(provider)
-    .model(lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None, None).expect("valid model metadata"))
-    .plugins(plugins)
-    .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
-    .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
-    .build()?;</code></pre>
-            </article>
-          </div>
-          <p>Use <code>.plugin(...)</code> to append one factory, <code>.plugins(...)</code> to replace the full stack, and <code>.configure_plugins(...)</code> to mutate the current stack. <code>runtime_plugin_stack()</code> currently installs the built-in <code>ToolOutputBudgetPluginFactory</code>, which budgets oversized tool outputs for state, model context, and history projection.</p>
-        </div>
-
-        <div class="section" id="worked-example">
-          <div class="section-header">
-            <h2>A Worked Example</h2>
-            <p>The plan-mode plugin (<code>lash-plugin-plan-mode</code>) is a good single-file model. It exposes one tool (<code>update_plan</code>), keeps a session-local state shared between the tool and an after-tool hook, gates itself off in non-root sessions, and emits a TUI surface event when the plan changes. The skeleton:</p>
-          </div>
-          <pre><code>use std::sync::{Arc, Mutex};
+    <div class="section" id="worked-example">
+      <div class="section-header">
+        <h2>Worked Example</h2>
+        <p>The plan-mode plugin is a compact model: one factory, one session plugin, a session-local state object, one tool provider, and hooks that emit UI state after tool calls.</p>
+      </div>
+<pre data-lang="rust"><code>use std::sync::{Arc, Mutex};
 use lash::plugins::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
-use lash::tools::{
-    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
-};
+use lash::tools::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult};
 
 const PLUGIN_ID: &amp;str = "update_plan";
 
-// 1. Factory — per-core, cheap to build.
 pub struct UpdatePlanPluginFactory;
 
 impl PluginFactory for UpdatePlanPluginFactory {
     fn id(&amp;self) -&gt; &amp;'static str { PLUGIN_ID }
 
-    fn build(
-        &amp;self,
-        ctx: &amp;PluginSessionContext,
-    ) -&gt; Result&lt;Arc&lt;dyn SessionPlugin&gt;, PluginError&gt; {
+    fn build(&amp;self, ctx: &amp;PluginSessionContext)
+        -&gt; Result&lt;Arc&lt;dyn SessionPlugin&gt;, PluginError&gt;
+    {
         Ok(Arc::new(UpdatePlanPlugin {
-            // Gate by context: only enable in root sessions.
             active: ctx.is_root_session(),
             state: Arc::new(Mutex::new(PlanState::default())),
         }))
     }
 }
 
-// 2. SessionPlugin — per-session, wires hooks during register().
 struct UpdatePlanPlugin {
     active: bool,
     state: Arc&lt;Mutex&lt;PlanState&gt;&gt;,
@@ -165,8 +122,9 @@ impl SessionPlugin for UpdatePlanPlugin {
     }
 }
 
-// 3. ToolProvider — manifests advertise, contracts validate, execute() runs.
-struct UpdatePlanTool { state: Arc&lt;Mutex&lt;PlanState&gt;&gt; }
+struct UpdatePlanTool {
+    state: Arc&lt;Mutex&lt;PlanState&gt;&gt;,
+}
 
 #[async_trait::async_trait]
 impl ToolProvider for UpdatePlanTool {
@@ -179,55 +137,80 @@ impl ToolProvider for UpdatePlanTool {
     }
 
     async fn execute(&amp;self, call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
-        // Read call.args, validate, mutate self.state, emit ToolResult::ok(...).
+        // Validate call.args, mutate state, then return a typed payload.
         ToolResult::ok(serde_json::json!({ "generation": 1 }))
     }
 }
 
 fn update_plan_definition() -&gt; ToolDefinition {
     ToolDefinition::raw(
-            "tool:update_plan",
-            "update_plan",
-            "Publish or replace the current plan.",
-            serde_json::json!({ "type": "object", "properties": { /* … */ } }),
-            serde_json::json!({}),
+        "tool:update_plan",
+        "update_plan",
+        "Publish or replace the current plan.",
+        serde_json::json!({ "type": "object", "properties": {} }),
+        serde_json::json!({}),
     )
 }</code></pre>
-          <p>Real plugins typically register multiple hooks in the same <code>register()</code> call (e.g. a tool plus an after-tool hook that emits a UI event, plus a prompt contribution describing the tool). See <code>lash-plugin-plan-mode</code> for the full version.</p>
-        </div>
+      <aside class="callout callout--note">
+        <strong>Note</strong>
+        <p>Real plugins usually register more than a tool: prompt hooks to explain it, before/after-tool hooks to update state, and snapshot hooks when state must survive session resume.</p>
+      </aside>
+    </div>
 
-        <div class="section" id="what-you-can-register">
-          <div class="section-header">
-            <h2>What You Can Register</h2>
-            <p>The <code>PluginRegistrar</code> exposes hook namespaces. Each returns a small builder you push closures into. The most common groups:</p>
-          </div>
-          <div class="table">
-            <table>
-              <thead><tr><th>Method</th><th>What you register</th></tr></thead>
-              <tbody>
-                <tr><td><code>reg.tools()</code></td><td>One or more <code>ToolProvider</code> implementations.</td></tr>
-                <tr><td><code>reg.prompt()</code></td><td>Async <code>PromptContribution</code> producers — system/environment/tool-doc blocks composed into the model prompt.</td></tr>
-                <tr><td><code>reg.surface()</code></td><td>Tool-surface overrides — change which tools are visible / callable / showcased per session or per turn.</td></tr>
-                <tr><td><code>reg.discovery()</code></td><td>Hints for the tool-discovery ranker (lexical, embedding, schema indexing).</td></tr>
-                <tr><td><code>reg.turn()</code></td><td>Before-turn / after-turn / checkpoint hooks.</td></tr>
-                <tr><td><code>reg.tool_calls()</code></td><td>Before-tool / after-tool hooks. Useful for emitting UI events or mutating session state in response to specific tools.</td></tr>
-                <tr><td><code>reg.output()</code></td><td>Hooks on assistant streaming output, final responses, and visible-prose projection.</td></tr>
-                <tr><td><code>reg.tool_results()</code></td><td>Tool-output budgeting and projection. <strong>Exclusive</strong> — only one plugin can register a projector per session.</td></tr>
-                <tr><td><code>reg.session()</code></td><td>Runtime-event observers and config mutators.</td></tr>
-                <tr><td><code>reg.actions()</code></td><td>Typed or raw RPC-shaped entry points the host can invoke directly, without going through tool calls.</td></tr>
-                <tr><td><code>reg.history()</code></td><td>History transforms and rewrites that run as part of compaction / rolling history.</td></tr>
-                <tr><td><code>reg.protocol()</code> / <code>reg.execution()</code></td><td>Protocol driver/session and optional code execution. Most users install the built-in <code>lash-protocol-standard</code> or <code>lash-protocol-rlm</code> presets.</td></tr>
-              </tbody>
-            </table>
-          </div>
+    <div class="section" id="common-tasks">
+      <div class="section-header">
+        <h2>Common Tasks</h2>
+        <p>The registrar namespaces keep plugin responsibilities explicit.</p>
+      </div>
+      <div class="table">
+        <table>
+          <thead><tr><th>Task</th><th>Register</th><th>Canonical guide</th></tr></thead>
+          <tbody>
+            <tr><td>Add host tools</td><td><code>reg.tools().provider(...)</code></td><td><a href="./plugins-tools.html">Tool plugins</a></td></tr>
+            <tr><td>Add prompt context</td><td><code>reg.prompt()</code></td><td><a href="./embedding-prompts.html">Prompts and bindings</a></td></tr>
+            <tr><td>Change visible tools</td><td><code>reg.surface()</code></td><td><a href="./plugins-tools.html">Tool plugins</a></td></tr>
+            <tr><td>React before/after turns</td><td><code>reg.turn()</code></td><td><a href="./plugins-runtime.html">Runtime plugins</a></td></tr>
+            <tr><td>React before/after tool calls</td><td><code>reg.tool_calls()</code></td><td><a href="./plugins-runtime.html">Runtime plugins</a></td></tr>
+            <tr><td>Expose host actions</td><td><code>reg.actions()</code></td><td><a href="./plugins-runtime.html">Runtime plugins</a></td></tr>
+            <tr><td>Control history projection</td><td><code>reg.history()</code></td><td><a href="./embedding-prompts.html">Prompts and bindings</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section" id="failure-modes">
+      <div class="section-header">
+        <h2>Failure Modes</h2>
+        <p>Most plugin bugs come from lifetime confusion, expensive factories, duplicate exclusive hooks, or state that was not snapshotted.</p>
+      </div>
+      <div class="listing">
+        <div class="listing__row">
+          <div class="listing__label">slow open</div>
+          <div class="listing__body"><p><code>PluginFactory::build()</code> runs whenever a session opens, including children and resumed sessions. Do not perform network I/O there; keep shared clients on the factory.</p></div>
         </div>
+        <div class="listing__row">
+          <div class="listing__label">lost state</div>
+          <div class="listing__body"><p>Session-local plugin state must implement snapshot/restore if it should survive persistence. Otherwise the plugin restarts with default in-memory state after reopen.</p></div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">surface drift</div>
+          <div class="listing__body"><p>Tool manifests are prompt/search metadata; full contracts are resolved later. Keep both generated from the same source so the model does not see stale schemas.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section" id="where-next">
+      <div class="section-header">
+        <h2>Where Next</h2>
+        <p>This page is the canonical plugin-writing guide. Use the references below for deeper contracts.</p>
+      </div>
+      <div data-related="plugins-tools.html plugins-runtime.html embedding-prompts.html architecture/providers.html architecture/abstractions.html"></div>
+    </div>
   </main>
 
   <section class="pager" aria-label="chapter navigation">
   <div class="pager__rail">read on &middot;</div>
   <div class="pager__main">
-    <a class="pager__prev" href="./cli.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>cli</strong></a>
-    <a class="pager__next" href="./plugins-tools.html"><span>next</span><strong>plugins · tools</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
 </section>
 </body>

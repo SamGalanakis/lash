@@ -6,115 +6,333 @@
 (function () {
   "use strict";
 
-  const SCENE_ASSET_VERSION = "3";
+  const SCENE_ASSET_VERSION = "6";
 
-  // ── single global TOC structure for the docs ──────────────
-  // Edit this when adding / renaming / reordering pages.
-  // hrefs are relative to /docs/ (top level); architecture pages
-  // use "architecture/<name>.html".
-  // Items can be a plain link {name, href} OR a nested subgroup
-  // {label, items: [...]} that renders as a small heading + indented
-  // children. Subgroups exist so repeated prefixes like "lashlang ·"
-  // collapse into one label.
-  const TOC = [
+  // ── docs registry ────────────────────────────────────────
+  // The docs registry is the single canonical source for navigation,
+  // pager order, landing cards, search page labels, and related-link
+  // surfaces. hrefs are relative to /docs/ (top level);
+  // architecture pages use "architecture/<name>.html".
+  //
+  // Moved/stub pages are intentionally omitted: they stay on disk for
+  // external compatibility, but they must not appear in canonical nav,
+  // pager order, landing cards, search, or related-link flows.
+  const DOCS = [
     {
-      label: "start",
+      label: "Start here",
+      summary: "Install the runtime, run a turn, and choose the next task path.",
+      href: "quickstart.html",
       items: [
-        { name: "quickstart", href: "quickstart.html" },
-        { name: "cli",        href: "cli.html" },
+        {
+          title: "Quickstart",
+          href: "quickstart.html",
+          summary: "Add the crate, configure a provider, open a session, and run one collected turn.",
+          kind: "guide",
+        },
+        {
+          title: "Task index",
+          href: "tasks.html",
+          summary: "Pick a common job: stream a turn, persist a session, add a tool, expose state, spawn subagents, run background work, or inspect traces.",
+          kind: "guide",
+        },
+        {
+          title: "Using the CLI",
+          href: "cli.html",
+          summary: "Run Lash from the terminal, configure providers, resume sessions, export traces, and use slash commands.",
+          kind: "reference",
+        },
       ],
     },
     {
-      label: "lash api",
+      label: "Build an app",
+      summary: "Wire Lash into a product backend with sessions, turns, prompts, persistence, and traces.",
+      href: "embedding.html",
       items: [
-        { name: "basics",   href: "embedding.html" },
-        { name: "turns",    href: "embedding-turns.html" },
-        { name: "prompts",  href: "embedding-prompts.html" },
-        { name: "advanced", href: "embedding-advanced.html" },
+        {
+          title: "API basics",
+          href: "embedding.html",
+          summary: "The core/session/turn facade and the host-owned runtime facets every app names explicitly.",
+          kind: "guide",
+        },
+        {
+          title: "Turns and streams",
+          href: "embedding-turns.html",
+          summary: "Turn outcomes, live semantic activity, streaming sinks, usage events, and RLM submit behavior.",
+          kind: "guide",
+        },
+        {
+          title: "Prompts and bindings",
+          href: "embedding-prompts.html",
+          summary: "Context strategy, prompt templates, typed plugin input, and projected RLM bindings.",
+          kind: "guide",
+        },
+        {
+          title: "Advanced runtime",
+          href: "embedding-advanced.html",
+          summary: "Session lifecycle, durable effect scopes, subagents, MCP servers, and advanced host controls.",
+          kind: "guide",
+        },
+        {
+          title: "Persistence",
+          href: "persistence.html",
+          summary: "Install a session store, understand what persists, handle CAS conflicts, and garbage-collect durable state.",
+          kind: "guide",
+        },
+        {
+          title: "Tracing",
+          href: "tracing.html",
+          summary: "Attach TraceSink, write JSONL, inspect Lashlang execution graphs, and render trace reports.",
+          kind: "guide",
+        },
       ],
     },
     {
-      label: "rlm",
+      label: "RLM and lashlang",
+      summary: "Let the model write Lashlang programs while all effects stay behind host boundaries.",
+      href: "rlm.html",
       items: [
-        { name: "protocol", href: "rlm.html" },
+        {
+          title: "RLM protocol",
+          href: "rlm.html",
+          summary: "Prompt construction, history projection, variables, execution loop, finish semantics, and failure modes.",
+          kind: "guide",
+        },
+        {
+          title: "Lashlang language",
+          href: "architecture/lashlang.html",
+          summary: "Syntax, module shape, foreground blocks, processes, labels, and language-level diagnostics.",
+          kind: "reference",
+        },
+        {
+          title: "Lashlang effects",
+          href: "architecture/lashlang-effects.html",
+          summary: "Executor effects, projected host bindings, trigger registry, process wiring, and module artifacts.",
+          kind: "internal",
+        },
+        {
+          title: "Lashlang runtime",
+          href: "architecture/lashlang-runtime.html",
+          summary: "Parser, linker, compiler, VM, bytecode, artifact cache, and runtime execution internals.",
+          kind: "internal",
+        },
       ],
     },
     {
-      label: "examples",
+      label: "Examples",
+      summary: "See complete hosts that combine runtime, product state, tools, UI, persistence, and workflow edges.",
+      href: "examples.html",
       items: [
-        { name: "overview",        href: "examples.html" },
-        { name: "agent service",   href: "example-agent-service.html" },
-        { name: "agent workbench", href: "example-agent-workbench.html" },
+        {
+          title: "Examples overview",
+          href: "examples.html",
+          summary: "Choose between the browser agent service and the process-heavy workbench walkthrough.",
+          kind: "guide",
+        },
+        {
+          title: "Agent service",
+          href: "example-agent-service.html",
+          summary: "Browser chat app with RLM, streaming, board tools, SQLite app state, and optional Restate turns.",
+          kind: "example",
+        },
+        {
+          title: "Agent workbench",
+          href: "example-agent-workbench.html",
+          summary: "Trigger, process, cron, mail, and queued-work example for background-capable hosts.",
+          kind: "example",
+        },
       ],
     },
     {
-      label: "plugins",
+      label: "Extend lash",
+      summary: "Add host tools, plugins, prompt hooks, runtime hooks, providers, and tool-surface policies.",
+      href: "plugins.html",
       items: [
-        { name: "writing", href: "plugins.html" },
-        { name: "tools",   href: "plugins-tools.html" },
-        { name: "runtime", href: "plugins-runtime.html" },
+        {
+          title: "Plugin basics",
+          href: "plugins.html",
+          summary: "Implement PluginFactory, SessionPlugin, ToolProvider, and registrar hooks.",
+          kind: "guide",
+        },
+        {
+          title: "Tool plugins",
+          href: "plugins-tools.html",
+          summary: "Advertise manifests, resolve contracts, validate args, execute tools, and expose tool surfaces.",
+          kind: "guide",
+        },
+        {
+          title: "Runtime plugins",
+          href: "plugins-runtime.html",
+          summary: "Persist plugin state, restore snapshots, and hook into runtime/session lifecycle.",
+          kind: "reference",
+        },
+        {
+          title: "Providers",
+          href: "architecture/providers.html",
+          summary: "Provider request/response normalization, cache policy, usage mapping, and adding a provider crate.",
+          kind: "reference",
+        },
       ],
     },
     {
-      label: "lashlang",
+      label: "Architecture",
+      summary: "Understand why the runtime is split into facade, core, protocol, language, provider, store, and export crates.",
+      href: "architecture/index.html",
       items: [
-        { name: "language", href: "architecture/lashlang.html" },
-        { name: "effects",  href: "architecture/lashlang-effects.html" },
-        { name: "runtime",  href: "architecture/lashlang-runtime.html" },
+        {
+          title: "System paths",
+          href: "architecture/index.html",
+          summary: "Entry points into the architecture docs for builders, contributors, and debuggers.",
+          kind: "internal",
+        },
+        {
+          title: "System overview",
+          href: "architecture/overview.html",
+          summary: "The runtime boundary, session graph, host effects, plugins, providers, and stores at a glance.",
+          kind: "internal",
+        },
+        {
+          title: "Crate map",
+          href: "architecture/modules.html",
+          summary: "Workspace module boundaries and which crates own which responsibilities.",
+          kind: "internal",
+        },
+        {
+          title: "Data flow",
+          href: "architecture/flow.html",
+          summary: "How input, prompts, LLM effects, tool effects, graph commits, and projections move through a turn.",
+          kind: "internal",
+        },
+        {
+          title: "Execution",
+          href: "architecture/execution.html",
+          summary: "Turn machine phases, protocol drivers, stream projection, and runtime execution boundaries.",
+          kind: "internal",
+        },
+        {
+          title: "Runtime host",
+          href: "architecture/runtime.html",
+          summary: "Runtime environment, host services, session lifecycle, residency, queued work, and effects.",
+          kind: "internal",
+        },
+        {
+          title: "Contracts",
+          href: "architecture/abstractions.html",
+          summary: "Core abstractions and invariants across sessions, plugins, tools, providers, and stores.",
+          kind: "internal",
+        },
+        {
+          title: "Durability and replay",
+          href: "architecture/durability.html",
+          summary: "EffectHost, ScopedEffectController, workflow replay, idempotent commits, and durable background work.",
+          kind: "internal",
+        },
       ],
     },
     {
-      label: "architecture",
+      label: "Reference",
+      summary: "Jump to API indices and low-level supporting references.",
+      href: "architecture/reference.html",
       items: [
-        { name: "system",          href: "architecture/index.html" },
-        { name: "overview",        href: "architecture/overview.html" },
-        { name: "modules",         href: "architecture/modules.html" },
-        { name: "flow",            href: "architecture/flow.html" },
-        { name: "execution",       href: "architecture/execution.html" },
-        { name: "execution modes", href: "architecture/execution-modes.html" },
-        { name: "runtime",         href: "architecture/runtime.html" },
-        { name: "abstractions",    href: "architecture/abstractions.html" },
-      ],
-    },
-    {
-      label: "persistence",
-      items: [
-        { name: "overview",   href: "persistence.html" },
-        { name: "durability", href: "architecture/durability.html" },
-      ],
-    },
-    {
-      label: "tracing",
-      items: [
-        { name: "overview",     href: "tracing.html" },
-        { name: "trace export", href: "trace-export-edges.html" },
-      ],
-    },
-    {
-      label: "reference",
-      items: [
-        { name: "api (docs.rs)", href: "architecture/reference.html" },
-        { name: "providers",     href: "architecture/providers.html" },
-        { name: "html exporter", href: "architecture/html-exporter.html" },
-        { name: "deps",          href: "architecture/deps.html" },
+        {
+          title: "API reference",
+          href: "architecture/reference.html",
+          summary: "Rustdoc index for facade, core, provider, protocol, store, trace, export, and example crates.",
+          kind: "reference",
+        },
+        {
+          title: "Remote protocol",
+          href: "remote-protocol.html",
+          summary: "Versioned DTOs for exposing Lash through HTTP, queues, callbacks, workflow handlers, and remote tool transports.",
+          kind: "reference",
+        },
+        {
+          title: "Dependency map",
+          href: "architecture/deps.html",
+          summary: "Workspace dependency boundaries and crate-layer constraints.",
+          kind: "reference",
+        },
+        {
+          title: "HTML exporter",
+          href: "architecture/html-exporter.html",
+          summary: "Exporter internals for session trace HTML and static assets.",
+          kind: "reference",
+        },
+        {
+          title: "Trace export",
+          href: "trace-export-edges.html",
+          summary: "Trace edge cases and export behaviors that matter for downstream viewers.",
+          kind: "reference",
+        },
       ],
     },
   ];
 
-  // Flatten the TOC into a single ordered list of {name, href} for
-  // pager auto-fill and any other code that wants the linear order.
-  function flatTOC() {
-    const out = [];
-    const visit = (item) => {
-      if (item.items) {
-        if (item.href) out.push({ name: item.label, href: item.href });
-        item.items.forEach(visit);
-      } else if (item.href) {
-        out.push(item);
-      }
-    };
-    TOC.forEach(visit);
+  const MOVED_STUB_HREFS = new Set([
+    "architecture.html",
+    "architecture/execution-modes.html",
+  ]);
+
+  function normalizeDocHref(href) {
+    if (!href) return "";
+    let out = String(href).trim();
+    out = out.replace(/^[.]\//, "");
+    out = out.replace(/^\/docs\//, "");
+    out = out.replace(/^docs\//, "");
+    out = out.replace(/[?#].*$/, "");
+    if (out === "" || out === "/") return "index.html";
+    out = out.replace(/^\//, "");
+    if (out.endsWith("/")) out += "index.html";
+    if (out === "architecture/") return "architecture/index.html";
     return out;
+  }
+
+  function flatDocs() {
+    const out = [];
+    for (const group of DOCS) {
+      for (const item of group.items || []) {
+        const href = normalizeDocHref(item.href);
+        if (!href || MOVED_STUB_HREFS.has(href)) continue;
+        out.push({
+          ...item,
+          href,
+          track: group.label,
+          trackSummary: group.summary,
+        });
+      }
+    }
+    return out;
+  }
+
+  const DOCS_BY_HREF = new Map(flatDocs().map((page) => [page.href, page]));
+
+  // Keep the old TOC shape as a view of the registry; renderers below
+  // consume TOC so the nav code stays small.
+  const TOC = DOCS.map((group) => ({
+    label: group.label,
+    summary: group.summary,
+    href: normalizeDocHref(group.href),
+    items: (group.items || [])
+      .filter((item) => !MOVED_STUB_HREFS.has(normalizeDocHref(item.href)))
+      .map((item) => ({
+        name: item.title,
+        title: item.title,
+        href: normalizeDocHref(item.href),
+        summary: item.summary,
+        kind: item.kind,
+      })),
+  }));
+
+  // Flatten the TOC into a single ordered list for pager auto-fill and
+  // any other code that wants the canonical linear order.
+  function flatTOC() {
+    return flatDocs().map((page) => ({
+      name: page.title,
+      title: page.title,
+      href: page.href,
+      summary: page.summary,
+      kind: page.kind,
+      track: page.track,
+    }));
   }
 
   // ── helpers ─────────────────────────────────────────────
@@ -288,8 +506,6 @@
   function buildPager() {
     const host = document.querySelector(".pager__main");
     if (!host) return;
-    // skip if the page already provided explicit prev/next links
-    if (host.querySelector(".pager__prev, .pager__next")) return;
     const flat = flatTOC();
     const cur = currentPath();
     const idx = flat.findIndex(e => e.href === cur);
@@ -310,6 +526,70 @@
         `</a>`
       : '<span></span>';
     host.innerHTML = prevHtml + nextHtml;
+  }
+
+  function pageForHref(href) {
+    return DOCS_BY_HREF.get(normalizeDocHref(href)) || null;
+  }
+
+  function trackEntryPage(group) {
+    return pageForHref(group.href) || pageForHref((group.items && group.items[0] && group.items[0].href) || "");
+  }
+
+  function mountLandingRegistry() {
+    const host = document.querySelector("[data-docs-landing]");
+    if (!host) return;
+    const base = tocBase();
+    const rows = [];
+    for (const group of DOCS) {
+      const page = trackEntryPage(group);
+      if (!page) continue;
+      rows.push(
+        `<a class="listing__row docs-registry-row" href="${escapeHtml(base + page.href)}">` +
+          `<div class="listing__label">${escapeHtml(group.label)}</div>` +
+          `<div class="listing__body">` +
+            `<p>${escapeHtml(group.summary || page.summary || "")}</p>` +
+            `<span class="docs-registry-row__meta">${escapeHtml(page.title)} &middot; ${escapeHtml(page.kind || "page")}</span>` +
+          `</div>` +
+        `</a>`
+      );
+    }
+    host.innerHTML = rows.join("");
+  }
+
+  function mountRelatedLinks() {
+    const hosts = document.querySelectorAll("[data-related]");
+    if (!hosts.length) return;
+    const base = tocBase();
+    hosts.forEach((host) => {
+      const refs = (host.getAttribute("data-related") || "")
+        .split(/[,\s]+/)
+        .map((ref) => ref.trim())
+        .filter(Boolean);
+      const pages = [];
+      const seen = new Set();
+      refs.forEach((ref) => {
+        const page = pageForHref(ref);
+        if (!page || seen.has(page.href)) return;
+        seen.add(page.href);
+        pages.push(page);
+      });
+      if (!pages.length) {
+        host.innerHTML = "";
+        return;
+      }
+      if (!host.getAttribute("aria-label")) {
+        host.setAttribute("aria-label", "related documentation");
+      }
+      host.classList.add("related-links");
+      host.innerHTML = pages.map((page) =>
+        `<a class="related-links__item" href="${escapeHtml(base + page.href)}">` +
+          `<span class="related-links__kind">${escapeHtml(page.kind || "page")}</span>` +
+          `<strong>${escapeHtml(page.title)}</strong>` +
+          `<span>${escapeHtml(page.summary || "")}</span>` +
+        `</a>`
+      ).join("");
+    });
   }
 
   // ── auto-knot — only on the landing (no .docs-page class) ──
@@ -673,6 +953,8 @@
       // post-swap re-init — TOC active state, per-page outline, spine,
       // mermaid, scene
       refreshTOCActive();
+      buildPager();
+      mountRelatedLinks();
       injectPageOutline();
       drawSpineSnake();
       loadMermaidIfNeeded();
@@ -761,10 +1043,10 @@
     // flatten TOC into the unique page list, preserving order
     const seen = new Set();
     const pages = [];
-    for (const { name, href } of flatTOC()) {
+    for (const { title, name, href, summary, kind, track } of flatTOC()) {
       if (!seen.has(href)) {
         seen.add(href);
-        pages.push({ href, label: name });
+        pages.push({ href, label: title || name, summary, kind, track });
       }
     }
     return pages;
@@ -797,6 +1079,8 @@
           url: p.href,
           page_title: pageTitle,
           heading_text: "",
+          summary: p.summary || "",
+          track: p.track || "",
           kind: "page",
         });
         const body = doc.querySelector(".body");
@@ -816,6 +1100,8 @@
             url: anchor ? p.href + "#" + anchor : p.href,
             page_title: pageTitle,
             heading_text: text,
+            summary: p.summary || "",
+            track: p.track || "",
             kind: "heading",
           });
         });
@@ -834,7 +1120,7 @@
     if (!q) return entries.slice(0, 30);
     const matches = [];
     for (const e of entries) {
-      const hay = (e.page_title + " " + e.heading_text).toLowerCase();
+      const hay = (e.page_title + " " + e.heading_text + " " + (e.summary || "") + " " + (e.track || "")).toLowerCase();
       if (hay.indexOf(q) < 0) continue;
       // page-title hits rank above heading hits
       const titleHit = e.page_title.toLowerCase().indexOf(q) >= 0;
@@ -1203,6 +1489,8 @@
   function bootstrap() {
     mountShell();
     fixupSearchChip();
+    mountLandingRegistry();
+    mountRelatedLinks();
     buildTOC();
     buildPager();
     autoKnot();

@@ -12,9 +12,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css?v=10">
+<link rel="stylesheet" href="../styles.css?v=11">
 <script src="../theme.js"></script>
-<script src="../docs.js?v=5" defer></script>
+<script src="../docs.js?v=6" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -106,6 +106,36 @@
 
         <div class="section">
           <div class="section-header">
+            <h2>Reliability Policy</h2>
+            <p><code>ProviderOptions.reliability</code> configures request timeouts, retry behavior, and local rate limiting for a <code>ProviderHandle</code>. The facade reexports the knobs under <code>lash::provider</code>.</p>
+          </div>
+          <div class="listing">
+            <div class="listing__row">
+              <div class="listing__label">timeouts</div>
+              <div class="listing__body"><p><code>ProviderTimeoutPolicy</code> maps to <code>LlmTimeouts</code>. By default, requests have a 300 second overall timeout and streams have a 120 second chunk timeout. Set <code>RequestTimeout::Disabled</code> only when an outer workflow or transport layer owns cancellation.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">retries</div>
+              <div class="listing__body"><p><code>ProviderRetryPolicy</code> defaults to four attempts with exponential delay capped at 10 seconds and <code>Retry-After</code> capped at 60 seconds. <code>ProviderReliability::disabled()</code> turns retries off for hosts that already retry at a higher layer.</p></div>
+            </div>
+            <div class="listing__row">
+              <div class="listing__label">rate limits</div>
+              <div class="listing__body"><p><code>ProviderRateLimitPolicy</code> can cap max concurrency, requests per window, and tokens per window before a provider request is admitted.</p></div>
+            </div>
+          </div>
+          <pre><code>use lash::provider::{ProviderReliability, RequestTimeout};
+
+let reliability = ProviderReliability::builder()
+    .request_timeout(Some(RequestTimeout::Millis(120_000)))
+    .stream_chunk_timeout_ms(Some(30_000))
+    .max_attempts(3)
+    .max_concurrency(Some(8))
+    .requests_per_window(Some(120), Some(60_000))
+    .build();</code></pre>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
             <h2>Usage And Cost Inputs</h2>
             <p>Every provider returns a normalized <code>LlmUsage</code> to the runtime usage ledger after each completion. Chat-parsing handles both streaming and non-streaming usage chunks, including OpenRouter cache fields. Cache-write tokens are <strong>not</strong> counted as cached reads, so downstream cost/export code doesn't overstate cache hits.</p>
           </div>
@@ -138,8 +168,6 @@
   <section class="pager" aria-label="chapter navigation">
   <div class="pager__rail">read on &middot;</div>
   <div class="pager__main">
-    <a class="pager__prev" href="./html-exporter.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>09 · html exporter</strong></a>
-    <a class="pager__next" href="./index.html"><span>next</span><strong>index</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
 </section>
 </body>

@@ -343,6 +343,31 @@ pub fn turn_status_elapsed() -> Style {
     Style::default().fg(text_subtle())
 }
 
+pub fn process_selected_chrome() -> Style {
+    Style::default().bg(SELECTION_BG)
+}
+
+pub fn process_selected_indicator() -> Style {
+    Style::default()
+        .fg(brand())
+        .bg(SELECTION_BG)
+        .add_modifier(Modifier::Bold)
+}
+
+pub fn process_selected_badge() -> Style {
+    Style::default()
+        .fg(text_primary())
+        .bg(SELECTION_BG)
+        .add_modifier(Modifier::Bold)
+}
+
+pub fn process_selected_label() -> Style {
+    Style::default()
+        .fg(text_primary())
+        .bg(SELECTION_BG)
+        .add_modifier(Modifier::Bold)
+}
+
 pub fn error_border() -> Style {
     Style::default().fg(state_error())
 }

@@ -306,24 +306,42 @@ pub fn process_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'
             Some(lash_core::ProcessTerminalState::Failed)
             | Some(lash_core::ProcessTerminalState::Cancelled) => theme::tool_failure(),
         };
+        let selected_chrome = theme::process_selected_chrome();
+        let row_style = |style: Style| {
+            if selected {
+                style.merge(selected_chrome)
+            } else {
+                style
+            }
+        };
         let glyph = if selected { "  ▶ " } else { "  ◆ " };
         let label_style = if selected {
-            Style::default()
-                .fg(theme::text_primary())
-                .add_modifier(Modifier::Bold)
+            theme::process_selected_label()
         } else {
             Style::default().fg(theme::text_muted())
         };
-        lines.push(Line::from(vec![
-            Span::styled(glyph, theme::turn_status_slash()),
-            Span::styled(state.to_string(), state_style),
-            Span::styled(" · ", theme::text_faint_style()),
-            Span::styled(producer.to_string(), theme::text_subtle_style()),
-            Span::styled(" · ", theme::text_faint_style()),
+        let mut spans = Vec::new();
+        spans.push(Span::styled(
+            glyph,
+            if selected {
+                theme::process_selected_indicator()
+            } else {
+                theme::turn_status_slash()
+            },
+        ));
+        if selected {
+            spans.push(Span::styled("SELECTED ", theme::process_selected_badge()));
+        }
+        spans.extend([
+            Span::styled(state.to_string(), row_style(state_style)),
+            Span::styled(" · ", row_style(theme::text_faint_style())),
+            Span::styled(producer.to_string(), row_style(theme::text_subtle_style())),
+            Span::styled(" · ", row_style(theme::text_faint_style())),
             Span::styled(task.label.clone(), label_style),
-            Span::styled(" · ", theme::text_faint_style()),
-            Span::styled(elapsed, theme::text_faint_style()),
-        ]));
+            Span::styled(" · ", row_style(theme::text_faint_style())),
+            Span::styled(elapsed, row_style(theme::text_faint_style())),
+        ]);
+        lines.push(Line::from(spans));
     }
 
     Some(lines)

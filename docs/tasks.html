@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
+<title>task index · lash docs</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" href="./favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css?v=11">
+<script src="./theme.js"></script>
+<script src="./docs.js?v=6" defer></script>
+<script src="./syntax.js" defer></script>
+</head>
+<body class="docs-page" data-cover-source="<code>crates/lash</code>, <code>crates/lash-core</code>, <code>crates/lash-protocol-rlm</code>, <code>crates/lash-subagents</code>, <code>crates/lash-trace</code>.">
+<section class="opener">
+  <h1 class="opener__title">task<span class="slash">/</span>index</h1>
+  <p class="opener__lede">Start here when you know the job you need Lash to do. Each row points to the canonical guide for the task and the deeper reference only when the contract matters.</p>
+</section>
+
+<main class="body" id="content">
+  <div class="section" id="how-to-use-this-page">
+    <div class="section-header">
+      <h2>How To Use This Page</h2>
+      <p>Use this as a routing table. App-facing guides say what to wire; architecture pages explain why that wiring works.</p>
+    </div>
+    <aside class="callout callout--note">
+      <strong>Note</strong>
+      <p>If two pages mention the same concept, the task row points at the canonical home. For example, session persistence lives in <a href="./persistence.html">Persistence</a>; replay and effect durability live in <a href="./architecture/durability.html">Durability and replay</a>.</p>
+    </aside>
+  </div>
+
+  <div class="section" id="turn-work">
+    <div class="section-header">
+      <h2>Turn Work</h2>
+      <p>Running turns is the core application path. Pick collected output for backend jobs, streaming output for interactive UI, and queued turns for background/session-driven ingress.</p>
+    </div>
+    <div class="listing">
+      <div class="listing__row">
+        <div class="listing__label">run a turn</div>
+        <div class="listing__body">
+          <p>Build <code>LashCore</code>, open a <code>LashSession</code>, call <code>session.turn(TurnInput::text(...)).run().await?</code>, then read <code>TurnOutput::assistant_message()</code>. Start with <a href="./quickstart.html#minimal-example">Quickstart</a>, then use <a href="./embedding.html#run-a-turn">API basics</a> for the full facade shape.</p>
+        </div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">stream a turn</div>
+        <div class="listing__body">
+          <p>Implement <code>TurnActivitySink</code> and call <code>TurnBuilder::stream(&amp;sink)</code>, <code>collect_with(&amp;sink)</code>, or <code>into_stream()</code>. Fold <code>TurnActivity.correlation_id</code> into stable UI rows. See <a href="./embedding-turns.html#semantic-events">Turns and streams</a>.</p>
+        </div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">persist a session</div>
+        <div class="listing__body">
+          <p>Install a <code>SessionStoreFactory</code> on <code>LashCoreBuilder::store_factory(...)</code>, use file-backed attachment/artifact stores, and reopen the same session id after restart. See <a href="./persistence.html#wiring">Persistence wiring</a>.</p>
+        </div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">delete a session</div>
+        <div class="listing__body">
+          <p>Call <code>LashCore::delete_session(...)</code> for factory-backed sessions. If a process registry is installed, Lash cancels and revokes session-owned process state before deleting the store state. See <a href="./persistence.html#delete-sessions">Delete sessions</a>.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="host-surface">
+    <div class="section-header">
+      <h2>Host Surface</h2>
+      <p>The host decides what the model can see and do: tools, prompt contributions, projected state, and plugin-specific input.</p>
+    </div>
+    <div class="listing">
+      <div class="listing__row">
+        <div class="listing__label">add a tool</div>
+        <div class="listing__body">
+          <p>Implement <code>ToolProvider</code> or use <code>StaticToolProvider</code>; advertise cheap manifests, resolve full contracts, and execute work in <code>execute()</code>. Register the provider through a plugin or core tool surface. See <a href="./plugins.html#worked-example">Plugin basics</a> and <a href="./plugins-tools.html">Tool plugins</a>.</p>
+        </div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">expose state to RLM</div>
+        <div class="listing__body">
+          <p>Use <code>RlmProjectedBindings</code> for read-only names in Lashlang scope. Use JSON/value bindings for small state and <code>ProjectionRef</code> bindings for large host objects behind a resolver. See <a href="./embedding-prompts.html#projected-bindings">Projected bindings</a> and <a href="./rlm.html#variables-and-state">RLM variables</a>.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="long-running-work">
+    <div class="section-header">
+      <h2>Long-Running Work</h2>
+      <p>Use child sessions for delegated reasoning, Lashlang processes for reusable background work, and queued turns when background events should re-enter the model.</p>
+    </div>
+    <div class="listing">
+      <div class="listing__row">
+        <div class="listing__label">spawn subagents</div>
+        <div class="listing__body">
+          <p>Install <code>SubagentsPluginFactory</code>, choose or define capabilities, and let RLM call <code>spawn_agent</code>. Child sessions receive constrained specs and their usage rolls up to the parent. See <a href="./embedding-advanced.html#subagents">Subagents</a>.</p>
+        </div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">start background work</div>
+        <div class="listing__body">
+          <p>Install a <code>ProcessRegistry</code> with <code>.process_registry(...)</code> plus a <code>SessionStoreFactory</code> so the default inline process worker can rebuild session runtimes, or pass <code>.process_work_driver(...)</code> when an external durable runner owns work execution. Then observe or cancel runs through <code>session.process_control()</code>. See <a href="./embedding-advanced.html#process-work">Process work</a> and <a href="./architecture/durability.html">Durability and replay</a>.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="inspect-and-debug">
+    <div class="section-header">
+      <h2>Inspect And Debug</h2>
+      <p>Use traces for runtime-level evidence and read views for committed app-facing state.</p>
+    </div>
+    <div class="listing">
+      <div class="listing__row">
+        <div class="listing__label">inspect traces</div>
+        <div class="listing__body">
+          <p>Attach <code>JsonlTraceSink</code> with <code>.trace_sink(Some(...))</code>, set <code>TraceLevel</code>, and render the JSONL with <code>lash-trace-viewer</code>. Add a separate Lashlang execution sink when you need foreground/process execution graphs. See <a href="./tracing.html">Tracing</a>.</p>
+        </div>
+      </div>
+    </div>
+    <h3>Where next</h3>
+    <div data-related="quickstart.html embedding.html embedding-turns.html persistence.html plugins.html rlm.html tracing.html"></div>
+  </div>
+</main>
+
+<section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+  </div>
+</section>
+</body>
+</html>

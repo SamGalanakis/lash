@@ -12,9 +12,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="../styles.css?v=10">
+<link rel="stylesheet" href="../styles.css?v=11">
 <script src="../theme.js"></script>
-<script src="../docs.js?v=5" defer></script>
+<script src="../docs.js?v=6" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -27,7 +27,7 @@
     <div class="section">
       <div class="section-header">
         <h2>Where To Start</h2>
-        <p>Four crates cover the user-facing surface. Pick by role, not by stack position — most embedders only ever need <code>lash-runtime</code>.</p>
+        <p>Five crates cover the user-facing surface. Pick by role, not by stack position — most embedders only ever need <code>lash-runtime</code>.</p>
       </div>
       <div class="def-list-grid">
         <article class="panel">
@@ -41,6 +41,10 @@
         <article class="panel">
           <h3><a href="https://docs.rs/lash-sansio" target="_blank" rel="noopener">lash-sansio <span aria-hidden="true">↗</span></a></h3>
           <p>Pure protocol types — <code>LlmRequest</code>, <code>LlmResponse</code>, <code>ToolDefinition</code>, <code>TurnDriverPreamble</code>, the sans-IO state machine. No async, no IO, no Lashlang dependency. Reach for it when writing a provider or anything that touches the wire shape directly.</p>
+        </article>
+        <article class="panel">
+          <h3><a href="https://docs.rs/lash-remote-protocol" target="_blank" rel="noopener">lash-remote-protocol <span aria-hidden="true">↗</span></a></h3>
+          <p>Versioned DTOs for exposing Lash behind service boundaries: <code>RemoteTurnRequest</code>, <code>RemoteTurnResult</code>, <code>RemoteLlmRequest</code>, <code>RemoteLlmResponse</code>, prompt layers, activity streams, remote tool grants, and optional <code>lash-core</code> conversions. See the <a href="../remote-protocol.html">remote protocol guide</a> for the contract.</p>
         </article>
         <article class="panel">
           <h3><a href="https://docs.rs/lashlang" target="_blank" rel="noopener">lashlang <span aria-hidden="true">↗</span></a></h3>
@@ -59,7 +63,7 @@
         <li>Plugin crates: <code>lash-plugin-mcp</code>, <code>lash-plugin-process-controls</code>, <code>lash-plugin-rolling-history</code>, <code>lash-plugin-tool-discovery</code>, <code>lash-plugin-observational-memory</code>, <code>lash-plugin-plan-mode</code>, and the <code>lash-standard-plugins</code> aggregator.</li>
         <li>Tool crates: <code>lash-tool-shell</code>, <code>lash-tool-files</code>, <code>lash-tool-search</code>, <code>lash-tool-web</code>, <code>lash-tool-apply-patch</code>, shared scaffolding in <code>lash-tool-support</code> and <code>lash-llm-tools</code>.</li>
         <li>Mode crates: <code>lash-protocol-standard</code>, <code>lash-protocol-rlm</code>.</li>
-        <li>Persistence and tracing: <code>lash-turso-store</code>, <code>lash-restate</code>, <code>lash-trace</code>, <code>lash-trace-viewer</code>, <code>lash-export</code>.</li>
+        <li>Persistence, tracing, and remote DTOs: <code>lash-turso-store</code>, <code>lash-restate</code>, <code>lash-trace</code>, <code>lash-trace-viewer</code>, <code>lash-export</code>, <code>lash-remote-protocol</code>.</li>
         <li>Hosts: <code>lash-cli</code>, <code>lash-tui</code>, <code>lash-tui-extensions</code>.</li>
       </ul>
       <p>Every published crate has its own page on docs.rs at <code>https://docs.rs/&lt;crate-name&gt;</code>. The crates.io index is at <a href="https://crates.io/search?q=lash" target="_blank" rel="noopener">crates.io/search?q=lash <span aria-hidden="true">↗</span></a>.</p>
@@ -79,6 +83,7 @@
             <tr><td>What fields does <code>TurnBuilder</code> have? What does this function return?</td><td>docs.rs (cards above)</td></tr>
             <tr><td>What traits do I need to implement to add a plugin?</td><td><a href="../plugins.html">plugins guide</a>, then <a href="https://docs.rs/lash-core" target="_blank" rel="noopener">lash-core <span aria-hidden="true">↗</span></a></td></tr>
             <tr><td>What's the wire shape of an <code>LlmRequest</code>?</td><td><a href="https://docs.rs/lash-sansio" target="_blank" rel="noopener">lash-sansio <span aria-hidden="true">↗</span></a></td></tr>
+            <tr><td>What should an HTTP or queue boundary serialize for a turn?</td><td><a href="../remote-protocol.html">remote protocol</a>, then <a href="https://docs.rs/lash-remote-protocol" target="_blank" rel="noopener">lash-remote-protocol <span aria-hidden="true">↗</span></a></td></tr>
           </tbody>
         </table>
       </div>

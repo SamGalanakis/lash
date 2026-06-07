@@ -1138,6 +1138,138 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "microbenchmark; run with `-- --ignored --nocapture`"]
+    fn bench_bound_variables_render_cost() {
+        block_on(async {
+            let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities(
+                lashlang::LashlangAbilities::default(),
+            );
+            // Realistic mid-game RLM state: a ~25-room map, a 67-entry notes
+            // log, and a small inventory.
+            let code = "map = {}\n\
+                for i in range(25) {\n\
+                  map[format(\"room_{}\", i)] = { exits: [\"north\", \"south\", \"east\"], items: [format(\"item_{}\", i), format(\"thing_{}\", i)] }\n\
+                }\n\
+                notes = []\n\
+                for i in range(67) {\n\
+                  notes = push(notes, format(\"note {}: a fairly long observation about world state, the current plan, and the next few steps to try\", i))\n\
+                }\n\
+                inventory = [\"brass lantern\", \"elvish sword\", \"leaflet\"]"
+                .to_string();
+            let (state, response) = execute_code(
+                state,
+                ctx,
+                ExecRequest {
+                    code,
+                    accept_finish: true,
+                },
+                RlmProjectedBindings::default(),
+                Arc::new(ProjectionRegistry::new()),
+            )
+            .await
+            .expect("execute");
+            assert_eq!(response.error, None);
+
+            let exclude = BTreeSet::new();
+            let n = 5000u32;
+
+            let t = std::time::Instant::now();
+            let mut sink = 0usize;
+            for _ in 0..n {
+                sink += state.bound_variable_values(&exclude).len();
+            }
+            let bv_us = t.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
+
+            let globals = state.bound_variable_values(&exclude);
+
+            let mut warm = crate::rlm_support::BoundVariableRenderCache::default();
+            let _ = crate::rlm_support::render_bound_variables(&mut warm, &globals, 50, 1024);
+            let t2 = std::time::Instant::now();
+            let mut s2 = 0usize;
+            for _ in 0..n {
+                s2 += crate::rlm_support::render_bound_variables(&mut warm, &globals, 50, 1024)
+                    .content
+                    .len();
+            }
+            let warm_us = t2.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
+
+            let t3 = std::time::Instant::now();
+            let mut s3 = 0usize;
+            for _ in 0..n {
+                let mut cold = crate::rlm_support::BoundVariableRenderCache::default();
+                s3 += crate::rlm_support::render_bound_variables(&mut cold, &globals, 50, 1024)
+                    .content
+                    .len();
+            }
+            let cold_us = t3.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
+
+            println!(
+                "BENCH vars={} content_chars={}",
+                globals.len(),
+                s2 / n as usize
+            );
+            println!("BENCH bound_variable_values : {bv_us:8.3} us/call");
+            println!("BENCH render (warm cache)   : {warm_us:8.3} us/call");
+            println!("BENCH render (cold cache)   : {cold_us:8.3} us/call");
+            println!(
+                "BENCH per prompt build (values+render) ~ {:.3} us",
+                bv_us + warm_us
+            );
+            let _ = (sink, s2, s3);
+        });
+    }
+
+    #[test]
+    fn bound_variables_prompt_degrades_large_live_globals() {
+        block_on(async {
+            let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+            let ctx = lash_core::testing::code_execution_context_with_lashlang_abilities(
+                lashlang::LashlangAbilities::default(),
+            );
+            // Same constructs the runtime-perf `rlm_globals` scenario seeds:
+            // a large record and a large list that exceed the inline budget.
+            let code = "big_map = {}\n\
+                for i in range(24) {\n\
+                  big_map[format(\"room_{}\", i)] = { exits: [\"north\", \"south\"], items: [format(\"item_{}\", i)] }\n\
+                }\n\
+                big_notes = []\n\
+                for i in range(45) {\n\
+                  big_notes = push(big_notes, format(\"note {}: observation\", i))\n\
+                }"
+            .to_string();
+            let (state, response) = execute_code(
+                state,
+                ctx,
+                ExecRequest {
+                    code,
+                    accept_finish: true,
+                },
+                RlmProjectedBindings::default(),
+                Arc::new(ProjectionRegistry::new()),
+            )
+            .await
+            .expect("execute");
+            assert_eq!(response.error, None);
+
+            let globals = state.bound_variable_values(&BTreeSet::new());
+            let mut cache = crate::rlm_support::BoundVariableRenderCache::default();
+            // Small budget forces the degradation path.
+            let rendered = crate::rlm_support::render_bound_variables(&mut cache, &globals, 0, 200);
+            let s = rendered.content.to_string();
+
+            // Large record -> type + keys=N + keys preview.
+            assert!(s.contains("`big_map`:"), "{s}");
+            assert!(s.contains("keys=24"), "{s}");
+            assert!(s.contains("≈ {") && s.contains("room_0"), "{s}");
+            // Large list -> type + len=N + head/tail preview.
+            assert!(s.contains("`big_notes`:"), "{s}");
+            assert!(s.contains("len=45"), "{s}");
+            assert!(s.contains("≈ [") && s.contains("note 0:"), "{s}");
+        });
+    }
+
+    #[test]
     fn flow_to_json_value_emits_projected_marker_for_projected_values() {
         block_on(async {
             let projected = ProjectedValue::scalar("input", FlowValue::String("hello".into()));

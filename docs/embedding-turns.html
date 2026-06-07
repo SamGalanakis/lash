@@ -12,9 +12,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
-<link rel="stylesheet" href="./styles.css?v=10">
+<link rel="stylesheet" href="./styles.css?v=11">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=5" defer></script>
+<script src="./docs.js?v=6" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -64,7 +64,7 @@ pub enum TurnFinish {
             </table>
           </div>
           <p>Host-driven stops are recoverable next request. Provider stops usually want a different model or shorter context. Runtime stops indicate a configuration or authoring problem. <code>RuntimeError</code> is the only category where identical-input retry is unlikely to help.</p>
-          <p>CAS commit conflicts are <em>not</em> a <code>Stopped</code> variant — they surface as <code>Err</code> from <code>run()</code>/<code>stream()</code>, no partial commit. See <a href="./persistence.html#contract">Persistence → The Contract</a>.</p>
+          <p>CAS commit conflicts are <em>not</em> a <code>Stopped</code> variant — they surface as <code>Err</code> from <code>run()</code>/<code>stream()</code>, no partial commit. See <a href="./persistence.html#cas-conflicts">Persistence → Concurrent Writes And CAS</a>.</p>
           <pre><code>use lash::runtime::{TurnOutcome, TurnStop};
 
 match result.outcome {
@@ -263,14 +263,36 @@ match result.outcome {
 }</code></pre>
             </article>
           </div>
+          <p>Use <code>require_submit_schema(...)</code> when the submitted value must match a JSON Schema. Use <code>RlmSessionBuilderExt::final_answer_format(...)</code> to set the session's normal submit presentation: root RLM sessions default to Markdown guidance, managed child sessions default to raw submit values, and schema-required turns ignore the presentation preference.</p>
+          <pre><code>use lash::modes::{
+    RlmFinalAnswerFormat, RlmSessionBuilderExt as _, RlmTurnBuilderExt as _,
+};
+
+let session = core
+    .session("analysis")
+    .rlm()
+    .final_answer_format(RlmFinalAnswerFormat::RawSubmitValue)
+    .open()
+    .await?;
+
+let result = session
+    .turn(TurnInput::text("Return a risk rating."))
+    .require_submit_schema(serde_json::json!({
+        "type": "object",
+        "required": ["rating"],
+        "properties": {
+            "rating": { "type": "string" }
+        },
+        "additionalProperties": false
+    }))?
+    .run()
+    .await?;</code></pre>
         </div>
   </main>
 
   <section class="pager" aria-label="chapter navigation">
   <div class="pager__rail">read on &middot;</div>
   <div class="pager__main">
-    <a class="pager__prev" href="./embedding.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>lash api · basics</strong></a>
-    <a class="pager__next" href="./embedding-prompts.html"><span>next</span><strong>lash api · prompts</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
 </section>
 </body>
