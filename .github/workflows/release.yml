@@ -70,7 +70,10 @@ jobs:
           cargo test -p lash-core --locked
           cargo test -p lash-turso-store --locked
           cargo test -p lash-runtime --locked
-          cargo test -p lash-standard-plugins --locked --features fff-zlob
+          # No --features fff-zlob: it pulls in zlob (zig build dep) which this
+          # publish job doesn't install, and no published crate enables it by
+          # default. The fff-zlob path is covered by the main CI workflow.
+          cargo test -p lash-standard-plugins --locked
 
       # Publishes every publishable workspace member in dependency order,
       # waiting for index propagation between crates. publish=false crates are
