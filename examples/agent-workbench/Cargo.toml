@@ -20,14 +20,14 @@ chrono = { workspace = true, features = ["clock"] }
 chrono-tz = { workspace = true }
 croner = { workspace = true }
 dotenvy = "0.15"
-lash = { package = "lash-runtime", path = "../../crates/lash", version = "=0.1.0-alpha.28" }
-lashlang = { path = "../../crates/lashlang", version = "=0.1.0-alpha.28" }
-lash-plugin-process-controls = { path = "../../crates/lash-plugin-process-controls", version = "=0.1.0-alpha.28" }
-lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.28" }
-lash-restate = { path = "../../crates/lash-restate", version = "=0.1.0-alpha.28" }
-lash-turso-store = { path = "../../crates/lash-turso-store", version = "=0.1.0-alpha.28" }
-lash-subagents = { path = "../../crates/lash-subagents", version = "=0.1.0-alpha.28" }
-lash-tool-web = { path = "../../crates/lash-tool-web", version = "=0.1.0-alpha.28" }
+lash = { workspace = true }
+lashlang = { workspace = true }
+lash-plugin-process-controls = { workspace = true }
+lash-provider-openai = { workspace = true }
+lash-restate = { workspace = true }
+lash-turso-store = { workspace = true }
+lash-subagents = { workspace = true }
+lash-tool-web = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "http2"] }
 restate-sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -37,5 +37,5 @@ tokio-stream = "0.1"
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-lash-core = { path = "../../crates/lash-core", version = "=0.1.0-alpha.28", features = ["testing"] }
-lash = { package = "lash-runtime", path = "../../crates/lash", version = "=0.1.0-alpha.28", features = ["testing"] }
+lash-core = { workspace = true, features = ["testing"] }
+lash = { workspace = true, features = ["testing"] }
