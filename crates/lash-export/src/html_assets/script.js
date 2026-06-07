@@ -263,7 +263,7 @@
   document.addEventListener('click', (ev) => {
     const a = ev.target.closest('.entry-num');
     if (!a) return;
-    // entry-num lives inside a <summary> in tool-call entries; without
+    // entry-num may live inside a <summary>; without
     // stopPropagation the click would also toggle the parent <details>.
     ev.stopPropagation();
     const id = a.getAttribute('href').slice(1);
@@ -439,7 +439,7 @@
   applyFilters();
 })();
 
-// ─── multi-view: drill-in / breadcrumb / browser history ──────────────────
+// ─── multi-view: lineage / breadcrumb / browser history ───────────────────
 
 (function () {
   var tree = window.__lashTraceTree;

@@ -5,7 +5,7 @@ use lash_core::{
     AssistantOutput, ExecutionSummary, OutputState, TokenUsage, TurnIssue, TurnOutcome, TurnStop,
 };
 #[cfg(test)]
-use lash_turso_store::Store;
+use lash_sqlite_store::Store;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

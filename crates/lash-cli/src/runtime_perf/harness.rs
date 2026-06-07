@@ -500,7 +500,7 @@ pub(crate) async fn build_runtime_with_store(
     })
 }
 
-pub(crate) async fn build_runtime_with_turso_store(
+pub(crate) async fn build_runtime_with_sqlite_store(
     scenario: RuntimePerfScenario,
     root: PathBuf,
 ) -> anyhow::Result<BenchmarkRuntime> {
@@ -527,7 +527,7 @@ pub(crate) async fn build_runtime_with_turso_store(
         .provider(provider)
         .model(benchmark_model_spec())
         .effect_host(Arc::new(
-            lash_turso_store::TursoEffectHost::open(&effects_db)
+            lash_sqlite_store::SqliteEffectHost::open(&effects_db)
                 .await
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
         ))
@@ -535,16 +535,16 @@ pub(crate) async fn build_runtime_with_turso_store(
             attachments_root,
         )))
         .lashlang_artifact_store(Arc::new(
-            lash_turso_store::Store::open(&artifacts_db)
+            lash_sqlite_store::Store::open(&artifacts_db)
                 .await
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
         ))
         .process_registry(Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(&process_db)
+            lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
                 .await
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
         ))
-        .store_factory(Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+        .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             sessions_root,
         )))
         .plugins(plugin_stack);
@@ -818,7 +818,7 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
             "Turn {} in scoped effect-controller benchmark mode. Continue the benchmark chat and reply with exactly: runtime perf benchmark ok",
             turn_index + 1
         ),
-        RuntimePerfScenario::StoreReopen | RuntimePerfScenario::TursoStoreReopen => format!(
+        RuntimePerfScenario::StoreReopen | RuntimePerfScenario::SqliteStoreReopen => format!(
             "Turn {} in store reopen benchmark mode. Continue after persisted reload and reply with exactly: runtime perf benchmark ok",
             turn_index + 1
         ),

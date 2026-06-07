@@ -1,5 +1,5 @@
 //! Runs the backend-agnostic `ProcessRegistry` conformance suite against the
-//! Turso implementation. The same suite runs against the in-memory registry
+//! Sqlite implementation. The same suite runs against the in-memory registry
 //! in lash-core, so both backends are held to one contract.
 
 use std::future::Future;
@@ -16,9 +16,9 @@ use lash_core::{
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
     RuntimeInvocation, RuntimePersistence,
 };
-use lash_turso_store::{
-    Store, TursoEffectHost, TursoEffectReplayOptions, TursoProcessRegistry,
-    TursoRuntimeEffectController,
+use lash_sqlite_store::{
+    Store, SqliteEffectHost, SqliteEffectReplayOptions, SqliteProcessRegistry,
+    SqliteRuntimeEffectController,
 };
 use tempfile::TempDir;
 
@@ -48,7 +48,7 @@ where
 fn open_registry(path: &Path) -> Arc<dyn ProcessRegistry> {
     let path = path.to_path_buf();
     Arc::new(sync_await(async move {
-        TursoProcessRegistry::open(&path)
+        SqliteProcessRegistry::open(&path)
             .await
             .expect("file registry")
     })) as Arc<dyn ProcessRegistry>
@@ -119,7 +119,7 @@ fn failing_executor() -> RuntimeEffectLocalExecutor<'static> {
 }
 
 #[tokio::test]
-async fn turso_process_registry_satisfies_conformance() {
+async fn sqlite_process_registry_satisfies_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
     lash_core::testing::conformance::process_registry_reopenable(|| {
         let path = fresh_db_path(&dirs, "processes.db");
@@ -132,7 +132,7 @@ async fn turso_process_registry_satisfies_conformance() {
 }
 
 #[tokio::test]
-async fn turso_store_satisfies_runtime_persistence_conformance() {
+async fn sqlite_store_satisfies_runtime_persistence_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
     lash_core::testing::conformance::runtime_persistence_reopenable(|| {
         let path = fresh_db_path(&dirs, "session.db");
@@ -145,15 +145,11 @@ async fn turso_store_satisfies_runtime_persistence_conformance() {
 }
 
 #[tokio::test]
-async fn turso_store_schema_excludes_embedded_turn_replay_tables() {
+async fn sqlite_store_schema_excludes_embedded_turn_replay_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("schema.db");
     drop(Store::open(&path).await.expect("open store"));
-    let db = turso::Builder::new_local(&path.to_string_lossy())
-        .build()
-        .await
-        .expect("open raw turso");
-    let conn = db.connect().expect("connect raw turso");
+    let conn = rusqlite::Connection::open(&path).expect("open raw sqlite");
     for removed in [
         concat!("runtime_", "turn_", "checkpoints"),
         concat!("runtime_", "effect_", "journal"),
@@ -162,33 +158,24 @@ async fn turso_store_schema_excludes_embedded_turn_replay_tables() {
             &conn,
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
             removed,
-        )
-        .await;
+        );
         assert_eq!(count, 0, "{removed} table must not exist");
     }
     let turn_commits = raw_count(
         &conn,
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
         "runtime_turn_commits",
-    )
-    .await;
+    );
     assert_eq!(turn_commits, 1);
 }
 
-async fn raw_count(conn: &turso::Connection, sql: &str, name: &str) -> i64 {
-    let mut rows = conn
-        .query(sql, turso::params![name])
-        .await
-        .expect("query sqlite_master");
-    let row = rows.next().await.expect("read row").expect("count row");
-    match row.get_value(0).expect("count value") {
-        turso::Value::Integer(value) => value,
-        other => panic!("expected integer count, got {other:?}"),
-    }
+fn raw_count(conn: &rusqlite::Connection, sql: &str, name: &str) -> i64 {
+    conn.query_row(sql, rusqlite::params![name], |row| row.get::<_, i64>(0))
+        .expect("query sqlite_master")
 }
 
 #[tokio::test]
-async fn turso_store_satisfies_lashlang_artifact_store_conformance() {
+async fn sqlite_store_satisfies_lashlang_artifact_store_conformance() {
     let dirs = Arc::new(Mutex::new(Vec::new()));
     lash_core::testing::conformance::lashlang_artifact_store_reopenable(
         || {
@@ -204,18 +191,18 @@ async fn turso_store_satisfies_lashlang_artifact_store_conformance() {
 }
 
 #[tokio::test]
-async fn turso_effect_host_satisfies_scope_conformance() {
+async fn sqlite_effect_host_satisfies_scope_conformance() {
     lash_core::testing::conformance::effect_host(|| {
         Arc::new(sync_await(async {
-            TursoEffectHost::memory().await.expect("effect host")
+            SqliteEffectHost::memory().await.expect("effect host")
         })) as Arc<dyn EffectHost>
     })
     .await;
 }
 
 #[tokio::test]
-async fn turso_effect_controller_satisfies_replay_conformance() {
-    let controller = TursoRuntimeEffectController::memory(EffectScope::turn(
+async fn sqlite_effect_controller_satisfies_replay_conformance() {
+    let controller = SqliteRuntimeEffectController::memory(EffectScope::turn(
         "effect-conformance-session",
         "effect-conformance-turn",
     ))
@@ -230,8 +217,8 @@ async fn turso_effect_controller_satisfies_replay_conformance() {
 }
 
 #[tokio::test]
-async fn turso_effect_controller_replays_without_local_executor() {
-    let controller = TursoRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
+async fn sqlite_effect_controller_replays_without_local_executor() {
+    let controller = SqliteRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
         .await
         .expect("controller");
     let envelope = exec_envelope("exec-replay", "first");
@@ -250,8 +237,8 @@ async fn turso_effect_controller_replays_without_local_executor() {
 }
 
 #[tokio::test]
-async fn turso_effect_controller_rejects_envelope_hash_conflict() {
-    let controller = TursoRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
+async fn sqlite_effect_controller_rejects_envelope_hash_conflict() {
+    let controller = SqliteRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
         .await
         .expect("controller");
     controller
@@ -269,14 +256,14 @@ async fn turso_effect_controller_rejects_envelope_hash_conflict() {
         )
         .await
         .expect_err("same replay key with changed envelope must fail");
-    assert_eq!(err.code, "turso_effect_replay_hash_conflict");
+    assert_eq!(err.code, "sqlite_effect_replay_hash_conflict");
 }
 
 #[tokio::test]
-async fn turso_effect_controller_reclaims_stale_in_progress_lease() {
-    let controller = TursoRuntimeEffectController::memory_with_options(
+async fn sqlite_effect_controller_reclaims_stale_in_progress_lease() {
+    let controller = SqliteRuntimeEffectController::memory_with_options(
         EffectScope::turn("session", "turn"),
-        TursoEffectReplayOptions {
+        SqliteEffectReplayOptions {
             lease_ttl: std::time::Duration::from_millis(20),
         },
     )
@@ -314,7 +301,7 @@ async fn turso_effect_controller_reclaims_stale_in_progress_lease() {
         .await
         .expect("first task joins")
         .expect_err("stale owner must not finalize after lease loss");
-    assert_eq!(first_err.code, "turso_effect_replay_lease_lost");
+    assert_eq!(first_err.code, "sqlite_effect_replay_lease_lost");
 
     controller.start_replay();
     let replayed = controller
@@ -325,8 +312,8 @@ async fn turso_effect_controller_reclaims_stale_in_progress_lease() {
 }
 
 #[tokio::test]
-async fn turso_sleep_replay_returns_after_recorded_due_time() {
-    let controller = TursoRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
+async fn sqlite_sleep_replay_returns_after_recorded_due_time() {
+    let controller = SqliteRuntimeEffectController::memory(EffectScope::turn("session", "turn"))
         .await
         .expect("controller");
     let envelope = RuntimeEffectEnvelope::new(

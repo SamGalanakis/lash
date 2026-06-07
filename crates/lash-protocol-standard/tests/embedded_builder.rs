@@ -4,7 +4,7 @@ use lash_core::{
     LashRuntime, Message, MessageRole, ModelSpec, Part, PartKind, PersistedSessionConfig,
     PersistedTurnState, PruneState, RuntimePersistence, SessionGraph, SessionHead, TokenUsage,
 };
-use lash_turso_store::Store;
+use lash_sqlite_store::Store;
 
 fn test_model_spec() -> ModelSpec {
     ModelSpec::from_token_limits("gpt-5.4-mini", None, 200_000, None)
@@ -64,10 +64,11 @@ async fn embedded_runtime_builder_loads_state_from_store() {
             head_revision: 0,
             agent_frames: Vec::new(),
             current_agent_frame_id: String::new(),
-            graph: SessionGraph::from_active_read_state(
-                &[text_message("u0", MessageRole::User, "stored question")],
-                &[],
-            ),
+            graph: SessionGraph::from_active_read_state(&[text_message(
+                "u0",
+                MessageRole::User,
+                "stored question",
+            )]),
             config: PersistedSessionConfig {
                 provider_id: "openai-compatible".into(),
                 model: test_model_spec(),

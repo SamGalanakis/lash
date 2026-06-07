@@ -380,7 +380,7 @@ impl LashCoreBuilder {
 
     /// Set the deployment-level Lashlang artifact store (compiled module
     /// cache, shared across the session tree). A durable store such as
-    /// `lash_turso_store::Store` implements it.
+    /// `lash_sqlite_store::Store` implements it.
     pub fn lashlang_artifact_store(
         mut self,
         artifact_store: Arc<dyn lash_core::LashlangArtifactStore>,

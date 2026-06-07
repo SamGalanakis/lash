@@ -1,9 +1,7 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lash_core::{
-    ChronologicalPayload, Message, MessageRole, PartKind, RuntimeExecutionContext, ToolCallRecord,
-};
+use lash_core::{ChronologicalPayload, Message, MessageRole, PartKind, RuntimeExecutionContext};
 use lash_rlm_types::{
     RlmAttachmentRef, RlmHistoryItem, RlmHistoryRole, RlmImageRef, RlmProtocolEvent,
     RlmTrajectoryEntry,
@@ -38,17 +36,11 @@ pub struct RlmHistoryProjection {
 impl RlmHistoryProjection {
     pub fn from_chronological(projection: &lash_core::ChronologicalProjection) -> Self {
         let mut history = Vec::with_capacity(projection.entries().len());
-        let mut seen_tool_calls = HashSet::new();
         for entry in projection.entries() {
             match &entry.payload {
                 ChronologicalPayload::Message(message) => {
                     if let Some(item) = history_item_from_message(message) {
                         history.push(item);
-                    }
-                }
-                ChronologicalPayload::ToolCall(record) => {
-                    if seen_tool_calls.insert(tool_call_record_key(record)) {
-                        history.push(history_item_from_tool_call(record));
                     }
                 }
                 ChronologicalPayload::ProtocolEvent(event) => {
@@ -258,23 +250,9 @@ fn history_item_from_rlm_step(entry: &RlmTrajectoryEntry) -> RlmHistoryItem {
         reasoning: entry.reasoning.clone(),
         code: entry.code.clone(),
         output: entry.output.clone(),
-        tool_call_ids: entry.tool_call_ids.clone(),
         images: entry.images.iter().map(image_ref).collect(),
         error: entry.error.clone(),
         final_output: entry.final_output.clone(),
-    }
-}
-
-fn history_item_from_tool_call(record: &ToolCallRecord) -> RlmHistoryItem {
-    RlmHistoryItem::ToolCall {
-        id: record
-            .call_id
-            .clone()
-            .unwrap_or_else(|| tool_call_record_key(record)),
-        tool: record.tool.clone(),
-        args: record.args.clone(),
-        output: record.output.clone(),
-        duration_ms: record.duration_ms,
     }
 }
 
@@ -309,17 +287,6 @@ fn image_ref(image: &lash_core::AttachmentRef) -> RlmImageRef {
     }
 }
 
-fn tool_call_record_key(record: &ToolCallRecord) -> String {
-    if let Some(call_id) = record
-        .call_id
-        .as_ref()
-        .filter(|call_id| !call_id.is_empty())
-    {
-        return format!("call_id:{call_id}");
-    }
-    serde_json::to_string(record).unwrap_or_else(|_| format!("tool:{}", record.tool))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,7 +298,6 @@ mod tests {
             reasoning: "thinking".to_string(),
             code: "print big".to_string(),
             output: vec![output.to_string()],
-            tool_call_ids: Vec::new(),
             images: Vec::new(),
             error: None,
             final_output: None,
@@ -342,7 +308,6 @@ mod tests {
         lash_core::ChronologicalProjection::from_turn_view(
             &events,
             &lash_core::MessageSequence::default(),
-            &[],
         )
     }
 

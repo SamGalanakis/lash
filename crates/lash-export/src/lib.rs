@@ -1,15 +1,15 @@
 //! Render persisted lash sessions into human-viewable formats.
 //!
-//! This crate is independent of `lash-cli`. It reads a session's Turso
-//! store, projects the `SessionGraph` into messages + tool calls, and
-//! writes a self-contained HTML (or JSON) document.
+//! This crate is independent of `lash-cli`. It reads a session's Sqlite
+//! store, projects the `SessionGraph` into committed messages and protocol
+//! events, and writes a self-contained HTML (or JSON) document.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use lash_core::{ChronologicalEntry, SessionGraph, SessionMeta, SessionSnapshot};
-use lash_turso_store::Store;
+use lash_sqlite_store::Store;
 
 pub mod html;
 pub mod json;
@@ -51,7 +51,7 @@ pub struct LoadedSession {
     pub llm_prompts: Vec<LlmPromptSnapshot>,
 }
 
-/// Load a session by its Turso store path and full provider trace path.
+/// Load a session by its Sqlite store path and full provider trace path.
 pub async fn load_session_from_paths(
     store_path: &Path,
     trace_path: &Path,

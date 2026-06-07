@@ -54,9 +54,9 @@ let core = LashCore::rlm()
     .build()?;</code></pre>
           <pre><code>use std::sync::Arc;
 use lash::persistence::FileAttachmentStore;
-use lash_turso_store::{TursoSessionStoreFactory, Store};
+use lash_sqlite_store::{SqliteSessionStoreFactory, Store};
 
-let store_factory = Arc::new(TursoSessionStoreFactory::new(data_dir.join("sessions")));
+let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
 let artifact_store = Arc::new(Store::open(&amp;data_dir.join("artifacts.db"))?);
 
 let core = LashCore::rlm()
@@ -88,7 +88,7 @@ let core = LashCore::rlm()
           <pre><code>use std::sync::Arc;
 use lash::durability::{InlineEffectHost, Residency};
 use lash::persistence::FileAttachmentStore;
-use lash_turso_store::Store;
+use lash_sqlite_store::Store;
 
 let core = LashCore::rlm()
     .provider(provider)
@@ -241,7 +241,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
     .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
     .effect_host(std::sync::Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(std::sync::Arc::new(lash_turso_store::Store::open(&amp;data_dir.join("artifacts.db"))?))
+    .lashlang_artifact_store(std::sync::Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("artifacts.db"))?))
     .attachment_store(std::sync::Arc::new(lash::persistence::FileAttachmentStore::new(data_dir.join("attachments"))))
     .residency(lash::durability::Residency::ActivePathOnly)
     .build()?;</code></pre>
@@ -268,7 +268,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
             <article class="panel"><h3><a href="./rlm.html">RLM Protocol</a></h3><p>Prompt construction, history projection, bound variables, and the Lashlang execution loop.</p></article>
             <article class="panel"><h3><a href="./example-agent-service.html">Agent Service</a></h3><p>Browser example: OpenRouter, RLM submit, typed session plugin activation, app-owned tools, streaming, per-chat model selection, SQLite, Restate.</p></article>
             <article class="panel"><h3><a href="./plugins.html">Plugins</a></h3><p><code>PluginFactory</code>, <code>SessionPlugin</code>, registering tools and hooks, cheap-build contract, four reference plugins.</p></article>
-            <article class="panel"><h3><a href="./persistence.html">Persistence</a></h3><p><code>lash-turso-store</code>, what's persisted, in-memory mode, GC and vacuum.</p></article>
+            <article class="panel"><h3><a href="./persistence.html">Persistence</a></h3><p><code>lash-sqlite-store</code>, what's persisted, in-memory mode, GC and vacuum.</p></article>
             <article class="panel"><h3><a href="./tracing.html">Tracing</a></h3><p><code>TraceSink</code>, JSONL schema v2, Lashlang execution graphs, fan-out, <code>lash-trace-viewer</code>, OTel export.</p></article>
             <article class="panel"><h3><a href="./cli.html">CLI</a></h3><p>Slash commands, keyboard shortcuts, config schema, env vars, resume/fork.</p></article>
             <article class="panel"><h3><a href="./architecture/">Architecture</a></h3><p>Crate map, residency, session graph, plugin host traits, providers, Lashlang internals.</p></article>

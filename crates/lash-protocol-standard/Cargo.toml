@@ -19,7 +19,7 @@ async-trait = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash-turso-store = { workspace = true }
+lash-sqlite-store = { workspace = true }
 lash-tool-shell = { workspace = true }
 lash-plugin-process-controls = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

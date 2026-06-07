@@ -205,12 +205,6 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
                     .tool_calls
                     .iter()
                     .find_map(terminal_outcome_from_tool_result);
-                state.tool_call_ids.extend(
-                    response
-                        .tool_calls
-                        .iter()
-                        .filter_map(|record| record.call_id.clone()),
-                );
                 state.images.extend(response.printed_images);
                 for observation in response.observations {
                     if !observation.is_empty() {
@@ -396,7 +390,6 @@ fn trajectory_entry(
         reasoning: state.reasoning.clone(),
         code: state.executed_code.clone().unwrap_or_default(),
         output: state.output.clone(),
-        tool_call_ids: state.tool_call_ids.clone(),
         images: state.images.clone(),
         error: validation_error.or_else(|| state.exec_error.clone()),
         final_output,

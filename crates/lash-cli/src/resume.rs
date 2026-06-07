@@ -10,7 +10,7 @@ use lash_core::store::HydratedSessionCheckpoint;
 use lash_core::{
     PersistedSessionConfig, PersistedTurnState, PromptUsage, ProviderHandle, TokenUsage, ToolState,
 };
-use lash_turso_store::Store;
+use lash_sqlite_store::Store;
 
 use crate::app::{App, UiTimelineItem};
 use crate::model_catalog::CachedModelCatalog;
@@ -155,7 +155,6 @@ async fn apply_graph_resume_state(
         ..lash_core::SessionSnapshot::default()
     });
     let messages = read_view.messages().to_vec();
-    let _tool_calls = read_view.tool_calls().to_vec();
     *history = messages.clone();
 
     if let Some(tool_state) = checkpoint
@@ -378,10 +377,8 @@ mod tests {
                 graph,
                 config: lash_core::PersistedSessionConfig {
                     provider_id: "openai_generic".to_string(),
-                    model: lash_core::ModelSpec::from_token_limits(
-                        "gpt-5", None, 200_000, None,
-                    )
-                    .expect("valid model spec"),
+                    model: lash_core::ModelSpec::from_token_limits("gpt-5", None, 200_000, None)
+                        .expect("valid model spec"),
                 },
                 checkpoint_ref: Some(checkpoint_ref),
                 token_ledger: Vec::new(),
@@ -399,7 +396,7 @@ mod tests {
         lash_core::store::HydratedSessionCheckpoint,
     ) {
         (
-            lash_core::SessionGraph::from_active_read_state(&messages, &[]),
+            lash_core::SessionGraph::from_active_read_state(&messages),
             lash_core::store::HydratedSessionCheckpoint {
                 turn_state: lash_core::PersistedTurnState {
                     turn_index: iteration,

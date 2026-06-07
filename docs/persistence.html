@@ -17,7 +17,7 @@
 <script src="./docs.js?v=7" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
-<body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash</code>, <code>crates/lash-turso-store</code>, <code>examples/agent-service</code>.">
+<body class="docs-page" data-cover-source="<code>crates/lash-core</code>, <code>crates/lash</code>, <code>crates/lash-sqlite-store</code>, <code>examples/agent-service</code>.">
   <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">session<span class="slash">/</span>persistence</h1>
@@ -60,10 +60,10 @@
       </div>
           <pre><code>use std::sync::Arc;
 use lash::{LashCore, ModeId, ModePreset};
-use lash_turso_store::{TursoSessionStoreFactory, Store};
+use lash_sqlite_store::{SqliteSessionStoreFactory, Store};
 
 let data_dir = std::path::PathBuf::from("./.lash-data");
-let store_factory = Arc::new(TursoSessionStoreFactory::new(data_dir.join("sessions")));
+let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
 let artifact_store = Arc::new(Store::open(&amp;data_dir.join("artifacts.db"))?);
 
 let core = LashCore::builder()
@@ -163,10 +163,10 @@ if let Some(process_report) = report.process {
         <p>The <code>agent-service</code> example keeps app storage and runtime storage separate: chat rows in one database, Lash sessions in the runtime store.</p>
       </div>
           <pre><code>// One factory at boot, shared across every chat.
-let store_factory = Arc::new(TursoSessionStoreFactory::new(
+let store_factory = Arc::new(SqliteSessionStoreFactory::new(
     data_dir.join("lash-sessions"),
 ));
-let artifact_store = Arc::new(lash_turso_store::Store::open(
+let artifact_store = Arc::new(lash_sqlite_store::Store::open(
     &amp;data_dir.join("lash-artifacts.db"),
 )?);
 

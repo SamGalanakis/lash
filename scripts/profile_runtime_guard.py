@@ -25,7 +25,7 @@ DEFAULT_SCENARIOS = [
     "rlm_process_handles",
     "tool_discovery_search",
     "turn_checkpoint",
-    "turso_store_reopen",
+    "sqlite_store_reopen",
 ]
 DEFAULT_STACKS = ["64k", "128k", "256k", "320k", "512k", "1m", "8m"]
 

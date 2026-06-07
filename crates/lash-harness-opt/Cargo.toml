@@ -20,7 +20,7 @@ lash = { workspace = true }
 lash-rlm-types = { workspace = true }
 lash-sansio = { workspace = true }
 lash-trace = { workspace = true }
-rusqlite = { version = "0.33", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

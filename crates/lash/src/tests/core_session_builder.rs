@@ -1237,10 +1237,10 @@ fn turn_result_total_usage_sums_parent_and_children() {
 // real durable backends so the durability tier each store reports is the
 // production tier, not a faked one:
 //
-// - durable session store factory => `lash_turso_store::TursoSessionStoreFactory`
+// - durable session store factory => `lash_sqlite_store::SqliteSessionStoreFactory`
 // - durable attachment store       => `lash::FileAttachmentStore`
-// - durable artifact store         => `lash_turso_store::Store`
-// - durable process registry       => `lash_turso_store::TursoProcessRegistry`
+// - durable artifact store         => `lash_sqlite_store::Store`
+// - durable process registry       => `lash_sqlite_store::SqliteProcessRegistry`
 //
 // Ephemeral peers are the named in-memory implementations.
 
@@ -1254,7 +1254,7 @@ fn peer_coherence_builder() -> crate::core::LashCoreBuilder {
 }
 
 fn durable_session_store_factory(dir: &std::path::Path) -> Arc<dyn lash_core::SessionStoreFactory> {
-    Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+    Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         dir.join("sessions"),
     ))
 }
@@ -1281,7 +1281,7 @@ async fn durable_artifact_store(
     dir: &std::path::Path,
 ) -> Arc<dyn lash_core::LashlangArtifactStore> {
     Arc::new(
-        lash_turso_store::Store::open(&dir.join("artifacts.db"))
+        lash_sqlite_store::Store::open(&dir.join("artifacts.db"))
             .await
             .expect("open durable artifact store"),
     )
@@ -1340,7 +1340,7 @@ async fn durable_process_registry_rejects_missing_durable_store_factory_at_build
     // store tier is unknown/non-durable, so the registry must be rejected.
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
-        lash_turso_store::TursoProcessRegistry::open(&dir.path().join("processes.db"))
+        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
             .await
             .expect("open durable registry"),
     );
@@ -1365,7 +1365,7 @@ async fn all_durable_stores_build_successfully() -> Result<()> {
     // without error.
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
-        lash_turso_store::TursoProcessRegistry::open(&dir.path().join("processes.db"))
+        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
             .await
             .expect("open durable registry"),
     );
@@ -1391,7 +1391,7 @@ async fn durable_registry_with_only_child_store_factory_builds() -> Result<()> {
     // wire the child factory durably.
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
-        lash_turso_store::TursoProcessRegistry::open(&dir.path().join("processes.db"))
+        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
             .await
             .expect("open durable registry"),
     );

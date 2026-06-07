@@ -3321,7 +3321,7 @@ use lash_sansio::{AttachmentCreateMeta, ImageMediaType, MediaType};
 /// Run the full [`AttachmentStore`] conformance suite against the backend
 /// produced by `make`. `make` must return a fresh, empty store on each call.
 /// `expected_persistence` is the tier this backend declares (`Ephemeral` for
-/// in-memory, `Durable` for file/Turso-backed).
+/// in-memory, `Durable` for file/Sqlite-backed).
 pub fn attachment_store<F>(make: F, expected_persistence: AttachmentStorePersistence)
 where
     F: Fn() -> Arc<dyn AttachmentStore>,
@@ -3432,7 +3432,7 @@ fn attachment_store_survives_reopen(factory: ReopenableAttachmentStore) {
 /// Run the full [`LashlangArtifactStore`] conformance suite against the backend
 /// produced by `make`. `make` must return a fresh, empty store on each call.
 /// `expected_tier` is the tier this backend declares (`Inline` for in-memory,
-/// `Durable` for Turso-backed).
+/// `Durable` for Sqlite-backed).
 pub async fn lashlang_artifact_store<F>(make: F, expected_tier: DurabilityTier)
 where
     F: Fn() -> Arc<dyn LashlangArtifactStore>,

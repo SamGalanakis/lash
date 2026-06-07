@@ -1,25 +1,22 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
+use lash_core::ChronologicalPayload;
 use lash_core::session_model::MessageRole;
-use lash_core::{ChronologicalPayload, ToolCallRecord, ToolControl};
 
 use crate::LoadedSession;
-use crate::tree::{LoadedSessionNode, LoadedSessionTree, NodeRelation, SubagentEdge};
+use crate::tree::{LoadedSessionNode, LoadedSessionTree, NodeRelation};
 
 use super::assets::{CSS, JS};
 use super::chronological_rlm_step;
-use super::entries::{first_message_text, render_message, render_rlm_step, render_tool_call_entry};
+use super::entries::{render_message, render_rlm_step};
 use super::escaping::{escape, escape_attr, js_escape};
 use super::prompt::{
     PromptAnchor, compute_prompt_insertions, render_system_prompt, write_usage_chart_bar,
 };
 use super::session::write_controls;
 use super::stats::{SessionStats, compute_stats};
-use super::view_model::{
-    RenderCtx, format_count, format_duration, message_matches_text, one_line_summary,
-    submit_value_text,
-};
+use super::view_model::{RenderCtx, message_matches_text, one_line_summary, submit_value_text};
 
 pub fn render_tree(tree: &LoadedSessionTree) -> String {
     let mut out = String::with_capacity(128 * 1024);
@@ -70,7 +67,7 @@ pub(crate) fn write_crumb_bar(out: &mut String) {
 fn write_view(out: &mut String, tree: &LoadedSessionTree, head: &LoadedSessionNode) {
     let chain: Vec<&LoadedSessionNode> = vec![head];
     let chain_stats = compute_chain_stats(&chain);
-    let mut ctx = RenderCtx::new(&chain_stats);
+    let mut ctx = RenderCtx::new();
     let view_id = view_id_of(head);
     let active_attr = if matches!(head.kind, NodeRelation::Root) {
         " is-active"
@@ -96,7 +93,7 @@ fn write_view(out: &mut String, tree: &LoadedSessionTree, head: &LoadedSessionNo
     let mut entries = String::new();
 
     for node in &chain {
-        render_node_entries(&mut entries, &mut spine, &mut ctx, tree, node);
+        render_node_entries(&mut entries, &mut spine, &mut ctx, node);
     }
 
     out.push_str(&spine);
@@ -353,8 +350,7 @@ fn lineage_order(tree: &LoadedSessionTree) -> Vec<&LoadedSessionNode> {
 fn render_node_entries(
     out: &mut String,
     spine: &mut String,
-    ctx: &mut RenderCtx<'_>,
-    tree: &LoadedSessionTree,
+    ctx: &mut RenderCtx,
     node: &LoadedSessionNode,
 ) {
     let session = node_as_session(node);
@@ -380,29 +376,8 @@ fn render_node_entries(
                 }
                 last_final_output = None;
             }
-            ChronologicalPayload::ToolCall(_) => {}
         }
     }
-    let tool_call_map = session
-        .chronological
-        .iter()
-        .filter_map(|entry| match &entry.payload {
-            ChronologicalPayload::ToolCall(record) => record
-                .call_id
-                .as_ref()
-                .map(|call_id| (call_id.clone(), record)),
-            ChronologicalPayload::Message(_) | ChronologicalPayload::ProtocolEvent(_) => None,
-        })
-        .collect::<HashMap<_, _>>();
-    let rlm_owned_tool_call_ids = session
-        .chronological
-        .iter()
-        .filter_map(|entry| match &entry.payload {
-            ChronologicalPayload::ProtocolEvent(event) => chronological_rlm_step(event),
-            ChronologicalPayload::Message(_) | ChronologicalPayload::ToolCall(_) => None,
-        })
-        .flat_map(|step| step.tool_call_ids)
-        .collect::<HashSet<_>>();
 
     for (i, entry) in session.chronological.iter().enumerate() {
         for &prompt_idx in &insertions.before_index[i] {
@@ -424,45 +399,11 @@ fn render_node_entries(
                 }
                 render_message(out, spine, ctx, message);
             }
-            ChronologicalPayload::ToolCall(record) => {
-                if record
-                    .call_id
-                    .as_ref()
-                    .is_some_and(|call_id| rlm_owned_tool_call_ids.contains(call_id))
-                {
-                    continue;
-                }
-                if matches!(
-                    record.output.control,
-                    Some(ToolControl::SwitchAgentFrame { .. })
-                ) || record.tool == "continue_as"
-                {
-                    render_agent_frame_divider(out, spine, ctx, node, record);
-                    continue;
-                }
-                match record.tool.as_str() {
-                    "spawn_agent" => {
-                        if let Some(edge) = node
-                            .subagent_children
-                            .iter()
-                            .find(|e| e.call_id.as_deref() == record.call_id.as_deref())
-                            && let Some(child) = tree.get(&edge.child_session_id)
-                        {
-                            render_drill_card(out, spine, ctx, edge, child);
-                        } else {
-                            render_tool_call_entry(out, spine, ctx, record, None);
-                        }
-                    }
-                    _ => {
-                        render_tool_call_entry(out, spine, ctx, record, None);
-                    }
-                }
-            }
             ChronologicalPayload::ProtocolEvent(event) => {
                 let Some(step) = chronological_rlm_step(event) else {
                     continue;
                 };
-                render_rlm_step(out, spine, ctx, &step, &tool_call_map);
+                render_rlm_step(out, spine, ctx, &step);
             }
         }
     }
@@ -486,7 +427,7 @@ fn render_node_entries(
 fn emit_prompt_inline(
     out: &mut String,
     spine: &mut String,
-    ctx: &mut RenderCtx<'_>,
+    ctx: &mut RenderCtx,
     session: &LoadedSession,
     last_hash: &mut Option<String>,
     first_seen: &mut HashMap<String, PromptAnchor>,
@@ -515,270 +456,6 @@ fn emit_prompt_inline(
                 .unwrap_or_else(|| "first call".to_string()),
         });
     *last_hash = Some(prompt.system_hash.clone());
-}
-
-fn render_drill_card(
-    out: &mut String,
-    spine: &mut String,
-    ctx: &mut RenderCtx<'_>,
-    edge: &SubagentEdge,
-    child: &LoadedSessionNode,
-) {
-    let id = ctx.next_id();
-    let view_id = view_id_of(child);
-    let label = edge
-        .task
-        .as_deref()
-        .map(|task| one_line_summary(task, 80))
-        .unwrap_or_else(|| "subagent".to_string());
-    let cap = edge.capability.as_deref().unwrap_or("");
-    let task = child
-        .chronological
-        .iter()
-        .find_map(|e| match &e.payload {
-            ChronologicalPayload::Message(m)
-                if matches!(m.role, MessageRole::User) && !m.is_transient() =>
-            {
-                first_message_text(m)
-            }
-            _ => None,
-        })
-        .unwrap_or_default();
-    let turns = child
-        .chronological
-        .iter()
-        .filter(|e| {
-            matches!(&e.payload,
-                ChronologicalPayload::Message(m)
-                    if matches!(m.role, MessageRole::Assistant) && !m.is_transient()
-            )
-        })
-        .count();
-    let token_total: i64 = child
-        .llm_prompts
-        .iter()
-        .filter_map(|p| p.usage.as_ref())
-        .map(|u| u.input_tokens.max(0) + u.output_tokens.max(0))
-        .sum();
-    let (status_class, status_label) = match edge.status {
-        lash_core::ToolCallStatus::Success => ("ok", "ok"),
-        lash_core::ToolCallStatus::Failure => ("err", "error"),
-        lash_core::ToolCallStatus::Cancelled => ("cancelled", "cancelled"),
-    };
-    let dur = format_duration(edge.duration_ms);
-    let short_id = short_session_id(&child.meta.session_id);
-
-    let _ = writeln!(
-        out,
-        "    <button class=\"drill\" data-go=\"{vid}\" id=\"{id}\" data-role=\"subagent\">",
-        vid = escape_attr(&view_id)
-    );
-    out.push_str("      <div class=\"drill-left\">\n");
-    out.push_str("        <div class=\"drill-rail\">▾</div>\n");
-    out.push_str("        <div class=\"drill-content\">\n");
-    out.push_str("          <span class=\"drill-eyebrow\">▾ subagent · spawn_agent</span>\n");
-    let _ = writeln!(
-        out,
-        "          <span class=\"drill-title\">{}{}</span>",
-        escape(&label),
-        if cap.is_empty() {
-            String::new()
-        } else {
-            format!(" <span class=\"drill-cap\">· {}</span>", escape(cap))
-        }
-    );
-    if !task.trim().is_empty() {
-        let _ = writeln!(
-            out,
-            "          <p class=\"drill-task\">{}</p>",
-            escape(&one_line_summary(&task, 240))
-        );
-    }
-    out.push_str("          <div class=\"drill-pills\">\n");
-    let _ = writeln!(
-        out,
-        "            <span class=\"drill-pill\" data-kind=\"status\" data-status=\"{status_class}\">{status_label}</span>"
-    );
-    let _ = writeln!(
-        out,
-        "            <span class=\"drill-pill\"><span class=\"drill-pill-key\">turns</span><span class=\"drill-pill-val\">{}</span></span>",
-        turns
-    );
-    if token_total > 0 {
-        let _ = writeln!(
-            out,
-            "            <span class=\"drill-pill\"><span class=\"drill-pill-key\">tokens</span><span class=\"drill-pill-val\">{}</span></span>",
-            format_count(token_total as u64)
-        );
-    }
-    out.push_str("          </div>\n");
-    out.push_str("        </div>\n");
-    out.push_str("      </div>\n");
-    out.push_str("      <div class=\"drill-right\">\n");
-    let _ = writeln!(
-        out,
-        "        <span class=\"drill-route\"><span class=\"drill-route-arrow\">→</span>{}</span>",
-        escape(&short_id)
-    );
-    let _ = writeln!(
-        out,
-        "        <span class=\"drill-duration\">{}</span>",
-        escape(&dur)
-    );
-    out.push_str("      </div>\n");
-    out.push_str("    </button>\n");
-
-    let _ = writeln!(
-        spine,
-        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"child\" data-status=\"{status_class}\" title=\"spawn_agent · {}\"></a>",
-        escape_attr(&label)
-    );
-}
-
-fn render_agent_frame_divider(
-    out: &mut String,
-    spine: &mut String,
-    ctx: &mut RenderCtx<'_>,
-    node: &LoadedSessionNode,
-    record: &ToolCallRecord,
-) {
-    let id = ctx.next_id();
-    let (frame_id, control_task) = match &record.output.control {
-        Some(ToolControl::SwitchAgentFrame { frame_id, task, .. }) => {
-            (Some(frame_id.as_str()), task.as_deref())
-        }
-        _ => (None, None),
-    };
-    let task = control_task
-        .or_else(|| record.args.get("task").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string();
-    let frame_short = frame_id
-        .map(short_session_id)
-        .unwrap_or_else(|| "next".to_string());
-    let summary = if task.trim().is_empty() {
-        "continued in a new agent frame".to_string()
-    } else {
-        one_line_summary(&task, 200)
-    };
-    let session_short = short_session_id(&node.meta.session_id);
-
-    let _ = writeln!(
-        out,
-        "    <section class=\"agent-frame-switch\" id=\"{id}\" aria-label=\"agent frame switch from {p} to {s}\">",
-        p = escape_attr(&session_short),
-        s = escape_attr(&frame_short)
-    );
-    out.push_str("      <div class=\"agent-frame-banner\">\n");
-    out.push_str("        <div class=\"agent-frame-glyph\">↪</div>\n");
-    out.push_str("        <div class=\"agent-frame-title\">\n");
-    out.push_str("          <span class=\"agent-frame-eyebrow\">↪ new AgentFrame</span>\n");
-    let _ = writeln!(
-        out,
-        "          <span class=\"agent-frame-summary\">{}</span>",
-        escape(&summary)
-    );
-    out.push_str("        </div>\n");
-    let _ = writeln!(
-        out,
-        "        <div class=\"agent-frame-route\"><span class=\"route-id\">{}</span><span class=\"route-arrow\">→</span><span class=\"route-id sodium\">{}</span></div>",
-        escape(&session_short),
-        escape(&frame_short)
-    );
-    out.push_str("      </div>\n");
-
-    out.push_str("      <div class=\"agent-frame-body\">\n");
-    if !task.trim().is_empty() {
-        let _ = writeln!(
-            out,
-            "        <p class=\"agent-frame-task\">{}</p>",
-            escape(&task)
-        );
-    }
-
-    if let Ok(seed) = lash_protocol_rlm::RlmSeed::from_tool_args(&record.args)
-        && !seed.is_empty()
-    {
-        let seed_len = seed.globals.len() + seed.projected.entries.len();
-        let _ = writeln!(
-            out,
-            "        <div><span class=\"agent-frame-seed-label\">seed · {} entries</span><div class=\"seed-list\">",
-            seed_len
-        );
-        for name in seed.globals.keys() {
-            let _ = writeln!(
-                out,
-                "          <span class=\"seed-pill\" data-kind=\"global\"><span class=\"seed-name\">{name}</span><span class=\"seed-kind\">global</span></span>",
-                name = escape(name)
-            );
-        }
-        for (name, _) in &seed.projected.entries {
-            let _ = writeln!(
-                out,
-                "          <span class=\"seed-pill\" data-kind=\"projected\"><span class=\"seed-name\">{name}</span><span class=\"seed-kind\">projected</span></span>",
-                name = escape(name)
-            );
-        }
-        out.push_str("        </div></div>\n");
-    }
-
-    let session_turns = node
-        .chronological
-        .iter()
-        .filter(|e| {
-            matches!(&e.payload,
-                ChronologicalPayload::Message(m)
-                    if matches!(m.role, MessageRole::User) && !m.is_transient()
-            )
-        })
-        .count()
-        + node
-            .chronological
-            .iter()
-            .filter(|e| {
-                matches!(
-                    &e.payload,
-                    ChronologicalPayload::ProtocolEvent(event) if chronological_rlm_step(event).is_some()
-                )
-            })
-            .count();
-    let max_ctx_pct = node
-        .llm_prompts
-        .iter()
-        .filter_map(|p| {
-            let usage = p.usage.as_ref()?;
-            let window = node.context_window_tokens.filter(|w| *w > 0)?;
-            Some(usage.input_tokens.max(0) as f64 * 100.0 / window as f64)
-        })
-        .fold(None::<f64>, |acc, x| Some(acc.map_or(x, |m| m.max(x))));
-
-    out.push_str("        <div class=\"agent-frame-stats\">\n");
-    if let Some(pct) = max_ctx_pct {
-        let _ = writeln!(
-            out,
-            "          <span class=\"agent-frame-stat\"><span class=\"agent-frame-stat-key\">ctx</span><span class=\"agent-frame-stat-val\">{:.0}%</span></span>",
-            pct
-        );
-    }
-    let _ = writeln!(
-        out,
-        "          <span class=\"agent-frame-stat\"><span class=\"agent-frame-stat-key\">turns</span><span class=\"agent-frame-stat-val\">{}</span></span>",
-        session_turns
-    );
-    let _ = writeln!(
-        out,
-        "          <span class=\"agent-frame-stat\"><span class=\"agent-frame-stat-key\">reason</span><span class=\"agent-frame-stat-val\">continue_as</span></span>"
-    );
-    out.push_str("        </div>\n");
-
-    out.push_str("      </div>\n");
-    out.push_str("    </section>\n");
-
-    let _ = writeln!(
-        spine,
-        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"agent-frame\" title=\"AgentFrame {}\"></a>",
-        escape_attr(&frame_short)
-    );
 }
 
 pub fn render_tree_data_script(

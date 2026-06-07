@@ -28,7 +28,7 @@ use crate::perf_support::tempdir::make_temp_bench_dir;
 use crate::perf_support::time::{elapsed_ms, round3};
 
 use super::harness::{
-    benchmark_prompt, build_embed_core, build_runtime, build_runtime_with_turso_store,
+    benchmark_prompt, build_embed_core, build_runtime, build_runtime_with_sqlite_store,
     prepare_turn, rlm_perf_projected_bindings, seed_runtime_state, validate_runtime_perf_turn,
 };
 use super::scenarios::RuntimePerfScenario;
@@ -364,13 +364,13 @@ pub(crate) async fn run_once(
 
     let build_before_alloc = allocator_stats();
     let build_started = Instant::now();
-    let turso_root = if matches!(scenario, RuntimePerfScenario::TursoStoreReopen) {
-        Some(make_temp_bench_dir("lash-runtime-perf-turso-store")?)
+    let sqlite_root = if matches!(scenario, RuntimePerfScenario::SqliteStoreReopen) {
+        Some(make_temp_bench_dir("lash-runtime-perf-sqlite-store")?)
     } else {
         None
     };
-    let mut runtime = if let Some(root) = turso_root.as_ref() {
-        build_runtime_with_turso_store(scenario, root.clone()).await?
+    let mut runtime = if let Some(root) = sqlite_root.as_ref() {
+        build_runtime_with_sqlite_store(scenario, root.clone()).await?
     } else {
         build_runtime(scenario).await?
     };
@@ -443,13 +443,13 @@ pub(crate) async fn run_once(
                 },
             );
         }
-        if matches!(scenario, RuntimePerfScenario::TursoStoreReopen) && turn_index > 0 {
+        if matches!(scenario, RuntimePerfScenario::SqliteStoreReopen) && turn_index > 0 {
             let reopen_before_alloc = allocator_stats();
             let reopen_before_memory = process_memory_sample();
             let reopen_started = Instant::now();
             runtime.reopen_session(scenario).await?;
             extra_phase_profile.insert(
-                "turso_store_reopen.runtime_reopen".to_string(),
+                "sqlite_store_reopen.runtime_reopen".to_string(),
                 RuntimePerfPhaseRunResult {
                     duration_ms: elapsed_ms(reopen_started),
                     allocations: alloc_delta(reopen_before_alloc, allocator_stats()),
@@ -589,7 +589,7 @@ pub(crate) async fn run_once(
     let after_export_memory = process_memory_sample();
     let total_alloc = alloc_delta(total_before_alloc, allocator_stats());
     let last_turn_memory = turns.last().map(|turn| &turn.memory);
-    if let Some(root) = turso_root {
+    if let Some(root) = sqlite_root {
         runtime.close().await?;
         let _ = std::fs::remove_dir_all(root);
     }

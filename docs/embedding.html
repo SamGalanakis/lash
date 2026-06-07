@@ -122,8 +122,8 @@
 use lash::{plugins::runtime_plugin_stack, tools::*, LashCore, ModeId, ModePreset, TurnEvent, TurnInput};
 
 let data_dir = std::path::PathBuf::from(".lash-data");
-let store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(data_dir.join("sessions")));
-let artifact_store = Arc::new(lash_turso_store::Store::open(&amp;data_dir.join("artifacts.db"))?);
+let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(data_dir.join("sessions")));
+let artifact_store = Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("artifacts.db"))?);
 
 let core = LashCore::builder()
     .install_mode(ModePreset::standard())

@@ -1,7 +1,5 @@
-use std::collections::HashMap;
-
+use lash_core::ChronologicalPayload;
 use lash_core::session_model::{MessageRole, PruneState};
-use lash_core::{ChronologicalPayload, ToolCallRecord};
 
 use crate::LoadedSession;
 
@@ -68,20 +66,6 @@ pub(crate) fn compute_stats(session: &LoadedSession) -> SessionStats {
         chronological: session.chronological.len(),
         ..SessionStats::default()
     };
-    let mut tool_counts: HashMap<String, usize> = HashMap::new();
-
-    let record_tool_call = |s: &mut SessionStats,
-                            tool_counts: &mut HashMap<String, usize>,
-                            record: &ToolCallRecord| {
-        match record.output.status() {
-            lash_core::ToolCallStatus::Success => s.tool_calls_ok += 1,
-            lash_core::ToolCallStatus::Failure => s.tool_calls_err += 1,
-            lash_core::ToolCallStatus::Cancelled => s.tool_calls_cancelled += 1,
-        }
-        s.tool_total_ms = s.tool_total_ms.saturating_add(record.duration_ms);
-        *tool_counts.entry(record.tool.clone()).or_insert(0) += 1;
-    };
-
     for entry in &session.chronological {
         match &entry.payload {
             ChronologicalPayload::Message(message) => {
@@ -105,9 +89,6 @@ pub(crate) fn compute_stats(session: &LoadedSession) -> SessionStats {
                     }
                 }
             }
-            ChronologicalPayload::ToolCall(record) => {
-                record_tool_call(&mut s, &mut tool_counts, record);
-            }
             ChronologicalPayload::ProtocolEvent(event) => {
                 let Some(step) = chronological_rlm_step(event) else {
                     continue;
@@ -121,11 +102,6 @@ pub(crate) fn compute_stats(session: &LoadedSession) -> SessionStats {
             }
         }
     }
-
-    let mut freq: Vec<(String, usize)> = tool_counts.into_iter().collect();
-    freq.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    s.tool_names_set = freq.iter().map(|(name, _)| name.clone()).collect();
-    s.tool_freq = freq;
 
     for prompt in &session.llm_prompts {
         let Some(usage) = &prompt.usage else {

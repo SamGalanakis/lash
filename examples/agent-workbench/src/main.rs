@@ -134,13 +134,13 @@ async fn async_main() -> AnyhowResult<()> {
         None,
     )
     .map_err(|err| anyhow!("invalid OPENROUTER_MODEL metadata: {err}"))?;
-    let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+    let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         data_dir.join("lash-sessions"),
     ));
     let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
         session_store_factory.clone();
     let process_registry = Arc::new(
-        lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+        lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
             .await
             .context("open process registry")?,
     ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -148,7 +148,7 @@ async fn async_main() -> AnyhowResult<()> {
     // modules), shared across the session tree. SQLite keeps installed triggers
     // durable across restarts.
     let artifact_store = Arc::new(
-        lash_turso_store::Store::open(&data_dir.join("artifacts.db"))
+        lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
             .await
             .context("open lashlang artifact store")?,
     ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
@@ -1212,13 +1212,8 @@ fn model_spec_for_request(
         .unwrap_or(selected_model.model.as_str())
         .to_string();
     let model_variant = model_variant_for_request(&selected_model, model_variant);
-    lash::ModelSpec::from_token_limits(
-        model,
-        model_variant,
-        DEFAULT_CONTEXT_WINDOW_TOKENS,
-        None,
-    )
-    .map_err(AppError::bad_request)
+    lash::ModelSpec::from_token_limits(model, model_variant, DEFAULT_CONTEXT_WINDOW_TOKENS, None)
+        .map_err(AppError::bad_request)
 }
 
 fn model_variant_for_request(
@@ -1717,7 +1712,7 @@ mod tests {
             .lashlang_artifact_store(Arc::new(sync_await({
                 let path = data_dir.join("artifacts.db");
                 async move {
-                    lash_turso_store::Store::open(&path)
+                    lash_sqlite_store::Store::open(&path)
                         .await
                         .expect("open artifact store")
                 }
@@ -2015,12 +2010,12 @@ mod tests {
         let process_registry = Arc::new(sync_await({
             let path = data_dir.join("processes.db");
             async move {
-                lash_turso_store::TursoProcessRegistry::open(&path)
+                lash_sqlite_store::SqliteProcessRegistry::open(&path)
                     .await
                     .expect("open registry")
             }
         })) as Arc<dyn lash::process::ProcessRegistry>;
-        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
@@ -2030,8 +2025,8 @@ mod tests {
             .complete_error("transient done test should not call the provider")
             .build()
             .into_handle();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
-            .expect("model spec");
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let (event_tx, _) = broadcast::channel(16);
         let mut events = event_tx.subscribe();
         let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
@@ -2092,13 +2087,13 @@ mod tests {
         let data_dir =
             std::env::temp_dir().join(format!("agent-workbench-inbox-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -2113,8 +2108,8 @@ mod tests {
             })
             .build()
             .into_handle();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
-            .expect("model spec");
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let session_id = WorkbenchSessionIds::fresh().current();
         let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
             .install_mode(ModePreset::rlm_with_config(
@@ -2174,13 +2169,13 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -2190,8 +2185,8 @@ mod tests {
             .complete_error("dynamic inbox surface test should not call the provider")
             .build()
             .into_handle();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
-            .expect("model spec");
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let session_ids = WorkbenchSessionIds::fresh();
         let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
             .install_mode(ModePreset::rlm_with_config(
@@ -2281,19 +2276,19 @@ mod tests {
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
         let db_path = data_dir.join("processes.db");
-        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory.clone();
         let process_registry = Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(&db_path)
+            lash_sqlite_store::SqliteProcessRegistry::open(&db_path)
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let provider = trigger_registration_provider();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
-            .expect("model spec");
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let session_ids = WorkbenchSessionIds::fresh();
         let session_id = session_ids.current();
         let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
@@ -2391,7 +2386,7 @@ mod tests {
         };
         let target_scope_id = lash::process::ProcessScope::new(state.current_session_id()).id();
         let session_store =
-            lash_turso_store::Store::open(&session_store_factory.path_for_session(&session_id))
+            lash_sqlite_store::Store::open(&session_store_factory.path_for_session(&session_id))
                 .await
                 .expect("open session store");
         let queued = session_store
@@ -2439,18 +2434,18 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let artifact_store = Arc::new(
-            lash_turso_store::Store::open(&data_dir.join("artifacts.db"))
+            lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
                 .await
                 .expect("open artifact store"),
         );
@@ -2462,8 +2457,8 @@ mod tests {
             .complete(|_| async { Ok(trigger_registration_response()) })
             .build()
             .into_handle();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
-            .expect("model spec");
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
         let (event_tx, _) = broadcast::channel(1024);
         let core = LashCore::builder()
@@ -2620,19 +2615,19 @@ mod tests {
         let data_dir =
             std::env::temp_dir().join(format!("agent-workbench-reset-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let provider = trigger_registration_provider();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
-            .expect("model spec");
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         let (restate_ingress_url, mut restate_requests) = spawn_restate_ingress_capture().await;
         let core = explicit_durable_test_facets(LashCore::builder(), &data_dir)
             .install_mode(ModePreset::rlm_with_config(
@@ -2889,18 +2884,18 @@ mod tests {
         data_dir: &std::path::Path,
         restate_ingress_url: String,
     ) -> LiveWorkbenchRestateHarness {
-        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory.clone();
         let process_registry = Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
                 .await
                 .expect("open process registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let artifact_store = Arc::new(
-            lash_turso_store::Store::open(&data_dir.join("artifacts.db"))
+            lash_sqlite_store::Store::open(&data_dir.join("artifacts.db"))
                 .await
                 .expect("open artifact store"),
         ) as Arc<dyn lash::persistence::LashlangArtifactStore>;
@@ -2934,13 +2929,9 @@ mod tests {
             })
             .build()
             .into_handle();
-        let model = lash::ModelSpec::from_token_limits(
-            "mock-model",
-            Some("high".to_string()),
-            4096,
-            None,
-        )
-        .expect("model spec");
+        let model =
+            lash::ModelSpec::from_token_limits("mock-model", Some("high".to_string()), 4096, None)
+                .expect("model spec");
         let process_deployment = lash_restate::RestateProcessDeployment::new(
             restate_ingress_url.clone(),
             Arc::clone(&process_registry),
@@ -3109,17 +3100,17 @@ mod tests {
     }
 
     #[test]
-    fn persisted_trigger_route_fires_after_reopening_turso_artifact_store() {
+    fn persisted_trigger_route_fires_after_reopening_sqlite_artifact_store() {
         run_async_test_on_large_stack("workbench-persisted-trigger-test", || {
-            persisted_trigger_route_fires_after_reopening_turso_artifact_store_inner()
+            persisted_trigger_route_fires_after_reopening_sqlite_artifact_store_inner()
         });
     }
 
-    async fn persisted_trigger_route_fires_after_reopening_turso_artifact_store_inner() {
+    async fn persisted_trigger_route_fires_after_reopening_sqlite_artifact_store_inner() {
         let data_dir =
             std::env::temp_dir().join(format!("agent-workbench-trigger-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
-        let session_store_factory = Arc::new(lash_turso_store::TursoSessionStoreFactory::new(
+        let session_store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
             data_dir.join("lash-sessions"),
         ));
         let process_registry_path = data_dir.join("processes.db");
@@ -3128,14 +3119,14 @@ mod tests {
 
         {
             let artifact_store = Arc::new(
-                lash_turso_store::Store::open(&artifact_store_path)
+                lash_sqlite_store::Store::open(&artifact_store_path)
                     .await
                     .expect("open artifacts"),
             );
             let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
                 artifact_store.clone();
             let process_registry = Arc::new(
-                lash_turso_store::TursoProcessRegistry::open(&process_registry_path)
+                lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
                     .await
                     .expect("open registry"),
             ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -3156,14 +3147,14 @@ mod tests {
         }
 
         let artifact_store = Arc::new(
-            lash_turso_store::Store::open(&artifact_store_path)
+            lash_sqlite_store::Store::open(&artifact_store_path)
                 .await
                 .expect("reopen artifacts"),
         );
         let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
             artifact_store.clone();
         let process_registry = Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(&process_registry_path)
+            lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
                 .await
                 .expect("reopen registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -3194,8 +3185,8 @@ mod tests {
         artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
     ) -> LashCore {
         let provider = trigger_registration_provider();
-        let model = lash::ModelSpec::from_token_limits("test-model", None, 4096, None)
-            .expect("model spec");
+        let model =
+            lash::ModelSpec::from_token_limits("test-model", None, 4096, None).expect("model spec");
         LashCore::builder()
             .install_mode(ModePreset::rlm_with_config(
                 lash::modes::RlmProtocolPluginConfig::default()

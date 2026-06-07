@@ -56,19 +56,13 @@ fn events_from_messages(messages: &[Message]) -> Vec<lash_core::SessionEventReco
 fn test_read_view(
     events: &[lash_core::SessionEventRecord],
     messages: &[Message],
-    tool_calls: &[ToolCallRecord],
+    _tool_calls: &[ToolCallRecord],
 ) -> lash_core::SessionReadView {
     let mut graph = lash_core::SessionGraph::default();
     for event in events {
         match event {
             lash_core::SessionEventRecord::Conversation(record) => {
                 graph.append_message(record.to_message());
-            }
-            lash_core::SessionEventRecord::Tool(lash_core::ToolEvent::Invocation {
-                record,
-                ..
-            }) => {
-                graph.append_active_read_delta(&[], std::slice::from_ref(record));
             }
             lash_core::SessionEventRecord::Protocol(event) => {
                 graph.append_protocol_event(event.clone());
@@ -87,7 +81,7 @@ fn test_read_view(
         .filter(|message| !event_message_ids.contains(message.id.as_str()))
         .cloned()
         .collect::<Vec<_>>();
-    graph.append_active_read_delta(&missing_messages, tool_calls);
+    graph.append_active_read_delta(&missing_messages);
     let state = lash_core::SessionSnapshot {
         session_graph: graph,
         ..lash_core::SessionSnapshot::default()

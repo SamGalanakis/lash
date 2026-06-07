@@ -18,7 +18,7 @@ use lash_core::{
     DeliveryPolicy, PluginSessionSnapshot, RuntimeCommit, RuntimePersistence, RuntimeSessionState,
     SlotPolicy, StoreError, ToolState, TurnInput,
 };
-use lash_turso_store::Store;
+use lash_sqlite_store::Store;
 
 fn unique_db_path(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -118,7 +118,7 @@ async fn gc_keeps_live_committed_checkpoint_blobs() {
     let store = Store::memory().await.expect("store");
     let orphan = store
         .put_artifact_blob(
-            lash_turso_store::BlobArtifactDescriptor::plugin_session_snapshot(),
+            lash_sqlite_store::BlobArtifactDescriptor::plugin_session_snapshot(),
             b"orphan-blob",
         )
         .await;
@@ -287,15 +287,10 @@ fn concurrent_claims_never_double_own_a_batch() {
 async fn unsupported_schema_error_reports_real_versions() {
     let path = unique_db_path("schema");
     {
-        let db = turso::Builder::new_local(&path.to_string_lossy())
-            .build()
-            .await
-            .expect("open raw");
-        let conn = db.connect().expect("connect raw");
+        let conn = rusqlite::Connection::open(&path).expect("open raw");
         // Create a user object and stamp a bogus, unsupported user_version so
         // the store's open path takes the reject branch.
         conn.execute_batch("CREATE TABLE legacy (id INTEGER); PRAGMA user_version = 99;")
-            .await
             .expect("seed legacy schema");
     }
 
@@ -341,25 +336,9 @@ fn concurrent_first_open_never_observes_version_zero_schema() {
             .expect("schema-open worker")
             .expect("concurrent first open should succeed");
     }
-    let user_version = block_on(async {
-        let db = turso::Builder::new_local(&path.to_string_lossy())
-            .build()
-            .await
-            .expect("open initialized db");
-        let conn = db.connect().expect("connect initialized db");
-        let mut rows = conn
-            .query("PRAGMA user_version", ())
-            .await
-            .expect("read user_version");
-        let row = rows
-            .next()
-            .await
-            .expect("read user_version row")
-            .expect("row");
-        match row.get_value(0).expect("user_version value") {
-            turso::Value::Integer(value) => value as i32,
-            other => panic!("expected integer user_version, got {other:?}"),
-        }
-    });
+    let conn = rusqlite::Connection::open(&path).expect("open initialized db");
+    let user_version: i32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("read user_version");
     assert_eq!(user_version, 3);
 }

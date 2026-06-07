@@ -2,10 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn tool_result_projector_only_changes_model_observation() {
-    let committed_results = Arc::new(tokio::sync::Mutex::new(Vec::<(
-        serde_json::Value,
-        serde_json::Value,
-    )>::new()));
+    let committed_results = Arc::new(tokio::sync::Mutex::new(Vec::<serde_json::Value>::new()));
     let committed_results_hook = Arc::clone(&committed_results);
     let plugin = Arc::new(RuntimeTestPluginFactory {
         build: Arc::new(move |_| {
@@ -26,18 +23,12 @@ async fn tool_result_projector_only_changes_model_observation() {
                     let committed_results = Arc::clone(&committed_results);
                     Box::pin(async move {
                         if let crate::plugin::PluginLifecycleEvent::TurnFinalized(turn) = event {
-                            committed_results.lock().await.push((
+                            committed_results.lock().await.push(
                                 turn.tool_calls
                                     .first()
                                     .map(|call| call.output.value_for_projection().clone())
                                     .unwrap_or(serde_json::Value::Null),
-                                turn.state
-                                    .read_model()
-                                    .tool_calls
-                                    .first()
-                                    .map(|call| call.output.value_for_projection().clone())
-                                    .unwrap_or(serde_json::Value::Null),
-                            ));
+                            );
                         }
                         Ok(())
                     })
@@ -110,24 +101,10 @@ async fn tool_result_projector_only_changes_model_observation() {
     let committed = committed_results.lock().await;
     assert_eq!(
         committed.as_slice(),
-        &[(
-            serde_json::json!({ "payload": "raw:sample" }),
-            serde_json::json!({ "payload": "raw:sample" }),
-        )]
-    );
-    assert_eq!(active_tool_calls(&turn.state).len(), 1);
-    assert_eq!(
-        active_tool_calls(&turn.state)[0].call_id.as_deref(),
-        Some("tool-1")
+        &[serde_json::json!({ "payload": "raw:sample" })]
     );
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].call_id.as_deref(), Some("tool-1"));
-    assert_eq!(
-        active_tool_calls(&turn.state)[0]
-            .output
-            .value_for_projection(),
-        serde_json::json!({ "payload": "raw:sample" })
-    );
     assert_eq!(
         turn.tool_calls[0].output.value_for_projection(),
         serde_json::json!({ "payload": "raw:sample" })

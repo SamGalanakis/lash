@@ -31,7 +31,9 @@ pub fn render(session: &LoadedSession) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
+    use lash_core::{
+        ChronologicalEntry, ChronologicalPayload, Message, MessageRole, PruneState, shared_parts,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -40,12 +42,22 @@ mod tests {
             meta: None,
             chronological: vec![ChronologicalEntry {
                 index: 0,
-                payload: ChronologicalPayload::ToolCall(ToolCallRecord {
-                    call_id: Some("call_1".to_string()),
-                    tool: "lookup".to_string(),
-                    args: serde_json::json!({"q": "x"}),
-                    output: lash_core::ToolCallOutput::success(serde_json::json!({"answer": "y"})),
-                    duration_ms: 4,
+                payload: ChronologicalPayload::Message(Message {
+                    id: "m1".to_string(),
+                    role: MessageRole::User,
+                    parts: shared_parts(vec![lash_core::Part {
+                        id: "p1".to_string(),
+                        kind: lash_core::PartKind::Text,
+                        content: "hello".to_string(),
+                        attachment: None,
+                        tool_call_id: None,
+                        tool_name: None,
+                        tool_replay: None,
+                        prune_state: PruneState::Intact,
+                        reasoning_meta: None,
+                        response_meta: None,
+                    }]),
+                    origin: None,
                 }),
             }],
             trace_path: PathBuf::from("session.trace.jsonl"),
@@ -55,7 +67,7 @@ mod tests {
 
         let rendered = render(&session);
         assert!(rendered.contains("\"chronological\""));
-        assert!(rendered.contains("\"kind\": \"tool_call\""));
+        assert!(rendered.contains("\"kind\": \"message\""));
         assert!(!rendered.contains("\"messages\""));
         assert!(!rendered.contains("\"tool_calls\""));
     }

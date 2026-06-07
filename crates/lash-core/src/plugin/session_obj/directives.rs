@@ -259,9 +259,7 @@ impl PluginSession {
             }
         }
         if let Some(messages) = updated_messages.as_ref() {
-            let tool_calls = turn.state.read_view().tool_calls().to_vec();
-            turn.state
-                .replace_active_read_state(messages.as_slice(), &tool_calls);
+            turn.state.replace_active_read_state(messages.as_slice());
         }
 
         if self.has_runtime_event_hooks() {

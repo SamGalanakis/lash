@@ -1,6 +1,6 @@
 use super::*;
 use crate::assistant_text::{merge_assistant_reasoning_text, normalize_assistant_text};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
 const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
@@ -144,19 +144,7 @@ pub(crate) fn interrupted_blocks_from_read_view(
 fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) -> UiTimeline {
     let mut timeline = UiTimeline::new();
     let mut activity_state = ActivityState::default();
-    let rlm_owned_tool_call_ids = rlm_owned_tool_call_ids(projection);
-    let tool_call_map = projection
-        .entries()
-        .iter()
-        .filter_map(|entry| match &entry.payload {
-            lash_core::ChronologicalPayload::ToolCall(record) => record
-                .call_id
-                .as_deref()
-                .map(|call_id| (call_id, record.clone())),
-            lash_core::ChronologicalPayload::Message(_)
-            | lash_core::ChronologicalPayload::ProtocolEvent(_) => None,
-        })
-        .collect::<HashMap<_, _>>();
+    let tool_call_map = HashMap::new();
 
     for entry in projection.entries() {
         match &entry.payload {
@@ -169,25 +157,11 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
                     false,
                 );
             }
-            lash_core::ChronologicalPayload::ToolCall(record) => {
-                if !record
-                    .call_id
-                    .as_deref()
-                    .is_some_and(|call_id| rlm_owned_tool_call_ids.contains(call_id))
-                {
-                    append_tool_call_record_items(&mut timeline, record, &mut activity_state);
-                }
-            }
             lash_core::ChronologicalPayload::ProtocolEvent(event) => {
                 if let Some(lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry)) =
                     lash_protocol_rlm::decode_rlm_protocol_event(event)
                 {
-                    append_rlm_trajectory_items(
-                        &mut timeline,
-                        &entry,
-                        &tool_call_map,
-                        &mut activity_state,
-                    );
+                    append_rlm_trajectory_items(&mut timeline, &entry);
                 }
             }
         }
@@ -196,41 +170,14 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
     timeline
 }
 
-fn rlm_owned_tool_call_ids(projection: &lash_core::ChronologicalProjection) -> HashSet<String> {
-    projection
-        .entries()
-        .iter()
-        .filter_map(|entry| match &entry.payload {
-            lash_core::ChronologicalPayload::ProtocolEvent(event) => {
-                lash_protocol_rlm::decode_rlm_protocol_event(event)
-            }
-            lash_core::ChronologicalPayload::Message(_)
-            | lash_core::ChronologicalPayload::ToolCall(_) => None,
-        })
-        .flat_map(|event| match event {
-            lash_rlm_types::RlmProtocolEvent::RlmTrajectoryEntry(entry) => entry.tool_call_ids,
-            lash_rlm_types::RlmProtocolEvent::RlmGlobalsPatch(_)
-            | lash_rlm_types::RlmProtocolEvent::RlmSeed(_)
-            | lash_rlm_types::RlmProtocolEvent::RlmDiagnostic(_) => Vec::new(),
-        })
-        .collect()
-}
-
 fn append_rlm_trajectory_items(
     timeline: &mut UiTimeline,
     entry: &lash_rlm_types::RlmTrajectoryEntry,
-    tool_calls: &HashMap<&str, ToolCallRecord>,
-    activity_state: &mut ActivityState,
 ) {
     if let Some(reasoning) = rlm_reasoning_display_text(&entry.reasoning) {
         let _ = push_assistant_reasoning_item(timeline, &reasoning);
     }
     timeline.push(UiTimelineItem::LashlangCode(entry.code.clone()));
-    for call_id in &entry.tool_call_ids {
-        if let Some(record) = tool_calls.get(call_id.as_str()) {
-            append_tool_call_record_items(timeline, record, activity_state);
-        }
-    }
     // Mirror the live path (`CodeBlockCompleted`): a failed block keeps its
     // code on screen with the error rendered after it, so scrollback shows the
     // same thing the turn did.
@@ -586,23 +533,6 @@ fn is_internal_rlm_message(message: &Message) -> bool {
         }
         MessageRole::User | MessageRole::Event => false,
     }
-}
-
-fn append_tool_call_record_items(
-    timeline: &mut UiTimeline,
-    record: &ToolCallRecord,
-    activity_state: &mut ActivityState,
-) {
-    if record.tool == "execute_lashlang" {
-        return;
-    }
-    activity_state.append_tool_call_to_timeline(
-        timeline,
-        &record.tool,
-        record.args.clone(),
-        record.output.clone(),
-        record.duration_ms,
-    );
 }
 
 /// True when a legacy user-message part carries an RLM exec result.

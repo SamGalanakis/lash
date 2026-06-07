@@ -1,3 +1,15 @@
+//! SQLite-backed runtime effect replay host (tokio-rusqlite port of the the prior store
+//! store's `effect_replay`).
+//!
+//! The public surface is identical to the prior implementation — same type names
+//! (`SqliteEffectHost`, `SqliteRuntimeEffectController`, `SqliteEffectReplayOptions`),
+//! same async signatures — so consumers swap backends with a path rename only.
+//! The only mechanical change is the database layer: the prior store ran every op directly
+//! on `&Connection` with `.await`; here every database body is a *synchronous*
+//! rusqlite closure handed to the shared [`SqliteConnection`] wrapper. The
+//! claim/finalize paths run inside `conn.write` (`BEGIN IMMEDIATE`) so the
+//! cross-process write lock is taken up front — the lease fence WAL gives us.
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,13 +32,13 @@ const BUSY_POLL: Duration = Duration::from_millis(25);
 
 static EFFECT_OWNER_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// Options for Turso-backed runtime effect replay.
+/// Options for SQLite-backed runtime effect replay.
 #[derive(Clone, Debug)]
-pub struct TursoEffectReplayOptions {
+pub struct SqliteEffectReplayOptions {
     pub lease_ttl: Duration,
 }
 
-impl Default for TursoEffectReplayOptions {
+impl Default for SqliteEffectReplayOptions {
     fn default() -> Self {
         Self {
             lease_ttl: DEFAULT_LEASE_TTL,
@@ -34,29 +46,28 @@ impl Default for TursoEffectReplayOptions {
     }
 }
 
-struct TursoEffectReplayInner {
-    _db: turso::Database,
-    conn: tokio::sync::Mutex<Connection>,
+struct SqliteEffectReplayInner {
+    conn: SqliteConnection,
     owner_id: String,
     lease_counter: AtomicU64,
     replay_mode: AtomicBool,
     lease_ttl_ms: u64,
 }
 
-/// Deployment-level Turso effect host.
+/// Deployment-level SQLite effect host.
 ///
-/// This host persists runtime effect history in a local Turso database and
+/// This host persists runtime effect history in a local SQLite database and
 /// returns scoped controllers that replay completed outcomes by
 /// `(scope_id, replay_key)`.
 #[derive(Clone)]
-pub struct TursoEffectHost {
-    inner: Arc<TursoEffectReplayInner>,
+pub struct SqliteEffectHost {
+    inner: Arc<SqliteEffectReplayInner>,
 }
 
-/// Scoped Turso-backed runtime effect controller.
+/// Scoped SQLite-backed runtime effect controller.
 #[derive(Clone)]
-pub struct TursoRuntimeEffectController {
-    inner: Arc<TursoEffectReplayInner>,
+pub struct SqliteRuntimeEffectController {
+    inner: Arc<SqliteEffectReplayInner>,
     scope: EffectScope,
 }
 
@@ -80,25 +91,27 @@ enum PreparedEffect {
     },
 }
 
-impl TursoEffectHost {
-    pub async fn open(path: &Path) -> turso::Result<Self> {
-        Self::open_with_options(path, TursoEffectReplayOptions::default()).await
+impl SqliteEffectHost {
+    pub async fn open(path: &Path) -> tokio_rusqlite::Result<Self> {
+        Self::open_with_options(path, SqliteEffectReplayOptions::default()).await
     }
 
     pub async fn open_with_options(
         path: &Path,
-        options: TursoEffectReplayOptions,
-    ) -> turso::Result<Self> {
+        options: SqliteEffectReplayOptions,
+    ) -> tokio_rusqlite::Result<Self> {
         Ok(Self {
             inner: open_effect_replay_inner(path, StoreBacking::File, options).await?,
         })
     }
 
-    pub async fn memory() -> turso::Result<Self> {
-        Self::memory_with_options(TursoEffectReplayOptions::default()).await
+    pub async fn memory() -> tokio_rusqlite::Result<Self> {
+        Self::memory_with_options(SqliteEffectReplayOptions::default()).await
     }
 
-    pub async fn memory_with_options(options: TursoEffectReplayOptions) -> turso::Result<Self> {
+    pub async fn memory_with_options(
+        options: SqliteEffectReplayOptions,
+    ) -> tokio_rusqlite::Result<Self> {
         Ok(Self {
             inner: open_effect_replay_memory_inner(options).await?,
         })
@@ -111,7 +124,7 @@ impl TursoEffectHost {
     }
 }
 
-impl EffectHost for TursoEffectHost {
+impl EffectHost for SqliteEffectHost {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -124,7 +137,7 @@ impl EffectHost for TursoEffectHost {
         &'run self,
         scope: EffectScope,
     ) -> Result<ScopedEffectController<'run>, RuntimeError> {
-        let controller = TursoRuntimeEffectController {
+        let controller = SqliteRuntimeEffectController {
             inner: Arc::clone(&self.inner),
             scope: scope.clone(),
         };
@@ -135,7 +148,7 @@ impl EffectHost for TursoEffectHost {
         &self,
         scope: EffectScope,
     ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
-        let controller = TursoRuntimeEffectController {
+        let controller = SqliteRuntimeEffectController {
             inner: Arc::clone(&self.inner),
             scope: scope.clone(),
         };
@@ -146,30 +159,30 @@ impl EffectHost for TursoEffectHost {
     }
 }
 
-impl TursoRuntimeEffectController {
-    pub async fn open(path: &Path, scope: EffectScope) -> turso::Result<Self> {
-        Self::open_with_options(path, scope, TursoEffectReplayOptions::default()).await
+impl SqliteRuntimeEffectController {
+    pub async fn open(path: &Path, scope: EffectScope) -> tokio_rusqlite::Result<Self> {
+        Self::open_with_options(path, scope, SqliteEffectReplayOptions::default()).await
     }
 
     pub async fn open_with_options(
         path: &Path,
         scope: EffectScope,
-        options: TursoEffectReplayOptions,
-    ) -> turso::Result<Self> {
+        options: SqliteEffectReplayOptions,
+    ) -> tokio_rusqlite::Result<Self> {
         Ok(Self {
             inner: open_effect_replay_inner(path, StoreBacking::File, options).await?,
             scope,
         })
     }
 
-    pub async fn memory(scope: EffectScope) -> turso::Result<Self> {
-        Self::memory_with_options(scope, TursoEffectReplayOptions::default()).await
+    pub async fn memory(scope: EffectScope) -> tokio_rusqlite::Result<Self> {
+        Self::memory_with_options(scope, SqliteEffectReplayOptions::default()).await
     }
 
     pub async fn memory_with_options(
         scope: EffectScope,
-        options: TursoEffectReplayOptions,
-    ) -> turso::Result<Self> {
+        options: SqliteEffectReplayOptions,
+    ) -> tokio_rusqlite::Result<Self> {
         Ok(Self {
             inner: open_effect_replay_memory_inner(options).await?,
             scope,
@@ -191,7 +204,7 @@ impl TursoRuntimeEffectController {
             .replay_key()
             .ok_or_else(|| {
                 RuntimeEffectControllerError::new(
-                    "turso_effect_replay_key_missing",
+                    "sqlite_effect_replay_key_missing",
                     "runtime effect envelope requires replay.key",
                 )
             })?
@@ -203,167 +216,170 @@ impl TursoRuntimeEffectController {
         let due_at_ms = sleep_due_at_ms(envelope, now);
         let lease_expires_at_ms = now.saturating_add(self.inner.lease_ttl_ms);
         let replay_mode = self.inner.replay_mode.load(Ordering::SeqCst);
+        let owner_id = self.inner.owner_id.clone();
+        let lease_ttl_ms = self.inner.lease_ttl_ms;
 
-        let conn = self.inner.conn.lock().await;
-        conn.execute("BEGIN IMMEDIATE", ())
-            .await
-            .map_err(effect_turso_error)?;
-        let result = async {
-            let row = optional_row(
-                &conn,
-                "SELECT envelope_hash, status, outcome_json, error_json,
-                        lease_owner_id, lease_token, lease_expires_at_ms, due_at_ms
-                 FROM runtime_effect_replay
-                 WHERE scope_id = ?1 AND replay_key = ?2",
-                params![scope_id.as_str(), replay_key.as_str()],
-            )
-            .await
-            .map_err(effect_turso_error)?;
+        // The `BEGIN IMMEDIATE` transaction is run on the connection thread via
+        // `conn.write`. The closure returns a `rusqlite::Result` carrying our
+        // own outcome `Result<PreparedEffect, RuntimeEffectControllerError>`:
+        // the SQL committing is independent of whether the recorded effect was
+        // a success, a failure, or a fresh claim — exactly the prior behaviour
+        // (commit on `Ok(_)` for any `PreparedEffect` variant). Only a real
+        // SQLite error rolls back.
+        let outcome: Result<PreparedEffect, RuntimeEffectControllerError> = self
+            .inner
+            .conn
+            .write(move |tx| {
+                let row = tx
+                    .query_row(
+                        "SELECT envelope_hash, status, outcome_json, error_json,
+                                lease_owner_id, lease_token, lease_expires_at_ms, due_at_ms
+                         FROM runtime_effect_replay
+                         WHERE scope_id = ?1 AND replay_key = ?2",
+                        params![scope_id.as_str(), replay_key.as_str()],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                                row.get::<_, i64>(6)?,
+                                row.get::<_, Option<i64>>(7)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
 
-            let Some(row) = row else {
-                if replay_mode {
-                    return Ok(PreparedEffect::ReplayError(
-                        RuntimeEffectControllerError::new(
-                            "turso_effect_replay_missing",
+                let Some((
+                    existing_hash,
+                    status,
+                    outcome_json,
+                    error_json,
+                    lease_expires_row,
+                    existing_due_row,
+                )) = row
+                else {
+                    if replay_mode {
+                        return Ok(Err(RuntimeEffectControllerError::new(
+                            "sqlite_effect_replay_missing",
                             format!(
                                 "no recorded runtime effect for scope `{scope_id}` and replay key `{replay_key}`"
                             ),
-                        ),
-                    ));
-                }
-                let due_at_param = due_at_ms.map(|value| value as i64);
-                conn.execute(
-                    "INSERT INTO runtime_effect_replay (
-                        scope_id, replay_key, envelope_hash, status, outcome_json,
-                        error_json, lease_owner_id, lease_token, lease_expires_at_ms,
-                        due_at_ms, created_at_ms, updated_at_ms
-                     )
-                     VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![
-                        scope_id.as_str(),
-                        replay_key.as_str(),
-                        envelope_hash.as_str(),
-                        STATUS_IN_PROGRESS,
-                        self.inner.owner_id.as_str(),
-                        lease_token.as_str(),
-                        lease_expires_at_ms as i64,
-                        due_at_param,
-                        now as i64,
-                        now as i64,
-                    ],
-                )
-                .await
-                .map_err(effect_turso_error)?;
-                return Ok(PreparedEffect::Claimed(ClaimedEffect {
-                    scope_id,
-                    replay_key,
-                    envelope_hash,
-                    lease_token,
-                    due_at_ms,
-                }));
-            };
-
-            let existing_hash = row_string(&row, 0).map_err(effect_turso_error)?;
-            if existing_hash != envelope_hash {
-                return Ok(PreparedEffect::ReplayError(
-                    RuntimeEffectControllerError::new(
-                        "turso_effect_replay_hash_conflict",
-                        format!(
-                            "runtime effect replay key `{replay_key}` in scope `{scope_id}` was reused with a different envelope hash"
-                        ),
-                    ),
-                ));
-            }
-
-            let status = row_string(&row, 1).map_err(effect_turso_error)?;
-            let outcome_json = row_optional_string(&row, 2).map_err(effect_turso_error)?;
-            let error_json = row_optional_string(&row, 3).map_err(effect_turso_error)?;
-            let lease_expires_at_ms = row_i64(&row, 6).map_err(effect_turso_error)? as u64;
-            let existing_due_at_ms = row_optional_i64(&row, 7)
-                .map_err(effect_turso_error)?
-                .map(|value| value as u64);
-
-            match status.as_str() {
-                STATUS_COMPLETED => {
-                    let json = outcome_json.ok_or_else(|| {
-                        RuntimeEffectControllerError::new(
-                            "turso_effect_replay_corrupt_row",
-                            "completed runtime effect row is missing outcome_json",
-                        )
-                    })?;
-                    let outcome = serde_json::from_str(&json).map_err(effect_decode_error)?;
-                    Ok(PreparedEffect::ReplayOutcome {
-                        outcome: Box::new(outcome),
-                        due_at_ms: existing_due_at_ms,
-                    })
-                }
-                STATUS_FAILED => {
-                    let json = error_json.ok_or_else(|| {
-                        RuntimeEffectControllerError::new(
-                            "turso_effect_replay_corrupt_row",
-                            "failed runtime effect row is missing error_json",
-                        )
-                    })?;
-                    let err = serde_json::from_str(&json).map_err(effect_decode_error)?;
-                    Ok(PreparedEffect::ReplayError(err))
-                }
-                STATUS_IN_PROGRESS if lease_expires_at_ms > now => {
-                    Ok(PreparedEffect::Busy {
-                        retry_at_ms: lease_expires_at_ms,
-                    })
-                }
-                STATUS_IN_PROGRESS => {
-                    let due_at_ms = existing_due_at_ms.or(due_at_ms);
+                        )));
+                    }
                     let due_at_param = due_at_ms.map(|value| value as i64);
-                    conn.execute(
-                        "UPDATE runtime_effect_replay
-                         SET lease_owner_id = ?3,
-                             lease_token = ?4,
-                             lease_expires_at_ms = ?5,
-                             due_at_ms = ?6,
-                             updated_at_ms = ?7
-                         WHERE scope_id = ?1 AND replay_key = ?2",
+                    tx.execute(
+                        "INSERT INTO runtime_effect_replay (
+                            scope_id, replay_key, envelope_hash, status, outcome_json,
+                            error_json, lease_owner_id, lease_token, lease_expires_at_ms,
+                            due_at_ms, created_at_ms, updated_at_ms
+                         )
+                         VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8, ?9, ?10)",
                         params![
                             scope_id.as_str(),
                             replay_key.as_str(),
-                            self.inner.owner_id.as_str(),
+                            envelope_hash.as_str(),
+                            STATUS_IN_PROGRESS,
+                            owner_id.as_str(),
                             lease_token.as_str(),
-                            current_epoch_ms().saturating_add(self.inner.lease_ttl_ms) as i64,
+                            lease_expires_at_ms as i64,
                             due_at_param,
-                            current_epoch_ms() as i64,
+                            now as i64,
+                            now as i64,
                         ],
-                    )
-                    .await
-                    .map_err(effect_turso_error)?;
-                    Ok(PreparedEffect::Claimed(ClaimedEffect {
+                    )?;
+                    return Ok(Ok(PreparedEffect::Claimed(ClaimedEffect {
                         scope_id,
                         replay_key,
                         envelope_hash,
                         lease_token,
                         due_at_ms,
-                    }))
-                }
-                other => Ok(PreparedEffect::ReplayError(
-                    RuntimeEffectControllerError::new(
-                        "turso_effect_replay_corrupt_row",
-                        format!("unknown runtime effect replay status `{other}`"),
-                    ),
-                )),
-            }
-        }
-        .await;
+                    })));
+                };
 
-        match &result {
-            Ok(_) => {
-                conn.execute("COMMIT", ())
-                    .await
-                    .map_err(effect_turso_error)?;
-            }
-            Err(_) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-            }
-        };
-        result
+                if existing_hash != envelope_hash {
+                    return Ok(Err(RuntimeEffectControllerError::new(
+                        "sqlite_effect_replay_hash_conflict",
+                        format!(
+                            "runtime effect replay key `{replay_key}` in scope `{scope_id}` was reused with a different envelope hash"
+                        ),
+                    )));
+                }
+
+                let lease_expires_at_ms = lease_expires_row as u64;
+                let existing_due_at_ms = existing_due_row.map(|value| value as u64);
+
+                match status.as_str() {
+                    STATUS_COMPLETED => {
+                        let Some(json) = outcome_json else {
+                            return Ok(Err(RuntimeEffectControllerError::new(
+                                "sqlite_effect_replay_corrupt_row",
+                                "completed runtime effect row is missing outcome_json",
+                            )));
+                        };
+                        let outcome = match serde_json::from_str(&json) {
+                            Ok(outcome) => outcome,
+                            Err(err) => return Ok(Err(effect_decode_error(err))),
+                        };
+                        Ok(Ok(PreparedEffect::ReplayOutcome {
+                            outcome: Box::new(outcome),
+                            due_at_ms: existing_due_at_ms,
+                        }))
+                    }
+                    STATUS_FAILED => {
+                        let Some(json) = error_json else {
+                            return Ok(Err(RuntimeEffectControllerError::new(
+                                "sqlite_effect_replay_corrupt_row",
+                                "failed runtime effect row is missing error_json",
+                            )));
+                        };
+                        let err = match serde_json::from_str(&json) {
+                            Ok(err) => err,
+                            Err(err) => return Ok(Err(effect_decode_error(err))),
+                        };
+                        Ok(Ok(PreparedEffect::ReplayError(err)))
+                    }
+                    STATUS_IN_PROGRESS if lease_expires_at_ms > now => Ok(Ok(PreparedEffect::Busy {
+                        retry_at_ms: lease_expires_at_ms,
+                    })),
+                    STATUS_IN_PROGRESS => {
+                        let due_at_ms = existing_due_at_ms.or(due_at_ms);
+                        let due_at_param = due_at_ms.map(|value| value as i64);
+                        tx.execute(
+                            "UPDATE runtime_effect_replay
+                             SET lease_owner_id = ?3,
+                                 lease_token = ?4,
+                                 lease_expires_at_ms = ?5,
+                                 due_at_ms = ?6,
+                                 updated_at_ms = ?7
+                             WHERE scope_id = ?1 AND replay_key = ?2",
+                            params![
+                                scope_id.as_str(),
+                                replay_key.as_str(),
+                                owner_id.as_str(),
+                                lease_token.as_str(),
+                                current_epoch_ms().saturating_add(lease_ttl_ms) as i64,
+                                due_at_param,
+                                current_epoch_ms() as i64,
+                            ],
+                        )?;
+                        Ok(Ok(PreparedEffect::Claimed(ClaimedEffect {
+                            scope_id,
+                            replay_key,
+                            envelope_hash,
+                            lease_token,
+                            due_at_ms,
+                        })))
+                    }
+                    other => Ok(Err(RuntimeEffectControllerError::new(
+                        "sqlite_effect_replay_corrupt_row",
+                        format!("unknown runtime effect replay status `{other}`"),
+                    ))),
+                }
+            })
+            .await
+            .map_err(effect_sqlite_error)?;
+        outcome
     }
 
     async fn finalize_effect(
@@ -384,13 +400,17 @@ impl TursoRuntimeEffectController {
             ),
         };
         let now = current_epoch_ms();
-        let conn = self.inner.conn.lock().await;
-        conn.execute("BEGIN IMMEDIATE", ())
-            .await
-            .map_err(effect_turso_error)?;
-        let result = async {
-            let changed = conn
-                .execute(
+        let scope_id = claim.scope_id.clone();
+        let replay_key = claim.replay_key.clone();
+        let envelope_hash = claim.envelope_hash.clone();
+        let lease_token = claim.lease_token.clone();
+        let status = status.to_string();
+
+        let result: Result<(), RuntimeEffectControllerError> = self
+            .inner
+            .conn
+            .write(move |tx| {
+                let changed = tx.execute(
                     "UPDATE runtime_effect_replay
                      SET status = ?5,
                          outcome_json = ?6,
@@ -405,42 +425,29 @@ impl TursoRuntimeEffectController {
                        AND lease_token = ?4
                        AND status = 'in_progress'",
                     params![
-                        claim.scope_id.as_str(),
-                        claim.replay_key.as_str(),
-                        claim.envelope_hash.as_str(),
-                        claim.lease_token.as_str(),
-                        status,
-                        outcome_json.as_deref(),
-                        error_json.as_deref(),
+                        scope_id.as_str(),
+                        replay_key.as_str(),
+                        envelope_hash.as_str(),
+                        lease_token.as_str(),
+                        status.as_str(),
+                        outcome_json,
+                        error_json,
                         now as i64,
                     ],
-                )
-                .await
-                .map_err(effect_turso_error)?;
-            if changed != 1 {
-                return Err(RuntimeEffectControllerError::new(
-                    "turso_effect_replay_lease_lost",
-                    format!(
-                        "runtime effect replay lease was lost before finalizing scope `{}` replay key `{}`",
-                        claim.scope_id, claim.replay_key
-                    ),
-                ));
-            }
-            Ok(())
-        }
-        .await;
-        match result {
-            Ok(()) => {
-                conn.execute("COMMIT", ())
-                    .await
-                    .map_err(effect_turso_error)?;
-                Ok(())
-            }
-            Err(err) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(err)
-            }
-        }
+                )?;
+                if changed != 1 {
+                    return Ok(Err(RuntimeEffectControllerError::new(
+                        "sqlite_effect_replay_lease_lost",
+                        format!(
+                            "runtime effect replay lease was lost before finalizing scope `{scope_id}` replay key `{replay_key}`"
+                        ),
+                    )));
+                }
+                Ok(Ok(()))
+            })
+            .await
+            .map_err(effect_sqlite_error)?;
+        result
     }
 
     async fn execute_claimed_effect(
@@ -553,7 +560,7 @@ impl TursoRuntimeEffectController {
 }
 
 #[async_trait::async_trait]
-impl RuntimeEffectController for TursoRuntimeEffectController {
+impl RuntimeEffectController for SqliteRuntimeEffectController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
@@ -596,38 +603,28 @@ impl RuntimeEffectController for TursoRuntimeEffectController {
 async fn open_effect_replay_inner(
     path: &Path,
     backing: StoreBacking,
-    options: TursoEffectReplayOptions,
-) -> turso::Result<Arc<TursoEffectReplayInner>> {
-    let _schema_guard = match backing {
-        StoreBacking::File => Some(file_schema_open_guard().await),
-        StoreBacking::Memory => None,
-    };
-    let path = path.to_string_lossy().into_owned();
-    let db = turso::Builder::new_local(&path).build().await?;
-    let conn = db.connect()?;
-    conn.busy_timeout(TURSO_BUSY_TIMEOUT)?;
+    options: SqliteEffectReplayOptions,
+) -> tokio_rusqlite::Result<Arc<SqliteEffectReplayInner>> {
+    let conn = SqliteConnection::open(path).await?;
     ensure_effect_schema(&conn).await?;
     apply_pragmas(&conn, backing).await?;
-    Ok(Arc::new(TursoEffectReplayInner::new(db, conn, options)))
+    Ok(Arc::new(SqliteEffectReplayInner::new(conn, options)))
 }
 
 async fn open_effect_replay_memory_inner(
-    options: TursoEffectReplayOptions,
-) -> turso::Result<Arc<TursoEffectReplayInner>> {
-    let db = turso::Builder::new_local(":memory:").build().await?;
-    let conn = db.connect()?;
-    conn.busy_timeout(TURSO_BUSY_TIMEOUT)?;
+    options: SqliteEffectReplayOptions,
+) -> tokio_rusqlite::Result<Arc<SqliteEffectReplayInner>> {
+    let conn = SqliteConnection::open_in_memory().await?;
     ensure_effect_schema(&conn).await?;
     apply_pragmas(&conn, StoreBacking::Memory).await?;
-    Ok(Arc::new(TursoEffectReplayInner::new(db, conn, options)))
+    Ok(Arc::new(SqliteEffectReplayInner::new(conn, options)))
 }
 
-impl TursoEffectReplayInner {
-    fn new(db: turso::Database, conn: Connection, options: TursoEffectReplayOptions) -> Self {
+impl SqliteEffectReplayInner {
+    fn new(conn: SqliteConnection, options: SqliteEffectReplayOptions) -> Self {
         let sequence = EFFECT_OWNER_COUNTER.fetch_add(1, Ordering::SeqCst);
         Self {
-            _db: db,
-            conn: tokio::sync::Mutex::new(conn),
+            conn,
             owner_id: format!(
                 "pid{}-{sequence}-{}",
                 std::process::id(),
@@ -681,20 +678,20 @@ async fn sleep_until_retry(retry_at_ms: u64) {
     tokio::time::sleep(delay).await;
 }
 
-fn effect_turso_error(err: turso::Error) -> RuntimeEffectControllerError {
-    RuntimeEffectControllerError::new("turso_effect_replay_store", err.to_string())
+fn effect_sqlite_error(err: rusqlite::Error) -> RuntimeEffectControllerError {
+    RuntimeEffectControllerError::new("sqlite_effect_replay_store", err.to_string())
 }
 
 fn effect_encode_error(err: serde_json::Error) -> RuntimeEffectControllerError {
     RuntimeEffectControllerError::new(
-        "turso_effect_replay_encode",
+        "sqlite_effect_replay_encode",
         format!("failed to encode runtime effect replay row: {err}"),
     )
 }
 
 fn effect_decode_error(err: serde_json::Error) -> RuntimeEffectControllerError {
     RuntimeEffectControllerError::new(
-        "turso_effect_replay_decode",
+        "sqlite_effect_replay_decode",
         format!("failed to decode runtime effect replay row: {err}"),
     )
 }

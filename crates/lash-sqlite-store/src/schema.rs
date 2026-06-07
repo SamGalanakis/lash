@@ -1,73 +1,22 @@
+//! Canonical SQLite schema + the open/ensure helpers built on
+//! [`SqliteConnection`].
+//!
+//! The `SCHEMA` / `PROCESS_SCHEMA` / `EFFECT_SCHEMA` strings are plain SQLite
+//! and are copied verbatim from the prior store. The only thing that changes in
+//! the rusqlite port is the *open path*: the prior store's `Builder::new_local` +
+//! `experimental_multiprocess_wal` + `PRAGMA journal_mode='mvcc'` is replaced by
+//! [`SqliteConnection::open`], which applies real `journal_mode=WAL` and a
+//! 15-second `busy_timeout` (see `conn.rs`).
+
 use super::*;
 
-const SCHEMA_CHANGED_RETRY_ATTEMPTS: usize = 8;
-const SCHEMA_CHANGED_RETRY_BASE_DELAY: Duration = Duration::from_millis(5);
-
-pub(crate) async fn ensure_process_schema(conn: &Connection) -> turso::Result<()> {
-    for attempt in 0..SCHEMA_CHANGED_RETRY_ATTEMPTS {
-        match ensure_process_schema_once(conn).await {
-            Err(err)
-                if is_database_schema_changed(&err)
-                    && attempt + 1 < SCHEMA_CHANGED_RETRY_ATTEMPTS =>
-            {
-                schema_changed_backoff(attempt);
-            }
-            result => return result,
-        }
-    }
-    unreachable!("schema retry loop always returns")
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoreBacking {
+    File,
+    Memory,
 }
 
-async fn ensure_process_schema_once(conn: &Connection) -> turso::Result<()> {
-    let user_version = pragma_user_version(conn).await?;
-    if user_version == PROCESS_SCHEMA_VERSION {
-        conn.execute_batch(PROCESS_SCHEMA).await?;
-        return Ok(());
-    }
-    if user_version == 0 && !has_user_schema_objects(conn).await? {
-        initialize_schema(conn, PROCESS_SCHEMA, PROCESS_SCHEMA_VERSION).await?;
-        return Ok(());
-    }
-    Err(turso::Error::Misuse(unsupported_schema_message(
-        "process registry",
-        PROCESS_SCHEMA_VERSION,
-        user_version,
-    )))
-}
-
-pub(crate) async fn ensure_effect_schema(conn: &Connection) -> turso::Result<()> {
-    for attempt in 0..SCHEMA_CHANGED_RETRY_ATTEMPTS {
-        match ensure_effect_schema_once(conn).await {
-            Err(err)
-                if is_database_schema_changed(&err)
-                    && attempt + 1 < SCHEMA_CHANGED_RETRY_ATTEMPTS =>
-            {
-                schema_changed_backoff(attempt);
-            }
-            result => return result,
-        }
-    }
-    unreachable!("schema retry loop always returns")
-}
-
-async fn ensure_effect_schema_once(conn: &Connection) -> turso::Result<()> {
-    let user_version = pragma_user_version(conn).await?;
-    if user_version == EFFECT_SCHEMA_VERSION {
-        conn.execute_batch(EFFECT_SCHEMA).await?;
-        return Ok(());
-    }
-    if user_version == 0 && !has_user_schema_objects(conn).await? {
-        initialize_schema(conn, EFFECT_SCHEMA, EFFECT_SCHEMA_VERSION).await?;
-        return Ok(());
-    }
-    Err(turso::Error::Misuse(unsupported_schema_message(
-        "effect replay",
-        EFFECT_SCHEMA_VERSION,
-        user_version,
-    )))
-}
-
-/// Canonical Turso schema for a lash session database.
+/// Canonical SQLite schema for a lash session database.
 ///
 /// This is the *only* schema the store supports. Older session databases —
 /// including any rolled forward through prior migration chains — must be
@@ -185,15 +134,6 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// rationale.
 pub(crate) const SCHEMA_VERSION: i32 = 3;
 
-pub(crate) const TURSO_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
-
-pub(crate) async fn file_schema_open_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await
-}
-
 pub(crate) const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (
     process_id            TEXT PRIMARY KEY,
@@ -284,118 +224,95 @@ CREATE INDEX IF NOT EXISTS idx_runtime_effect_replay_lease
 
 pub(crate) const EFFECT_SCHEMA_VERSION: i32 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StoreBacking {
-    File,
-    Memory,
-}
-
-pub(crate) async fn apply_pragmas(conn: &Connection, backing: StoreBacking) -> turso::Result<()> {
-    conn.busy_timeout(TURSO_BUSY_TIMEOUT)?;
-    conn.execute_batch(
-        "PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA cache_size = -2000;",
-    )
-    .await?;
-    if matches!(backing, StoreBacking::File) {
-        drain_pragma_rows(conn, "PRAGMA journal_mode = 'mvcc'").await?;
-    }
-    Ok(())
-}
-
-async fn drain_pragma_rows(conn: &Connection, sql: &str) -> turso::Result<()> {
-    let mut rows = conn.query(sql, ()).await?;
-    while rows.next().await?.is_some() {}
-    Ok(())
-}
-
-pub(crate) async fn ensure_schema(conn: &Connection) -> turso::Result<()> {
-    for attempt in 0..SCHEMA_CHANGED_RETRY_ATTEMPTS {
-        match ensure_schema_once(conn).await {
-            Err(err)
-                if is_database_schema_changed(&err)
-                    && attempt + 1 < SCHEMA_CHANGED_RETRY_ATTEMPTS =>
-            {
-                schema_changed_backoff(attempt);
-            }
-            result => return result,
-        }
-    }
-    unreachable!("schema retry loop always returns")
-}
-
-async fn ensure_schema_once(conn: &Connection) -> turso::Result<()> {
-    let user_version = pragma_user_version(conn).await?;
-    if user_version == SCHEMA_VERSION {
-        conn.execute_batch(SCHEMA).await?;
-        return Ok(());
-    }
-
-    if user_version == 0 && !has_user_schema_objects(conn).await? {
-        initialize_schema(conn, SCHEMA, SCHEMA_VERSION).await?;
-        return Ok(());
-    }
-
-    Err(turso::Error::Misuse(unsupported_schema_message(
-        "session",
-        SCHEMA_VERSION,
-        user_version,
-    )))
-}
-
-fn is_database_schema_changed(err: &turso::Error) -> bool {
-    err.to_string().contains("Database schema changed")
-}
-
-fn schema_changed_backoff(attempt: usize) {
-    let multiplier = (attempt + 1) as u32;
-    std::thread::sleep(SCHEMA_CHANGED_RETRY_BASE_DELAY * multiplier);
-}
-
-async fn initialize_schema(
-    conn: &Connection,
-    schema: &str,
-    schema_version: i32,
-) -> turso::Result<()> {
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
-    let result = async {
-        conn.execute_batch(schema).await?;
-        conn.pragma_update("user_version", schema_version).await?;
+pub(crate) async fn apply_pragmas(
+    conn: &SqliteConnection,
+    backing: StoreBacking,
+) -> rusqlite::Result<()> {
+    // WAL + busy_timeout are already applied in `SqliteConnection::open` /
+    // `open_in_memory`. The remaining tuning PRAGMAs match the prior store. The
+    // `backing` argument is retained so the lifecycle call sites read the same
+    // as the prior store port; WAL is only meaningful for file-backed databases.
+    let _ = backing;
+    conn.call(|c| {
+        c.execute_batch(
+            "PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;
+             PRAGMA cache_size = -2000;",
+        )?;
         Ok(())
-    }
-    .await;
-    match result {
-        Ok(()) => conn.execute("COMMIT", ()).await.map(|_| ()),
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(err)
+    })
+    .await
+}
+
+pub(crate) async fn ensure_schema(conn: &SqliteConnection) -> rusqlite::Result<()> {
+    ensure_versioned_schema(conn, "session", SCHEMA, SCHEMA_VERSION).await
+}
+
+pub(crate) async fn ensure_process_schema(conn: &SqliteConnection) -> rusqlite::Result<()> {
+    ensure_versioned_schema(conn, "process registry", PROCESS_SCHEMA, PROCESS_SCHEMA_VERSION).await
+}
+
+pub(crate) async fn ensure_effect_schema(conn: &SqliteConnection) -> rusqlite::Result<()> {
+    ensure_versioned_schema(conn, "effect replay", EFFECT_SCHEMA, EFFECT_SCHEMA_VERSION).await
+}
+
+/// Apply `schema` if the database is already at `schema_version`, initialise it
+/// (under one transaction stamping `user_version`) if the database is empty, or
+/// reject the open if the on-disk `user_version` is anything else. Runs entirely
+/// on the connection thread so the version check and DDL share one connection.
+async fn ensure_versioned_schema(
+    conn: &SqliteConnection,
+    database_kind: &'static str,
+    schema: &'static str,
+    schema_version: i32,
+) -> rusqlite::Result<()> {
+    conn.call(move |c| {
+        // The whole check-then-initialise runs inside one `BEGIN IMMEDIATE`
+        // transaction so the write lock is held across the `user_version` read.
+        // Reading the version outside the transaction and only then upgrading to
+        // a writer races concurrent first-openers into a lock-upgrade deadlock
+        // (SQLite returns "database is locked" immediately, bypassing
+        // `busy_timeout`). Holding the write lock from the first statement makes
+        // every contender serialise on the busy handler instead.
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let user_version: i32 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if user_version == schema_version {
+            tx.execute_batch(schema)?;
+            tx.commit()?;
+            return Ok(());
         }
-    }
+        if user_version == 0 && !has_user_schema_objects(&tx)? {
+            tx.execute_batch(schema)?;
+            tx.pragma_update(None, "user_version", schema_version)?;
+            tx.commit()?;
+            return Ok(());
+        }
+        Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+            Some(unsupported_schema_message(
+                database_kind,
+                schema_version,
+                user_version,
+            )),
+        ))
+    })
+    .await
 }
 
-async fn pragma_user_version(conn: &Connection) -> turso::Result<i32> {
-    let row = required_row(conn, "PRAGMA user_version", ()).await?;
-    Ok(row_i64(&row, 0)? as i32)
-}
-
-pub(crate) async fn has_user_schema_objects(conn: &Connection) -> turso::Result<bool> {
-    let row = required_row(
-        conn,
+pub(crate) fn has_user_schema_objects(conn: &Connection) -> rusqlite::Result<bool> {
+    let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master
          WHERE name NOT LIKE 'sqlite_%'
            AND type IN ('table', 'index', 'trigger', 'view')",
-        (),
-    )
-    .await?;
-    let count = row_i64(&row, 0)?;
+        [],
+        |row| row.get(0),
+    )?;
     Ok(count > 0)
 }
 
 /// Build the error message for an unsupported on-disk schema. The expected and
-/// found `PRAGMA user_version` values are reported accurately (the message used
-/// to hard-code "version 1 only" while [`SCHEMA_VERSION`] had moved to 2). There
-/// is no migration chain — the database must be deleted before reopening.
+/// found `PRAGMA user_version` values are reported accurately. There is no
+/// migration chain — the database must be deleted before reopening.
 pub(crate) fn unsupported_schema_message(
     database_kind: &str,
     expected_version: i32,

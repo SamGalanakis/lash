@@ -1,4 +1,4 @@
-use lash_sansio::{AttachmentRef, ToolCallOutput, TurnProtocol};
+use lash_sansio::{AttachmentRef, TurnProtocol};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct RlmTrajectoryEntry {
@@ -14,8 +14,6 @@ pub struct RlmTrajectoryEntry {
     /// iteration.
     #[serde(default, alias = "observations")]
     pub output: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_call_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<AttachmentRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,13 +70,6 @@ pub enum RlmHistoryItem {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<RlmAttachmentRef>,
     },
-    ToolCall {
-        id: String,
-        tool: String,
-        args: serde_json::Value,
-        output: ToolCallOutput,
-        duration_ms: u64,
-    },
     RlmStep {
         id: String,
         protocol_iteration: usize,
@@ -87,8 +78,6 @@ pub enum RlmHistoryItem {
         code: String,
         #[serde(default, alias = "observations")]
         output: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tool_call_ids: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<RlmImageRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

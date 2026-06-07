@@ -32,7 +32,7 @@ lash = { workspace = true }
 lash-plugin-mcp = { workspace = true }
 lash-plugin-observational-memory = { workspace = true, optional = true }
 lash-plugin-process-controls = { workspace = true }
-lash-turso-store = { workspace = true }
+lash-sqlite-store = { workspace = true }
 lash-llm-tools = { workspace = true }
 lash-standard-plugins = { workspace = true }
 lash-protocol-rlm = { workspace = true }
