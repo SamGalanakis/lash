@@ -204,7 +204,7 @@ impl ProviderModelPolicy for TestProvider {
 pub fn mock_session_policy() -> SessionPolicy {
     SessionPolicy {
         provider_id: "stub".to_string(),
-        model: ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+        model: ModelSpec::from_token_limits("mock-model", None, 200_000, None)
             .expect("valid mock model spec"),
         ..Default::default()
     }

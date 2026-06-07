@@ -240,7 +240,7 @@ submit "registered"
     }
 
     fn rebuild_model() -> crate::ModelSpec {
-        crate::ModelSpec::from_token_limits("rebuild-conformance-model", None, 4096, None, None)
+        crate::ModelSpec::from_token_limits("rebuild-conformance-model", None, 4096, None)
             .expect("model spec")
     }
 

@@ -5,7 +5,7 @@ pub(super) fn model_spec(
     variant: Option<String>,
     context_window_tokens: usize,
 ) -> lash_core::ModelSpec {
-    lash_core::ModelSpec::from_token_limits(model, variant, context_window_tokens, None, None)
+    lash_core::ModelSpec::from_token_limits(model, variant, context_window_tokens, None)
         .expect("valid model spec")
 }
 

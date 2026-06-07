@@ -20,6 +20,14 @@ pub(crate) struct ModelInfo {
 }
 
 impl ModelInfo {
+    /// The prompt budget: the maximum input the provider accepts. The model's
+    /// total `context` (input + output) over-budgets by the whole response
+    /// reservation, so history is measured against `input`; fall back to the
+    /// total context only when the catalog omits an input limit.
+    pub(crate) fn prompt_budget_tokens(&self) -> u64 {
+        self.max_input_tokens.unwrap_or(self.context_window)
+    }
+
     pub(crate) fn to_model_spec(
         &self,
         id: impl Into<String>,
@@ -28,14 +36,8 @@ impl ModelInfo {
         ModelSpec::from_token_limits(
             id,
             variant,
-            usize::try_from(self.context_window)
-                .map_err(|_| "context window does not fit in usize".to_string())?,
-            self.max_input_tokens
-                .map(|value| {
-                    usize::try_from(value)
-                        .map_err(|_| "input token capacity does not fit in usize".to_string())
-                })
-                .transpose()?,
+            usize::try_from(self.prompt_budget_tokens())
+                .map_err(|_| "prompt budget does not fit in usize".to_string())?,
             self.max_output_tokens
                 .map(|value| {
                     usize::try_from(value)
@@ -55,8 +57,10 @@ pub(crate) struct ResolvedModelSpec {
 }
 
 impl ResolvedModelSpec {
+    /// The prompt budget the session and UI use (input limit, route-clamped),
+    /// not the model's total context.
     pub(crate) fn context_window(&self) -> u64 {
-        self.info.context_window
+        self.info.prompt_budget_tokens()
     }
 
     pub(crate) fn into_model_spec(self, variant: Option<String>) -> Result<ModelSpec, String> {
@@ -361,5 +365,26 @@ mod tests {
                 .and_then(|info| info.max_input_tokens),
             Some(900000)
         );
+    }
+
+    #[test]
+    fn prompt_budget_prefers_input_over_total_context() {
+        let map = ModelCatalog::from_models_dev_json(
+            r#"{ "openai": { "models": {
+              "gpt-5.5": { "limit": { "context": 1050000, "input": 922000, "output": 128000 } },
+              "no-input": { "limit": { "context": 400000, "output": 128000 } }
+            } } }"#,
+        )
+        .expect("parse");
+
+        // Input present -> budget is the input limit, not the total context.
+        let info = map.get("openai/gpt-5.5").expect("model");
+        assert_eq!(info.prompt_budget_tokens(), 922_000);
+        let spec = info.to_model_spec("gpt-5.5", None).expect("spec");
+        assert_eq!(spec.context_window_tokens(), 922_000);
+
+        // Input absent -> fall back to the total context.
+        let info = map.get("openai/no-input").expect("model");
+        assert_eq!(info.prompt_budget_tokens(), 400_000);
     }
 }

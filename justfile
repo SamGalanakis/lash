@@ -173,3 +173,6 @@ publish-all SLEEP="12":
   done
   echo
   echo "Done."
+
+check-file-size:
+  ./scripts/check-production-file-size.sh

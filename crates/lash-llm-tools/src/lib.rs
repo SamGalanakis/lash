@@ -386,7 +386,6 @@ mod tests {
             variant.map(str::to_string),
             200_000,
             None,
-            None,
         )
         .expect("valid test model spec")
     }

@@ -224,7 +224,7 @@ fn copy_shortcut_rejects_plain_ctrl_c() {
 #[test]
 fn cleared_session_state_preserves_model_spec() {
     let state = cleared_session_state(SessionPolicy {
-        model: lash_core::ModelSpec::from_token_limits("mock-model", None, 123_456, None, None)
+        model: lash_core::ModelSpec::from_token_limits("mock-model", None, 123_456, None)
             .expect("valid model spec"),
         ..SessionPolicy::default()
     });

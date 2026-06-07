@@ -7,8 +7,7 @@ use lash_core::provider::ProviderHandle;
 use lash_core::runtime::RuntimeSessionState;
 use lash_core::store::SessionHead;
 use lash_core::{
-    AttachmentStore, PersistedSessionConfig, ProcessRegistry, RuntimePersistence, SessionGraph,
-    SessionPolicy,
+    AttachmentStore, PersistedSessionConfig, RuntimePersistence, SessionGraph, SessionPolicy,
 };
 use lash_standard_plugins::StandardContextApproach;
 use lash_turso_store::Store;
@@ -64,7 +63,6 @@ pub(crate) struct CliSessionOpener {
     provider: ProviderHandle,
     trace_jsonl_path: Option<PathBuf>,
     trace_level: lash::tracing::TraceLevel,
-    process_registry: Arc<dyn ProcessRegistry>,
 }
 
 fn policy_with_persisted_config(
@@ -173,6 +171,23 @@ impl SessionBootstrap {
         Arc::clone(&self.store)
     }
 
+    fn sidecar_db_path(&self, suffix: &str) -> PathBuf {
+        self.sessions_dir
+            .join(format!("{}.{}", self.filename, suffix))
+    }
+
+    pub(crate) fn artifacts_db_file(&self) -> PathBuf {
+        self.sidecar_db_path("artifacts.db")
+    }
+
+    pub(crate) fn effects_db_file(&self) -> PathBuf {
+        self.sidecar_db_path("effects.db")
+    }
+
+    pub(crate) fn processes_db_file(&self) -> PathBuf {
+        self.sidecar_db_path("processes.db")
+    }
+
     pub(crate) fn run_session_id(&self) -> Option<String> {
         self.resume_start
             .as_ref()
@@ -257,7 +272,6 @@ impl CliSessionOpener {
         provider: ProviderHandle,
         trace_jsonl_path: Option<PathBuf>,
         trace_level: lash::tracing::TraceLevel,
-        process_registry: Arc<dyn ProcessRegistry>,
     ) -> Self {
         Self {
             plugin_stack,
@@ -266,7 +280,6 @@ impl CliSessionOpener {
             provider,
             trace_jsonl_path,
             trace_level,
-            process_registry,
         }
     }
 
@@ -300,10 +313,12 @@ impl CliSessionOpener {
             ..RuntimeSessionState::default()
         };
         let store: Arc<dyn RuntimePersistence> = bootstrap.store();
-        let artifact_store = Arc::new(Store::open(&crate::paths::artifacts_db_file()).await?)
+        let artifact_store = Arc::new(Store::open(&bootstrap.artifacts_db_file()).await?)
             as Arc<dyn lash::persistence::LashlangArtifactStore>;
-        let effect_host = Arc::new(
-            lash_turso_store::TursoEffectHost::open(&crate::paths::effects_db_file()).await?,
+        let effect_host =
+            Arc::new(lash_turso_store::TursoEffectHost::open(&bootstrap.effects_db_file()).await?);
+        let process_registry = Arc::new(
+            lash_turso_store::TursoProcessRegistry::open(&bootstrap.processes_db_file()).await?,
         );
         let core_builder = LashCore::builder()
             .install_mode(ModePreset::standard())
@@ -321,7 +336,7 @@ impl CliSessionOpener {
             .attachment_store(Arc::clone(&self.attachment_store))
             .trace_jsonl_path(self.trace_jsonl_path.clone())
             .trace_level(self.trace_level)
-            .process_registry(Arc::clone(&self.process_registry));
+            .process_registry(process_registry);
         let core = core_builder.build()?;
         let session = core
             .session(session_id)
@@ -381,12 +396,6 @@ mod tests {
         let provider = lash_core::testing::TestProvider::builder()
             .build()
             .into_handle();
-        let process_registry = Arc::new(
-            lash_turso_store::TursoProcessRegistry::open(
-                &crate::paths::lash_home().join("processes.db"),
-            )
-            .await?,
-        ) as Arc<dyn ProcessRegistry>;
         let opener = CliSessionOpener::new(
             PluginStack::new(),
             lash_core::PromptLayer::new(),
@@ -396,10 +405,9 @@ mod tests {
             provider,
             None,
             lash::tracing::TraceLevel::Standard,
-            process_registry,
         );
         let policy = SessionPolicy {
-            model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+            model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
                 .expect("model spec"),
             provider_id: "test".to_string(),
             ..Default::default()
@@ -414,8 +422,9 @@ mod tests {
             .await?;
 
         assert!(!opened.session.session_id().is_empty());
-        assert!(crate::paths::artifacts_db_file().is_file());
-        assert!(crate::paths::effects_db_file().is_file());
+        assert!(opened.bootstrap.artifacts_db_file().is_file());
+        assert!(opened.bootstrap.effects_db_file().is_file());
+        assert!(opened.bootstrap.processes_db_file().is_file());
         Ok(())
     }
 }

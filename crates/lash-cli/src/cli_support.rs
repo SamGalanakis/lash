@@ -13,7 +13,7 @@ use crate::SkillCatalog;
 use crate::app::{App, PluginPanelBlock, PreparedTurn, UiTimelineItem};
 use crate::command;
 use crate::model_catalog::{
-    CachedModelCatalog, FileModelCatalogStore, ModelsDevHttpSource, ResolvedModelSpec,
+    CachedModelCatalog, FileModelCatalogStore, ModelInfo, ModelsDevHttpSource, ResolvedModelSpec,
 };
 use crate::overlay::{DocumentRow, DocumentSection, DocumentState};
 
@@ -414,6 +414,28 @@ pub(crate) fn validate_model_selection(
     provider.validate_model_name(&selection.model)
 }
 
+/// Curated model limits that take precedence over models.dev — only for
+/// `(provider, model)` pairs the catalog gets wrong or omits. Keep this minimal
+/// and dated; everything else flows from models.dev so it stays current. The
+/// per-provider input ceiling (below) handles route-wide caps; use this table
+/// for one-off model corrections.
+fn builtin_model_info(_provider_kind: &str, _model: &str) -> Option<ModelInfo> {
+    None
+}
+
+/// The maximum input a provider's *route* accepts when it caps below the
+/// model's nominal catalog limit. The Codex OAuth route serves OpenAI models
+/// through a much smaller window than the API, and the catalog has no
+/// codex-specific row for every model (e.g. `gpt-5.5` resolves to the generic
+/// `openai/gpt-5.5` at ~922k input). gpt-5-codex catalogs at 256k input and the
+/// OAuth route rejected ~270k, so clamp every codex request to 256k.
+fn provider_input_ceiling(provider_kind: &str) -> Option<u64> {
+    match provider_kind {
+        "codex" => Some(256_000),
+        _ => None,
+    }
+}
+
 pub(crate) fn resolve_model_selection(
     provider: &ProviderHandle,
     selection: &ModelSelection,
@@ -423,7 +445,10 @@ pub(crate) fn resolve_model_selection(
     let configured_model = selection.model.trim();
     let catalog_model_id =
         crate::provider_metadata::provider_catalog_model_id(provider.kind(), configured_model);
-    let Some(info) = catalog.get(&catalog_model_id) else {
+    // Built-in overrides win over models.dev; fall back to the catalog.
+    let Some(mut info) = builtin_model_info(provider.kind(), configured_model)
+        .or_else(|| catalog.get(&catalog_model_id))
+    else {
         let normalized =
             crate::provider_metadata::provider_wire_model_id(provider.kind(), configured_model);
         let mut message = format!(
@@ -436,6 +461,10 @@ pub(crate) fn resolve_model_selection(
         }
         return Err(message);
     };
+    // Clamp the prompt budget to the route's real input ceiling (e.g. codex).
+    if let Some(ceiling) = provider_input_ceiling(provider.kind()) {
+        info.max_input_tokens = Some(info.prompt_budget_tokens().min(ceiling));
+    }
     Ok(ResolvedModelSpec {
         configured_model: configured_model.to_string(),
         provider_model: crate::provider_metadata::provider_wire_model_id(
@@ -679,16 +708,10 @@ pub(crate) fn info_document(
     });
 
     let tools_rows = match tool_summary {
-        Some((tool_count, toolset_hash)) => vec![
-            DocumentRow::KeyValue {
-                label: "count".to_string(),
-                value: tool_count.to_string(),
-            },
-            DocumentRow::KeyValue {
-                label: "hash".to_string(),
-                value: toolset_hash.to_string(),
-            },
-        ],
+        Some((tool_count, _toolset_hash)) => vec![DocumentRow::KeyValue {
+            label: "count".to_string(),
+            value: tool_count.to_string(),
+        }],
         None => vec![DocumentRow::Text("session not started".to_string())],
     };
 
@@ -701,10 +724,6 @@ pub(crate) fn info_document(
                     DocumentRow::KeyValue {
                         label: "lash-cli".to_string(),
                         value: crate::APP_VERSION.to_string(),
-                    },
-                    DocumentRow::KeyValue {
-                        label: "lash-sansio".to_string(),
-                        value: lash_core::SANSIO_VERSION.to_string(),
                     },
                     DocumentRow::KeyValue {
                         label: "provider".to_string(),
@@ -995,6 +1014,24 @@ mod tests {
     use lash_core::SessionMeta;
 
     #[test]
+    fn codex_route_clamps_prompt_budget_to_input_ceiling() {
+        assert_eq!(provider_input_ceiling("codex"), Some(256_000));
+        assert_eq!(provider_input_ceiling("openai"), None);
+
+        // On codex, gpt-5.5 resolves to the generic openai entry (922k input);
+        // the route clamp must bring the prompt budget down to the codex
+        // ceiling so history pruning trims before the real limit.
+        let mut info = ModelInfo {
+            context_window: 1_050_000,
+            max_input_tokens: Some(922_000),
+            max_output_tokens: Some(128_000),
+        };
+        let ceiling = provider_input_ceiling("codex").expect("codex ceiling");
+        info.max_input_tokens = Some(info.prompt_budget_tokens().min(ceiling));
+        assert_eq!(info.prompt_budget_tokens(), 256_000);
+    }
+
+    #[test]
     fn desktop_notification_effect_respects_focus() {
         let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
         app.focused = true;
@@ -1241,6 +1278,24 @@ mod tests {
             section_titles,
             ["Runtime", "Model", "Session", "Tools", "Paths"]
         );
+        let runtime = document
+            .sections
+            .iter()
+            .find(|section| section.title == "Runtime")
+            .expect("runtime section");
+        assert!(!runtime.rows.iter().any(|row| matches!(
+            row,
+            DocumentRow::KeyValue { label, .. } if label == "lash-sansio"
+        )));
+        let tools = document
+            .sections
+            .iter()
+            .find(|section| section.title == "Tools")
+            .expect("tools section");
+        assert!(!tools.rows.iter().any(|row| matches!(
+            row,
+            DocumentRow::KeyValue { label, .. } if label == "hash"
+        )));
         let paths = document
             .sections
             .iter()
@@ -1267,8 +1322,10 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains('…'), "{rendered}");
-        assert!(!rendered.contains(session_db), "{rendered}");
+        assert!(!rendered.contains('…'), "{rendered}");
+        let compact_rendered = rendered.split_whitespace().collect::<String>();
+        assert!(compact_rendered.contains(cwd), "{rendered}");
+        assert!(compact_rendered.contains(session_db), "{rendered}");
 
         let text = info_text(
             &provider,

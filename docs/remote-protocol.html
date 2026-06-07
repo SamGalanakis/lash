@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
 <link rel="stylesheet" href="./styles.css?v=11">
 <script src="./theme.js"></script>
-<script src="./docs.js?v=6" defer></script>
+<script src="./docs.js?v=7" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash-remote-protocol</code>, <code>crates/lash/src/lib.rs</code>.">
@@ -123,11 +123,11 @@ request.validate()?;</code></pre>
     <div class="listing">
       <div class="listing__row">
         <div class="listing__label">grant</div>
-        <div class="listing__body"><p><code>RemoteToolGrant</code> defines the advertised name, schemas, projection overrides, output contract, examples, availability, activation, scheduling, retry policy, required agent surface, and executor.</p></div>
+        <div class="listing__body"><p><code>RemoteToolGrant</code> defines the advertised name, schemas, projection overrides, output contract, examples, availability, activation, scheduling, retry policy, and required agent surface. Host-owned bindings decide how granted tools execute.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">executor</div>
-        <div class="listing__body"><p><code>RemoteToolExecutor</code> supports <code>Http</code>, <code>CallbackRef</code>, and <code>QueueRef</code>. HTTP endpoints must start with <code>http://</code> or <code>https://</code>; timeouts must be greater than zero when present.</p></div>
+        <div class="listing__body"><p>The remote protocol describes callable tools and tool-call envelopes. It does not prescribe HTTP, callback, or queue transport; each host maps tool calls to implementation using its own binding metadata.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">call path</div>
@@ -135,7 +135,7 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">provider helper</div>
-        <div class="listing__body"><p>When using the <code>lash-remote-protocol</code> crate directly with its <code>core-conversions</code> feature, <code>RemoteToolProvider&lt;T&gt;</code> adapts grants into a normal <code>ToolProvider</code> and dispatches through your <code>RemoteToolTransport</code>.</p></div>
+        <div class="listing__body"><p>When using the <code>lash-remote-protocol</code> crate directly with its <code>core-conversions</code> feature, <code>RemoteToolProvider&lt;T&gt;</code> adapts grants into a normal <code>ToolProvider</code> and dispatches canonical tool-call requests through your host-owned <code>RemoteToolTransport</code>.</p></div>
       </div>
     </div>
   </div>

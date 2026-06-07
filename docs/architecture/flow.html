@@ -15,7 +15,7 @@
 <link rel="stylesheet" href="../styles.css?v=11">
 <script src="../theme.js"></script>
 <script src="../mermaid.js?v=4" defer></script>
-<script src="../docs.js?v=6" defer></script>
+<script src="../docs.js?v=7" defer></script>
 <script src="../syntax.js" defer></script>
 </head>
 <body class="docs-page">
@@ -56,7 +56,7 @@ sequenceDiagram
       Runtime->>EffectController: llm_call(invocation, request)
       EffectController->>Provider: complete(LlmRequest)
       Provider-->>EffectController: stream events + LlmResponse
-      EffectController-->>Runtime: Result<LlmResponse, LlmCallError>
+      EffectController-->>Runtime: Result&lt;LlmResponse, LlmCallError&gt;
       Runtime->>Machine: Response::LlmComplete
     else ToolCalls
       loop each PendingToolCall
@@ -71,7 +71,7 @@ sequenceDiagram
       Runtime->>EffectController: exec_code(invocation, code)
       EffectController->>Lang: execute lashlang (with resolved ProjectedBindings)
       Lang-->>EffectController: ExecResponse + observations
-      EffectController-->>Runtime: Result<ExecResponse, String>
+      EffectController-->>Runtime: Result&lt;ExecResponse, String&gt;
       Runtime->>Machine: Response::ExecResult
     else Progress / Done
       Runtime->>Store: graph delta + checkpoint + usage

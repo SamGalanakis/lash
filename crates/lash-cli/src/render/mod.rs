@@ -760,18 +760,22 @@ pub(crate) fn document_max_scroll(
 fn push_document_key_value(lines: &mut Vec<Line<'static>>, label: &str, value: &str, width: usize) {
     let label_width = 16usize.min(width.saturating_sub(1));
     let visible_label = truncate_to_display_width(label, label_width);
-    let value_width = width.saturating_sub(label_width + 1).max(1);
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{visible_label:<label_width$}"),
-            theme::text_faint_style(),
-        ),
-        Span::styled(" ", theme::text_faint_style()),
-        Span::styled(
-            truncate_with_forced_ellipsis(value, value_width),
-            Style::default().fg(theme::text_muted()),
-        ),
-    ]));
+    let segments = wrap_line(value, label_width + 1, label_width + 1, width);
+    for (idx, (start, end)) in segments.into_iter().enumerate() {
+        let label = if idx == 0 {
+            format!("{visible_label:<label_width$}")
+        } else {
+            " ".repeat(label_width)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(label, theme::text_faint_style()),
+            Span::styled(" ", theme::text_faint_style()),
+            Span::styled(
+                value[start..end].to_string(),
+                Style::default().fg(theme::text_muted()),
+            ),
+        ]));
+    }
 }
 
 fn push_document_shortcut(

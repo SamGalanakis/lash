@@ -255,7 +255,6 @@ mod tests {
                         None,
                         200_000,
                         None,
-                        None,
                     )
                     .expect("valid model spec"),
                 },

@@ -30,7 +30,7 @@ const HISTORY_EXCHANGES: usize = 18;
 const RUNTIME_PERF_MAX_TURNS: usize = 1;
 
 fn benchmark_model_spec() -> lash::ModelSpec {
-    lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+    lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
         .expect("valid benchmark model spec")
 }
 

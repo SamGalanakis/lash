@@ -102,7 +102,6 @@ async fn main() -> anyhow_like::Result<()> {
         Some(model_variant.clone()),
         200_000,
         None,
-        None,
     )
     .map_err(|err| format!("invalid OPENROUTER_MODEL metadata: {err}"))?;
     let core_builder = LashCore::builder()

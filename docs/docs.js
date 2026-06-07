@@ -8,6 +8,14 @@
 
   const SCENE_ASSET_VERSION = "6";
 
+  // Capture our own <script> element NOW, during initial top-level
+  // execution: `document.currentScript` is valid here (a deferred
+  // classic script), and crucially this runs before any SPA pushState
+  // has rewritten `location`. We freeze the docs root off it in
+  // TOC_BASE below — see the note there for why deriving it lazily is a
+  // bug.
+  const SELF_SCRIPT = document.currentScript;
+
   // ── docs registry ────────────────────────────────────────
   // The docs registry is the single canonical source for navigation,
   // pager order, landing cards, search page labels, and related-link
@@ -363,26 +371,49 @@
     return p;
   }
 
-  function tocBase() {
-    // absolute URL path of the docs ROOT, so TOC links + dynamic
-    // script injections resolve correctly from any page no matter
-    // how deeply nested. Derive from docs.js's own <script src> —
-    // wherever this file lives is, by definition, the docs root.
-    // Falls back to a /docs/ path scan, then /, for legacy setups.
+  // Absolute URL path of the docs ROOT, so TOC links + dynamic script
+  // injections (mermaid loader) + search-index fetches resolve from any
+  // page no matter how deeply nested. Derived from docs.js's own
+  // <script src> — wherever this file lives is, by definition, the docs
+  // root — and COMPUTED ONCE, at load time, then cached.
+  //
+  // It must be captured before any SPA pushState runs. `spaNavigate`
+  // rewrites `location` via history.pushState but never swaps the
+  // <head> <script> tags, so the docs.js element keeps its original
+  // relative `src` ("./docs.js" on a root page, "../docs.js" under
+  // architecture/). Re-resolving that relative src against the *live*
+  // location after a cross-directory nav yields the wrong root (e.g.
+  // "/architecture/" instead of "/") — which 404s the injected
+  // mermaid loader and every search-index fetch. That was the
+  // "diagrams don't render / ⌘K finds nothing until a hard refresh"
+  // bug: a hard refresh is a full load, so the base resolved correctly.
+  const TOC_BASE = (function () {
+    // 1) our own script element, resolved against the load-time URL.
+    if (SELF_SCRIPT) {
+      const src = SELF_SCRIPT.getAttribute("src") || "";
+      try {
+        return new URL(src, location.href).pathname.replace(/[^/]*$/, "");
+      } catch (e) { /* fall through */ }
+    }
+    // 2) scan for any docs.js script (unexpected embeddings).
     const scripts = document.querySelectorAll('script[src]');
     for (const s of scripts) {
       const src = s.getAttribute("src") || "";
       if (/(^|\/)docs\.js(?:\?|$)/.test(src)) {
         try {
-          const url = new URL(src, location.href);
-          return url.pathname.replace(/docs\.js$/, "");
+          return new URL(src, location.href).pathname.replace(/docs\.js$/, "");
         } catch (e) { /* fall through */ }
       }
     }
+    // 3) /docs/ path scan, then root — legacy fallbacks.
     const p = location.pathname;
     const idx = p.indexOf("/docs/");
     if (idx >= 0) return p.slice(0, idx + 6);
     return "/";
+  })();
+
+  function tocBase() {
+    return TOC_BASE;
   }
 
   // ── TOC builder ─────────────────────────────────────────
@@ -671,13 +702,26 @@
   const MERMAID_LOADER_VERSION = "4";
   function loadMermaidIfNeeded() {
     if (!document.querySelector(".mermaid")) return;
-    if (window.__lashMermaid) return;
+    // Loader already running? `__lashMermaidRerender` is published
+    // synchronously the moment mermaid.js's IIFE executes — well before
+    // the CDN import resolves and sets `__lashMermaid`. The old guard
+    // checked only `__lashMermaid`, so on a full load of a page that
+    // ships mermaid.js in its own <head> (the architecture pages do) it
+    // raced the import and injected a SECOND copy. Two mermaid instances
+    // then fight over the same .mermaid nodes (reset-to-source + re-run),
+    // which throws and can leave a diagram as raw text — a second source
+    // of "diagrams sometimes don't render".
+    if (window.__lashMermaid || typeof window.__lashMermaidRerender === "function") return;
+    if (document.querySelector('script[data-lash-mermaid]')) return;
+    // mermaid.js may already be on the page via the per-page HTML
+    // <script> even before its IIFE has run — don't duplicate it.
+    const onPage = [...document.querySelectorAll('script[src]')].some(
+      (s) => /(^|\/)mermaid\.js(?:\?|$)/.test(s.getAttribute("src") || "")
+    );
+    if (onPage) return;
     const base = tocBase();
-    const url = base + "mermaid.js?v=" + MERMAID_LOADER_VERSION;
-    const existing = document.querySelector('script[data-lash-mermaid]');
-    if (existing) return;
     const s = document.createElement("script");
-    s.src = url;
+    s.src = base + "mermaid.js?v=" + MERMAID_LOADER_VERSION;
     s.defer = true;
     s.setAttribute("data-lash-mermaid", "");
     document.head.appendChild(s);
@@ -1112,7 +1156,11 @@
   }
 
   async function buildSearchIndex() {
-    if (window.__LASH_SEARCH_INDEX) {
+    // Only treat a NON-EMPTY index as a valid cache. An empty array is
+    // truthy, so caching it (e.g. after a transient fetch failure) would
+    // wedge ⌘K on "no matches" for the rest of the session — reopening
+    // search must be free to retry the build.
+    if (Array.isArray(window.__LASH_SEARCH_INDEX) && window.__LASH_SEARCH_INDEX.length) {
       SEARCH.indexed = true;
       return window.__LASH_SEARCH_INDEX;
     }
@@ -1168,8 +1216,12 @@
     } finally {
       SEARCH.indexing = false;
     }
-    window.__LASH_SEARCH_INDEX = entries;
-    SEARCH.indexed = true;
+    // Cache only a real index; leave a failed/empty build uncached so
+    // the next openSearch retries instead of serving "no matches".
+    if (entries.length) {
+      window.__LASH_SEARCH_INDEX = entries;
+      SEARCH.indexed = true;
+    }
     return entries;
   }
 

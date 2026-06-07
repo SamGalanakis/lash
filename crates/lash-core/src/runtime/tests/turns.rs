@@ -88,7 +88,7 @@ async fn session_config_change_hook_receives_context_window_updates() {
         .kind("alt")
         .complete_error("alt provider not wired")
         .build();
-    let alt_model = crate::ModelSpec::from_token_limits("alt-model", None, 123_456, None, None)
+    let alt_model = crate::ModelSpec::from_token_limits("alt-model", None, 123_456, None)
         .expect("valid model spec");
     runtime
         .update_session_config(

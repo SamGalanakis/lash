@@ -1520,7 +1520,7 @@ fn recovery_worker(
             registry,
         )
         .with_session_policy(lash_core::SessionPolicy {
-            model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+            model: lash_core::ModelSpec::from_token_limits("mock-model", None, 200_000, None)
                 .expect("model spec"),
             ..lash_core::SessionPolicy::default()
         }),
@@ -1648,7 +1648,6 @@ async fn turso_process_recovery_reopens_registry_worker_grants_wakes_and_cancel(
                     "mock-model",
                     None,
                     200_000,
-                    None,
                     None,
                 )
                 .expect("model spec"),

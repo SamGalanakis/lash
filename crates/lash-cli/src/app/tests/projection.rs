@@ -248,6 +248,44 @@ fn read_view_timeline_places_reasoning_before_text() {
 }
 
 #[test]
+fn committed_reasoning_is_not_duplicated_by_stale_live_buffer() {
+    // The durable commit and the live-buffer clear are not synchronized, so a
+    // turn whose reasoning is already committed to history can still have the
+    // same text sitting in the live buffer. The live tail must not be appended
+    // a second time (otherwise it renders twice, visibly so under Alt+O).
+    let message = Message {
+        id: "a1".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            part(
+                "a1.r",
+                PartKind::Reasoning,
+                "Planning the refactor in detail.",
+            ),
+            part("a1.t", PartKind::Text, "Done."),
+        ]
+        .into(),
+        origin: None,
+    };
+
+    let ui_state = UiProjectionState {
+        live_reasoning_text: Some("Planning the refactor in detail.".to_string()),
+        ..UiProjectionState::default()
+    };
+
+    let events = events_from_messages(std::slice::from_ref(&message));
+    let blocks = timeline_items_from_test_read_view(&events, &[message], &[], &ui_state);
+    let reasoning_count = blocks
+        .iter()
+        .filter(|item| matches!(item, projection::UiTimelineItem::AssistantReasoning(_)))
+        .count();
+    assert_eq!(
+        reasoning_count, 1,
+        "committed reasoning must not be duplicated by the stale live buffer: {blocks:?}"
+    );
+}
+
+#[test]
 fn read_view_timeline_round_trips_to_existing_display_blocks() {
     let user = text_message("u1", MessageRole::User, "Summarize this");
     let assistant = text_message("a1", MessageRole::Assistant, "Summary.");

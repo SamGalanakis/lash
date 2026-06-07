@@ -16,7 +16,6 @@ impl ModelSpec {
             variant: None,
             limits: ModelLimits {
                 context_window_tokens,
-                input_token_capacity: None,
                 output_token_capacity: None,
             },
         }
@@ -39,21 +38,20 @@ impl ModelSpec {
         self
     }
 
+    /// Build a spec from the prompt budget (`context_window_tokens` — the
+    /// maximum input the provider accepts for this model on this route) and the
+    /// optional output cap. The budget is what history pruning and the UI
+    /// measure against.
     pub fn from_token_limits(
         id: impl Into<String>,
         variant: Option<String>,
         context_window_tokens: usize,
-        input_token_capacity: Option<usize>,
         output_token_capacity: Option<usize>,
     ) -> Result<Self, String> {
         Ok(Self::with_limits(
             id,
             variant,
-            ModelLimits::from_token_limits(
-                context_window_tokens,
-                input_token_capacity,
-                output_token_capacity,
-            )?,
+            ModelLimits::from_token_limits(context_window_tokens, output_token_capacity)?,
         ))
     }
 
@@ -74,9 +72,11 @@ impl Default for ModelSpec {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelLimits {
+    /// The prompt budget: the maximum input tokens the provider accepts for
+    /// this model on this route. History pruning and the UI measure against
+    /// this — not the model's total context (input + output), which would
+    /// over-budget by the whole response reservation.
     pub context_window_tokens: NonZeroUsize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_token_capacity: Option<NonZeroUsize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_token_capacity: Option<NonZeroUsize>,
 }
@@ -84,17 +84,12 @@ pub struct ModelLimits {
 impl ModelLimits {
     pub fn from_token_limits(
         context_window_tokens: usize,
-        input_token_capacity: Option<usize>,
         output_token_capacity: Option<usize>,
     ) -> Result<Self, String> {
         Ok(Self {
             context_window_tokens: nonzero_token_limit(
                 "context_window_tokens",
                 context_window_tokens,
-            )?,
-            input_token_capacity: optional_nonzero_token_limit(
-                "input_token_capacity",
-                input_token_capacity,
             )?,
             output_token_capacity: optional_nonzero_token_limit(
                 "output_token_capacity",
@@ -108,7 +103,6 @@ impl Default for ModelLimits {
     fn default() -> Self {
         Self {
             context_window_tokens: NonZeroUsize::new(1).expect("one is non-zero"),
-            input_token_capacity: None,
             output_token_capacity: None,
         }
     }
