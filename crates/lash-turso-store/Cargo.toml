@@ -14,8 +14,8 @@ keywords = ["lash", "agent", "turso", "persistence", "store"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.29" }
-lashlang = { path = "../lashlang", version = "=0.1.0-alpha.29" }
+lash-core = { workspace = true }
+lashlang = { workspace = true }
 async-trait = { workspace = true }
 flate2 = "1"
 futures-executor = "0.3"
@@ -28,7 +28,7 @@ tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.29", features = ["testing"] }
-lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.29" }
+lash-core = { workspace = true, features = ["testing"] }
+lash-sansio = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

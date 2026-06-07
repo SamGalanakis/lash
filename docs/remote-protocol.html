@@ -18,6 +18,7 @@
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash-remote-protocol</code>, <code>crates/lash/src/lib.rs</code>.">
+  <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
   <h1 class="opener__title">remote<span class="slash">/</span>protocol</h1>
   <p class="opener__lede">Use the remote protocol when Lash crosses a service boundary. The <code>lash-remote-protocol</code> crate defines versioned, serde-compatible DTOs for turns, LLM calls, activities, prompt layers, and remote tool grants; the facade reexports the DTO surface as <code>lash::remote</code>.</p>
@@ -35,18 +36,18 @@
     </aside>
   </div>
 
-  <div class="section" id="when-to-use-it">
+  <div class="section" id="service-boundary">
     <div class="section-header">
-      <h2>When To Use It</h2>
-      <p>The DTOs are for product-owned service edges. If your app calls Lash in-process, use the normal facade in <a href="./embedding.html">API basics</a> instead.</p>
+      <h2>Service Boundary</h2>
+      <p>The DTOs are for host-owned service edges. If your code calls Lash in-process, use the normal facade in <a href="./embedding.html">API basics</a> instead.</p>
     </div>
     <div class="listing">
       <div class="listing__row">
-        <div class="listing__label">use when</div>
+        <div class="listing__label">remote edge</div>
         <div class="listing__body"><p>A web service, worker, workflow activity, queue consumer, remote provider, or remote tool executor must exchange Lash-owned fields with another process.</p></div>
       </div>
       <div class="listing__row">
-        <div class="listing__label">avoid when</div>
+        <div class="listing__label">local call</div>
         <div class="listing__body"><p>The caller already has a <code>LashCore</code> and <code>LashSession</code> in memory. Do not serialize and deserialize just to call local turns.</p></div>
       </div>
     </div>
@@ -55,7 +56,7 @@
   <div class="section" id="minimal-example">
     <div class="section-header">
       <h2>Minimal Example</h2>
-      <p>Wrap Lash's DTO in your product envelope. Product-specific fields belong in the wrapper or in <code>metadata</code>, not as local forks of Lash sub-objects.</p>
+      <p>Wrap Lash's DTO in your host envelope. Service-specific fields belong in the wrapper or in <code>metadata</code>, not as local forks of Lash sub-objects.</p>
     </div>
 <pre data-lang="rust"><code>use lash::remote::{
     RemoteInputItem, RemoteTurnInput, RemoteTurnRequest, REMOTE_PROTOCOL_VERSION,
@@ -142,7 +143,7 @@ request.validate()?;</code></pre>
   <div class="section" id="validation">
     <div class="section-header">
       <h2>Validation Rules</h2>
-      <p>The DTOs validate protocol and shape, not business authorization. Keep product checks in your service layer.</p>
+      <p>The DTOs validate protocol and shape, not caller authorization. Keep auth and tenancy checks in your service layer.</p>
     </div>
     <div class="listing">
       <div class="listing__row"><div class="listing__label">version</div><div class="listing__body"><p>Top-level envelopes reject unsupported <code>protocol_version</code>; nested turn input/activity versions must match the parent envelope where applicable.</p></div></div>
@@ -153,7 +154,7 @@ request.validate()?;</code></pre>
     </div>
     <aside class="gotcha">
       <strong>Gotcha</strong>
-      <p>Validation cannot prove that an <code>ImageAttachment.attachment_index</code> points at an existing attachment or that a remote caller is authorized for a session. Check those at the boundary that has the attachment list and product identity.</p>
+      <p>Validation cannot prove that an <code>ImageAttachment.attachment_index</code> points at an existing attachment or that a remote caller is authorized for a session. Check those at the boundary that has the attachment list and caller identity.</p>
     </aside>
   </div>
 

@@ -18,6 +18,7 @@
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page">
+  <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">rlm<span class="slash">/</span>protocol</h1>
     <p class="opener__lede">Use RLM when the model should write Lashlang programs instead of issuing one provider-native tool call at a time. Lash executes the code in a persistent VM, every effect crosses the host boundary, and the turn commits once.</p>
@@ -45,17 +46,17 @@
       </div>
     </div>
 
-    <div class="section" id="when-to-use-it">
+    <div class="section" id="mode-fit">
       <div class="section-header">
-        <h2>When To Use It</h2>
-        <p>Use RLM for agentic turns where a model should compose state reads, tools, loops, validation, subagents, or background processes inside a single turn.</p>
+        <h2>Mode Fit</h2>
+        <p>RLM is the mode for turns where the model should compose state reads, tools, loops, validation, subagents, or background processes inside one turn.</p>
       </div>
       <aside class="use-when">
-        <strong>Use when</strong>
+        <strong>Choose RLM</strong>
         <p>The model needs a typed scratchpad, repeated host calls, structured <code>submit</code>, projected state, or Lashlang background/process abilities.</p>
       </aside>
       <aside class="avoid">
-        <strong>Avoid</strong>
+        <strong>Choose standard mode</strong>
         <p>If one provider-native tool call plus prose is enough, standard mode has a smaller prompt and fewer protocol rules.</p>
       </aside>
     </div>

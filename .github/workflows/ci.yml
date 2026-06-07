@@ -348,13 +348,17 @@ jobs:
       - name: Commit release version
         id: commit
         run: |
-          if git diff --quiet -- Cargo.toml Cargo.lock '**/Cargo.toml'; then
+          if git diff --quiet; then
             echo "created=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git ls-files -z Cargo.toml Cargo.lock '**/Cargo.toml' | xargs -0 git add
+          # Stage everything release_version.py rewrote — Cargo manifests, the
+          # lockfile, AND the doc version snippets (README + docs/*.html). The
+          # checkout is clean, so -A captures exactly the bump's edits. Staging
+          # only Cargo files here is what let the docs drift behind the version.
+          git add -A
           git commit -m "Release v${{ steps.version.outputs.version }} [skip ci]"
           git push origin HEAD:main
           echo "created=true" >> "$GITHUB_OUTPUT"
@@ -373,14 +377,18 @@ jobs:
           cd "$sync_dir"
           python3 scripts/release_version.py set "${{ steps.version.outputs.version }}"
           cargo metadata --format-version 1 --locked >/dev/null
-          if git diff --quiet -- Cargo.toml Cargo.lock '**/Cargo.toml'; then
+          if git diff --quiet; then
             echo "origin/staging already has version ${{ steps.version.outputs.version }}."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git ls-files -z Cargo.toml Cargo.lock '**/Cargo.toml' | xargs -0 git add
+          # Stage everything release_version.py rewrote (Cargo files + the doc
+          # version snippets). git diff above now also notices doc-only drift,
+          # so a stale README/docs heals on the next release even if Cargo is
+          # already current.
+          git add -A
           git commit -m "Sync release version to staging (v${{ steps.version.outputs.version }}) [skip ci]"
           git push origin HEAD:staging
 

@@ -18,6 +18,7 @@
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash</code> &middot; <code>crates/lash-providers-builtin</code>">
+  <a class="skip-link" href="#content">skip to content</a>
 
 <section class="opener">
   <h1 class="opener__title">quick<span class="slash">/</span>start</h1>
@@ -26,9 +27,9 @@
 
 <main class="body" id="content">
 
-  <div class="section" id="what-this-is">
+  <div class="section" id="what-this-builds">
     <div class="section-header">
-      <h2>What This Is</h2>
+      <h2>What This Builds</h2>
       <p>A minimal embedded-agent program. It uses the app-facing <code>lash-runtime</code> facade, one provider handle, the default standard mode, and in-memory runtime facets.</p>
     </div>
     <p><code>lash-runtime</code> is published under that crate name because <code>lash</code> is owned by another project on crates.io. The Rust library import is still <code>use lash::...</code>.</p>
@@ -38,19 +39,23 @@
     </aside>
   </div>
 
-  <div class="section" id="when-to-use-it">
+  <div class="section" id="before-you-start">
     <div class="section-header">
-      <h2>When To Use It</h2>
-      <p>Use this path when you want the smallest complete host before adding tools, streaming, RLM, persistence, background work, or tracing.</p>
+      <h2>Before You Start</h2>
+      <p>This page keeps the host deliberately small: one provider, one core, one session, one collected turn.</p>
     </div>
     <div class="listing">
       <div class="listing__row">
-        <div class="listing__label">use when</div>
-        <div class="listing__body"><p>You are proving provider wiring, writing a first integration test, or adding Lash to an app backend for the first time.</p></div>
+        <div class="listing__label">provider key</div>
+        <div class="listing__body"><p>The example uses OpenRouter through the OpenAI-compatible provider. Substitute any provider crate and model id your host already uses.</p></div>
       </div>
       <div class="listing__row">
-        <div class="listing__label">avoid when</div>
-        <div class="listing__body"><p>You need resumable sessions or multi-process workers immediately. Start with <a href="./persistence.html">Persistence</a> and <a href="./embedding-advanced.html#durable-workflows">Durable workflows</a> instead.</p></div>
+        <div class="listing__label">state</div>
+        <div class="listing__body"><p>The first run uses in-memory runtime facets. Add <a href="./persistence.html">Persistence</a> when the same session id must survive process restart.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">next features</div>
+        <div class="listing__body"><p>Streaming, RLM, tools, background work, and traces are linked after the minimal example instead of being mixed into it.</p></div>
       </div>
     </div>
   </div>
@@ -61,8 +66,8 @@
       <p>Pin the alpha pre-release explicitly and add the provider crate you actually use.</p>
     </div>
 <pre data-lang="cargo.toml"><code>[dependencies]
-lash-runtime         = "=0.1.0-alpha.21"
-lash-provider-openai = "=0.1.0-alpha.21"
+lash-runtime         = "=0.1.0-alpha.28"
+lash-provider-openai = "=0.1.0-alpha.28"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }</code></pre>
     <p>For ordinary projects the facade and provider crates are enough. Drop down to <code>lash-core</code> only for custom runtime hosts, explicit process registries, store implementations, or diagnostics that need internal state.</p>

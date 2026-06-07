@@ -34,6 +34,62 @@ jobs:
       - name: Validate locked workspace metadata
         run: cargo metadata --format-version 1 --locked >/dev/null
 
+  publish-crates:
+    name: Publish crates to crates.io
+    runs-on: ubuntu-latest
+    needs: validate-release-ref
+    # CARGO_REGISTRY_TOKEN lives in the `main` GitHub Environment; a job must
+    # declare the environment to read its secrets.
+    environment: main
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      # Gate the (irreversible) publish on the same core tests CI runs.
+      - name: Test core crates
+        run: |
+          cargo test -p lash-sansio --locked
+          cargo test -p lash-core --locked
+          cargo test -p lash-turso-store --locked
+          cargo test -p lash-runtime --locked
+          cargo test -p lash-standard-plugins --locked --features fff-zlob
+
+      # Publishes every publishable workspace member in dependency order,
+      # waiting for index propagation between crates. publish=false crates are
+      # skipped; versions already on crates.io are skipped (so reruns resume).
+      #
+      # Auth: a crates.io API token in the CARGO_REGISTRY_TOKEN secret. This is
+      # required for the *first* publish of brand-new crates, because crates.io
+      # Trusted Publishing can only be configured on a crate that already
+      # exists. Once every crate has been published once and a trusted
+      # publisher (repo + this workflow) is configured for each, switch to
+      # OIDC by adding `id-token: write` to this job's permissions, a
+      # `rust-lang/crates-io-auth-action@v1` step (id: auth), and setting
+      # CARGO_REGISTRY_TOKEN to `${{ steps.auth.outputs.token }}` — then the
+      # long-lived secret can be removed.
+      - name: Publish workspace to crates.io
+        run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
   build-release-assets:
     name: Build (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}

@@ -18,6 +18,7 @@
 <script src="./syntax.js" defer></script>
 </head>
 <body class="docs-page" data-cover-source="<code>crates/lash-trace</code>, <code>crates/lash</code>, <code>crates/lash-trace-viewer</code>, <code>examples/agent-service</code>.">
+  <a class="skip-link" href="#content">skip to content</a>
 <section class="opener">
     <h1 class="opener__title">tracing<span class="slash">/</span>observability</h1>
     <p class="opener__lede">Structured runtime records emit through <code>TraceSink</code>. The bundled <code>JsonlTraceSink</code> writes one record per line; fan-out, OTel, and custom sinks are wrappers. Lashlang execution graphs are a separate opt-in sink for foreground blocks, durable process runs, and trace-derived graph snapshots. <code>lash-trace-viewer</code> renders JSONL to a self-contained HTML page.</p>
@@ -194,8 +195,8 @@ $ cargo run -p lash-trace-viewer -- trace.jsonl \
           </div>
           <pre><code># In your downstream Cargo.toml — pull in lash-core with the otel-trace
 # feature alongside the lash-runtime facade.
-lash-runtime = "=0.1.0-alpha.21"
-lash-core    = { version = "=0.1.0-alpha.21", features = ["otel-trace"] }</code></pre>
+lash-runtime = "=0.1.0-alpha.28"
+lash-core    = { version = "=0.1.0-alpha.28", features = ["otel-trace"] }</code></pre>
           <p><code>lash_core::OtelTraceSink</code> wraps an <code>opentelemetry</code> tracer and converts every event to a span with payload attributes. Use in place of (or alongside) <code>JsonlTraceSink</code>:</p>
           <pre><code>use std::sync::Arc;
 

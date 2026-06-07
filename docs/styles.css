@@ -1242,8 +1242,20 @@ body.docs-page {
 
 /* cross-document view transition — Chrome 126+ smoothly fades
    between same-origin pages, killing the "full reload" feel even
-   on the very first navigation */
-@view-transition { navigation: auto; }
+   on the very first navigation.
+
+   Gated above the layout breakpoint on purpose. The default crossfade
+   snapshots the whole root and dissolves the outgoing page into the
+   incoming one at the same coordinates. On wide screens the TOC is a
+   fixed-width sticky sidebar, so the content column keeps the same Y on
+   every page and the two snapshots line up. Below 980px the TOC becomes
+   an inline block whose height varies per page (the active page's group
+   auto-expands), so the heading lands at a different Y on each page and
+   the crossfade ghosts the outgoing TOC over the incoming heading — the
+   "weird overlap" seen on narrow windows. Only opt in where it aligns. */
+@media (min-width: 981px) {
+  @view-transition { navigation: auto; }
+}
 
 /* floating marker beside each entry — hollow ring (normal) or
    filled dot (active page). Never touches the thread or the text. */
@@ -1370,6 +1382,31 @@ button.toc__group-title:focus-visible {
 .toc__caret-spacer { display: inline-block; width: 16px; height: 16px; flex: 0 0 auto; }
 
 .toc__group.is-collapsed .toc__items { display: none; }
+
+/* ── TOC disclosure wrapper ──────────────────────────────────
+   buildTOC() wraps the groups in a native <details class="toc-disclosure">
+   so the whole nav can collapse behind a "Contents" summary on narrow
+   viewports (see the @media block below). On desktop the disclosure is
+   inert chrome: the summary is hidden and the panel always shows, so the
+   sticky sidebar looks identical to the pre-disclosure layout. The mobile
+   summary styling (tappable target, caret, focus ring) lives in the
+   responsive block — keeping the desktop default here as the no-chrome
+   baseline. */
+.toc-disclosure {
+  margin: 0;
+}
+.toc-disclosure__summary {
+  /* desktop: no summary chrome at all. The responsive block re-shows and
+     styles it below 980px. */
+  display: none;
+}
+/* The native marker (triangle) is suppressed everywhere — we draw our own
+   caret. Both selectors are needed for cross-browser coverage. */
+.toc-disclosure__summary::-webkit-details-marker { display: none; }
+.toc-disclosure__summary::marker { content: ""; }
+/* Desktop default: the panel is always laid out regardless of [open], so a
+   stale closed state can never hide the sidebar on wide screens. */
+.toc-disclosure__panel { display: block; }
 
 .toc__items {
   list-style: none;
@@ -1778,13 +1815,76 @@ body.docs-page .cover__top     { display: none; }
   }
   .toc {
     position: static;
+    /* reset the desktop sticky sidebar's fixed viewport height
+       (height: calc(100vh - …)) — otherwise it leaks down here and the
+       collapsed disclosure reserves a full screen of empty space above
+       the content. Let the TOC size to its content (44px summary when
+       closed, the panel when open). */
+    height: auto;
     max-height: none;
     overflow: visible;
     padding: var(--space-md) 0 var(--space-md);
     border-bottom: 1px solid var(--rule);
     margin-bottom: var(--space-md);
   }
-  .toc-disclosure { /* JS adds <details> wrapper on mobile */ }
+  /* On narrow viewports the TOC is a collapsed disclosure: the reader
+     taps "Contents" to reveal the multi-group nav, so the page content
+     (the <h1> and prose) sits right at the top instead of below two
+     screens of links. buildTOC() defaults the <details> closed here. */
+  .toc-disclosure__summary {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    /* generous tap target — ~2.75rem keeps it comfortably above the 44px
+       touch-target floor */
+    min-height: 2.75rem;
+    padding: var(--space-xs) var(--space-sm);
+    /* chrome voice — matches the mono labels used elsewhere */
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-mid);
+    background: var(--bg-elev);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    cursor: pointer;
+    list-style: none; /* belt-and-braces marker suppression */
+    user-select: none;
+    transition: background 140ms ease, color 140ms ease;
+  }
+  .toc-disclosure__summary:hover {
+    color: var(--sodium);
+    background: color-mix(in oklch, var(--ink) 6%, transparent);
+  }
+  /* native <details><summary> handles aria-expanded itself, but the focus
+     ring is ours to provide — never a bare outline:none */
+  .toc-disclosure__summary:focus-visible {
+    outline: 2px solid var(--sodium);
+    outline-offset: 2px;
+  }
+  .toc-disclosure__caret {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ink-faint);
+  }
+  /* the disclosure caret points right when closed, down when open —
+     mirrors the per-group caret idiom */
+  .toc-disclosure[open] .toc-disclosure__caret .toc__caret {
+    transform: rotate(90deg);
+  }
+  .toc-disclosure__label { color: inherit; }
+  /* closed: hide the panel; the native <details> does this via [open], but
+     we set it explicitly so the desktop "always display:block" rule (which
+     wins by source order otherwise) doesn't leak the panel open at <=980px */
+  .toc-disclosure:not([open]) .toc-disclosure__panel { display: none; }
+  .toc-disclosure__panel {
+    padding-top: var(--space-sm);
+  }
 }
 
 /* ── delight — interactive suns, hover affordances ─── */
@@ -1834,9 +1934,21 @@ body.docs-page .cover__top     { display: none; }
    pager are never touched by these rules. */
 .cover .scene-enter,
 .cover .scene-exit {
-  will-change: transform, opacity;
   transform-box: fill-box;
   transform-origin: center;
+}
+/* will-change only WHILE a layer is in motion. Each .scene-enter
+   wrapper persists after it lands (it's the layer for the next
+   regen's exit), so a blanket will-change would pin all six layers
+   to their own GPU composite layers for the lifetime of the page —
+   wasted memory/compositing with nothing animating. settleEnter()
+   adds --settled once the entrance transition is armed, which drops
+   the hint here; .scene-exit nodes are short-lived (removed ~1100ms)
+   so they keep it for their whole life. Purely a compositing hint —
+   no effect on the rendered frame. */
+.cover .scene-enter:not(.scene-enter--settled),
+.cover .scene-exit {
+  will-change: transform, opacity;
 }
 .cover .scene-enter {
   transition:
@@ -2108,6 +2220,13 @@ html.cmdk-open { overflow: hidden; }
   padding: var(--space-sm) var(--space-md);
   border-bottom: 1px solid var(--rule);
   background: var(--bg-faint);
+}
+/* The input itself strips its border/outline (it reads as a bare search
+   field, not a boxed control). The focus ring lives on the row so the
+   whole search bar lights up when the field has focus — never a bare
+   outline:none. Inset keeps it flush with the card's rounded top edge. */
+.cmdk__search-row:focus-within {
+  box-shadow: inset 0 0 0 1px var(--sodium);
 }
 .cmdk__icon {
   color: var(--sodium);
