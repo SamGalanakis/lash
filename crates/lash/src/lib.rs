@@ -36,10 +36,12 @@ pub use crate::turn::{
 };
 pub use lash_core::{
     HostEvent, HostEventEmitReport, HostEventOccurrenceRequest, InputItem, ModelLimits, ModelSpec,
-    PluginStack, SessionCommand, SessionCommandReceipt, SessionSpec, TriggerRegistration,
-    TriggerSourceType, TriggerSubscriptionFilter, TriggerTargetSummary, TurnActivity,
-    TurnActivityId, TurnActivitySink, TurnEvent, TurnInput, empty_host_event_source_key,
-    impl_unsupported_queued_work_methods,
+    PluginStack, SessionCommand, SessionCommandReceipt, SessionCursor, SessionObservation,
+    SessionObservationEvent, SessionObservationEventPayload, SessionObservationSubscription,
+    SessionProcessEventKind, SessionQueueEventKind, SessionResume, SessionRevision, SessionSpec,
+    TriggerRegistration, TriggerSourceType, TriggerSubscriptionFilter, TriggerTargetSummary,
+    TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
+    empty_host_event_source_key, impl_unsupported_queued_work_methods,
 };
 
 pub mod prelude {
@@ -48,10 +50,13 @@ pub mod prelude {
         HostEventOccurrenceRequest, HostEventsControl, InputItem, LashCore, LashCoreBuilder,
         LashSession, ModeId, ModePreset, ModelSpec, ObservableSession, PluginActions,
         PluginBinding, PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder,
-        SessionCommand, SessionCommandReceipt, SessionCommandsControl, SessionSpec, ToolsControl,
-        TriggerRegistration, TriggerSourceType, TriggerSubscriptionFilter, TriggerTargetSummary,
-        TriggersControl, TurnActivity, TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult,
-        TurnStream, empty_host_event_source_key,
+        SessionCommand, SessionCommandReceipt, SessionCommandsControl, SessionCursor,
+        SessionObservation, SessionObservationEvent, SessionObservationEventPayload,
+        SessionObservationSubscription, SessionProcessEventKind, SessionQueueEventKind,
+        SessionResume, SessionRevision, SessionSpec, ToolsControl, TriggerRegistration,
+        TriggerSourceType, TriggerSubscriptionFilter, TriggerTargetSummary, TriggersControl,
+        TurnActivity, TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
+        empty_host_event_source_key,
     };
     pub use lash_core::TurnActivitySink;
 }
@@ -185,7 +190,8 @@ pub mod runtime {
         RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
         RuntimeInvocation, RuntimeObservation, RuntimeScope, RuntimeTurnPhase,
         RuntimeTurnPhaseProbe, ScopedEffectController, SessionCommand, SessionCommandReceipt,
-        TurnContext,
+        SessionCursor, SessionObservation, SessionObservationEvent, SessionObservationEventPayload,
+        SessionObservationSubscription, SessionResume, SessionRevision, TurnContext,
     };
     pub use lash_core::{
         PersistentRuntimeServices, PluginMessage, ProtocolSessionExtensionHandle,

@@ -235,6 +235,12 @@
           kind: "internal",
         },
         {
+          title: "Host events",
+          href: "architecture/host-events.html",
+          summary: "Session-agnostic ingress: declare, emit, match by source_type, idempotent delivery, and the wake that is the only session-ordered step. Timers and cron as host-event sources.",
+          kind: "internal",
+        },
+        {
           title: "Scaling",
           href: "architecture/scaling.html",
           summary: "Running lash as a stateless, horizontally-scaling microservice: durable object per session, the RuntimePersistence seam, CAS, and session-agnostic ingress.",

@@ -102,6 +102,10 @@ match result.outcome {
             <strong>Three event types — only one is for your app.</strong>
             <p>Apps consume <code>TurnActivity</code>: <code>id</code>, <code>correlation_id</code>, and a <code>TurnEvent</code> payload. <code>SessionEvent</code> is a deeper runtime/debug enum inside the graph; hosts do not subscribe to it. There is no app-facing <code>SessionEvent::Message { kind: "final" }</code> contract. Sinks match only on <code>TurnEvent</code>.</p>
           </div>
+          <div class="callout">
+            <strong>Turn streams are not reconnect cursors.</strong>
+            <p>Use <code>TurnBuilder::stream</code>, <code>collect_with</code>, and <code>into_stream</code> for one running turn. Hosts that need browser reconnect or service resume use <code>ObservableSession::current_observation()</code>, <code>resume_from_cursor</code>, and <code>subscribe_from_cursor</code>, which replay session-level <code>SessionObservationEvent</code>s or return a <code>LiveReplayGap</code>.</p>
+          </div>
           <div class="diagram">
             <div class="diagram-title">TurnActivity sink</div>
             <pre><code>use async_trait::async_trait;

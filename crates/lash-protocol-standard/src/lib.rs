@@ -596,11 +596,14 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for StandardDriver {
         for outcome in completed {
             if terminal_outcome.is_none() && outcome.output.is_success() {
                 terminal_outcome = match outcome.output.control.as_ref() {
-                    Some(lash_core::ToolControl::SwitchAgentFrame { frame_id, .. })
-                        if !frame_id.trim().is_empty() =>
-                    {
+                    Some(lash_core::ToolControl::SwitchAgentFrame {
+                        frame_id,
+                        task: Some(task),
+                        ..
+                    }) if !frame_id.trim().is_empty() && !task.trim().is_empty() => {
                         Some(TurnOutcome::AgentFrameSwitch {
                             frame_id: frame_id.clone(),
+                            task: task.clone(),
                         })
                     }
                     Some(lash_core::ToolControl::Finish { value }) => {

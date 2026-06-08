@@ -400,7 +400,6 @@ impl RemoteLlmRequest {
                 session_id: value.session_id,
                 idempotency_key: None,
                 trace_id: None,
-                activity_cursor: None,
             },
             metadata: HashMap::new(),
         }
@@ -1065,8 +1064,8 @@ impl From<lash_core::TurnOutcome> for RemoteTurnOutcome {
             lash_core::TurnOutcome::Finished(finish) => Self::Finished {
                 finish: finish.into(),
             },
-            lash_core::TurnOutcome::AgentFrameSwitch { frame_id } => {
-                Self::AgentFrameSwitch { frame_id }
+            lash_core::TurnOutcome::AgentFrameSwitch { frame_id, task } => {
+                Self::AgentFrameSwitch { frame_id, task }
             }
             lash_core::TurnOutcome::Stopped(stop) => Self::Stopped { stop: stop.into() },
         }
@@ -1176,6 +1175,83 @@ impl RemoteTurnActivity {
             id: activity.id.0,
             correlation_id: activity.correlation_id.0,
             event: RemoteTurnEvent::from(activity.event),
+        }
+    }
+}
+
+impl From<lash_core::SessionQueueEventKind> for RemoteSessionQueueEventKind {
+    fn from(value: lash_core::SessionQueueEventKind) -> Self {
+        match value {
+            lash_core::SessionQueueEventKind::Enqueued => Self::Enqueued,
+            lash_core::SessionQueueEventKind::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<lash_core::SessionProcessEventKind> for RemoteSessionProcessEventKind {
+    fn from(value: lash_core::SessionProcessEventKind) -> Self {
+        match value {
+            lash_core::SessionProcessEventKind::Started => Self::Started,
+            lash_core::SessionProcessEventKind::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl RemoteSessionObservationEvent {
+    pub fn from_core(sequence: u64, event: lash_core::SessionObservationEvent) -> Self {
+        let payload = match event.payload {
+            lash_core::SessionObservationEventPayload::TurnActivity(activity) => {
+                RemoteSessionObservationEventPayload::TurnActivity {
+                    activity: RemoteTurnActivity::from_core(sequence, activity),
+                }
+            }
+            lash_core::SessionObservationEventPayload::Committed { .. } => {
+                RemoteSessionObservationEventPayload::Committed
+            }
+            lash_core::SessionObservationEventPayload::AgentFrameSwitched { frame_id } => {
+                RemoteSessionObservationEventPayload::AgentFrameSwitched { frame_id }
+            }
+            lash_core::SessionObservationEventPayload::QueueChanged { kind, batch_ids } => {
+                RemoteSessionObservationEventPayload::QueueChanged {
+                    kind: kind.into(),
+                    batch_ids,
+                }
+            }
+            lash_core::SessionObservationEventPayload::ProcessChanged { kind, process_ids } => {
+                RemoteSessionObservationEventPayload::ProcessChanged {
+                    kind: kind.into(),
+                    process_ids,
+                }
+            }
+        };
+        Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
+            session_id: event.session_id,
+            revision: event.revision.as_u64(),
+            cursor: event.cursor.to_string(),
+            event: payload,
+        }
+    }
+}
+
+impl From<lash_core::LiveReplayGapReason> for RemoteLiveReplayGapReason {
+    fn from(value: lash_core::LiveReplayGapReason) -> Self {
+        match value {
+            lash_core::LiveReplayGapReason::Trimmed => Self::Trimmed,
+            lash_core::LiveReplayGapReason::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
+impl From<lash_core::LiveReplayGap> for RemoteLiveReplayGap {
+    fn from(value: lash_core::LiveReplayGap) -> Self {
+        Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
+            session_id: value.session_id,
+            requested_cursor: value.requested_cursor.to_string(),
+            latest_cursor: value.latest_cursor.to_string(),
+            latest_revision: value.latest_revision.as_u64(),
+            reason: value.reason.into(),
         }
     }
 }

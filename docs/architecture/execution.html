@@ -79,6 +79,7 @@ flowchart LR
   App --> Session["core.session(id)<br/>SessionBuilder"]
   Session --> Runtime["parked runtime handle<br/>per chat/session"]
   Runtime --> Turn["turn(TurnInput).stream(&sink, scope) / .run(scope)"]
+  Runtime --> Observe["observe()<br/>SessionObservation + cursor"]
   Turn --> Result["TurnResult / TurnOutput<br/>result (+ activities)"]
   Turn --> Events["TurnActivitySink<br/>text, reasoning, tools, usage, done"]
             </div>
@@ -89,13 +90,15 @@ flowchart LR
             <dt><code>ModePreset</code></dt>
             <dd><code>standard()</code>, <code>rlm()</code>, <code>rlm_with_config(...)</code>. Install multiple and pick a default with <code>default_mode</code>; override per session with <code>.standard()</code>, <code>.rlm()</code>, or <code>.mode(...)</code>.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>One conversation. Parked/resumable handle exposing <code>run(...)</code>, <code>turn(...)</code>, <code>read_view()</code>, and <code>control()</code>. Carries an optional parent session id.</dd>
+            <dd>One conversation. Parked/resumable handle exposing <code>run(...)</code>, <code>turn(...)</code>, <code>read_view()</code>, <code>observe()</code>, and <code>control()</code>. Carries an optional parent session id.</dd>
             <dt><code>TurnBuilder</code></dt>
             <dd>Per-turn config: cancellation token, mode options, plugin input, RLM bindings. <code>.stream(&amp;sink, scope)</code> drives against a <code>TurnActivitySink</code>; <code>.run(scope)</code> returns a <code>TurnOutput</code> with terminal result and ordered activities.</dd>
             <dt><code>TurnInput</code></dt>
             <dd>Text plus image refs. Hosts resolve UI syntax like <code>@path</code> before constructing the turn.</dd>
             <dt><code>TurnActivity</code></dt>
             <dd>Semantic activity records with stable ids and correlation ids. Raw session events are runtime/tracing internals.</dd>
+            <dt><code>SessionObservation</code></dt>
+            <dd>Current session read view plus opaque cursor. Recent session observation events can be replayed for reconnect; stale cursors return a live replay gap and a fresh observation.</dd>
           </dl>
           <pre><code>let core = LashCore::standard()
     .provider(provider)

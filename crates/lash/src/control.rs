@@ -400,10 +400,15 @@ impl SessionControl {
         let session_id = runtime.session_id().to_string();
         let processes = runtime.process_service()?;
         let scope = lash_core::ProcessOpScope::new(scoped_effect_controller);
-        processes
+        let summary = processes
             .start_from_request(&session_id, request, scope)
             .await
-            .map_err(Into::into)
+            .map_err(EmbedError::Plugin)?;
+        self.runtime.record_process_changed(
+            SessionProcessEventKind::Started,
+            vec![summary.process_id.clone()],
+        );
+        Ok(summary)
     }
 
     async fn session_state_service(&self) -> Result<Arc<dyn SessionStateService>> {
@@ -426,7 +431,7 @@ impl SessionControl {
         let processes = runtime.process_service()?;
         let cancel_ability = runtime.process_cancel_ability();
         let scope = lash_core::ProcessOpScope::new(scoped_effect_controller);
-        cancel_ability
+        let summary = cancel_ability
             .cancel_summary(
                 processes.as_ref(),
                 lash_core::ProcessCancelRequest::new(
@@ -438,7 +443,12 @@ impl SessionControl {
                 .with_reason("requested by host API"),
             )
             .await
-            .map_err(Into::into)
+            .map_err(EmbedError::Plugin)?;
+        self.runtime.record_process_changed(
+            SessionProcessEventKind::Cancelled,
+            vec![summary.process_id.clone()],
+        );
+        Ok(summary)
     }
 
     async fn cancel_visible_processes(
@@ -451,7 +461,7 @@ impl SessionControl {
         let processes = runtime.process_service()?;
         let cancel_ability = runtime.process_cancel_ability();
         let scope = lash_core::ProcessOpScope::new(scoped_effect_controller);
-        cancel_ability
+        let summaries = cancel_ability
             .cancel_all_visible(
                 processes.as_ref(),
                 lash_core::ProcessCancelAllRequest::new(
@@ -462,7 +472,15 @@ impl SessionControl {
                 .with_reason("requested by host API"),
             )
             .await
-            .map_err(Into::into)
+            .map_err(EmbedError::Plugin)?;
+        self.runtime.record_process_changed(
+            SessionProcessEventKind::Cancelled,
+            summaries
+                .iter()
+                .map(|summary| summary.process_id.clone())
+                .collect(),
+        );
+        Ok(summaries)
     }
 
     async fn snapshot_execution_state(&self) -> Result<Option<Vec<u8>>> {

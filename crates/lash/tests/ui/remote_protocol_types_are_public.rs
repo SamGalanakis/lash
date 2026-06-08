@@ -8,7 +8,6 @@ fn main() {
         input,
         tool_grants: Vec::new(),
         model_intent: Some(lash::remote::RemoteModelIntent::new("gpt-test")),
-        activity_cursor: None,
         metadata: std::collections::HashMap::new(),
     };
 
@@ -36,5 +35,14 @@ fn main() {
 
     let _cause = lash::remote::RemoteCausalRef::HostEvent {
         occurrence_id: "occurrence:1".to_string(),
+    };
+
+    let _queue = lash::remote::RemoteSessionObservationEventPayload::QueueChanged {
+        kind: lash::remote::RemoteSessionQueueEventKind::Enqueued,
+        batch_ids: vec!["batch".to_string()],
+    };
+    let _process = lash::remote::RemoteSessionObservationEventPayload::ProcessChanged {
+        kind: lash::remote::RemoteSessionProcessEventKind::Started,
+        process_ids: vec!["process".to_string()],
     };
 }

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub const REMOTE_PROTOCOL_VERSION: u32 = 2;
+pub const REMOTE_PROTOCOL_VERSION: u32 = 3;
 
 pub fn ensure_protocol_version(actual: u32) -> Result<(), RemoteProtocolError> {
     if actual == REMOTE_PROTOCOL_VERSION {
@@ -155,16 +155,11 @@ pub struct RemoteLlmRequestMetadata {
     pub idempotency_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activity_cursor: Option<String>,
 }
 
 impl RemoteLlmRequestMetadata {
     pub fn is_empty(&self) -> bool {
-        self.session_id.is_none()
-            && self.idempotency_key.is_none()
-            && self.trace_id.is_none()
-            && self.activity_cursor.is_none()
+        self.session_id.is_none() && self.idempotency_key.is_none() && self.trace_id.is_none()
     }
 }
 
@@ -547,8 +542,6 @@ pub struct RemoteTurnRequest {
     pub tool_grants: Vec<RemoteToolGrant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_intent: Option<RemoteModelIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activity_cursor: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -595,6 +588,124 @@ pub struct RemoteTurnResult {
     pub activities: Vec<RemoteTurnActivity>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteSessionCursor {
+    pub protocol_version: u32,
+    pub cursor: String,
+}
+
+impl RemoteSessionCursor {
+    pub fn new(cursor: impl Into<String>) -> Self {
+        Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
+            cursor: cursor.into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version)?;
+        require_non_empty("RemoteSessionCursor", "cursor", &self.cursor)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteSessionObservationEvent {
+    pub protocol_version: u32,
+    pub session_id: String,
+    pub revision: u64,
+    pub cursor: String,
+    #[serde(flatten)]
+    pub event: RemoteSessionObservationEventPayload,
+}
+
+impl RemoteSessionObservationEvent {
+    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version)?;
+        require_non_empty(
+            "RemoteSessionObservationEvent",
+            "session_id",
+            &self.session_id,
+        )?;
+        require_non_empty("RemoteSessionObservationEvent", "cursor", &self.cursor)?;
+        if let RemoteSessionObservationEventPayload::TurnActivity { activity } = &self.event {
+            activity.validate()?;
+            if activity.protocol_version != self.protocol_version {
+                return Err(RemoteProtocolError::MismatchedNestedProtocolVersion {
+                    parent: "RemoteSessionObservationEvent",
+                    child: "activity",
+                    parent_version: self.protocol_version,
+                    child_version: activity.protocol_version,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RemoteSessionObservationEventPayload {
+    TurnActivity {
+        activity: RemoteTurnActivity,
+    },
+    Committed,
+    AgentFrameSwitched {
+        frame_id: String,
+    },
+    QueueChanged {
+        kind: RemoteSessionQueueEventKind,
+        batch_ids: Vec<String>,
+    },
+    ProcessChanged {
+        kind: RemoteSessionProcessEventKind,
+        process_ids: Vec<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteSessionQueueEventKind {
+    Enqueued,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteSessionProcessEventKind {
+    Started,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoteLiveReplayGap {
+    pub protocol_version: u32,
+    pub session_id: String,
+    pub requested_cursor: String,
+    pub latest_cursor: String,
+    pub latest_revision: u64,
+    pub reason: RemoteLiveReplayGapReason,
+}
+
+impl RemoteLiveReplayGap {
+    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
+        ensure_protocol_version(self.protocol_version)?;
+        require_non_empty("RemoteLiveReplayGap", "session_id", &self.session_id)?;
+        require_non_empty(
+            "RemoteLiveReplayGap",
+            "requested_cursor",
+            &self.requested_cursor,
+        )?;
+        require_non_empty("RemoteLiveReplayGap", "latest_cursor", &self.latest_cursor)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteLiveReplayGapReason {
+    Trimmed,
+    Unavailable,
 }
 
 impl RemoteTurnResult {
@@ -827,7 +938,7 @@ pub enum RemoteTurnStatus {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RemoteTurnOutcome {
     Finished { finish: RemoteTurnFinish },
-    AgentFrameSwitch { frame_id: String },
+    AgentFrameSwitch { frame_id: String, task: String },
     Stopped { stop: RemoteTurnStop },
 }
 

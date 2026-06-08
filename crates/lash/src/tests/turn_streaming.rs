@@ -114,6 +114,120 @@ async fn turn_builder_into_stream_emits_activities_and_finishes() -> Result<()> 
 }
 
 #[tokio::test]
+async fn session_observation_replays_live_activity_and_commit() -> Result<()> {
+    let core = standard_core();
+    let session = core.session("session-observation-replay").open().await?;
+    let cursor = session.observe().current_observation().cursor;
+
+    let output = session
+        .turn(TurnInput::text("observe me"))
+        .run(turn_scope(&session.session_id()))
+        .await?;
+    assert_eq!(assistant_prose(&output.activities), "echo: observe me");
+
+    let replay = session.observe().resume_from_cursor(&cursor)?;
+    let SessionResume::Replayed { events } = replay else {
+        panic!("recent cursor should replay live events");
+    };
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.payload,
+            lash_core::SessionObservationEventPayload::TurnActivity(activity)
+                if matches!(
+                    &activity.event,
+                    TurnEvent::AssistantProseDelta { text } if text == "echo: observe me"
+                )
+        )
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.payload,
+            lash_core::SessionObservationEventPayload::Committed { .. }
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_observation_rejects_cursor_from_another_session() -> Result<()> {
+    let core = standard_core();
+    let session = core.session("session-observation-a").open().await?;
+    let other = core.session("session-observation-b").open().await?;
+    let other_cursor = other.observe().current_observation().cursor;
+
+    let err = session
+        .observe()
+        .resume_from_cursor(&other_cursor)
+        .expect_err("cursor from another session should be rejected");
+    assert!(
+        err.to_string().contains("session-observation-b")
+            && err.to_string().contains("session-observation-a"),
+        "unexpected error: {err}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_observation_subscription_replays_buffered_events_before_live_events() -> Result<()>
+{
+    let core = standard_core();
+    let session = core
+        .session("session-observation-subscribe-replay")
+        .open()
+        .await?;
+    let cursor = session.observe().current_observation().cursor;
+
+    session
+        .turn(TurnInput::text("first observed"))
+        .run(turn_scope(&session.session_id()))
+        .await?;
+    let SessionObservationSubscription::Subscribed(mut subscription) =
+        session.observe().subscribe_from_cursor(&cursor)?
+    else {
+        panic!("recent cursor should subscribe without a gap");
+    };
+
+    loop {
+        let event =
+            tokio::time::timeout(std::time::Duration::from_secs(2), subscription.next_event())
+                .await
+                .expect("timed out waiting for replayed event")
+                .expect("replayed event");
+        if observation_assistant_delta(&event).as_deref() == Some("echo: first observed") {
+            break;
+        }
+    }
+
+    session
+        .turn(TurnInput::text("second observed"))
+        .run(turn_scope(&session.session_id()))
+        .await?;
+    loop {
+        let event =
+            tokio::time::timeout(std::time::Duration::from_secs(2), subscription.next_event())
+                .await
+                .expect("timed out waiting for live event")
+                .expect("live event");
+        if observation_assistant_delta(&event).as_deref() == Some("echo: second observed") {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn observation_assistant_delta(event: &lash_core::SessionObservationEvent) -> Option<String> {
+    match &event.payload {
+        lash_core::SessionObservationEventPayload::TurnActivity(activity) => {
+            match &activity.event {
+                TurnEvent::AssistantProseDelta { text } => Some(text.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+#[tokio::test]
 async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
     let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(semantic_group_provider())
@@ -641,6 +755,50 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
         unreachable!();
     };
     assert_eq!(value, &serde_json::json!("done"));
+    Ok(())
+}
+
+#[test]
+fn continue_as_observation_emits_frame_switch_then_commit() -> Result<()> {
+    run_async_test_on_large_stack("continue-as-observation-test", || {
+        continue_as_observation_emits_frame_switch_then_commit_inner()
+    })
+}
+
+async fn continue_as_observation_emits_frame_switch_then_commit_inner() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::rlm())
+        .provider(queued_text_provider(vec![
+            "```lashlang\nawait control.continue_as({ task: \"finish in a fresh frame\" })?\n```",
+            "```lashlang\nsubmit \"done after continue_as\"\n```",
+        ]))
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()?;
+    let session = core.session("continue-as-observation").open().await?;
+    let cursor = session.observe().current_observation().cursor;
+
+    let output = session
+        .turn(TurnInput::text("switch frames"))
+        .run(turn_scope(&session.session_id()))
+        .await?;
+    assert_eq!(
+        output.submitted_value(),
+        Some(&serde_json::json!("done after continue_as"))
+    );
+
+    let SessionResume::Replayed { events } = session.observe().resume_from_cursor(&cursor)? else {
+        panic!("recent cursor should replay continue_as observation events");
+    };
+    assert!(
+        events.windows(2).any(|window| matches!(
+            (&window[0].payload, &window[1].payload),
+            (
+                lash_core::SessionObservationEventPayload::AgentFrameSwitched { .. },
+                lash_core::SessionObservationEventPayload::Committed { .. }
+            )
+        )),
+        "expected AgentFrameSwitched immediately followed by Committed, got {events:?}"
+    );
     Ok(())
 }
 

@@ -273,7 +273,10 @@ impl SessionBuilder {
         // process control seam can wake the runner after a successful start.
         env.process_work_poke = self.core.process_work_runner.poke().await;
         let runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
-        let handle = RuntimeHandle::new(runtime);
+        let handle = RuntimeHandle::with_live_replay_store(
+            runtime,
+            Arc::clone(&self.core.live_replay_store),
+        );
         Ok(LashSession {
             runtime: handle,
             mode,
@@ -499,6 +502,25 @@ impl ObservableSession {
         self.runtime.observe()
     }
 
+    pub fn current_observation(&self) -> SessionObservation {
+        self.runtime.current_session_observation()
+    }
+
+    pub fn resume_from_cursor(&self, cursor: &SessionCursor) -> Result<SessionResume> {
+        self.runtime
+            .resume_session_observation(cursor)
+            .map_err(live_replay_error)
+    }
+
+    pub fn subscribe_from_cursor(
+        &self,
+        cursor: &SessionCursor,
+    ) -> Result<SessionObservationSubscription> {
+        self.runtime
+            .subscribe_session_observation(cursor)
+            .map_err(live_replay_error)
+    }
+
     pub fn session_id(&self) -> String {
         self.snapshot().session_id().to_string()
     }
@@ -539,6 +561,14 @@ impl ObservableSession {
         self.snapshot().process_scope()
     }
 }
+
+fn live_replay_error(err: lash_core::LiveReplayStoreError) -> EmbedError {
+    EmbedError::Runtime(lash_core::RuntimeError::new(
+        RuntimeErrorCode::Other("live_replay".to_string()),
+        err.to_string(),
+    ))
+}
+
 pub struct QueueInputBuilder<'a> {
     session: &'a LashSession,
     input: TurnInput,
