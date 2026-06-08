@@ -50,12 +50,19 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
 
+      - name: Check out release tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Publishes every publishable workspace member in dependency order,
-      # waiting for index propagation between crates. publish=false crates are
-      # skipped; versions already on crates.io are skipped (so reruns resume).
+      # Publishes every publishable workspace member one crate at a time in
+      # dependency order, waiting for crates.io API visibility between crates.
+      # publish=false crates are skipped; versions already visible on crates.io
+      # are skipped, so reruns resume after partial publication.
       #
       # --no-verify: skip the per-crate verify-build. It is both unnecessary and
       # broken here — the release is cut from a fully CI-tested `main`, and the
@@ -74,7 +81,7 @@ jobs:
       # CARGO_REGISTRY_TOKEN to `${{ steps.auth.outputs.token }}` — then the
       # long-lived secret can be removed.
       - name: Publish workspace to crates.io
-        run: cargo publish --workspace --no-verify --locked
+        run: python3 .release-tools/scripts/publish_workspace.py
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
