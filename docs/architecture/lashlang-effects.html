@@ -250,22 +250,34 @@ let cron_subscriptions = core
     .subscriptions(TriggerSubscriptionFilter::for_source_type("cron.Schedule"))
     .await?;
 let source_key = cron_subscriptions[0].source_key.clone();
+let cron_effect_scope = runtime_effect_controller.scoped_effect_controller(
+    EffectScope::runtime_operation("cron:daily-digest:2026-06-08T08:00:00Z"),
+)?;
 core.host_events()
-    .emit(HostEventOccurrenceRequest::new(
-        "cron.Schedule",
-        source_key,
-        tick_payload,
-        "cron:daily-digest:2026-06-08T08:00:00Z",
-    ))
+    .emit(
+        HostEventOccurrenceRequest::new(
+            "cron.Schedule",
+            source_key,
+            tick_payload,
+            "cron:daily-digest:2026-06-08T08:00:00Z",
+        ),
+        cron_effect_scope,
+    )
     .await?;
 
+let button_effect_scope = runtime_effect_controller.scoped_effect_controller(
+    EffectScope::runtime_operation("button:red:2026-06-08T12:00:00Z"),
+)?;
 core.host_events()
-    .emit(HostEventOccurrenceRequest::new(
-        "ui.button.pressed",
-        empty_host_event_source_key("ui.button.pressed")?,
-        button_payload,
-        "button:red:2026-06-08T12:00:00Z",
-    ))
+    .emit(
+        HostEventOccurrenceRequest::new(
+            "ui.button.pressed",
+            empty_host_event_source_key("ui.button.pressed")?,
+            button_payload,
+            "button:red:2026-06-08T12:00:00Z",
+        ),
+        button_effect_scope,
+    )
     .await?;</code></pre>
         </div>
 

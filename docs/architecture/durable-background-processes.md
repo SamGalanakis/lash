@@ -31,7 +31,7 @@ Before this work, only the first was durably re-executed in a Restate
 deployment, and the asymmetry was silent.
 
 Durability of execution used to be borrowed from the **turn-local effect
-scope**. A turn run with `stream_with_effect_scope(scope)` threaded the
+scope**. A turn run with `stream(&sink, scope)` threaded the
 Restate-backed scoped controller into process control via a silent
 `effect_controller.unwrap_or(current.host.core.effect_controller)` fallback, so a
 turn's `start name(...)` scheduled a `LashProcessWorkflow` invocation that

@@ -75,7 +75,7 @@ pub(super) async fn run_turn_case_without_success_assertions(
 
     let turn_output = session
         .turn(TurnInput::text(case.root_prompt))
-        .stream(events.as_ref())
+        .stream(events.as_ref(), turn_scope(&session.session_id()))
         .await?;
     session.process_control().await_all().await?;
     let prompt_captures_snapshot = prompt_captures.lock().expect("prompt captures").clone();
@@ -171,15 +171,18 @@ pub(super) async fn run_session_turn_process_case() -> Result<()> {
 
     let handle = session
         .process_control()
-        .start(lash_core::ProcessStartRequest::new(
-            process_id,
-            lash_core::ProcessInput::SessionTurn {
-                create_request: Box::new(create_request),
-                turn_input: Box::new(TurnInput::text("run child session turn")),
-                output_contract: lash_core::ToolOutputContract::Static,
-            },
-            lash_core::ProcessHandleDescriptor::new(Some("session_turn"), Some("child turn")),
-        ))
+        .start(
+            lash_core::ProcessStartRequest::new(
+                process_id,
+                lash_core::ProcessInput::SessionTurn {
+                    create_request: Box::new(create_request),
+                    turn_input: Box::new(TurnInput::text("run child session turn")),
+                    output_contract: lash_core::ToolOutputContract::Static,
+                },
+                lash_core::ProcessHandleDescriptor::new(Some("session_turn"), Some("child turn")),
+            ),
+            inline_scope(lash_core::EffectScope::process(process_id)),
+        )
         .await?;
     assert_eq!(handle.process_id, process_id);
     session.process_control().await_all().await?;

@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+state_dir="${AGENT_WORKBENCH_RUN_DIR:-.agent-workbench/run}"
+mkdir -p "$state_dir"
+
 log() {
   printf '[agent-workbench] %s\n' "$*" >&2
 }
@@ -11,6 +14,23 @@ log() {
 die() {
   printf '[agent-workbench] error: %s\n' "$*" >&2
   exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/agent-workbench-dev.sh [up] [--port PORT | --addr HOST:PORT]
+  scripts/agent-workbench-dev.sh foreground [--port PORT | --addr HOST:PORT]
+  scripts/agent-workbench-dev.sh restart [--port PORT | --addr HOST:PORT]
+  scripts/agent-workbench-dev.sh status [--port PORT | --addr HOST:PORT]
+  scripts/agent-workbench-dev.sh logs [--port PORT | --addr HOST:PORT] [-f]
+  scripts/agent-workbench-dev.sh down [--port PORT | --addr HOST:PORT]
+
+Defaults:
+  up is detached and idempotent.
+  --port PORT binds 127.0.0.1:PORT.
+  Without --port/--addr, AGENT_WORKBENCH_ADDR is used, then 127.0.0.1:3030.
+USAGE
 }
 
 url_host_port() {
@@ -44,9 +64,11 @@ wait_tcp() {
   local label="$1"
   local host="$2"
   local port="$3"
-  local deadline=$((SECONDS + ${4:-60}))
+  local timeout_seconds="${4:-60}"
+  local deadline=$((SECONDS + timeout_seconds))
   until tcp_ready "$host" "$port"; do
     if (( SECONDS >= deadline )); then
+      log "$label did not become ready at $host:$port"
       return 1
     fi
     sleep 1
@@ -76,7 +98,7 @@ register_deployment() {
   )"; do
     if (( SECONDS >= deadline )); then
       printf '%s\n' "$last_response" >&2
-      die "failed to register Restate deployment $endpoint_url through $admin_url"
+      return 1
     fi
     sleep 1
   done
@@ -96,7 +118,412 @@ open_browser() {
   fi
 }
 
-workbench_addr="${AGENT_WORKBENCH_ADDR:-127.0.0.1:3030}"
+port_owner() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN || true
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null | grep -E "[:.]$port[[:space:]]" || true
+  else
+    printf 'install lsof or ss to show the owning process for port %s\n' "$port"
+  fi
+}
+
+pid_alive() {
+  local pid="${1:-}"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1
+}
+
+read_pid_file() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  local pid
+  pid="$(tr -d '[:space:]' < "$file")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+tail_log() {
+  if [[ -f "$log_file" ]]; then
+    tail -n "${AGENT_WORKBENCH_LOG_LINES:-120}" "$log_file" >&2 || true
+  else
+    log "no log file yet at $log_file"
+  fi
+}
+
+workbench_ready() {
+  curl -fsS --max-time 2 "$workbench_url/healthz" 2>/dev/null \
+    | grep -q '"service":"agent-workbench"'
+}
+
+cleanup_stale_pid() {
+  local pid=""
+  pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && pid_alive "$pid"; then
+    return
+  fi
+  rm -f "$pid_file" "$meta_file"
+}
+
+stop_pid_file() {
+  local file="$1"
+  local pid=""
+  pid="$(read_pid_file "$file" 2>/dev/null || true)"
+  if [[ -z "$pid" ]]; then
+    rm -f "$file"
+    return
+  fi
+
+  if pid_alive "$pid"; then
+    log "stopping process $pid"
+    kill "-$pid" >/dev/null 2>&1 || kill "$pid" >/dev/null 2>&1 || true
+    for _ in {1..30}; do
+      pid_alive "$pid" || break
+      sleep 0.5
+    done
+    if pid_alive "$pid"; then
+      log "process $pid did not exit; sending SIGKILL"
+      kill -KILL "-$pid" >/dev/null 2>&1 || kill -KILL "$pid" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  rm -f "$file" "${file%.pid}.meta"
+}
+
+stop_started_restate() {
+  if [[ -f "$restate_marker_file" ]]; then
+    local container
+    container="$(cat "$restate_marker_file")"
+    if [[ -n "$container" ]]; then
+      log "stopping Restate container $container"
+      docker rm -f "$container" >/dev/null 2>&1 || true
+    fi
+    rm -f "$restate_marker_file"
+  fi
+}
+
+stop_target() {
+  stop_pid_file "$pid_file"
+  stop_started_restate
+}
+
+stop_all_known() {
+  local found=0
+  local file
+  for file in "$state_dir"/workbench-*.pid; do
+    [[ -e "$file" ]] || continue
+    found=1
+    stop_pid_file "$file"
+  done
+  for file in "$state_dir"/restate-*.container; do
+    [[ -e "$file" ]] || continue
+    local container
+    container="$(cat "$file")"
+    if [[ -n "$container" ]]; then
+      log "stopping Restate container $container"
+      docker rm -f "$container" >/dev/null 2>&1 || true
+    fi
+    rm -f "$file"
+  done
+  if (( ! found )); then
+    log "no managed workbench processes found"
+  fi
+}
+
+ensure_ports_available() {
+  cleanup_stale_pid
+  if workbench_ready; then
+    log "already ready: $workbench_url"
+    return 1
+  fi
+  if tcp_ready "$workbench_wait_host" "$workbench_port"; then
+    port_owner "$workbench_port" >&2
+    die "workbench UI port $workbench_host:$workbench_port is already in use by a non-workbench process"
+  fi
+  if tcp_ready "$endpoint_wait_host" "$endpoint_port"; then
+    port_owner "$endpoint_port" >&2
+    die "workbench Restate endpoint port $endpoint_host:$endpoint_port is already in use"
+  fi
+}
+
+ensure_restate() {
+  if tcp_ready "$ingress_host" "$ingress_port" && tcp_ready "$admin_host" "$admin_port"; then
+    log "using existing Restate at ingress=$restate_ingress_url admin=$restate_admin_url"
+    return
+  fi
+
+  command -v docker >/dev/null 2>&1 || die "Restate is not running and docker is unavailable"
+  log "starting Restate container $restate_container from $restate_image"
+  docker rm -f "$restate_container" >/dev/null 2>&1 || true
+  docker run -d --rm \
+    --name "$restate_container" \
+    --network host \
+    -e RESTATE_INGRESS__BIND_PORT="$ingress_port" \
+    -e RESTATE_ADMIN__BIND_PORT="$admin_port" \
+    -e RESTATE_BIND_PORT="$restate_node_port" \
+    "$restate_image" >/dev/null
+  printf '%s\n' "$restate_container" > "$restate_marker_file"
+
+  if ! wait_tcp "Restate ingress" "$ingress_host" "$ingress_port" 60; then
+    docker logs "$restate_container" >&2 || true
+    stop_started_restate
+    die "Restate ingress did not become ready at $restate_ingress_url"
+  fi
+  if ! wait_tcp "Restate admin" "$admin_host" "$admin_port" 60; then
+    docker logs "$restate_container" >&2 || true
+    stop_started_restate
+    die "Restate admin did not become ready at $restate_admin_url"
+  fi
+}
+
+endpoint_url() {
+  if [[ -n "$configured_endpoint_url" ]]; then
+    printf '%s\n' "$configured_endpoint_url"
+  elif [[ "$endpoint_host" = "0.0.0.0" ]]; then
+    printf 'http://127.0.0.1:%s\n' "$endpoint_port"
+  else
+    printf 'http://%s:%s\n' "$endpoint_host" "$endpoint_port"
+  fi
+}
+
+write_meta() {
+  {
+    printf 'workbench_addr=%q\n' "$workbench_addr"
+    printf 'workbench_url=%q\n' "$workbench_url"
+    printf 'restate_endpoint_addr=%q\n' "$restate_endpoint_addr"
+    printf 'restate_ingress_url=%q\n' "$restate_ingress_url"
+    printf 'restate_admin_url=%q\n' "$restate_admin_url"
+    printf 'log_file=%q\n' "$log_file"
+  } > "$meta_file"
+}
+
+start_detached() {
+  log "building agent-workbench"
+  cargo build -p agent-workbench
+
+  printf '\n[%s] starting agent-workbench at %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$workbench_url" >> "$log_file"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid env \
+      AGENT_WORKBENCH_ADDR="$workbench_addr" \
+      AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
+      RESTATE_INGRESS_URL="$restate_ingress_url" \
+      "$repo_root/target/debug/agent-workbench" >> "$log_file" 2>&1 < /dev/null &
+  else
+    nohup env \
+      AGENT_WORKBENCH_ADDR="$workbench_addr" \
+      AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
+      RESTATE_INGRESS_URL="$restate_ingress_url" \
+      "$repo_root/target/debug/agent-workbench" >> "$log_file" 2>&1 < /dev/null &
+  fi
+  local pid="$!"
+  printf '%s\n' "$pid" > "$pid_file"
+  write_meta
+  log "started process $pid; log: $log_file"
+}
+
+wait_workbench_ready() {
+  local timeout_seconds="${1:-90}"
+  local deadline=$((SECONDS + timeout_seconds))
+  local pid
+  pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
+  until workbench_ready; do
+    if [[ -n "$pid" ]] && ! pid_alive "$pid"; then
+      tail_log
+      die "workbench process $pid exited before becoming ready"
+    fi
+    if (( SECONDS >= deadline )); then
+      tail_log
+      stop_target
+      die "workbench did not become healthy at $workbench_url/healthz"
+    fi
+    sleep 1
+  done
+}
+
+run_up() {
+  if ! ensure_ports_available; then
+    return
+  fi
+  ensure_restate
+  start_detached
+  wait_workbench_ready 90
+  if ! wait_tcp "workbench Restate endpoint" "$endpoint_wait_host" "$endpoint_port" 90; then
+    tail_log
+    stop_target
+    die "workbench Restate endpoint did not become ready at $restate_endpoint_addr"
+  fi
+  local deployment_url
+  deployment_url="$(endpoint_url)"
+  log "registering Restate deployment $deployment_url"
+  if ! register_deployment "$restate_admin_url" "$deployment_url"; then
+    tail_log
+    stop_target
+    die "failed to register Restate deployment $deployment_url through $restate_admin_url"
+  fi
+  log "ready: $workbench_url"
+  open_browser "$workbench_url"
+}
+
+run_foreground() {
+  if ! ensure_ports_available; then
+    return
+  fi
+  ensure_restate
+
+  local started_pid=""
+  cleanup_foreground() {
+    if [[ -n "$started_pid" ]]; then
+      kill "$started_pid" >/dev/null 2>&1 || true
+      wait "$started_pid" >/dev/null 2>&1 || true
+    fi
+    stop_started_restate
+  }
+  trap cleanup_foreground EXIT INT TERM
+
+  log "starting workbench at $workbench_url"
+  AGENT_WORKBENCH_ADDR="$workbench_addr" \
+  AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
+  RESTATE_INGRESS_URL="$restate_ingress_url" \
+  cargo run -p agent-workbench &
+  started_pid="$!"
+  printf '%s\n' "$started_pid" > "$pid_file"
+  write_meta
+
+  wait_workbench_ready 90
+  if ! wait_tcp "workbench Restate endpoint" "$endpoint_wait_host" "$endpoint_port" 90; then
+    die "workbench Restate endpoint did not become ready at $restate_endpoint_addr"
+  fi
+  local deployment_url
+  deployment_url="$(endpoint_url)"
+  log "registering Restate deployment $deployment_url"
+  register_deployment "$restate_admin_url" "$deployment_url" \
+    || die "failed to register Restate deployment $deployment_url through $restate_admin_url"
+
+  log "ready: $workbench_url"
+  open_browser "$workbench_url"
+  wait "$started_pid"
+}
+
+run_status_one() {
+  cleanup_stale_pid
+  local pid=""
+  pid="$(read_pid_file "$pid_file" 2>/dev/null || true)"
+  if workbench_ready; then
+    if [[ -n "$pid" ]]; then
+      log "running: $workbench_url (pid $pid, log $log_file)"
+    else
+      log "running: $workbench_url (unmanaged process)"
+    fi
+    return 0
+  fi
+  if [[ -n "$pid" ]] && pid_alive "$pid"; then
+    log "process $pid exists but health check failed: $workbench_url/healthz"
+    return 1
+  fi
+  log "stopped: $workbench_url"
+  return 1
+}
+
+run_status_all() {
+  local found=0
+  local file
+  for file in "$state_dir"/workbench-*.pid; do
+    [[ -e "$file" ]] || continue
+    found=1
+    pid_file="$file"
+    meta_file="${file%.pid}.meta"
+    # shellcheck disable=SC1090
+    [[ -f "$meta_file" ]] && source "$meta_file"
+    run_status_one || true
+  done
+  if (( ! found )); then
+    run_status_one
+  fi
+}
+
+run_logs() {
+  if [[ ! -f "$log_file" && -z "${explicit_target:-}" ]]; then
+    local count=0
+    local only=""
+    local file
+    for file in "$state_dir"/workbench-*.log; do
+      [[ -e "$file" ]] || continue
+      only="$file"
+      count=$((count + 1))
+    done
+    if (( count == 1 )); then
+      log_file="$only"
+    elif (( count > 1 )); then
+      ls -1 "$state_dir"/workbench-*.log >&2
+      die "multiple workbench logs found; pass --port or --addr"
+    fi
+  fi
+  [[ -f "$log_file" ]] || die "no log file found at $log_file"
+  if (( follow_logs )); then
+    tail -f "$log_file"
+  else
+    tail -n "${AGENT_WORKBENCH_LOG_LINES:-120}" "$log_file"
+  fi
+}
+
+action="up"
+if (($#)); then
+  case "$1" in
+    up|start|foreground|run|restart|status|logs|down|stop)
+      action="$1"
+      shift
+      ;;
+    help|-h|--help)
+      usage
+      exit 0
+      ;;
+  esac
+fi
+
+port_override=""
+addr_override=""
+explicit_target=""
+follow_logs=0
+while (($#)); do
+  case "$1" in
+    --port)
+      [[ $# -ge 2 ]] || die "--port requires a value"
+      port_override="$2"
+      explicit_target=1
+      shift 2
+      ;;
+    --addr)
+      [[ $# -ge 2 ]] || die "--addr requires a value"
+      addr_override="$2"
+      explicit_target=1
+      shift 2
+      ;;
+    -f|--follow)
+      follow_logs=1
+      shift
+      ;;
+    [0-9]*)
+      port_override="$1"
+      explicit_target=1
+      shift
+      ;;
+    help|-h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+if [[ -n "$addr_override" ]]; then
+  workbench_addr="$addr_override"
+elif [[ -n "$port_override" ]]; then
+  workbench_addr="127.0.0.1:$port_override"
+else
+  workbench_addr="${AGENT_WORKBENCH_ADDR:-127.0.0.1:3030}"
+fi
 restate_endpoint_addr="${AGENT_WORKBENCH_RESTATE_ADDR:-127.0.0.1:9081}"
 restate_ingress_url="${RESTATE_INGRESS_URL:-http://127.0.0.1:8080}"
 restate_admin_url="${RESTATE_ADMIN_URL:-http://127.0.0.1:${AGENT_WORKBENCH_RESTATE_ADMIN_PORT:-19070}}"
@@ -109,6 +536,7 @@ read -r workbench_host workbench_port < <(addr_host_port "$workbench_addr")
 read -r endpoint_host endpoint_port < <(addr_host_port "$restate_endpoint_addr")
 read -r ingress_host ingress_port < <(url_host_port "$restate_ingress_url")
 read -r admin_host admin_port < <(url_host_port "$restate_admin_url")
+
 workbench_wait_host="$workbench_host"
 endpoint_wait_host="$endpoint_host"
 if [[ "$workbench_wait_host" = "0.0.0.0" ]]; then
@@ -117,80 +545,43 @@ fi
 if [[ "$endpoint_wait_host" = "0.0.0.0" ]]; then
   endpoint_wait_host="127.0.0.1"
 fi
+workbench_url="http://$workbench_wait_host:$workbench_port"
 
-started_restate=0
-workbench_pid=""
+state_key="$(printf '%s' "$workbench_addr" | tr -c 'A-Za-z0-9_.-' '_')"
+pid_file="$state_dir/workbench-$state_key.pid"
+meta_file="$state_dir/workbench-$state_key.meta"
+log_file="$state_dir/workbench-$state_key.log"
+restate_marker_file="$state_dir/restate-$state_key.container"
 
-cleanup() {
-  if [[ -n "$workbench_pid" ]]; then
-    kill "$workbench_pid" >/dev/null 2>&1 || true
-    wait "$workbench_pid" >/dev/null 2>&1 || true
-  fi
-  if (( started_restate )); then
-    docker rm -f "$restate_container" >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup EXIT INT TERM
-
-if tcp_ready "$workbench_wait_host" "$workbench_port"; then
-  die "workbench UI port $workbench_host:$workbench_port is already in use"
-fi
-if tcp_ready "$endpoint_wait_host" "$endpoint_port"; then
-  die "workbench Restate endpoint port $endpoint_host:$endpoint_port is already in use"
-fi
-
-if tcp_ready "$ingress_host" "$ingress_port" && tcp_ready "$admin_host" "$admin_port"; then
-  log "using existing Restate at ingress=$restate_ingress_url admin=$restate_admin_url"
-else
-  command -v docker >/dev/null 2>&1 || die "Restate is not running and docker is unavailable"
-  log "starting Restate container $restate_container from $restate_image"
-  docker rm -f "$restate_container" >/dev/null 2>&1 || true
-  docker run -d --rm \
-    --name "$restate_container" \
-    --network host \
-    -e RESTATE_INGRESS__BIND_PORT="$ingress_port" \
-    -e RESTATE_ADMIN__BIND_PORT="$admin_port" \
-    -e RESTATE_BIND_PORT="$restate_node_port" \
-    "$restate_image" >/dev/null
-  started_restate=1
-fi
-
-if ! wait_tcp "Restate ingress" "$ingress_host" "$ingress_port" 60; then
-  (( started_restate )) && docker logs "$restate_container" >&2 || true
-  die "Restate ingress did not become ready at $restate_ingress_url"
-fi
-if ! wait_tcp "Restate admin" "$admin_host" "$admin_port" 60; then
-  (( started_restate )) && docker logs "$restate_container" >&2 || true
-  die "Restate admin did not become ready at $restate_admin_url"
-fi
-
-if [[ -n "$configured_endpoint_url" ]]; then
-  endpoint_url="$configured_endpoint_url"
-elif (( started_restate )); then
-  endpoint_url="http://127.0.0.1:$endpoint_port"
-elif [[ "$endpoint_host" = "0.0.0.0" ]]; then
-  endpoint_url="http://127.0.0.1:$endpoint_port"
-else
-  endpoint_url="http://$endpoint_host:$endpoint_port"
-fi
-
-log "starting workbench at http://$workbench_addr"
-AGENT_WORKBENCH_ADDR="$workbench_addr" \
-AGENT_WORKBENCH_RESTATE_ADDR="$restate_endpoint_addr" \
-RESTATE_INGRESS_URL="$restate_ingress_url" \
-cargo run -p agent-workbench &
-workbench_pid="$!"
-
-if ! wait_tcp "workbench UI" "$workbench_wait_host" "$workbench_port" 90; then
-  die "workbench UI did not become ready at http://$workbench_addr"
-fi
-if ! wait_tcp "workbench Restate endpoint" "$endpoint_wait_host" "$endpoint_port" 90; then
-  die "workbench Restate endpoint did not become ready at $restate_endpoint_addr"
-fi
-
-log "registering Restate deployment $endpoint_url"
-register_deployment "$restate_admin_url" "$endpoint_url"
-
-log "ready: http://$workbench_addr"
-open_browser "http://$workbench_addr"
-wait "$workbench_pid"
+case "$action" in
+  up|start)
+    run_up
+    ;;
+  foreground|run)
+    run_foreground
+    ;;
+  restart)
+    stop_target
+    run_up
+    ;;
+  status)
+    if [[ -z "$explicit_target" ]]; then
+      run_status_all
+    else
+      run_status_one
+    fi
+    ;;
+  logs)
+    run_logs
+    ;;
+  down|stop)
+    if [[ -z "$explicit_target" ]]; then
+      stop_all_known
+    else
+      stop_target
+    fi
+    ;;
+  *)
+    die "unknown command: $action"
+    ;;
+esac

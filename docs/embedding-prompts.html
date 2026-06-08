@@ -100,7 +100,7 @@ let input = TurnInput::text("Play one move.")
             .bind_json("board", serde_json::to_value(&amp;board)?)?,
     )?;
 
-let result = session.turn(input).run().await?;</code></pre>
+let result = session.turn(input).run(scoped_effect_controller).await?;</code></pre>
           <p>The model reads these names directly in fenced lashlang:</p>
           <pre><code>```lashlang
 let move_idx = best_move(board.cells, board.turn)
@@ -201,7 +201,7 @@ let result = session
         "Turn",
         "Keep this reply under 120 words.",
     ))
-    .run()
+    .run(scoped_effect_controller)
     .await?;</code></pre>
           </div>
         </div>

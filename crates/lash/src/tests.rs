@@ -994,6 +994,31 @@ fn standard_core() -> LashCore {
         .expect("standard core")
 }
 
+fn inline_scope(scope: lash_core::EffectScope) -> lash_core::ScopedEffectController<'static> {
+    lash_core::ScopedEffectController::shared(
+        Arc::new(lash_core::InlineRuntimeEffectController),
+        scope,
+    )
+    .expect("inline effect scope")
+}
+
+fn turn_scope(session_id: &str) -> lash_core::ScopedEffectController<'static> {
+    inline_scope(lash_core::EffectScope::turn(
+        session_id,
+        lash_core::TurnActivityId::fresh().0,
+    ))
+}
+
+fn runtime_operation_scope(
+    scope_id: impl Into<String>,
+) -> lash_core::ScopedEffectController<'static> {
+    inline_scope(lash_core::EffectScope::runtime_operation(scope_id))
+}
+
+fn session_delete_scope(session_id: &str) -> lash_core::ScopedEffectController<'static> {
+    inline_scope(lash_core::EffectScope::session_delete(session_id))
+}
+
 fn explicit_ephemeral_facets(
     builder: crate::core::LashCoreBuilder,
 ) -> crate::core::LashCoreBuilder {

@@ -9,8 +9,29 @@ dev *args:
   cargo build --manifest-path "{{repo}}/crates/lash-cli/Cargo.toml"
   cd "${LASH_DEV_LAUNCH_CWD:-{{invocation_directory()}}}" && exec "{{repo}}/target/debug/lash" "$@"
 
-agent-workbench:
-  ./scripts/agent-workbench-dev.sh
+agent-workbench port='3030':
+  ./scripts/agent-workbench-dev.sh up --port "{{port}}"
+
+agent-workbench-up port='3030':
+  ./scripts/agent-workbench-dev.sh up --port "{{port}}"
+
+agent-workbench-restart port='3030':
+  ./scripts/agent-workbench-dev.sh restart --port "{{port}}"
+
+agent-workbench-status port='3030':
+  ./scripts/agent-workbench-dev.sh status --port "{{port}}"
+
+agent-workbench-logs port='3030':
+  ./scripts/agent-workbench-dev.sh logs --port "{{port}}"
+
+agent-workbench-logs-follow port='3030':
+  ./scripts/agent-workbench-dev.sh logs --port "{{port}}" --follow
+
+agent-workbench-down port='3030':
+  ./scripts/agent-workbench-dev.sh down --port "{{port}}"
+
+agent-workbench-foreground port='3030':
+  ./scripts/agent-workbench-dev.sh foreground --port "{{port}}"
 
 agent-service-restate-e2e:
   #!/usr/bin/env bash

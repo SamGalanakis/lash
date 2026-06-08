@@ -407,16 +407,8 @@ impl LashRuntime {
         input: TurnInput,
         opts: TurnOptions<'_>,
     ) -> Result<AssembledTurn, RuntimeError> {
-        let turn_id = input
-            .trace_turn_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let cancel = opts.cancel.clone();
-        let effect_host = Arc::clone(&self.host.core.control.effect_host);
-        let scoped_effect_controller = match opts.scoped_effect_controller() {
-            Some(scope) => scope,
-            None => effect_host.scoped(EffectScope::turn(&self.state.session_id, &turn_id))?,
-        };
+        let scoped_effect_controller = opts.scoped_effect_controller();
         self.stream_turn_with_scoped_effect_controller_inner(
             input,
             opts.events_or_noop(),
@@ -488,7 +480,7 @@ impl LashRuntime {
             .input
             .trace_turn_id
             .clone()
-            .or_else(|| opts.effect_scope_id().map(ToOwned::to_owned))
+            .or_else(|| Some(opts.effect_scope_id().to_owned()))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         work.input.trace_turn_id = Some(turn_id.clone());
         let causes = work.turn_causes.clone();
@@ -516,14 +508,7 @@ impl LashRuntime {
             },
         );
         let cancel = opts.cancel.clone();
-        let effect_host = Arc::clone(&self.host.core.control.effect_host);
-        let scoped_effect_controller = match opts.scoped_effect_controller() {
-            Some(scope) => scope,
-            None => effect_host.scoped(EffectScope::queue_drain(
-                &self.state.session_id,
-                &claim.claim_id,
-            ))?,
-        };
+        let scoped_effect_controller = opts.scoped_effect_controller();
         self.stream_turn_with_scoped_effect_controller_inner(
             work.input,
             opts.events_or_noop(),
@@ -649,19 +634,8 @@ impl LashRuntime {
         input: TurnInput,
         opts: TurnOptions<'_>,
     ) -> Result<AgentFrameRun, RuntimeError> {
-        let follow_trace_turn_id = input
-            .trace_turn_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let cancel = opts.cancel.clone();
-        let effect_host = Arc::clone(&self.host.core.control.effect_host);
-        let scoped_effect_controller = match opts.scoped_effect_controller() {
-            Some(scope) => scope,
-            None => effect_host.scoped(EffectScope::turn(
-                &self.state.session_id,
-                &follow_trace_turn_id,
-            ))?,
-        };
+        let scoped_effect_controller = opts.scoped_effect_controller();
         self.stream_turn_with_agent_frames_inner(
             input,
             opts.events_or_noop(),
@@ -1033,8 +1007,10 @@ impl LashRuntime {
         &mut self,
         input: TurnInput,
         cancel: CancellationToken,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<AssembledTurn, RuntimeError> {
-        self.stream_turn(input, TurnOptions::new(cancel)).await
+        self.stream_turn(input, TurnOptions::new(cancel, scoped_effect_controller))
+            .await
     }
 
     /// Run a turn using host-prepared message history.

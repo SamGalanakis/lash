@@ -59,14 +59,6 @@ impl LashRuntime {
         if let Some(frame) = self.state.current_agent_frame_mut() {
             frame.assignment.policy = self.policy.clone();
         }
-        // Eagerly compact messages if the context window shrunk.
-        let new_max = Some(self.policy.context_window_tokens());
-        let old_max = Some(previous.context_window_tokens());
-        if new_max < old_max {
-            let _ = self
-                .rewrite_history(crate::RewriteTrigger::WindowShrink { old_max, new_max })
-                .await;
-        }
         self.apply_session_config_mutations(previous.clone()).await;
         self.notify_session_config_changed(previous).await;
     }

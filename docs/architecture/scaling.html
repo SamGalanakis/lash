@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
+<title>scaling - lash architecture</title>
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link rel="icon" href="../favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="../apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="../styles.css?v=11">
+<script src="../theme.js"></script>
+<script src="../mermaid.js?v=4" defer></script>
+<script src="../docs.js?v=7" defer></script>
+<script src="../syntax.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip-link" href="#content">skip to content</a>
+<section class="opener">
+    <h1 class="opener__title">scaling<span class="slash">/</span>stateless</h1>
+    <p class="opener__lede">lash is already a durable-object / actor-per-session architecture: the durable truth lives entirely behind one async store trait, and the in-process runtime holds only a rehydratable working copy. Running lash as a horizontally-scaling microservice is therefore additive work against existing seams — a networked store implementation, turns under a durable effect host, and session-agnostic ingress — not a rewrite. <strong>Status: design.</strong></p>
+  </section>
+
+  <main class="body" id="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>No Durable State In Process Memory</h2>
+            <p><code>LashRuntime.state</code> (<code>RuntimeSessionState</code>) is a <strong>rehydratable working copy</strong>, not a source of truth. It is loaded via <code>RuntimePersistence::load_session</code> and refreshed via <code>refresh_session_graph_from_store</code>; <code>Residency</code> controls whether a load rehydrates the full graph or just the active path.</p>
+          </div>
+          <p>The other in-memory fields on <code>LashRuntime</code> are either ephemeral per-turn accumulators (<code>shared_token_ledger</code>, drained into <code>state</code> at commit) or per-worker coordination (<code>managed_sessions</code>, <code>managed_turns</code> — what <em>this</em> instance is currently running). None of it is durable truth.</p>
+          <p>Durable truth lives behind a single trait, <code>RuntimePersistence</code> (<code>crates/lash-core/src/store.rs</code>), whose surface is exactly a durable-object store:</p>
+          <ul class="bullets">
+            <li><code>load_session</code>, <code>load_node</code> — rehydrate working state.</li>
+            <li><code>commit_runtime_state</code> — <strong>compare-and-swap (CAS)</strong> on the session's revision: a worker commits only if the session is unchanged since it loaded; a losing writer reloads and retries. No worker "owns" or locks the session.</li>
+            <li><code>enqueue_queued_work</code>, <code>claim_ready_queued_work</code>, <code>renew_/abandon_/cancel_*</code> — a durable work queue with <code>claim_id</code> / <code>claim_owner_id</code> / <code>claim_token</code> / <code>claim_fencing_token</code>.</li>
+            <li><code>save_/load_session_meta</code>, <code>tombstone_nodes</code>, <code>vacuum</code>, <code>gc_unreachable</code>.</li>
+          </ul>
+          <p>Any backend that satisfies this trait (and the <code>ProcessRegistry</code> / <code>LashlangArtifactStore</code> traits) is a valid store. The backend-agnostic conformance suite (<code>lash_core::testing::conformance</code>) is what guarantees a new backend behaves identically.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>The Model: A Durable Object Per Session</h2>
+            <p>A request for <code>session_id</code> routes to any worker. The worker rehydrates the session from the store, runs the turn (pure <code>lash-sansio</code> compute + replayed effects), and commits under CAS. Workers are identical and hold no durable state, so the fleet scales by adding replicas.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Horizontal topology</div>
+            <div class="mermaid">
+flowchart TB
+  Clients["clients &middot; external signals"] --> LB["load balancer<br/>route by session_id"]
+  LB --> WA["worker A"]
+  LB --> WB["worker B"]
+  LB --> WN["worker N<br/>(identical, stateless)"]
+  WA --> P["shared session store<br/>CAS on each session's revision &middot; durable work queue"]
+  WB --> P
+  WN --> P
+  WA -.-> H["networked HostEventStore<br/>occurrences &middot; subscriptions &middot; deliveries"]
+  WB -.-> H
+  WN -.-> H
+  R["Restate<br/>durable execution + dispatch"] -.-> WA
+  R -.-> WB
+  R -.-> WN
+            </div>
+          </div>
+          <p>The store box is shared by the whole fleet, so it must be a <strong>networked backend</strong> every worker can reach — the shipped local-file SQLite store is fine for many processes on one host but not across machines (the headline gap below). It is <code>RuntimePersistence</code> (the store trait) backing each session's current revision plus the durable work queue.</p>
+          <p>Concurrent writers are safe by construction: the CAS on each session's revision in <code>commit_runtime_state</code> lets exactly one writer win; the loser reloads and retries. No worker claims or locks the session — collisions are detected at commit, not prevented by ownership. (The "head revision conflict" surfaced by the two-process store test <em>is</em> this guard firing — the intended multi-writer safety net, not a bug.)</p>
+          <div class="diagram">
+            <div class="diagram-title">Per-session request lifecycle</div>
+            <div class="mermaid">
+flowchart LR
+  Req["request for<br/>session_id"] --> Load["load_session<br/>rehydrate working copy"]
+  Load --> Turn["run turn<br/>sans-io compute + replayed effects"]
+  Turn --> Commit{"commit_runtime_state<br/>CAS on session revision"}
+  Commit -->|wins| Done["committed"]
+  Commit -->|loses CAS| Load
+            </div>
+          </div>
+          <p>You scale <strong>across sessions</strong> — shard/route by <code>session_id</code> — not within one (see Inherent Limits).</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>What Already Supports This</h2>
+            <p>The seams a stateless fleet needs are already present and deliberate — the sans-IO / store / effect-replay split was built with exactly this shape in mind.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Primitive</th><th>Role</th><th>Where</th></tr></thead>
+              <tbody>
+                <tr><td><code>lash-sansio</code> pure <code>TurnMachine</code></td><td>compute is deterministic <code>(state, input) → (state, effects)</code></td><td><code>crates/lash-sansio</code></td></tr>
+                <tr><td><code>RuntimePersistence</code></td><td>the single durable store seam; backend-swappable</td><td><code>store.rs</code>, conformance suite</td></tr>
+                <tr><td><code>commit_runtime_state</code> CAS on <code>session_head</code></td><td>optimistic concurrency for many writers</td><td><code>store.rs</code></td></tr>
+                <tr><td>queue with claim + fencing tokens</td><td>exactly-once work pickup by any worker</td><td><code>queued_work_batches</code></td></tr>
+                <tr><td>effect replay keys + <code>lash-restate</code></td><td>re-run a turn on another worker, replay effects</td><td><code>crates/lash-restate</code></td></tr>
+                <tr><td>rehydratable <code>state</code> + <code>Residency</code></td><td>no durable-only memory; reload anywhere</td><td><code>runtime/session_ops.rs</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>The Gaps To Close</h2>
+            <p>Three additive pieces against existing seams turn the durable-object model into a deployed scaling microservice. None is a rearchitecture.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Gap</th><th>What it needs</th></tr></thead>
+              <tbody>
+                <tr><td><strong>Networked store</strong> (headline)</td><td>The shipped <code>lash-sqlite-store</code> is a <em>local file</em> — multi-process WAL is safe for many processes on one host, but a distributed fleet needs a networked <code>RuntimePersistence</code> (Postgres, libsql-server, FoundationDB, …). A new impl behind the existing trait, validated by the existing conformance suite.</td></tr>
+                <tr><td><strong>Turn durability across workers</strong></td><td>The <code>InlineEffectHost</code> runs a turn in process; a crash mid-turn loses it. Deploying turns under <strong>Restate</strong> (already integrated) makes a turn survive worker death via effect replay. The seam (<code>RuntimeEffectController</code> / <code>ScopedEffectController</code>) already exists.</td></tr>
+                <tr><td><strong>Fleet work dispatch</strong></td><td>Either Restate pushes handlers (the <code>agent-workbench</code> example already does this) or each worker polls the shared queue with claims. The claim/fencing columns are present; only the fleet-level driver wiring is deployment work.</td></tr>
+                <tr><td><strong>Session-agnostic ingress</strong></td><td>External signals must route to whichever worker holds the session, so ingress must not be bolted to one session. See Host Events below.</td></tr>
+                <tr><td><strong>Affinity vs pure reload</strong></td><td>A routing policy choice: <code>session_id</code> affinity (warm working-copy cache) vs reload-per-request (simpler, more store reads). CAS supports either; <code>Residency</code> tunes reload cost.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Inherent Limits — Domain, Not Implementation</h2>
+            <p>Some boundaries are properties of agent conversations, not of lash.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3>Single-writer-per-session</h3>
+              <p>A session is a serial conversation; the CAS head enforces one logical writer. You scale across many sessions, not within one — ideal for multi-tenant workloads, but a single session's throughput is domain-bounded.</p>
+            </article>
+            <article class="panel">
+              <h3>The store is the ceiling</h3>
+              <p>Whatever networked backend is chosen must sustain the CAS commits and queue claims at fleet scale. The store choice <em>is</em> the scaling story.</p>
+            </article>
+            <article class="panel">
+              <h3>Long LLM turns</h3>
+              <p>A long turn holds or migrates a worker; durable execution (Restate) is the answer, at the cost of replay on recovery.</p>
+            </article>
+            <article class="panel">
+              <h3>Not a blocker: tokio</h3>
+              <p>Statelessness is about where durable truth lives, not the async runtime. lash-core staying on tokio is orthogonal: each worker is a tokio service; the durable truth is already 100% external to the process.</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Host Events — Ingress</h2>
+            <p>Host events are the session-agnostic ingress that completes the stateless model. A host event is <em>not</em> attached to a session: it is recorded to its own backend-swappable seam and routed to whichever worker holds the interested session/process. Only the resulting wake is session-coupled.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Ingress: emit → match → idempotent delivery → wake</div>
+            <div class="mermaid">
+flowchart LR
+  Sig["external signal<br/>button &middot; mail &middot; cron &middot; webhook"] --> Emit["router.emit<br/>record occurrence"]
+  Emit --> Match["reserve_matching_deliveries<br/>match by source_type"]
+  Match --> Deliver["idempotent effect delivery<br/>deterministic occurrence / delivery id"]
+  Deliver --> Proc["start trigger process<br/>in subscription's session scope"]
+  Proc --> Wake["wake → target session input queue<br/>EarliestSafeBoundary"]
+            </div>
+          </div>
+          <ul class="bullets">
+            <li><strong>A second store seam.</strong> Subscriptions, occurrences, and delivery reservations live behind a <code>HostEventStore</code> trait — parallel to <code>RuntimePersistence</code>. The in-memory implementation does not fan out across workers, so a distributed fleet needs a <strong>networked <code>HostEventStore</code></strong> for the same reason it needs a networked <code>RuntimePersistence</code>. This is the one new seam ingress adds to the deployment.</li>
+            <li><strong>The event carries no session; the subscription carries the target.</strong> An emitted event is matched by <code>source_type</code> against registered subscriptions, each of which names its own target scope (<code>session_id</code>). A single event fans out to 0..N subscribers across any sessions on any workers. Session identity enters only as a property of the matched subscription — never of the event.</li>
+            <li><strong>Delivery is an idempotent effect.</strong> Each matched delivery runs through the effect controller with a deterministic id (<code>occurrence_id</code> from <code>source_type</code> + source key + idempotency key; delivery process id from <code>occurrence_id</code> + <code>subscription_id</code>). Delivery is <strong>exactly-once</strong> and replay-safe: any worker can run it, and a crash-and-replay under Restate cannot double-start a trigger process.</li>
+            <li><strong>Only the wake is session-coupled.</strong> When a delivered process wakes an agent, that wake lands on the target session's input queue at <code>EarliestSafeBoundary</code> — the sole point where session identity and turn-ordering apply.</li>
+          </ul>
+          <p>Net for the fleet: route external signals to a runtime-level emit → match → idempotent effect-delivery → wake. The only addition over the core scaling model is a second networked store seam; everything else reuses the existing CAS, claim, and replay machinery. Concrete type names reflect the in-progress ingress effort and may shift; the scaling-relevant properties above are stable.</p>
+        </div>
+  </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__link" href="./durability.html"><span class="pager__dir">next</span><span class="pager__title">durability / workflows</span></a>
+  </div>
+</section>
+</body>
+</html>

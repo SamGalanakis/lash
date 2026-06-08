@@ -67,9 +67,8 @@ impl ManagedSessionCapability {
                 let run = runtime_guard
                     .stream_turn_with_agent_frames(
                         input,
-                        crate::runtime::TurnOptions::new(cancel)
-                            .with_events(&sink)
-                            .with_scoped_effect_controller(scoped_effect_controller),
+                        crate::runtime::TurnOptions::new(cancel, scoped_effect_controller)
+                            .with_events(&sink),
                     )
                     .await
                     .map_err(|err| crate::PluginError::Session(err.to_string()))?;

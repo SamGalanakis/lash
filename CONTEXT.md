@@ -5,6 +5,10 @@
 - **Host Event**: Session-agnostic world signal emitted by a host-owned source such as a UI control, webhook, or schedule. It is routed to interested runtime subscribers and is not queued session work.
 - **Queued Work**: Durable, session-scoped runtime ingress for work that must enter one session at a turn boundary. It may carry turn input, process wakes, or runtime maintenance command payloads; it does not carry host events or timers.
 - **Queued Turn**: Queued Work whose payload is user-visible `TurnInput`.
+- **Agent Frame**: Durable context boundary inside a session. Opening a new Agent Frame continues the same session from new initial context while prior frame content remains durable and inspectable.
+- **Agent Frame Reason**: Open label describing why an Agent Frame was opened. Core defines common labels but the label set is not exhaustive.
+- **Compaction**: Deliberate transition to a new Agent Frame seeded from an assistant summary message of earlier context. It continues the same assignment with reduced future model context, without deleting or rewriting prior frame content.
+- **Prompt View**: Ephemeral projection of session content prepared for one model turn. Prompt View shaping does not mutate durable session history.
 - **Early Injection**: User input submitted with Enter while a turn is active. The runtime accepts it at the earliest safe boundary in the active turn.
 - **Next Full Turn**: User input submitted with Tab while a turn is active. The runtime delivers it only after the current turn commits.
 - **Slash Command**: CLI host command. Slash commands are not queued as model work.

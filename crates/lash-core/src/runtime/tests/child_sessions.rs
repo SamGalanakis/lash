@@ -244,9 +244,12 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                 protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            TurnOptions::new(CancellationToken::new())
-                .with_events(&sink)
-                .with_turn_events(&turn_events),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "child-session-usage-parent"),
+            )
+            .with_events(&sink)
+            .with_turn_events(&turn_events),
         )
         .await
         .expect("parent turn");
@@ -392,7 +395,11 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                 protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            TurnOptions::new(CancellationToken::new()).with_events(&sink),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "child-session-event-parent"),
+            )
+            .with_events(&sink),
         )
         .await
         .expect("parent turn");

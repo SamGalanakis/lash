@@ -1,18 +1,5 @@
 use super::*;
 
-fn rewrite_history_scope_id(
-    session_id: &str,
-    turn_index: usize,
-    trigger: &crate::RewriteTrigger,
-) -> String {
-    let trigger_id = match trigger {
-        crate::RewriteTrigger::Manual { .. } => "manual",
-        crate::RewriteTrigger::WindowShrink { .. } => "window-shrink",
-        crate::RewriteTrigger::Periodic => "periodic",
-    };
-    format!("{session_id}:rewrite-history:{trigger_id}:{turn_index}")
-}
-
 impl LashRuntime {
     pub fn session_id(&self) -> &str {
         &self.state.session_id
@@ -282,6 +269,7 @@ impl LashRuntime {
     pub async fn rewrite_history(
         &mut self,
         trigger: crate::RewriteTrigger,
+        scoped_effect_controller: crate::ScopedEffectController<'_>,
     ) -> Result<bool, PluginActionInvokeError> {
         let services = self.runtime_session_services()?;
         let Some(plugin_session) = self.session.as_ref().map(|s| Arc::clone(s.plugins())) else {
@@ -296,19 +284,7 @@ impl LashRuntime {
             sessions: services.state_service(),
             session_lifecycle: services.lifecycle_service(),
             session_graph: services.graph_service(),
-            scoped_effect_controller: self
-                .host
-                .core
-                .control
-                .effect_host
-                .scoped(crate::EffectScope::runtime_operation(
-                    rewrite_history_scope_id(
-                        &self.state.session_id,
-                        self.state.turn_index,
-                        &trigger,
-                    ),
-                ))
-                .map_err(|err| PluginActionInvokeError::Unknown(err.to_string()))?,
+            scoped_effect_controller,
         };
         let input = crate::HistoryState::from_snapshot(&self.state.to_snapshot());
         let baseline_messages = input.messages.len();

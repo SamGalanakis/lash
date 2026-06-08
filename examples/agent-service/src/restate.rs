@@ -226,7 +226,7 @@ async fn run_restate_chat_turn_and_persist(
         .turn(input)
         .model(turn_model)
         .require_submit()?
-        .stream_with_effect_scope(&ui_events, effect_scope)
+        .stream(&ui_events, effect_scope)
         .await;
 
     match output {

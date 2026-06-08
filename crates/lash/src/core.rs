@@ -157,17 +157,11 @@ impl LashCore {
         crate::control::HostEventsControl { core: self.clone() }
     }
 
-    pub async fn delete_session(&self, session_id: impl AsRef<str>) -> Result<SessionDeleteReport> {
-        let session_id = session_id.as_ref().to_string();
-        let effect_host = Arc::clone(&self.env.core.control.effect_host);
-        let scoped_effect_controller = effect_host
-            .scoped(lash_core::EffectScope::session_delete(&session_id))
-            .map_err(EmbedError::from)?;
-        self.delete_session_with_effect_scope(session_id, scoped_effect_controller)
-            .await
+    pub fn effect_host(&self) -> Arc<dyn EffectHost> {
+        Arc::clone(&self.env.core.control.effect_host)
     }
 
-    pub async fn delete_session_with_effect_scope(
+    pub async fn delete_session(
         &self,
         session_id: impl AsRef<str>,
         scoped_effect_controller: ScopedEffectController<'_>,

@@ -45,7 +45,7 @@ sequenceDiagram
   participant Lang as RLM lashlang runtime
   participant Store as RuntimePersistence
 
-  Host->>Runtime: session.turn(TurnInput).stream(&sink)
+  Host->>Runtime: session.turn(TurnInput).stream(&sink, scope)
   Runtime->>Runtime: normalize InputItem text/image refs
   Runtime->>Plugins: prepare_turn + context transforms
   Runtime->>Plugins: build TurnDriverPreamble from ProtocolBuildInput(ToolSurface + LashlangSurface)

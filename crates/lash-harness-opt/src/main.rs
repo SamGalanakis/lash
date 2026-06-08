@@ -436,6 +436,16 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
         tokio::fs::write(&prompt_path, &prompt)
             .await
             .map_err(lash_harness_opt::HarnessOptError::Io)?;
+        let effect_host = session.effect_host().await;
+        let scoped_effect_controller = effect_host
+            .scoped(lash::runtime::EffectScope::turn(
+                session.session_id(),
+                format!(
+                    "harness-opt-gepa-turn-{}-{}",
+                    request.run_id, request.generation
+                ),
+            ))
+            .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
         let turn = session
             .turn(TurnInput::text(prompt))
             .cancel(cancellation)
@@ -448,7 +458,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
                 })
                 .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?,
             )
-            .run()
+            .run(scoped_effect_controller)
             .await
             .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
 

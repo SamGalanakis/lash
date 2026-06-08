@@ -133,13 +133,19 @@ impl BenchmarkRuntime {
         input: lash::TurnInput,
         cancel: tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<lash::TurnResult> {
-        self.session
-            .as_ref()
-            .expect("benchmark session")
+        let session = self.session.as_ref().expect("benchmark session");
+        let effect_host = session.effect_host().await;
+        let scoped_effect_controller = effect_host
+            .scoped(lash::runtime::EffectScope::turn(
+                session.session_id(),
+                lash_core::TurnActivityId::fresh().0,
+            ))
+            .map_err(anyhow::Error::from)?;
+        session
             .turn(input)
             .cancel(cancel)
             .advanced()
-            .collect_session_events_with(&lash::runtime::NoopEventSink)
+            .collect_session_events_with(&lash::runtime::NoopEventSink, scoped_effect_controller)
             .await
             .map_err(anyhow::Error::from)
     }
@@ -155,7 +161,7 @@ impl BenchmarkRuntime {
             .expect("benchmark session")
             .turn(input)
             .cancel(cancel)
-            .run_with_effect_scope(scoped_effect_controller)
+            .run(scoped_effect_controller)
             .await
             .map(|output| output.result)
             .map_err(anyhow::Error::from)
