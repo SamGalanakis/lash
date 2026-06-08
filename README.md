@@ -58,8 +58,8 @@ the explicit pre-release tag:
 
 ```toml
 [dependencies]
-lash-runtime         = "=0.1.0-alpha.38"
-lash-provider-openai = "=0.1.0-alpha.38"
+lash-runtime         = "=0.1.0-alpha.39"
+lash-provider-openai = "=0.1.0-alpha.39"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }
 ```
