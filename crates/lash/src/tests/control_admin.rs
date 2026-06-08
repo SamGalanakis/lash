@@ -57,6 +57,43 @@ impl lash_core::ProcessCancelAbility for RecordingCancelAbility {
     }
 }
 
+struct FixedCompactor;
+
+#[async_trait]
+impl lash_core::ContextCompactor for FixedCompactor {
+    fn id(&self) -> &'static str {
+        "test.fixed_compactor"
+    }
+
+    async fn compact(
+        &self,
+        ctx: &lash_core::CompactionContext<'_>,
+    ) -> std::result::Result<Option<lash_core::ContextCompaction>, lash_core::ContextError> {
+        assert_eq!(
+            ctx.instructions.as_deref(),
+            Some("focus on durable summary")
+        );
+        assert!(
+            ctx.state
+                .messages()
+                .iter()
+                .any(|message| message.parts[0].content.contains("old durable request"))
+        );
+        Ok(Some(lash_core::ContextCompaction::new(vec![
+            lash_core::SessionAppendNode::message(
+                lash_core::PluginMessage::text(
+                    lash_core::MessageRole::Assistant,
+                    "Compaction summary:\nold durable request summarized",
+                )
+                .with_origin(lash_core::MessageOrigin::Plugin {
+                    plugin_id: "test_compactor".to_string(),
+                    transient: false,
+                }),
+            ),
+        ])))
+    }
+}
+
 #[tokio::test]
 async fn session_operations_delegate_to_runtime() -> Result<()> {
     let core = standard_core();
@@ -94,6 +131,101 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
         err,
         EmbedError::Session(SessionError::CodeExecutionUnavailable)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn compact_context_opens_compaction_frame_and_preserves_prior_frame() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .plugin(Arc::new(StaticPluginFactory::new(
+            "test-compactor",
+            lash_core::PluginSpec::new().with_context_compactor(100, Arc::new(FixedCompactor)),
+        )))
+        .build()?;
+    let session = core.session("compact-context").open().await?;
+    session
+        .run(
+            TurnInput::text("old durable request"),
+            turn_scope(&session.session_id()),
+        )
+        .await?;
+    let before = session.control().state().persist_current().await?;
+    let previous_frame_id = before.current_agent_frame_id.clone();
+    assert!(
+        before.session_graph.nodes.iter().any(|node| {
+            node.agent_frame_id.as_deref() == Some(previous_frame_id.as_str())
+                && node
+                    .message()
+                    .is_some_and(|message| message.parts[0].content.contains("old durable request"))
+        }),
+        "initial frame should contain the original request"
+    );
+
+    let compacted = session
+        .control()
+        .state()
+        .compact_context(
+            Some("focus on durable summary".to_string()),
+            runtime_operation_scope("compact-context-test"),
+        )
+        .await?;
+
+    assert!(compacted);
+    let read_view = session.read_view();
+    assert_eq!(read_view.messages().len(), 1);
+    assert_eq!(
+        read_view.messages()[0].parts[0].content,
+        "Compaction summary:\nold durable request summarized"
+    );
+    assert!(matches!(
+        read_view.messages()[0].origin.as_ref(),
+        Some(lash_core::MessageOrigin::Plugin { plugin_id, .. }) if plugin_id == "test_compactor"
+    ));
+
+    let after = session.control().state().persist_current().await?;
+    let current = after
+        .agent_frames
+        .iter()
+        .find(|frame| frame.frame_id == after.current_agent_frame_id)
+        .expect("current frame");
+    assert_eq!(
+        current.reason.as_str(),
+        lash_core::AgentFrameReason::COMPACTION
+    );
+    assert_eq!(
+        current.previous_frame_id.as_deref(),
+        Some(previous_frame_id.as_str())
+    );
+    assert_eq!(
+        current.assignment.policy.provider_id,
+        before.agent_frames[0].assignment.policy.provider_id
+    );
+    assert_eq!(
+        current.protocol_turn_options.payload,
+        before.agent_frames[0].protocol_turn_options.payload
+    );
+    assert!(
+        after.session_graph.nodes.iter().any(|node| {
+            node.agent_frame_id.as_deref() == Some(previous_frame_id.as_str())
+                && node
+                    .message()
+                    .is_some_and(|message| message.parts[0].content.contains("old durable request"))
+        }),
+        "previous frame content should remain durable after compaction"
+    );
+    assert!(
+        after.session_graph.nodes.iter().any(|node| {
+            node.agent_frame_id.as_deref() == Some(after.current_agent_frame_id.as_str())
+                && node.message().is_some_and(|message| {
+                    message.parts[0]
+                        .content
+                        .contains("old durable request summarized")
+                })
+        }),
+        "compaction summary should be scoped to the new frame"
+    );
     Ok(())
 }
 

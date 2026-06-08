@@ -92,7 +92,7 @@
                 <tr>
                   <td><code>AgentFrame</code></td>
                   <td>The current agent assignment: effective policy, plugin options/source, tool access, subagent context, protocol turn options, execution snapshot, provenance, and prior-frame link.</td>
-                  <td><code>continue_as</code> appends a new frame in the same session with explicit <code>task</code> + <code>seed</code>. The facade keeps driving the same session until a real final result or stop.</td>
+                  <td><code>continue_as</code> appends a new frame in the same session with explicit <code>task</code> + <code>seed</code>. <code>/compact</code> appends a compaction frame seeded by an assistant summary. The facade keeps driving the same session until a real final result or stop.</td>
                 </tr>
                 <tr>
                   <td><code>SessionGraph</code></td>

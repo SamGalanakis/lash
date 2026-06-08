@@ -113,7 +113,8 @@ pub mod plugins {
         AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantResponseHookContext,
         AssistantResponseTransform, AssistantStreamHook, AssistantStreamHookContext,
         AssistantStreamTransform, BeforeToolCallHook, BeforeTurnHook, CheckpointHook,
-        CheckpointHookContext, PluginSpecBuilder, StaticPluginFactory, ToolCallHookContext,
+        CheckpointHookContext, CompactionContext, ContextCompaction, ContextCompactor,
+        ContextError, PluginSpecBuilder, StaticPluginFactory, ToolCallHookContext,
         ToolResultHookContext,
     };
     pub use lash_core::{
@@ -188,8 +189,8 @@ pub mod runtime {
     };
     pub use lash_core::{
         PersistentRuntimeServices, PluginMessage, ProtocolSessionExtensionHandle,
-        ProtocolTurnOptions, RewriteTrigger, SessionEvent, SessionHandle, SessionPolicy,
-        SessionSnapshot, TurnCause, TurnFinish, TurnOutcome, TurnStop, render_turn_causes_prompt,
+        ProtocolTurnOptions, SessionEvent, SessionHandle, SessionPolicy, SessionSnapshot,
+        TurnCause, TurnFinish, TurnOutcome, TurnStop, render_turn_causes_prompt,
     };
 }
 

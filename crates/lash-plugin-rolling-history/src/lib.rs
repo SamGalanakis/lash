@@ -1,9 +1,7 @@
 //! Default rolling-history plugin.
 //!
-//! Owns the compaction strategy that used to live in
-//! `crates/lash/src/session_model/context.rs`: per-turn pruning of old
-//! images and summary insertion, plus persistent history rewrites for
-//! manual compaction, overflow recovery, and window-shrink events.
+//! Owns rolling prompt-view shaping and the explicit `/compact`
+//! summarization strategy.
 //!
 //! Registered as a default plugin by
 //! the first-party default tool bundles from `lash-standard-plugins`,
@@ -16,8 +14,8 @@ use async_trait::async_trait;
 
 use lash_core::PreparedContext;
 use lash_core::plugin::{
-    HistoryError, HistoryRewriter, HistoryState, PluginError, PluginFactory, PluginOptions,
-    PluginRegistrar, PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
+    CompactionContext, ContextCompaction, ContextCompactor, ContextError, PluginError,
+    PluginFactory, PluginOptions, PluginRegistrar, PluginSessionContext, SessionContextSurface,
     SessionCreateRequest, SessionPlugin, SessionStartPoint, TurnContextTransform,
     TurnTransformContext,
 };
@@ -203,6 +201,23 @@ fn compaction_turn_id(parent_turn_id: &str) -> String {
     format!("{parent_turn_id}:rolling-history-compaction")
 }
 
+fn prompt_tail_window(messages: &[Message], cut_point: usize) -> Vec<Message> {
+    let prefix_len = leading_system_prefix_len(messages);
+    let latest_summary_index = messages[prefix_len..]
+        .iter()
+        .rposition(is_compaction_summary_message)
+        .map(|index| prefix_len + index);
+    let mut out = Vec::new();
+    out.extend_from_slice(&messages[..prefix_len]);
+    if let Some(summary_index) = latest_summary_index
+        && summary_index < cut_point
+    {
+        out.push(messages[summary_index].clone());
+    }
+    out.extend_from_slice(&messages[cut_point..]);
+    out
+}
+
 async fn summarize_compaction_prefix(
     session_id: &str,
     state: &SessionSnapshot,
@@ -210,7 +225,7 @@ async fn summarize_compaction_prefix(
     instructions: Option<&str>,
     session_lifecycle: Arc<dyn lash_core::plugin::runtime_host::SessionLifecycleService>,
     scoped_effect_controller: lash_core::ScopedEffectController<'_>,
-) -> Result<Option<String>, HistoryError> {
+) -> Result<Option<String>, ContextError> {
     if prefix_messages.is_empty() {
         return Ok(None);
     }
@@ -245,7 +260,7 @@ async fn summarize_compaction_prefix(
     let handle = session_lifecycle
         .create_session(request)
         .await
-        .map_err(HistoryError::from)?;
+        .map_err(ContextError::from)?;
 
     let base_prompt = match previous_summary {
         Some(prev) => compaction_update_prompt(&prev),
@@ -258,7 +273,7 @@ async fn summarize_compaction_prefix(
         scoped_effect_controller.controller(),
         lash_core::EffectScope::turn(&handle.session_id, &turn_id),
     )
-    .map_err(|err| HistoryError::Session(err.to_string()))?;
+    .map_err(|err| ContextError::Session(err.to_string()))?;
     let request = lash_core::SessionTurnRequest::new(
         &handle.session_id,
         &turn_id,
@@ -272,10 +287,10 @@ async fn summarize_compaction_prefix(
         },
         compaction_effect_controller,
     )
-    .map_err(|err| HistoryError::Session(err.to_string()))?;
+    .map_err(|err| ContextError::Session(err.to_string()))?;
     let turn = session_lifecycle.start_turn(request).await;
     let _ = session_lifecycle.close_session(&handle.session_id).await;
-    let turn = turn.map_err(HistoryError::from)?;
+    let turn = turn.map_err(ContextError::from)?;
     let summary = turn.assistant_output.safe_text.trim().to_string();
     if summary.is_empty() {
         return Ok(None);
@@ -283,36 +298,17 @@ async fn summarize_compaction_prefix(
     Ok(Some(summary))
 }
 
-fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usize) -> Vec<Message> {
-    let prefix_len = leading_system_prefix_len(messages);
-    if cut_point <= prefix_len || cut_point > messages.len() {
-        return messages.to_vec();
-    }
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&messages[..prefix_len]);
-    out.push(Message {
-        id: "compaction-summary".to_string(),
-        role: MessageRole::Assistant,
-        parts: lash_core::shared_parts(vec![Part {
-            id: "compaction-summary.p0".to_string(),
-            kind: PartKind::Prose,
-            content: format!("{COMPACTION_SUMMARY_TITLE}\n{summary}"),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            tool_replay: None,
-            prune_state: lash_core::PruneState::Intact,
-            reasoning_meta: None,
-            response_meta: None,
-        }]),
-        origin: Some(MessageOrigin::Plugin {
+fn compaction_summary_seed(summary: &str) -> lash_core::SessionAppendNode {
+    lash_core::SessionAppendNode::message(
+        lash_core::PluginMessage::text(
+            MessageRole::Assistant,
+            format!("{COMPACTION_SUMMARY_TITLE}\n{summary}"),
+        )
+        .with_origin(MessageOrigin::Plugin {
             plugin_id: ROLLING_HISTORY_PLUGIN_ID.to_string(),
             transient: false,
         }),
-    });
-    out.extend_from_slice(&messages[cut_point..]);
-    out
+    )
 }
 
 async fn compact_messages_core(
@@ -322,13 +318,13 @@ async fn compact_messages_core(
     instructions: Option<&str>,
     session_lifecycle: Arc<dyn lash_core::plugin::runtime_host::SessionLifecycleService>,
     scoped_effect_controller: lash_core::ScopedEffectController<'_>,
-) -> Result<Option<Vec<Message>>, HistoryError> {
+) -> Result<Option<ContextCompaction>, ContextError> {
     let prefix_len = leading_system_prefix_len(messages);
     let cut_point = find_compaction_cut_point(messages, prefix_len);
     if cut_point <= prefix_len {
         return Ok(None);
     }
-    let prefix_messages = messages[prefix_len..cut_point].to_vec();
+    let prefix_messages = messages[prefix_len..].to_vec();
     let Some(summary) = summarize_compaction_prefix(
         session_id,
         state,
@@ -341,9 +337,9 @@ async fn compact_messages_core(
     else {
         return Ok(None);
     };
-    Ok(Some(apply_compaction_summary(
-        messages, &summary, cut_point,
-    )))
+    Ok(Some(ContextCompaction::new(vec![compaction_summary_seed(
+        &summary,
+    )])))
 }
 
 pub struct RollingHistoryPluginFactory {
@@ -385,10 +381,10 @@ impl SessionPlugin for RollingHistoryPlugin {
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         let config = self.config.clone();
-        reg.history()
+        reg.context()
             .prepare_turn(100, Arc::new(RollingTurnTransform::new(config.clone())));
-        reg.history()
-            .rewrite(100, Arc::new(RollingHistoryRewriter::new(config)));
+        reg.context()
+            .compact(100, Arc::new(RollingContextCompactor::new(config)));
         Ok(())
     }
 }
@@ -411,11 +407,9 @@ impl TurnContextTransform for RollingTurnTransform {
         &self,
         ctx: &TurnTransformContext<'_>,
         mut input: PreparedContext,
-    ) -> Result<PreparedContext, HistoryError> {
-        let state = &ctx.state;
+    ) -> Result<PreparedContext, ContextError> {
         let prompt_usage = ctx.prompt_usage.as_ref();
         let max_context_tokens = ctx.max_context_tokens;
-        let session_lifecycle = Arc::clone(&ctx.session_lifecycle);
 
         let needs_pruning = pruning_needed(prompt_usage, max_context_tokens);
         let needs_compaction = compaction_needed(prompt_usage, max_context_tokens);
@@ -433,107 +427,57 @@ impl TurnContextTransform for RollingTurnTransform {
             return Ok(input);
         }
 
-        let messages = input.messages.as_slice();
+        let messages = input.messages.make_mut();
         let prefix_len = leading_system_prefix_len(messages);
         let cut_point = find_compaction_cut_point(messages, prefix_len);
         if cut_point <= prefix_len {
             return Ok(input);
         }
 
-        let prefix_messages = messages[prefix_len..cut_point].to_vec();
-        let Some(summary) = summarize_compaction_prefix(
-            &ctx.session_id,
-            &state.to_snapshot(),
-            prefix_messages,
-            None,
-            session_lifecycle,
-            ctx.scoped_effect_controller.clone(),
-        )
-        .await?
-        else {
-            return Ok(input);
-        };
-
-        input
-            .messages
-            .replace(apply_compaction_summary(messages, &summary, cut_point));
+        let projected = prompt_tail_window(messages, cut_point);
+        input.messages.replace(projected);
         Ok(input)
     }
 }
 
-struct RollingHistoryRewriter;
+struct RollingContextCompactor;
 
-impl RollingHistoryRewriter {
+impl RollingContextCompactor {
     fn new(_config: RollingHistoryConfig) -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl HistoryRewriter for RollingHistoryRewriter {
+impl ContextCompactor for RollingContextCompactor {
     fn id(&self) -> &'static str {
-        "rolling_history.rewrite"
+        "rolling_history.compact"
     }
 
-    async fn rewrite(
+    async fn compact(
         &self,
-        ctx: &RewriteContext<'_>,
-        mut input: HistoryState,
-    ) -> Result<HistoryState, HistoryError> {
+        ctx: &CompactionContext<'_>,
+    ) -> Result<Option<ContextCompaction>, ContextError> {
         let session_id = ctx.session_id.clone();
         let session_lifecycle = Arc::clone(&ctx.session_lifecycle);
         let scoped_effect_controller = ctx.scoped_effect_controller.clone();
 
-        match &ctx.trigger {
-            RewriteTrigger::Manual { instructions } => {
-                if let Some(compacted) = compact_messages_core(
-                    &session_id,
-                    &ctx.state.to_snapshot(),
-                    &input.messages,
-                    instructions.as_deref(),
-                    session_lifecycle.clone(),
-                    scoped_effect_controller.clone(),
-                )
-                .await?
-                {
-                    input.metadata.produced_summary = true;
-                    input.metadata.pruned_message_count =
-                        input.messages.len().saturating_sub(compacted.len()) as u32;
-                    input.messages = compacted;
-                }
-                Ok(input)
-            }
-            RewriteTrigger::WindowShrink { .. } => {
-                if !compaction_needed(
-                    ctx.state.last_prompt_usage(),
-                    Some(ctx.state.policy().context_window_tokens()),
-                ) {
-                    return Ok(input);
-                }
-                if let Some(compacted) = compact_messages_core(
-                    &session_id,
-                    &ctx.state.to_snapshot(),
-                    &input.messages,
-                    None,
-                    session_lifecycle,
-                    scoped_effect_controller,
-                )
-                .await?
-                {
-                    input.metadata.produced_summary = true;
-                    input.messages = compacted;
-                }
-                Ok(input)
-            }
-            RewriteTrigger::Periodic => Ok(input),
-        }
+        compact_messages_core(
+            &session_id,
+            &ctx.state.to_snapshot(),
+            ctx.state.messages(),
+            ctx.instructions.as_deref(),
+            session_lifecycle,
+            scoped_effect_controller,
+        )
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::SessionPolicy;
+    use lash_core::{SessionGraph, SessionPolicy};
     use serde_json::json;
 
     fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
@@ -626,6 +570,27 @@ mod tests {
         }
     }
 
+    fn build_compaction_ctx(
+        session_id: &str,
+        state: SessionSnapshot,
+        instructions: Option<String>,
+        manager: Arc<MockSessionManager>,
+    ) -> CompactionContext<'static> {
+        CompactionContext {
+            session_id: session_id.to_string(),
+            instructions,
+            state: state.read_view(),
+            sessions: manager.clone(),
+            session_lifecycle: manager.clone(),
+            session_graph: manager,
+            scoped_effect_controller: lash_core::ScopedEffectController::shared(
+                Arc::new(lash_core::InlineRuntimeEffectController),
+                lash_core::EffectScope::runtime_operation("rolling-history-compact-test"),
+            )
+            .expect("test scoped effect controller"),
+        }
+    }
+
     #[tokio::test]
     async fn rolling_turn_transform_strips_old_image_attachments() {
         let messages = vec![
@@ -666,7 +631,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rolling_turn_transform_replaces_prefix_with_summary() {
+    async fn rolling_turn_transform_projects_tail_without_summary() {
         let manager = Arc::new(mock_manager());
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
         let state = SessionSnapshot {
@@ -705,12 +670,6 @@ mod tests {
             message
                 .parts
                 .iter()
-                .any(|part| part.content.contains("Compacted work summary"))
-        }));
-        assert!(built.iter().any(|message| {
-            message
-                .parts
-                .iter()
                 .any(|part| part.content.contains("latest request"))
         }));
         assert!(!built.iter().any(|message| {
@@ -721,22 +680,73 @@ mod tests {
         }));
 
         let created = manager.created_snapshot();
+        assert!(created.is_empty());
+        let turns = manager.turns.lock().expect("turns lock").clone();
+        assert!(turns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rolling_compactor_returns_summary_seed_for_new_frame() {
+        let manager = Arc::new(mock_manager());
+        let messages = vec![
+            text_message("u1", MessageRole::User, "old work"),
+            text_message("a1", MessageRole::Assistant, "assistant old"),
+            text_message("u2", MessageRole::User, "latest request"),
+        ];
+        let state = SessionSnapshot {
+            session_id: "root".to_string(),
+            policy: SessionPolicy::default(),
+            session_graph: SessionGraph::from_active_read_state(&messages),
+            ..Default::default()
+        };
+        let ctx = build_compaction_ctx(
+            "root",
+            state,
+            Some("focus on latest request".to_string()),
+            manager.clone(),
+        );
+        let compactor = RollingContextCompactor::new(RollingHistoryConfig);
+
+        let compaction = compactor
+            .compact(&ctx)
+            .await
+            .expect("compact")
+            .expect("compaction");
+
+        assert_eq!(compaction.initial_nodes.len(), 1);
+        let lash_core::SessionAppendNode::Message { message, .. } = &compaction.initial_nodes[0]
+        else {
+            panic!("expected summary message seed");
+        };
+        assert_eq!(message.role, MessageRole::Assistant);
+        assert!(
+            message
+                .first_text()
+                .expect("summary text")
+                .contains("Compacted work summary")
+        );
+        assert!(matches!(
+            message.origin.as_ref(),
+            Some(MessageOrigin::Plugin { plugin_id, .. }) if plugin_id == ROLLING_HISTORY_PLUGIN_ID
+        ));
+
+        let created = manager.created_snapshot();
         assert_eq!(created.len(), 1);
         let turns = manager.turns.lock().expect("turns lock").clone();
         assert_eq!(turns.len(), 1);
         assert_eq!(
             turns[0].1,
-            "rolling-history-test-turn:rolling-history-compaction"
+            "rolling-history-compact-test:rolling-history-compaction"
         );
         assert_eq!(
             turns[0].2.as_deref(),
-            Some("rolling-history-test-turn:rolling-history-compaction")
+            Some("rolling-history-compact-test:rolling-history-compaction")
         );
         assert_eq!(
             turns[0].3,
             lash_core::EffectScope::turn(
                 "root-compaction",
-                "rolling-history-test-turn:rolling-history-compaction"
+                "rolling-history-compact-test:rolling-history-compaction"
             )
         );
     }

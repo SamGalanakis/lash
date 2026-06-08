@@ -28,17 +28,17 @@
 <div class="section" id="context-window">
           <div class="section-header">
             <h2>Context Window And History</h2>
-            <p><code>ModelSpec.limits.context_window_tokens</code> caps every provider request. Overflow finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> auto-truncate. Compact, switch model, or switch frames.</p>
+            <p><code>ModelSpec.limits.context_window_tokens</code> caps every provider request. Overflow finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> rewrite committed history. Compact into a new Agent Frame, switch model, or switch frames.</p>
           </div>
-          <p>Two history strategies, picked via the mode's context-approach setting:</p>
+          <p>Two context strategies, picked via the mode's context-approach setting:</p>
           <div class="two-col">
             <article class="panel">
               <h3><code>RollingHistory</code> (default)</h3>
-              <p>Full ordered history each turn, trimmed only to fit the active model's context window.</p>
+              <p>Prompt View shaping each turn: old images can be elided and the prompt can project a tail window. Durable session graph content remains append-only.</p>
             </article>
             <article class="panel">
               <h3><code>ObservationalMemory</code></h3>
-              <p>Older turns collapse into rolling runtime-authored observations. Configurable: <code>observation_message_tokens</code> (default 30 000), <code>observation_buffer_tokens</code> (6 000), reflection thresholds.</p>
+              <p>Older context is represented through runtime-authored observations in the Prompt View. Configurable: <code>observation_message_tokens</code> (default 30 000), <code>observation_buffer_tokens</code> (6 000), reflection thresholds.</p>
             </article>
           </div>
           <pre><code>use std::sync::Arc;

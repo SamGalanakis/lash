@@ -1,4 +1,4 @@
-//! History rewriting and turn-context transform plugin contracts.
+//! Prompt-view transforms and explicit context compaction plugin contracts.
 //!
 //! Split out of `plugin/mod.rs` purely for file size. All types keep
 //! their original module path via `pub use` in `plugin/mod.rs`.
@@ -9,46 +9,6 @@ use crate::runtime::RuntimeSessionState;
 use crate::{SessionPolicy, SessionSnapshot};
 
 use super::PluginError;
-
-/// Reason the history pipeline is being invoked.
-#[derive(Clone, Debug)]
-pub enum RewriteTrigger {
-    /// User invoked `/compact` (or an equivalent plugin command).
-    Manual { instructions: Option<String> },
-    /// Session config changed to a smaller context window.
-    WindowShrink {
-        old_max: Option<usize>,
-        new_max: Option<usize>,
-    },
-    /// Reserved for future scheduled compactors — not fired by any call
-    /// site today.
-    Periodic,
-}
-
-/// Metadata accumulated as a history rewrite pipeline runs.
-#[derive(Clone, Debug, Default)]
-pub struct HistoryRewriteMetadata {
-    pub summarized_token_count: Option<u64>,
-    pub pruned_message_count: u32,
-    pub produced_summary: bool,
-}
-
-/// Mutable state passed through the history rewrite pipeline.
-#[derive(Clone, Debug)]
-pub struct HistoryState {
-    pub messages: Vec<crate::Message>,
-    pub metadata: HistoryRewriteMetadata,
-}
-
-impl HistoryState {
-    pub fn from_snapshot(snapshot: &SessionSnapshot) -> Self {
-        let read_view = snapshot.read_view();
-        Self {
-            messages: read_view.messages().to_vec(),
-            metadata: HistoryRewriteMetadata::default(),
-        }
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct SessionReadView(Arc<SessionReadState>);
@@ -313,11 +273,11 @@ pub struct TurnTransformContext<'run> {
     pub direct_completions: crate::DirectCompletionClient<'run>,
 }
 
-/// Context passed to a history rewriter.
+/// Context passed to an explicit compactor.
 #[derive(Clone)]
-pub struct RewriteContext<'run> {
+pub struct CompactionContext<'run> {
     pub session_id: String,
-    pub trigger: RewriteTrigger,
+    pub instructions: Option<String>,
     pub state: SessionReadView,
     pub sessions: Arc<dyn super::SessionStateService>,
     pub session_lifecycle: Arc<dyn super::SessionLifecycleService>,
@@ -326,16 +286,31 @@ pub struct RewriteContext<'run> {
 }
 
 #[derive(Debug, thiserror::Error, Clone)]
-pub enum HistoryError {
-    #[error("history pipeline error: {0}")]
+pub enum ContextError {
+    #[error("context pipeline error: {0}")]
     Pipeline(String),
-    #[error("history session error: {0}")]
+    #[error("context session error: {0}")]
     Session(String),
 }
 
-impl From<PluginError> for HistoryError {
+impl From<PluginError> for ContextError {
     fn from(value: PluginError) -> Self {
         Self::Session(value.to_string())
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ContextCompaction {
+    pub initial_nodes: Vec<crate::SessionAppendNode>,
+}
+
+impl ContextCompaction {
+    pub fn new(initial_nodes: Vec<crate::SessionAppendNode>) -> Self {
+        Self { initial_nodes }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.initial_nodes.is_empty()
     }
 }
 
@@ -347,20 +322,15 @@ pub trait TurnContextTransform: Send + Sync {
         &self,
         ctx: &TurnTransformContext<'_>,
         input: crate::session_model::context::PreparedContext,
-    ) -> Result<crate::session_model::context::PreparedContext, HistoryError>;
+    ) -> Result<crate::session_model::context::PreparedContext, ContextError>;
 }
 
-/// Performs a permanent transform on persisted history (compaction,
-/// overflow recovery, manual `/compact`, ...).
+/// Produces seed nodes for an explicit compaction Agent Frame.
 #[async_trait::async_trait]
-pub trait HistoryRewriter: Send + Sync {
+pub trait ContextCompactor: Send + Sync {
     fn id(&self) -> &'static str;
-    fn accepts(&self, _trigger: &RewriteTrigger) -> bool {
-        true
-    }
-    async fn rewrite(
+    async fn compact(
         &self,
-        ctx: &RewriteContext<'_>,
-        input: HistoryState,
-    ) -> Result<HistoryState, HistoryError>;
+        ctx: &CompactionContext<'_>,
+    ) -> Result<Option<ContextCompaction>, ContextError>;
 }

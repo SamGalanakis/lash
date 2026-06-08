@@ -198,24 +198,24 @@ pub use plugin::{
     AgentFrameAssignment, AgentFrameId, AgentFrameReason, AgentFrameRecord, AgentFrameStatus,
     AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
-    CheckpointHookContext, DirectCompletion, DirectLlmCompletion, HistoryError,
-    HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState,
-    HostEventRegistrations, PersistentRuntimeServices, PluginAction, PluginActionContext,
-    PluginActionDef, PluginActionFailure, PluginActionInvokeError, PluginActionKind,
-    PluginDirective, PluginError, PluginFactory, PluginHost, PluginLifecycleEvent,
-    PluginLifecycleEventHook, PluginOptions, PluginOwned, PluginRegistrar, PluginSession,
-    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
-    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
-    ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RewriteContext, RewriteTrigger,
-    RuntimeServices, SessionAppendNode, SessionConfigChangedContext, SessionContextSurface,
-    SessionCreateRequest, SessionGraphService, SessionHandle, SessionLifecycleService,
-    SessionParam, SessionPlugin, SessionPluginSource, SessionReadView, SessionRelation,
-    SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionStateService,
-    SessionToolAccess, SessionTurnInput, SessionTurnRequest, SnapshotReader, SnapshotWriter,
-    SubagentSessionContext, ToolDiscoveryContext, ToolDiscoveryContribution,
-    ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolResultProjectionContext,
-    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
-    TurnResultHookContext, TurnResultSummary, TurnTransformContext, plugin_action_def,
+    CheckpointHookContext, CompactionContext, ContextCompaction, ContextCompactor, ContextError,
+    ContextRegistrations, DirectCompletion, DirectLlmCompletion, HostEventRegistrations,
+    OpenAgentFrameRequest, OpenAgentFrameResult, PersistentRuntimeServices, PluginAction,
+    PluginActionContext, PluginActionDef, PluginActionFailure, PluginActionInvokeError,
+    PluginActionKind, PluginDirective, PluginError, PluginFactory, PluginHost,
+    PluginLifecycleEvent, PluginLifecycleEventHook, PluginOptions, PluginOwned, PluginRegistrar,
+    PluginSession, PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact,
+    PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
+    ProtocolBeforeLlmCallContext, ProtocolLlmCallAction, RuntimeServices, SessionAppendNode,
+    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionGraphService,
+    SessionHandle, SessionLifecycleService, SessionParam, SessionPlugin, SessionPluginSource,
+    SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
+    SessionStateChangedContext, SessionStateService, SessionToolAccess, SessionTurnInput,
+    SessionTurnRequest, SnapshotReader, SnapshotWriter, SubagentSessionContext,
+    ToolDiscoveryContext, ToolDiscoveryContribution, ToolDiscoveryContributor,
+    ToolDiscoveryToolContribution, ToolResultProjectionContext, ToolResultProjector,
+    ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
+    TurnResultSummary, TurnTransformContext, plugin_action_def,
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{
@@ -339,9 +339,19 @@ mod tests {
         let source = include_str!("lib.rs");
         let removed_envelope = ["SessionState", "Envelope"].concat();
         let removed_persisted = ["PersistedSession", "Snapshot"].concat();
+        let removed_history_rewriter = ["History", "Rewriter"].concat();
+        let removed_rewrite_trigger = ["Rewrite", "Trigger"].concat();
+        let removed_rewrite_context = ["Rewrite", "Context"].concat();
+        let removed_history_state = ["History", "State"].concat();
+        let removed_history_metadata = ["History", "Rewrite", "Metadata"].concat();
 
         assert!(!source.contains(&removed_envelope));
         assert!(!source.contains(&removed_persisted));
+        assert!(!source.contains(&removed_history_rewriter));
+        assert!(!source.contains(&removed_rewrite_trigger));
+        assert!(!source.contains(&removed_rewrite_context));
+        assert!(!source.contains(&removed_history_state));
+        assert!(!source.contains(&removed_history_metadata));
     }
 
     fn public_reexport_block(source: &str, module: &str) -> String {

@@ -230,7 +230,7 @@ impl PluginHost {
             .turn_context_transforms
             .sort_by_key(|entry| std::cmp::Reverse(entry.0));
         contributions
-            .history_rewriters
+            .context_compactors
             .sort_by_key(|entry| std::cmp::Reverse(entry.0));
         let host_events = crate::HostEventCatalog::from_events(contributions.host_events.clone())
             .map_err(|message| {

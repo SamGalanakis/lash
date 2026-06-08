@@ -301,9 +301,9 @@ impl LashRuntime {
         })?;
         self.state.apply_persisted_commit_result(result);
         // Drain pending tombstones if any. Under KeepHistory this is a
-        // no-op (tombstones never get added). Under DropOrphans,
-        // Phase-9's not-yet-wired rewrite path would have populated the
-        // set — wired fully in Phase 10's vacuum() design.
+        // no-op (tombstones never get added). Under DropOrphans, a future
+        // orphan-trim path would populate the set for Phase 10's vacuum()
+        // design.
         Ok(ParkedSession {
             session_id,
             store,

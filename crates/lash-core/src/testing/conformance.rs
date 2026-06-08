@@ -1976,11 +1976,12 @@ async fn commit_increments_head_and_round_trips_agent_frames(store: Arc<dyn Runt
         .expect("initial frame")
         .assignment
         .clone();
+    let custom_reason = AgentFrameReason::new("plan_mode");
     state.append_agent_frame(AgentFrameRecord::new(
         "frame-2".to_string(),
         "root".to_string(),
         Some(previous_frame_id),
-        AgentFrameReason::ContinueAs,
+        custom_reason.clone(),
         None,
         assignment,
         ProtocolTurnOptions::default(),
@@ -2004,6 +2005,7 @@ async fn commit_increments_head_and_round_trips_agent_frames(store: Arc<dyn Runt
         .iter()
         .find(|frame| frame.frame_id == "frame-2")
         .expect("current frame");
+    assert_eq!(current.reason, custom_reason);
     assert_eq!(
         current.execution_state_snapshot.as_deref(),
         Some(&b"frame-vm"[..])

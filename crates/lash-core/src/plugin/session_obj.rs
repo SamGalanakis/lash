@@ -188,7 +188,7 @@ impl PluginSession {
         ctx: &TurnTransformContext<'_>,
         input: crate::session_model::context::PreparedContext,
         phase_probe: Option<Arc<dyn crate::runtime::RuntimeTurnPhaseProbe>>,
-    ) -> Result<crate::session_model::context::PreparedContext, HistoryError> {
+    ) -> Result<crate::session_model::context::PreparedContext, ContextError> {
         let mut current = input;
         for (_, registered) in &self.contributions.turn_context_transforms {
             let phase_name =
@@ -205,21 +205,19 @@ impl PluginSession {
         Ok(current)
     }
 
-    /// Chain registered history rewriters, skipping any that opt out of
-    /// the current trigger via `accepts()`.
-    pub async fn rewrite_history(
+    /// Ask registered compactors for seed nodes for a new compaction frame.
+    pub async fn compact_context(
         &self,
-        ctx: &RewriteContext<'_>,
-        input: HistoryState,
-    ) -> Result<HistoryState, HistoryError> {
-        let mut current = input;
-        for (_, registered) in &self.contributions.history_rewriters {
-            if !registered.hook.accepts(&ctx.trigger) {
-                continue;
+        ctx: &CompactionContext<'_>,
+    ) -> Result<Option<ContextCompaction>, ContextError> {
+        for (_, registered) in &self.contributions.context_compactors {
+            if let Some(compaction) = registered.hook.compact(ctx).await?
+                && !compaction.is_empty()
+            {
+                return Ok(Some(compaction));
             }
-            current = registered.hook.rewrite(ctx, current).await?;
         }
-        Ok(current)
+        Ok(None)
     }
 
     pub async fn collect_prompt_contributions(

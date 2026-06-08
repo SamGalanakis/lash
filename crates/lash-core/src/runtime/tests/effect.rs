@@ -1037,7 +1037,11 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
             TurnInput::text("emit host event from tool"),
             TurnOptions::new(
                 CancellationToken::new(),
-                named_turn_scope("root", "host-event-tool"),
+                ScopedEffectController::shared(
+                    Arc::new(controller.clone()),
+                    EffectScope::turn("root", "host-event-tool"),
+                )
+                .expect("capturing effect scope"),
             )
             .with_events(&NoopEventSink),
         )

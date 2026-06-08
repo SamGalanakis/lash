@@ -32,7 +32,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "/compact",
         aliases: &[],
         usage: "/compact [focus instructions]",
-        description: "Summarize older messages to free up context",
+        description: "Open a compaction frame seeded by a summary",
         argument_hint: Some("[focus instructions]"),
         argument_options: &[],
         takes_argument: true,

@@ -50,7 +50,7 @@ pub(super) fn register_rlm_protocol_plugin(
     // Per-turn `prompt_usage` is captured here and passed to the projector via a
     // shared cell so the budget line can ride in the volatile turn-tail message
     // instead of poisoning the cached system prefix.
-    reg.history().prepare_turn(
+    reg.context().prepare_turn(
         10,
         Arc::new(BudgetUsageObserver {
             cell: last_prompt_usage,

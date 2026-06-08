@@ -122,7 +122,7 @@ impl SessionPlugin for ObservationalMemoryPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        reg.history().prepare_turn(
+        reg.context().prepare_turn(
             100,
             Arc::new(ObservationalMemoryTransform::new(self.config.clone())),
         );

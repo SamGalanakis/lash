@@ -360,14 +360,14 @@ impl SessionControl {
         })
     }
 
-    async fn rewrite_history(
+    async fn compact_context(
         &self,
-        trigger: RewriteTrigger,
+        instructions: Option<String>,
         scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<bool> {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
-                .rewrite_history(trigger, scoped_effect_controller)
+                .compact_context(instructions, scoped_effect_controller)
                 .await
                 .map_err(Into::into)
         })
@@ -943,13 +943,13 @@ impl StateControl {
         self.control.restore_execution_state(bytes).await
     }
 
-    pub async fn rewrite_history(
+    pub async fn compact_context(
         &self,
-        trigger: RewriteTrigger,
+        instructions: Option<String>,
         scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<bool> {
         self.control
-            .rewrite_history(trigger, scoped_effect_controller)
+            .compact_context(instructions, scoped_effect_controller)
             .await
     }
 }

@@ -262,13 +262,18 @@ impl LashRuntime {
         self.session.as_ref().map(|s| Arc::clone(s.plugins()))
     }
 
-    /// Run the registered history rewrite pipeline against the current
-    /// state, applying the resulting messages back onto the runtime.
-    /// Returns true when at least one rewriter produced a summary or
-    /// otherwise mutated the message list.
-    pub async fn rewrite_history(
+    pub fn open_agent_frame(
         &mut self,
-        trigger: crate::RewriteTrigger,
+        request: crate::OpenAgentFrameRequest,
+    ) -> crate::OpenAgentFrameResult {
+        open_agent_frame_in_state(&mut self.state, request)
+    }
+
+    /// Run the registered compaction provider and commit the resulting
+    /// seed nodes into a fresh Agent Frame.
+    pub async fn compact_context(
+        &mut self,
+        instructions: Option<String>,
         scoped_effect_controller: crate::ScopedEffectController<'_>,
     ) -> Result<bool, PluginActionInvokeError> {
         let services = self.runtime_session_services()?;
@@ -277,39 +282,34 @@ impl LashRuntime {
                 "runtime session not available".to_string(),
             ));
         };
-        let ctx = crate::RewriteContext {
+        let ctx = crate::CompactionContext {
             session_id: self.state.session_id.clone(),
-            trigger: trigger.clone(),
             state: self.read_view(),
+            instructions,
             sessions: services.state_service(),
             session_lifecycle: services.lifecycle_service(),
             session_graph: services.graph_service(),
             scoped_effect_controller,
         };
-        let input = crate::HistoryState::from_snapshot(&self.state.to_snapshot());
-        let baseline_messages = input.messages.len();
-        let outcome = plugin_session
-            .rewrite_history(&ctx, input)
-            .await
-            .map_err(|err| {
-                PluginActionInvokeError::Unknown(format!("rewrite_history failed: {err}"))
-            })?;
-        let mutated =
-            outcome.metadata.produced_summary || outcome.messages.len() != baseline_messages;
-        if mutated {
-            self.state.replace_active_read_state(&outcome.messages);
-            if let Some(session) = self.session.as_ref() {
-                self.state.tool_state_snapshot = Some(session.tool_registry().export_state());
-                let captured = session.plugins().snapshot();
-                crate::runtime::state::store_plugin_snapshot(
-                    &mut self.state.plugin_snapshot,
-                    captured,
-                );
-                self.state.plugin_snapshot_revision =
-                    Some(session.plugins().snapshot_revision_fingerprint());
-            }
+        let Some(compaction) = plugin_session.compact_context(&ctx).await.map_err(|err| {
+            PluginActionInvokeError::Unknown(format!("context compaction failed: {err}"))
+        })?
+        else {
+            return Ok(false);
+        };
+        let frame_id = format!(
+            "{}:frame:compaction:{}",
+            self.state.session_id,
+            uuid::Uuid::new_v4()
+        );
+        let result = self.open_agent_frame(
+            crate::OpenAgentFrameRequest::new(frame_id, crate::AgentFrameReason::compaction())
+                .with_initial_nodes(compaction.initial_nodes),
+        );
+        if result.opened {
+            self.stamp_live_plugin_state();
         }
-        Ok(mutated)
+        Ok(result.opened)
     }
 
     pub(super) fn session_policy(&self) -> SessionPolicy {

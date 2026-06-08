@@ -110,14 +110,76 @@ pub enum AgentFrameStatus {
     Superseded,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentFrameReason {
-    #[default]
-    Initial,
-    ContinueAs,
-    Handoff,
-    PlanMode,
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentFrameReason(String);
+
+impl AgentFrameReason {
+    pub const INITIAL: &'static str = "initial";
+    pub const CONTINUE_AS: &'static str = "continue_as";
+    pub const COMPACTION: &'static str = "compaction";
+
+    pub fn new(label: impl Into<String>) -> Self {
+        Self(label.into())
+    }
+
+    pub fn initial() -> Self {
+        Self::new(Self::INITIAL)
+    }
+
+    pub fn continue_as() -> Self {
+        Self::new(Self::CONTINUE_AS)
+    }
+
+    pub fn compaction() -> Self {
+        Self::new(Self::COMPACTION)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for AgentFrameReason {
+    fn default() -> Self {
+        Self::initial()
+    }
+}
+
+impl From<&str> for AgentFrameReason {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for AgentFrameReason {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl std::fmt::Display for AgentFrameReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod agent_frame_reason_tests {
+    use super::AgentFrameReason;
+
+    #[test]
+    fn agent_frame_reason_round_trips_arbitrary_labels() {
+        let reason: AgentFrameReason =
+            serde_json::from_str("\"plan_mode\"").expect("deserialize reason");
+
+        assert_eq!(reason.as_str(), "plan_mode");
+        assert_eq!(
+            serde_json::to_string(&reason).expect("serialize reason"),
+            "\"plan_mode\""
+        );
+        assert_eq!(AgentFrameReason::compaction().as_str(), "compaction");
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -205,6 +267,45 @@ impl AgentFrameRecord {
             execution_state_snapshot: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OpenAgentFrameRequest {
+    pub frame_id: AgentFrameId,
+    pub reason: AgentFrameReason,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_nodes: Vec<SessionAppendNode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caused_by: Option<crate::CausalRef>,
+}
+
+impl OpenAgentFrameRequest {
+    pub fn new(frame_id: impl Into<AgentFrameId>, reason: AgentFrameReason) -> Self {
+        Self {
+            frame_id: frame_id.into(),
+            reason,
+            initial_nodes: Vec::new(),
+            caused_by: None,
+        }
+    }
+
+    pub fn with_initial_nodes(mut self, initial_nodes: Vec<SessionAppendNode>) -> Self {
+        self.initial_nodes = initial_nodes;
+        self
+    }
+
+    pub fn with_caused_by(mut self, caused_by: crate::CausalRef) -> Self {
+        self.caused_by = Some(caused_by);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct OpenAgentFrameResult {
+    pub frame_id: AgentFrameId,
+    pub opened: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_node_ids: Vec<String>,
 }
 
 #[derive(Clone)]
