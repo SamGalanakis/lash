@@ -71,7 +71,6 @@ fn register_singleton_hook<H>(
 pub(crate) struct PluginContributions {
     pub(crate) tool_providers: Vec<Arc<dyn ToolProvider>>,
     pub(crate) host_events: Vec<crate::HostEvent>,
-    pub(crate) trigger_registry: Option<Arc<SessionTriggerRegistry>>,
     pub(crate) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
     pub(crate) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
     pub(crate) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
@@ -118,22 +117,6 @@ pub struct HostEventRegistrations<'a> {
 impl HostEventRegistrations<'_> {
     pub fn declare(self, event: crate::HostEvent) -> Result<(), PluginError> {
         self.reg.add_host_event(event)
-    }
-}
-
-pub(crate) struct TriggerRegistrations<'a> {
-    reg: &'a mut PluginRegistrar,
-}
-
-impl TriggerRegistrations<'_> {
-    pub(crate) fn registry(self, registry: Arc<SessionTriggerRegistry>) -> Result<(), PluginError> {
-        if self.reg.contributions.trigger_registry.is_some() {
-            return Err(PluginError::Registration(
-                "duplicate session trigger registry".to_string(),
-            ));
-        }
-        self.reg.contributions.trigger_registry = Some(registry);
-        Ok(())
     }
 }
 
@@ -368,10 +351,6 @@ impl PluginRegistrar {
 
     pub fn host_events(&mut self) -> HostEventRegistrations<'_> {
         HostEventRegistrations { reg: self }
-    }
-
-    pub(crate) fn triggers(&mut self) -> TriggerRegistrations<'_> {
-        TriggerRegistrations { reg: self }
     }
 
     pub fn prompt(&mut self) -> PromptRegistrations<'_> {

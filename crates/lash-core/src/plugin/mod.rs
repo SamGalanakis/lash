@@ -92,14 +92,13 @@ pub use surface::{
     TurnPreparation,
 };
 pub(crate) use surface::{emit_plugin_runtime_events, plugin_runtime_session_events};
-pub(crate) use trigger_registry::{SessionTriggerRegistry, SessionTriggerRoute};
-pub use trigger_registry::{TriggerRegistration, TriggerSourceType, TriggerTargetSummary};
+pub(crate) use trigger_registry::{trigger_handle_json, validate_target_process};
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     // Protocol plugins must be registered by the embedder before calling
     // `PluginHost::build_session`. Unit tests use an in-tree fake to avoid
     // a dev-dep cycle through the protocol crates.
     let factories: Vec<Arc<dyn PluginFactory>> =
-        vec![Arc::new(trigger_registry::SessionTriggerPluginFactory)];
+        vec![Arc::new(trigger_registry::TriggerResourcePluginFactory)];
     #[cfg(not(test))]
     return factories;
 

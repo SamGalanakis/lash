@@ -3,6 +3,80 @@ use crate::support::*;
 pub use lash_core::{AcceptedInjectedTurnInput, PluginAction};
 
 #[derive(Clone)]
+pub struct HostEventsControl {
+    pub(crate) core: LashCore,
+}
+
+impl HostEventsControl {
+    pub async fn emit(
+        &self,
+        request: lash_core::HostEventOccurrenceRequest,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        let store = self.core.env.host_event_store.as_ref().ok_or_else(|| {
+            EmbedError::Plugin(lash_core::PluginError::Session(
+                "host event store is unavailable in this runtime".to_string(),
+            ))
+        })?;
+        let process_work_poke = self.core.process_work_runner.poke().await;
+        let router = lash_core::HostEventRouter::new(
+            Arc::clone(store),
+            self.core.env.process_registry.clone(),
+            process_work_poke,
+            self.core.env.core.profile.host_profile_id.clone(),
+        );
+        let scoped = self.core.env.core.control.effect_host.scoped(
+            lash_core::EffectScope::runtime_operation(format!(
+                "host-event:{}",
+                request.idempotency_key
+            )),
+        )?;
+        router
+            .emit(request, scoped.controller())
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn emit_with_effect_scope(
+        &self,
+        request: lash_core::HostEventOccurrenceRequest,
+        scoped_effect_controller: lash_core::ScopedEffectController<'_>,
+    ) -> Result<lash_core::HostEventEmitReport> {
+        let store = self.core.env.host_event_store.as_ref().ok_or_else(|| {
+            EmbedError::Plugin(lash_core::PluginError::Session(
+                "host event store is unavailable in this runtime".to_string(),
+            ))
+        })?;
+        let process_work_poke = self.core.process_work_runner.poke().await;
+        let router = lash_core::HostEventRouter::new(
+            Arc::clone(store),
+            self.core.env.process_registry.clone(),
+            process_work_poke,
+            self.core.env.core.profile.host_profile_id.clone(),
+        );
+        router
+            .emit(request, scoped_effect_controller.controller())
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn subscriptions(
+        &self,
+        filter: lash_core::TriggerSubscriptionFilter,
+    ) -> Result<Vec<lash_core::TriggerRegistration>> {
+        let store = self.core.env.host_event_store.as_ref().ok_or_else(|| {
+            EmbedError::Plugin(lash_core::PluginError::Session(
+                "host event store is unavailable in this runtime".to_string(),
+            ))
+        })?;
+        let records = store.list_subscriptions(filter).await?;
+        Ok(records
+            .iter()
+            .map(lash_core::TriggerRegistration::from)
+            .collect())
+    }
+}
+
+#[derive(Clone)]
 pub struct SessionControl {
     pub(crate) runtime: RuntimeHandle,
 }
@@ -244,78 +318,13 @@ impl SessionControl {
         .await
     }
 
-    async fn activate_lashlang_trigger(
-        &self,
-        handle: &str,
-        payload: serde_json::Value,
-    ) -> Result<lash_core::HostEventEmitReport> {
-        self.with_writer(async |runtime: &mut LashRuntime| {
-            runtime
-                .activate_lashlang_trigger(handle, payload)
-                .await
-                .map_err(Into::into)
-        })
-        .await
-    }
-
-    async fn activate_lashlang_trigger_with_effect_scope(
-        &self,
-        handle: &str,
-        payload: serde_json::Value,
-        scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<lash_core::HostEventEmitReport> {
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let value = runtime
-            .activate_lashlang_trigger_with_effect_scope(handle, payload, scoped_effect_controller)
-            .await
-            .map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        value
-    }
-
-    async fn activate_lashlang_trigger_source_type(
-        &self,
-        source_type: impl AsRef<str>,
-        payload: serde_json::Value,
-    ) -> Result<lash_core::HostEventEmitReport> {
-        let source_type = source_type.as_ref().to_string();
-        self.with_writer(async |runtime: &mut LashRuntime| {
-            runtime
-                .activate_lashlang_trigger_source_type(&source_type, payload)
-                .await
-                .map_err(Into::into)
-        })
-        .await
-    }
-
-    async fn activate_lashlang_trigger_source_type_with_effect_scope(
-        &self,
-        source_type: impl AsRef<str>,
-        payload: serde_json::Value,
-        scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<lash_core::HostEventEmitReport> {
-        let source_type = source_type.as_ref().to_string();
-        let writer = self.runtime.writer();
-        let mut runtime = writer.lock().await;
-        let value = runtime
-            .activate_lashlang_trigger_source_type_with_effect_scope(
-                &source_type,
-                payload,
-                scoped_effect_controller,
-            )
-            .await
-            .map_err(Into::into);
-        self.runtime.publish_from(&runtime);
-        value
-    }
-
     async fn list_lashlang_trigger_registrations(
         &self,
     ) -> Result<Vec<lash_core::TriggerRegistration>> {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
                 .list_lashlang_trigger_registrations()
+                .await
                 .map_err(Into::into)
         })
         .await
@@ -328,6 +337,7 @@ impl SessionControl {
         self.with_writer(async |runtime: &mut LashRuntime| {
             runtime
                 .lashlang_trigger_registrations_by_source_type(source_type)
+                .await
                 .map_err(Into::into)
         })
         .await
@@ -848,27 +858,6 @@ impl SessionCommandsControl {
             .await
     }
 
-    pub async fn emit_host_event(
-        &self,
-        resource_type: impl AsRef<str>,
-        alias: impl AsRef<str>,
-        event: impl AsRef<str>,
-        payload: serde_json::Value,
-        idempotency_key: impl Into<String>,
-    ) -> Result<lash_core::SessionCommandReceipt> {
-        self.control
-            .submit_session_command(
-                lash_core::SessionCommand::EmitHostEvent {
-                    resource_type: resource_type.as_ref().to_string(),
-                    alias: alias.as_ref().to_string(),
-                    event: event.as_ref().to_string(),
-                    payload,
-                },
-                idempotency_key,
-            )
-            .await
-    }
-
     pub async fn reset(
         &self,
         reason: impl Into<String>,
@@ -885,11 +874,7 @@ impl SessionCommandsControl {
     }
 }
 
-/// Host controls for Lashlang trigger registrations.
-///
-/// Lash does not own trigger source schedulers. Hosts or plugins that own a
-/// concrete source type can activate every enabled route for that source type,
-/// while scheduler-like sources may still activate an exact selected handle.
+/// Session-scoped read controls for Lashlang trigger registrations.
 #[derive(Clone)]
 pub struct TriggersControl {
     control: SessionControl,
@@ -908,69 +893,13 @@ impl TriggersControl {
     /// Return registrations whose source value has the given host value type.
     ///
     /// This is the source-owner API: a timer, UI, webhook, or other host-owned
-    /// source uses it to find the exact handles it may activate.
+    /// source uses it to inspect registrations for keys it may schedule and emit.
     pub async fn by_source_type(
         &self,
         source_type: impl Into<lash_core::TriggerSourceType>,
     ) -> Result<Vec<lash_core::TriggerRegistration>> {
         self.control
             .lashlang_trigger_registrations_by_source_type(source_type)
-            .await
-    }
-
-    /// Activate one exact trigger handle with an event payload.
-    ///
-    /// The payload must match the event type declared for the registered source.
-    /// Disabled or unknown handles do not start a process.
-    pub async fn activate(
-        &self,
-        handle: impl AsRef<str>,
-        payload: serde_json::Value,
-    ) -> Result<lash_core::HostEventEmitReport> {
-        self.control
-            .activate_lashlang_trigger(handle.as_ref(), payload)
-            .await
-    }
-
-    pub async fn activate_with_effect_scope(
-        &self,
-        handle: impl AsRef<str>,
-        payload: serde_json::Value,
-        scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<lash_core::HostEventEmitReport> {
-        self.control
-            .activate_lashlang_trigger_with_effect_scope(
-                handle.as_ref(),
-                payload,
-                scoped_effect_controller,
-            )
-            .await
-    }
-
-    /// Activate every enabled trigger route whose source value has this host
-    /// value type.
-    pub async fn activate_source_type(
-        &self,
-        source_type: impl AsRef<str>,
-        payload: serde_json::Value,
-    ) -> Result<lash_core::HostEventEmitReport> {
-        self.control
-            .activate_lashlang_trigger_source_type(source_type.as_ref(), payload)
-            .await
-    }
-
-    pub async fn activate_source_type_with_effect_scope(
-        &self,
-        source_type: impl AsRef<str>,
-        payload: serde_json::Value,
-        scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<lash_core::HostEventEmitReport> {
-        self.control
-            .activate_lashlang_trigger_source_type_with_effect_scope(
-                source_type.as_ref(),
-                payload,
-                scoped_effect_controller,
-            )
             .await
     }
 }

@@ -880,7 +880,7 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
 }
 
 #[tokio::test]
-async fn tool_emitted_host_event_is_serialized_and_appended_to_final_turn_commit() {
+async fn tool_emitted_host_event_is_serialized_without_appending_session_node() {
     #[derive(Clone, Default)]
     struct CapturingToolReplayController {
         llm_calls: Arc<Mutex<usize>>,
@@ -1039,6 +1039,11 @@ async fn tool_emitted_host_event_is_serialized_and_appended_to_final_turn_commit
         tool_outcomes[0]["host_events"][0]["payload"],
         serde_json::json!({ "pressed": true })
     );
+    assert!(
+        tool_outcomes[0]["host_events"][0]["occurrence_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
 
     let host_event_nodes = turn
         .state
@@ -1054,12 +1059,7 @@ async fn tool_emitted_host_event_is_serialized_and_appended_to_final_turn_commit
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(host_event_nodes.len(), 1);
-    assert_eq!(host_event_nodes[0]["source_type"], "ui.button.pressed");
-    assert_eq!(
-        host_event_nodes[0]["payload"],
-        serde_json::json!({ "pressed": true })
-    );
+    assert!(host_event_nodes.is_empty());
 }
 
 #[tokio::test]

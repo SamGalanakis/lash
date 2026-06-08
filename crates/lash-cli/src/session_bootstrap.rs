@@ -188,6 +188,10 @@ impl SessionBootstrap {
         self.sidecar_db_path("processes.db")
     }
 
+    pub(crate) fn host_events_db_file(&self) -> PathBuf {
+        self.sidecar_db_path("host-events.db")
+    }
+
     pub(crate) fn run_session_id(&self) -> Option<String> {
         self.resume_start
             .as_ref()
@@ -321,6 +325,9 @@ impl CliSessionOpener {
         let process_registry = Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&bootstrap.processes_db_file()).await?,
         );
+        let host_event_store = Arc::new(
+            lash_sqlite_store::SqliteHostEventStore::open(&bootstrap.host_events_db_file()).await?,
+        );
         let core_builder = LashCore::builder()
             .install_mode(ModePreset::standard())
             .install_mode(ModePreset::rlm())
@@ -337,7 +344,8 @@ impl CliSessionOpener {
             .attachment_store(Arc::clone(&self.attachment_store))
             .trace_jsonl_path(self.trace_jsonl_path.clone())
             .trace_level(self.trace_level)
-            .process_registry(process_registry);
+            .process_registry(process_registry)
+            .host_event_store(host_event_store);
         let core = core_builder.build()?;
         let session = core
             .session(session_id)
@@ -426,6 +434,7 @@ mod tests {
         assert!(opened.bootstrap.artifacts_db_file().is_file());
         assert!(opened.bootstrap.effects_db_file().is_file());
         assert!(opened.bootstrap.processes_db_file().is_file());
+        assert!(opened.bootstrap.host_events_db_file().is_file());
         Ok(())
     }
 }

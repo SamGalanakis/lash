@@ -2,7 +2,8 @@
 
 ## Interaction Glossary
 
-- **Queued Work**: Durable, session-scoped runtime ingress. It may carry turn input, process wakes, host events, timers, or runtime maintenance command payloads.
+- **Host Event**: Session-agnostic world signal emitted by a host-owned source such as a UI control, webhook, or schedule. It is routed to interested runtime subscribers and is not queued session work.
+- **Queued Work**: Durable, session-scoped runtime ingress for work that must enter one session at a turn boundary. It may carry turn input, process wakes, or runtime maintenance command payloads; it does not carry host events or timers.
 - **Queued Turn**: Queued Work whose payload is user-visible `TurnInput`.
 - **Early Injection**: User input submitted with Enter while a turn is active. The runtime accepts it at the earliest safe boundary in the active turn.
 - **Next Full Turn**: User input submitted with Tab while a turn is active. The runtime delivers it only after the current turn commits.

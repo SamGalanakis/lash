@@ -1241,6 +1241,7 @@ fn turn_result_total_usage_sums_parent_and_children() {
 // - durable attachment store       => `lash::FileAttachmentStore`
 // - durable artifact store         => `lash_sqlite_store::Store`
 // - durable process registry       => `lash_sqlite_store::SqliteProcessRegistry`
+// - durable host event store       => `lash_sqlite_store::SqliteHostEventStore`
 //
 // Ephemeral peers are the named in-memory implementations.
 
@@ -1284,6 +1285,14 @@ async fn durable_artifact_store(
         lash_sqlite_store::Store::open(&dir.join("artifacts.db"))
             .await
             .expect("open durable artifact store"),
+    )
+}
+
+async fn durable_host_event_store(dir: &std::path::Path) -> Arc<dyn lash_core::HostEventStore> {
+    Arc::new(
+        lash_sqlite_store::SqliteHostEventStore::open(&dir.join("host-events.db"))
+            .await
+            .expect("open durable host event store"),
     )
 }
 
@@ -1361,8 +1370,8 @@ async fn durable_process_registry_rejects_missing_durable_store_factory_at_build
 #[tokio::test]
 async fn all_durable_stores_build_successfully() -> Result<()> {
     // Positive control: a coherent durable wiring (durable session store +
-    // durable attachment + durable artifact + durable process registry) builds
-    // without error.
+    // durable attachment + durable artifact + durable process registry +
+    // durable host event store) builds without error.
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
@@ -1374,9 +1383,38 @@ async fn all_durable_stores_build_successfully() -> Result<()> {
         .store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
         .lashlang_artifact_store(durable_artifact_store(dir.path()).await)
+        .host_event_store(durable_host_event_store(dir.path()).await)
         .process_registry(registry)
         .build()?;
     Ok(())
+}
+
+#[tokio::test]
+async fn durable_process_registry_rejects_ephemeral_host_event_store_at_build() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
+            .await
+            .expect("open durable registry"),
+    );
+    let result = peer_coherence_builder()
+        .effect_host(Arc::new(lash_core::InlineEffectHost::default()))
+        .store_factory(durable_session_store_factory(dir.path()))
+        .attachment_store(durable_attachment_store(dir.path()))
+        .lashlang_artifact_store(durable_artifact_store(dir.path()).await)
+        .process_registry(registry)
+        .build();
+    let err = expect_build_error(
+        result,
+        "durable process registry without durable host event store must be rejected",
+    );
+
+    assert!(matches!(
+        err,
+        EmbedError::DurableStorePeerRequired {
+            facet: "host event store"
+        }
+    ));
 }
 
 #[tokio::test]
@@ -1400,6 +1438,7 @@ async fn durable_registry_with_only_child_store_factory_builds() -> Result<()> {
         .child_store_factory(durable_session_store_factory(dir.path()))
         .attachment_store(durable_attachment_store(dir.path()))
         .lashlang_artifact_store(durable_artifact_store(dir.path()).await)
+        .host_event_store(durable_host_event_store(dir.path()).await)
         .process_registry(registry)
         .build()?;
     Ok(())

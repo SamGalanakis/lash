@@ -357,7 +357,8 @@ submit "registered"
         );
     }
 
-    async fn activate_first_clock_trigger(
+    async fn emit_first_clock_alarm(
+        core: &LashCore,
         session: &crate::LashSession,
         payload: serde_json::Value,
     ) -> lash_core::HostEventEmitReport {
@@ -369,14 +370,23 @@ submit "registered"
         let handle = registrations
             .iter()
             .find(|registration| registration.enabled)
-            .map(|registration| registration.handle.as_str())
-            .expect("registered clock trigger handle")
-            .to_string();
-        session
-            .triggers()
-            .activate(handle, payload)
+            .expect("registered clock trigger");
+        let idempotency_key = format!(
+            "test-clock:{}",
+            payload
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("occurrence")
+        );
+        core.host_events()
+            .emit(crate::HostEventOccurrenceRequest::new(
+                "clock.Alarm",
+                handle.source_key.clone(),
+                payload,
+                idempotency_key,
+            ))
             .await
-            .expect("activate trigger")
+            .expect("emit clock host event")
     }
 
     /// Differential baseline: a live reopen restores the trigger registry route
@@ -393,7 +403,8 @@ submit "registered"
             .open()
             .await
             .expect("reopen session");
-        let report = activate_first_clock_trigger(
+        let report = emit_first_clock_alarm(
+            &core,
             &reopened,
             serde_json::json!({
                 "id": "daily-2026-06-01",
@@ -417,7 +428,8 @@ submit "registered"
             .open()
             .await
             .expect("reopen session");
-        let report = activate_first_clock_trigger(
+        let report = emit_first_clock_alarm(
+            &core,
             &session,
             serde_json::json!({
                 "id": "daily-2026-06-01",
@@ -442,32 +454,25 @@ submit "registered"
         )
         .await;
 
-        let session = core
-            .session(SESSION_ID)
-            .rlm()
-            .open()
-            .await
-            .expect("reopen session");
-        let _receipt = session
-            .commands()
-            .emit_host_event(
-                "Button",
-                "ui.button",
-                "pressed",
-                serde_json::json!({
+        let source_key =
+            crate::empty_host_event_source_key("ui.button.pressed").expect("button source key");
+        let report = core
+            .host_events()
+            .emit(
+                crate::HostEventOccurrenceRequest::new(
+                    "ui.button.pressed",
+                    source_key,
+                    serde_json::json!({
                     "button": "Red",
                     "message": "user pressed the red button",
                     "pressed_at": "2026-06-02T12:00:00Z"
-                }),
-                "runtime-rebuild-host-event",
+                    }),
+                    "runtime-rebuild-host-event",
+                )
+                .with_source(serde_json::json!({})),
             )
             .await
             .expect("emit host event");
-        let _ = session
-            .next_queued_turn()
-            .run()
-            .await
-            .expect("drain host event command");
         let process_records = registry
             .list_non_terminal()
             .await
@@ -485,13 +490,17 @@ submit "registered"
             .expect("triggered process cause");
         assert!(matches!(
             &process_caused_by,
-            lash_core::CausalRef::SessionNode {
-                session_id,
-                node_id,
-            } if session_id == SESSION_ID && node_id.starts_with("plugin:")
+            lash_core::CausalRef::HostEvent { occurrence_id }
+                if occurrence_id == &report.occurrence_id
         ));
 
         await_success(&registry, &process_id).await;
+        let session = core
+            .session(SESSION_ID)
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session");
         let queued = session.queued_work().await.expect("queued wake");
         let wake = queued
             .iter()

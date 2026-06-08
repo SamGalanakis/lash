@@ -78,6 +78,9 @@ pub struct RuntimeEnvironment {
     // Host-owned process lifecycle and local execution support.
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
 
+    // Host-owned trigger subscription and host-event occurrence routing.
+    pub host_event_store: Option<Arc<dyn crate::HostEventStore>>,
+
     // Store factory used by managed child sessions created from runtimes
     // built with this environment.
     pub session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
@@ -133,6 +136,7 @@ impl Default for RuntimeEnvironmentBuilder {
                 plugin_host: None,
                 residency: Residency::default(),
                 process_registry: None,
+                host_event_store: Some(Arc::new(crate::InMemoryHostEventStore::default())),
                 session_store_factory: None,
                 process_work_poke: None,
                 queued_work_poke: None,
@@ -164,6 +168,11 @@ impl RuntimeEnvironmentBuilder {
                 host.as_ref().clone().with_lashlang_abilities(abilities),
             ));
         }
+        self
+    }
+
+    pub fn with_host_event_store(mut self, store: Arc<dyn crate::HostEventStore>) -> Self {
+        self.env.host_event_store = Some(store);
         self
     }
 

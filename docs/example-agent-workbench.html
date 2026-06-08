@@ -100,7 +100,7 @@ handle = await triggers.register({
   name: "daily_digest"
 })?
 submit { handle: handle, registrations: await triggers.list({ target: daily_digest })? }</code></pre>
-      <p>After a Restate-backed turn registers an enabled <code>cron.Schedule</code>, the workbench syncs that trigger to <code>WorkbenchCronJob/{session_id}:{trigger_handle}</code>. The virtual object stores the source request, the next execution timestamp, and the Restate invocation id in Restate K/V state. Its <code>run</code> handler activates that exact trigger handle with a validated <code>cron.Tick</code> payload, then schedules its next <code>run</code> with a delayed Restate send. Resetting the workbench cancels known cron objects for the old session. The trace JSONL includes <code>agent_workbench.cron.restate.sync_upserted</code> and <code>agent_workbench.cron.restate.run</code> events.</p>
+      <p>After a Restate-backed turn registers an enabled <code>cron.Schedule</code>, the workbench syncs that source key to <code>WorkbenchCronJob/{session_id}:{source_key}</code>. The virtual object stores the source request, the next execution timestamp, and the Restate invocation id in Restate K/V state. Its <code>run</code> handler emits a validated <code>cron.Tick</code> host-event occurrence for that stored source key, then schedules its next <code>run</code> with a delayed Restate send. Resetting the workbench cancels known cron objects for the old session. The trace JSONL includes <code>agent_workbench.cron.restate.sync_upserted</code> and <code>agent_workbench.cron.restate.run</code> events.</p>
     </div>
 
     <div class="section" id="host-wiring">

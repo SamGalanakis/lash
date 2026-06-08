@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{HostEventEmitReport, PluginError};
 
 use super::ToolContext;
@@ -33,20 +31,21 @@ impl<'run> ToolHostEventControl<'run> {
             &payload,
         )?;
         let source_type = crate::host_event_source_type(alias, event);
-        let event_scope = tool_event_scope_id(&self.context, &source_type, &payload)?;
-        let scoped_effect_controller = crate::ScopedEffectController::borrowed(
-            dispatch.effect_controller.controller(),
-            crate::EffectScope::host_event(&self.context.session_id, event_scope),
-        )
-        .map_err(|err| PluginError::Session(err.to_string()))?;
-        let activation = dispatch
-            .plugins
-            .trigger_activation_service(Arc::clone(&dispatch.processes), scoped_effect_controller);
-        let started_process_ids = activation
-            .activate_source_type(
-                &source_type,
-                payload.clone(),
-                self.context.parent_invocation.clone(),
+        let idempotency_key = tool_event_scope_id(&self.context, &source_type, &payload)?;
+        let source_key = crate::empty_host_event_source_key(&source_type)?;
+        let router = dispatch.host_event_router.as_ref().ok_or_else(|| {
+            PluginError::Session("host event store is unavailable in this runtime".to_string())
+        })?;
+        let report = router
+            .emit(
+                crate::HostEventOccurrenceRequest::new(
+                    &source_type,
+                    &source_key,
+                    payload.clone(),
+                    idempotency_key,
+                )
+                .with_source(serde_json::json!({})),
+                dispatch.effect_controller.controller(),
             )
             .await?;
         dispatch
@@ -56,13 +55,13 @@ impl<'run> ToolHostEventControl<'run> {
                 alias: alias.to_string(),
                 event: event.to_string(),
                 source_type,
+                source_key,
+                occurrence_id: report.occurrence_id.clone(),
                 payload: payload.clone(),
-                started_process_ids: started_process_ids.clone(),
+                started_process_ids: report.started_process_ids.clone(),
             })
             .map_err(PluginError::Session)?;
-        Ok(HostEventEmitReport {
-            started_process_ids,
-        })
+        Ok(report)
     }
 }
 

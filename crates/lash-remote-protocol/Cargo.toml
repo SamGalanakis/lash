@@ -28,4 +28,5 @@ core-conversions = ["dep:lash-core"]
 
 [dev-dependencies]
 lash-core = { workspace = true, features = ["testing"] }
+lashlang = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -321,6 +321,9 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         .expect("test plugin session");
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
     let attachment_store = Arc::new(crate::InMemoryAttachmentStore::new());
+    let host_event_store = Arc::new(crate::InMemoryHostEventStore::default());
+    let process_registry: Arc<dyn crate::ProcessRegistry> =
+        Arc::new(crate::TestLocalProcessRegistry::default());
     let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
         plugins,
         tools: Arc::new(EmptyCodeExecutionTools),
@@ -333,6 +336,12 @@ pub fn code_execution_context_with_lashlang_abilities_and_resources(
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        host_event_router: Some(crate::HostEventRouter::new(
+            host_event_store,
+            Some(process_registry),
+            None,
+            "test".to_string(),
+        )),
         effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),

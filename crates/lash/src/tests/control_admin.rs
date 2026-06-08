@@ -128,7 +128,7 @@ async fn session_commands_enqueue_idempotently_by_source_key() -> Result<()> {
 }
 
 #[tokio::test]
-async fn emit_host_event_command_appends_node_and_completes_claim() -> Result<()> {
+async fn host_event_emit_does_not_append_session_node_or_queue_work() -> Result<()> {
     let host_event = lash_core::HostEvent::new(
         "Button",
         "ui.button",
@@ -146,23 +146,30 @@ async fn emit_host_event_command_appends_node_and_completes_claim() -> Result<()
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .build()?;
     let session = core.session("command-host-event").open().await?;
+    let before = session.control().state().persist_current().await?;
 
-    let receipt = session
-        .commands()
-        .emit_host_event(
-            "Button",
-            "ui.button",
-            "pressed",
-            serde_json::json!({ "pressed": true }),
-            "button-press-1",
+    let source_key = lash_core::empty_host_event_source_key("ui.button.pressed")?;
+    let report = core
+        .host_events()
+        .emit(
+            lash_core::HostEventOccurrenceRequest::new(
+                "ui.button.pressed",
+                source_key,
+                serde_json::json!({ "pressed": true }),
+                "button-press-1",
+            )
+            .with_source(serde_json::json!({})),
         )
         .await?;
-    assert_eq!(receipt.source_key, "command:emit_host_event:button-press-1");
-    assert_eq!(session.queued_work().await?.len(), 1);
+    assert!(!report.occurrence_id.is_empty());
+    assert!(report.started_process_ids.is_empty());
 
-    assert!(session.next_queued_turn().run().await?.is_none());
     assert!(session.queued_work().await?.is_empty());
     let persisted = session.control().state().persist_current().await?;
+    assert_eq!(
+        persisted.session_graph.leaf_node_id,
+        before.session_graph.leaf_node_id
+    );
     let host_event_nodes = persisted
         .session_graph
         .nodes
@@ -172,7 +179,7 @@ async fn emit_host_event_command_appends_node_and_completes_claim() -> Result<()
             *plugin_type == "lash.host_event" && body["source_type"] == "ui.button.pressed"
         })
         .collect::<Vec<_>>();
-    assert_eq!(host_event_nodes.len(), 1);
+    assert!(host_event_nodes.is_empty());
     Ok(())
 }
 

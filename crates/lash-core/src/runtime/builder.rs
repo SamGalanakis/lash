@@ -33,6 +33,7 @@ pub struct EmbeddedRuntimeBuilder {
     plugin_source: PluginSource,
     core: RuntimeHostConfig,
     session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
+    host_event_store: Option<Arc<dyn crate::HostEventStore>>,
     store: Option<Arc<dyn RuntimePersistence>>,
     process_registry: Option<Arc<dyn ProcessRegistry>>,
     residency: Residency,
@@ -50,6 +51,7 @@ impl Default for EmbeddedRuntimeBuilder {
             // it with `with_runtime_host`.
             core: RuntimeHostConfig::in_memory(),
             session_store_factory: None,
+            host_event_store: Some(Arc::new(crate::InMemoryHostEventStore::default())),
             store: None,
             process_registry: None,
             residency: Residency::default(),
@@ -203,6 +205,11 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    pub fn with_host_event_store(mut self, store: Arc<dyn crate::HostEventStore>) -> Self {
+        self.host_event_store = Some(store);
+        self
+    }
+
     pub fn with_store(mut self, store: Arc<dyn RuntimePersistence>) -> Self {
         self.store = Some(store);
         self
@@ -312,7 +319,8 @@ impl EmbeddedRuntimeBuilder {
         let state = self.resolve_state().await?;
         let plugins = self.resolve_plugins(&state)?;
         let embedded_host = EmbeddedRuntimeHost::new(self.core)
-            .with_session_store_factory_option(self.session_store_factory.clone());
+            .with_session_store_factory_option(self.session_store_factory.clone())
+            .with_host_event_store_option(self.host_event_store.clone());
         // `assemble_runtime` owns the (store, registry) wiring + residency so the
         // worker rebuild cannot drift from the live open path.
         LashRuntime::assemble_runtime(
@@ -362,6 +370,11 @@ trait EmbeddedRuntimeHostExt {
         self,
         session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     ) -> Self;
+
+    fn with_host_event_store_option(
+        self,
+        host_event_store: Option<Arc<dyn crate::HostEventStore>>,
+    ) -> Self;
 }
 
 impl EmbeddedRuntimeHostExt for EmbeddedRuntimeHost {
@@ -370,6 +383,14 @@ impl EmbeddedRuntimeHostExt for EmbeddedRuntimeHost {
         session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     ) -> Self {
         self.session_store_factory = session_store_factory;
+        self
+    }
+
+    fn with_host_event_store_option(
+        mut self,
+        host_event_store: Option<Arc<dyn crate::HostEventStore>>,
+    ) -> Self {
+        self.host_event_store = host_event_store;
         self
     }
 }

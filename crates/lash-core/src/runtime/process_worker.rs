@@ -24,6 +24,7 @@ pub struct DurableProcessWorkerConfig {
     pub session_policy: crate::SessionPolicy,
     pub session_store_factory: Arc<dyn SessionStoreFactory>,
     pub process_registry: Arc<dyn ProcessRegistry>,
+    pub host_event_store: Arc<dyn crate::HostEventStore>,
     /// Residency for sessions the worker rebuilds to run a process. Defaults to
     /// [`Residency::KeepAll`]; a host running [`Residency::ActivePathOnly`] wires
     /// it here so the worker's rebuilt sessions trim to the active path too,
@@ -45,8 +46,14 @@ impl DurableProcessWorkerConfig {
             session_policy: crate::SessionPolicy::default(),
             session_store_factory,
             process_registry,
+            host_event_store: Arc::new(crate::InMemoryHostEventStore::default()),
             residency: crate::Residency::default(),
         }
+    }
+
+    pub fn with_host_event_store(mut self, store: Arc<dyn crate::HostEventStore>) -> Self {
+        self.host_event_store = store;
+        self
     }
 
     pub fn with_session_policy(mut self, policy: crate::SessionPolicy) -> Self {
@@ -454,6 +461,7 @@ impl DurableProcessWorker {
             .with_runtime_host(self.config.runtime_host.clone())
             .with_policy(self.config.session_policy.clone())
             .with_session_store_factory(Arc::clone(&self.config.session_store_factory))
+            .with_host_event_store(Arc::clone(&self.config.host_event_store))
             .with_process_registry(Arc::clone(&self.config.process_registry))
             .with_residency(self.config.residency)
             .with_store(store)
@@ -515,6 +523,9 @@ impl DurableProcessWorker {
         if self.config.process_registry.durability_tier() != crate::DurabilityTier::Durable {
             return Err(require(crate::DurableStoreFacet::ProcessRegistry));
         }
+        if self.config.host_event_store.durability_tier() != crate::DurabilityTier::Durable {
+            return Err(require(crate::DurableStoreFacet::HostEventStore));
+        }
         Ok(())
     }
 
@@ -572,8 +583,8 @@ mod boundary_tests {
     use super::*;
     use crate::{
         AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier,
-        DurableStoreFacet, InMemoryAttachmentStore, LashlangArtifactStore, ProcessInput,
-        ProcessRegistration, RuntimeEffectController, RuntimeError, StoredAttachment,
+        DurableStoreFacet, HostEventStore, InMemoryAttachmentStore, LashlangArtifactStore,
+        ProcessInput, ProcessRegistration, RuntimeEffectController, RuntimeError, StoredAttachment,
     };
     use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentRef};
 
@@ -672,6 +683,63 @@ mod boundary_tests {
         }
     }
 
+    struct TierHostEventStore {
+        tier: DurabilityTier,
+        inner: crate::InMemoryHostEventStore,
+    }
+
+    impl TierHostEventStore {
+        fn new(tier: DurabilityTier) -> Self {
+            Self {
+                tier,
+                inner: crate::InMemoryHostEventStore::default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HostEventStore for TierHostEventStore {
+        fn durability_tier(&self) -> DurabilityTier {
+            self.tier
+        }
+
+        async fn register_subscription(
+            &self,
+            draft: crate::TriggerSubscriptionDraft,
+        ) -> Result<crate::TriggerSubscriptionRecord, PluginError> {
+            self.inner.register_subscription(draft).await
+        }
+
+        async fn list_subscriptions(
+            &self,
+            filter: crate::TriggerSubscriptionFilter,
+        ) -> Result<Vec<crate::TriggerSubscriptionRecord>, PluginError> {
+            self.inner.list_subscriptions(filter).await
+        }
+
+        async fn cancel_subscription(
+            &self,
+            session_id: &str,
+            handle: &str,
+        ) -> Result<bool, PluginError> {
+            self.inner.cancel_subscription(session_id, handle).await
+        }
+
+        async fn record_occurrence(
+            &self,
+            request: crate::HostEventOccurrenceRequest,
+        ) -> Result<crate::HostEventOccurrenceRecord, PluginError> {
+            self.inner.record_occurrence(request).await
+        }
+
+        async fn reserve_matching_deliveries(
+            &self,
+            occurrence_id: &str,
+        ) -> Result<Vec<crate::TriggerDeliveryReservation>, PluginError> {
+            self.inner.reserve_matching_deliveries(occurrence_id).await
+        }
+    }
+
     /// Build a worker whose controller is durable but whose stores can be set
     /// per-facet to durable/ephemeral, so each facet's loud rejection can be
     /// exercised independently.
@@ -680,19 +748,21 @@ mod boundary_tests {
         artifact: Arc<dyn LashlangArtifactStore>,
         session_store_tier: DurabilityTier,
     ) -> DurableProcessWorker {
-        worker_with_process_registry_tier(
+        worker_with_store_tiers(
             attachment,
             artifact,
             session_store_tier,
             DurabilityTier::Durable,
+            DurabilityTier::Durable,
         )
     }
 
-    fn worker_with_process_registry_tier(
+    fn worker_with_store_tiers(
         attachment: Arc<dyn AttachmentStore>,
         artifact: Arc<dyn LashlangArtifactStore>,
         session_store_tier: DurabilityTier,
         process_registry_tier: DurabilityTier,
+        host_event_store_tier: DurabilityTier,
     ) -> DurableProcessWorker {
         let mut runtime_host = RuntimeHostConfig::in_memory();
         runtime_host.control.effect_host =
@@ -706,12 +776,12 @@ mod boundary_tests {
         let registry: Arc<dyn ProcessRegistry> = Arc::new(
             crate::TestLocalProcessRegistry::default().with_durability_tier(process_registry_tier),
         );
-        DurableProcessWorker::new(DurableProcessWorkerConfig::new(
-            plugin_host,
-            runtime_host,
-            factory,
-            registry,
-        ))
+        let host_event_store: Arc<dyn HostEventStore> =
+            Arc::new(TierHostEventStore::new(host_event_store_tier));
+        DurableProcessWorker::new(
+            DurableProcessWorkerConfig::new(plugin_host, runtime_host, factory, registry)
+                .with_host_event_store(host_event_store),
+        )
     }
 
     fn external_registration() -> ProcessRegistration {
@@ -782,16 +852,32 @@ mod boundary_tests {
 
     #[tokio::test]
     async fn durable_worker_rejects_ephemeral_process_registry() {
-        let worker = worker_with_process_registry_tier(
+        let worker = worker_with_store_tiers(
             Arc::new(DurableAttachmentStore::default()),
             Arc::new(DurableArtifactStore::default()),
             DurabilityTier::Durable,
             DurabilityTier::Inline,
+            DurabilityTier::Durable,
         );
         let err = run(&worker)
             .await
             .expect_err("ephemeral process registry must be rejected at the worker boundary");
         assert_facet(err, DurableStoreFacet::ProcessRegistry);
+    }
+
+    #[tokio::test]
+    async fn durable_worker_rejects_ephemeral_host_event_store() {
+        let worker = worker_with_store_tiers(
+            Arc::new(DurableAttachmentStore::default()),
+            Arc::new(DurableArtifactStore::default()),
+            DurabilityTier::Durable,
+            DurabilityTier::Durable,
+            DurabilityTier::Inline,
+        );
+        let err = run(&worker)
+            .await
+            .expect_err("ephemeral host event store must be rejected at the worker boundary");
+        assert_facet(err, DurableStoreFacet::HostEventStore);
     }
 
     #[tokio::test]

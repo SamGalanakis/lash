@@ -521,6 +521,7 @@ pub(crate) async fn build_runtime_with_sqlite_store(
     let artifacts_db = root.join("artifacts.db");
     let effects_db = root.join("effects.db");
     let process_db = root.join("processes.db");
+    let host_events_db = root.join("host-events.db");
     let mut builder = LashCore::builder()
         .install_mode(mode_preset(&mode_id)?)
         .default_mode(mode_id.clone())
@@ -541,6 +542,11 @@ pub(crate) async fn build_runtime_with_sqlite_store(
         ))
         .process_registry(Arc::new(
             lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
+                .await
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+        ))
+        .host_event_store(Arc::new(
+            lash_sqlite_store::SqliteHostEventStore::open(&host_events_db)
                 .await
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?,
         ))

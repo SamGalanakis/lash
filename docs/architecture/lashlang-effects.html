@@ -103,7 +103,7 @@ fn lashlang_resources(&self) -&gt; lashlang::ResourceCatalog {
         <div class="section" id="tool-calls-and-async-handles">
           <div class="section-header">
             <h2>Resource Operations And Process Handles</h2>
-            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, and trigger registry operations are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. In RLM, <code>HostBridge</code> dispatches ordinary module operations to the callable tool surface, trigger operations to the session trigger registry, process starts to the process service, and sleep through the runtime effect controller. Timers and recurring jobs are host-owned source policies, not Lashlang syntax.</p>
+            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>. Resource operations, named processes, process sleep/signals, and trigger registry operations are advertised only when the linked <code>LashlangSurface</code> enables them, and the RLM prompt is rendered from that same effective surface. In RLM, <code>HostBridge</code> dispatches ordinary module operations to the callable tool surface, trigger registry operations to the runtime host-event store, process starts to the process service, and sleep through the runtime effect controller. Timers and recurring jobs are host-owned source policies, not Lashlang syntax.</p>
           </div>
           <h3 id="resource-operations">Resource operations</h3>
           <dl class="def-list">
@@ -139,7 +139,7 @@ submit { line_count: len(lines), notes: notes, items: items }</code></pre>
             <dt><code>cancel</code></dt>
             <dd><code>cancel handle</code> asks the host to stop a live process run. Cancellation is best-effort and uses the run handle identity.</dd>
           </dl>
-          <p>Process definitions describe reusable background work; process runs are concrete invocations created by <code>start</code> or by trigger activation. Results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to receiver operations. If <code>label_annotations</code> is enabled, <code>@label</code> titles and descriptions can appear in trace process maps without affecting execution.</p>
+          <p>Process definitions describe reusable background work; process runs are concrete invocations created by <code>start</code> or by matched host-event occurrences. Results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to receiver operations. If <code>label_annotations</code> is enabled, <code>@label</code> titles and descriptions can appear in trace process maps without affecting execution.</p>
 
           <h3 id="await-handles">Awaiting handles</h3>
           <dl class="def-list">
@@ -181,7 +181,7 @@ submit {
         <div class="section" id="triggers">
           <div class="section-header">
             <h2>Triggers</h2>
-          <p>Lashlang owns the canonical trigger registry contract. A host exposes pure source constructors such as <code>cron.Schedule(...)</code> or <code>ui.button.pressed(...)</code> and declares protocol metadata saying the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Code then passes that source value, a process definition, and explicit <code>inputs</code> to awaited registry operations such as <code>triggers.register</code>, <code>triggers.list</code>, and <code>triggers.cancel</code>. Every process param is mapped exactly once; <code>trigger.event</code> is the direct whole-event placeholder inside <code>inputs</code>. A trigger registration is a durable rule; each activation creates a process run.</p>
+          <p>Lashlang owns the canonical trigger registry contract. A host exposes pure source constructors such as <code>cron.Schedule(...)</code> or <code>ui.button.pressed(...)</code> and declares protocol metadata saying the constructed value satisfies <code>TriggerSource&lt;Event&gt;</code>. Code then passes that source value, a process definition, and explicit <code>inputs</code> to awaited registry operations such as <code>triggers.register</code>, <code>triggers.list</code>, and <code>triggers.cancel</code>. Every process param is mapped exactly once; <code>trigger.event</code> is the direct whole-event placeholder inside <code>inputs</code>. A trigger registration is a durable rule; a matched runtime host-event occurrence starts the target process.</p>
           </div>
           <pre><code>process daily_digest(tick: cron.Tick) {
   wake { kind: "daily_digest_due", tick: tick }
@@ -203,7 +203,7 @@ registrations = await triggers.list({ target: daily_digest })?
 broad_registrations = await triggers.list({})?
 
 submit handle</code></pre>
-          <p>A host event source uses the same registry. The workbench registers a typed UI button event whose source config is empty; the selected button arrives in the activation payload:</p>
+          <p>A host event source uses the same registry. The workbench registers a typed UI button event whose source config is empty; the selected button arrives in the matched occurrence payload:</p>
           <pre><code>process on_button(event: ui.button.Pressed) {
   wake { kind: "button_pressed", button: event.button, message: event.message }
   finish true
@@ -216,7 +216,7 @@ handle = await triggers.register({
   name: "button watcher"
 })?
 submit handle</code></pre>
-          <p>The matching host contract exposes constructors, trigger-source relations, and optionally typed host events. Source owners can list source registrations, activate exact handles, activate every enabled route for a source type, or emit a declared host event that validates the payload and fans out to matching routes:</p>
+          <p>The matching host contract exposes constructors, trigger-source relations, and optionally typed host events. Source owners list source registrations by source type/key, keep their own source-specific schedules, and emit declared host-event occurrences that validate payloads and fan out to matching routes:</p>
           <pre><code>let cron_tick = NamedDataType::object(
     "cron.Tick",
     vec![TypeField { name: "fired_at".into(), ty: TypeExpr::Str, optional: false }],
@@ -245,9 +245,28 @@ reg.host_events().declare(
     HostEvent::new("Button", "ui.button", "pressed", button_pressed),
 )?;
 
-session.activate_lashlang_trigger(handle, tick_payload).await?;
-session.activate_lashlang_trigger_source_type("cron.Schedule", tick_payload).await?;
-session.emit_host_event("Button", "ui.button", "pressed", button_payload).await?;</code></pre>
+let cron_subscriptions = core
+    .host_events()
+    .subscriptions(TriggerSubscriptionFilter::for_source_type("cron.Schedule"))
+    .await?;
+let source_key = cron_subscriptions[0].source_key.clone();
+core.host_events()
+    .emit(HostEventOccurrenceRequest::new(
+        "cron.Schedule",
+        source_key,
+        tick_payload,
+        "cron:daily-digest:2026-06-08T08:00:00Z",
+    ))
+    .await?;
+
+core.host_events()
+    .emit(HostEventOccurrenceRequest::new(
+        "ui.button.pressed",
+        empty_host_event_source_key("ui.button.pressed")?,
+        button_payload,
+        "button:red:2026-06-08T12:00:00Z",
+    ))
+    .await?;</code></pre>
         </div>
 
         <div class="section" id="terminator-effects">

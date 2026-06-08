@@ -114,7 +114,6 @@ impl RuntimeTurnDriver<'_> {
                     RuntimeEffectOutcome::into_tool_call_effect,
                 )
                 .await?;
-            self.pending_tool_host_events.extend(outcome.host_events);
             results.push(outcome.result);
         }
         drop(prepare_context);

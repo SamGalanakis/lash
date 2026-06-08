@@ -11,13 +11,6 @@ pub enum SessionCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_generation: Option<u64>,
     },
-    EmitHostEvent {
-        resource_type: String,
-        alias: String,
-        event: String,
-        #[serde(default)]
-        payload: serde_json::Value,
-    },
     ResetSession {
         reason: String,
     },
@@ -27,7 +20,6 @@ impl SessionCommand {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::RefreshToolSurface { .. } => "refresh_tool_surface",
-            Self::EmitHostEvent { .. } => "emit_host_event",
             Self::ResetSession { .. } => "reset_session",
         }
     }
@@ -103,25 +95,9 @@ pub enum MergeKey {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum QueuedWorkPayload {
-    TurnInput {
-        input: Box<TurnInput>,
-    },
-    ProcessWake {
-        wake: Box<ProcessWakeDelivery>,
-    },
-    HostEvent {
-        name: String,
-        #[serde(default)]
-        payload: serde_json::Value,
-    },
-    Timer {
-        name: String,
-        #[serde(default)]
-        payload: serde_json::Value,
-    },
-    SessionCommand {
-        command: Box<SessionCommand>,
-    },
+    TurnInput { input: Box<TurnInput> },
+    ProcessWake { wake: Box<ProcessWakeDelivery> },
+    SessionCommand { command: Box<SessionCommand> },
 }
 
 impl QueuedWorkPayload {
@@ -271,15 +247,6 @@ impl QueuedWorkClaim {
                     QueuedWorkPayload::ProcessWake { wake } => {
                         turn_causes.push(crate::process_wake_turn_cause(wake));
                     }
-                    QueuedWorkPayload::HostEvent { name, payload }
-                    | QueuedWorkPayload::Timer { name, payload } => {
-                        turn_causes.push(host_event_cause(
-                            &item.item_id,
-                            name,
-                            payload,
-                            matches!(&item.payload, QueuedWorkPayload::Timer { .. }),
-                        ));
-                    }
                     QueuedWorkPayload::SessionCommand { .. } => {}
                 }
             }
@@ -311,15 +278,6 @@ impl QueuedWorkClaim {
                     }
                     QueuedWorkPayload::ProcessWake { wake } => {
                         turn_causes.push(crate::process_wake_turn_cause(wake));
-                    }
-                    QueuedWorkPayload::HostEvent { name, payload }
-                    | QueuedWorkPayload::Timer { name, payload } => {
-                        turn_causes.push(host_event_cause(
-                            &item.item_id,
-                            name,
-                            payload,
-                            matches!(&item.payload, QueuedWorkPayload::Timer { .. }),
-                        ));
                     }
                     QueuedWorkPayload::SessionCommand { .. } => {}
                 }
@@ -520,26 +478,4 @@ fn plugin_message_from_turn_input_with_attachments(
         parts,
         images: Vec::new(),
     }))
-}
-
-fn host_event_cause(
-    item_id: &str,
-    name: &str,
-    payload: &serde_json::Value,
-    timer: bool,
-) -> TurnCause {
-    let event_type = if timer { "timer" } else { "host_event" };
-    TurnCause {
-        id: item_id.to_string(),
-        event_type: name.to_string(),
-        origin: crate::MessageOrigin::Plugin {
-            plugin_id: event_type.to_string(),
-            transient: false,
-        },
-        text: if payload.is_null() {
-            name.to_string()
-        } else {
-            format!("{name}\n{payload}")
-        },
-    }
 }

@@ -120,6 +120,9 @@ impl RuntimeInvocation {
                 process_id: process_id.clone(),
                 sequence: *sequence,
             }),
+            RuntimeSubject::HostEvent { occurrence_id } => Some(CausalRef::HostEvent {
+                occurrence_id: occurrence_id.clone(),
+            }),
             RuntimeSubject::SessionNode { node_id } => Some(CausalRef::SessionNode {
                 session_id: self.scope.session_id.clone(),
                 node_id: node_id.clone(),
@@ -183,6 +186,9 @@ pub enum RuntimeSubject {
         process_id: String,
         sequence: u64,
         event_type: String,
+    },
+    HostEvent {
+        occurrence_id: String,
     },
     SessionNode {
         node_id: String,

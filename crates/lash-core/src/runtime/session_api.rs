@@ -548,39 +548,6 @@ impl LashRuntime {
                     leaf_node_id: self.state.session_graph.leaf_node_id.clone(),
                 }
             }
-            crate::SessionCommand::EmitHostEvent {
-                resource_type,
-                alias,
-                event,
-                payload,
-            } => {
-                let effect_host = Arc::clone(&self.host.core.control.effect_host);
-                let drain_id = completion
-                    .as_ref()
-                    .map(|completion| completion.claim_id.clone())
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                let scoped = effect_host
-                    .scoped(crate::EffectScope::queue_drain(
-                        &self.state.session_id,
-                        drain_id,
-                    ))
-                    .map_err(|err| {
-                        RuntimeError::new("session_command_effect_scope", err.to_string())
-                    })?;
-                let (_report, graph) = self
-                    .emit_host_event_without_persist(
-                        &resource_type,
-                        &alias,
-                        &event,
-                        payload,
-                        scoped,
-                    )
-                    .await
-                    .map_err(|err| {
-                        RuntimeError::new("session_command_host_event", err.to_string())
-                    })?;
-                graph
-            }
             crate::SessionCommand::ResetSession { .. } => {
                 let mut state = crate::RuntimeSessionState {
                     session_id: self.state.session_id.clone(),

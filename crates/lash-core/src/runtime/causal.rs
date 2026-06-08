@@ -176,17 +176,16 @@ pub fn process_event_invocation(
     }
 }
 
-pub(crate) fn session_node_invocation(
-    session_id: &str,
-    node_id: impl Into<String>,
-) -> RuntimeInvocation {
+pub(crate) fn host_event_invocation(session_id: &str, occurrence_id: &str) -> RuntimeInvocation {
     RuntimeInvocation {
         scope: RuntimeScope::new(session_id),
-        subject: RuntimeSubject::SessionNode {
-            node_id: node_id.into(),
+        subject: RuntimeSubject::HostEvent {
+            occurrence_id: occurrence_id.to_string(),
         },
         caused_by: None,
-        replay: None,
+        replay: Some(RuntimeReplay {
+            key: format!("host_event:{occurrence_id}"),
+        }),
     }
 }
 
@@ -263,6 +262,7 @@ fn causal_replay_discriminator(caused_by: &CausalRef) -> String {
             process_id,
             sequence,
         } => format!("cause:process_event:{process_id}:{sequence}:"),
+        CausalRef::HostEvent { occurrence_id } => format!("cause:host_event:{occurrence_id}:"),
         CausalRef::SessionNode {
             session_id,
             node_id,

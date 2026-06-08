@@ -28,13 +28,14 @@ where
     .expect("runtime thread")
 }
 
-fn fresh_sqlite_session_backend(
-    root: &std::path::Path,
-) -> (
+type FreshSqliteSessionBackend = (
     std::path::PathBuf,
     Arc<dyn lash_core::SessionStoreFactory>,
     Arc<dyn lash_core::ProcessRegistry>,
-) {
+    Arc<dyn lash_core::HostEventStore>,
+);
+
+fn fresh_sqlite_session_backend(root: &std::path::Path) -> FreshSqliteSessionBackend {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static SCENARIO: AtomicUsize = AtomicUsize::new(0);
     let dir = root.join(format!(
@@ -51,7 +52,13 @@ fn fresh_sqlite_session_backend(
             .await
             .expect("open process registry")
     })) as Arc<dyn lash_core::ProcessRegistry>;
-    (dir, store_factory, registry)
+    let host_events_db = dir.join("host-events.db");
+    let host_event_store = Arc::new(sync_await(async move {
+        lash_sqlite_store::SqliteHostEventStore::open(&host_events_db)
+            .await
+            .expect("open host event store")
+    })) as Arc<dyn lash_core::HostEventStore>;
+    (dir, store_factory, registry, host_event_store)
 }
 
 fn fresh_in_memory_backend() -> (
@@ -91,7 +98,8 @@ fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
         let root = tempfile::tempdir().expect("tempdir");
         let root_path = root.path().to_path_buf();
         runtime_rebuild_and_worker_recovery(move || {
-            let (dir, store_factory, registry) = fresh_sqlite_session_backend(&root_path);
+            let (dir, store_factory, registry, host_event_store) =
+                fresh_sqlite_session_backend(&root_path);
             let attachment = Arc::new(crate::persistence::FileAttachmentStore::new(
                 dir.join("attachments"),
             )) as Arc<dyn lash_core::AttachmentStore>;
@@ -108,6 +116,7 @@ fn runtime_rebuild_and_worker_recovery_with_durable_stores() {
                         .store_factory(Arc::clone(&store_factory))
                         .attachment_store(Arc::clone(&attachment))
                         .lashlang_artifact_store(Arc::clone(&artifact))
+                        .host_event_store(Arc::clone(&host_event_store))
                         .effect_host(Arc::new(crate::durability::InlineEffectHost::default()))
                         .build()
                         .expect("build core")

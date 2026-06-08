@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -69,7 +69,7 @@ pub(crate) struct WorkbenchMailReceivedWorkflowRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct WorkbenchCronRequest {
     session_id: String,
-    trigger_handle: String,
+    source_key: String,
     expr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tz: Option<String>,
@@ -95,7 +95,7 @@ struct WorkbenchCronState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct WorkbenchCronInfo {
-    trigger_handle: String,
+    source_key: String,
     expr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tz: Option<String>,
@@ -106,14 +106,14 @@ struct WorkbenchCronInfo {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct CronActivationReport {
+struct CronEmitReport {
     started_process_ids: Vec<String>,
 }
 
 impl From<&WorkbenchCronState> for WorkbenchCronInfo {
     fn from(state: &WorkbenchCronState) -> Self {
         Self {
-            trigger_handle: state.request.trigger_handle.clone(),
+            source_key: state.request.source_key.clone(),
             expr: state.request.expr.clone(),
             tz: state.request.tz.clone(),
             next_execution_time: state.next_execution_time.clone(),
@@ -331,17 +331,17 @@ impl WorkbenchCronJob for WorkbenchCronJobImpl {
         let fired_at = journaled_now(controller.context(), "workbench-cron:fired-at").await?;
         let request = state.request.clone();
         let fired_at_text = fired_at.to_rfc3339();
-        let Json(activation) =
-            activate_cron_trigger(self.state.clone(), request, fired_at_text, &controller).await?;
+        let Json(emit_report) =
+            emit_cron_occurrence(self.state.clone(), request, fired_at_text, &controller).await?;
         self.state.trace(
             "cron.restate.run",
             json!({
                 "job_key": controller.context().key(),
-                "trigger_handle": state.request.trigger_handle,
+                "source_key": state.request.source_key,
                 "expr": state.request.expr,
                 "tz": state.request.tz,
                 "fired_at": fired_at.to_rfc3339(),
-                "started_process_ids": activation.started_process_ids,
+                "started_process_ids": emit_report.started_process_ids,
             }),
         );
         self.state
@@ -557,7 +557,6 @@ async fn run_button_trigger(
     .await?;
     let receipt = enqueue_button_host_event_command(
         &state,
-        &session,
         request.button,
         &request.pressed_at,
         &request.operation_id,
@@ -565,14 +564,14 @@ async fn run_button_trigger(
     .await
     .map_err(AppError::internal)?;
     state.trace(
-        "button_trigger.restate.host_event_command",
+        "button_trigger.restate.host_event_occurrence",
         json!({
             "button": request.button,
-            "batch_id": receipt.batch_id,
-            "source_key": receipt.source_key,
+            "occurrence_id": receipt.occurrence_id,
+            "started_process_ids": receipt.started_process_ids,
         }),
     );
-    state.push_message("event", "button host event queued");
+    state.push_message("event", "button host event emitted");
     // Host-event dispatch is the end of this client-initiated request. Emit a
     // terminal Done so the UI clears its busy state even when no trigger
     // matched (any process the event started streams its own turn separately).
@@ -594,21 +593,17 @@ async fn run_mail_received(
         .await
         .map_err(AppError::internal)?;
     apply_model_selection_to_session(&state, &session, turn_model, "restate_mail_received").await?;
-    let receipt = enqueue_mail_received_host_event_command(
-        &state,
-        &session,
-        &request.delivery,
-        &request.operation_id,
-    )
-    .await
-    .map_err(AppError::internal)?;
+    let receipt =
+        enqueue_mail_received_host_event_command(&state, &request.delivery, &request.operation_id)
+            .await
+            .map_err(AppError::internal)?;
     state.trace(
-        "mail_received.restate.host_event_command",
+        "mail_received.restate.host_event_occurrence",
         json!({
             "account": request.delivery.account,
             "title": request.delivery.title,
-            "batch_id": receipt.batch_id,
-            "source_key": receipt.source_key,
+            "occurrence_id": receipt.occurrence_id,
+            "started_process_ids": receipt.started_process_ids,
         }),
     );
     state.push_message("event", "mail received host event queued");
@@ -747,7 +742,7 @@ async fn sync_cron_jobs_with_context(
         .lock()
         .expect("restate cron job key lock")
         .clone();
-    let mut active = BTreeSet::new();
+    let mut scheduled = BTreeMap::new();
     for registration in registrations {
         if !registration.enabled {
             continue;
@@ -767,6 +762,10 @@ async fn sync_cron_jobs_with_context(
                     continue;
                 }
             };
+        scheduled.entry(job_key).or_insert(request);
+    }
+    let mut active = BTreeSet::new();
+    for (job_key, request) in scheduled {
         let Json(info) = ctx
             .object_client::<WorkbenchCronJobClient>(job_key.clone())
             .upsert(Json(request))
@@ -803,37 +802,44 @@ async fn sync_cron_jobs_with_context(
     Ok(())
 }
 
-async fn activate_cron_trigger(
+async fn emit_cron_occurrence(
     state: AppState,
     request: WorkbenchCronRequest,
     fired_at: String,
     controller: &lash_restate::RestateRuntimeEffectController<'_, ObjectContext<'_>>,
-) -> HandlerResult<Json<CronActivationReport>> {
-    let session = state
-        .core
-        .session(request.session_id.clone())
-        .rlm()
-        .open()
-        .await
-        .map_err(|err| TerminalError::new(err.to_string()))?;
+) -> HandlerResult<Json<CronEmitReport>> {
     let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::cron(
-            controller.context().key(),
-            fired_at.clone(),
-        ))
+        .scoped_effect_controller(lash::runtime::EffectScope::runtime_operation(format!(
+            "cron:{}:{fired_at}",
+            controller.context().key()
+        )))
         .map_err(|err| HandlerError::from(TerminalError::new(err.to_string())))?;
-    let report = session
-        .triggers()
-        .activate_with_effect_scope(
-            request.trigger_handle.clone(),
-            json!({
-                "fired_at": fired_at,
-            }),
+    let report = state
+        .core
+        .host_events()
+        .emit_with_effect_scope(
+            lash::HostEventOccurrenceRequest::new(
+                CRON_SCHEDULE_SOURCE_TYPE,
+                request.source_key.clone(),
+                json!({
+                    "fired_at": fired_at,
+                }),
+                format!(
+                    "workbench-cron:{}:{}:{}",
+                    request.session_id,
+                    request.source_key,
+                    controller.context().key()
+                ),
+            )
+            .with_source(json!({
+                "expr": request.expr,
+                "tz": request.tz,
+            })),
             scoped_effect_controller,
         )
         .await
         .map_err(|err| HandlerError::from(TerminalError::new(err.to_string())))?;
-    Ok(Json(CronActivationReport {
+    Ok(Json(CronEmitReport {
         started_process_ids: report.started_process_ids,
     }))
 }
@@ -930,16 +936,16 @@ fn cron_request_from_registration(
         .map_err(|err| err.to_string())?;
     let request = WorkbenchCronRequest {
         session_id: session_id.to_string(),
-        trigger_handle: registration.handle.clone(),
+        source_key: registration.source_key.clone(),
         expr: payload.expr,
         tz: payload.tz,
         name: registration.name.clone(),
     };
-    Ok((cron_job_key(session_id, &registration.handle), request))
+    Ok((cron_job_key(session_id, &registration.source_key), request))
 }
 
-fn cron_job_key(session_id: &str, handle: &str) -> String {
-    format!("{session_id}:{handle}")
+fn cron_job_key(session_id: &str, source_key: &str) -> String {
+    format!("{session_id}:{source_key}")
 }
 
 async fn submit_restate_json<T: Serialize>(

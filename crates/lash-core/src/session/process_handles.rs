@@ -360,6 +360,7 @@ mod tests {
             session_graph: host.clone(),
             processes: host.clone(),
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+            host_event_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
@@ -465,6 +466,7 @@ mod tests {
             session_graph: host.clone(),
             processes: host.clone(),
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+            host_event_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
@@ -551,6 +553,7 @@ mod tests {
             session_graph: host.clone(),
             processes: host.clone(),
             process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+            host_event_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),
@@ -631,6 +634,7 @@ mod tests {
             session_graph: host,
             processes: Arc::new(crate::UnavailableProcessService),
             process_cancel_ability: ability.clone(),
+            host_event_router: None,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController,
             )),

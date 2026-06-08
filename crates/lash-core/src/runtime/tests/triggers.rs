@@ -362,7 +362,9 @@ fn clock_trigger_test_source() -> &'static str {
 }
 
 struct TriggerRegistrationHost {
-    plugins: Arc<crate::PluginSession>,
+    session_id: String,
+    resources: lashlang::ResourceCatalog,
+    store: Arc<dyn crate::HostEventStore>,
     artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
 }
 
@@ -375,20 +377,9 @@ impl lashlang::ExecutionHost for TriggerRegistrationHost {
             lashlang::AbilityOp::ResourceOperation(operation) => {
                 let payload = resource_operation_payload(operation.args)?;
                 let value = match operation.operation.as_str() {
-                    "triggers.register" | "register" => self
-                        .plugins
-                        .register_lashlang_trigger(payload, Arc::clone(&self.artifact_store))
-                        .await
-                        .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?,
-                    "triggers.list" | "list" => self
-                        .plugins
-                        .list_lashlang_triggers(payload)
-                        .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?,
-                    "triggers.cancel" | "cancel" => {
-                        self.plugins
-                            .cancel_lashlang_trigger(payload)
-                            .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?
-                    }
+                    "triggers.register" | "register" => self.register_trigger(payload).await?,
+                    "triggers.list" | "list" => self.list_triggers(payload).await?,
+                    "triggers.cancel" | "cancel" => self.cancel_trigger(payload).await?,
                     other => {
                         return Err(lashlang::ExecutionHostError::new(format!(
                             "unsupported operation `{other}`"
@@ -404,6 +395,89 @@ impl lashlang::ExecutionHost for TriggerRegistrationHost {
                 "unsupported host ability in trigger registration test",
             )),
         }
+    }
+}
+
+impl TriggerRegistrationHost {
+    async fn register_trigger(
+        &self,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, lashlang::ExecutionHostError> {
+        let request = lashlang::TriggerRegistrationRequest::decode(&payload)
+            .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?;
+        let source_type = request.source.source_type.clone();
+        let source_value = request.source.value.clone();
+        let source = request.source.to_json();
+        let event_type = lashlang::event_type_for_source(&self.resources, &source_type)
+            .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?;
+        let validation = crate::plugin::validate_target_process(
+            &request.target,
+            &event_type,
+            &request.inputs,
+            self.artifact_store.as_ref(),
+        )
+        .await
+        .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?;
+        let source_key = self
+            .store
+            .source_key_for_subscription(&source_type, &source_value)
+            .await
+            .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?;
+        let record = self
+            .store
+            .register_subscription(crate::TriggerSubscriptionDraft {
+                session_id: self.session_id.clone(),
+                name: request.name,
+                source_type,
+                source_key,
+                source,
+                event_ty: validation.event_ty,
+                module_ref: request.target.module_ref,
+                required_surface_ref: request.target.required_surface_ref,
+                process_ref: request.target.process_ref,
+                process_name: request.target.process_name,
+                input_template: validation.inputs,
+            })
+            .await
+            .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?;
+        Ok(crate::plugin::trigger_handle_json(&record.handle))
+    }
+
+    async fn list_triggers(
+        &self,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, lashlang::ExecutionHostError> {
+        let request = lashlang::TriggerListRequest::decode(&payload)
+            .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?;
+        let mut filter = crate::TriggerSubscriptionFilter::for_session(&self.session_id);
+        filter.target = request.target;
+        filter.name = request.name;
+        filter.source_type = request.source_type;
+        filter.enabled = request.enabled;
+        let registrations = self
+            .store
+            .list_subscriptions(filter)
+            .await
+            .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?
+            .iter()
+            .map(crate::TriggerRegistration::from)
+            .collect::<Vec<_>>();
+        serde_json::to_value(registrations)
+            .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))
+    }
+
+    async fn cancel_trigger(
+        &self,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, lashlang::ExecutionHostError> {
+        let request = lashlang::TriggerCancelRequest::decode(&payload)
+            .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?;
+        let changed = self
+            .store
+            .cancel_subscription(&self.session_id, &request.handle)
+            .await
+            .map_err(|err| lashlang::ExecutionHostError::new(err.to_string()))?;
+        Ok(json!(changed))
     }
 }
 
@@ -452,7 +526,14 @@ async fn execute_trigger_registration(runtime: &mut LashRuntime, source: &str) -
         .expect("store module artifact");
     let compiled = lashlang::compile_linked(&linked);
     let host = TriggerRegistrationHost {
-        plugins: Arc::clone(session.plugins()),
+        session_id: runtime.session_id().to_string(),
+        resources: session.plugins().lashlang_resources(),
+        store: runtime
+            .host
+            .host_event_store
+            .as_ref()
+            .expect("host event store")
+            .clone(),
         artifact_store: Arc::clone(&runtime.host.core.durability.lashlang_artifact_store),
     };
     let mut state = lashlang::State::new();
@@ -481,8 +562,128 @@ fn plugin_node_count(runtime: &LashRuntime, expected_plugin_type: &str) -> usize
         .count()
 }
 
+async fn emit_test_occurrence(
+    runtime: &LashRuntime,
+    source_type: &str,
+    source_key: String,
+    payload: serde_json::Value,
+    idempotency_key: &str,
+) -> crate::HostEventEmitReport {
+    let router = crate::HostEventRouter::new(
+        runtime
+            .host
+            .host_event_store
+            .as_ref()
+            .expect("host event store")
+            .clone(),
+        runtime.host.process_registry.clone(),
+        runtime.host.process_work_poke.clone(),
+        runtime.host.core.profile.host_profile_id.clone(),
+    );
+    let scoped = runtime
+        .host
+        .core
+        .control
+        .effect_host
+        .scoped(crate::EffectScope::runtime_operation(format!(
+            "test-host-event:{idempotency_key}"
+        )))
+        .expect("host event effect scope");
+    router
+        .emit(
+            crate::HostEventOccurrenceRequest::new(
+                source_type,
+                source_key,
+                payload,
+                idempotency_key,
+            ),
+            scoped.controller(),
+        )
+        .await
+        .expect("emit host event occurrence")
+}
+
+async fn try_emit_test_occurrence(
+    runtime: &LashRuntime,
+    source_type: &str,
+    source_key: String,
+    payload: serde_json::Value,
+    idempotency_key: &str,
+) -> Result<crate::HostEventEmitReport, crate::PluginError> {
+    let router = crate::HostEventRouter::new(
+        runtime
+            .host
+            .host_event_store
+            .as_ref()
+            .expect("host event store")
+            .clone(),
+        runtime.host.process_registry.clone(),
+        runtime.host.process_work_poke.clone(),
+        runtime.host.core.profile.host_profile_id.clone(),
+    );
+    let scoped = runtime
+        .host
+        .core
+        .control
+        .effect_host
+        .scoped(crate::EffectScope::runtime_operation(format!(
+            "test-host-event:{idempotency_key}"
+        )))
+        .expect("host event effect scope");
+    router
+        .emit(
+            crate::HostEventOccurrenceRequest::new(
+                source_type,
+                source_key,
+                payload,
+                idempotency_key,
+            ),
+            scoped.controller(),
+        )
+        .await
+}
+
+async fn trigger_subscriptions(runtime: &LashRuntime) -> Vec<crate::TriggerSubscriptionRecord> {
+    runtime
+        .host
+        .host_event_store
+        .as_ref()
+        .expect("host event store")
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session(
+            runtime.session_id(),
+        ))
+        .await
+        .expect("list trigger subscriptions")
+}
+
+async fn source_key_for(
+    runtime: &LashRuntime,
+    source_type: &str,
+    source: serde_json::Value,
+) -> String {
+    runtime
+        .host
+        .host_event_store
+        .as_ref()
+        .expect("host event store")
+        .source_key_for_subscription(source_type, &source)
+        .await
+        .expect("source key")
+}
+
+async fn cancel_trigger_subscription(runtime: &LashRuntime, handle: &str) -> bool {
+    runtime
+        .host
+        .host_event_store
+        .as_ref()
+        .expect("host event store")
+        .cancel_subscription(runtime.session_id(), handle)
+        .await
+        .expect("cancel trigger subscription")
+}
+
 #[tokio::test]
-async fn host_event_emission_activates_matching_button_trigger_routes() {
+async fn host_event_occurrence_activates_matching_button_subscription_without_graph_node() {
     let mut runtime = runtime_with_plugins_and_tools(
         vec![Arc::new(ButtonTriggerFactory)],
         Arc::new(EmptyTools),
@@ -500,19 +701,20 @@ async fn host_event_emission_activates_matching_button_trigger_routes() {
     let finish_json = crate::lashlang_bridge::lashlang_value_to_json(&finish).expect("finish json");
     assert_eq!(finish_json["id"], json!("trigger:1"));
 
-    let report = runtime
-        .emit_host_event(
-            "Button",
-            "ui.button",
-            "pressed",
-            json!({
-                "button": "Red",
-                "message": "user pressed the red button",
-                "pressed_at": "2026-06-02T12:00:00Z"
-            }),
-        )
-        .await
-        .expect("emit button host event");
+    let source_type = "ui.button.pressed";
+    let source_key = source_key_for(&runtime, source_type, json!({})).await;
+    let report = emit_test_occurrence(
+        &runtime,
+        source_type,
+        source_key,
+        json!({
+            "button": "Red",
+            "message": "user pressed the red button",
+            "pressed_at": "2026-06-02T12:00:00Z"
+        }),
+        "button-red-1",
+    )
+    .await;
 
     assert_eq!(report.started_process_ids.len(), 1);
     let process_id = report
@@ -543,27 +745,27 @@ async fn host_event_emission_activates_matching_button_trigger_routes() {
         .caused_by
         .clone()
         .expect("triggered process cause");
-    let crate::CausalRef::SessionNode {
-        session_id,
-        node_id,
-    } = &process_caused_by
-    else {
-        panic!("host-event-triggered process should be caused by the host event session node");
+    let crate::CausalRef::HostEvent { occurrence_id } = &process_caused_by else {
+        panic!("host-event-triggered process should be caused by the host event occurrence");
     };
-    assert_eq!(session_id, runtime.session_id());
-    let node = runtime
-        .state
-        .session_graph
-        .find_node(node_id)
-        .expect("host event node");
-    match &node.payload {
-        crate::SessionNodePayload::Plugin { plugin_type, body } => {
-            assert_eq!(plugin_type, "lash.host_event");
-            assert_eq!(body.as_ref()["source_type"], json!("ui.button.pressed"));
-            assert_eq!(body.as_ref()["payload"]["button"], json!("Red"));
-        }
-        _ => panic!("host event should append a plugin session node"),
-    }
+    assert_eq!(occurrence_id, &report.occurrence_id);
+    assert_eq!(plugin_node_count(&runtime, "lash.host_event"), 0);
+    assert_eq!(plugin_node_count(&runtime, "lash.trigger_activation"), 0);
+
+    let replayed = emit_test_occurrence(
+        &runtime,
+        source_type,
+        source_key_for(&runtime, source_type, json!({})).await,
+        json!({
+            "button": "Red",
+            "message": "user pressed the red button",
+            "pressed_at": "2026-06-02T12:00:00Z"
+        }),
+        "button-red-1",
+    )
+    .await;
+    assert_eq!(replayed.occurrence_id, report.occurrence_id);
+    assert!(replayed.started_process_ids.is_empty());
 
     let session_store_factory =
         Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
@@ -574,7 +776,15 @@ async fn host_event_emission_activates_matching_button_trigger_routes() {
             session_store_factory.clone(),
             Arc::clone(&registry),
         )
-        .with_session_policy(crate::runtime::tests::helpers::standard_test_policy()),
+        .with_session_policy(crate::runtime::tests::helpers::standard_test_policy())
+        .with_host_event_store(
+            runtime
+                .host
+                .host_event_store
+                .as_ref()
+                .expect("host event store")
+                .clone(),
+        ),
     );
     worker
         .drive_pending_processes()
@@ -605,7 +815,7 @@ async fn host_event_emission_activates_matching_button_trigger_routes() {
 }
 
 #[tokio::test]
-async fn trigger_activation_materializes_event_and_fixed_input_templates() {
+async fn host_event_occurrence_materializes_event_and_fixed_input_templates() {
     let mut runtime = runtime_with_plugins_and_tools(
         vec![Arc::new(TriggerRouteTestFactory)],
         Arc::new(EmptyTools),
@@ -622,15 +832,12 @@ async fn trigger_activation_materializes_event_and_fixed_input_templates() {
     let finish =
         execute_trigger_registration(&mut runtime, multi_input_trigger_test_source()).await;
     let finish_json = crate::lashlang_bridge::lashlang_value_to_json(&finish).expect("finish json");
-    let handle = finish_json["id"].as_str().expect("trigger handle");
-    let registrations = runtime
-        .session
-        .as_ref()
-        .expect("session")
-        .plugins()
-        .list_all_lashlang_triggers()
-        .expect("list trigger registrations");
-    let registration = serde_json::to_value(&registrations[0]).expect("registration json");
+    assert_eq!(finish_json["id"], json!("trigger:1"));
+    let registrations = trigger_subscriptions(&runtime).await;
+    assert_eq!(registrations.len(), 1);
+    let subscription = &registrations[0];
+    let registration = serde_json::to_value(crate::TriggerRegistration::from(subscription))
+        .expect("registration json");
     assert_eq!(
         registration["target"]["inputs"]["first"]["kind"],
         json!("event")
@@ -648,10 +855,14 @@ async fn trigger_activation_materializes_event_and_fixed_input_templates() {
         "id": "daily-2026-06-01",
         "scheduled_at": "2026-06-01T08:00:00Z"
     });
-    let report = runtime
-        .activate_lashlang_trigger(handle, payload.clone())
-        .await
-        .expect("activate multi-input trigger");
+    let report = emit_test_occurrence(
+        &runtime,
+        "test.Schedule",
+        subscription.source_key.clone(),
+        payload.clone(),
+        "daily-2026-06-01",
+    )
+    .await;
     assert_eq!(report.started_process_ids.len(), 1);
     let record = registry
         .get_process(&report.started_process_ids[0])
@@ -670,7 +881,7 @@ async fn trigger_activation_materializes_event_and_fixed_input_templates() {
 }
 
 #[tokio::test]
-async fn host_event_trigger_activation_handles_no_routes_disabled_routes_and_invalid_payloads() {
+async fn host_event_router_handles_no_subscriptions_disabled_subscriptions_and_invalid_payloads() {
     let mut runtime = runtime_with_plugins_and_tools(
         vec![Arc::new(ButtonTriggerFactory)],
         Arc::new(EmptyTools),
@@ -678,73 +889,63 @@ async fn host_event_trigger_activation_handles_no_routes_disabled_routes_and_inv
     )
     .await;
 
-    let no_routes = runtime
-        .emit_host_event(
-            "Button",
-            "ui.button",
-            "pressed",
-            json!({
-                "button": "Blue",
-                "message": "user pressed the blue button",
-                "pressed_at": "2026-06-02T12:01:00Z"
-            }),
-        )
-        .await
-        .expect("emit button host event with no registrations");
+    let source_type = "ui.button.pressed";
+    let source_key = source_key_for(&runtime, source_type, json!({})).await;
+    let no_routes = emit_test_occurrence(
+        &runtime,
+        source_type,
+        source_key.clone(),
+        json!({
+            "button": "Blue",
+            "message": "user pressed the blue button",
+            "pressed_at": "2026-06-02T12:01:00Z"
+        }),
+        "button-blue-no-routes",
+    )
+    .await;
     assert!(no_routes.started_process_ids.is_empty());
-    assert_eq!(plugin_node_count(&runtime, "lash.host_event"), 1);
-
-    let invalid = runtime
-        .emit_host_event(
-            "Button",
-            "ui.button",
-            "pressed",
-            json!({
-                "button": "Green",
-                "message": "invalid button payload",
-                "pressed_at": "2026-06-02T12:02:00Z"
-            }),
-        )
-        .await
-        .expect_err("invalid payload should fail before append");
-    assert!(
-        invalid
-            .to_string()
-            .contains("invalid payload for host event")
-    );
-    assert_eq!(plugin_node_count(&runtime, "lash.host_event"), 1);
+    assert_eq!(plugin_node_count(&runtime, "lash.host_event"), 0);
 
     let finish = execute_trigger_registration(&mut runtime, button_trigger_test_source()).await;
     let finish_json = crate::lashlang_bridge::lashlang_value_to_json(&finish).expect("finish json");
     let handle = finish_json["id"].as_str().expect("trigger handle");
-    let cancelled = runtime
-        .session
-        .as_ref()
-        .expect("session")
-        .plugins()
-        .cancel_lashlang_trigger(json!({ "handle": handle }))
-        .expect("cancel trigger");
-    assert_eq!(cancelled, json!(true));
 
-    let disabled = runtime
-        .emit_host_event(
-            "Button",
-            "ui.button",
-            "pressed",
-            json!({
-                "button": "Blue",
-                "message": "user pressed the blue button",
-                "pressed_at": "2026-06-02T12:03:00Z"
-            }),
-        )
-        .await
-        .expect("disabled route should be skipped");
+    let invalid = try_emit_test_occurrence(
+        &runtime,
+        source_type,
+        source_key.clone(),
+        json!({
+            "button": "Green",
+            "message": "invalid button payload",
+            "pressed_at": "2026-06-02T12:02:00Z"
+        }),
+        "button-green-invalid",
+    )
+    .await
+    .expect_err("invalid payload should fail before process start");
+    assert!(invalid.to_string().contains("invalid payload for trigger"));
+    assert_eq!(plugin_node_count(&runtime, "lash.host_event"), 0);
+
+    assert!(cancel_trigger_subscription(&runtime, handle).await);
+
+    let disabled = emit_test_occurrence(
+        &runtime,
+        source_type,
+        source_key,
+        json!({
+            "button": "Blue",
+            "message": "user pressed the blue button",
+            "pressed_at": "2026-06-02T12:03:00Z"
+        }),
+        "button-blue-disabled",
+    )
+    .await;
     assert!(disabled.started_process_ids.is_empty());
-    assert_eq!(plugin_node_count(&runtime, "lash.host_event"), 2);
+    assert_eq!(plugin_node_count(&runtime, "lash.host_event"), 0);
 }
 
 #[tokio::test]
-async fn registering_schedule_source_persists_route_and_activation_reuses_artifact_refs() {
+async fn registering_schedule_source_stores_source_key_and_occurrence_reuses_artifact_refs() {
     let artifact_store = Arc::new(CountingArtifactStore::default());
     let artifact_store_for_host: Arc<dyn lashlang::LashlangArtifactStore> = artifact_store.clone();
     let host = EmbeddedRuntimeHost::new({
@@ -785,6 +986,12 @@ async fn registering_schedule_source_persists_route_and_activation_reuses_artifa
         json!("test.Schedule")
     );
     assert_eq!(finish_json["registrations"][0]["enabled"], json!(true));
+    assert!(
+        finish_json["registrations"][0]["source_key"]
+            .as_str()
+            .expect("source key")
+            .starts_with("source:test.Schedule:sha256:")
+    );
     assert_eq!(
         finish_json["registrations"][0]["target"]["inputs"]["event"]["kind"],
         json!("event")
@@ -798,11 +1005,8 @@ async fn registering_schedule_source_persists_route_and_activation_reuses_artifa
     assert_eq!(artifact_store.put_count(), 1);
 
     let registrations = runtime
-        .session
-        .as_ref()
-        .expect("session")
-        .plugins()
-        .list_all_lashlang_triggers()
+        .list_lashlang_trigger_registrations()
+        .await
         .expect("registrations");
     assert_eq!(registrations.len(), 1);
     let registration = serde_json::to_value(&registrations[0]).expect("registration json");
@@ -829,32 +1033,35 @@ async fn registering_schedule_source_persists_route_and_activation_reuses_artifa
         .snapshot()
         .expect("plugin snapshot");
     let snapshot_json = serde_json::to_string(&snapshot).expect("snapshot json");
-    assert!(snapshot_json.contains("module_ref"));
+    assert!(!snapshot_json.contains("module_ref"));
     assert!(!snapshot_json.contains("process daily_digest"));
     assert!(!snapshot_json.contains("daily_digest_due"));
 
-    let handle = finish_json["handle"]["id"].as_str().expect("handle id");
-    let invalid = runtime
-        .activate_lashlang_trigger(
-            handle,
-            json!({
-                "id": "daily-2026-06-01"
-            }),
-        )
-        .await
-        .expect_err("missing scheduled_at should reject trigger payload");
+    let source_key = registrations[0].source_key.clone();
+    let invalid = try_emit_test_occurrence(
+        &runtime,
+        "test.Schedule",
+        source_key.clone(),
+        json!({
+            "id": "daily-2026-06-01"
+        }),
+        "daily-invalid",
+    )
+    .await
+    .expect_err("missing scheduled_at should reject trigger payload");
     assert!(invalid.to_string().contains("invalid payload for trigger"));
 
-    let report = runtime
-        .activate_lashlang_trigger(
-            handle,
-            json!({
-                "id": "daily-2026-06-01",
-                "scheduled_at": "2026-06-01T08:00:00Z"
-            }),
-        )
-        .await
-        .expect("activate schedule trigger");
+    let report = emit_test_occurrence(
+        &runtime,
+        "test.Schedule",
+        source_key,
+        json!({
+            "id": "daily-2026-06-01",
+            "scheduled_at": "2026-06-01T08:00:00Z"
+        }),
+        "daily-2026-06-01",
+    )
+    .await;
     assert_eq!(report.started_process_ids.len(), 1);
     assert_eq!(artifact_store.put_count(), 1);
 
@@ -875,7 +1082,15 @@ async fn registering_schedule_source_persists_route_and_activation_reuses_artifa
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
             Arc::clone(&registry),
         )
-        .with_session_policy(crate::runtime::tests::helpers::standard_test_policy()),
+        .with_session_policy(crate::runtime::tests::helpers::standard_test_policy())
+        .with_host_event_store(
+            runtime
+                .host
+                .host_event_store
+                .as_ref()
+                .expect("host event store")
+                .clone(),
+        ),
     );
     worker
         .drive_pending_processes()
@@ -892,31 +1107,15 @@ async fn registering_schedule_source_persists_route_and_activation_reuses_artifa
         .get_process(process_id)
         .await
         .expect("process record");
-    let Some(crate::CausalRef::SessionNode {
-        session_id,
-        node_id,
-    }) = record.provenance.caused_by
-    else {
-        panic!("triggered process should be caused by the trigger activation session node");
+    let Some(crate::CausalRef::HostEvent { occurrence_id }) = record.provenance.caused_by else {
+        panic!("triggered process should be caused by the host event occurrence");
     };
-    assert_eq!(session_id, runtime.session_id());
-    let node = runtime
-        .state
-        .session_graph
-        .find_node(&node_id)
-        .expect("trigger activation node");
-    match &node.payload {
-        crate::SessionNodePayload::Plugin { plugin_type, body } => {
-            assert_eq!(plugin_type, "lash.trigger_activation");
-            assert_eq!(body.as_ref()["handle"], handle);
-            assert_eq!(body.as_ref()["payload"]["id"], "daily-2026-06-01");
-        }
-        _ => panic!("trigger activation should append a plugin session node"),
-    }
+    assert_eq!(occurrence_id, report.occurrence_id);
+    assert_eq!(plugin_node_count(&runtime, "lash.trigger_activation"), 0);
 }
 
 #[tokio::test]
-async fn source_owner_lists_source_routes_and_activates_exact_handles_without_crossfire() {
+async fn source_owner_lists_source_keys_and_emits_exact_key_without_crossfire() {
     let artifact_store = Arc::new(CountingArtifactStore::default());
     let artifact_store_for_host: Arc<dyn lashlang::LashlangArtifactStore> = artifact_store.clone();
     let host = EmbeddedRuntimeHost::new({
@@ -964,13 +1163,10 @@ async fn source_owner_lists_source_routes_and_activates_exact_handles_without_cr
     let first_handle = finish_json["first"]["id"].as_str().expect("first handle");
     let second_handle = finish_json["second"]["id"].as_str().expect("second handle");
     let source_registrations = runtime
-        .session
-        .as_ref()
-        .expect("session")
-        .plugins()
         .lashlang_trigger_registrations_by_source_type(crate::TriggerSourceType::from(
             "clock.Alarm",
         ))
+        .await
         .expect("source registrations");
     assert_eq!(
         source_registrations
@@ -979,17 +1175,28 @@ async fn source_owner_lists_source_routes_and_activates_exact_handles_without_cr
             .collect::<Vec<_>>(),
         vec![first_handle, second_handle]
     );
+    assert_ne!(
+        source_registrations[0].source_key,
+        source_registrations[1].source_key
+    );
+    let second_source_key = source_registrations
+        .iter()
+        .find(|registration| registration.handle == second_handle)
+        .expect("second source registration")
+        .source_key
+        .clone();
 
-    let report = runtime
-        .activate_lashlang_trigger(
-            second_handle,
-            json!({
-                "id": "alarm-09",
-                "scheduled_at": "2026-06-01T09:00:00Z"
-            }),
-        )
-        .await
-        .expect("activate second handle");
+    let report = emit_test_occurrence(
+        &runtime,
+        "clock.Alarm",
+        second_source_key.clone(),
+        json!({
+            "id": "alarm-09",
+            "scheduled_at": "2026-06-01T09:00:00Z"
+        }),
+        "alarm-09",
+    )
+    .await;
     assert_eq!(report.started_process_ids.len(), 1);
     let process_id = report.started_process_ids.first().expect("process id");
     let record = registry
@@ -1008,29 +1215,34 @@ async fn source_owner_lists_source_routes_and_activates_exact_handles_without_cr
         Some(&json!("alarm-09"))
     );
 
-    let cancelled = runtime
-        .session
-        .as_ref()
-        .expect("session")
-        .plugins()
-        .cancel_lashlang_trigger(json!({ "handle": { "id": second_handle } }))
-        .expect("cancel second handle");
-    assert_eq!(cancelled, json!(true));
-    let disabled = runtime
-        .activate_lashlang_trigger(
-            second_handle,
-            json!({
-                "id": "alarm-disabled",
-                "scheduled_at": "2026-06-01T09:05:00Z"
-            }),
-        )
-        .await
-        .expect("disabled activation is not an error");
+    assert!(cancel_trigger_subscription(&runtime, second_handle).await);
+    let disabled = emit_test_occurrence(
+        &runtime,
+        "clock.Alarm",
+        second_source_key,
+        json!({
+            "id": "alarm-disabled",
+            "scheduled_at": "2026-06-01T09:05:00Z"
+        }),
+        "alarm-disabled",
+    )
+    .await;
     assert!(disabled.started_process_ids.is_empty());
+    assert!(
+        !runtime
+            .host
+            .host_event_store
+            .as_ref()
+            .expect("host event store")
+            .cancel_subscription("other-session", first_handle)
+            .await
+            .expect("cross-session cancel")
+    );
+    assert!(cancel_trigger_subscription(&runtime, first_handle).await);
 }
 
 #[tokio::test]
-async fn cancel_disables_future_activations_without_canceling_started_runs() {
+async fn cancel_disables_future_occurrences_without_canceling_started_runs() {
     let artifact_store = Arc::new(CountingArtifactStore::default());
     let artifact_store_for_host: Arc<dyn lashlang::LashlangArtifactStore> = artifact_store.clone();
     let host = EmbeddedRuntimeHost::new({
@@ -1056,46 +1268,41 @@ async fn cancel_disables_future_activations_without_canceling_started_runs() {
     let finish_json = crate::lashlang_bridge::lashlang_value_to_json(&finish).expect("finish json");
     let handle = finish_json["handle"].clone();
     let handle_id = handle["id"].as_str().expect("handle id").to_string();
-
-    let report = runtime
-        .activate_lashlang_trigger(
-            &handle_id,
-            json!({
-                "id": "daily-2026-06-01",
-                "scheduled_at": "2026-06-01T08:00:00Z"
-            }),
-        )
+    let source_key = trigger_subscriptions(&runtime)
         .await
-        .expect("activate schedule trigger");
+        .first()
+        .expect("schedule subscription")
+        .source_key
+        .clone();
+
+    let report = emit_test_occurrence(
+        &runtime,
+        "test.Schedule",
+        source_key.clone(),
+        json!({
+            "id": "daily-2026-06-01",
+            "scheduled_at": "2026-06-01T08:00:00Z"
+        }),
+        "daily-before-cancel",
+    )
+    .await;
     assert_eq!(report.started_process_ids.len(), 1);
 
-    let cancelled = runtime
-        .session
-        .as_ref()
-        .expect("session")
-        .plugins()
-        .cancel_lashlang_trigger(json!({ "handle": handle }))
-        .expect("cancel trigger");
-    assert_eq!(cancelled, json!(true));
-    let registrations = runtime
-        .session
-        .as_ref()
-        .expect("session")
-        .plugins()
-        .list_all_lashlang_triggers()
-        .expect("list triggers");
+    assert!(cancel_trigger_subscription(&runtime, &handle_id).await);
+    let registrations = trigger_subscriptions(&runtime).await;
     assert!(!registrations[0].enabled);
 
-    let after_cancel = runtime
-        .activate_lashlang_trigger(
-            &handle_id,
-            json!({
-                "id": "daily-2026-06-02",
-                "scheduled_at": "2026-06-02T08:00:00Z"
-            }),
-        )
-        .await
-        .expect("activate schedule trigger after cancel");
+    let after_cancel = emit_test_occurrence(
+        &runtime,
+        "test.Schedule",
+        source_key,
+        json!({
+            "id": "daily-2026-06-02",
+            "scheduled_at": "2026-06-02T08:00:00Z"
+        }),
+        "daily-after-cancel",
+    )
+    .await;
     assert!(after_cancel.started_process_ids.is_empty());
 
     let process_id = &report.started_process_ids[0];
@@ -1129,7 +1336,15 @@ async fn cancel_disables_future_activations_without_canceling_started_runs() {
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default()),
             Arc::clone(&registry),
         )
-        .with_session_policy(crate::runtime::tests::helpers::standard_test_policy()),
+        .with_session_policy(crate::runtime::tests::helpers::standard_test_policy())
+        .with_host_event_store(
+            runtime
+                .host
+                .host_event_store
+                .as_ref()
+                .expect("host event store")
+                .clone(),
+        ),
     );
     worker
         .drive_pending_processes()

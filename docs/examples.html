@@ -61,7 +61,7 @@
       </div>
       <div class="module-grid">
         <article class="panel"><h3>Background work</h3><p>The model starts named Lashlang <code>process</code>es and spawns subagents; the right rail polls the process registry for live runs.</p></article>
-        <article class="panel"><h3>Host-event buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> host events that activate a registered trigger with a validated payload.</p></article>
+        <article class="panel"><h3>Host-event buttons</h3><p>Red and blue buttons emit <code>ui.button.pressed</code> host-event occurrences that start processes for matching trigger registrations.</p></article>
         <article class="panel"><h3>Restate cron</h3><p>A registered <code>cron.Schedule</code> source syncs to a <code>WorkbenchCronJob</code> Restate virtual object that fires <code>cron.Tick</code>s on its own timer.</p></article>
         <article class="panel"><h3>Lashlang graph</h3><p>The graph panel reads <code>TraceLashlangGraphStore</code> — a trace-derived view of foreground blocks, durable runs, and child links.</p></article>
       </div>

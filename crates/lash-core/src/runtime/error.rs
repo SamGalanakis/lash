@@ -9,6 +9,7 @@ pub enum DurableStoreFacet {
     ArtifactStore,
     SessionStore,
     ProcessRegistry,
+    HostEventStore,
 }
 
 impl DurableStoreFacet {
@@ -20,6 +21,7 @@ impl DurableStoreFacet {
             Self::ArtifactStore => "durable_store_required:artifact_store",
             Self::SessionStore => "durable_store_required:session_store",
             Self::ProcessRegistry => "durable_store_required:process_registry",
+            Self::HostEventStore => "durable_store_required:host_event_store",
         }
     }
 }
@@ -104,6 +106,9 @@ impl From<&str> for RuntimeErrorCode {
             "durable_store_required:process_registry" => Self::DurableStoreRequired {
                 facet: DurableStoreFacet::ProcessRegistry,
             },
+            "durable_store_required:host_event_store" => Self::DurableStoreRequired {
+                facet: DurableStoreFacet::HostEventStore,
+            },
             "store_commit_failed" => Self::StoreCommitFailed,
             "plugin_session_manager" => Self::PluginSessionManager,
             "plugin_finalize_turn" => Self::PluginFinalizeTurn,
@@ -173,6 +178,7 @@ impl RuntimeError {
             DurableStoreFacet::ArtifactStore => "lashlang artifact store",
             DurableStoreFacet::SessionStore => "session store",
             DurableStoreFacet::ProcessRegistry => "process registry",
+            DurableStoreFacet::HostEventStore => "host event store",
         };
         Self::new(
             RuntimeErrorCode::DurableStoreRequired { facet },
@@ -213,6 +219,7 @@ mod tests {
             DurableStoreFacet::ArtifactStore,
             DurableStoreFacet::SessionStore,
             DurableStoreFacet::ProcessRegistry,
+            DurableStoreFacet::HostEventStore,
         ] {
             let err = RuntimeError::durable_store_required(facet);
             let json = serde_json::to_value(&err).expect("serialize runtime error");

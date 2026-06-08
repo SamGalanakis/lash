@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use super::*;
@@ -185,6 +186,63 @@ fn prompt_layer_round_trips_without_protocol_crate_depending_on_core_by_default(
     let remote = RemotePromptLayer::from(prompt.clone());
     let core = lash_core::PromptLayer::from(remote);
     assert_eq!(core, prompt);
+}
+
+#[test]
+fn host_event_dtos_round_trip_core_values() {
+    let request = lash_core::HostEventOccurrenceRequest::new(
+        "ui.button.pressed",
+        "source-key",
+        serde_json::json!({ "button": "Blue" }),
+        "button-blue-1",
+    )
+    .with_source(serde_json::json!({ "id": "blue" }));
+    let remote = RemoteHostEventOccurrenceRequest::from(request.clone());
+    remote.validate().expect("valid remote request");
+    let core = lash_core::HostEventOccurrenceRequest::try_from(remote).expect("core request");
+    assert_eq!(core, request);
+
+    let report = lash_core::HostEventEmitReport {
+        occurrence_id: "occurrence:1".to_string(),
+        started_process_ids: vec!["process:1".to_string()],
+    };
+    let remote = RemoteHostEventEmitReport::from(report.clone());
+    remote.validate().expect("valid remote report");
+    let core = lash_core::HostEventEmitReport::try_from(remote).expect("core report");
+    assert_eq!(core, report);
+
+    let mut filter = lash_core::TriggerSubscriptionFilter::for_source_type("ui.button.pressed");
+    filter.source_key = Some("source-key".to_string());
+    filter.enabled = Some(true);
+    let remote = RemoteTriggerSubscriptionFilter::from(filter.clone());
+    remote.validate().expect("valid remote filter");
+    let core = lash_core::TriggerSubscriptionFilter::try_from(remote).expect("core filter");
+    assert_eq!(core, filter);
+
+    let mut inputs = BTreeMap::new();
+    inputs.insert("event".to_string(), lashlang::TriggerInputBinding::Event);
+    let registration = lash_core::TriggerRegistration {
+        handle: "trigger:1".to_string(),
+        source_key: "source-key".to_string(),
+        name: Some("button watcher".to_string()),
+        source_type: lash_core::TriggerSourceType::new("ui.button.pressed"),
+        source: serde_json::json!({}),
+        target: lash_core::TriggerTargetSummary {
+            process_name: "on_button".to_string(),
+            inputs: lashlang::TriggerInputTemplate::new(inputs),
+        },
+        enabled: true,
+    };
+    let remote = RemoteTriggerRegistration::from(registration.clone());
+    let core = lash_core::TriggerRegistration::try_from(remote).expect("core registration");
+    assert_eq!(core, registration);
+
+    let cause = lash_core::CausalRef::HostEvent {
+        occurrence_id: "occurrence:1".to_string(),
+    };
+    let remote = RemoteCausalRef::from(cause.clone());
+    let core = lash_core::CausalRef::from(remote);
+    assert_eq!(core, cause);
 }
 
 #[test]

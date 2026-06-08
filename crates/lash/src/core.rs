@@ -153,6 +153,10 @@ impl LashCore {
         }
     }
 
+    pub fn host_events(&self) -> crate::control::HostEventsControl {
+        crate::control::HostEventsControl { core: self.clone() }
+    }
+
     pub async fn delete_session(&self, session_id: impl AsRef<str>) -> Result<SessionDeleteReport> {
         let session_id = session_id.as_ref().to_string();
         let effect_host = Arc::clone(&self.env.core.control.effect_host);
@@ -289,6 +293,7 @@ pub struct LashCoreBuilder {
     effect_host: Option<Arc<dyn EffectHost>>,
     attachment_store: Option<Arc<dyn AttachmentStore>>,
     lashlang_artifact_store: Option<Arc<dyn lash_core::LashlangArtifactStore>>,
+    host_event_store: Option<Arc<dyn lash_core::HostEventStore>>,
     // Benign core overrides applied on top of the resolved core.
     prompt: Option<PromptLayer>,
     trace_sink: Option<Arc<dyn lash_trace::TraceSink>>,
@@ -550,6 +555,10 @@ impl LashCoreBuilder {
             .lashlang_artifact_store
             .as_ref()
             .map(|store| store.durability_tier());
+        let host_event_store_tier = self
+            .host_event_store
+            .as_ref()
+            .map(|store| store.durability_tier());
 
         if session_store_tier == Some(DurabilityTier::Durable) {
             if attachment_tier == Some(DurabilityTier::Inline) {
@@ -565,10 +574,30 @@ impl LashCoreBuilder {
         }
 
         if let Some(process_registry) = self.process_work_source.process_registry().as_ref() {
-            if process_registry.durability_tier() == DurabilityTier::Durable
-                && session_store_tier != Some(DurabilityTier::Durable)
+            if process_registry.durability_tier() == DurabilityTier::Durable {
+                if session_store_tier != Some(DurabilityTier::Durable) {
+                    return Err(EmbedError::DurableProcessRegistryRequiresStoreFactory);
+                }
+                if host_event_store_tier != Some(DurabilityTier::Durable) {
+                    return Err(EmbedError::DurableStorePeerRequired {
+                        facet: "host event store",
+                    });
+                }
+            }
+        }
+
+        if host_event_store_tier == Some(DurabilityTier::Durable) {
+            if session_store_tier != Some(DurabilityTier::Durable) {
+                return Err(EmbedError::DurableStorePeerRequired {
+                    facet: "session store factory",
+                });
+            }
+            if let Some(process_registry) = self.process_work_source.process_registry().as_ref()
+                && process_registry.durability_tier() == DurabilityTier::Inline
             {
-                return Err(EmbedError::DurableProcessRegistryRequiresStoreFactory);
+                return Err(EmbedError::DurableStorePeerRequired {
+                    facet: "process registry",
+                });
             }
         }
 
@@ -660,6 +689,7 @@ impl LashCoreBuilder {
                 .or(self.store_factory.as_ref()),
             &policy,
             self.residency.unwrap_or_default(),
+            self.host_event_store.as_ref(),
         )?;
 
         let mut env_builder = RuntimeEnvironment::builder()
@@ -677,6 +707,9 @@ impl LashCoreBuilder {
             .or(self.store_factory.as_ref())
         {
             env_builder = env_builder.with_session_store_factory(Arc::clone(child_store_factory));
+        }
+        if let Some(host_event_store) = self.host_event_store.as_ref() {
+            env_builder = env_builder.with_host_event_store(Arc::clone(host_event_store));
         }
         if let Some(queued_work_poke) = self.queued_work_poke.clone() {
             env_builder = env_builder.with_queued_work_poke(queued_work_poke);
@@ -709,6 +742,7 @@ impl LashCoreBuilder {
         store_factory: Option<&Arc<dyn SessionStoreFactory>>,
         policy: &SessionPolicy,
         residency: lash_core::Residency,
+        host_event_store: Option<&Arc<dyn lash_core::HostEventStore>>,
     ) -> Result<ProcessWorkRunnerSetup> {
         let process_registry = match process_work_source {
             ProcessWorkSource::None => return Ok(ProcessWorkRunnerSetup::None),
@@ -740,6 +774,11 @@ impl LashCoreBuilder {
                 process_registry,
             )
             .with_session_policy(policy.clone())
+            .with_host_event_store(
+                host_event_store
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(lash_core::InMemoryHostEventStore::default())),
+            )
             .with_residency(residency),
         );
         Ok(ProcessWorkRunnerSetup::LazyDefault { config })
@@ -753,6 +792,11 @@ impl LashCoreBuilder {
         self.process_work_source = ProcessWorkSource::Inline {
             registry: process_registry,
         };
+        self
+    }
+
+    pub fn host_event_store(mut self, store: Arc<dyn lash_core::HostEventStore>) -> Self {
+        self.host_event_store = Some(store);
         self
     }
 

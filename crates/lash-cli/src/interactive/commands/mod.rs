@@ -150,10 +150,7 @@ fn ready_batches_for_idle_dispatch(batches: &[QueuedWorkBatch]) -> Vec<QueuedWor
 fn batch_has_visible_turn_input(batch: &QueuedWorkBatch) -> bool {
     batch.items.iter().any(|item| match &item.payload {
         QueuedWorkPayload::TurnInput { input } => turn_input_has_visible_content(input),
-        QueuedWorkPayload::ProcessWake { .. }
-        | QueuedWorkPayload::HostEvent { .. }
-        | QueuedWorkPayload::Timer { .. }
-        | QueuedWorkPayload::SessionCommand { .. } => false,
+        QueuedWorkPayload::ProcessWake { .. } | QueuedWorkPayload::SessionCommand { .. } => false,
     })
 }
 

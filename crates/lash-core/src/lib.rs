@@ -46,7 +46,13 @@ pub use direct::{
     DirectRequest, DirectRole,
 };
 pub use host_events::{
-    HostEvent, HostEventCatalog, HostEventEmitReport, HostEventKey, host_event_source_type,
+    HostEvent, HostEventCatalog, HostEventEmitReport, HostEventKey, HostEventOccurrenceRecord,
+    HostEventOccurrenceRequest, HostEventRouter, HostEventStore, InMemoryHostEventStore,
+    TriggerDeliveryReservation, TriggerRegistration, TriggerSourceType, TriggerSubscriptionDraft,
+    TriggerSubscriptionFilter, TriggerSubscriptionRecord, TriggerTargetSummary,
+    default_host_event_source_key, deterministic_delivery_process_id, deterministic_occurrence_id,
+    empty_host_event_source_key, host_event_occurrence_request_hash, host_event_source_type,
+    validate_host_event_occurrence_request,
 };
 pub use lash_sansio::llm::types::{
     GenerationOptions, LlmOutputPart, LlmRequest, LlmResponse, LlmTerminalReason,
@@ -75,7 +81,6 @@ pub use lash_sansio::{
 };
 pub use lashlang::{DurabilityTier, InMemoryLashlangArtifactStore, LashlangArtifactStore};
 pub use protocol_build::ProtocolBuildInput;
-pub use session::triggers::TriggerActivationService;
 pub use tool_registry::{
     ReconfigureError, ToolRegistry, ToolSourceHandle, ToolState, ToolStateEntry,
 };
@@ -209,9 +214,8 @@ pub use plugin::{
     SessionToolAccess, SessionTurnInput, SessionTurnRequest, SnapshotReader, SnapshotWriter,
     SubagentSessionContext, ToolDiscoveryContext, ToolDiscoveryContribution,
     ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolResultProjectionContext,
-    ToolResultProjector, ToolSurfaceContribution, TriggerRegistration, TriggerSourceType,
-    TriggerTargetSummary, TurnContextTransform, TurnHookContext, TurnResultHookContext,
-    TurnResultSummary, TurnTransformContext, plugin_action_def,
+    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
+    TurnResultHookContext, TurnResultSummary, TurnTransformContext, plugin_action_def,
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{

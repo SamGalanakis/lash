@@ -10,19 +10,6 @@ use crate::{PluginActionInvokeError, SessionError};
 use super::LashRuntime;
 use super::state::{RuntimeSessionState, append_session_nodes_to_state, normalize_session_graph};
 
-struct AppendedHostEvent {
-    source_type: String,
-    #[cfg(test)]
-    node_id: String,
-    invocation: crate::RuntimeInvocation,
-    graph: crate::store::GraphCommitDelta,
-}
-
-struct AppendedActivation {
-    node_id: String,
-    invocation: crate::RuntimeInvocation,
-}
-
 impl LashRuntime {
     /// Replace the host-owned state envelope.
     pub fn set_persisted_state(&mut self, state: RuntimeSessionState) -> Result<(), SessionError> {
@@ -232,428 +219,42 @@ impl LashRuntime {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(in crate::runtime) async fn emit_host_event(
-        &mut self,
-        resource_type: &str,
-        alias: &str,
-        event: &str,
-        payload: serde_json::Value,
-    ) -> Result<crate::HostEventEmitReport, SessionError> {
-        let effect_host = Arc::clone(&self.host.core.control.effect_host);
-        let source_type = self
-            .validate_and_append_host_event(resource_type, alias, event, &payload)
-            .await?;
-        let scoped_effect_controller = effect_host
-            .scoped(crate::EffectScope::host_event(
-                &self.state.session_id,
-                source_type.node_id.clone(),
-            ))
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        self.activate_host_event_source(
-            &source_type.source_type,
-            payload,
-            scoped_effect_controller,
-            source_type.invocation,
-        )
-        .await
-    }
-
-    #[cfg(test)]
-    async fn validate_and_append_host_event(
-        &mut self,
-        resource_type: &str,
-        alias: &str,
-        event: &str,
-        payload: &serde_json::Value,
-    ) -> Result<AppendedHostEvent, SessionError> {
-        let appended = self
-            .validate_and_append_host_event_to_state(resource_type, alias, event, payload)
-            .await?;
-        if let Some(store) = self
-            .session
-            .as_ref()
-            .and_then(|session| session.history_store())
-        {
-            let commit = crate::store::RuntimeCommit::persisted_state_with_graph_commit(
-                &self.state,
-                appended.graph.clone(),
-                &[],
-            );
-            match store.commit_runtime_state(commit).await {
-                Ok(result) => self.state.apply_persisted_commit_result(result),
-                Err(err) => tracing::warn!("failed to persist runtime state: {err}"),
-            }
-        }
-        Ok(appended)
-    }
-
-    pub(in crate::runtime) async fn emit_host_event_without_persist(
-        &mut self,
-        resource_type: &str,
-        alias: &str,
-        event: &str,
-        payload: serde_json::Value,
-        scoped_effect_controller: crate::ScopedEffectController<'_>,
-    ) -> Result<(crate::HostEventEmitReport, crate::store::GraphCommitDelta), SessionError> {
-        let appended = self
-            .validate_and_append_host_event_to_state(resource_type, alias, event, &payload)
-            .await?;
-        let report = self
-            .activate_host_event_source(
-                &appended.source_type,
-                payload,
-                scoped_effect_controller,
-                appended.invocation.clone(),
-            )
-            .await?;
-        Ok((report, appended.graph))
-    }
-
-    async fn validate_and_append_host_event_to_state(
-        &mut self,
-        resource_type: &str,
-        alias: &str,
-        event: &str,
-        payload: &serde_json::Value,
-    ) -> Result<AppendedHostEvent, SessionError> {
-        self.refresh_session_graph_from_store().await?;
-        {
-            let Some(session) = self.session.as_ref() else {
-                return Err(SessionError::Protocol(
-                    "runtime session not available".to_string(),
-                ));
-            };
-            crate::session::triggers::validate_host_event(
-                session.plugins(),
-                resource_type,
-                alias,
-                event,
-                payload,
-            )
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        }
-        let source_type = crate::host_event_source_type(alias, event);
-        let nodes = vec![crate::SessionAppendNode::plugin(
-            "lash.host_event",
-            serde_json::json!({
-                "resource_type": resource_type,
-                "alias": alias,
-                "event": event,
-                "source_type": source_type.clone(),
-                "payload": payload.clone(),
-            }),
-        )];
-        let node_ids = append_session_nodes_to_state(&mut self.state, &nodes);
-        if let Some(session) = self.session.as_mut() {
-            let protocol_session = Arc::clone(session.plugins().protocol_session());
-            let session_id = self.state.session_id.clone();
-            protocol_session
-                .append_session_nodes(
-                    crate::plugin::ProtocolSessionContext::new(session, &session_id),
-                    &nodes,
-                )
-                .await?;
-        }
-        self.stamp_live_plugin_state();
-        let host_event_node_id = node_ids.into_iter().next().unwrap_or_default();
-        let graph = crate::store::GraphCommitDelta::Append {
-            nodes: self
-                .state
-                .session_graph
-                .find_node(&host_event_node_id)
-                .cloned()
-                .into_iter()
-                .collect(),
-            leaf_node_id: self.state.session_graph.leaf_node_id.clone(),
-        };
-        let host_event_invocation = crate::runtime::causal::session_node_invocation(
-            &self.state.session_id,
-            host_event_node_id.clone(),
-        );
-        Ok(AppendedHostEvent {
-            source_type,
-            #[cfg(test)]
-            node_id: host_event_node_id.clone(),
-            invocation: host_event_invocation,
-            graph,
-        })
-    }
-
-    async fn activate_host_event_source(
-        &mut self,
-        source_type: &str,
-        payload: serde_json::Value,
-        scoped_effect_controller: crate::ScopedEffectController<'_>,
-        host_event_invocation: crate::RuntimeInvocation,
-    ) -> Result<crate::HostEventEmitReport, SessionError> {
-        let Some(session) = self.session.as_ref() else {
-            return Err(SessionError::Protocol(
-                "runtime session not available".to_string(),
-            ));
-        };
-        let manager = self
-            .runtime_session_services()
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        let activation = session
-            .plugins()
-            .trigger_activation_service(manager.process_service(), scoped_effect_controller);
-        let started_process_ids = activation
-            .activate_source_type(source_type, payload, Some(host_event_invocation))
-            .await
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        Ok(crate::HostEventEmitReport {
-            started_process_ids,
-        })
-    }
-
-    pub async fn activate_lashlang_trigger(
-        &mut self,
-        handle: &str,
-        payload: serde_json::Value,
-    ) -> Result<crate::HostEventEmitReport, SessionError> {
-        let effect_host = Arc::clone(&self.host.core.control.effect_host);
-        let appended = self
-            .append_lashlang_trigger_activation(handle, &payload)
-            .await?;
-        let scoped_effect_controller = effect_host
-            .scoped(crate::EffectScope::host_event(
-                &self.state.session_id,
-                appended.node_id.clone(),
-            ))
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        self.activate_lashlang_trigger_from_scope(
-            handle,
-            payload,
-            scoped_effect_controller,
-            appended.invocation,
-        )
-        .await
-    }
-
-    pub async fn activate_lashlang_trigger_with_effect_scope(
-        &mut self,
-        handle: &str,
-        payload: serde_json::Value,
-        scoped_effect_controller: crate::ScopedEffectController<'_>,
-    ) -> Result<crate::HostEventEmitReport, SessionError> {
-        let appended = self
-            .append_lashlang_trigger_activation(handle, &payload)
-            .await?;
-        self.activate_lashlang_trigger_from_scope(
-            handle,
-            payload,
-            scoped_effect_controller,
-            appended.invocation,
-        )
-        .await
-    }
-
-    async fn append_lashlang_trigger_activation(
-        &mut self,
-        handle: &str,
-        payload: &serde_json::Value,
-    ) -> Result<AppendedActivation, SessionError> {
-        let append = self
-            .append_session_nodes(crate::AppendSessionNodesRequest {
-                nodes: vec![crate::SessionAppendNode::plugin(
-                    "lash.trigger_activation",
-                    serde_json::json!({
-                        "handle": handle,
-                        "payload": payload.clone(),
-                    }),
-                )],
-                requires_ancestor_node_id: None,
-            })
-            .await?;
-        let activation_node_id = match append {
-            crate::AppendSessionNodesResult::Appended { node_ids, .. } => {
-                node_ids.into_iter().next().unwrap_or_default()
-            }
-            crate::AppendSessionNodesResult::StaleBranch {
-                current_leaf_node_id,
-            } => {
-                return Err(SessionError::Protocol(format!(
-                    "trigger activation append targeted a stale session branch at {:?}",
-                    current_leaf_node_id
-                )));
-            }
-        };
-        let activation_invocation = crate::runtime::causal::session_node_invocation(
-            &self.state.session_id,
-            activation_node_id.clone(),
-        );
-        Ok(AppendedActivation {
-            node_id: activation_node_id,
-            invocation: activation_invocation,
-        })
-    }
-
-    async fn activate_lashlang_trigger_from_scope(
-        &mut self,
-        handle: &str,
-        payload: serde_json::Value,
-        scoped_effect_controller: crate::ScopedEffectController<'_>,
-        activation_invocation: crate::RuntimeInvocation,
-    ) -> Result<crate::HostEventEmitReport, SessionError> {
-        let Some(session) = self.session.as_ref() else {
-            return Err(SessionError::Protocol(
-                "runtime session not available".to_string(),
-            ));
-        };
-        let manager = self
-            .runtime_session_services()
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        let activation = session
-            .plugins()
-            .trigger_activation_service(manager.process_service(), scoped_effect_controller);
-        let started = activation
-            .activate(handle, payload, Some(activation_invocation))
-            .await
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        Ok(crate::HostEventEmitReport {
-            started_process_ids: started.into_iter().collect(),
-        })
-    }
-
-    pub async fn activate_lashlang_trigger_source_type(
-        &mut self,
-        source_type: impl AsRef<str>,
-        payload: serde_json::Value,
-    ) -> Result<crate::HostEventEmitReport, SessionError> {
-        let effect_host = Arc::clone(&self.host.core.control.effect_host);
-        let source_type = source_type.as_ref().to_string();
-        let appended = self
-            .append_lashlang_trigger_source_activation(&source_type, &payload)
-            .await?;
-        let scoped_effect_controller = effect_host
-            .scoped(crate::EffectScope::host_event(
-                &self.state.session_id,
-                appended.node_id.clone(),
-            ))
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        self.activate_lashlang_trigger_source_from_scope(
-            &source_type,
-            payload,
-            scoped_effect_controller,
-            appended.invocation,
-        )
-        .await
-    }
-
-    pub async fn activate_lashlang_trigger_source_type_with_effect_scope(
-        &mut self,
-        source_type: impl AsRef<str>,
-        payload: serde_json::Value,
-        scoped_effect_controller: crate::ScopedEffectController<'_>,
-    ) -> Result<crate::HostEventEmitReport, SessionError> {
-        let source_type = source_type.as_ref().to_string();
-        let appended = self
-            .append_lashlang_trigger_source_activation(&source_type, &payload)
-            .await?;
-        self.activate_lashlang_trigger_source_from_scope(
-            &source_type,
-            payload,
-            scoped_effect_controller,
-            appended.invocation,
-        )
-        .await
-    }
-
-    async fn append_lashlang_trigger_source_activation(
-        &mut self,
-        source_type: &str,
-        payload: &serde_json::Value,
-    ) -> Result<AppendedActivation, SessionError> {
-        let append = self
-            .append_session_nodes(crate::AppendSessionNodesRequest {
-                nodes: vec![crate::SessionAppendNode::plugin(
-                    "lash.trigger_source_activation",
-                    serde_json::json!({
-                        "source_type": source_type,
-                        "payload": payload.clone(),
-                    }),
-                )],
-                requires_ancestor_node_id: None,
-            })
-            .await?;
-        let activation_node_id = match append {
-            crate::AppendSessionNodesResult::Appended { node_ids, .. } => {
-                node_ids.into_iter().next().unwrap_or_default()
-            }
-            crate::AppendSessionNodesResult::StaleBranch {
-                current_leaf_node_id,
-            } => {
-                return Err(SessionError::Protocol(format!(
-                    "trigger source activation append targeted a stale session branch at {:?}",
-                    current_leaf_node_id
-                )));
-            }
-        };
-        let activation_invocation = crate::runtime::causal::session_node_invocation(
-            &self.state.session_id,
-            activation_node_id.clone(),
-        );
-        Ok(AppendedActivation {
-            node_id: activation_node_id,
-            invocation: activation_invocation,
-        })
-    }
-
-    async fn activate_lashlang_trigger_source_from_scope(
-        &mut self,
-        source_type: &str,
-        payload: serde_json::Value,
-        scoped_effect_controller: crate::ScopedEffectController<'_>,
-        activation_invocation: crate::RuntimeInvocation,
-    ) -> Result<crate::HostEventEmitReport, SessionError> {
-        let Some(session) = self.session.as_ref() else {
-            return Err(SessionError::Protocol(
-                "runtime session not available".to_string(),
-            ));
-        };
-        let manager = self
-            .runtime_session_services()
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        let activation = session
-            .plugins()
-            .trigger_activation_service(manager.process_service(), scoped_effect_controller);
-        let started_process_ids = activation
-            .activate_source_type(source_type, payload, Some(activation_invocation))
-            .await
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        Ok(crate::HostEventEmitReport {
-            started_process_ids,
-        })
-    }
-
-    pub fn list_lashlang_trigger_registrations(
+    pub async fn list_lashlang_trigger_registrations(
         &self,
     ) -> Result<Vec<crate::TriggerRegistration>, SessionError> {
-        let Some(session) = self.session.as_ref() else {
-            return Err(SessionError::Protocol(
-                "runtime session not available".to_string(),
-            ));
-        };
-        session
-            .plugins()
-            .list_all_lashlang_triggers()
-            .map_err(|err| SessionError::Protocol(err.to_string()))
+        let store = self.host.host_event_store.as_ref().ok_or_else(|| {
+            SessionError::Protocol("host event store is unavailable in this runtime".to_string())
+        })?;
+        let records = store
+            .list_subscriptions(crate::TriggerSubscriptionFilter::for_session(
+                self.state.session_id.clone(),
+            ))
+            .await
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        Ok(records
+            .iter()
+            .map(crate::TriggerRegistration::from)
+            .collect())
     }
 
-    pub fn lashlang_trigger_registrations_by_source_type(
+    pub async fn lashlang_trigger_registrations_by_source_type(
         &self,
         source_type: impl Into<crate::TriggerSourceType>,
     ) -> Result<Vec<crate::TriggerRegistration>, SessionError> {
-        let Some(session) = self.session.as_ref() else {
-            return Err(SessionError::Protocol(
-                "runtime session not available".to_string(),
-            ));
-        };
-        session
-            .plugins()
-            .lashlang_trigger_registrations_by_source_type(source_type.into())
-            .map_err(|err| SessionError::Protocol(err.to_string()))
+        let store = self.host.host_event_store.as_ref().ok_or_else(|| {
+            SessionError::Protocol("host event store is unavailable in this runtime".to_string())
+        })?;
+        let mut filter =
+            crate::TriggerSubscriptionFilter::for_session(self.state.session_id.clone());
+        filter.source_type = Some(source_type.into().to_string());
+        let records = store
+            .list_subscriptions(filter)
+            .await
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
+        Ok(records
+            .iter()
+            .map(crate::TriggerRegistration::from)
+            .collect())
     }
 
     pub async fn invoke_plugin_action(

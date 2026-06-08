@@ -25,6 +25,9 @@ pub enum CausalRef {
         process_id: String,
         sequence: u64,
     },
+    HostEvent {
+        occurrence_id: String,
+    },
     SessionNode {
         session_id: String,
         node_id: String,

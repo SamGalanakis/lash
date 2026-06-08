@@ -170,6 +170,69 @@ fn remote_turn_result_json_round_trips() {
 }
 
 #[test]
+fn remote_host_event_dtos_json_round_trip() {
+    let request = RemoteHostEventOccurrenceRequest::new(
+        "ui.button.pressed",
+        "source-key",
+        serde_json::json!({ "button": "Blue" }),
+        "button-blue-1",
+    )
+    .with_source(serde_json::json!({ "id": "blue" }));
+    request.validate().expect("valid host event request");
+    let decoded: RemoteHostEventOccurrenceRequest =
+        serde_json::from_value(serde_json::to_value(&request).expect("serialize request"))
+            .expect("deserialize request");
+    assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
+    assert_eq!(decoded.source_type, "ui.button.pressed");
+    assert_eq!(decoded.source.as_ref().unwrap()["id"], "blue");
+
+    let report = RemoteHostEventEmitReport {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        occurrence_id: "occurrence:1".to_string(),
+        started_process_ids: vec!["process:1".to_string()],
+    };
+    report.validate().expect("valid report");
+    let decoded: RemoteHostEventEmitReport =
+        serde_json::from_value(serde_json::to_value(&report).expect("serialize report"))
+            .expect("deserialize report");
+    assert_eq!(decoded.started_process_ids, vec!["process:1".to_string()]);
+
+    let mut filter = RemoteTriggerSubscriptionFilter::for_source_type("ui.button.pressed");
+    filter.source_key = Some("source-key".to_string());
+    filter.enabled = Some(true);
+    filter.validate().expect("valid filter");
+    let decoded: RemoteTriggerSubscriptionFilter =
+        serde_json::from_value(serde_json::to_value(&filter).expect("serialize filter"))
+            .expect("deserialize filter");
+    assert_eq!(decoded.source_key.as_deref(), Some("source-key"));
+
+    let registration = RemoteTriggerRegistration {
+        handle: "trigger:1".to_string(),
+        source_key: "source-key".to_string(),
+        name: Some("button watcher".to_string()),
+        source_type: "ui.button.pressed".to_string(),
+        source: serde_json::json!({}),
+        target: RemoteTriggerTargetSummary {
+            process_name: "on_button".to_string(),
+            inputs: serde_json::json!({ "event": "trigger.event" }),
+        },
+        enabled: true,
+    };
+    let decoded: RemoteTriggerRegistration = serde_json::from_value(
+        serde_json::to_value(&registration).expect("serialize registration"),
+    )
+    .expect("deserialize registration");
+    assert_eq!(decoded.target.process_name, "on_button");
+
+    let cause = RemoteCausalRef::HostEvent {
+        occurrence_id: "occurrence:1".to_string(),
+    };
+    let value = serde_json::to_value(&cause).expect("serialize cause");
+    assert_eq!(value["type"], "host_event");
+    assert_eq!(value["occurrence_id"], "occurrence:1");
+}
+
+#[test]
 fn wrong_protocol_versions_are_rejected() {
     let mut input = RemoteTurnInput::text("hello");
     input.protocol_version = REMOTE_PROTOCOL_VERSION + 1;
@@ -224,6 +287,35 @@ fn wrong_protocol_versions_are_rejected() {
         activity.validate(),
         Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
     ));
+
+    let mut event = RemoteHostEventOccurrenceRequest::new(
+        "ui.button.pressed",
+        "source-key",
+        serde_json::Value::Null,
+        "idem",
+    );
+    event.protocol_version = REMOTE_PROTOCOL_VERSION + 1;
+    assert!(matches!(
+        event.validate(),
+        Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
+    ));
+
+    let mut filter = RemoteTriggerSubscriptionFilter::for_session("session");
+    filter.protocol_version = REMOTE_PROTOCOL_VERSION + 1;
+    assert!(matches!(
+        filter.validate(),
+        Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
+    ));
+
+    let report = RemoteHostEventEmitReport {
+        protocol_version: REMOTE_PROTOCOL_VERSION + 1,
+        occurrence_id: "occurrence:1".to_string(),
+        started_process_ids: Vec::new(),
+    };
+    assert!(matches!(
+        report.validate(),
+        Err(RemoteProtocolError::UnsupportedProtocolVersion { .. })
+    ));
 }
 
 #[test]
@@ -257,6 +349,9 @@ fn top_level_protocol_schema_exports_include_versions() {
     assert_schema_has_protocol_version::<RemoteToolCallRequest>();
     assert_schema_has_protocol_version::<RemoteToolCallResponse>();
     assert_schema_has_protocol_version::<RemoteTurnActivity>();
+    assert_schema_has_protocol_version::<RemoteHostEventOccurrenceRequest>();
+    assert_schema_has_protocol_version::<RemoteHostEventEmitReport>();
+    assert_schema_has_protocol_version::<RemoteTriggerSubscriptionFilter>();
 }
 
 #[test]

@@ -19,7 +19,8 @@ pub mod turn;
 pub mod usage;
 
 pub use crate::control::{
-    AdvancedToolsControl, PluginActions, SessionCommandsControl, ToolsControl, TriggersControl,
+    AdvancedToolsControl, HostEventsControl, PluginActions, SessionCommandsControl, ToolsControl,
+    TriggersControl,
 };
 pub use crate::core::{LashCore, LashCoreBuilder, SessionDeleteReport};
 pub use crate::error::{EmbedError, Result};
@@ -34,21 +35,23 @@ pub use crate::turn::{
     TurnStream, message_role, message_text,
 };
 pub use lash_core::{
-    HostEvent, HostEventEmitReport, InputItem, ModelLimits, ModelSpec, PluginStack, SessionCommand,
-    SessionCommandReceipt, SessionSpec, TriggerRegistration, TriggerSourceType,
-    TriggerTargetSummary, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
+    HostEvent, HostEventEmitReport, HostEventOccurrenceRequest, InputItem, ModelLimits, ModelSpec,
+    PluginStack, SessionCommand, SessionCommandReceipt, SessionSpec, TriggerRegistration,
+    TriggerSourceType, TriggerSubscriptionFilter, TriggerTargetSummary, TurnActivity,
+    TurnActivityId, TurnActivitySink, TurnEvent, TurnInput, empty_host_event_source_key,
     impl_unsupported_queued_work_methods,
 };
 
 pub mod prelude {
     pub use crate::{
-        AdvancedToolsControl, EmbedError, HostEvent, HostEventEmitReport, InputItem, LashCore,
-        LashCoreBuilder, LashSession, ModeId, ModePreset, ModelSpec, ObservableSession,
-        PluginActions, PluginBinding, PluginStack, PromptLayerSink, QueuedTurnBuilder, Result,
-        SessionBuilder, SessionCommand, SessionCommandReceipt, SessionCommandsControl, SessionSpec,
-        ToolsControl, TriggerRegistration, TriggerSourceType, TriggerTargetSummary,
+        AdvancedToolsControl, EmbedError, HostEvent, HostEventEmitReport,
+        HostEventOccurrenceRequest, HostEventsControl, InputItem, LashCore, LashCoreBuilder,
+        LashSession, ModeId, ModePreset, ModelSpec, ObservableSession, PluginActions,
+        PluginBinding, PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder,
+        SessionCommand, SessionCommandReceipt, SessionCommandsControl, SessionSpec, ToolsControl,
+        TriggerRegistration, TriggerSourceType, TriggerSubscriptionFilter, TriggerTargetSummary,
         TriggersControl, TurnActivity, TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult,
-        TurnStream,
+        TurnStream, empty_host_event_source_key,
     };
     pub use lash_core::TurnActivitySink;
 }

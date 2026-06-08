@@ -251,9 +251,6 @@ impl PluginHost {
                     ))
                 })?;
         }
-        let trigger_registry = contributions.trigger_registry.clone().ok_or_else(|| {
-            PluginError::Registration("missing session trigger registry".to_string())
-        })?;
         let registry = match tool_snapshot {
             Some(snapshot) => Arc::new(
                 crate::ToolRegistry::from_tool_providers(contributions.tool_providers.clone())
@@ -289,7 +286,6 @@ impl PluginHost {
             lashlang_language_features: self.lashlang_language_features,
             lashlang_resources,
             host_events,
-            trigger_registry,
             contributions,
         });
         self.register_session(&session_id, &session)?;

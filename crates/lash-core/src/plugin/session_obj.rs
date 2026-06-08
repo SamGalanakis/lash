@@ -93,7 +93,6 @@ pub struct PluginSession {
     pub(super) lashlang_language_features: lashlang::LashlangLanguageFeatures,
     pub(super) lashlang_resources: lashlang::ResourceCatalog,
     pub(super) host_events: crate::HostEventCatalog,
-    pub(super) trigger_registry: Arc<SessionTriggerRegistry>,
     pub(super) contributions: PluginContributions,
 }
 impl PluginSession {
@@ -123,59 +122,6 @@ impl PluginSession {
 
     pub fn host_events(&self) -> &crate::HostEventCatalog {
         &self.host_events
-    }
-
-    pub async fn register_lashlang_trigger(
-        &self,
-        request: serde_json::Value,
-        artifact_store: Arc<dyn lashlang::LashlangArtifactStore>,
-    ) -> Result<serde_json::Value, PluginError> {
-        let route = self
-            .trigger_registry
-            .register_route(request, &self.lashlang_resources, artifact_store.as_ref())
-            .await?;
-        Ok(super::trigger_registry::trigger_handle_json(&route.handle))
-    }
-
-    pub fn list_lashlang_triggers(
-        &self,
-        request: serde_json::Value,
-    ) -> Result<serde_json::Value, PluginError> {
-        serde_json::to_value(self.trigger_registry.list(request)?).map_err(|err| {
-            PluginError::Session(format!("failed to encode trigger registrations: {err}"))
-        })
-    }
-
-    pub fn list_all_lashlang_triggers(&self) -> Result<Vec<TriggerRegistration>, PluginError> {
-        self.trigger_registry.list_all()
-    }
-
-    pub fn lashlang_trigger_registrations_by_source_type(
-        &self,
-        source_type: TriggerSourceType,
-    ) -> Result<Vec<TriggerRegistration>, PluginError> {
-        self.trigger_registry.routes_by_source_type(&source_type)
-    }
-
-    pub fn cancel_lashlang_trigger(
-        &self,
-        request: serde_json::Value,
-    ) -> Result<serde_json::Value, PluginError> {
-        let changed = self.trigger_registry.cancel(request)?;
-        Ok(serde_json::json!(changed))
-    }
-
-    pub(crate) fn trigger_activation_service<'a>(
-        &'a self,
-        processes: Arc<dyn crate::ProcessService>,
-        scoped_effect_controller: crate::ScopedEffectController<'a>,
-    ) -> crate::TriggerActivationService<'a> {
-        crate::TriggerActivationService::new(
-            self.session_id.clone(),
-            Arc::clone(&self.trigger_registry),
-            processes,
-            scoped_effect_controller,
-        )
     }
 
     pub fn host(&self) -> &PluginHost {

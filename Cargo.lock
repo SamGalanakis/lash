@@ -2703,6 +2703,7 @@ dependencies = [
  "base64 0.22.1",
  "lash-core",
  "lash-sansio",
+ "lashlang",
  "schemars",
  "serde",
  "serde_json",

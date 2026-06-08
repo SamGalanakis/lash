@@ -128,6 +128,7 @@ impl RuntimeHostConfig {
 pub struct EmbeddedRuntimeHost {
     pub core: RuntimeHostConfig,
     pub session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
+    pub host_event_store: Option<Arc<dyn crate::HostEventStore>>,
 }
 
 impl EmbeddedRuntimeHost {
@@ -135,6 +136,7 @@ impl EmbeddedRuntimeHost {
         Self {
             core,
             session_store_factory: None,
+            host_event_store: Some(Arc::new(crate::InMemoryHostEventStore::default())),
         }
     }
 
@@ -143,6 +145,11 @@ impl EmbeddedRuntimeHost {
         session_store_factory: Arc<dyn SessionStoreFactory>,
     ) -> Self {
         self.session_store_factory = Some(session_store_factory);
+        self
+    }
+
+    pub fn with_host_event_store(mut self, store: Arc<dyn crate::HostEventStore>) -> Self {
+        self.host_event_store = Some(store);
         self
     }
 }
@@ -167,6 +174,7 @@ impl ProcessRuntimeHost {
 pub(crate) struct RuntimeHost {
     pub core: RuntimeHostConfig,
     pub session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
+    pub host_event_store: Option<Arc<dyn crate::HostEventStore>>,
     pub process_registry: Option<Arc<dyn ProcessRegistry>>,
     /// Wakes the host's [`ProcessWorkRunner`](super::ProcessWorkRunner) so a
     /// successful process start is consumed promptly. Absent when no work runner
@@ -218,6 +226,7 @@ impl From<EmbeddedRuntimeHost> for RuntimeHost {
         Self {
             core: value.core,
             session_store_factory: value.session_store_factory,
+            host_event_store: value.host_event_store,
             process_registry: None,
             process_work_poke: None,
             queued_work_poke: None,
@@ -230,6 +239,7 @@ impl From<ProcessRuntimeHost> for RuntimeHost {
         Self {
             core: value.embedded.core,
             session_store_factory: value.embedded.session_store_factory,
+            host_event_store: value.embedded.host_event_store,
             process_registry: Some(value.process_registry),
             process_work_poke: None,
             queued_work_poke: None,

@@ -15,12 +15,8 @@ error[E0599]: no method named `activate_with_effect_host` found for struct `Trig
    |  _____________-
 10 | |         .triggers()
 11 | |         .activate_with_effect_host("trigger:1", serde_json::json!({}), scope.controller())
-   | |_________-^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-help: there is a method `activate_with_effect_scope` with a similar name
-   |
-11 -         .activate_with_effect_host("trigger:1", serde_json::json!({}), scope.controller())
-11 +         .activate_with_effect_scope("trigger:1", serde_json::json!({}), scope.controller())
+   | |         -^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `TriggersControl`
+   | |_________|
    |
 
 error[E0599]: no method named `activate_source_type_with_effect_host` found for struct `TriggersControl` in the current scope
@@ -30,14 +26,6 @@ error[E0599]: no method named `activate_source_type_with_effect_host` found for 
    |  _____________-
 14 | |         .triggers()
 15 | |         .activate_source_type_with_effect_host("ui.button.pressed", serde_json::json!({}), scope.controller())
-   | |_________-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |         -^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `TriggersControl`
+   | |_________|
    |
-help: there is a method `activate_source_type` with a similar name, but with different arguments
-  --> src/control.rs
-   |
-   | /     pub async fn activate_source_type(
-   | |         &self,
-   | |         source_type: impl AsRef<str>,
-   | |         payload: serde_json::Value,
-   | |     ) -> Result<lash_core::HostEventEmitReport> {
-   | |_______________________________________________^

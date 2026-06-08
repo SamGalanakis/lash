@@ -310,6 +310,7 @@ fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContex
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        host_event_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -352,6 +353,7 @@ fn dispatch_context() -> ToolDispatchContext<'static> {
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        host_event_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -401,6 +403,7 @@ fn projection_policy_dispatch_context(
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        host_event_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -556,6 +559,7 @@ fn lazy_contract_dispatch_context(
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        host_event_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -587,6 +591,7 @@ fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContex
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        host_event_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -644,6 +649,7 @@ fn parallel_dispatch_context(
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        host_event_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -1272,6 +1278,7 @@ fn serial_dispatch_context(
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        host_event_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -1421,6 +1428,7 @@ async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        host_event_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),
@@ -1556,6 +1564,7 @@ async fn mixed_batch_runs_parallel_tools_concurrently_and_serial_alone() {
         session_graph: Arc::new(MockSessionManager::default()),
         processes: Arc::new(crate::UnavailableProcessService),
         process_cancel_ability: Arc::new(crate::DefaultProcessCancelAbility),
+        host_event_router: None,
         effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController,
         )),

@@ -178,10 +178,10 @@ submit format("Registered daily digest `{}`. Active matching registrations: {}."
 ```
 
 After a Restate-backed turn registers an enabled `cron.Schedule`, the workbench
-syncs that trigger to `WorkbenchCronJob/{session_id}:{trigger_handle}`. The
+syncs that source key to `WorkbenchCronJob/{session_id}:{source_key}`. The
 virtual object stores the source request, the next execution timestamp, and the
-Restate invocation id in Restate K/V state. Its `run` handler activates that
-exact trigger handle with a validated `cron.Tick` payload:
+Restate invocation id in Restate K/V state. Its `run` handler emits a validated
+`cron.Tick` host-event occurrence for that stored source key:
 
 ```json
 { "fired_at": "2026-06-02T12:00:00Z" }

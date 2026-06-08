@@ -10,6 +10,7 @@
 //! `#[tokio::test]`. Embedders with custom backends can run them via
 //! `lash::testing::conformance`.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -58,6 +59,13 @@ pub struct ReopenableAttachmentStore {
 pub struct ReopenableLashlangArtifactStore {
     pub open: Arc<dyn crate::LashlangArtifactStore>,
     pub reopen: Arc<dyn crate::LashlangArtifactStore>,
+}
+
+/// A pair of [`HostEventStore`](crate::HostEventStore) handles opened against
+/// the same durable backing store.
+pub struct ReopenableHostEventStore {
+    pub open: Arc<dyn crate::HostEventStore>,
+    pub reopen: Arc<dyn crate::HostEventStore>,
 }
 
 /// One scope selected by an [`EffectHost`] and one effect envelope executed
@@ -209,9 +217,7 @@ async fn effect_host_rejects_missing_scope_ids(host: Arc<dyn EffectHost>) {
         EffectScope::turn("", "turn"),
         EffectScope::turn("session", ""),
         EffectScope::process(""),
-        EffectScope::host_event("session", ""),
         EffectScope::queue_drain("session", ""),
-        EffectScope::cron("job", ""),
         EffectScope::session_delete(""),
         EffectScope::runtime_operation(""),
     ];
@@ -1924,10 +1930,7 @@ fn queued_batch_text(batch: &QueuedWorkBatch) -> Option<&str> {
             crate::InputItem::Text { text } => Some(text.as_str()),
             crate::InputItem::ImageRef { .. } => None,
         }),
-        QueuedWorkPayload::ProcessWake { .. }
-        | QueuedWorkPayload::HostEvent { .. }
-        | QueuedWorkPayload::Timer { .. }
-        | QueuedWorkPayload::SessionCommand { .. } => None,
+        QueuedWorkPayload::ProcessWake { .. } | QueuedWorkPayload::SessionCommand { .. } => None,
     }
 }
 
@@ -3309,6 +3312,311 @@ async fn final_commit_stamp_is_idempotent_and_conflicts_on_changed_hash(
 }
 
 // ---------------------------------------------------------------------------
+// HostEventStore conformance
+// ---------------------------------------------------------------------------
+
+/// Run the full [`HostEventStore`](crate::HostEventStore) conformance suite
+/// against the backend produced by `make`. `make` must return a fresh, empty
+/// store on each call.
+pub async fn host_event_store<F>(make: F, expected_tier: DurabilityTier)
+where
+    F: Fn() -> Arc<dyn crate::HostEventStore>,
+{
+    host_event_store_reports_declared_tier(make(), expected_tier);
+    host_event_source_key_is_stable(make()).await;
+    host_event_store_registers_lists_and_cancels(make()).await;
+    host_event_store_records_and_reserves_idempotently(make()).await;
+}
+
+/// Run the full [`HostEventStore`](crate::HostEventStore) suite plus durable
+/// reopen checks.
+pub async fn host_event_store_reopenable<F>(make: F, expected_tier: DurabilityTier)
+where
+    F: Fn() -> ReopenableHostEventStore,
+{
+    host_event_store(|| make().open, expected_tier).await;
+    host_event_store_survives_reopen(make()).await;
+}
+
+fn sample_trigger_subscription_draft(
+    session_id: &str,
+    source_key: &str,
+    process_name: &str,
+) -> crate::TriggerSubscriptionDraft {
+    let mut inputs = BTreeMap::new();
+    inputs.insert("event".to_string(), lashlang::TriggerInputBinding::Event);
+    crate::TriggerSubscriptionDraft {
+        session_id: session_id.to_string(),
+        name: Some(process_name.to_string()),
+        source_type: "ui.button.pressed".to_string(),
+        source_key: source_key.to_string(),
+        source: serde_json::json!({}),
+        event_ty: lashlang::TypeExpr::Object(vec![lashlang::TypeField {
+            name: "button".into(),
+            ty: lashlang::TypeExpr::Str,
+            optional: false,
+        }]),
+        module_ref: lashlang::ModuleRef::new(&lashlang::ContentHash::new("module")),
+        required_surface_ref: lashlang::RequiredSurfaceRef::new(&lashlang::ContentHash::new(
+            "surface",
+        )),
+        process_ref: lashlang::ProcessRef::new(lashlang::ContentHash::new("process"), 1),
+        process_name: process_name.to_string(),
+        input_template: lashlang::TriggerInputTemplate::new(inputs),
+    }
+}
+
+fn button_occurrence_request(
+    source_key: impl Into<String>,
+    idempotency_key: impl Into<String>,
+) -> crate::HostEventOccurrenceRequest {
+    crate::HostEventOccurrenceRequest::new(
+        "ui.button.pressed",
+        source_key,
+        serde_json::json!({ "button": "Blue" }),
+        idempotency_key,
+    )
+    .with_source(serde_json::json!({}))
+}
+
+fn host_event_store_reports_declared_tier(
+    store: Arc<dyn crate::HostEventStore>,
+    expected: DurabilityTier,
+) {
+    assert_eq!(
+        store.durability_tier(),
+        expected,
+        "durability tier must match the backend"
+    );
+}
+
+async fn host_event_source_key_is_stable(store: Arc<dyn crate::HostEventStore>) {
+    let source = serde_json::json!({ "button": "Blue" });
+    let first = store
+        .source_key_for_subscription("ui.button.pressed", &source)
+        .await
+        .expect("first source key");
+    let second = store
+        .source_key_for_subscription("ui.button.pressed", &source)
+        .await
+        .expect("second source key");
+    assert_eq!(first, second, "source keys must be stable");
+    assert!(!first.is_empty(), "source keys must be non-empty");
+}
+
+async fn host_event_store_registers_lists_and_cancels(store: Arc<dyn crate::HostEventStore>) {
+    let source_key = store
+        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
+        .await
+        .expect("source key");
+    let first = store
+        .register_subscription(sample_trigger_subscription_draft(
+            "session-a",
+            &source_key,
+            "first",
+        ))
+        .await
+        .expect("register first subscription");
+    let second = store
+        .register_subscription(sample_trigger_subscription_draft(
+            "session-b",
+            &source_key,
+            "second",
+        ))
+        .await
+        .expect("register second subscription");
+
+    assert!(!first.subscription_id.is_empty());
+    assert!(!first.handle.is_empty());
+    assert_ne!(first.handle, second.handle);
+
+    let by_session = store
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
+        .await
+        .expect("list by session");
+    assert_eq!(by_session.len(), 1);
+    assert_eq!(by_session[0].handle, first.handle);
+
+    let mut by_source = crate::TriggerSubscriptionFilter::for_source_type("ui.button.pressed");
+    by_source.source_key = Some(source_key.clone());
+    by_source.enabled = Some(true);
+    let source_matches = store
+        .list_subscriptions(by_source)
+        .await
+        .expect("list by source");
+    assert_eq!(source_matches.len(), 2);
+
+    assert!(
+        !store
+            .cancel_subscription("session-b", &first.handle)
+            .await
+            .expect("wrong-session cancel"),
+        "cancel must be scoped by session"
+    );
+    assert!(
+        store
+            .cancel_subscription("session-a", &first.handle)
+            .await
+            .expect("cancel first")
+    );
+
+    let mut disabled_filter = crate::TriggerSubscriptionFilter::for_session("session-a");
+    disabled_filter.handle = Some(first.handle.clone());
+    let disabled = store
+        .list_subscriptions(disabled_filter)
+        .await
+        .expect("list disabled");
+    assert_eq!(disabled.len(), 1);
+    assert!(!disabled[0].enabled);
+}
+
+async fn host_event_store_records_and_reserves_idempotently(store: Arc<dyn crate::HostEventStore>) {
+    let source_key = store
+        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
+        .await
+        .expect("source key");
+    let subscription = store
+        .register_subscription(sample_trigger_subscription_draft(
+            "session-a",
+            &source_key,
+            "on_button",
+        ))
+        .await
+        .expect("register subscription");
+
+    let occurrence = store
+        .record_occurrence(button_occurrence_request(
+            source_key.clone(),
+            "button-blue-1",
+        ))
+        .await
+        .expect("record occurrence");
+    assert!(!occurrence.occurrence_id.is_empty());
+    assert_eq!(occurrence.source_type, "ui.button.pressed");
+    assert_eq!(occurrence.source_key, source_key);
+
+    let first = store
+        .reserve_matching_deliveries(&occurrence.occurrence_id)
+        .await
+        .expect("reserve first delivery");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].subscription.handle, subscription.handle);
+    assert_eq!(first[0].occurrence.occurrence_id, occurrence.occurrence_id);
+    assert_eq!(
+        first[0].process_id,
+        crate::deterministic_delivery_process_id(
+            &occurrence.occurrence_id,
+            &subscription.subscription_id
+        )
+        .expect("deterministic delivery process id")
+    );
+
+    let duplicate = store
+        .reserve_matching_deliveries(&occurrence.occurrence_id)
+        .await
+        .expect("reserve duplicate delivery");
+    assert!(duplicate.is_empty());
+
+    let replayed = store
+        .record_occurrence(button_occurrence_request(
+            source_key.clone(),
+            "button-blue-1",
+        ))
+        .await
+        .expect("replay occurrence");
+    assert_eq!(replayed.occurrence_id, occurrence.occurrence_id);
+    let replayed_delivery = store
+        .reserve_matching_deliveries(&replayed.occurrence_id)
+        .await
+        .expect("reserve replayed delivery");
+    assert!(replayed_delivery.is_empty());
+
+    assert!(
+        store
+            .cancel_subscription("session-a", &subscription.handle)
+            .await
+            .expect("cancel subscription")
+    );
+    let disabled = store
+        .record_occurrence(button_occurrence_request(source_key, "button-blue-2"))
+        .await
+        .expect("record disabled occurrence");
+    let disabled_deliveries = store
+        .reserve_matching_deliveries(&disabled.occurrence_id)
+        .await
+        .expect("reserve disabled occurrence");
+    assert!(disabled_deliveries.is_empty());
+}
+
+async fn host_event_store_survives_reopen(factory: ReopenableHostEventStore) {
+    let source_key = factory
+        .open
+        .source_key_for_subscription("ui.button.pressed", &serde_json::json!({}))
+        .await
+        .expect("source key");
+    let subscription = factory
+        .open
+        .register_subscription(sample_trigger_subscription_draft(
+            "session-a",
+            &source_key,
+            "on_button",
+        ))
+        .await
+        .expect("register subscription before reopen");
+    let occurrence = factory
+        .open
+        .record_occurrence(button_occurrence_request(
+            source_key.clone(),
+            "button-blue-1",
+        ))
+        .await
+        .expect("record occurrence before reopen");
+    let first_delivery = factory
+        .open
+        .reserve_matching_deliveries(&occurrence.occurrence_id)
+        .await
+        .expect("reserve before reopen");
+    assert_eq!(first_delivery.len(), 1);
+
+    let reopened_subscriptions = factory
+        .reopen
+        .list_subscriptions(crate::TriggerSubscriptionFilter::for_session("session-a"))
+        .await
+        .expect("list subscriptions after reopen");
+    assert_eq!(reopened_subscriptions.len(), 1);
+    assert_eq!(reopened_subscriptions[0].handle, subscription.handle);
+
+    let replayed = factory
+        .reopen
+        .record_occurrence(button_occurrence_request(
+            source_key.clone(),
+            "button-blue-1",
+        ))
+        .await
+        .expect("replay after reopen");
+    assert_eq!(replayed.occurrence_id, occurrence.occurrence_id);
+    let replayed_delivery = factory
+        .reopen
+        .reserve_matching_deliveries(&replayed.occurrence_id)
+        .await
+        .expect("reserve replay after reopen");
+    assert!(replayed_delivery.is_empty());
+
+    let next = factory
+        .reopen
+        .record_occurrence(button_occurrence_request(source_key, "button-blue-2"))
+        .await
+        .expect("record new occurrence after reopen");
+    let next_delivery = factory
+        .reopen
+        .reserve_matching_deliveries(&next.occurrence_id)
+        .await
+        .expect("reserve new occurrence after reopen");
+    assert_eq!(next_delivery.len(), 1);
+    assert_eq!(next_delivery[0].subscription.handle, subscription.handle);
+}
+
+// ---------------------------------------------------------------------------
 // AttachmentStore conformance
 // ---------------------------------------------------------------------------
 
@@ -3544,6 +3852,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn in_memory_host_event_store_satisfies_conformance() {
+        host_event_store(
+            || Arc::new(crate::InMemoryHostEventStore::default()) as Arc<dyn crate::HostEventStore>,
+            DurabilityTier::Inline,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn inline_effect_host_satisfies_conformance() {
         effect_host(|| Arc::new(crate::InlineEffectHost::default())).await;
     }
@@ -3551,14 +3868,14 @@ mod tests {
     #[tokio::test]
     async fn recording_effect_host_records_selected_scope_and_envelope() {
         let host = RecordingEffectHost::default();
-        let scope = EffectScope::host_event("session-1", "button-1");
+        let scope = EffectScope::runtime_operation("host-event:button-1");
         let scoped = host.scoped(scope.clone()).expect("scoped controller");
         let envelope = RuntimeEffectEnvelope::new(
             crate::RuntimeInvocation::effect(
                 RuntimeScope::new("session-1"),
                 "sleep-effect",
                 RuntimeEffectKind::Sleep,
-                "button-1:sleep-effect",
+                "host-event:button-1:sleep-effect",
             ),
             RuntimeEffectCommand::Sleep { duration_ms: 0 },
         );
@@ -3579,7 +3896,7 @@ mod tests {
         assert_eq!(records[0].effect_kind, RuntimeEffectKind::Sleep);
         assert_eq!(
             records[0].replay_key.as_deref(),
-            Some("button-1:sleep-effect")
+            Some("host-event:button-1:sleep-effect")
         );
     }
 

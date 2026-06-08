@@ -9,20 +9,23 @@ durable work queue, and a `ProcessWorkRunner` drains them **on poke, on a poll
 tick, and once at startup**. So the *first* run of an out-of-turn start is itself
 lease-protected and prompt (a poke fires after the start), not merely eventually
 recovered by the next restart's sweep. This closes the turn-vs-trigger asymmetry
-— trigger-started processes run durably and recover on crash, exactly like
-turn-started ones — and removes the double-execution window the startup-only
-sweep left open. Timers and recurring jobs are host-owned trigger sources: once a
-source owner activates a concrete trigger handle, the started process inherits
-the same lease-protected execution + recovery. This note records the design and
-principle; the *Implementation* section below maps it to the code that shipped.
+— processes started by matched host-event occurrences run durably and recover on
+crash, exactly like turn-started ones — and removes the double-execution window
+the startup-only sweep left open. Timers and recurring jobs are host-owned
+scheduling sources: a source owner emits a host-event occurrence with a stored
+`source_key`, and every matched subscription starts a deterministic process run
+with the same lease-protected execution + recovery. This note records the design
+and principle; the *Implementation* section below maps it to the code that
+shipped.
 
 ## Problem (the asymmetry this resolved)
 
 A background `process` can be started two ways:
 
 - **in a turn** — the model emits `start name(...)` while a turn runs;
-- **by a trigger** — a host-owned source activates a concrete trigger
-  handle through the trigger activation service.
+- **by a host-event occurrence** — a host-owned source emits an occurrence
+  through the runtime router, which matches stored trigger subscriptions by
+  `source_type` and `source_key`.
 
 Before this work, only the first was durably re-executed in a Restate
 deployment, and the asymmetry was silent.
@@ -32,9 +35,11 @@ scope**. A turn run with `stream_with_effect_scope(scope)` threaded the
 Restate-backed scoped controller into process control via a silent
 `effect_controller.unwrap_or(current.host.core.effect_controller)` fallback, so a
 turn's `start name(...)` scheduled a `LashProcessWorkflow` invocation that
-Restate re-invoked on crash — but trigger activation runs **outside** a turn. It
-cannot borrow a turn-scoped controller, so its process starts hit that fallback
-and ran on the **build-time** inline effect host in a Restate deployment (the
+Restate re-invoked on crash — but host-event emission runs **outside** a turn.
+It cannot borrow a turn-scoped controller, so process starts must use the
+host-supplied runtime effect controller for the occurrence emission. Before the
+cutover, the old session-coupled trigger path hit the **build-time** inline effect host in a
+Restate deployment (the
 Restate-backed controller is constructed per-invocation from a Restate `ctx`, so
 it can never be a process-global build-time controller). The inline path
 `tokio::spawn`ed the
@@ -96,10 +101,11 @@ clean worker-owns-execution-durability model belongs.
 
 ## Design: separate intent from execution
 
-**1. Start = durable intent, full stop.** `start name(...)` in a turn and exact
-trigger-handle activation each do one thing: write a durable process record +
-grant (+ causal session node) to the registry. The rows survive restart. None of
-these paths carries an execution scope.
+**1. Start = durable intent, full stop.** `start name(...)` in a turn and a
+matched host-event delivery each do one thing: write a durable process record +
+grant to the registry. The rows survive restart. Turn starts carry turn
+causality; host-event deliveries carry `CausalRef::HostEvent { occurrence_id }`.
+Neither path carries a borrowed execution scope.
 
 **2. Execution = a lash-owned durable worker with a per-process lease +
 recovery.** Turns use effect-host replay plus final commit stamps; processes use
@@ -159,7 +165,7 @@ A generalization of code that already existed for turns — not a new subsystem:
   handle fences-submits `LashProcessWorkflow/{process_id}` per non-terminal row.
   The control seam pokes after every successful `Start` — idempotently, since the
   runner skips leased/terminal rows and the durable submit is keyed-idempotent —
-  so in-turn-inline, trigger activation, and other explicit out-of-turn starts
+  so in-turn-inline, host-event delivery, and other explicit out-of-turn starts
   are all driven the same way.
   The poke handle lives on the runtime host, not the trait-object controller.
 
@@ -208,13 +214,13 @@ the boundary where the tier is known:
   peer-coherence only — the per-invocation durable controller is not visible at
   build, so build checks the stores against each other (durable session store
   ⇒ durable attachment + artifact store; durable process registry ⇒ durable
-  session store factory), never the controller.
+  session store factory + durable host-event store), never the controller.
 
-Out-of-turn starts (trigger activations in `session/triggers.rs`; facade
-`start`; `api.rs`) write durable intent and execute via the worker. The
-silent `effect_controller.unwrap_or(...)` fallback at
-`process_runners/control.rs` is gone — out of turn there is no turn-scoped
-controller, so the host's explicitly named build-time effect host is used. A
+Out-of-turn starts (host-event deliveries; facade `start`; `api.rs`) write
+durable intent and execute via the worker. The silent
+`effect_controller.unwrap_or(...)` fallback at `process_runners/control.rs` is
+gone — out of turn there is no turn-scoped controller, so the host's explicitly
+named runtime effect controller is used for the effect that registers the row. A
 `Start` only *registers* the row (the inline off-lease `tokio::spawn` is
 deleted), and `ProcessCommandRunner::run` pokes the host's
 `ProcessWorkRunner` after a successful `Start`. The runner is wired by the host:

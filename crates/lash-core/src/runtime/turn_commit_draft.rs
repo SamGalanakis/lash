@@ -53,26 +53,6 @@ impl TurnCommitDraft {
         self.graph.append_protocol_events(events);
     }
 
-    pub(super) fn append_tool_host_events(
-        &mut self,
-        events: &[crate::tool_dispatch::ToolHostEventEffectOutcome],
-    ) {
-        self.graph.append_plugin_nodes(events.iter().map(|event| {
-            (
-                "lash.host_event".to_string(),
-                serde_json::json!({
-                    "resource_type": event.resource_type.clone(),
-                    "alias": event.alias.clone(),
-                    "event": event.event.clone(),
-                    "source_type": event.source_type.clone(),
-                    "payload": event.payload.clone(),
-                    "started_process_ids": event.started_process_ids.clone(),
-                }),
-                None,
-            )
-        }));
-    }
-
     pub(super) fn read_view(
         &self,
         policy: crate::SessionPolicy,

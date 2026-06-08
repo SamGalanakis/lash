@@ -40,6 +40,8 @@ pub struct ToolHostEventEffectOutcome {
     pub alias: String,
     pub event: String,
     pub source_type: String,
+    pub source_key: String,
+    pub occurrence_id: String,
     #[serde(default)]
     pub payload: serde_json::Value,
     pub started_process_ids: Vec<String>,
@@ -79,6 +81,7 @@ pub struct ToolDispatchContext<'run> {
     pub session_graph: Arc<dyn SessionGraphService>,
     pub processes: Arc<dyn crate::ProcessService>,
     pub process_cancel_ability: Arc<dyn crate::ProcessCancelAbility>,
+    pub host_event_router: Option<crate::HostEventRouter>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub(crate) parent_invocation: Option<crate::RuntimeInvocation>,

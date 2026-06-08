@@ -28,6 +28,262 @@ impl From<lash_core::ProtocolTurnOptions> for RemoteProtocolTurnOptions {
     }
 }
 
+impl TryFrom<RemoteHostEventOccurrenceRequest> for lash_core::HostEventOccurrenceRequest {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteHostEventOccurrenceRequest) -> Result<Self, Self::Error> {
+        value.validate()?;
+        let mut request = lash_core::HostEventOccurrenceRequest::new(
+            value.source_type,
+            value.source_key,
+            value.payload,
+            value.idempotency_key,
+        );
+        request.source = value.source;
+        Ok(request)
+    }
+}
+
+impl From<lash_core::HostEventOccurrenceRequest> for RemoteHostEventOccurrenceRequest {
+    fn from(value: lash_core::HostEventOccurrenceRequest) -> Self {
+        Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
+            source_type: value.source_type,
+            source_key: value.source_key,
+            payload: value.payload,
+            idempotency_key: value.idempotency_key,
+            source: value.source,
+        }
+    }
+}
+
+impl From<lash_core::HostEventOccurrenceRecord> for RemoteHostEventOccurrenceRecord {
+    fn from(value: lash_core::HostEventOccurrenceRecord) -> Self {
+        Self {
+            occurrence_id: value.occurrence_id,
+            source_type: value.source_type,
+            source_key: value.source_key,
+            payload: value.payload,
+            idempotency_key: value.idempotency_key,
+            source: value.source,
+            occurred_at_ms: value.occurred_at_ms,
+        }
+    }
+}
+
+impl From<RemoteHostEventOccurrenceRecord> for lash_core::HostEventOccurrenceRecord {
+    fn from(value: RemoteHostEventOccurrenceRecord) -> Self {
+        Self {
+            occurrence_id: value.occurrence_id,
+            source_type: value.source_type,
+            source_key: value.source_key,
+            payload: value.payload,
+            idempotency_key: value.idempotency_key,
+            source: value.source,
+            occurred_at_ms: value.occurred_at_ms,
+        }
+    }
+}
+
+impl From<lash_core::HostEventEmitReport> for RemoteHostEventEmitReport {
+    fn from(value: lash_core::HostEventEmitReport) -> Self {
+        Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
+            occurrence_id: value.occurrence_id,
+            started_process_ids: value.started_process_ids,
+        }
+    }
+}
+
+impl TryFrom<RemoteHostEventEmitReport> for lash_core::HostEventEmitReport {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteHostEventEmitReport) -> Result<Self, Self::Error> {
+        value.validate()?;
+        Ok(Self {
+            occurrence_id: value.occurrence_id,
+            started_process_ids: value.started_process_ids,
+        })
+    }
+}
+
+impl TryFrom<RemoteTriggerSubscriptionFilter> for lash_core::TriggerSubscriptionFilter {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteTriggerSubscriptionFilter) -> Result<Self, Self::Error> {
+        value.validate()?;
+        let target = value
+            .target
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|err| RemoteProtocolError::InvalidEnvelope {
+                type_name: "RemoteTriggerSubscriptionFilter",
+                message: format!("invalid target identity: {err}"),
+            })?;
+        Ok(Self {
+            session_id: value.session_id,
+            handle: value.handle,
+            name: value.name,
+            source_type: value.source_type,
+            source_key: value.source_key,
+            target,
+            enabled: value.enabled,
+        })
+    }
+}
+
+impl From<lash_core::TriggerSubscriptionFilter> for RemoteTriggerSubscriptionFilter {
+    fn from(value: lash_core::TriggerSubscriptionFilter) -> Self {
+        Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION,
+            session_id: value.session_id,
+            handle: value.handle,
+            name: value.name,
+            source_type: value.source_type,
+            source_key: value.source_key,
+            target: value
+                .target
+                .map(|target| serde_json::to_value(target).expect("target identity serializes")),
+            enabled: value.enabled,
+        }
+    }
+}
+
+impl From<lash_core::TriggerRegistration> for RemoteTriggerRegistration {
+    fn from(value: lash_core::TriggerRegistration) -> Self {
+        Self {
+            handle: value.handle,
+            source_key: value.source_key,
+            name: value.name,
+            source_type: value.source_type.to_string(),
+            source: value.source,
+            target: RemoteTriggerTargetSummary {
+                process_name: value.target.process_name,
+                inputs: serde_json::to_value(value.target.inputs)
+                    .expect("trigger input template serializes"),
+            },
+            enabled: value.enabled,
+        }
+    }
+}
+
+impl TryFrom<RemoteTriggerRegistration> for lash_core::TriggerRegistration {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteTriggerRegistration) -> Result<Self, Self::Error> {
+        let inputs = serde_json::from_value(value.target.inputs).map_err(|err| {
+            RemoteProtocolError::InvalidEnvelope {
+                type_name: "RemoteTriggerTargetSummary",
+                message: format!("invalid input template: {err}"),
+            }
+        })?;
+        Ok(Self {
+            handle: value.handle,
+            source_key: value.source_key,
+            name: value.name,
+            source_type: lash_core::TriggerSourceType::new(value.source_type),
+            source: value.source,
+            target: lash_core::TriggerTargetSummary {
+                process_name: value.target.process_name,
+                inputs,
+            },
+            enabled: value.enabled,
+        })
+    }
+}
+
+impl From<lash_core::CausalRef> for RemoteCausalRef {
+    fn from(value: lash_core::CausalRef) -> Self {
+        match value {
+            lash_core::CausalRef::Turn {
+                session_id,
+                turn_id,
+            } => Self::Turn {
+                session_id,
+                turn_id,
+            },
+            lash_core::CausalRef::Effect {
+                session_id,
+                turn_id,
+                effect_id,
+            } => Self::Effect {
+                session_id,
+                turn_id,
+                effect_id,
+            },
+            lash_core::CausalRef::ToolCall {
+                session_id,
+                call_id,
+            } => Self::ToolCall {
+                session_id,
+                call_id,
+            },
+            lash_core::CausalRef::Process { process_id } => Self::Process { process_id },
+            lash_core::CausalRef::ProcessEvent {
+                process_id,
+                sequence,
+            } => Self::ProcessEvent {
+                process_id,
+                sequence,
+            },
+            lash_core::CausalRef::HostEvent { occurrence_id } => Self::HostEvent { occurrence_id },
+            lash_core::CausalRef::SessionNode {
+                session_id,
+                node_id,
+            } => Self::SessionNode {
+                session_id,
+                node_id,
+            },
+        }
+    }
+}
+
+impl From<RemoteCausalRef> for lash_core::CausalRef {
+    fn from(value: RemoteCausalRef) -> Self {
+        match value {
+            RemoteCausalRef::Turn {
+                session_id,
+                turn_id,
+            } => Self::Turn {
+                session_id,
+                turn_id,
+            },
+            RemoteCausalRef::Effect {
+                session_id,
+                turn_id,
+                effect_id,
+            } => Self::Effect {
+                session_id,
+                turn_id,
+                effect_id,
+            },
+            RemoteCausalRef::ToolCall {
+                session_id,
+                call_id,
+            } => Self::ToolCall {
+                session_id,
+                call_id,
+            },
+            RemoteCausalRef::Process { process_id } => Self::Process { process_id },
+            RemoteCausalRef::ProcessEvent {
+                process_id,
+                sequence,
+            } => Self::ProcessEvent {
+                process_id,
+                sequence,
+            },
+            RemoteCausalRef::HostEvent { occurrence_id } => Self::HostEvent { occurrence_id },
+            RemoteCausalRef::SessionNode {
+                session_id,
+                node_id,
+            } => Self::SessionNode {
+                session_id,
+                node_id,
+            },
+        }
+    }
+}
+
 impl TryFrom<RemoteTurnInput> for lash_core::TurnInput {
     type Error = RemoteProtocolError;
 

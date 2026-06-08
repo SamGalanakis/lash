@@ -41,17 +41,9 @@ pub enum EffectScope {
     Process {
         process_id: String,
     },
-    HostEvent {
-        session_id: String,
-        event_id: String,
-    },
     QueueDrain {
         session_id: String,
         drain_id: String,
-    },
-    Cron {
-        job_id: String,
-        execution_id: String,
     },
     SessionDelete {
         session_id: String,
@@ -75,24 +67,10 @@ impl EffectScope {
         }
     }
 
-    pub fn host_event(session_id: impl Into<String>, event_id: impl Into<String>) -> Self {
-        Self::HostEvent {
-            session_id: session_id.into(),
-            event_id: event_id.into(),
-        }
-    }
-
     pub fn queue_drain(session_id: impl Into<String>, drain_id: impl Into<String>) -> Self {
         Self::QueueDrain {
             session_id: session_id.into(),
             drain_id: drain_id.into(),
-        }
-    }
-
-    pub fn cron(job_id: impl Into<String>, execution_id: impl Into<String>) -> Self {
-        Self::Cron {
-            job_id: job_id.into(),
-            execution_id: execution_id.into(),
         }
     }
 
@@ -112,9 +90,7 @@ impl EffectScope {
         match self {
             Self::Turn { turn_id, .. } => turn_id,
             Self::Process { process_id } => process_id,
-            Self::HostEvent { event_id, .. } => event_id,
             Self::QueueDrain { drain_id, .. } => drain_id,
-            Self::Cron { execution_id, .. } => execution_id,
             Self::SessionDelete { session_id } => session_id,
             Self::RuntimeOperation { operation_id } => operation_id,
         }
@@ -123,10 +99,9 @@ impl EffectScope {
     pub fn session_id(&self) -> Option<&str> {
         match self {
             Self::Turn { session_id, .. }
-            | Self::HostEvent { session_id, .. }
             | Self::QueueDrain { session_id, .. }
             | Self::SessionDelete { session_id } => Some(session_id),
-            Self::Process { .. } | Self::Cron { .. } | Self::RuntimeOperation { .. } => None,
+            Self::Process { .. } | Self::RuntimeOperation { .. } => None,
         }
     }
 
@@ -148,18 +123,10 @@ impl EffectScope {
                 turn_id,
             } => session_id.trim().is_empty() || turn_id.trim().is_empty(),
             Self::Process { process_id } => process_id.trim().is_empty(),
-            Self::HostEvent {
-                session_id,
-                event_id,
-            } => session_id.trim().is_empty() || event_id.trim().is_empty(),
             Self::QueueDrain {
                 session_id,
                 drain_id,
             } => session_id.trim().is_empty() || drain_id.trim().is_empty(),
-            Self::Cron {
-                job_id,
-                execution_id,
-            } => job_id.trim().is_empty() || execution_id.trim().is_empty(),
             Self::SessionDelete { session_id } => session_id.trim().is_empty(),
             Self::RuntimeOperation { operation_id } => operation_id.trim().is_empty(),
         };
