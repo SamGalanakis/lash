@@ -11,8 +11,11 @@ continuing.
 from __future__ import annotations
 
 import argparse
+import datetime
+import email.utils
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -27,6 +30,9 @@ TRANSIENT_PUBLISH_ERRORS = (
     "no matching package named",
     "failed to select a version",
     "perhaps a crate was updated and forgotten to be re-vendored",
+    "too many requests",
+    "published too many new crates",
+    "try again after",
 )
 ALREADY_PUBLISHED_ERRORS = (
     "already uploaded",
@@ -142,8 +148,9 @@ def publish_package(package: dict, args: argparse.Namespace) -> None:
 
         if attempt == args.publish_attempts or time.monotonic() >= deadline:
             break
-        print(f"waiting for crates.io dependency propagation before retrying {name}")
-        time.sleep(args.retry_delay_seconds)
+        delay = retry_delay_seconds(output, args.retry_delay_seconds)
+        print(f"waiting {delay}s before retrying {name}")
+        time.sleep(delay)
 
     raise RuntimeError(f"cargo publish did not complete for {name} {version}\n{last_output}")
 
@@ -157,6 +164,23 @@ def wait_for_crate_version(name: str, version: str, args: argparse.Namespace) ->
         print(f"waiting for crates.io visibility: {name} {version}")
         time.sleep(args.visibility_delay_seconds)
     raise RuntimeError(f"timed out waiting for crates.io visibility: {name} {version}")
+
+
+def retry_delay_seconds(output: str, default_delay_seconds: int) -> int:
+    match = re.search(r"try again after ([^\n.]+GMT)", output, flags=re.IGNORECASE)
+    if not match:
+        return default_delay_seconds
+
+    try:
+        retry_at = email.utils.parsedate_to_datetime(match.group(1))
+    except (TypeError, ValueError):
+        return default_delay_seconds
+
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    seconds_until_retry = int((retry_at - now).total_seconds()) + 5
+    return max(default_delay_seconds, seconds_until_retry)
 
 
 def crate_version_visible(name: str, version: str) -> bool:
