@@ -1346,7 +1346,7 @@ fn rlm_exec_any_tool_control_frame_switch_is_terminal() {
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::Emit(SessionEvent::TurnOutcome {
-            outcome: lash_core::TurnOutcome::AgentFrameSwitch { frame_id }
+            outcome: lash_core::TurnOutcome::AgentFrameSwitch { frame_id, .. }
         }) if frame_id == "next-frame"
     )));
     assert!(find_done(&effects).is_some());

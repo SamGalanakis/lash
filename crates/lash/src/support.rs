@@ -6,10 +6,11 @@ pub(crate) use async_trait::async_trait;
 pub(crate) use lash_core::plugin::StaticPluginFactory;
 pub(crate) use lash_core::runtime::{EffectHost, RuntimeSessionState, ScopedEffectController};
 pub(crate) use lash_core::{
-    DurabilityTier, DurableProcessWorker, DurableProcessWorkerConfig, LashRuntime, MessageRole,
-    PluginHost, PluginSpec, PluginStack, ProcessWorkDriver, ProcessWorkObserver, ProcessWorkPoke,
-    ProcessWorkRunner, QueuedWorkPoke, RuntimeEnvironment, RuntimeHandle, RuntimeHostConfig,
-    RuntimeObservation, SessionPolicy, SessionSpec,
+    DurabilityTier, DurableProcessWorker, DurableProcessWorkerConfig, InMemoryLiveReplayStore,
+    LashRuntime, LiveReplayStore, MessageRole, PluginHost, PluginSpec, PluginStack,
+    ProcessWorkDriver, ProcessWorkObserver, ProcessWorkPoke, ProcessWorkRunner, QueuedWorkPoke,
+    RuntimeEnvironment, RuntimeHandle, RuntimeHostConfig, RuntimeObservation, SessionPolicy,
+    SessionSpec,
 };
 pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;
@@ -21,10 +22,11 @@ pub(crate) use lash_core::plugin::runtime_host::SessionStateService;
 pub(crate) use lash_core::{
     AssembledTurn, AttachmentStore, EventSink, ExecutionSummary, Message, PluginFactory,
     PluginMessage, ProcessRegistry, ProcessScope, ProtocolTurnOptions, ProviderHandle, Residency,
-    RuntimeErrorCode, RuntimePersistence, SessionCreateRequest, SessionError, SessionHandle,
-    SessionReadView, SessionSnapshot, SessionStoreCreateRequest, SessionStoreFactory,
-    SessionUsageReport, TerminationPolicy, ToolAvailability, ToolCallRecord, ToolManifest,
-    ToolProvider, ToolResult, ToolSourceHandle, TurnActivitySink, TurnOutcome,
+    RuntimeErrorCode, RuntimePersistence, SessionCreateRequest, SessionCursor, SessionError,
+    SessionHandle, SessionObservation, SessionObservationSubscription, SessionProcessEventKind,
+    SessionReadView, SessionResume, SessionSnapshot, SessionStoreCreateRequest,
+    SessionStoreFactory, SessionUsageReport, TerminationPolicy, ToolAvailability, ToolCallRecord,
+    ToolManifest, ToolProvider, ToolResult, ToolSourceHandle, TurnActivitySink, TurnOutcome,
 };
 pub(crate) use lash_core::{InputItem, TokenLedgerEntry, TokenUsage};
 pub(crate) use lash_core::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};

@@ -9,6 +9,12 @@
 - **Agent Frame Reason**: Open label describing why an Agent Frame was opened. Core defines common labels but the label set is not exhaustive.
 - **Compaction**: Deliberate transition to a new Agent Frame seeded from an assistant summary message of earlier context. It continues the same assignment with reduced future model context, without deleting or rewriting prior frame content.
 - **Prompt View**: Ephemeral projection of session content prepared for one model turn. Prompt View shaping does not mutate durable session history.
+- **Session Observation**: Host-facing view of a session at a point in time, paired with a Session Cursor. Live Replay may extend an observation with recent in-flight activity.
+- **Session Observation Event**: Observer-visible session activity that advances a Session Cursor. It may include preview activity before it is durable and committed activity that settles the session view; it is not scoped to a single turn.
+- **Session Revision**: Durable point in the committed session graph as observed through a session read view.
+- **Session Cursor**: Opaque position in a session observation stream. It includes a Session Revision and any live replay position needed for reconnecting observers without making live activity permanent history.
+- **Live Replay**: Bounded replay of recent in-flight session activity for short reconnects. It is recovery semantics, not durable session history; when it is unavailable, observers recover from the latest durable read view.
+- **Live Replay Gap**: Observer-visible signal that a requested Session Cursor can no longer be replayed from recent live activity. The observer reconciles from a fresh Session Observation and continues from its new cursor.
 - **Early Injection**: User input submitted with Enter while a turn is active. The runtime accepts it at the earliest safe boundary in the active turn.
 - **Next Full Turn**: User input submitted with Tab while a turn is active. The runtime delivers it only after the current turn commits.
 - **Slash Command**: CLI host command. Slash commands are not queued as model work.

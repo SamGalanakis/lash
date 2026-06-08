@@ -138,7 +138,7 @@ impl ProtocolBeforeLlmCallContext<'_> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProtocolLlmCallAction {
-    SwitchAgentFrame { frame_id: String },
+    SwitchAgentFrame { frame_id: String, task: String },
 }
 
 /// Narrow wrapper around `LashRuntime` that protocol plugins use when

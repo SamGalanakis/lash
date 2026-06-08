@@ -392,6 +392,92 @@ fn remote_activity_preserves_semantic_fields_and_collapses_runtime_diagnostics()
     }
 }
 
+#[test]
+fn remote_session_observation_from_core_maps_all_payload_variants() {
+    fn event(
+        payload: lash_core::SessionObservationEventPayload,
+    ) -> lash_core::SessionObservationEvent {
+        let store = lash_core::InMemoryLiveReplayStore::default();
+        lash_core::LiveReplayStore::append(
+            &store,
+            "session",
+            lash_core::SessionRevision::new(4),
+            payload,
+        )
+        .expect("append observation event")
+    }
+
+    let activity =
+        lash_core::TurnActivity::independent(lash_core::TurnEvent::AssistantProseDelta {
+            text: "delta".to_string(),
+        });
+    let remote = RemoteSessionObservationEvent::from_core(
+        7,
+        event(lash_core::SessionObservationEventPayload::TurnActivity(
+            activity,
+        )),
+    );
+    match remote.event {
+        RemoteSessionObservationEventPayload::TurnActivity { activity } => {
+            assert_eq!(activity.sequence, 7);
+        }
+        other => panic!("unexpected payload: {other:?}"),
+    }
+
+    let read_view =
+        lash_core::SessionReadView::from_snapshot(&lash_core::SessionSnapshot::default());
+    let remote = RemoteSessionObservationEvent::from_core(
+        8,
+        event(lash_core::SessionObservationEventPayload::Committed { read_view }),
+    );
+    assert!(matches!(
+        remote.event,
+        RemoteSessionObservationEventPayload::Committed
+    ));
+
+    let remote = RemoteSessionObservationEvent::from_core(
+        9,
+        event(
+            lash_core::SessionObservationEventPayload::AgentFrameSwitched {
+                frame_id: "frame-1".to_string(),
+            },
+        ),
+    );
+    assert!(matches!(
+        remote.event,
+        RemoteSessionObservationEventPayload::AgentFrameSwitched { frame_id }
+            if frame_id == "frame-1"
+    ));
+
+    let remote = RemoteSessionObservationEvent::from_core(
+        10,
+        event(lash_core::SessionObservationEventPayload::QueueChanged {
+            kind: lash_core::SessionQueueEventKind::Cancelled,
+            batch_ids: vec!["batch-1".to_string()],
+        }),
+    );
+    assert!(matches!(
+        remote.event,
+        RemoteSessionObservationEventPayload::QueueChanged { kind, batch_ids }
+            if kind == RemoteSessionQueueEventKind::Cancelled
+                && batch_ids == vec!["batch-1".to_string()]
+    ));
+
+    let remote = RemoteSessionObservationEvent::from_core(
+        11,
+        event(lash_core::SessionObservationEventPayload::ProcessChanged {
+            kind: lash_core::SessionProcessEventKind::Started,
+            process_ids: vec!["process-1".to_string()],
+        }),
+    );
+    assert!(matches!(
+        remote.event,
+        RemoteSessionObservationEventPayload::ProcessChanged { kind, process_ids }
+            if kind == RemoteSessionProcessEventKind::Started
+                && process_ids == vec!["process-1".to_string()]
+    ));
+}
+
 fn demo_grant(name: &str, module: &str, operation: &str) -> RemoteToolGrant {
     RemoteToolGrant {
         protocol_version: REMOTE_PROTOCOL_VERSION,

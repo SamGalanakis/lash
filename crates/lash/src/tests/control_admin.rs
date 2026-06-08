@@ -153,6 +153,7 @@ async fn compact_context_opens_compaction_frame_and_preserves_prior_frame() -> R
         .await?;
     let before = session.control().state().persist_current().await?;
     let previous_frame_id = before.current_agent_frame_id.clone();
+    let observation_cursor = session.observe().current_observation().cursor;
     assert!(
         before.session_graph.nodes.iter().any(|node| {
             node.agent_frame_id.as_deref() == Some(previous_frame_id.as_str())
@@ -183,6 +184,21 @@ async fn compact_context_opens_compaction_frame_and_preserves_prior_frame() -> R
         read_view.messages()[0].origin.as_ref(),
         Some(lash_core::MessageOrigin::Plugin { plugin_id, .. }) if plugin_id == "test_compactor"
     ));
+    let SessionResume::Replayed { events } =
+        session.observe().resume_from_cursor(&observation_cursor)?
+    else {
+        panic!("recent cursor should replay compaction observation events");
+    };
+    assert!(
+        events.windows(2).any(|window| matches!(
+            (&window[0].payload, &window[1].payload),
+            (
+                lash_core::SessionObservationEventPayload::AgentFrameSwitched { .. },
+                lash_core::SessionObservationEventPayload::Committed { .. }
+            )
+        )),
+        "expected AgentFrameSwitched immediately followed by Committed, got {events:?}"
+    );
 
     let after = session.control().state().persist_current().await?;
     let current = after
@@ -258,6 +274,94 @@ async fn session_commands_enqueue_idempotently_by_source_key() -> Result<()> {
         &queued[0].items[0].payload,
         lash_core::runtime::QueuedWorkPayload::SessionCommand { .. }
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn queue_enqueue_and_cancel_emit_typed_observation_events() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()?;
+    let session = core.session("queue-observation-events").open().await?;
+    let cursor = session.observe().current_observation().cursor;
+
+    session
+        .queue(TurnInput::text("queued observation"))
+        .id("queue-observation")
+        .send()
+        .await?;
+    let queued = session.queued_work().await?;
+    let batch_id = queued.first().expect("queued batch").batch_id.clone();
+    session.cancel_queued_work_batch(&batch_id).await?;
+
+    let SessionResume::Replayed { events } = session.observe().resume_from_cursor(&cursor)? else {
+        panic!("recent cursor should replay queue observation events");
+    };
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        lash_core::SessionObservationEventPayload::QueueChanged { kind, batch_ids }
+            if *kind == lash_core::SessionQueueEventKind::Enqueued
+                && batch_ids.as_slice() == std::slice::from_ref(&batch_id)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        lash_core::SessionObservationEventPayload::QueueChanged { kind, batch_ids }
+            if *kind == lash_core::SessionQueueEventKind::Cancelled
+                && batch_ids.as_slice() == std::slice::from_ref(&batch_id)
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn process_start_and_cancel_emit_typed_observation_events() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build()?;
+    let session = core.session("process-observation-events").open().await?;
+    let cursor = session.observe().current_observation().cursor;
+    let process_id = "observed-process";
+
+    session
+        .process_control()
+        .start(
+            lash_core::ProcessStartRequest::external(
+                process_id,
+                lash_core::ProcessHandleDescriptor::new(Some("test"), Some("observed process")),
+                serde_json::Value::Null,
+            ),
+            inline_scope(lash_core::EffectScope::process(process_id)),
+        )
+        .await?;
+    session
+        .process_control()
+        .cancel(
+            process_id,
+            inline_scope(lash_core::EffectScope::process(process_id)),
+        )
+        .await?;
+
+    let SessionResume::Replayed { events } = session.observe().resume_from_cursor(&cursor)? else {
+        panic!("recent cursor should replay process observation events");
+    };
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        lash_core::SessionObservationEventPayload::ProcessChanged { kind, process_ids }
+            if *kind == SessionProcessEventKind::Started
+                && process_ids.len() == 1
+                && process_ids[0] == process_id
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        lash_core::SessionObservationEventPayload::ProcessChanged { kind, process_ids }
+            if *kind == SessionProcessEventKind::Cancelled
+                && process_ids.len() == 1
+                && process_ids[0] == process_id
+    )));
     Ok(())
 }
 

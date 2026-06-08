@@ -41,7 +41,6 @@ fn remote_llm_request_json_round_trips() {
             session_id: Some("session".to_string()),
             idempotency_key: Some("idem".to_string()),
             trace_id: None,
-            activity_cursor: None,
         },
         metadata: HashMap::new(),
     };
@@ -49,7 +48,7 @@ fn remote_llm_request_json_round_trips() {
     request.validate().expect("valid request");
     let value = serde_json::to_value(&request).expect("serialize");
     let decoded: RemoteLlmRequest = serde_json::from_value(value).expect("deserialize");
-    assert_eq!(decoded.protocol_version, 2);
+    assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
     assert_eq!(decoded.request_id, request.request_id);
     assert_eq!(decoded.messages, request.messages);
 }
@@ -78,7 +77,7 @@ fn remote_llm_response_json_round_trips() {
     response.validate().expect("valid response");
     let value = serde_json::to_value(&response).expect("serialize");
     let decoded: RemoteLlmResponse = serde_json::from_value(value).expect("deserialize");
-    assert_eq!(decoded.protocol_version, 2);
+    assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
     assert_eq!(decoded.full_text, "done");
 }
 
@@ -108,7 +107,6 @@ fn remote_turn_request_json_round_trips() {
         },
         tool_grants: vec![demo_grant("demo", "tools", "search")],
         model_intent: Some(RemoteModelIntent::new("gpt-test")),
-        activity_cursor: Some("cursor".to_string()),
         metadata: HashMap::new(),
     };
 
@@ -116,7 +114,7 @@ fn remote_turn_request_json_round_trips() {
     let value = serde_json::to_value(&request).expect("serialize");
     let decoded: RemoteTurnRequest = serde_json::from_value(value).expect("deserialize");
 
-    assert_eq!(decoded.protocol_version, 2);
+    assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
     assert_eq!(decoded.session_id, "session");
     assert_eq!(decoded.input.image_blobs_base64["img"], "AQID");
     assert_eq!(decoded.tool_grants.len(), 1);
@@ -164,7 +162,7 @@ fn remote_turn_result_json_round_trips() {
     result.validate().expect("valid result");
     let value = serde_json::to_value(&result).expect("serialize");
     let decoded: RemoteTurnResult = serde_json::from_value(value).expect("deserialize");
-    assert_eq!(decoded.protocol_version, 2);
+    assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
     assert_eq!(decoded.session_id, "session");
     assert_eq!(decoded.tool_calls.len(), 1);
 }
@@ -230,6 +228,54 @@ fn remote_host_event_dtos_json_round_trip() {
     let value = serde_json::to_value(&cause).expect("serialize cause");
     assert_eq!(value["type"], "host_event");
     assert_eq!(value["occurrence_id"], "occurrence:1");
+}
+
+#[test]
+fn remote_session_observation_dtos_json_round_trip_typed_kinds() {
+    let event = RemoteSessionObservationEvent {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        session_id: "session".to_string(),
+        revision: 3,
+        cursor: "lashsc1:3:7:session".to_string(),
+        event: RemoteSessionObservationEventPayload::QueueChanged {
+            kind: RemoteSessionQueueEventKind::Enqueued,
+            batch_ids: vec!["batch-1".to_string()],
+        },
+    };
+    event.validate().expect("valid queue event");
+    let value = serde_json::to_value(&event).expect("serialize event");
+    assert!(
+        value.to_string().contains("\"kind\":\"enqueued\""),
+        "queue kind should serialize as snake_case: {value}"
+    );
+    let decoded: RemoteSessionObservationEvent =
+        serde_json::from_value(value).expect("deserialize event");
+    assert_eq!(decoded, event);
+
+    let process = RemoteSessionObservationEventPayload::ProcessChanged {
+        kind: RemoteSessionProcessEventKind::Cancelled,
+        process_ids: vec!["process-1".to_string()],
+    };
+    let value = serde_json::to_value(&process).expect("serialize process payload");
+    assert!(
+        value.to_string().contains("\"kind\":\"cancelled\""),
+        "process kind should serialize as snake_case: {value}"
+    );
+    let decoded: RemoteSessionObservationEventPayload =
+        serde_json::from_value(value).expect("deserialize process payload");
+    assert_eq!(decoded, process);
+}
+
+#[test]
+fn remote_session_observation_schema_includes_typed_kind_enums() {
+    let schema = schemars::schema_for!(RemoteSessionObservationEvent);
+    let schema_text = serde_json::to_value(&schema)
+        .expect("schema json")
+        .to_string();
+    assert!(
+        schema_text.contains("enqueued") && schema_text.contains("started"),
+        "schema did not include typed observation kind enum values: {schema_text}"
+    );
 }
 
 #[test]
@@ -328,7 +374,6 @@ fn nested_protocol_versions_must_match_envelope() {
         input: RemoteTurnInput::text("hello"),
         tool_grants: Vec::new(),
         model_intent: None,
-        activity_cursor: None,
         metadata: HashMap::new(),
     };
     request.input.protocol_version = REMOTE_PROTOCOL_VERSION + 1;
@@ -345,6 +390,9 @@ fn top_level_protocol_schema_exports_include_versions() {
     assert_schema_has_protocol_version::<RemoteTurnInput>();
     assert_schema_has_protocol_version::<RemoteTurnRequest>();
     assert_schema_has_protocol_version::<RemoteTurnResult>();
+    assert_schema_has_protocol_version::<RemoteSessionCursor>();
+    assert_schema_has_protocol_version::<RemoteSessionObservationEvent>();
+    assert_schema_has_protocol_version::<RemoteLiveReplayGap>();
     assert_schema_has_protocol_version::<RemoteToolGrant>();
     assert_schema_has_protocol_version::<RemoteToolCallRequest>();
     assert_schema_has_protocol_version::<RemoteToolCallResponse>();

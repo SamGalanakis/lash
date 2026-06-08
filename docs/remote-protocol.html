@@ -79,7 +79,6 @@ let request = RemoteTurnRequest {
     },
     tool_grants: Vec::new(),
     model_intent: None,
-    activity_cursor: None,
     metadata: Default::default(),
 };
 
@@ -94,7 +93,7 @@ request.validate()?;</code></pre>
     <div class="listing">
       <div class="listing__row">
         <div class="listing__label">turn ingress</div>
-        <div class="listing__body"><p><code>RemoteTurnRequest</code> carries <code>session_id</code>, <code>turn_id</code>, optional idempotency key, <code>RemoteTurnInput</code>, remote tool grants, optional model intent, activity cursor, and metadata.</p></div>
+        <div class="listing__body"><p><code>RemoteTurnRequest</code> carries <code>session_id</code>, <code>turn_id</code>, optional idempotency key, <code>RemoteTurnInput</code>, remote tool grants, optional model intent, and metadata.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">turn result</div>
@@ -106,7 +105,11 @@ request.validate()?;</code></pre>
       </div>
       <div class="listing__row">
         <div class="listing__label">activity stream</div>
-        <div class="listing__body"><p><code>RemoteTurnActivity</code> wraps semantic turn events with monotonically assigned <code>sequence</code>, event id, correlation id, and one flattened <code>RemoteTurnEvent</code>.</p></div>
+        <div class="listing__body"><p><code>RemoteTurnActivity</code> wraps semantic turn events with monotonically assigned per-stream <code>sequence</code>, event id, correlation id, and one flattened <code>RemoteTurnEvent</code>. It is still a turn convenience item, not the reconnect cursor.</p></div>
+      </div>
+      <div class="listing__row">
+        <div class="listing__label">session observation</div>
+        <div class="listing__body"><p><code>RemoteSessionCursor</code>, <code>RemoteSessionObservationEvent</code>, and <code>RemoteLiveReplayGap</code> are the remote reconnect surface. They carry opaque cursor strings, session revisions, bounded replay events, and explicit gap recovery without serializing a full <code>SessionReadView</code>.</p></div>
       </div>
       <div class="listing__row">
         <div class="listing__label">prompt layer</div>

@@ -545,7 +545,7 @@ fn materialize_agent_frame_switch(
     outcome: &TurnOutcome,
     tool_calls: &[ToolCallRecord],
 ) {
-    let TurnOutcome::AgentFrameSwitch { frame_id } = outcome else {
+    let TurnOutcome::AgentFrameSwitch { frame_id, .. } = outcome else {
         return;
     };
     if frame_id.trim().is_empty() || state.current_agent_frame_id == *frame_id {
@@ -679,6 +679,7 @@ mod tests {
             &mut state,
             &TurnOutcome::AgentFrameSwitch {
                 frame_id: frame_id.clone(),
+                task: "next task".to_string(),
             },
             &tool_calls,
         );

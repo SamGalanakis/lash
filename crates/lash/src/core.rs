@@ -14,6 +14,7 @@ pub struct LashCore {
     pub(crate) store_factory: Option<Arc<dyn SessionStoreFactory>>,
     pub(crate) plugin_factories: Arc<Vec<Arc<dyn PluginFactory>>>,
     pub(crate) provider: Option<ProviderHandle>,
+    pub(crate) live_replay_store: Arc<dyn LiveReplayStore>,
     pub(crate) process_observer: Option<ProcessWorkObserver>,
     /// Shared resolution of the process work runner. The poke it yields is
     /// threaded onto every session's host so the process control seam can wake
@@ -305,6 +306,7 @@ pub struct LashCoreBuilder {
     // consumption.
     process_work_source: ProcessWorkSource,
     queued_work_poke: Option<QueuedWorkPoke>,
+    live_replay_store: Option<Arc<dyn LiveReplayStore>>,
 }
 
 impl LashCoreBuilder {
@@ -461,6 +463,14 @@ impl LashCoreBuilder {
 
     pub fn residency(mut self, residency: Residency) -> Self {
         self.residency = Some(residency);
+        self
+    }
+
+    /// Configure the bounded live replay buffer used by session observation
+    /// cursors. This is best-effort reconnect recovery only; durable state
+    /// still comes from the session store and [`SessionReadView`].
+    pub fn live_replay_store(mut self, live_replay_store: Arc<dyn LiveReplayStore>) -> Self {
+        self.live_replay_store = Some(live_replay_store);
         self
     }
 
@@ -709,6 +719,11 @@ impl LashCoreBuilder {
             env_builder = env_builder.with_queued_work_poke(queued_work_poke);
         }
 
+        let live_replay_store = self
+            .live_replay_store
+            .take()
+            .unwrap_or_else(|| Arc::new(InMemoryLiveReplayStore::default()));
+
         Ok(LashCore {
             env: env_builder.build(),
             policy,
@@ -717,6 +732,7 @@ impl LashCoreBuilder {
             store_factory: self.store_factory,
             plugin_factories: Arc::new(plugin_factories),
             provider: self.provider,
+            live_replay_store,
             process_observer: process_registry.map(ProcessWorkObserver::new),
             process_work_runner: Arc::new(ProcessWorkRunnerSlot::new(process_work_runner)),
         })

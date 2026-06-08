@@ -1288,11 +1288,14 @@ mod test_protocol_fakes {
             for outcome in completed {
                 if terminal_outcome.is_none() && outcome.output.is_success() {
                     terminal_outcome = match outcome.output.control.as_ref() {
-                        Some(crate::ToolControl::SwitchAgentFrame { frame_id, .. })
-                            if !frame_id.trim().is_empty() =>
-                        {
+                        Some(crate::ToolControl::SwitchAgentFrame {
+                            frame_id,
+                            task: Some(task),
+                            ..
+                        }) if !frame_id.trim().is_empty() && !task.trim().is_empty() => {
                             Some(TurnOutcome::AgentFrameSwitch {
                                 frame_id: frame_id.clone(),
+                                task: task.clone(),
                             })
                         }
                         Some(crate::ToolControl::Finish { value }) => {

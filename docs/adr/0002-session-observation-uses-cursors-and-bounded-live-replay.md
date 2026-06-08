@@ -1,0 +1,30 @@
+# ADR 0002: Session Observation Uses Cursors And Bounded Live Replay
+
+Status: accepted
+
+## Context
+
+Lash has two different observation needs:
+
+- Durable session state for settled UI and host reconciliation.
+- Live semantic activity for one running turn.
+
+`SessionReadView` already represents the durable projection. `TurnActivity` already represents per-turn semantic activity such as prose deltas, reasoning, tools, usage, and errors. Reconnect/resume should not make `TurnActivity` a durable history API, and it should not require a cursor scoped to a request or turn.
+
+## Decision
+
+Reconnect is session-level. A host observes a `SessionObservation`: the current `SessionReadView` plus an opaque `SessionCursor`.
+
+`SessionObservationEvent` advances that cursor. Events may wrap `TurnActivity`, but they can also represent session commits, Agent Frame switches, queued-work changes, process changes, or replay gaps. `SessionRevision` names the durable committed point: the store `head_revision` for persisted sessions and a process-local revision for in-memory sessions.
+
+Live replay is best-effort and bounded. `LiveReplayStore` is not `RuntimePersistence`, not durable history, and not required to survive process loss. The default `InMemoryLiveReplayStore` keeps at most 2048 events or 120 seconds per session. Hosts that need a deployment-specific buffer can pass a custom store through `LashCoreBuilder::live_replay_store`.
+
+`SessionCursor` is opaque outside core. Malformed cursors are invalid input. Cursors for a different session are rejected. Stale or trimmed cursors return a fresh `SessionObservation` plus `LiveReplayGap`.
+
+## Consequences
+
+`TurnBuilder::stream`, `collect_with`, `into_stream`, and `TurnOutput.activities` remain turn convenience APIs. They are not the reconnect surface.
+
+Remote protocol turn requests no longer carry a turn-level activity cursor field. `RemoteTurnActivity.sequence` remains only per-stream ordering. Remote session observation uses `RemoteSessionCursor`, `RemoteSessionObservationEvent`, and `RemoteLiveReplayGap`; the protocol does not serialize a full `SessionReadView`.
+
+Live replay append failures must not fail turn execution or durable commits. They are logged, and later reconnect falls back to gap recovery from durable state.

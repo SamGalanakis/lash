@@ -28,7 +28,7 @@
 <div class="section" id="context-window">
           <div class="section-header">
             <h2>Context Window And History</h2>
-            <p><code>ModelSpec.limits.context_window_tokens</code> caps every provider request. Overflow finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> rewrite committed history. Compact into a new Agent Frame, switch model, or switch frames.</p>
+            <p><code>ModelSpec.limits.context_window_tokens</code> caps every provider request. It is the model's <strong>prompt (input) budget</strong>, not the total input+output context — the value the rolling-history / prompt-view layer prunes against. The CLI resolves it from a built-in limits table first and falls back to models.dev, applying a provider-level clamp where the route's real ceiling is lower than the catalog (e.g. the Codex OAuth route is clamped to ~256k). Overflow finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> rewrite committed history. Compact into a new Agent Frame, switch model, or switch frames.</p>
           </div>
           <p>Two context strategies, picked via the mode's context-approach setting:</p>
           <div class="two-col">

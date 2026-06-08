@@ -92,7 +92,14 @@ pub use error::{DurableStoreFacet, RuntimeError, RuntimeErrorCode};
 pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeHostConfig};
 pub use in_memory_store::{InMemorySessionStore, InMemorySessionStoreFactory};
 use io::normalize_input_items;
-pub use observation::{RuntimeHandle, RuntimeObservation};
+pub use observation::{
+    InMemoryLiveReplayStore, InMemoryLiveReplayStoreConfig, LiveReplayGap, LiveReplayGapReason,
+    LiveReplayResult, LiveReplayStore, LiveReplayStoreError, LiveReplaySubscribeResult,
+    LiveReplaySubscription, RuntimeHandle, RuntimeObservation, SessionCursor, SessionCursorError,
+    SessionObservation, SessionObservationEvent, SessionObservationEventPayload,
+    SessionObservationSubscription, SessionProcessEventKind, SessionQueueEventKind, SessionResume,
+    SessionRevision,
+};
 #[cfg(any(test, feature = "testing"))]
 pub use process::TestLocalProcessRegistry;
 pub use process::{

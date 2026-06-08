@@ -15,7 +15,7 @@ fn trace_fields_from_outcome(
             ("completed", "submitted_value", None)
         }
         TurnOutcome::Finished(TurnFinish::ToolValue { .. }) => ("completed", "tool_value", None),
-        TurnOutcome::AgentFrameSwitch { frame_id } => (
+        TurnOutcome::AgentFrameSwitch { frame_id, .. } => (
             "completed",
             "agent_frame_switch",
             Some(lash_trace::TraceAgentFrameSwitch {
@@ -699,25 +699,17 @@ impl LashRuntime {
                     None,
                 )
                 .await?;
-            let switched_frame_id = match &turn.outcome {
-                TurnOutcome::AgentFrameSwitch { frame_id } => Some(frame_id.clone()),
+            let switched_frame = match &turn.outcome {
+                TurnOutcome::AgentFrameSwitch { frame_id, task } => {
+                    Some((frame_id.clone(), task.clone()))
+                }
                 _ => None,
             };
-            let next_task = switched_frame_id
-                .as_ref()
-                .and_then(|frame_id| frame_switch_task(&turn, frame_id));
             turns.push(turn);
 
-            let Some(_frame_id) = switched_frame_id else {
+            let Some((_frame_id, task)) = switched_frame else {
                 return Ok(AgentFrameRun { turns });
             };
-
-            let task = next_task.ok_or_else(|| {
-                RuntimeError::new(
-                    RuntimeErrorCode::Other("agent_frame_missing_task".to_string()),
-                    "agent frame switch did not provide a task",
-                )
-            })?;
             input = turn_input_from_text(task);
             input.protocol_turn_options = follow_protocol_turn_options.clone();
             input.turn_context = follow_turn_context.clone();
@@ -1278,19 +1270,6 @@ impl LashRuntime {
             self.host.core.durability.attachment_store.as_ref(),
         )
     }
-}
-
-fn frame_switch_task(turn: &AssembledTurn, frame_id: &str) -> Option<String> {
-    turn.tool_calls
-        .iter()
-        .find_map(|record| match &record.output.control {
-            Some(crate::ToolControl::SwitchAgentFrame {
-                frame_id: control_frame_id,
-                task: Some(task),
-                ..
-            }) if control_frame_id == frame_id => Some(task.clone()),
-            _ => None,
-        })
 }
 
 fn turn_input_from_text(text: String) -> TurnInput {

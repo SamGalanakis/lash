@@ -329,7 +329,16 @@ pub(crate) async fn stream_next_queued_prepared_assembled(
 ) -> Result<Option<AssembledTurn>> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
-    let opts = turn_options(sinks, scoped_effect_controller, cancel);
+    let observation_sink = SessionObservationTurnActivitySink {
+        runtime: runtime.clone(),
+        live: sinks.turn_events(),
+    };
+    let opts = turn_options(
+        sinks.events(),
+        &observation_sink,
+        scoped_effect_controller,
+        cancel,
+    );
     let turn = if batch_ids.is_empty() {
         writer.stream_next_queued_work(opts).await?
     } else {
@@ -340,18 +349,35 @@ pub(crate) async fn stream_next_queued_prepared_assembled(
 }
 
 fn turn_options<'a>(
-    sinks: TurnSinks<'a>,
+    events: Option<&'a dyn EventSink>,
+    turn_events: &'a dyn TurnActivitySink,
     scoped_effect_controller: ScopedEffectController<'a>,
     cancel: CancellationToken,
 ) -> lash_core::TurnOptions<'a> {
     let mut opts = lash_core::TurnOptions::new(cancel, scoped_effect_controller);
-    if let Some(events) = sinks.events() {
+    if let Some(events) = events {
         opts = opts.with_events(events);
     }
-    if let Some(turn_events) = sinks.turn_events() {
-        opts = opts.with_turn_events(turn_events);
+    opts.with_turn_events(turn_events)
+}
+
+struct SessionObservationTurnActivitySink<'a> {
+    runtime: RuntimeHandle,
+    live: Option<&'a dyn TurnActivitySink>,
+}
+
+#[async_trait]
+impl TurnActivitySink for SessionObservationTurnActivitySink<'_> {
+    fn is_noop(&self) -> bool {
+        false
     }
-    opts
+
+    async fn emit(&self, activity: TurnActivity) {
+        self.runtime.record_turn_activity(activity.clone());
+        if let Some(live) = self.live {
+            live.emit(activity).await;
+        }
+    }
 }
 
 struct ChannelTurnActivitySink {
@@ -434,9 +460,18 @@ pub(crate) async fn stream_prepared_agent_frame_run(
             .await
             .map_err(EmbedError::Session)?;
     }
+    let observation_sink = SessionObservationTurnActivitySink {
+        runtime: runtime.clone(),
+        live: sinks.turn_events(),
+    };
     let turn = Box::pin(writer.stream_turn_with_agent_frames(
         input,
-        turn_options(sinks, scoped_effect_controller, cancel),
+        turn_options(
+            sinks.events(),
+            &observation_sink,
+            scoped_effect_controller,
+            cancel,
+        ),
     ))
     .await?;
     runtime.publish_from(&writer);
