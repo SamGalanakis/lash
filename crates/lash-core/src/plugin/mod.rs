@@ -36,8 +36,8 @@ pub use actions::{
 };
 pub use error::PluginError;
 pub use history::{
-    HistoryError, HistoryRewriteMetadata, HistoryRewriter, HistoryState, RewriteContext,
-    RewriteTrigger, SessionReadView, TurnContextTransform, TurnTransformContext,
+    CompactionContext, ContextCompaction, ContextCompactor, ContextError, SessionReadView,
+    TurnContextTransform, TurnTransformContext,
 };
 pub use hooks::{
     AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantResponseHookContext,
@@ -56,7 +56,7 @@ pub use protocol::{
     ProtocolSessionPlugin,
 };
 pub use registrar::{
-    ExecutionRegistrations, HistoryRegistrations, HostEventRegistrations, OutputRegistrations,
+    ContextRegistrations, ExecutionRegistrations, HostEventRegistrations, OutputRegistrations,
     PluginActionRegistrations, PluginRegistrar, PromptRegistrations, ProtocolRegistrations,
     SessionRegistrations, SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations,
     ToolResultRegistrations, TurnRegistrations,
@@ -77,9 +77,9 @@ pub use services::{PersistentRuntimeServices, PluginActionInvokeError, RuntimeSe
 pub use session_obj::PluginSession;
 pub use session_types::{
     AgentFrameAssignment, AgentFrameId, AgentFrameReason, AgentFrameRecord, AgentFrameStatus,
-    PluginOwned, SessionAppendNode, SessionContextSurface, SessionCreateRequest, SessionHandle,
-    SessionPluginSource, SessionRelation, SessionSnapshot, SessionStartPoint, SessionToolAccess,
-    SubagentSessionContext,
+    OpenAgentFrameRequest, OpenAgentFrameResult, PluginOwned, SessionAppendNode,
+    SessionContextSurface, SessionCreateRequest, SessionHandle, SessionPluginSource,
+    SessionRelation, SessionSnapshot, SessionStartPoint, SessionToolAccess, SubagentSessionContext,
 };
 pub(crate) use snapshot::{InMemorySnapshotReader, InMemorySnapshotWriter};
 pub use snapshot::{

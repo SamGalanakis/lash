@@ -156,10 +156,6 @@ impl Session {
         Arc::clone(&self.tool_registry) as Arc<dyn ToolProvider>
     }
 
-    pub(crate) fn tool_registry(&self) -> Arc<crate::ToolRegistry> {
-        Arc::clone(&self.tool_registry)
-    }
-
     pub fn plugins(&self) -> &Arc<crate::PluginSession> {
         &self.services.plugins
     }

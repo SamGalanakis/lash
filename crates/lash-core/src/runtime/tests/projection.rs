@@ -84,6 +84,7 @@ async fn tool_result_projector_only_changes_model_observation() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "projection-tool-turn"),
         )
         .await
         .expect("turn");
@@ -159,6 +160,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "custom-store-projection-turn"),
         )
         .await
         .expect("turn");
@@ -279,6 +281,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "parked-custom-store-projection-turn"),
         )
         .await
         .expect("turn");

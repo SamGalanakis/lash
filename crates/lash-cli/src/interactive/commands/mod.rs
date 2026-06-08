@@ -9,7 +9,7 @@ use super::*;
 use crate::SkillCatalog;
 use crate::turn_runner::make_turn_input;
 use crate::{controls_document, help_document, info_document};
-use lash_core::runtime::{QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
+use lash_core::runtime::{EffectScope, QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
 
 #[derive(Clone)]
 pub(super) enum ParsedSlashCommand {
@@ -428,10 +428,23 @@ async fn handle_slash_command(
                 push_system_message(app, "Compaction is unavailable while a turn is running.");
                 return Ok(false);
             };
-            let trigger = lash_core::RewriteTrigger::Manual {
-                instructions: argument,
+            let effect_host = rt.effect_host().await;
+            let scoped_effect_controller = effect_host.scoped(EffectScope::runtime_operation(
+                format!("cli-compact:{}:{}", rt.session_id(), uuid::Uuid::new_v4()),
+            ));
+            let scoped_effect_controller = match scoped_effect_controller {
+                Ok(controller) => controller,
+                Err(err) => {
+                    push_system_message(app, format!("Compaction failed: {err}"));
+                    return Ok(false);
+                }
             };
-            match rt.control().state().rewrite_history(trigger).await {
+            match rt
+                .control()
+                .state()
+                .compact_context(argument, scoped_effect_controller)
+                .await
+            {
                 Ok(true) => {
                     let read_view = rt.read_view();
                     history.clear();
@@ -440,7 +453,7 @@ async fn handle_slash_command(
                         app::timeline_from_read_view(&read_view, &app.ui_projection_state());
                     app.invalidate_height_cache();
                     app.scroll_to_bottom();
-                    push_system_message(app, "Compaction summary inserted.");
+                    push_system_message(app, "Compaction frame opened.");
                 }
                 Ok(false) => push_system_message(
                     app,

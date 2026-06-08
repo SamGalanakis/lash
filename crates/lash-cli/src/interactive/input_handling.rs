@@ -5,8 +5,8 @@ use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
 use lash::{LashSession, ModeId, provider::ProviderHandle};
-use lash_core::ToolState;
 use lash_core::session_model::Message;
+use lash_core::{ToolState, runtime::EffectScope};
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiInputOutcome, TuiSurfaceSlot};
 use tokio::task;
@@ -192,7 +192,19 @@ async fn cancel_selected_process(app: &mut App, runtime: &Option<LashSession>) {
         return;
     };
     let process_control = session.control().processes();
-    match process_control.cancel(&process.process_id).await {
+    let effect_host = session.effect_host().await;
+    let scoped_effect_controller =
+        match effect_host.scoped(EffectScope::process(process.process_id.clone())) {
+            Ok(controller) => controller,
+            Err(err) => {
+                push_system_message(app, format!("Failed to scope process cancellation: {err}"));
+                return;
+            }
+        };
+    match process_control
+        .cancel(&process.process_id, scoped_effect_controller)
+        .await
+    {
         Ok(summary) => {
             push_system_message(
                 app,

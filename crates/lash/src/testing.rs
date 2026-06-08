@@ -321,7 +321,13 @@ submit "registered"
             .expect("open session");
         let output = session
             .turn(lash_core::TurnInput::text(prompt))
-            .run()
+            .run(
+                lash_core::ScopedEffectController::shared(
+                    Arc::new(lash_core::InlineRuntimeEffectController),
+                    lash_core::EffectScope::turn(SESSION_ID, lash_core::TurnActivityId::fresh().0),
+                )
+                .expect("inline trigger registration effect scope"),
+            )
             .await
             .expect("register trigger route");
         assert_eq!(
@@ -357,6 +363,16 @@ submit "registered"
         );
     }
 
+    fn inline_host_event_scope(
+        scope_id: impl Into<String>,
+    ) -> lash_core::ScopedEffectController<'static> {
+        lash_core::ScopedEffectController::shared(
+            Arc::new(lash_core::InlineRuntimeEffectController),
+            lash_core::EffectScope::runtime_operation(scope_id.into()),
+        )
+        .expect("inline host event effect scope")
+    }
+
     async fn emit_first_clock_alarm(
         core: &LashCore,
         session: &crate::LashSession,
@@ -379,12 +395,15 @@ submit "registered"
                 .unwrap_or("occurrence")
         );
         core.host_events()
-            .emit(crate::HostEventOccurrenceRequest::new(
-                "clock.Alarm",
-                handle.source_key.clone(),
-                payload,
-                idempotency_key,
-            ))
+            .emit(
+                crate::HostEventOccurrenceRequest::new(
+                    "clock.Alarm",
+                    handle.source_key.clone(),
+                    payload,
+                    idempotency_key.clone(),
+                ),
+                inline_host_event_scope(format!("host-event:{idempotency_key}")),
+            )
             .await
             .expect("emit clock host event")
     }
@@ -456,6 +475,7 @@ submit "registered"
 
         let source_key =
             crate::empty_host_event_source_key("ui.button.pressed").expect("button source key");
+        let idempotency_key = "runtime-rebuild-host-event";
         let report = core
             .host_events()
             .emit(
@@ -467,9 +487,10 @@ submit "registered"
                     "message": "user pressed the red button",
                     "pressed_at": "2026-06-02T12:00:00Z"
                     }),
-                    "runtime-rebuild-host-event",
+                    idempotency_key,
                 )
                 .with_source(serde_json::json!({})),
+                inline_host_event_scope(format!("host-event:{idempotency_key}")),
             )
             .await
             .expect("emit host event");

@@ -57,7 +57,11 @@ async fn standard_runtime_assembles_stream_only_text_response() {
                 protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            TurnOptions::new(CancellationToken::new()).with_events(&sink),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "stream-only-text-turn"),
+            )
+            .with_events(&sink),
         )
         .await
         .expect("turn");
@@ -118,7 +122,11 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
                 protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            TurnOptions::new(CancellationToken::new()).with_events(&sink),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "recover-streamed-text-turn"),
+            )
+            .with_events(&sink),
         )
         .await
         .expect("turn");
@@ -215,6 +223,7 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
                 turn_context: crate::TurnContext::default(),
             },
             cancel,
+            named_turn_scope("root", "cancel-tool-turn"),
         )
         .await;
     let elapsed = start.elapsed();
@@ -293,7 +302,11 @@ async fn standard_runtime_tool_control_finish_emits_terminal_output() {
                 protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            TurnOptions::new(CancellationToken::new()).with_turn_events(&turn_events),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "terminal-tool-finish-turn"),
+            )
+            .with_turn_events(&turn_events),
         )
         .await
         .expect("turn");
@@ -386,7 +399,11 @@ async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event(
                 protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            TurnOptions::new(CancellationToken::new()).with_turn_events(&turn_events),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "terminal-tool-fail-turn"),
+            )
+            .with_turn_events(&turn_events),
         )
         .await
         .expect("turn");
@@ -459,6 +476,7 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "streamed-tool-call-turn"),
         )
         .await
         .expect("turn");
@@ -508,7 +526,11 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
                 protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            TurnOptions::new(CancellationToken::new()).with_events(&sink),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "part-boundaries-turn"),
+            )
+            .with_events(&sink),
         )
         .await
         .expect("turn");
@@ -566,6 +588,7 @@ async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "streamed-usage-turn"),
         )
         .await
         .expect("turn");
@@ -617,6 +640,7 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "final-usage-turn"),
         )
         .await
         .expect("turn");

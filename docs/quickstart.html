@@ -82,7 +82,7 @@ tokio                = { version = "1", features = ["full"] }</code></pre>
 
 <pre data-lang="rust"><code>use std::sync::Arc;
 
-use lash::{provider::ProviderHandle, LashCore, TurnInput};
+use lash::{provider::ProviderHandle, runtime::EffectScope, LashCore, TurnActivityId, TurnInput};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
@@ -106,9 +106,14 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     let session = core.session("hello-1").open().await?;
 
     // run one turn; read settled prose from the terminal result.
+    let effect_host = session.effect_host().await;
+    let scope = effect_host.scoped(EffectScope::turn(
+        session.session_id(),
+        TurnActivityId::fresh().0,
+    ))?;
     let result = session
         .turn(TurnInput::text("Say hi in one short sentence."))
-        .run()
+        .run(scope)
         .await?;
 
     let prose = result.assistant_message().unwrap_or_default();

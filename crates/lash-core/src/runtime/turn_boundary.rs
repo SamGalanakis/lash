@@ -564,26 +564,6 @@ fn materialize_agent_frame_switch(
     let empty_nodes = Vec::new();
     let empty_task = None;
     let (initial_nodes, _task) = control.unwrap_or((&empty_nodes, &empty_task));
-    let previous = state.current_agent_frame().cloned();
-    let assignment = previous
-        .as_ref()
-        .map(|frame| frame.assignment.clone())
-        .unwrap_or_else(|| crate::AgentFrameAssignment::from_policy(state.policy.clone()));
-    let protocol_turn_options = previous
-        .as_ref()
-        .map(|frame| frame.protocol_turn_options.clone())
-        .unwrap_or_else(|| state.protocol_turn_options.clone());
-    let previous_frame_id = previous.map(|frame| frame.frame_id);
-    state.append_agent_frame(crate::AgentFrameRecord::new(
-        frame_id.clone(),
-        state.session_id.clone(),
-        previous_frame_id,
-        crate::AgentFrameReason::ContinueAs,
-        None,
-        assignment,
-        protocol_turn_options,
-    ));
-
     let nodes = initial_nodes
         .iter()
         .filter_map(|value| {
@@ -596,10 +576,11 @@ fn materialize_agent_frame_switch(
             }
         })
         .collect::<Vec<_>>();
-    if !nodes.is_empty() {
-        super::append_session_nodes_to_state(state, &nodes);
-        state.graph_replace_required = true;
-    }
+    super::open_agent_frame_in_state(
+        state,
+        crate::OpenAgentFrameRequest::new(frame_id.clone(), crate::AgentFrameReason::continue_as())
+            .with_initial_nodes(nodes),
+    );
 }
 
 fn message_rendered_text(message: &Message) -> String {
@@ -709,10 +690,10 @@ mod tests {
             current.previous_frame_id.as_deref(),
             Some(previous_frame_id.as_str())
         );
-        assert!(matches!(
-            current.reason,
-            crate::AgentFrameReason::ContinueAs
-        ));
+        assert_eq!(
+            current.reason.as_str(),
+            crate::AgentFrameReason::CONTINUE_AS
+        );
         let current_read = state
             .session_graph
             .read_model_for_agent_frame(&frame_id, false);
@@ -723,6 +704,96 @@ mod tests {
             .read_model_for_agent_frame(&previous_frame_id, true);
         assert_eq!(previous_read.messages.len(), 1);
         assert_eq!(previous_read.messages[0].parts[0].content, "old frame");
+    }
+
+    #[test]
+    fn open_agent_frame_seeds_compaction_frame_and_is_replay_idempotent() {
+        let graph = SessionGraph::from_active_read_state(&[text_message(
+            "u0",
+            MessageRole::User,
+            "old durable frame",
+        )]);
+        let mut state = state_with_graph(graph);
+        state.ensure_agent_frame_initialized();
+        let previous_frame_id = state.current_agent_frame_id.clone();
+        let previous = state
+            .current_agent_frame_mut()
+            .expect("current frame before compaction");
+        previous.assignment.usage_source = Some("root-assignment".to_string());
+        previous.protocol_turn_options = crate::ProtocolTurnOptions {
+            payload: serde_json::json!({ "mode": "test" }),
+        };
+
+        let frame_id = "frame-compaction".to_string();
+        let seed_node = crate::SessionAppendNode::message(
+            crate::PluginMessage::text(MessageRole::Assistant, "Compaction summary:\nold work")
+                .with_origin(crate::MessageOrigin::Plugin {
+                    plugin_id: "rolling_history".to_string(),
+                    transient: false,
+                }),
+        );
+
+        let opened = super::super::open_agent_frame_in_state(
+            &mut state,
+            crate::OpenAgentFrameRequest::new(
+                frame_id.clone(),
+                crate::AgentFrameReason::compaction(),
+            )
+            .with_initial_nodes(vec![seed_node.clone()]),
+        );
+
+        assert!(opened.opened);
+        assert_eq!(state.current_agent_frame_id, frame_id);
+        let current = state.current_agent_frame().expect("current frame");
+        assert_eq!(current.reason.as_str(), crate::AgentFrameReason::COMPACTION);
+        assert_eq!(
+            current.previous_frame_id.as_deref(),
+            Some(previous_frame_id.as_str())
+        );
+        assert_eq!(
+            current.assignment.usage_source.as_deref(),
+            Some("root-assignment")
+        );
+        assert_eq!(
+            current.protocol_turn_options.payload,
+            serde_json::json!({ "mode": "test" })
+        );
+
+        let current_read = state
+            .session_graph
+            .read_model_for_agent_frame(&frame_id, false);
+        assert_eq!(current_read.messages.len(), 1);
+        assert_eq!(
+            current_read.messages[0].parts[0].content,
+            "Compaction summary:\nold work"
+        );
+        assert!(matches!(
+            current_read.messages[0].origin.as_ref(),
+            Some(crate::MessageOrigin::Plugin { plugin_id, .. }) if plugin_id == "rolling_history"
+        ));
+
+        let previous_read = state
+            .session_graph
+            .read_model_for_agent_frame(&previous_frame_id, true);
+        assert_eq!(previous_read.messages.len(), 1);
+        assert_eq!(
+            previous_read.messages[0].parts[0].content,
+            "old durable frame"
+        );
+
+        let replay = super::super::open_agent_frame_in_state(
+            &mut state,
+            crate::OpenAgentFrameRequest::new(
+                frame_id.clone(),
+                crate::AgentFrameReason::compaction(),
+            )
+            .with_initial_nodes(vec![seed_node]),
+        );
+        assert!(!replay.opened);
+        let replay_read = state
+            .session_graph
+            .read_model_for_agent_frame(&frame_id, false);
+        assert_eq!(replay_read.messages.len(), 1);
     }
 
     #[tokio::test]

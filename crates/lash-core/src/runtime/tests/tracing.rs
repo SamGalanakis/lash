@@ -52,6 +52,7 @@ async fn standard_runtime_trace_records_stream_event_entries() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "trace-stream-events-turn"),
         )
         .await
         .expect("turn");
@@ -217,6 +218,7 @@ async fn extended_runtime_trace_records_provider_stream_events() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "trace-provider-stream-turn"),
         )
         .await
         .expect("turn");
@@ -302,6 +304,7 @@ async fn standard_runtime_trace_omits_stream_event_entries_by_default() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "trace-standard-turn"),
         )
         .await
         .expect("turn");
@@ -375,6 +378,7 @@ async fn standard_runtime_trace_records_failed_llm_calls() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "trace-failed-llm-turn"),
         )
         .await
         .expect("turn");

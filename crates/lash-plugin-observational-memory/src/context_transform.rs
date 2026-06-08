@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::borrow::Cow;
 
 use lash_core::PreparedContext;
-use lash_core::plugin::{HistoryError, TurnContextTransform, TurnTransformContext};
+use lash_core::plugin::{ContextError, TurnContextTransform, TurnTransformContext};
 use lash_core::{Message, MessageOrigin, MessageRole, Part, PartKind};
 
 use crate::ObservationalMemoryConfig;
@@ -38,7 +38,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
         &self,
         ctx: &TurnTransformContext<'_>,
         input: PreparedContext,
-    ) -> Result<PreparedContext, HistoryError> {
+    ) -> Result<PreparedContext, ContextError> {
         let graph = ctx.state.session_graph();
         let om_state = build_graph_state(graph);
         let pending_message_tokens = approx_message_nodes_tokens(&active_unobserved_message_nodes(

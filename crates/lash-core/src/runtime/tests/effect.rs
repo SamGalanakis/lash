@@ -416,6 +416,7 @@ async fn standard_turn_llm_and_checkpoint_effects_cross_controller_once() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            scoped_test_turn(&recorder, "standard-effects"),
         )
         .await
         .expect("turn");
@@ -464,6 +465,7 @@ async fn turn_effect_envelope_does_not_carry_checkpoint_payload() {
         .run_turn_assembled(
             TurnInput::text(large_marker.clone()),
             CancellationToken::new(),
+            scoped_test_turn(&recorder, "checkpoint-envelope"),
         )
         .await
         .expect("turn");
@@ -488,18 +490,27 @@ async fn turn_effect_envelope_does_not_carry_checkpoint_payload() {
 
 #[tokio::test]
 async fn controller_rejection_fails_turn_explicitly() {
+    let controller = Arc::new(RejectingEffectController);
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         Vec::new(),
         Arc::new(EmptyTools),
         mock_provider(Vec::new()),
-        EmbeddedRuntimeHost::new(runtime_host_config_with_inline_controller(Arc::new(
-            RejectingEffectController,
-        ))),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_inline_controller(
+            controller.clone(),
+        )),
     )
     .await;
 
     let turn = runtime
-        .run_turn_assembled(TurnInput::text("hello"), CancellationToken::new())
+        .run_turn_assembled(
+            TurnInput::text("hello"),
+            CancellationToken::new(),
+            ScopedEffectController::shared(
+                controller,
+                EffectScope::turn("root", "rejecting-controller"),
+            )
+            .expect("rejecting effect scope"),
+        )
         .await
         .expect("turn");
 
@@ -515,18 +526,27 @@ async fn controller_rejection_fails_turn_explicitly() {
 
 #[tokio::test]
 async fn wrong_controller_outcome_fails_turn_explicitly() {
+    let controller = Arc::new(WrongOutcomeEffectController);
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         Vec::new(),
         Arc::new(EmptyTools),
         mock_provider(Vec::new()),
-        EmbeddedRuntimeHost::new(runtime_host_config_with_inline_controller(Arc::new(
-            WrongOutcomeEffectController,
-        ))),
+        EmbeddedRuntimeHost::new(runtime_host_config_with_inline_controller(
+            controller.clone(),
+        )),
     )
     .await;
 
     let turn = runtime
-        .run_turn_assembled(TurnInput::text("hello"), CancellationToken::new())
+        .run_turn_assembled(
+            TurnInput::text("hello"),
+            CancellationToken::new(),
+            ScopedEffectController::shared(
+                controller,
+                EffectScope::turn("root", "wrong-outcome-controller"),
+            )
+            .expect("wrong outcome effect scope"),
+        )
         .await
         .expect("turn");
 
@@ -570,9 +590,8 @@ async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
     let turn = runtime
         .stream_turn(
             TurnInput::text("hello"),
-            TurnOptions::new(CancellationToken::new())
-                .with_events(&NoopEventSink)
-                .with_scoped_effect_controller(scoped_effect_controller),
+            TurnOptions::new(CancellationToken::new(), scoped_effect_controller)
+                .with_events(&NoopEventSink),
         )
         .await
         .expect("turn");
@@ -612,9 +631,8 @@ async fn durable_controller_rejects_ephemeral_attachment_store_before_turn_runs(
     let err = runtime
         .stream_turn(
             TurnInput::text("hello"),
-            TurnOptions::new(CancellationToken::new())
-                .with_events(&NoopEventSink)
-                .with_scoped_effect_controller(scoped_effect_controller),
+            TurnOptions::new(CancellationToken::new(), scoped_effect_controller)
+                .with_events(&NoopEventSink),
         )
         .await
         .expect_err("ephemeral attachment store should be rejected");
@@ -649,9 +667,8 @@ async fn durable_controller_rejects_ephemeral_artifact_store_before_turn_runs() 
     let err = runtime
         .stream_turn(
             TurnInput::text("hello"),
-            TurnOptions::new(CancellationToken::new())
-                .with_events(&NoopEventSink)
-                .with_scoped_effect_controller(scoped_effect_controller),
+            TurnOptions::new(CancellationToken::new(), scoped_effect_controller)
+                .with_events(&NoopEventSink),
         )
         .await
         .expect_err("ephemeral artifact store should be rejected");
@@ -687,9 +704,8 @@ async fn durable_controller_rejects_ephemeral_session_store_before_turn_runs() {
     let err = runtime
         .stream_turn(
             TurnInput::text("hello"),
-            TurnOptions::new(CancellationToken::new())
-                .with_events(&NoopEventSink)
-                .with_scoped_effect_controller(scoped_effect_controller),
+            TurnOptions::new(CancellationToken::new(), scoped_effect_controller)
+                .with_events(&NoopEventSink),
         )
         .await
         .expect_err("ephemeral session store should be rejected");
@@ -724,9 +740,8 @@ async fn durable_controller_rejects_ephemeral_process_registry_before_turn_runs(
     let err = runtime
         .stream_turn(
             TurnInput::text("hello"),
-            TurnOptions::new(CancellationToken::new())
-                .with_events(&NoopEventSink)
-                .with_scoped_effect_controller(scoped_effect_controller),
+            TurnOptions::new(CancellationToken::new(), scoped_effect_controller)
+                .with_events(&NoopEventSink),
         )
         .await
         .expect_err("ephemeral process registry should be rejected");
@@ -761,9 +776,8 @@ async fn durable_controller_with_all_durable_stores_runs_turn() {
     let turn = runtime
         .stream_turn(
             TurnInput::text("hello"),
-            TurnOptions::new(CancellationToken::new())
-                .with_events(&NoopEventSink)
-                .with_scoped_effect_controller(scoped_effect_controller),
+            TurnOptions::new(CancellationToken::new(), scoped_effect_controller)
+                .with_events(&NoopEventSink),
         )
         .await
         .expect("durable controller + all-durable stores should run");
@@ -864,9 +878,8 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
     let turn = runtime
         .stream_turn(
             TurnInput::text("use direct tool"),
-            TurnOptions::new(CancellationToken::new())
-                .with_events(&NoopEventSink)
-                .with_scoped_effect_controller(scoped_effect_controller),
+            TurnOptions::new(CancellationToken::new(), scoped_effect_controller)
+                .with_events(&NoopEventSink),
         )
         .await
         .expect("turn");
@@ -1022,7 +1035,15 @@ async fn tool_emitted_host_event_is_serialized_without_appending_session_node() 
     let turn = runtime
         .stream_turn(
             TurnInput::text("emit host event from tool"),
-            TurnOptions::new(CancellationToken::new()).with_events(&NoopEventSink),
+            TurnOptions::new(
+                CancellationToken::new(),
+                ScopedEffectController::shared(
+                    Arc::new(controller.clone()),
+                    EffectScope::turn("root", "host-event-tool"),
+                )
+                .expect("capturing effect scope"),
+            )
+            .with_events(&NoopEventSink),
         )
         .await
         .expect("turn");
@@ -1150,9 +1171,8 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
     let turn = runtime
         .stream_turn(
             TurnInput::text("use retry tool"),
-            TurnOptions::new(CancellationToken::new())
-                .with_events(&NoopEventSink)
-                .with_scoped_effect_controller(scoped_effect_controller),
+            TurnOptions::new(CancellationToken::new(), scoped_effect_controller)
+                .with_events(&NoopEventSink),
         )
         .await
         .expect("turn");
@@ -1229,6 +1249,7 @@ async fn tool_call_effect_crosses_controller_per_logical_call_and_runs_local_too
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            scoped_test_turn(&recorder, "tool-replay-effects"),
         )
         .await
         .expect("turn");
@@ -1287,6 +1308,7 @@ async fn exec_and_execution_surface_effects_cross_controller_once() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            scoped_test_turn(&recorder, "exec-surface-effects"),
         )
         .await
         .expect("turn");
@@ -1337,6 +1359,7 @@ async fn start_exec_without_code_executor_stops_as_runtime_error() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "exec-without-executor"),
         )
         .await
         .expect("turn");

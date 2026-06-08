@@ -90,7 +90,9 @@ impl ToolProvider for BlockingAppTools {
 async fn turn_builder_into_stream_emits_activities_and_finishes() -> Result<()> {
     let core = standard_core();
     let session = core.session("turn-stream").open().await?;
-    let mut stream = session.turn(TurnInput::text("stream me")).into_stream()?;
+    let mut stream = session
+        .turn(TurnInput::text("stream me"))
+        .into_stream(turn_scope(&session.session_id()))?;
 
     let mut activities = Vec::new();
     while let Some(activity) = stream.next_activity().await {
@@ -120,7 +122,7 @@ async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
     let session = core.session("turn-stream-last-group").open().await?;
     let mut stream = session
         .turn(TurnInput::text("stream groups"))
-        .into_stream()?;
+        .into_stream(turn_scope(&session.session_id()))?;
 
     let mut activities = Vec::new();
     while let Some(activity) = stream.next_activity().await {
@@ -142,7 +144,10 @@ async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -
         .build()?;
     let session = core.session("turn-run-last-group").open().await?;
 
-    let collected = session.turn(TurnInput::text("run groups")).run().await?;
+    let collected = session
+        .turn(TurnInput::text("run groups"))
+        .run(turn_scope(&session.session_id()))
+        .await?;
 
     assert_eq!(assistant_prose(&collected.activities), "firstsecond");
     assert_eq!(collected.result.assistant_message(), Some("second"));
@@ -160,7 +165,7 @@ async fn retry_status_streams_as_semantic_turn_event() -> Result<()> {
 
     let result = session
         .turn(TurnInput::text("hello"))
-        .stream(&events)
+        .stream(&events, turn_scope(&session.session_id()))
         .await?;
 
     assert!(matches!(
@@ -196,7 +201,13 @@ async fn control_turn_accepts_prebuilt_turn_input() -> Result<()> {
     let mut input = TurnInput::text("raw input");
     input.trace_turn_id = Some("host-trace-id".to_string());
 
-    let result = session.turn(input).run().await?;
+    let result = session
+        .turn(input)
+        .run(inline_scope(lash_core::EffectScope::turn(
+            session.session_id(),
+            "host-trace-id",
+        )))
+        .await?;
 
     assert_eq!(assistant_prose(&result.activities), "echo: raw input");
     Ok(())
@@ -215,10 +226,11 @@ async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
     let events = Arc::new(RecordingEvents::default());
     let turn_session = session.clone();
     let turn_events = Arc::clone(&events);
+    let scoped_effect_controller = turn_scope(&turn_session.session_id());
     let turn = tokio::spawn(async move {
         turn_session
             .turn(TurnInput::text("hello"))
-            .stream(turn_events.as_ref())
+            .stream(turn_events.as_ref(), scoped_effect_controller)
             .await
     });
 
@@ -267,7 +279,7 @@ async fn turn_stream_receives_semantic_activities() -> Result<()> {
     let result = session
         .turn(TurnInput::text("semantic stream"))
         .cancel(CancellationToken::new())
-        .stream(&turn_events)
+        .stream(&turn_events, turn_scope(&session.session_id()))
         .await?;
 
     assert!(matches!(
@@ -289,7 +301,12 @@ async fn run_collects_ordered_assistant_prose_activity() -> Result<()> {
     let core = standard_core();
     let session = core.session("main").open().await?;
 
-    let result = session.run(TurnInput::text("visible")).await?;
+    let result = session
+        .run(
+            TurnInput::text("visible"),
+            turn_scope(&session.session_id()),
+        )
+        .await?;
 
     assert_eq!(assistant_prose(&result.activities), "echo: visible");
     assert!(
@@ -394,7 +411,7 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
 
     let output = session
         .turn(TurnInput::text("use tool"))
-        .collect_with(live.as_ref())
+        .collect_with(live.as_ref(), turn_scope(&session.session_id()))
         .await?;
 
     assert!(matches!(
@@ -429,7 +446,7 @@ async fn stream_returns_terminal_metadata_without_prose() -> Result<()> {
 
     let result = session
         .turn(TurnInput::text("stream"))
-        .stream(&events)
+        .stream(&events, turn_scope(&session.session_id()))
         .await?;
 
     assert!(matches!(
@@ -467,7 +484,7 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
 
     let collected = session
         .turn(TurnInput::text("use tool"))
-        .stream(&events)
+        .stream(&events, turn_scope(&session.session_id()))
         .await?;
 
     assert!(matches!(
@@ -525,7 +542,7 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
 
     let result = session
         .turn(TurnInput::text("use tool"))
-        .stream(events.as_ref())
+        .stream(events.as_ref(), turn_scope(&session.session_id()))
         .await?;
 
     assert!(matches!(
@@ -679,10 +696,7 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
     let mut input = TurnInput::text("switch frames");
     input.trace_turn_id = Some(root_turn_id.to_string());
 
-    let output = session
-        .turn(input)
-        .run_with_effect_scope(scoped_effect_controller)
-        .await?;
+    let output = session.turn(input).run(scoped_effect_controller).await?;
 
     assert_eq!(output.assistant_message(), Some("done after frame switch"));
     let follow_turn_id = format!("{root_turn_id}:agent-frame:1");
@@ -761,8 +775,13 @@ submit value
         .build()?;
     let session = core.session("rlm-process-control-tool").open().await?;
     let turn_session = session.clone();
-    let turn =
-        tokio::spawn(async move { turn_session.turn(TurnInput::text("start tool")).run().await });
+    let scoped_effect_controller = turn_scope(&turn_session.session_id());
+    let turn = tokio::spawn(async move {
+        turn_session
+            .turn(TurnInput::text("start tool"))
+            .run(scoped_effect_controller)
+            .await
+    });
 
     tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
         .await
@@ -838,8 +857,13 @@ submit value
         .build()?;
     let session = core.session("rlm-lashlang-graph-store").open().await?;
     let turn_session = session.clone();
-    let turn =
-        tokio::spawn(async move { turn_session.turn(TurnInput::text("start tool")).run().await });
+    let scoped_effect_controller = turn_scope(&turn_session.session_id());
+    let turn = tokio::spawn(async move {
+        turn_session
+            .turn(TurnInput::text("start tool"))
+            .run(scoped_effect_controller)
+            .await
+    });
 
     tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
         .await
@@ -883,7 +907,7 @@ async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()>
     let result = session
         .turn(TurnInput::text("answer directly"))
         .allow_prose_or_submit()?
-        .stream(events.as_ref())
+        .stream(events.as_ref(), turn_scope(&session.session_id()))
         .await?;
 
     assert!(matches!(
@@ -924,7 +948,7 @@ async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
     let result = session
         .turn(TurnInput::text("submit"))
         .require_submit()?
-        .stream(events.as_ref())
+        .stream(events.as_ref(), turn_scope(&session.session_id()))
         .await?;
 
     assert!(matches!(
@@ -962,7 +986,7 @@ async fn rlm_failed_code_emits_failed_code_completion_without_fake_tools() -> Re
 
     let _result = session
         .turn(TurnInput::text("bad code"))
-        .stream(&events)
+        .stream(&events, turn_scope(&session.session_id()))
         .await?;
 
     let events = events.snapshot().await;

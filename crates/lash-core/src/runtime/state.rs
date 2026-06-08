@@ -63,9 +63,9 @@ pub struct RuntimeSessionState {
     /// first persisted head.
     #[serde(skip)]
     pub head_revision: Option<u64>,
-    /// Signals that the next commit must write the full graph (a
-    /// destructive rewrite happened, e.g. `heal_orphaned_leaf`). Cleared
-    /// after the next commit.
+    /// Signals that the next commit must write the full graph (for example,
+    /// `heal_orphaned_leaf` repaired an invalid leaf). Cleared after the
+    /// next commit.
     #[serde(skip)]
     pub graph_replace_required: bool,
 }
@@ -361,7 +361,7 @@ impl RuntimeSessionState {
             frame_id,
             self.session_id.clone(),
             None,
-            crate::AgentFrameReason::Initial,
+            crate::AgentFrameReason::initial(),
             None,
             assignment,
             protocol_turn_options,
@@ -572,6 +572,50 @@ pub(super) fn append_session_nodes_to_state(
     node_ids
 }
 
+pub(super) fn open_agent_frame_in_state(
+    state: &mut RuntimeSessionState,
+    request: crate::OpenAgentFrameRequest,
+) -> crate::OpenAgentFrameResult {
+    state.ensure_agent_frame_initialized();
+    if request.frame_id.trim().is_empty() || state.current_agent_frame_id == request.frame_id {
+        return crate::OpenAgentFrameResult {
+            frame_id: state.current_agent_frame_id.clone(),
+            opened: false,
+            initial_node_ids: Vec::new(),
+        };
+    }
+
+    let previous = state.current_agent_frame().cloned();
+    let assignment = previous
+        .as_ref()
+        .map(|frame| frame.assignment.clone())
+        .unwrap_or_else(|| crate::AgentFrameAssignment::from_policy(state.policy.clone()));
+    let protocol_turn_options = previous
+        .as_ref()
+        .map(|frame| frame.protocol_turn_options.clone())
+        .unwrap_or_else(|| state.protocol_turn_options.clone());
+    let previous_frame_id = previous.map(|frame| frame.frame_id);
+    state.append_agent_frame(crate::AgentFrameRecord::new(
+        request.frame_id.clone(),
+        state.session_id.clone(),
+        previous_frame_id,
+        request.reason,
+        request.caused_by,
+        assignment,
+        protocol_turn_options,
+    ));
+
+    let initial_node_ids = append_session_nodes_to_state(state, &request.initial_nodes);
+    if !initial_node_ids.is_empty() {
+        state.graph_replace_required = true;
+    }
+    crate::OpenAgentFrameResult {
+        frame_id: state.current_agent_frame_id.clone(),
+        opened: true,
+        initial_node_ids,
+    }
+}
+
 fn session_append_node_draft(
     node: &crate::SessionAppendNode,
 ) -> crate::session_graph::SessionNodeDraft {
@@ -606,7 +650,7 @@ fn default_agent_frame(session_id: &str, policy: &SessionPolicy) -> crate::Agent
         default_agent_frame_id(session_id),
         session_id.to_string(),
         None,
-        crate::AgentFrameReason::Initial,
+        crate::AgentFrameReason::initial(),
         None,
         crate::AgentFrameAssignment::from_policy(policy.clone()),
         crate::ProtocolTurnOptions::default(),

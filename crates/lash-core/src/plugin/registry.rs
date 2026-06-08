@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use super::{
     AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantStreamHook,
-    BeforeToolCallHook, BeforeTurnHook, CheckpointHook, HistoryRewriter, PluginAction,
+    BeforeToolCallHook, BeforeTurnHook, CheckpointHook, ContextCompactor, PluginAction,
     PluginActionDef, PluginActionHandler, PluginError, PluginHost, PluginLifecycleEventHook,
     PluginRegistrar, PluginSnapshotMeta, PromptContributor, SessionConfigMutator,
     SessionToolAccess, SnapshotReader, SnapshotWriter, SubagentSessionContext,
@@ -38,7 +38,7 @@ pub struct PluginSpec {
     pub session_config_mutators: Vec<SessionConfigMutator>,
     pub plugin_actions: Vec<(PluginActionDef, PluginActionHandler)>,
     pub turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
-    pub history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
+    pub context_compactors: Vec<(i32, Arc<dyn ContextCompactor>)>,
 }
 
 impl PluginSpec {
@@ -200,12 +200,12 @@ impl PluginSpec {
         self
     }
 
-    pub fn with_history_rewriter(
+    pub fn with_context_compactor(
         mut self,
         priority: i32,
-        rewriter: Arc<dyn HistoryRewriter>,
+        compactor: Arc<dyn ContextCompactor>,
     ) -> Self {
-        self.history_rewriters.push((priority, rewriter));
+        self.context_compactors.push((priority, compactor));
         self
     }
 }
@@ -461,10 +461,10 @@ impl SessionPlugin for SpecPlugin {
             reg.actions().op(def.clone(), Arc::clone(handler))?;
         }
         for (priority, transform) in &self.spec.turn_context_transforms {
-            reg.history().prepare_turn(*priority, Arc::clone(transform));
+            reg.context().prepare_turn(*priority, Arc::clone(transform));
         }
-        for (priority, rewriter) in &self.spec.history_rewriters {
-            reg.history().rewrite(*priority, Arc::clone(rewriter));
+        for (priority, compactor) in &self.spec.context_compactors {
+            reg.context().compact(*priority, Arc::clone(compactor));
         }
         Ok(())
     }

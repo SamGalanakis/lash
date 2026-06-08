@@ -143,6 +143,7 @@ async fn turn_provider_override_does_not_persist_into_session_policy_or_agent_fr
                 turn_context,
             },
             CancellationToken::new(),
+            named_turn_scope("root", "provider-override-turn"),
         )
         .await
         .expect("turn");
@@ -204,6 +205,7 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "plugin-extension-turn"),
         )
         .await
         .expect("turn");
@@ -254,6 +256,7 @@ async fn normal_turn_stores_effective_user_text_in_state() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "skill-command-visibility-turn"),
         )
         .await
         .expect("turn");
@@ -321,6 +324,7 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "retryable-error-turn"),
         )
         .await
         .expect("turn");
@@ -386,6 +390,7 @@ async fn queued_checkpoint_input_continues_standard_turn() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "queued-checkpoint-turn"),
         )
         .await
         .expect("turn");
@@ -469,6 +474,7 @@ async fn queued_checkpoint_input_preserves_images() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "image-attachment-turn"),
         )
         .await
         .expect("turn");
@@ -549,6 +555,7 @@ async fn checkpoint_hook_can_inject_messages() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "plugin-action-turn"),
         )
         .await
         .expect("turn");
@@ -613,7 +620,11 @@ async fn queued_checkpoint_input_accepts_active_turn_without_persisting_duplicat
                 protocol_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            TurnOptions::new(CancellationToken::new()).with_events(&sink),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "injection-accepted-turn"),
+            )
+            .with_events(&sink),
         )
         .await
         .expect("turn");
@@ -724,7 +735,11 @@ async fn pending_process_wake_drains_into_idle_queued_turn_as_turn_event() {
     let turn_events = RecordingTurnEvents::default();
     runtime
         .stream_next_queued_work(
-            TurnOptions::new(CancellationToken::new()).with_turn_events(&turn_events),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "queued-work-started-turn"),
+            )
+            .with_turn_events(&turn_events),
         )
         .await
         .expect("turn")
@@ -898,9 +913,12 @@ async fn durable_process_wake_drains_as_committed_event_history_and_acknowledges
     runtime
         .stream_turn(
             TurnInput::text("hello"),
-            TurnOptions::new(CancellationToken::new())
-                .with_events(&sink)
-                .with_turn_events(&turn_events),
+            TurnOptions::new(
+                CancellationToken::new(),
+                named_turn_scope("root", "process-wake-turn"),
+            )
+            .with_events(&sink)
+            .with_turn_events(&turn_events),
         )
         .await
         .expect("turn");
@@ -1284,6 +1302,7 @@ async fn child_relation_does_not_replace_active_session() {
                 turn_context: crate::TurnContext::default(),
             },
             CancellationToken::new(),
+            named_turn_scope("root", "ordinary-child-parent-turn"),
         )
         .await
         .expect("parent turn");

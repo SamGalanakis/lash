@@ -57,12 +57,51 @@ impl lash_core::ProcessCancelAbility for RecordingCancelAbility {
     }
 }
 
+struct FixedCompactor;
+
+#[async_trait]
+impl lash_core::ContextCompactor for FixedCompactor {
+    fn id(&self) -> &'static str {
+        "test.fixed_compactor"
+    }
+
+    async fn compact(
+        &self,
+        ctx: &lash_core::CompactionContext<'_>,
+    ) -> std::result::Result<Option<lash_core::ContextCompaction>, lash_core::ContextError> {
+        assert_eq!(
+            ctx.instructions.as_deref(),
+            Some("focus on durable summary")
+        );
+        assert!(
+            ctx.state
+                .messages()
+                .iter()
+                .any(|message| message.parts[0].content.contains("old durable request"))
+        );
+        Ok(Some(lash_core::ContextCompaction::new(vec![
+            lash_core::SessionAppendNode::message(
+                lash_core::PluginMessage::text(
+                    lash_core::MessageRole::Assistant,
+                    "Compaction summary:\nold durable request summarized",
+                )
+                .with_origin(lash_core::MessageOrigin::Plugin {
+                    plugin_id: "test_compactor".to_string(),
+                    transient: false,
+                }),
+            ),
+        ])))
+    }
+}
+
 #[tokio::test]
 async fn session_operations_delegate_to_runtime() -> Result<()> {
     let core = standard_core();
     let session = core.session("session-ops").open().await?;
 
-    session.run(TurnInput::text("usage")).await?;
+    session
+        .run(TurnInput::text("usage"), turn_scope(&session.session_id()))
+        .await?;
     let usage = session.usage_report();
     assert_eq!(usage.usage.output_tokens, 2);
     session
@@ -92,6 +131,101 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
         err,
         EmbedError::Session(SessionError::CodeExecutionUnavailable)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn compact_context_opens_compaction_frame_and_preserves_prior_frame() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .plugin(Arc::new(StaticPluginFactory::new(
+            "test-compactor",
+            lash_core::PluginSpec::new().with_context_compactor(100, Arc::new(FixedCompactor)),
+        )))
+        .build()?;
+    let session = core.session("compact-context").open().await?;
+    session
+        .run(
+            TurnInput::text("old durable request"),
+            turn_scope(&session.session_id()),
+        )
+        .await?;
+    let before = session.control().state().persist_current().await?;
+    let previous_frame_id = before.current_agent_frame_id.clone();
+    assert!(
+        before.session_graph.nodes.iter().any(|node| {
+            node.agent_frame_id.as_deref() == Some(previous_frame_id.as_str())
+                && node
+                    .message()
+                    .is_some_and(|message| message.parts[0].content.contains("old durable request"))
+        }),
+        "initial frame should contain the original request"
+    );
+
+    let compacted = session
+        .control()
+        .state()
+        .compact_context(
+            Some("focus on durable summary".to_string()),
+            runtime_operation_scope("compact-context-test"),
+        )
+        .await?;
+
+    assert!(compacted);
+    let read_view = session.read_view();
+    assert_eq!(read_view.messages().len(), 1);
+    assert_eq!(
+        read_view.messages()[0].parts[0].content,
+        "Compaction summary:\nold durable request summarized"
+    );
+    assert!(matches!(
+        read_view.messages()[0].origin.as_ref(),
+        Some(lash_core::MessageOrigin::Plugin { plugin_id, .. }) if plugin_id == "test_compactor"
+    ));
+
+    let after = session.control().state().persist_current().await?;
+    let current = after
+        .agent_frames
+        .iter()
+        .find(|frame| frame.frame_id == after.current_agent_frame_id)
+        .expect("current frame");
+    assert_eq!(
+        current.reason.as_str(),
+        lash_core::AgentFrameReason::COMPACTION
+    );
+    assert_eq!(
+        current.previous_frame_id.as_deref(),
+        Some(previous_frame_id.as_str())
+    );
+    assert_eq!(
+        current.assignment.policy.provider_id,
+        before.agent_frames[0].assignment.policy.provider_id
+    );
+    assert_eq!(
+        current.protocol_turn_options.payload,
+        before.agent_frames[0].protocol_turn_options.payload
+    );
+    assert!(
+        after.session_graph.nodes.iter().any(|node| {
+            node.agent_frame_id.as_deref() == Some(previous_frame_id.as_str())
+                && node
+                    .message()
+                    .is_some_and(|message| message.parts[0].content.contains("old durable request"))
+        }),
+        "previous frame content should remain durable after compaction"
+    );
+    assert!(
+        after.session_graph.nodes.iter().any(|node| {
+            node.agent_frame_id.as_deref() == Some(after.current_agent_frame_id.as_str())
+                && node.message().is_some_and(|message| {
+                    message.parts[0]
+                        .content
+                        .contains("old durable request summarized")
+                })
+        }),
+        "compaction summary should be scoped to the new frame"
+    );
     Ok(())
 }
 
@@ -149,6 +283,10 @@ async fn host_event_emit_does_not_append_session_node_or_queue_work() -> Result<
     let before = session.control().state().persist_current().await?;
 
     let source_key = lash_core::empty_host_event_source_key("ui.button.pressed")?;
+    let scoped_effect_controller = lash_core::ScopedEffectController::shared(
+        Arc::new(lash_core::InlineRuntimeEffectController),
+        lash_core::EffectScope::runtime_operation("host-event:button-press-1"),
+    )?;
     let report = core
         .host_events()
         .emit(
@@ -159,6 +297,7 @@ async fn host_event_emit_does_not_append_session_node_or_queue_work() -> Result<
                 "button-press-1",
             )
             .with_source(serde_json::json!({})),
+            scoped_effect_controller,
         )
         .await?;
     assert!(!report.occurrence_id.is_empty());
@@ -196,7 +335,12 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         .build()?;
     let session = core.session("nonblocking-observation").open().await?;
     let turn_session = session.clone();
-    let turn = tokio::spawn(async move { turn_session.run(TurnInput::text("blocked")).await });
+    let scoped_effect_controller = turn_scope(&turn_session.session_id());
+    let turn = tokio::spawn(async move {
+        turn_session
+            .run(TurnInput::text("blocked"), scoped_effect_controller)
+            .await
+    });
 
     entered_rx.await.expect("provider entered");
 
@@ -234,16 +378,22 @@ async fn process_control_cancel_uses_host_cancel_ability() -> Result<()> {
     let session = core.session("host-cancel").open().await?;
     session
         .process_control()
-        .start(lash_core::ProcessStartRequest::external(
-            "host-process",
-            lash_core::ProcessHandleDescriptor::new(Some("test"), Some("host process")),
-            serde_json::Value::Null,
-        ))
+        .start(
+            lash_core::ProcessStartRequest::external(
+                "host-process",
+                lash_core::ProcessHandleDescriptor::new(Some("test"), Some("host process")),
+                serde_json::Value::Null,
+            ),
+            inline_scope(lash_core::EffectScope::process("host-process")),
+        )
         .await?;
 
     let err = session
         .process_control()
-        .cancel("host-process")
+        .cancel(
+            "host-process",
+            inline_scope(lash_core::EffectScope::process("host-process")),
+        )
         .await
         .expect_err("host ability should deny cancellation");
 
@@ -277,15 +427,21 @@ async fn process_control_cancel_all_uses_host_cancel_ability() -> Result<()> {
     for process_id in ["host-process-a", "host-process-b"] {
         session
             .process_control()
-            .start(lash_core::ProcessStartRequest::external(
-                process_id,
-                lash_core::ProcessHandleDescriptor::new(Some("test"), Some(process_id)),
-                serde_json::Value::Null,
-            ))
+            .start(
+                lash_core::ProcessStartRequest::external(
+                    process_id,
+                    lash_core::ProcessHandleDescriptor::new(Some("test"), Some(process_id)),
+                    serde_json::Value::Null,
+                ),
+                inline_scope(lash_core::EffectScope::process(process_id)),
+            )
             .await?;
     }
 
-    let mut summaries = session.process_control().cancel_all().await?;
+    let mut summaries = session
+        .process_control()
+        .cancel_all(runtime_operation_scope("host-cancel-all"))
+        .await?;
     summaries.sort_by(|left, right| left.process_id.cmp(&right.process_id));
     let mut calls = ability.calls();
     calls.sort_by(|left, right| left.1.cmp(&right.1));
@@ -321,7 +477,12 @@ async fn observation_updates_after_completed_turn() -> Result<()> {
     let session = core.session("observation-after-turn").open().await?;
 
     assert!(session.read_view().messages().is_empty());
-    session.run(TurnInput::text("hello observation")).await?;
+    session
+        .run(
+            TurnInput::text("hello observation"),
+            turn_scope(&session.session_id()),
+        )
+        .await?;
 
     let observed = session.observe();
     assert_eq!(observed.read_view().messages().len(), 2);
@@ -369,64 +530,7 @@ async fn config_and_tool_mutations_publish_observation_immediately() -> Result<(
 }
 
 #[tokio::test]
-async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
-    let (entered_tx, entered_rx) = oneshot::channel();
-    let (release_tx, release_rx) = oneshot::channel();
-    let core = explicit_ephemeral_facets(LashCore::standard())
-        .provider(checkpoint_gated_provider(entered_tx, release_rx))
-        .model(mock_model_spec())
-        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
-        .build()?;
-    let session = core.session("child-observation-parent").open().await?;
-    let children = session.control().children();
-    children
-        .create_session(SessionCreateRequest {
-            session_id: Some("child-observation".to_string()),
-            relation: lash_core::SessionRelation::Child {
-                parent_session_id: "child-observation-parent".to_string(),
-                caused_by: None,
-            },
-            start: lash_core::SessionStartPoint::Empty,
-            policy: None,
-            plugin_source: lash_core::SessionPluginSource::CurrentSessionFork,
-            initial_nodes: Vec::new(),
-            tool_access: lash_core::SessionToolAccess::default(),
-            subagent: None,
-            context_surface: lash_core::SessionContextSurface::default(),
-            plugin_options: lash_core::PluginOptions::default(),
-            usage_source: None,
-        })
-        .await?;
-    let child_runner = {
-        let children = children.clone();
-        tokio::spawn(async move {
-            children
-                .start_turn(
-                    "child-observation",
-                    "child-observation-turn",
-                    TurnInput::text("blocked child"),
-                )
-                .await
-        })
-    };
-
-    entered_rx.await.expect("child provider entered");
-    let host = session.control().state().session_state_service().await?;
-    let snapshot = tokio::time::timeout(std::time::Duration::from_millis(50), async {
-        host.snapshot_session("child-observation").await
-    })
-    .await
-    .expect("child snapshot should not wait for the child turn")?;
-    assert_eq!(snapshot.session_id, "child-observation");
-
-    release_tx.send(()).expect("release child provider");
-    child_runner.await.expect("child turn task")?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn session_control_manages_child_session_turns() -> Result<()> {
+async fn session_control_manages_child_session_lifecycle() -> Result<()> {
     let core = standard_core();
     let session = core.session("parent-control").open().await?;
     let children = session.control().children();
@@ -449,14 +553,7 @@ async fn session_control_manages_child_session_turns() -> Result<()> {
         })
         .await?;
 
-    let assembled = children
-        .start_turn(
-            &child.session_id,
-            "child-control-turn",
-            TurnInput::text("child"),
-        )
-        .await?;
-    assert_eq!(assembled.state.session_id, "child-control");
+    assert_eq!(child.session_id, "child-control");
     children.close_session(&child.session_id).await?;
     Ok(())
 }

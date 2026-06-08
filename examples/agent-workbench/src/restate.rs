@@ -528,7 +528,7 @@ async fn run_user_turn(
         .model(turn_model)
         .require_submit()
         .map_err(AppError::internal)?
-        .stream_with_effect_scope(&ui_events, scoped_effect_controller)
+        .stream(&ui_events, scoped_effect_controller)
         .await
         .map_err(AppError::internal)?;
     record_turn_output(&state, output, turn_state, "restate_user_turn.completed");
@@ -538,7 +538,7 @@ async fn run_user_turn(
 async fn run_button_trigger(
     state: AppState,
     request: WorkbenchButtonTriggerWorkflowRequest,
-    _controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+    controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
     let turn_model = model_spec_from_selection(request.model);
     let session = state
@@ -555,11 +555,18 @@ async fn run_button_trigger(
         "restate_button_trigger",
     )
     .await?;
+    let scoped_effect_controller = controller
+        .scoped_effect_controller(lash::runtime::EffectScope::runtime_operation(format!(
+            "button-trigger:{}",
+            request.operation_id
+        )))
+        .map_err(AppError::internal)?;
     let receipt = enqueue_button_host_event_command(
         &state,
         request.button,
         &request.pressed_at,
         &request.operation_id,
+        scoped_effect_controller,
     )
     .await
     .map_err(AppError::internal)?;
@@ -582,7 +589,7 @@ async fn run_button_trigger(
 async fn run_mail_received(
     state: AppState,
     request: WorkbenchMailReceivedWorkflowRequest,
-    _controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
+    controller: &lash_restate::RestateRuntimeEffectController<'_, WorkflowContext<'_>>,
 ) -> Result<(), AppError> {
     let turn_model = model_spec_from_selection(request.model);
     let session = state
@@ -593,10 +600,20 @@ async fn run_mail_received(
         .await
         .map_err(AppError::internal)?;
     apply_model_selection_to_session(&state, &session, turn_model, "restate_mail_received").await?;
-    let receipt =
-        enqueue_mail_received_host_event_command(&state, &request.delivery, &request.operation_id)
-            .await
-            .map_err(AppError::internal)?;
+    let scoped_effect_controller = controller
+        .scoped_effect_controller(lash::runtime::EffectScope::runtime_operation(format!(
+            "mail-received:{}",
+            request.operation_id
+        )))
+        .map_err(AppError::internal)?;
+    let receipt = enqueue_mail_received_host_event_command(
+        &state,
+        &request.delivery,
+        &request.operation_id,
+        scoped_effect_controller,
+    )
+    .await
+    .map_err(AppError::internal)?;
     state.trace(
         "mail_received.restate.host_event_occurrence",
         json!({
@@ -626,7 +643,7 @@ async fn run_session_delete(
         .map_err(AppError::internal)?;
     state
         .core
-        .delete_session_with_effect_scope(&request.session_id, scoped_effect_controller)
+        .delete_session(&request.session_id, scoped_effect_controller)
         .await
         .map_err(AppError::internal)?;
     state.trace(
@@ -680,7 +697,7 @@ async fn run_queued_turn(
         .map_err(AppError::internal)?;
     let Some(output) = session
         .next_queued_turn()
-        .stream_with_effect_scope(&ui_events, scoped_effect_controller)
+        .stream(&ui_events, scoped_effect_controller)
         .await
         .map_err(AppError::internal)?
     else {
@@ -817,7 +834,7 @@ async fn emit_cron_occurrence(
     let report = state
         .core
         .host_events()
-        .emit_with_effect_scope(
+        .emit(
             lash::HostEventOccurrenceRequest::new(
                 CRON_SCHEDULE_SOURCE_TYPE,
                 request.source_key.clone(),

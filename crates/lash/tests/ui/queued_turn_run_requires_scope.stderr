@@ -1,0 +1,15 @@
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+ --> tests/ui/queued_turn_run_requires_scope.rs:2:40
+  |
+2 |     let _ = session.next_queued_turn().run().await;
+  |                                        ^^^-- argument #1 of type `ScopedEffectController<'_>` is missing
+  |
+note: method defined here
+ --> src/turn.rs
+  |
+  |     pub async fn run(
+  |                  ^^^
+help: provide the argument
+  |
+2 |     let _ = session.next_queued_turn().run(/* ScopedEffectController<'_> */).await;
+  |                                            ++++++++++++++++++++++++++++++++

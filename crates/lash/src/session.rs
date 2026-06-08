@@ -366,8 +366,16 @@ impl LashSession {
         self.parent_session_id.as_deref()
     }
 
-    pub async fn run(&self, input: TurnInput) -> Result<TurnOutput> {
-        self.turn(input).run().await
+    pub async fn effect_host(&self) -> Arc<dyn EffectHost> {
+        self.runtime.writer().lock().await.effect_host()
+    }
+
+    pub async fn run(
+        &self,
+        input: TurnInput,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<TurnOutput> {
+        self.turn(input).run(scoped_effect_controller).await
     }
 
     pub fn turn(&self, input: TurnInput) -> TurnBuilder {

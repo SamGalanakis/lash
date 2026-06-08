@@ -14,9 +14,10 @@ use lash::persistence::{
     load_persisted_session_state, load_persisted_session_state_active_path,
 };
 use lash::plugins::{
-    AfterToolCallHook, BeforeToolCallHook, PluginDirective, PluginHost, PluginSpec,
-    PluginSpecBuilder, PluginSpecFactory, ToolCallHookContext, ToolResultHookContext,
-    ToolSurfaceContribution, ToolSurfaceOverride,
+    AfterToolCallHook, BeforeToolCallHook, CompactionContext, ContextCompaction,
+    ContextCompactor, ContextError, PluginDirective, PluginHost, PluginSpec, PluginSpecBuilder,
+    PluginSpecFactory, ToolCallHookContext, ToolResultHookContext, ToolSurfaceContribution,
+    ToolSurfaceOverride,
 };
 use lash::provider::{
     ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder, ProviderRetryPolicy,
@@ -132,6 +133,26 @@ fn plugin_types_are_nameable() -> PluginHost {
     PluginHost::new(vec![Arc::new(PluginSpecFactory::new("facade", builder))])
 }
 
+struct FacadeCompactor;
+
+#[async_trait]
+impl ContextCompactor for FacadeCompactor {
+    fn id(&self) -> &'static str {
+        "facade.compactor"
+    }
+
+    async fn compact(
+        &self,
+        _ctx: &CompactionContext<'_>,
+    ) -> Result<Option<ContextCompaction>, ContextError> {
+        Ok(Some(ContextCompaction::default()))
+    }
+}
+
+fn context_compactor_types_are_nameable() -> PluginSpec {
+    PluginSpec::new().with_context_compactor(10, Arc::new(FacadeCompactor))
+}
+
 async fn direct_response_type_is_nameable(
     client: &mut DirectLlmClient,
     request: DirectRequest,
@@ -218,6 +239,7 @@ fn main() {
         Vec::new(),
     );
     let _ = plugin_types_are_nameable();
+    let _ = context_compactor_types_are_nameable();
     let _ = direct_response_type_is_nameable;
     let _ = direct_payload_types_are_nameable;
     let _ = advanced_builder_accepts_runtime_host_config;

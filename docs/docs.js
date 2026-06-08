@@ -234,6 +234,12 @@
           summary: "EffectHost, ScopedEffectController, workflow replay, idempotent commits, and durable background work.",
           kind: "internal",
         },
+        {
+          title: "Scaling",
+          href: "architecture/scaling.html",
+          summary: "Running lash as a stateless, horizontally-scaling microservice: durable object per session, the RuntimePersistence seam, CAS, and session-agnostic ingress.",
+          kind: "internal",
+        },
       ],
     },
     {

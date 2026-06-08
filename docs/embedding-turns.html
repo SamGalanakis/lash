@@ -237,13 +237,13 @@ impl TurnActivitySink for ChannelSink {
 let submitted = session
     .turn(TurnInput::text("Move on the board."))
     .require_submit()?
-    .stream(&amp;sink)
+    .stream(&amp;sink, scoped_effect_controller)
     .await?;
 
 let prose_or_submit = session
     .turn(TurnInput::text("Answer directly if no code is needed."))
     .allow_prose_or_submit()?
-    .run()
+    .run(scoped_effect_controller)
     .await?;</code></pre>
             </article>
             <article class="panel">
@@ -286,7 +286,7 @@ let result = session
         },
         "additionalProperties": false
     }))?
-    .run()
+    .run(scoped_effect_controller)
     .await?;</code></pre>
         </div>
   </main>

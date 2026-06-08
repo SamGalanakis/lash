@@ -9,7 +9,7 @@ async fn standard_core_runs_mock_turn() -> Result<()> {
 
     let result = session
         .turn(TurnInput::text("hello"))
-        .stream(&events)
+        .stream(&events, turn_scope(&session.session_id()))
         .await?;
 
     assert!(matches!(
@@ -95,7 +95,7 @@ async fn prompt_layers_apply_across_core_session_turn_and_mutation_scopes() -> R
     session
         .turn(TurnInput::text("first"))
         .prompt_contribution(PromptContribution::guidance("Turn", "turn guidance"))
-        .run()
+        .run(turn_scope(&session.session_id()))
         .await?;
     session
         .control()
@@ -108,13 +108,17 @@ async fn prompt_layers_apply_across_core_session_turn_and_mutation_scopes() -> R
             )],
         )
         .await?;
-    session.run(TurnInput::text("second")).await?;
+    session
+        .run(TurnInput::text("second"), turn_scope(&session.session_id()))
+        .await?;
     session
         .control()
         .config()
         .clear_prompt_slot(PromptSlot::Guidance)
         .await?;
-    session.run(TurnInput::text("third")).await?;
+    session
+        .run(TurnInput::text("third"), turn_scope(&session.session_id()))
+        .await?;
 
     let prompts = seen.lock().expect("seen prompts");
     assert!(prompts[0].contains("core guidance"));
@@ -145,17 +149,21 @@ async fn provider_overrides_apply_at_core_session_turn_and_config_scopes() -> Re
         .open()
         .await?;
 
-    let session_result = session.run(TurnInput::text("hello")).await?;
+    let session_result = session
+        .run(TurnInput::text("hello"), turn_scope(&session.session_id()))
+        .await?;
     assert_eq!(assistant_prose(&session_result.activities), "session");
 
     let turn_result = session
         .turn(TurnInput::text("hello"))
         .provider(text_provider("turn-provider", "turn-model", "turn"))
-        .run()
+        .run(turn_scope(&session.session_id()))
         .await?;
     assert_eq!(assistant_prose(&turn_result.activities), "turn");
 
-    let after_turn = session.run(TurnInput::text("hello")).await?;
+    let after_turn = session
+        .run(TurnInput::text("hello"), turn_scope(&session.session_id()))
+        .await?;
     assert_eq!(assistant_prose(&after_turn.activities), "session");
 
     session
@@ -172,7 +180,9 @@ async fn provider_overrides_apply_at_core_session_turn_and_config_scopes() -> Re
         })
         .await?;
 
-    let updated = session.run(TurnInput::text("hello")).await?;
+    let updated = session
+        .run(TurnInput::text("hello"), turn_scope(&session.session_id()))
+        .await?;
     assert_eq!(assistant_prose(&updated.activities), "updated");
     Ok(())
 }
@@ -207,7 +217,9 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
         .open()
         .await?;
 
-    session.run(TurnInput::text("hello")).await?;
+    session
+        .run(TurnInput::text("hello"), turn_scope(&session.session_id()))
+        .await?;
     session
         .turn(TurnInput::text("hello"))
         .provider(recording_text_provider(
@@ -217,7 +229,7 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
             "turn",
             Arc::clone(&seen),
         ))
-        .run()
+        .run(turn_scope(&session.session_id()))
         .await?;
     session
         .turn(TurnInput::text("hello"))
@@ -233,7 +245,7 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
             Some("manual-variant".to_string()),
             200_000,
         ))
-        .run()
+        .run(turn_scope(&session.session_id()))
         .await?;
     session
         .control()
@@ -249,7 +261,9 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
             ..SessionConfigPatch::default()
         })
         .await?;
-    session.run(TurnInput::text("hello")).await?;
+    session
+        .run(TurnInput::text("hello"), turn_scope(&session.session_id()))
+        .await?;
 
     assert_eq!(
         *seen.lock().expect("seen requests"),
@@ -325,7 +339,7 @@ async fn rlm_mode_config_lashlang_abilities_drive_prompt_surface() -> Result<()>
     session
         .turn(TurnInput::text("hello"))
         .require_submit()?
-        .run()
+        .run(turn_scope(&session.session_id()))
         .await?;
 
     let prompts = seen.lock().expect("seen prompts");
@@ -346,7 +360,10 @@ async fn rlm_root_session_final_answer_format_defaults_to_markdown_and_can_be_ra
         .build()?;
 
     let markdown = core.session("rlm-root-markdown").open().await?;
-    markdown.turn(TurnInput::text("hello")).run().await?;
+    markdown
+        .turn(TurnInput::text("hello"))
+        .run(turn_scope(&markdown.session_id()))
+        .await?;
 
     let raw = core
         .session("rlm-root-raw")
@@ -355,7 +372,7 @@ async fn rlm_root_session_final_answer_format_defaults_to_markdown_and_can_be_ra
         .await?;
     raw.turn(TurnInput::text("hello"))
         .require_submit()?
-        .run()
+        .run(turn_scope(&raw.session_id()))
         .await?;
 
     let prompts = seen.lock().expect("seen prompts");
@@ -437,7 +454,11 @@ async fn rlm_projection_errors_surface_from_protocol_extensions() -> Result<()> 
                 .expect("turn bind"),
         )
         .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
-    let err = match session.turn(input).run().await {
+    let err = match session
+        .turn(input)
+        .run(turn_scope(&session.session_id()))
+        .await
+    {
         Ok(_) => panic!("duplicate session and turn projection should fail"),
         Err(err) => err,
     };
@@ -555,7 +576,9 @@ async fn open_fresh_ignores_persisted_state_and_replaces_it_on_commit() -> Resul
         "open_fresh must not load persisted session state"
     );
 
-    fresh.run(TurnInput::text("new root")).await?;
+    fresh
+        .run(TurnInput::text("new root"), turn_scope(&fresh.session_id()))
+        .await?;
     drop(fresh);
 
     let reopened = core.session("fresh-start").open().await?;
@@ -656,7 +679,13 @@ async fn persisted_provider_id_mismatch_fails_at_turn_execution() -> Result<()> 
         .build()?;
 
     let session = core.session("provider-mismatch").open().await?;
-    let err = match session.run(TurnInput::text("must not run")).await {
+    let err = match session
+        .run(
+            TurnInput::text("must not run"),
+            turn_scope(&session.session_id()),
+        )
+        .await
+    {
         Ok(_) => panic!("provider mismatch should fail at turn execution"),
         Err(err) => err,
     };
@@ -701,7 +730,13 @@ async fn agent_frame_provider_id_mismatch_fails_at_turn_execution() -> Result<()
         .build()?;
 
     let session = core.session("frame-provider-mismatch").open().await?;
-    let err = match session.run(TurnInput::text("must not run")).await {
+    let err = match session
+        .run(
+            TurnInput::text("must not run"),
+            turn_scope(&session.session_id()),
+        )
+        .await
+    {
         Ok(_) => panic!("agent-frame provider mismatch should fail at turn execution"),
         Err(err) => err,
     };
@@ -745,7 +780,13 @@ async fn refreshed_head_provider_id_mismatch_fails_before_turn() -> Result<()> {
         .await?;
 
     store.set_head_provider_id("other-provider");
-    let err = match session.run(TurnInput::text("must not run")).await {
+    let err = match session
+        .run(
+            TurnInput::text("must not run"),
+            turn_scope(&session.session_id()),
+        )
+        .await
+    {
         Ok(_) => panic!("head-refresh provider mismatch should fail before turn"),
         Err(err) => err,
     };
@@ -774,7 +815,9 @@ async fn explicit_provider_persists_reopens_and_runs_second_turn() -> Result<()>
         .store(Arc::clone(&store))
         .open()
         .await?;
-    first.run(TurnInput::text("first")).await?;
+    first
+        .run(TurnInput::text("first"), turn_scope(&first.session_id()))
+        .await?;
     drop(first);
 
     let reopened = core
@@ -782,7 +825,12 @@ async fn explicit_provider_persists_reopens_and_runs_second_turn() -> Result<()>
         .store(Arc::clone(&store))
         .open()
         .await?;
-    let second = reopened.run(TurnInput::text("second")).await?;
+    let second = reopened
+        .run(
+            TurnInput::text("second"),
+            turn_scope(&reopened.session_id()),
+        )
+        .await?;
 
     assert_eq!(assistant_prose(&second.activities), "echo: second");
     assert_eq!(
@@ -801,11 +849,18 @@ async fn core_delete_session_removes_factory_backed_session_state() -> Result<()
         .store_factory(factory)
         .build()?;
     let session = core.session("delete-session").open().await?;
-    session.run(TurnInput::text("stored before delete")).await?;
+    session
+        .run(
+            TurnInput::text("stored before delete"),
+            turn_scope(&session.session_id()),
+        )
+        .await?;
     assert!(!session.read_view().messages().is_empty());
     drop(session);
 
-    let report = core.delete_session("delete-session").await?;
+    let report = core
+        .delete_session("delete-session", session_delete_scope("delete-session"))
+        .await?;
     let reopened = core.session("delete-session").open().await?;
 
     assert_eq!(report.session_id, "delete-session");

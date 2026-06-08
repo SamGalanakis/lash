@@ -1,10 +1,8 @@
 //! Context-preparation vocabulary shared between the runtime and the
-//! plugin host. The concrete strategy (rolling history, overflow
-//! recovery, `/compact`) lives in
-//! [`crate::plugin_builtin::rolling_history`] and is dispatched through
-//! the [`TurnContextTransform`](crate::plugin::TurnContextTransform) and
-//! [`HistoryRewriter`](crate::plugin::HistoryRewriter) plugin capability
-//! surfaces.
+//! plugin host. Rolling strategies are dispatched through the
+//! [`TurnContextTransform`](crate::plugin::TurnContextTransform) prompt-view
+//! hook. Durable compaction is an explicit Agent Frame transition, not a
+//! rewrite of this prepared context.
 
 use std::sync::Arc;
 

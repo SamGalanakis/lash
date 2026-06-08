@@ -1,5 +1,5 @@
 use lash_core::PreparedContext;
-use lash_core::plugin::{HistoryError, TurnContextTransform, TurnTransformContext};
+use lash_core::plugin::{ContextError, TurnContextTransform, TurnTransformContext};
 
 use crate::driver::SharedPromptUsage;
 
@@ -19,7 +19,7 @@ impl TurnContextTransform for BudgetUsageObserver {
         &self,
         ctx: &TurnTransformContext<'_>,
         input: PreparedContext,
-    ) -> Result<PreparedContext, HistoryError> {
+    ) -> Result<PreparedContext, ContextError> {
         if let Ok(mut guard) = self.cell.write() {
             *guard = ctx.prompt_usage.clone();
         }

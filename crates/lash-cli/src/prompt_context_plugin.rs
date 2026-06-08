@@ -6,7 +6,7 @@ use lash::ModeId;
 use lash_core::PreparedContext;
 use lash_core::PromptContribution;
 use lash_core::plugin::{
-    HistoryError, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
+    ContextError, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
     PluginSessionContext, TurnContextTransform, TurnTransformContext,
 };
 use lash_core::{Message, MessageRole, Part, PartKind, PluginMessage, PruneState, shared_parts};
@@ -127,7 +127,7 @@ impl lash_core::SessionPlugin for PromptContextPlugin {
         }));
 
         if self.config.include_environment && self.execution_mode == ModeId::standard() {
-            reg.history()
+            reg.context()
                 .prepare_turn(50, Arc::new(EnvironmentTailTransform));
         }
         Ok(())
@@ -146,7 +146,7 @@ impl TurnContextTransform for EnvironmentTailTransform {
         &self,
         _ctx: &TurnTransformContext<'_>,
         input: PreparedContext,
-    ) -> Result<PreparedContext, HistoryError> {
+    ) -> Result<PreparedContext, ContextError> {
         let context = build_prompt_environment_context();
         if context.trim().is_empty() {
             return Ok(input);

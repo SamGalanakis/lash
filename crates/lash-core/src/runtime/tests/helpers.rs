@@ -9,6 +9,18 @@ pub(crate) fn default_state() -> RuntimeSessionState {
     RuntimeSessionState::default()
 }
 
+pub(crate) fn inline_scope(scope: crate::EffectScope) -> crate::ScopedEffectController<'static> {
+    crate::ScopedEffectController::shared(Arc::new(crate::InlineRuntimeEffectController), scope)
+        .expect("inline effect scope")
+}
+
+pub(crate) fn named_turn_scope(
+    session_id: &str,
+    turn_id: &str,
+) -> crate::ScopedEffectController<'static> {
+    inline_scope(crate::EffectScope::turn(session_id, turn_id))
+}
+
 #[test]
 pub(crate) fn stream_accumulator_merges_adjacent_display_reasoning_chunks() {
     let mut accumulator = LlmStreamAccumulator::default();

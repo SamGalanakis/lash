@@ -16,7 +16,6 @@ categories = ["api-bindings", "data-structures"]
 [dependencies]
 base64 = { workspace = true }
 lash-core = { workspace = true, optional = true }
-lash-sansio = { workspace = true }
 schemars = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

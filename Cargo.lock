@@ -2702,7 +2702,6 @@ version = "0.1.0-alpha.37"
 dependencies = [
  "base64 0.22.1",
  "lash-core",
- "lash-sansio",
  "lashlang",
  "schemars",
  "serde",
@@ -2788,7 +2787,6 @@ dependencies = [
  "flate2",
  "futures-executor",
  "lash-core",
- "lash-sansio",
  "lashlang",
  "rmp-serde",
  "rusqlite",

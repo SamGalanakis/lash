@@ -128,7 +128,7 @@ pub use session_manager::DirectCompletionClient;
 pub use state::RuntimeSessionState;
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
-    apply_session_head, normalize_session_graph,
+    apply_session_head, normalize_session_graph, open_agent_frame_in_state,
 };
 pub use turn_loop::ensure_durable_effect_input;
 pub use turn_queue::{
@@ -776,23 +776,24 @@ impl TurnActivitySink for NoopTurnActivitySink {
 /// `stream_turn_with_agent_frames`).
 ///
 /// Construct via [`TurnOptions::new`] and chain `with_*` builders. Event sinks
-/// default to no-op sinks. Effect scope is explicit: callers that are already
-/// executing under an effect host must pass
-/// [`TurnOptions::with_scoped_effect_controller`]; host-local entry points
-/// construct a host-configured scope at their boundary.
+/// default to no-op sinks. Effect scope is explicit and required at every
+/// runtime boundary that can execute nondeterministic work.
 pub struct TurnOptions<'a> {
     events: Option<&'a dyn EventSink>,
     turn_events: Option<&'a dyn TurnActivitySink>,
-    scoped_effect_controller: Option<ScopedEffectController<'a>>,
+    scoped_effect_controller: ScopedEffectController<'a>,
     cancel: CancellationToken,
 }
 
 impl<'a> TurnOptions<'a> {
-    pub fn new(cancel: CancellationToken) -> Self {
+    pub fn new(
+        cancel: CancellationToken,
+        scoped_effect_controller: ScopedEffectController<'a>,
+    ) -> Self {
         Self {
             events: None,
             turn_events: None,
-            scoped_effect_controller: None,
+            scoped_effect_controller,
             cancel,
         }
     }
@@ -807,14 +808,6 @@ impl<'a> TurnOptions<'a> {
         self
     }
 
-    pub fn with_scoped_effect_controller(
-        mut self,
-        scoped_effect_controller: ScopedEffectController<'a>,
-    ) -> Self {
-        self.scoped_effect_controller = Some(scoped_effect_controller);
-        self
-    }
-
     pub(crate) fn events_or_noop(&self) -> &'a dyn EventSink {
         self.events.unwrap_or(&NOOP_EVENT_SINK)
     }
@@ -823,13 +816,11 @@ impl<'a> TurnOptions<'a> {
         self.turn_events.unwrap_or(&NOOP_TURN_ACTIVITY_SINK)
     }
 
-    pub(crate) fn effect_scope_id(&self) -> Option<&str> {
-        self.scoped_effect_controller
-            .as_ref()
-            .map(ScopedEffectController::scope_id)
+    pub(crate) fn effect_scope_id(&self) -> &str {
+        self.scoped_effect_controller.scope_id()
     }
 
-    pub(crate) fn scoped_effect_controller(&self) -> Option<ScopedEffectController<'a>> {
+    pub(crate) fn scoped_effect_controller(&self) -> ScopedEffectController<'a> {
         self.scoped_effect_controller.clone()
     }
 }

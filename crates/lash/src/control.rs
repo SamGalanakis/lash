@@ -11,35 +11,7 @@ impl HostEventsControl {
     pub async fn emit(
         &self,
         request: lash_core::HostEventOccurrenceRequest,
-    ) -> Result<lash_core::HostEventEmitReport> {
-        let store = self.core.env.host_event_store.as_ref().ok_or_else(|| {
-            EmbedError::Plugin(lash_core::PluginError::Session(
-                "host event store is unavailable in this runtime".to_string(),
-            ))
-        })?;
-        let process_work_poke = self.core.process_work_runner.poke().await;
-        let router = lash_core::HostEventRouter::new(
-            Arc::clone(store),
-            self.core.env.process_registry.clone(),
-            process_work_poke,
-            self.core.env.core.profile.host_profile_id.clone(),
-        );
-        let scoped = self.core.env.core.control.effect_host.scoped(
-            lash_core::EffectScope::runtime_operation(format!(
-                "host-event:{}",
-                request.idempotency_key
-            )),
-        )?;
-        router
-            .emit(request, scoped.controller())
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn emit_with_effect_scope(
-        &self,
-        request: lash_core::HostEventOccurrenceRequest,
-        scoped_effect_controller: lash_core::ScopedEffectController<'_>,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<lash_core::HostEventEmitReport> {
         let store = self.core.env.host_event_store.as_ref().ok_or_else(|| {
             EmbedError::Plugin(lash_core::PluginError::Session(
@@ -388,9 +360,16 @@ impl SessionControl {
         })
     }
 
-    async fn rewrite_history(&self, trigger: RewriteTrigger) -> Result<bool> {
+    async fn compact_context(
+        &self,
+        instructions: Option<String>,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<bool> {
         self.with_writer(async |runtime: &mut LashRuntime| {
-            runtime.rewrite_history(trigger).await.map_err(Into::into)
+            runtime
+                .compact_context(instructions, scoped_effect_controller)
+                .await
+                .map_err(Into::into)
         })
         .await
     }
@@ -414,17 +393,13 @@ impl SessionControl {
     async fn start_process(
         &self,
         request: lash_core::ProcessStartRequest,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<lash_core::ProcessHandleSummary> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
         let processes = runtime.process_service()?;
-        let effect_host = runtime.effect_host();
-        let scope = lash_core::ProcessOpScope::new(
-            effect_host
-                .scoped(lash_core::EffectScope::process(request.id.clone()))
-                .map_err(EmbedError::from)?,
-        );
+        let scope = lash_core::ProcessOpScope::new(scoped_effect_controller);
         processes
             .start_from_request(&session_id, request, scope)
             .await
@@ -440,18 +415,17 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    async fn cancel_process(&self, process_id: &str) -> Result<lash_core::ProcessCancelSummary> {
+    async fn cancel_process(
+        &self,
+        process_id: &str,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<lash_core::ProcessCancelSummary> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
         let processes = runtime.process_service()?;
         let cancel_ability = runtime.process_cancel_ability();
-        let effect_host = runtime.effect_host();
-        let scope = lash_core::ProcessOpScope::new(
-            effect_host
-                .scoped(lash_core::EffectScope::process(process_id.to_string()))
-                .map_err(EmbedError::from)?,
-        );
+        let scope = lash_core::ProcessOpScope::new(scoped_effect_controller);
         cancel_ability
             .cancel_summary(
                 processes.as_ref(),
@@ -467,20 +441,16 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    async fn cancel_visible_processes(&self) -> Result<Vec<lash_core::ProcessCancelSummary>> {
+    async fn cancel_visible_processes(
+        &self,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<Vec<lash_core::ProcessCancelSummary>> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
         let processes = runtime.process_service()?;
         let cancel_ability = runtime.process_cancel_ability();
-        let effect_host = runtime.effect_host();
-        let scope = lash_core::ProcessOpScope::new(
-            effect_host
-                .scoped(lash_core::EffectScope::runtime_operation(format!(
-                    "process:cancel-visible:{session_id}"
-                )))
-                .map_err(EmbedError::from)?,
-        );
+        let scope = lash_core::ProcessOpScope::new(scoped_effect_controller);
         cancel_ability
             .cancel_all_visible(
                 processes.as_ref(),
@@ -597,38 +567,6 @@ impl SessionControl {
         let runtime = writer.lock().await;
         let lifecycle = runtime.session_lifecycle_service()?;
         lifecycle.create_session(request).await.map_err(Into::into)
-    }
-
-    async fn start_child_turn(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        input: TurnInput,
-    ) -> Result<AssembledTurn> {
-        let (lifecycle, scoped_effect_controller) = {
-            let writer = self.runtime.writer();
-            let runtime = writer.lock().await;
-            let lifecycle = runtime.session_lifecycle_service()?;
-            let scoped_effect_controller = runtime
-                .effect_host()
-                .scoped_static(lash_core::EffectScope::turn(session_id, turn_id))
-                .map_err(EmbedError::from)?
-                .ok_or_else(|| {
-                    EmbedError::Session(lash_core::SessionError::Protocol(
-                        "child turn execution requires an effect host with static scoped controllers"
-                            .to_string(),
-                    ))
-                })?;
-            (lifecycle, scoped_effect_controller)
-        };
-        let request = lash_core::SessionTurnRequest::new(
-            session_id,
-            turn_id,
-            input,
-            scoped_effect_controller,
-        )
-        .map_err(EmbedError::from)?;
-        lifecycle.start_turn(request).await.map_err(Into::into)
     }
 
     async fn close_child_session(&self, session_id: &str) -> Result<()> {
@@ -917,8 +855,11 @@ impl ProcessControl {
     pub async fn start(
         &self,
         request: lash_core::ProcessStartRequest,
+        scoped_effect_controller: ScopedEffectController<'_>,
     ) -> Result<lash_core::ProcessHandleSummary> {
-        self.control.start_process(request).await
+        self.control
+            .start_process(request, scoped_effect_controller)
+            .await
     }
 
     pub async fn list(&self) -> Result<Vec<lash_core::ProcessHandleSummary>> {
@@ -933,12 +874,23 @@ impl ProcessControl {
         self.control.await_background_work().await
     }
 
-    pub async fn cancel(&self, process_id: &str) -> Result<lash_core::ProcessCancelSummary> {
-        self.control.cancel_process(process_id).await
+    pub async fn cancel(
+        &self,
+        process_id: &str,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<lash_core::ProcessCancelSummary> {
+        self.control
+            .cancel_process(process_id, scoped_effect_controller)
+            .await
     }
 
-    pub async fn cancel_all(&self) -> Result<Vec<lash_core::ProcessCancelSummary>> {
-        self.control.cancel_visible_processes().await
+    pub async fn cancel_all(
+        &self,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<Vec<lash_core::ProcessCancelSummary>> {
+        self.control
+            .cancel_visible_processes(scoped_effect_controller)
+            .await
     }
 }
 
@@ -991,8 +943,14 @@ impl StateControl {
         self.control.restore_execution_state(bytes).await
     }
 
-    pub async fn rewrite_history(&self, trigger: RewriteTrigger) -> Result<bool> {
-        self.control.rewrite_history(trigger).await
+    pub async fn compact_context(
+        &self,
+        instructions: Option<String>,
+        scoped_effect_controller: ScopedEffectController<'_>,
+    ) -> Result<bool> {
+        self.control
+            .compact_context(instructions, scoped_effect_controller)
+            .await
     }
 }
 
@@ -1015,17 +973,6 @@ pub struct ChildrenControl {
 impl ChildrenControl {
     pub async fn create_session(&self, request: SessionCreateRequest) -> Result<SessionHandle> {
         self.control.create_child_session(request).await
-    }
-
-    pub async fn start_turn(
-        &self,
-        session_id: &str,
-        turn_id: &str,
-        input: TurnInput,
-    ) -> Result<AssembledTurn> {
-        self.control
-            .start_child_turn(session_id, turn_id, input)
-            .await
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<()> {

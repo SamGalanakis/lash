@@ -32,6 +32,21 @@ fn push_registered_hook<T>(
     });
 }
 
+fn push_prioritized_registered_hook<T>(
+    hooks: &mut Vec<(i32, RegisteredHook<T>)>,
+    registering_plugin_id: &Option<String>,
+    priority: i32,
+    hook: T,
+) {
+    hooks.push((
+        priority,
+        RegisteredHook {
+            plugin_id: current_registration_owner(registering_plugin_id),
+            hook,
+        },
+    ));
+}
+
 fn exclusive_hook_owner(
     existing_owner: Option<&str>,
     registering_plugin_id: &Option<String>,
@@ -86,7 +101,7 @@ pub(crate) struct PluginContributions {
     pub(crate) session_config_mutators: Vec<SessionConfigMutator>,
     pub(crate) plugin_actions: BTreeMap<String, RegisteredPluginAction>,
     pub(crate) turn_context_transforms: Vec<(i32, RegisteredHook<Arc<dyn TurnContextTransform>>)>,
-    pub(crate) history_rewriters: Vec<(i32, RegisteredHook<Arc<dyn HistoryRewriter>>)>,
+    pub(crate) context_compactors: Vec<(i32, RegisteredHook<Arc<dyn ContextCompactor>>)>,
     pub(crate) protocol_session: Option<RegisteredExclusiveHook<Arc<dyn ProtocolSessionPlugin>>>,
     pub(crate) protocol_driver: Option<RegisteredExclusiveHook<Arc<dyn ProtocolDriverPlugin>>>,
     pub(crate) code_executor: Option<RegisteredExclusiveHook<Arc<dyn CodeExecutorPlugin>>>,
@@ -278,31 +293,29 @@ impl PluginActionRegistrations<'_> {
     }
 }
 
-pub struct HistoryRegistrations<'a> {
+pub struct ContextRegistrations<'a> {
     reg: &'a mut PluginRegistrar,
 }
 
-impl HistoryRegistrations<'_> {
+impl ContextRegistrations<'_> {
     /// Register a per-turn context transform. Higher priority runs first.
     pub fn prepare_turn(self, priority: i32, transform: Arc<dyn TurnContextTransform>) {
-        self.reg.contributions.turn_context_transforms.push((
+        push_prioritized_registered_hook(
+            &mut self.reg.contributions.turn_context_transforms,
+            &self.reg.registering_plugin_id,
             priority,
-            RegisteredHook {
-                plugin_id: current_registration_owner(&self.reg.registering_plugin_id),
-                hook: transform,
-            },
-        ));
+            transform,
+        );
     }
 
-    /// Register a permanent history rewriter. Higher priority runs first.
-    pub fn rewrite(self, priority: i32, rewriter: Arc<dyn HistoryRewriter>) {
-        self.reg.contributions.history_rewriters.push((
+    /// Register an explicit compaction provider. Higher priority runs first.
+    pub fn compact(self, priority: i32, compactor: Arc<dyn ContextCompactor>) {
+        push_prioritized_registered_hook(
+            &mut self.reg.contributions.context_compactors,
+            &self.reg.registering_plugin_id,
             priority,
-            RegisteredHook {
-                plugin_id: current_registration_owner(&self.reg.registering_plugin_id),
-                hook: rewriter,
-            },
-        ));
+            compactor,
+        );
     }
 }
 
@@ -389,8 +402,8 @@ impl PluginRegistrar {
         PluginActionRegistrations { reg: self }
     }
 
-    pub fn history(&mut self) -> HistoryRegistrations<'_> {
-        HistoryRegistrations { reg: self }
+    pub fn context(&mut self) -> ContextRegistrations<'_> {
+        ContextRegistrations { reg: self }
     }
 
     pub fn protocol(&mut self) -> ProtocolRegistrations<'_> {

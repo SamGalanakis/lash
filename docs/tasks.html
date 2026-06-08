@@ -45,13 +45,13 @@
       <div class="listing__row">
         <div class="listing__label">run a turn</div>
         <div class="listing__body">
-          <p>Build <code>LashCore</code>, open a <code>LashSession</code>, call <code>session.turn(TurnInput::text(...)).run().await?</code>, then read <code>TurnOutput::assistant_message()</code>. Start with <a href="./quickstart.html#minimal-example">Quickstart</a>, then use <a href="./embedding.html#run-a-turn">API basics</a> for the full facade shape.</p>
+          <p>Build <code>LashCore</code>, open a <code>LashSession</code>, create a turn <code>EffectScope</code>, call <code>session.turn(TurnInput::text(...)).run(scope).await?</code>, then read <code>TurnOutput::assistant_message()</code>. Start with <a href="./quickstart.html#minimal-example">Quickstart</a>, then use <a href="./embedding.html#run-a-turn">API basics</a> for the full facade shape.</p>
         </div>
       </div>
       <div class="listing__row">
         <div class="listing__label">stream a turn</div>
         <div class="listing__body">
-          <p>Implement <code>TurnActivitySink</code> and call <code>TurnBuilder::stream(&amp;sink)</code>, <code>collect_with(&amp;sink)</code>, or <code>into_stream()</code>. Fold <code>TurnActivity.correlation_id</code> into stable UI rows. See <a href="./embedding-turns.html#semantic-events">Turns and streams</a>.</p>
+          <p>Implement <code>TurnActivitySink</code> and call <code>TurnBuilder::stream(&amp;sink, scope)</code>, <code>collect_with(&amp;sink, scope)</code>, or <code>into_stream(scope)</code>. Fold <code>TurnActivity.correlation_id</code> into stable UI rows. See <a href="./embedding-turns.html#semantic-events">Turns and streams</a>.</p>
         </div>
       </div>
       <div class="listing__row">
@@ -63,7 +63,7 @@
       <div class="listing__row">
         <div class="listing__label">delete a session</div>
         <div class="listing__body">
-          <p>Call <code>LashCore::delete_session(...)</code> for factory-backed sessions. If a process registry is installed, Lash cancels and revokes session-owned process state before deleting the store state. See <a href="./persistence.html#delete-sessions">Delete sessions</a>.</p>
+          <p>Call <code>LashCore::delete_session(..., scope)</code> for factory-backed sessions. If a process registry is installed, Lash cancels and revokes session-owned process state before deleting the store state. See <a href="./persistence.html#delete-sessions">Delete sessions</a>.</p>
         </div>
       </div>
     </div>

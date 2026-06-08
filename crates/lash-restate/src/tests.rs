@@ -733,8 +733,10 @@ async fn run_restate_replay_turn(
     runtime
         .stream_turn(
             replay_test_input(turn_id),
-            lash_core::TurnOptions::new(tokio_util::sync::CancellationToken::new())
-                .with_scoped_effect_controller(scoped_effect_controller),
+            lash_core::TurnOptions::new(
+                tokio_util::sync::CancellationToken::new(),
+                scoped_effect_controller,
+            ),
         )
         .await
         .expect("run replay test turn")

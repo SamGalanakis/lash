@@ -828,10 +828,18 @@ async fn run_seed_probe_inner(
     .await
     .expect("runtime");
 
-    let turn =
-        Box::pin(runtime.run_turn_assembled(input, tokio_util::sync::CancellationToken::new()))
-            .await
-            .expect("turn");
+    let scoped_effect_controller = lash_core::ScopedEffectController::shared(
+        Arc::new(lash_core::InlineRuntimeEffectController),
+        lash_core::EffectScope::turn("root", "subagent-test-turn"),
+    )
+    .expect("test effect scope");
+    let turn = Box::pin(runtime.run_turn_assembled(
+        input,
+        tokio_util::sync::CancellationToken::new(),
+        scoped_effect_controller,
+    ))
+    .await
+    .expect("turn");
 
     let prompt = captured_child_prompt
         .lock()

@@ -68,7 +68,7 @@ The library is still imported as `lash` — only the crate name on
 crates.io changes:
 
 ```rust
-use lash::{provider::ProviderHandle, LashCore, ModelSpec, TurnInput};
+use lash::{provider::ProviderHandle, runtime::EffectScope, LashCore, ModelSpec, TurnActivityId, TurnInput};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
@@ -93,9 +93,14 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let session = core.session("hello-1").open().await?;
+    let effect_host = session.effect_host().await;
+    let scope = effect_host.scoped(EffectScope::turn(
+        session.session_id(),
+        TurnActivityId::fresh().0,
+    ))?;
     let result = session
         .turn(TurnInput::text("Say hi in one short sentence."))
-        .run()
+        .run(scope)
         .await?;
 
     println!("{}", result.assistant_message().unwrap_or_default());
@@ -124,10 +129,14 @@ Then open <http://127.0.0.1:3000>. See [`examples/agent-service/README.md`](exam
 `examples/agent-workbench` adds durable background work: Lashlang background processes, subagents, web tools, `ui.button.pressed` host events, and Restate-backed cron triggers. Restate is required — the bundled entrypoint starts it in Docker, registers the in-process endpoint, and opens the browser.
 
 ```bash
-OPENROUTER_API_KEY=sk-or-... just agent-workbench
+OPENROUTER_API_KEY=sk-or-... just agent-workbench 3000
 ```
 
-Then open <http://127.0.0.1:3030>. See [`examples/agent-workbench/README.md`](examples/agent-workbench/README.md) for the trigger sources, cron sync, and the full environment list.
+Then open <http://127.0.0.1:3000>. The runner is idempotent and detached; use
+`just agent-workbench-status 3000`, `just agent-workbench-logs 3000`, and
+`just agent-workbench-down 3000` to inspect or stop it. See
+[`examples/agent-workbench/README.md`](examples/agent-workbench/README.md) for
+the trigger sources, cron sync, and the full environment list.
 
 ## The CLI
 

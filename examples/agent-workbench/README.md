@@ -4,23 +4,43 @@ A standalone RLM chat demo for background processes, subagents, web tools,
 button host events, and Restate-backed cron triggers.
 
 Restate is required. Run the example from the repo root with the bundled
-entrypoint:
+entrypoint. The default command starts the workbench as a detached local
+service, waits for readiness, registers the Restate deployment, and then exits
+after printing the URL:
 
 ```bash
-OPENROUTER_API_KEY=... just agent-workbench
+OPENROUTER_API_KEY=... just agent-workbench 3000
 ```
+
+Open `http://127.0.0.1:3000`. Useful lifecycle commands:
+
+```bash
+just agent-workbench-status 3000
+just agent-workbench-logs 3000
+just agent-workbench-logs-follow 3000
+just agent-workbench-restart 3000
+just agent-workbench-down 3000
+```
+
+For the old attached process style, use `just agent-workbench-foreground 3000`.
 
 The entrypoint checks for Restate ingress/admin on the configured ports. If
 they are not already running, it starts `restatedev/restate:1.6.2` in Docker,
 waits for ingress/admin, starts the workbench and its in-process Restate
 endpoint, registers the endpoint through Restate Admin, then opens the browser.
+It writes PID, log, and run metadata under `.agent-workbench/run/`; stale PID
+files are cleaned up automatically. Readiness is checked with
+`/healthz`, so a random process on the same port is reported as a port conflict
+instead of being mistaken for the workbench.
 
 Configuration is read from `.env` or the process environment:
 
 - `OPENROUTER_API_KEY`: model provider key.
 - `TAVILY_API_KEY`: Tavily key for `web.search(...)` and `web.fetch(...)`, matching the
   CLI web tools.
-- `AGENT_WORKBENCH_ADDR`: bind address, default `127.0.0.1:3030`.
+- `AGENT_WORKBENCH_ADDR`: bind address, default `127.0.0.1:3030`. Passing a
+  port to the `just` recipes, for example `just agent-workbench 3000`, binds
+  `127.0.0.1:<port>`.
 - `AGENT_WORKBENCH_RESTATE_ADDR`: Restate endpoint bind address, default
   `127.0.0.1:9081`. The `just agent-workbench` entrypoint starts Restate with
   host networking, so Restate can call this localhost endpoint directly.
@@ -53,7 +73,8 @@ Configuration is read from `.env` or the process environment:
 - `OPENROUTER_MODEL_VARIANT`: default `high`; choose `provider default` in
   the UI to send no variant for models without configurable thinking.
 
-Open the workbench at `http://127.0.0.1:3030`. Restate ingress is
+Open the workbench at `http://127.0.0.1:3030` by default, or at the port passed
+to the `just` recipe. Restate ingress is
 `http://127.0.0.1:8080`; the local Restate admin/UI is on
 `http://127.0.0.1:9070`.
 

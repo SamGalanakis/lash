@@ -721,9 +721,16 @@ async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Resul
         )
         .await
         .map_err(AppError::internal)?;
+    let effect_host = session.effect_host().await;
+    let scoped_effect_controller = effect_host
+        .scoped(lash::runtime::EffectScope::queue_drain(
+            session_id.clone(),
+            receipt.batch_id.clone(),
+        ))
+        .map_err(AppError::internal)?;
     let _ = session
         .next_queued_turn()
-        .run()
+        .run(scoped_effect_controller)
         .await
         .map_err(AppError::internal)?;
     let persisted = session
@@ -960,6 +967,7 @@ pub(crate) async fn enqueue_button_host_event_command(
     button: ButtonChoice,
     pressed_at: &str,
     operation_id: &str,
+    scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
 ) -> AnyhowResult<lash::HostEventEmitReport> {
     let payload = json!({
         "pressed_at": pressed_at,
@@ -990,6 +998,7 @@ pub(crate) async fn enqueue_button_host_event_command(
                 format!("workbench-button-host-event:{operation_id}"),
             )
             .with_source(json!({})),
+            scoped_effect_controller,
         )
         .await
         .context("emit button host event occurrence")
@@ -999,6 +1008,7 @@ pub(crate) async fn enqueue_mail_received_host_event_command(
     state: &AppState,
     message: &mail::MailDelivery,
     operation_id: &str,
+    scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
 ) -> AnyhowResult<lash::HostEventEmitReport> {
     let payload = json!({
         "account": message.account,
@@ -1029,6 +1039,7 @@ pub(crate) async fn enqueue_mail_received_host_event_command(
                 format!("workbench-mail-host-event:{operation_id}"),
             )
             .with_source(json!({})),
+            scoped_effect_controller,
         )
         .await
         .context("emit mail received host event occurrence")
@@ -2172,7 +2183,16 @@ mod tests {
 
         let output = session
             .turn(lash::TurnInput::text("send a message"))
-            .run()
+            .run(
+                session
+                    .effect_host()
+                    .await
+                    .scoped(lash::runtime::EffectScope::turn(
+                        session.session_id(),
+                        format!("workbench-test-turn:{}", uuid::Uuid::new_v4()),
+                    ))
+                    .expect("test turn effect scope"),
+            )
             .await
             .expect("turn should resolve inbox.test.send, not fail with unknown name");
         assert_eq!(output.submitted_value(), Some(&serde_json::json!("test-1")));
@@ -3282,7 +3302,16 @@ mod tests {
     async fn register_test_trigger(session: &lash::LashSession) {
         let output = session
             .turn(lash::TurnInput::text("register trigger"))
-            .run()
+            .run(
+                session
+                    .effect_host()
+                    .await
+                    .scoped(lash::runtime::EffectScope::turn(
+                        session.session_id(),
+                        format!("workbench-test-register:{}", uuid::Uuid::new_v4()),
+                    ))
+                    .expect("test trigger registration effect scope"),
+            )
             .await
             .expect("register trigger route");
         assert_eq!(
@@ -3297,6 +3326,16 @@ mod tests {
     ) -> lash::HostEventEmitReport {
         let source_key =
             lash::empty_host_event_source_key(BUTTON_TRIGGER_SOURCE_TYPE).expect("source key");
+        let idempotency_key = format!(
+            "workbench-test-button-host-event:{}:{}",
+            button.as_str(),
+            uuid::Uuid::new_v4()
+        );
+        let scoped_effect_controller = lash::runtime::ScopedEffectController::shared(
+            Arc::new(lash::runtime::InlineRuntimeEffectController),
+            lash::runtime::EffectScope::runtime_operation(format!("host-event:{idempotency_key}")),
+        )
+        .expect("inline host event effect scope");
         core.host_events()
             .emit(
                 lash::HostEventOccurrenceRequest::new(
@@ -3307,13 +3346,10 @@ mod tests {
                         "message": format!("user pressed the {} button", button.lower()),
                         "pressed_at": "2026-06-02T12:00:00Z"
                     }),
-                    format!(
-                        "workbench-test-button-host-event:{}:{}",
-                        button.as_str(),
-                        uuid::Uuid::new_v4()
-                    ),
+                    idempotency_key,
                 )
                 .with_source(json!({})),
+                scoped_effect_controller,
             )
             .await
             .expect("emit button trigger occurrence")

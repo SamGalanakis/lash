@@ -2115,13 +2115,23 @@ pub(crate) async fn run_once_embed(
             "run_turn",
             Some(cancel.clone()),
             async {
+                let effect_host = session.effect_host().await;
+                let scoped_effect_controller = effect_host
+                    .scoped(lash::runtime::EffectScope::turn(
+                        session.session_id(),
+                        format!("runtime-perf-embed-{}", turn_index + 1),
+                    ))
+                    .map_err(anyhow::Error::from)?;
                 session
                     .turn(lash_core::TurnInput::text(benchmark_prompt(
                         scenario, turn_index,
                     )))
                     .cancel(cancel)
                     .advanced()
-                    .collect_session_events_with(&lash::runtime::NoopEventSink)
+                    .collect_session_events_with(
+                        &lash::runtime::NoopEventSink,
+                        scoped_effect_controller,
+                    )
                     .await
                     .map_err(anyhow::Error::from)
             },
