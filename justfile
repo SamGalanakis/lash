@@ -157,6 +157,9 @@ restate-postgres-workers-e2e:
 stack-budget:
   bash "{{repo}}/scripts/ci-stack-budget.sh"
 
+release-version-test:
+  python3 "{{repo}}/scripts/test_release_version.py"
+
 # ── crates.io publishing ─────────────────────────────────────
 # Topological order of every publishable crate. Computed once via
 # `cargo metadata` then frozen here; edit by hand if a new internal

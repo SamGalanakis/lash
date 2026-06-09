@@ -6,6 +6,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "Cargo.toml"
@@ -244,7 +245,7 @@ def update_doc_example_versions(version: str) -> None:
 
 
 def update_lockfile_versions(version: str) -> None:
-    workspace_packages = read_workspace_package_names()
+    workspace_packages = read_lockstep_workspace_package_names()
     lines = CARGO_LOCK.read_text().splitlines()
     current_name: str | None = None
     updated_lines: list[str] = []
@@ -261,6 +262,28 @@ def update_lockfile_versions(version: str) -> None:
             line = f'version = "{version}"'
         updated_lines.append(line)
     CARGO_LOCK.write_text("\n".join(updated_lines) + "\n")
+
+
+def read_lockstep_workspace_package_names() -> set[str]:
+    workspace_packages = read_workspace_package_names()
+    lockstep_packages: set[str] = set()
+    for manifest in sorted(ROOT.glob("**/Cargo.toml")):
+        if "target" in manifest.relative_to(ROOT).parts:
+            continue
+        data = tomllib.loads(manifest.read_text())
+        package = data.get("package")
+        if not isinstance(package, dict):
+            continue
+        name = package.get("name")
+        version = package.get("version")
+        if (
+            isinstance(name, str)
+            and name in workspace_packages
+            and isinstance(version, dict)
+            and version.get("workspace") is True
+        ):
+            lockstep_packages.add(name)
+    return lockstep_packages
 
 
 def read_workspace_package_names() -> set[str]:
