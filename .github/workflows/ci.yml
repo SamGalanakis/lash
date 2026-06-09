@@ -55,8 +55,10 @@ jobs:
       - name: Enforce stack budget
         run: bash scripts/ci-stack-budget.sh
 
-      - name: Test release version helper
-        run: python3 scripts/test_release_version.py
+      - name: Test release automation scripts
+        run: |
+          python3 scripts/test_release_version.py
+          python3 scripts/test_publish_workspace.py
 
       - name: Test first-party standard plugins
         run: cargo test -p lash-standard-plugins --locked --features fff-zlob

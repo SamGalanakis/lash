@@ -33,6 +33,14 @@ TRANSIENT_PUBLISH_ERRORS = (
     "too many requests",
     "published too many new crates",
     "try again after",
+    "download of config.json failed",
+    "failed to download",
+    "failed to update registry",
+    "curl failed",
+    "http2 framing layer",
+    "timeout was reached",
+    "connection reset",
+    "could not resolve host",
 )
 ALREADY_PUBLISHED_ERRORS = (
     "already uploaded",
