@@ -1169,13 +1169,13 @@ impl<'module> Linker<'module> {
         }
         for (index, declaration) in self.program.declarations.iter().enumerate() {
             let span = self.program.declaration_spans.get(index).copied();
-            if let Declaration::Process(process) = declaration {
-                if process.label.is_some() || expr_has_label_annotation(&process.body) {
-                    return Err(LinkError::FeatureDisabled {
-                        feature: "label annotations",
-                        span,
-                    });
-                }
+            if let Declaration::Process(process) = declaration
+                && (process.label.is_some() || expr_has_label_annotation(&process.body))
+            {
+                return Err(LinkError::FeatureDisabled {
+                    feature: "label annotations",
+                    span,
+                });
             }
         }
         if expr_has_label_annotation(&self.program.main) {

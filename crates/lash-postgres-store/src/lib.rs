@@ -680,11 +680,9 @@ async fn load_graph(
         let json: String = row.get(0);
         nodes.push(store_decode_json(&json, "session graph node")?);
     }
-    if active_path {
-        if let Some(leaf) = leaf_node_id.clone() {
-            let wanted = active_path_node_ids(&nodes, &leaf);
-            nodes.retain(|node| wanted.contains(&node.node_id));
-        }
+    if active_path && let Some(leaf) = leaf_node_id.clone() {
+        let wanted = active_path_node_ids(&nodes, &leaf);
+        nodes.retain(|node| wanted.contains(&node.node_id));
     }
     Ok(lash_core::SessionGraph::from_nodes(nodes, leaf_node_id))
 }

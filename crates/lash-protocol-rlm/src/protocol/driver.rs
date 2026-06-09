@@ -244,25 +244,24 @@ impl ProtocolDriverHandle<lash_core::HostTurnProtocol> for RlmDriver {
             if let RlmTermination::SubmitRequired {
                 schema: Some(schema),
             } = termination
+                && let Err(error_text) = validate_finish_value(finish_value, &schema)
             {
-                if let Err(error_text) = validate_finish_value(finish_value, &schema) {
-                    if let Err(err) = continue_or_stop_after_nonterminal(
-                        &ctx,
-                        &mut actions,
-                        vec![trajectory_event(trajectory_entry(
-                            ctx.protocol_iteration(),
-                            &state,
-                            Some(error_text.clone()),
-                            None,
-                        ))],
-                        vec![conversation_event(submit_schema_mismatch_message(
-                            &error_text,
-                        ))],
-                    ) {
-                        return invalid_turn_options_actions(err);
-                    }
-                    return actions;
+                if let Err(err) = continue_or_stop_after_nonterminal(
+                    &ctx,
+                    &mut actions,
+                    vec![trajectory_event(trajectory_entry(
+                        ctx.protocol_iteration(),
+                        &state,
+                        Some(error_text.clone()),
+                        None,
+                    ))],
+                    vec![conversation_event(submit_schema_mismatch_message(
+                        &error_text,
+                    ))],
+                ) {
+                    return invalid_turn_options_actions(err);
                 }
+                return actions;
             }
 
             actions.push(DriverAction::AppendEvents(vec![trajectory_event(

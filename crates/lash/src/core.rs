@@ -572,16 +572,16 @@ impl LashCoreBuilder {
             }
         }
 
-        if let Some(process_registry) = self.process_work_source.process_registry().as_ref() {
-            if process_registry.durability_tier() == DurabilityTier::Durable {
-                if session_store_tier != Some(DurabilityTier::Durable) {
-                    return Err(EmbedError::DurableProcessRegistryRequiresStoreFactory);
-                }
-                if host_event_store_tier != Some(DurabilityTier::Durable) {
-                    return Err(EmbedError::DurableStorePeerRequired {
-                        facet: "host event store",
-                    });
-                }
+        if let Some(process_registry) = self.process_work_source.process_registry().as_ref()
+            && process_registry.durability_tier() == DurabilityTier::Durable
+        {
+            if session_store_tier != Some(DurabilityTier::Durable) {
+                return Err(EmbedError::DurableProcessRegistryRequiresStoreFactory);
+            }
+            if host_event_store_tier != Some(DurabilityTier::Durable) {
+                return Err(EmbedError::DurableStorePeerRequired {
+                    facet: "host event store",
+                });
             }
         }
 

@@ -171,12 +171,12 @@ impl<'run> SessionTurnRequest<'run> {
                 "session turn `{turn_id}` requires an effect scope for session `{session_id}`"
             )));
         }
-        if let Some(input_turn_id) = input.trace_turn_id.as_deref() {
-            if input_turn_id != turn_id {
-                return Err(PluginError::Session(format!(
-                    "input trace_turn_id `{input_turn_id}` does not match turn id `{turn_id}`"
-                )));
-            }
+        if let Some(input_turn_id) = input.trace_turn_id.as_deref()
+            && input_turn_id != turn_id
+        {
+            return Err(PluginError::Session(format!(
+                "input trace_turn_id `{input_turn_id}` does not match turn id `{turn_id}`"
+            )));
         }
         input.trace_turn_id = Some(turn_id.clone());
         Ok(Self {

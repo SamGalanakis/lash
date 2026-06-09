@@ -1332,14 +1332,14 @@ impl<'program> RequirementsCollector<'program> {
         resource_type: &str,
         operation: &str,
     ) -> (String, TypeExpr, TypeExpr) {
-        if let Some(catalog) = self.resource_catalog {
-            if let Some(binding) = catalog.resolve_operation(resource_type, operation) {
-                return (
-                    operation.to_string(),
-                    binding.input_ty.clone(),
-                    binding.output_ty.clone(),
-                );
-            }
+        if let Some(catalog) = self.resource_catalog
+            && let Some(binding) = catalog.resolve_operation(resource_type, operation)
+        {
+            return (
+                operation.to_string(),
+                binding.input_ty.clone(),
+                binding.output_ty.clone(),
+            );
         }
         (operation.to_string(), TypeExpr::Any, TypeExpr::Any)
     }
