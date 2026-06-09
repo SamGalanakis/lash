@@ -307,10 +307,10 @@ struct AppState {
     restate_http: reqwest::Client,
     restate_cron_job_keys: Arc<Mutex<BTreeSet<String>>>,
     mail_world: mail::MailWorld,
-    /// Live cancellation tokens for in-flight user turns, keyed by turn id.
-    /// The Restate turn workflow runs in this same process, so cancelling a
-    /// token here interrupts the runtime's turn loop directly.
-    turn_cancels: Arc<Mutex<BTreeMap<String, (String, tokio_util::sync::CancellationToken)>>>,
+    /// Session handles of in-flight user turns, keyed by turn id. The Restate
+    /// turn workflow runs in this same process, so /api/turn/cancel calls
+    /// [`lash::LashSession::cancel_running_turns`] on the live handle.
+    turn_cancels: Arc<Mutex<BTreeMap<String, lash::LashSession>>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -419,15 +419,8 @@ impl StreamItem {
 }
 
 struct TurnCancelGuard {
-    registry: Arc<Mutex<BTreeMap<String, (String, tokio_util::sync::CancellationToken)>>>,
+    registry: Arc<Mutex<BTreeMap<String, lash::LashSession>>>,
     turn_id: String,
-    token: tokio_util::sync::CancellationToken,
-}
-
-impl TurnCancelGuard {
-    fn token(&self) -> tokio_util::sync::CancellationToken {
-        self.token.clone()
-    }
 }
 
 impl Drop for TurnCancelGuard {
@@ -1143,32 +1136,27 @@ impl AppState {
         let _ = self.event_tx.send(item);
     }
 
-    /// Register a cancellation token for an in-flight user turn. Dropping the
-    /// guard removes the entry, so abandoned workflows do not leak tokens.
-    fn register_turn_cancel(&self, session_id: &str, turn_id: &str) -> TurnCancelGuard {
-        let token = tokio_util::sync::CancellationToken::new();
+    /// Register the session handle driving an in-flight user turn. Dropping
+    /// the guard removes the entry, so abandoned workflows do not leak.
+    fn register_turn_cancel(&self, session: &lash::LashSession, turn_id: &str) -> TurnCancelGuard {
         self.turn_cancels
             .lock()
             .expect("turn cancel lock")
-            .insert(turn_id.to_string(), (session_id.to_string(), token.clone()));
+            .insert(turn_id.to_string(), session.clone());
         TurnCancelGuard {
             registry: Arc::clone(&self.turn_cancels),
             turn_id: turn_id.to_string(),
-            token,
         }
     }
 
     /// Cancel every in-flight user turn for `session_id`; returns how many.
     fn cancel_turns_for_session(&self, session_id: &str) -> usize {
         let registry = self.turn_cancels.lock().expect("turn cancel lock");
-        let mut cancelled = 0;
-        for (turn_session, token) in registry.values() {
-            if turn_session == session_id {
-                token.cancel();
-                cancelled += 1;
-            }
-        }
-        cancelled
+        registry
+            .values()
+            .filter(|session| session.session_id() == session_id)
+            .map(lash::LashSession::cancel_running_turns)
+            .sum()
     }
 
     fn push_message(&self, role: impl Into<String>, text: impl Into<String>) -> ChatMessage {

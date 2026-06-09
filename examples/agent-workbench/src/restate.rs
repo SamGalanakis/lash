@@ -572,13 +572,13 @@ async fn run_user_turn(
     let mut input = TurnInput::text(request.text.clone());
     input.trace_turn_id = Some(request.turn_id.clone());
     // Registered for /api/turn/cancel (the UI's stop button / Esc); the guard
-    // drops the registry entry when the turn finishes either way.
-    let cancel_guard = state.register_turn_cancel(&request.session_id, &request.turn_id);
+    // drops the registry entry when the turn finishes either way, and the
+    // cancel endpoint calls `cancel_running_turns()` on this session handle.
+    let _cancel_guard = state.register_turn_cancel(&session, &request.turn_id);
     let output = session
         .turn(input)
         .turn_id(request.turn_id.clone())
         .model(turn_model)
-        .cancel(cancel_guard.token())
         .require_submit()
         .map_err(AppError::internal)?
         .effects(controller)

@@ -602,6 +602,67 @@ async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
 }
 
 #[tokio::test]
+async fn pre_cancelled_token_yields_cancelled_outcome() -> Result<()> {
+    let core = standard_core();
+    let session = core.session("pre-cancelled").open().await?;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let output = session
+        .turn(TurnInput::text("never runs"))
+        .cancel(cancel)
+        .run()
+        .await?;
+
+    assert!(matches!(
+        output.result.outcome,
+        TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancel_running_turns_stops_inflight_turn() -> Result<()> {
+    let (started_tx, started_rx) = oneshot::channel::<()>();
+    let started_tx = Arc::new(StdMutex::new(Some(started_tx)));
+    let provider = crate::testing::TestProvider::builder()
+        .kind("embed-test")
+        .complete(move |_request| {
+            let started_tx = Arc::clone(&started_tx);
+            async move {
+                if let Some(tx) = started_tx.lock().expect("started signal").take() {
+                    let _ = tx.send(());
+                }
+                // Hang until the turn is cancelled out from under us.
+                std::future::pending::<()>().await;
+                unreachable!("provider future should be dropped by cancellation")
+            }
+        })
+        .build()
+        .into_handle();
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(provider)
+        .model(mock_model_spec())
+        .build()
+        .expect("core");
+    let session = core.session("cancel-inflight").open().await?;
+    let stopper = session.clone();
+
+    let stream = session.turn(TurnInput::text("hang forever")).stream()?;
+    started_rx.await.expect("provider reached");
+    assert_eq!(stopper.cancel_running_turns(), 1);
+
+    let result = stream.finish().await?;
+    assert!(matches!(
+        result.outcome,
+        TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
+    ));
+    // The registry entry is gone once the turn finished.
+    assert_eq!(stopper.cancel_running_turns(), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn turn_stream_receives_semantic_activities() -> Result<()> {
     let core = standard_core();
     let session = core.session("semantic-stream").open().await?;

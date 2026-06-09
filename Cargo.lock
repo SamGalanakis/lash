@@ -77,7 +77,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
- "tokio-util",
  "uuid",
 ]
 
@@ -2519,7 +2518,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
  "unicode-width",

@@ -43,6 +43,10 @@ pub use lash_core::{
     InputItem, ModelLimits, ModelSpec, PluginStack, SessionCommand, SessionCommandReceipt,
     SessionSpec, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
 };
+/// Cooperative cancellation handle accepted by
+/// [`TurnBuilder::cancel`](crate::TurnBuilder::cancel); re-exported so
+/// embedders cancel turns without depending on `tokio-util` themselves.
+pub use tokio_util::sync::CancellationToken;
 
 /// The prelude is exactly the crate root: `use lash::prelude::*;` brings in
 /// the daily core/session/turn vocabulary and nothing from the domain

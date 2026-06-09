@@ -216,6 +216,11 @@ fn model_spec_types_are_nameable(spec: ModelSpec, limits: ModelLimits) {
     let _ = (spec, limits);
 }
 
+fn cancellation_token_is_at_root(token: lash::CancellationToken, session: &lash::LashSession) {
+    token.cancel();
+    let _: usize = session.cancel_running_turns();
+}
+
 fn observation_types_are_homed_in_observe(
     cursor: lash::observe::SessionCursor,
     observation: lash::observe::SessionObservation,
@@ -266,4 +271,5 @@ fn main() {
     let _ = persistence_load_helpers_are_nameable;
     let _ = observation_types_are_homed_in_observe;
     let _ = host_event_types_are_homed_in_host_events;
+    let _ = cancellation_token_is_at_root;
 }

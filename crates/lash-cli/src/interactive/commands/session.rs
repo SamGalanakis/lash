@@ -1,8 +1,8 @@
+use lash::CancellationToken;
 use lash::{LashSession, ModeId, provider::ProviderHandle};
 use lash_core::session_model::Message;
 use lash_core::{SessionPolicy, ToolState};
 use lash_standard_plugins::StandardContextApproach;
-use tokio_util::sync::CancellationToken;
 
 use crate::SkillCatalog;
 use crate::app::{App, UiTimelineItem};

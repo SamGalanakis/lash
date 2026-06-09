@@ -215,6 +215,34 @@ async fn rlm_terminal_contracts(
     Ok(())
 }
 
+async fn cancel_turn(session: &LashSession) -> anyhow::Result<()> {
+    // docs:start:cancel-turn
+    use lash::CancellationToken;
+    use lash::runtime::{TurnOutcome, TurnStop};
+
+    // Per-turn token: hand it to whatever can decide to stop the turn
+    // (an HTTP handler, a keybinding, a timeout task).
+    let cancel = CancellationToken::new();
+    let stream = session
+        .turn(TurnInput::text("Summarize the incident."))
+        .cancel(cancel.clone())
+        .stream()?;
+    // elsewhere: cancel.cancel();
+
+    // Or skip token plumbing entirely: any clone of the opened session can
+    // stop whatever it is currently running.
+    let stopper = session.clone();
+    let cancelled_turns = stopper.cancel_running_turns();
+
+    let result = stream.finish().await?;
+    if matches!(result.outcome, TurnOutcome::Stopped(TurnStop::Cancelled)) {
+        // The turn committed as cancelled; the session is ready for the
+        // next turn.
+    }
+    // docs:end:cancel-turn
+    Ok(())
+}
+
 fn persist_typed_value(_value: serde_json::Value) -> anyhow::Result<()> {
     Ok(())
 }

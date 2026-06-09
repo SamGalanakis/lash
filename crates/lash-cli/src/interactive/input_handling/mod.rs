@@ -15,12 +15,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind};
+use lash::CancellationToken;
 use lash::{LashSession, ModeId, provider::ProviderHandle};
 use lash_core::ToolState;
 use lash_core::session_model::Message;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiInputOutcome};
-use tokio_util::sync::CancellationToken;
 
 use crate::Args;
 use crate::app::App;

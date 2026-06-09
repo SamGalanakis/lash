@@ -284,6 +284,7 @@ impl SessionBuilder {
             mode,
             parent_session_id: self.parent_session_id,
             active_plugins: self.active_plugins,
+            turn_cancels: crate::turn::TurnCancelRegistry::default(),
         })
     }
 
@@ -333,6 +334,7 @@ pub struct LashSession {
     pub(crate) mode: ModeId,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
+    pub(crate) turn_cancels: crate::turn::TurnCancelRegistry,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -383,6 +385,7 @@ impl LashSession {
             active_plugins: self.active_plugins.clone(),
             input,
             cancel: CancellationToken::new(),
+            cancels: self.turn_cancels.clone(),
             protocol_turn_options: None,
             provider: None,
             model: None,
@@ -395,9 +398,28 @@ impl LashSession {
             runtime: self.runtime.clone(),
             effect_host: Arc::clone(&self.effect_host),
             cancel: CancellationToken::new(),
+            cancels: self.turn_cancels.clone(),
             batch_ids: Vec::new(),
             drain_id: None,
         }
+    }
+
+    /// Cancel every turn currently executing through this opened session
+    /// (including its clones) and report how many were signalled.
+    ///
+    /// This is the affordance behind a UI "stop" control: hold a clone of the
+    /// session wherever the stop arrives and call this, instead of threading a
+    /// [`CancellationToken`](crate::CancellationToken) into every turn call
+    /// ([`TurnBuilder::cancel`](crate::TurnBuilder::cancel) remains the
+    /// per-turn hook when you need one). A cancelled turn finishes with
+    /// `TurnOutcome::Stopped(TurnStop::Cancelled)` and commits like any other
+    /// turn; the session stays usable.
+    ///
+    /// Scope: turns started from this `LashSession` instance and its clones.
+    /// A handle opened separately for the same session id has its own
+    /// registry and is not reached.
+    pub fn cancel_running_turns(&self) -> usize {
+        self.turn_cancels.cancel_all()
     }
 
     pub fn control(&self) -> SessionControl {

@@ -1,3 +1,4 @@
+use lash::CancellationToken;
 use lash::LashSession;
 use lash::{TurnActivitySink, TurnInput};
 use lash_core::runtime::RuntimeSessionState;
@@ -8,7 +9,6 @@ use lash_core::{
 use lash_sqlite_store::Store;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use crate::app::PreparedTurn;
 use crate::input_items::build_items_from_editor_input;

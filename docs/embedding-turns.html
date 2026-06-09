@@ -225,6 +225,36 @@ impl TurnActivitySink for ChannelSink {
           <p>Sink panics or <code>Err</code>-shaped activities do not abort the turn. Persistence and <code>TurnOutput.activities</code> are independent of the sink — a dropped sink loses no activity.</p>
         </div>
 
+        <div class="section" id="cancellation">
+          <div class="section-header">
+            <h2>Cancellation</h2>
+            <p>Cancellation is cooperative and first-class: a cancelled turn finishes with <code>TurnOutcome::Stopped(TurnStop::Cancelled)</code>, commits like any other turn, and leaves the session ready for the next turn. In-flight provider streaming is aborted, not awaited.</p>
+          </div>
+          <p>Two tiers. <code>TurnBuilder::cancel(token)</code> attaches a caller-owned <code>CancellationToken</code> (re-exported at the crate root — no <code>tokio-util</code> dependency needed) to one turn. <code>LashSession::cancel_running_turns()</code> cancels everything currently executing through that opened session and its clones — the affordance behind a UI stop button, with no token threading. It returns how many turns were signalled; a handle opened separately for the same session id is not reached.</p>
+          <pre data-lang="rust" data-snippet="embedding_turns#cancel-turn"><code>use lash::CancellationToken;
+use lash::runtime::{TurnOutcome, TurnStop};
+
+// Per-turn token: hand it to whatever can decide to stop the turn
+// (an HTTP handler, a keybinding, a timeout task).
+let cancel = CancellationToken::new();
+let stream = session
+    .turn(TurnInput::text("Summarize the incident."))
+    .cancel(cancel.clone())
+    .stream()?;
+// elsewhere: cancel.cancel();
+
+// Or skip token plumbing entirely: any clone of the opened session can
+// stop whatever it is currently running.
+let stopper = session.clone();
+let cancelled_turns = stopper.cancel_running_turns();
+
+let result = stream.finish().await?;
+if matches!(result.outcome, TurnOutcome::Stopped(TurnStop::Cancelled)) {
+    // The turn committed as cancelled; the session is ready for the
+    // next turn.
+}</code></pre>
+        </div>
+
         <div class="section" id="token-usage">
           <div class="section-header">
             <h2>Token Usage</h2>
