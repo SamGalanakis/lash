@@ -109,16 +109,29 @@ impl RuntimeTurnDriver<'_> {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return Ok(());
         }
-        let boundary = self
-            .turn_pipeline
-            .progress_boundary(
-                &mut self.session,
-                self.policy.policy.clone(),
-                self.turn_index,
-                messages,
-                event_delta,
-            )
-            .await;
+        let boundary = if self.scoped_effect_controller.controller().durability_tier()
+            == crate::DurabilityTier::Durable
+        {
+            self.turn_pipeline
+                .progress_boundary_in_memory(
+                    &mut self.session,
+                    self.policy.policy.clone(),
+                    self.turn_index,
+                    messages,
+                    event_delta,
+                )
+                .await
+        } else {
+            self.turn_pipeline
+                .progress_boundary(
+                    &mut self.session,
+                    self.policy.policy.clone(),
+                    self.turn_index,
+                    messages,
+                    event_delta,
+                )
+                .await
+        };
         if boundary.persisted {
             for event in &boundary.protocol_events {
                 self.emit_trace(protocol_iteration, protocol_step_trace_event(event));

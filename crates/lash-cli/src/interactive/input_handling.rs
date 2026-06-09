@@ -1604,7 +1604,7 @@ async fn handle_input_mode_key(key: KeyEvent, ctx: &mut SessionCtx<'_>) -> anyho
                 }
                 let injection = lash_core::InjectedTurnInput {
                     id: Some(queued.draft_id.clone()),
-                    message: make_injected_plugin_message(&queued),
+                    message: make_injected_plugin_message(&queued).await,
                 };
                 let Some(session) = runtime.as_ref() else {
                     push_system_message(

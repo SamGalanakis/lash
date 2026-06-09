@@ -154,7 +154,7 @@ impl DirectCompletionCapability {
     /// Both the text-only (`DirectRequest`) and full-output entry points feed
     /// the same effect lane; they differ only in how the caller projects the
     /// resulting [`crate::LlmResponse`].
-    fn plan_direct_effect(
+    async fn plan_direct_effect(
         &self,
         context: &DirectInvocationContext<'_>,
         provider: crate::ProviderHandle,
@@ -168,7 +168,8 @@ impl DirectCompletionCapability {
         let request_spec = crate::LlmRequestSpec::from_request(
             &request,
             current.host.core.durability.attachment_store.as_ref(),
-        )?;
+        )
+        .await?;
         let discriminator =
             crate::runtime::causal::direct_request_discriminator(&request_spec, replay, caused_by)?;
         let invocation = crate::runtime::causal::direct_effect_invocation(
@@ -246,14 +247,16 @@ impl DirectCompletionCapability {
         let replay = request.replay.clone();
         let caused_by = request.caused_by.clone();
         let normalized = crate::direct::build_llm_request(&provider, request, model);
-        let plan = self.plan_direct_effect(
-            &context,
-            provider,
-            normalized,
-            usage_source,
-            replay.as_ref(),
-            caused_by.as_ref(),
-        )?;
+        let plan = self
+            .plan_direct_effect(
+                &context,
+                provider,
+                normalized,
+                usage_source,
+                replay.as_ref(),
+                caused_by.as_ref(),
+            )
+            .await?;
         let (response, usage) = self.run_direct_effect(context, plan, caused_by).await?;
         Ok(crate::DirectCompletion {
             text: response.full_text,
@@ -268,14 +271,16 @@ impl DirectCompletionCapability {
         usage_source: &str,
     ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
         let resolved = context.current.resolve_policy()?;
-        let plan = self.plan_direct_effect(
-            &context,
-            resolved.binding.provider,
-            request,
-            usage_source,
-            None,
-            None,
-        )?;
+        let plan = self
+            .plan_direct_effect(
+                &context,
+                resolved.binding.provider,
+                request,
+                usage_source,
+                None,
+                None,
+            )
+            .await?;
         let (response, usage) = self.run_direct_effect(context, plan, None).await?;
         Ok(crate::DirectLlmCompletion { response, usage })
     }

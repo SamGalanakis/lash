@@ -1,0 +1,38 @@
+name: Restate Postgres Workers E2E
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/lash-core/**"
+      - "crates/lash-postgres-store/**"
+      - "crates/lash-s3-store/**"
+      - "crates/lash-restate/**"
+      - "e2e/restate-postgres-workers/**"
+      - "justfile"
+      - ".github/workflows/restate-postgres-workers-e2e.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  restate-postgres-workers:
+    name: Restate + Postgres + MinIO Workers
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Run distributed backend E2E
+        run: just restate-postgres-workers-e2e

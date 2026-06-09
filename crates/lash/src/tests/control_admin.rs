@@ -28,6 +28,15 @@ impl lash_core::ProcessCancelAbility for DenyCancelAbility {
     }
 }
 
+struct NoopProcessRunHandle;
+
+#[async_trait]
+impl lash_core::ProcessRunHandle for NoopProcessRunHandle {
+    async fn claim_and_run_pending(&self) -> std::result::Result<(), lash_core::PluginError> {
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct RecordingCancelAbility {
     calls: StdMutex<Vec<(lash_core::ProcessCancelSource, String, Option<String>)>>,
@@ -519,11 +528,15 @@ async fn process_control_cancel_uses_host_cancel_ability() -> Result<()> {
 async fn process_control_cancel_all_uses_host_cancel_ability() -> Result<()> {
     let ability = Arc::new(RecordingCancelAbility::default());
     let runtime_host = RuntimeHostConfig::in_memory().with_process_cancel_ability(ability.clone());
+    let registry =
+        Arc::new(TestLocalProcessRegistry::default()) as Arc<dyn lash_core::ProcessRegistry>;
+    let runner = lash_core::ProcessWorkRunner::new(Arc::new(NoopProcessRunHandle));
+    let driver = lash_core::ProcessWorkDriver::new(Arc::clone(&registry), runner.poke_handle());
     let core = explicit_ephemeral_facets(LashCore::standard())
         .provider(mock_provider())
         .model(mock_model_spec())
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
-        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .process_work_driver(driver)
         .advanced()
         .runtime_host_config(runtime_host)
         .build()?;

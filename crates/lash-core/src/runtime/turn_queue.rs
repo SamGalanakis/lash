@@ -258,7 +258,7 @@ impl QueuedWorkClaim {
         }
     }
 
-    pub fn materialize_for_checkpoint_with_attachments(
+    pub async fn materialize_for_checkpoint_with_attachments(
         &self,
         attachment_store: &dyn crate::AttachmentStore,
     ) -> Result<QueuedCheckpointWork, String> {
@@ -269,10 +269,10 @@ impl QueuedWorkClaim {
             for item in &batch.items {
                 match &item.payload {
                     QueuedWorkPayload::TurnInput { input } => {
-                        if let Some(message) = plugin_message_from_turn_input_with_attachments(
-                            input,
-                            attachment_store,
-                        )? {
+                        if let Some(message) =
+                            plugin_message_from_turn_input_with_attachments(input, attachment_store)
+                                .await?
+                        {
                             transient_messages.push(message);
                         }
                     }
@@ -417,12 +417,13 @@ fn plugin_message_from_turn_input(input: &TurnInput) -> Option<PluginMessage> {
     })
 }
 
-fn plugin_message_from_turn_input_with_attachments(
+async fn plugin_message_from_turn_input_with_attachments(
     input: &TurnInput,
     attachment_store: &dyn crate::AttachmentStore,
 ) -> Result<Option<PluginMessage>, String> {
     let normalized =
-        super::io::normalize_input_items(&input.items, &input.image_blobs, attachment_store)?;
+        super::io::normalize_input_items(&input.items, &input.image_blobs, attachment_store)
+            .await?;
     let has_image = normalized
         .iter()
         .any(|item| matches!(item, super::NormalizedItem::Image(_)));

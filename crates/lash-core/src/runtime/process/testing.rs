@@ -361,6 +361,11 @@ impl ProcessRegistry for TestLocalProcessRegistry {
             current_epoch_ms(),
         )?;
         if prepared.replayed {
+            if let Some(status) = prepared.status_update.clone() {
+                record.record.status = status;
+                record.record.updated_at_ms = prepared.occurred_at_ms;
+                record.notify.notify_waiters();
+            }
             return Ok(ProcessEventAppendResult {
                 event: prepared.event,
                 wake_delivery: prepared.wake_delivery,

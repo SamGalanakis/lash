@@ -38,7 +38,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
         instruction_ip: usize,
     ) -> Result<Option<VmOutcome>, RuntimeError> {
         let active = self.begin_lashlang_execution(instruction_ip);
-        let result = self.resolve_effect_inner(effect, active.as_ref()).await;
+        let result = Box::pin(self.resolve_effect_inner(effect, active.as_ref())).await;
         match (&result, active.as_ref()) {
             (Ok(Some(VmOutcome::ProcessFailed(value))), Some(active)) => {
                 self.fail_lashlang_execution(active, value.to_string());

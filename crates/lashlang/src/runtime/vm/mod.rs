@@ -975,7 +975,6 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
     /// `truthy`-hook bool ops, `Unary`, intrinsics, iteration, type literals,
     /// and effects. The opcodes the fast path always completes are unreachable
     /// here.
-    #[inline(always)]
     async fn step_instruction(&mut self, instruction: Instruction) -> Result<VmStep, RuntimeError> {
         match instruction {
             Instruction::LoadField { slot, field } => {

@@ -488,6 +488,7 @@ fn collect_printed_images_inner<'a>(
                 }
                 let reference = attachment_store
                     .get(&lash_core::AttachmentId::new(image.id.clone()))
+                    .await
                     .ok()
                     .map(|stored| stored.meta.as_ref())
                     .ok_or_else(|| {

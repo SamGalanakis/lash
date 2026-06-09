@@ -9,8 +9,8 @@ use lash_core::{AttachmentStore, AttachmentStorePersistence};
 use lash_local_store::FileAttachmentStore;
 use tempfile::TempDir;
 
-#[test]
-fn file_attachment_store_satisfies_conformance() {
+#[tokio::test]
+async fn file_attachment_store_satisfies_conformance() {
     // Each `make()` call needs its own root that outlives the returned store.
     // Keep the tempdirs alive for the duration of the suite.
     let dirs: Arc<Mutex<Vec<TempDir>>> = Arc::new(Mutex::new(Vec::new()));
@@ -23,5 +23,6 @@ fn file_attachment_store_satisfies_conformance() {
             ReopenableAttachmentStore { open, reopen }
         },
         AttachmentStorePersistence::Durable,
-    );
+    )
+    .await;
 }

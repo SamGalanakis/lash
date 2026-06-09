@@ -52,7 +52,7 @@ pub(crate) const MAIL_EVENT_RESOURCE: &str = "Mail";
 pub(crate) const MAIL_EVENT_ALIAS: &str = "mail";
 pub(crate) const MAIL_EVENT_EVENT: &str = "received";
 pub(crate) const MAIL_RECEIVED_SOURCE_TYPE: &str = "mail.received";
-const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_TOKIO_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
 fn main() -> AnyhowResult<()> {
     let stack_bytes = std::env::var("AGENT_WORKBENCH_TOKIO_STACK_BYTES")
@@ -1754,27 +1754,30 @@ mod tests {
             })))
     }
 
-    fn run_async_test_on_large_stack<F, Fut>(name: &str, test: F)
+    const STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
+
+    fn run_async_test_on_stack_budget<F, Fut>(name: &str, test: F)
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + 'static,
     {
         std::thread::Builder::new()
             .name(name.to_string())
-            .stack_size(16 * 1024 * 1024)
+            .stack_size(STACK_BUDGET_BYTES)
             .spawn(|| {
+                let test = Box::pin(test());
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("tokio runtime")
-                    .block_on(test())
+                    .block_on(test)
             })
-            .expect("spawn large-stack test thread")
+            .expect("spawn stack-budget test thread")
             .join()
-            .expect("large-stack test thread");
+            .expect("stack-budget test thread");
     }
 
-    fn run_async_test_on_large_multi_thread_stack<F, Fut>(
+    fn run_async_test_on_stack_budget_multi_thread<F, Fut>(
         name: &str,
         worker_threads: usize,
         test: F,
@@ -1784,19 +1787,20 @@ mod tests {
     {
         std::thread::Builder::new()
             .name(name.to_string())
-            .stack_size(DEFAULT_TOKIO_THREAD_STACK_BYTES)
+            .stack_size(STACK_BUDGET_BYTES)
             .spawn(move || {
+                let test = Box::pin(test());
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(worker_threads)
-                    .thread_stack_size(DEFAULT_TOKIO_THREAD_STACK_BYTES)
+                    .thread_stack_size(STACK_BUDGET_BYTES)
                     .enable_all()
                     .build()
                     .expect("tokio runtime")
-                    .block_on(test())
+                    .block_on(test)
             })
-            .expect("spawn large-stack multi-thread test thread")
+            .expect("spawn stack-budget multi-thread test thread")
             .join()
-            .expect("large-stack multi-thread test thread");
+            .expect("stack-budget multi-thread test thread");
     }
 
     fn test_graph(
@@ -2111,7 +2115,7 @@ mod tests {
 
     #[test]
     fn inbox_authority_resolves_for_any_account_name() {
-        run_async_test_on_large_stack("workbench-inbox-authority-test", || {
+        run_async_test_on_stack_budget("workbench-inbox-authority-test", || {
             inbox_authority_resolves_for_any_account_name_inner()
         });
     }
@@ -2202,7 +2206,7 @@ mod tests {
 
     #[test]
     fn inbox_added_after_session_open_updates_persisted_tool_surface() {
-        run_async_test_on_large_stack("workbench-dynamic-inbox-surface-test", || {
+        run_async_test_on_stack_budget("workbench-dynamic-inbox-surface-test", || {
             inbox_added_after_session_open_updates_persisted_tool_surface_inner()
         });
     }
@@ -2308,7 +2312,7 @@ mod tests {
 
     #[test]
     fn button_host_event_occurrence_starts_visible_lashlang_process() {
-        run_async_test_on_large_stack("workbench-button-trigger-test", || {
+        run_async_test_on_stack_budget("workbench-button-trigger-test", || {
             button_host_event_occurrence_starts_visible_lashlang_process_inner()
         });
     }
@@ -2467,7 +2471,7 @@ mod tests {
 
     #[test]
     fn button_host_event_occurrence_is_submitted_to_restate_workflow() {
-        run_async_test_on_large_stack("workbench-trigger-restate-test", || {
+        run_async_test_on_stack_budget("workbench-trigger-restate-test", || {
             button_host_event_occurrence_is_submitted_to_restate_workflow_inner()
         });
     }
@@ -2656,7 +2660,7 @@ mod tests {
 
     #[test]
     fn reset_chat_deletes_old_session_and_clears_trigger_started_work() {
-        run_async_test_on_large_stack("workbench-reset-chat-test", || {
+        run_async_test_on_stack_budget("workbench-reset-chat-test", || {
             reset_chat_deletes_old_session_and_clears_trigger_started_work_inner()
         });
     }
@@ -2825,7 +2829,7 @@ mod tests {
     #[test]
     #[ignore = "requires a running Restate server; use `just agent-workbench-restate-e2e`"]
     fn live_restate_cron_runs_trigger_and_queued_turn_end_to_end() {
-        run_async_test_on_large_multi_thread_stack("workbench-restate-cron-e2e", 4, || {
+        run_async_test_on_stack_budget_multi_thread("workbench-restate-cron-e2e", 4, || {
             live_restate_cron_runs_trigger_and_queued_turn_end_to_end_inner()
         });
     }
@@ -3157,7 +3161,7 @@ mod tests {
 
     #[test]
     fn persisted_trigger_route_fires_after_reopening_sqlite_artifact_store() {
-        run_async_test_on_large_stack("workbench-persisted-trigger-test", || {
+        run_async_test_on_stack_budget("workbench-persisted-trigger-test", || {
             persisted_trigger_route_fires_after_reopening_sqlite_artifact_store_inner()
         });
     }

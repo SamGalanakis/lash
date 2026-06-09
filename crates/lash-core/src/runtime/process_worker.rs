@@ -614,21 +614,22 @@ mod boundary_tests {
         inner: InMemoryAttachmentStore,
     }
 
+    #[async_trait::async_trait]
     impl AttachmentStore for DurableAttachmentStore {
         fn persistence(&self) -> AttachmentStorePersistence {
             AttachmentStorePersistence::Durable
         }
 
-        fn put(
+        async fn put(
             &self,
             bytes: Vec<u8>,
             meta: AttachmentCreateMeta,
         ) -> Result<AttachmentRef, AttachmentStoreError> {
-            self.inner.put(bytes, meta)
+            self.inner.put(bytes, meta).await
         }
 
-        fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
-            self.inner.get(id)
+        async fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
+            self.inner.get(id).await
         }
     }
 

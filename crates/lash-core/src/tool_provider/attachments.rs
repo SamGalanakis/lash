@@ -8,11 +8,11 @@ pub struct ToolAttachmentControl {
 }
 
 impl ToolAttachmentControl {
-    pub fn put(
+    pub async fn put(
         &self,
         data: Vec<u8>,
         meta: AttachmentCreateMeta,
     ) -> Result<AttachmentRef, AttachmentStoreError> {
-        self.store.put(data, meta)
+        self.store.put(data, meta).await
     }
 }

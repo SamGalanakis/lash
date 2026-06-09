@@ -14,7 +14,7 @@ use crate::turn_runner::{
     RuntimeRunResult, make_turn_input, spawn_session_queued_turn, spawn_session_turn,
 };
 
-pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
+pub(crate) async fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
     let (items, image_blobs) =
         build_items_from_editor_input(&turn.effective_text, turn.images.clone());
     let attachment_store = FileAttachmentStore::new(crate::paths::attachments_dir());
@@ -53,7 +53,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     None,
                     Some(id.clone()),
                 );
-                let Ok(reference) = attachment_store.put(bytes.clone(), meta) else {
+                let Ok(reference) = attachment_store.put(bytes.clone(), meta).await else {
                     continue;
                 };
                 parts.push(Part {

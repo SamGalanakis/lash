@@ -67,8 +67,8 @@ Configuration is read from `.env` or the process environment:
 - `AGENT_WORKBENCH_RESTATE_CONTAINER`: Restate Docker container name for the
   entrypoint, default `lash-agent-workbench-dev-restate`.
 - `AGENT_WORKBENCH_TOKIO_STACK_BYTES`: Tokio worker thread stack for the
-  workbench process, default `16777216`. RLM + Restate + Lashlang execution has
-  deep debug-build futures and should not run on Tokio's default worker stack.
+  workbench process, default `2097152`. Override only when diagnosing stack
+  regressions or comparing runtime stack-size lanes.
 - `OPENROUTER_MODEL`: default `anthropic/claude-sonnet-4.6`.
 - `OPENROUTER_MODEL_VARIANT`: default `high`; choose `provider default` in
   the UI to send no variant for models without configurable thinking.

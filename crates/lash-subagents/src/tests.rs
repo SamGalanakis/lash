@@ -15,6 +15,8 @@ use lash_core::{ToolArgumentProjectionPolicy, ToolDefinition, ToolOutputContract
 use lash_protocol_rlm::RlmTurnInputExt;
 use serde_json::json;
 
+const STACK_BUDGET_BYTES: usize = 2 * 1024 * 1024;
+
 fn model_spec(
     model: impl Into<String>,
     variant: Option<String>,
@@ -721,13 +723,14 @@ async fn run_seed_probe_with_graph_store(
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::Builder::new()
         .name("subagent-seed-probe".to_string())
-        .stack_size(16 * 1024 * 1024)
+        .stack_size(STACK_BUDGET_BYTES)
         .spawn(move || {
+            let test = Box::pin(run_seed_probe_inner(parent_response, input, graph_store));
             let result = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("tokio runtime")
-                .block_on(run_seed_probe_inner(parent_response, input, graph_store));
+                .block_on(test);
             let _ = tx.send(result);
         })
         .expect("spawn seed-probe thread");

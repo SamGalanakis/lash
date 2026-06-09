@@ -109,7 +109,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         type=parse_size,
         default=[],
-        help="Worker stack size to test, e.g. 768k, 2m, 8388608. May be repeated.",
+        help="Worker stack size to test, e.g. 768k, 2m, 4m. May be repeated.",
     )
     parser.add_argument("--runs", type=int, default=1, help="Measured runs per sample.")
     parser.add_argument("--warmups", type=int, default=0, help="Warmups per sample.")

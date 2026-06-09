@@ -636,7 +636,7 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
 
 #[test]
 fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
-    run_async_test_on_large_stack("rlm-live-exec-boundary-test", || {
+    run_async_test_on_stack_budget("rlm-live-exec-boundary-test", || {
         rlm_tool_calls_stream_from_live_exec_boundary_inner()
     })
 }
@@ -760,7 +760,7 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
 
 #[test]
 fn continue_as_observation_emits_frame_switch_then_commit() -> Result<()> {
-    run_async_test_on_large_stack("continue-as-observation-test", || {
+    run_async_test_on_stack_budget("continue-as-observation-test", || {
         continue_as_observation_emits_frame_switch_then_commit_inner()
     })
 }
@@ -804,7 +804,7 @@ async fn continue_as_observation_emits_frame_switch_then_commit_inner() -> Resul
 
 #[test]
 fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commits() -> Result<()> {
-    run_async_test_on_large_stack("durable-agent-frame-follow-through-test", || {
+    run_async_test_on_stack_budget("durable-agent-frame-follow-through-test", || {
         durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commits_inner()
     })
 }
@@ -903,7 +903,7 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
 
 #[test]
 fn process_control_lists_started_lashlang_process_until_awaited() -> Result<()> {
-    run_async_test_on_large_stack("process-control-lashlang-process-test", || {
+    run_async_test_on_stack_budget("process-control-lashlang-process-test", || {
         process_control_lists_started_lashlang_process_until_awaited_inner()
     })
 }
@@ -971,21 +971,9 @@ submit value
 
 #[test]
 fn lashlang_execution_graph_store_observes_lashlang_process_from_facade() -> Result<()> {
-    std::thread::Builder::new()
-        .name("lashlang-graph-store-facade-test".to_string())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime")
-                .block_on(
-                    lashlang_execution_graph_store_observes_lashlang_process_from_facade_inner(),
-                )
-        })
-        .expect("spawn graph-store facade test thread")
-        .join()
-        .expect("graph-store facade test thread")
+    run_async_test_on_stack_budget("lashlang-graph-store-facade-test", || {
+        lashlang_execution_graph_store_observes_lashlang_process_from_facade_inner()
+    })
 }
 
 async fn lashlang_execution_graph_store_observes_lashlang_process_from_facade_inner() -> Result<()>
