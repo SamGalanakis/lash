@@ -52,6 +52,19 @@ python3 scripts/test_publish_workspace.py
 Those tests pin the lockstep/private-crate version behavior and the publisher's
 transient retry classification.
 
+## Docs code snippets
+
+Every Rust code block on a published docs page is compiled. The sources live in
+`examples/docs-snippets/` (one module per page) inside
+`// docs:start:<id>` / `// docs:end:<id>` regions, and each page block carries
+`<pre data-snippet="<module>#<id>">`. CI runs
+`cargo check -p docs-snippets --locked` (snippets must build against the
+current API) and `python3 scripts/lint_docs.py` (the HTML must match the
+regions byte-for-byte). To change a snippet, edit the `.rs` source and run
+`python3 scripts/lint_docs.py --fix-snippets` to re-inject the HTML (and the
+README hero block). Display-only blocks (shell transcripts, Lashlang, API-shape
+excerpts) are marked `data-lang="..."` instead.
+
 ## Auth
 
 The `publish-crates` job uses a `CARGO_REGISTRY_TOKEN` repository secret (a

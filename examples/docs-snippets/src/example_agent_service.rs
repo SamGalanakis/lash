@@ -1,0 +1,118 @@
+//! Compiled sources for the Rust snippets on `docs/example-agent-service.html`.
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use lash::persistence::SessionStoreFactory;
+use lash::provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy};
+use lash::tracing::{TraceLevel, TraceSink};
+use lash::{LashCore, LashSession, ModeId, ModePreset, TurnInput, TurnResult};
+use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
+
+async fn service_core(
+    api_key: String,
+    model: String,
+    model_variant: String,
+    data_dir: PathBuf,
+    store_factory: Arc<dyn SessionStoreFactory>,
+    trace_sink: Arc<dyn TraceSink>,
+) -> anyhow::Result<()> {
+    // docs:start:service-core
+    let provider = ProviderHandle::new(
+        OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
+            .with_options(ProviderOptions {
+                thinking: ProviderThinkingPolicy { expose: true },
+                ..ProviderOptions::default()
+            })
+            .into_components(),
+    );
+    let artifact_store = std::sync::Arc::new(
+        lash_sqlite_store::Store::open(&data_dir.join("lash-artifacts.db")).await?,
+    );
+
+    let core = LashCore::builder()
+        .install_mode(ModePreset::rlm())
+        .default_mode(ModeId::rlm())
+        .provider(provider)
+        .model(
+            lash::ModelSpec::from_token_limits(
+                model.clone(),
+                Some(model_variant.clone()),
+                200_000,
+                None,
+            )
+            .expect("valid model metadata"),
+        )
+        .store_factory(store_factory)
+        .effect_host(std::sync::Arc::new(
+            lash::durability::InlineEffectHost::default(),
+        ))
+        .lashlang_artifact_store(artifact_store)
+        .attachment_store(std::sync::Arc::new(
+            lash::persistence::FileAttachmentStore::new(data_dir.join("attachments")),
+        ))
+        .trace_sink(trace_sink)
+        .trace_level(TraceLevel::Extended)
+        .build()?;
+    // docs:end:service-core
+    Ok(())
+}
+
+struct AppState {
+    core: LashCore,
+}
+
+impl AppState {
+    async fn open_session(&self, chat_id: &str) -> anyhow::Result<LashSession> {
+        Ok(self.core.session(chat_id).rlm().open().await?)
+    }
+}
+
+struct ModelSelection {
+    model: String,
+    model_variant: Option<String>,
+}
+
+#[derive(Default)]
+struct TurnUiState {
+    assistant_prose: String,
+}
+
+fn assistant_text_for_persistence(_output: &TurnResult, _live_prose: &str) -> String {
+    String::new()
+}
+
+async fn service_turn(
+    state: &AppState,
+    chat_id: String,
+    text: String,
+    model_selection: ModelSelection,
+    ui_events: lash::runtime::NoopTurnActivitySink,
+    turn_state: Arc<Mutex<TurnUiState>>,
+) -> anyhow::Result<()> {
+    // docs:start:service-turn
+    let session = state.open_session(&chat_id).await?;
+
+    use lash::modes::RlmTurnBuilderExt as _;
+
+    let turn = session
+        .turn(TurnInput::text(text))
+        .model(
+            lash::ModelSpec::from_token_limits(
+                model_selection.model,
+                model_selection.model_variant,
+                200_000,
+                None,
+            )
+            .expect("valid model metadata"),
+        )
+        .require_submit()?;
+
+    let output = turn.stream_to(&ui_events).await?;
+    let assistant_text = assistant_text_for_persistence(
+        &output,
+        &turn_state.lock().expect("turn state lock").assistant_prose,
+    );
+    // docs:end:service-turn
+    Ok(())
+}

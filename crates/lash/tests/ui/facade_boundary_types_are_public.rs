@@ -66,7 +66,7 @@ impl RuntimePersistence for FacadeStore {
         })
     }
 
-    lash::impl_unsupported_queued_work_methods!();
+    lash::persistence::impl_unsupported_queued_work_methods!();
 
     async fn save_session_meta(&self, _meta: SessionMeta) -> Result<(), StoreError> {
         Ok(())
@@ -223,6 +223,27 @@ fn model_spec_types_are_nameable(spec: ModelSpec, limits: ModelLimits) {
     let _ = (spec, limits);
 }
 
+fn observation_types_are_homed_in_observe(
+    cursor: lash::observe::SessionCursor,
+    observation: lash::observe::SessionObservation,
+    resume: lash::observe::SessionResume,
+    revision: lash::observe::SessionRevision,
+) {
+    let _ = (cursor, observation, resume, revision);
+}
+
+fn host_event_types_are_homed_in_host_events(
+    event: lash::host_events::HostEvent,
+    report: lash::host_events::HostEventEmitReport,
+    registration: lash::host_events::TriggerRegistration,
+    source_type: lash::host_events::TriggerSourceType,
+    filter: lash::host_events::TriggerSubscriptionFilter,
+    target: lash::host_events::TriggerTargetSummary,
+) {
+    let _ = (event, report, registration, source_type, filter, target);
+    let _ = lash::host_events::empty_host_event_source_key("ui.button.pressed");
+}
+
 async fn persistence_load_helpers_are_nameable(
     store: &dyn RuntimePersistence,
 ) -> Result<Option<RuntimeSessionState>, StoreError> {
@@ -250,4 +271,6 @@ fn main() {
     let _ = provider_reliability_types_are_nameable;
     let _ = model_spec_types_are_nameable;
     let _ = persistence_load_helpers_are_nameable;
+    let _ = observation_types_are_homed_in_observe;
+    let _ = host_event_types_are_homed_in_host_events;
 }

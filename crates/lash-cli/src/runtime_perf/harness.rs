@@ -140,7 +140,7 @@ impl BenchmarkRuntime {
         cancel: tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<lash::TurnResult> {
         let session = self.session.as_ref().expect("benchmark session");
-        let effect_host = session.effect_host().await;
+        let effect_host = session.effect_host();
         let scoped_effect_controller = effect_host
             .scoped(lash::runtime::EffectScope::turn(
                 session.session_id(),
@@ -479,10 +479,13 @@ pub(crate) async fn build_runtime_with_store(
         .model(benchmark_model_spec())
         .plugins(plugin_stack);
     if let Some(config) = trace_config {
-        builder = builder
-            .trace_jsonl_path(config.trace_jsonl_path)
-            .lashlang_execution_jsonl_path(config.lashlang_execution_jsonl_path)
-            .trace_level(config.trace_level);
+        if let Some(path) = config.trace_jsonl_path {
+            builder = builder.trace_jsonl_path(path);
+        }
+        if let Some(path) = config.lashlang_execution_jsonl_path {
+            builder = builder.lashlang_execution_jsonl_path(path);
+        }
+        builder = builder.trace_level(config.trace_level);
     }
     // RlmGlobals carries per-turn host values that are intentionally live-only.
     // Store-backed turns reject those extensions because they cannot be

@@ -337,10 +337,6 @@ impl<'run> ScopedTurnBuilder<'run> {
             .stream_to_with_effect_controller(events, self.controller)
             .await
     }
-
-    pub fn advanced(self) -> AdvancedTurn {
-        self.builder.advanced()
-    }
 }
 
 /// Lower-level turn execution that exposes the raw `SessionEvent` stream.

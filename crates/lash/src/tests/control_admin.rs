@@ -461,7 +461,7 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         let _ = session.read_view();
         let _ = session.usage_report();
         let _ = session.control().tools().state().await?;
-        let _ = session.control().tools().active_definitions().await?;
+        let _ = session.control().tools().active_manifests().await?;
         let _ = session.process_control().list().await?;
         Result::<()>::Ok(())
     })

@@ -10,6 +10,8 @@ fn model_selection_requires_model_and_variant_together() {
     t.compile_fail("tests/ui/session_turn_run_requires_scope.rs");
     t.compile_fail("tests/ui/session_turn_stream_requires_scope.rs");
     t.compile_fail("tests/ui/queued_turn_run_requires_scope.rs");
+    t.compile_fail("tests/ui/scoped_turn_builders_are_not_prelude.rs");
+    t.compile_fail("tests/ui/taxonomy_types_are_not_root.rs");
     t.compile_fail("tests/ui/process_start_requires_scope.rs");
     t.compile_fail("tests/ui/children_start_turn_is_not_public.rs");
     t.pass("tests/ui/config_control_update_session_config_returns_result.rs");

@@ -192,7 +192,7 @@ async fn cancel_selected_process(app: &mut App, runtime: &Option<LashSession>) {
         return;
     };
     let process_control = session.control().processes();
-    let effect_host = session.effect_host().await;
+    let effect_host = session.effect_host();
     let scoped_effect_controller =
         match effect_host.scoped(EffectScope::process(process.process_id.clone())) {
             Ok(controller) => controller,

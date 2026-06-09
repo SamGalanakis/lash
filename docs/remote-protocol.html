@@ -58,8 +58,8 @@
       <h2>Minimal Example</h2>
       <p>Wrap Lash's DTO in your host envelope. Service-specific fields belong in the wrapper or in <code>metadata</code>, not as local forks of Lash sub-objects.</p>
     </div>
-<pre data-lang="rust"><code>use lash::remote::{
-    RemoteInputItem, RemoteTurnInput, RemoteTurnRequest, REMOTE_PROTOCOL_VERSION,
+<pre data-lang="rust" data-snippet="remote_protocol#remote-turn-request"><code>use lash::remote::{
+    REMOTE_PROTOCOL_VERSION, RemoteInputItem, RemoteTurnInput, RemoteTurnRequest,
 };
 
 let request = RemoteTurnRequest {

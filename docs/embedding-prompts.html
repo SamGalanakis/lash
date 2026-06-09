@@ -41,12 +41,12 @@
               <p>Older context is represented through runtime-authored observations in the Prompt View. Configurable: <code>observation_message_tokens</code> (default 30 000), <code>observation_buffer_tokens</code> (6 000), reflection thresholds.</p>
             </article>
           </div>
-          <pre><code>use std::sync::Arc;
+          <pre data-lang="rust" data-snippet="embedding_prompts#observational-memory-core"><code>use std::sync::Arc;
 
 use lash::LashCore;
 use lash_standard_plugins::{
-    standard_tool_stack, ObservationalMemoryConfig, StandardContextApproach,
-    StandardToolStackOptions,
+    ObservationalMemoryConfig, StandardContextApproach, StandardToolStackOptions,
+    standard_tool_stack,
 };
 
 let core = LashCore::standard()
@@ -57,7 +57,9 @@ let core = LashCore::standard()
         ..Default::default()
     }))
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .lashlang_artifact_store(Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .build()?;</code></pre>
           <p>The CLI applies this only to the standard preset; RLM uses its protocol projection state and locked-down runtime stack instead. See <a href="./rlm.html#provider-request-shape">RLM provider request shape</a> for the model-visible request shape.</p>
@@ -79,8 +81,10 @@ let core = LashCore::standard()
               <p>Mode extension at session open — values that persist across turns.</p>
             </article>
           </div>
-          <pre><code>use lash::TurnInput;
-use lash_protocol_rlm::{RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension};
+          <pre data-lang="rust" data-snippet="embedding_prompts#projected-bindings"><code>use lash::TurnInput;
+use lash_protocol_rlm::{
+    RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension,
+};
 
 // Session-wide: applies to every turn the session runs.
 session
@@ -94,15 +98,13 @@ session
     .await?;
 
 // Per-turn: layered on top of the session bindings for this turn only.
-let input = TurnInput::text("Play one move.")
-    .rlm_project(
-        RlmProjectedBindings::new()
-            .bind_json("board", serde_json::to_value(&amp;board)?)?,
-    )?;
+let input = TurnInput::text("Play one move.").rlm_project(
+    RlmProjectedBindings::new().bind_json("board", serde_json::to_value(&amp;board)?)?,
+)?;
 
 let result = session.turn(input).run().await?;</code></pre>
           <p>The model reads these names directly in fenced lashlang:</p>
-          <pre><code>```lashlang
+          <pre data-lang="lashlang"><code>```lashlang
 let move_idx = best_move(board.cells, board.turn)
 submit({ "move": move_idx, "tenant": tenant_id })
 ```</code></pre>
@@ -113,11 +115,10 @@ submit({ "move": move_idx, "tenant": tenant_id })
             <li><code>.bind_lazy(name, ProjectionRef)</code> — for large host structures. Register the host object with a <code>ProjectionResolver</code>, bind the stable ref, and let RLM resolve it immediately before Lashlang execution.</li>
           </ul>
           <p>Lazy bindings no longer accept a raw <code>Arc&lt;dyn ProjectedHostValue&gt;</code> through the public RLM API. Keep the object behind a resolver so snapshots, AgentFrame switches, and child seeds carry an opaque <code>ProjectionRef</code> instead of accidentally materializing the large value.</p>
-          <pre><code>use std::sync::Arc;
-use lash::{plugins::runtime_plugin_stack, LashCore, ModeId, ModePreset, TurnInput};
-use lash_protocol_rlm::{
-    ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt,
-};
+          <pre data-lang="rust" data-snippet="embedding_prompts#lazy-projection"><code>use std::sync::Arc;
+
+use lash::{LashCore, ModeId, ModePreset, TurnInput, plugins::runtime_plugin_stack};
+use lash_protocol_rlm::{ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt};
 
 let registry = Arc::new(ProjectionRegistry::new());
 let core = LashCore::builder()
@@ -125,17 +126,16 @@ let core = LashCore::builder()
     .default_mode(ModeId::rlm())
     .plugins(runtime_plugin_stack())
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .lashlang_artifact_store(Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .build()?;
 
 // `my_docs_projection` implements `lashlang::ProjectedHostValue`.
 let docs_ref = registry.register_memory(Arc::new(my_docs_projection));
 let input = TurnInput::text("Answer using docs only when needed.")
-    .rlm_project(
-        RlmProjectedBindings::new()
-            .bind_lazy("docs", docs_ref)?,
-    )?;</code></pre>
+    .rlm_project(RlmProjectedBindings::new().bind_lazy("docs", docs_ref)?)?;</code></pre>
           <p><code>ProjectionRegistry::register_memory(...)</code> returns refs that remain valid while that registry lives. After process loss, or if the RLM factory was built with a different resolver, execution fails with an unavailable-projection error rather than replacing the binding with <code>null</code>.</p>
           <h3>Reserved names and the read-only guard</h3>
           <p>Projected names are read-only — assignment inside lashlang raises a protocol error. The runtime reserves <code>history</code>; override by narrowing through your own projected handle, not by rebinding.</p>
@@ -152,12 +152,13 @@ let input = TurnInput::text("Answer using docs only when needed.")
           </div>
           <div class="diagram">
             <div class="diagram-title">Template layout is separate from slot content</div>
-            <pre><code>use std::sync::Arc;
+            <pre data-lang="rust" data-snippet="embedding_prompts#prompt-template"><code>use std::sync::Arc;
 
 use lash::prompt::{
-    PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection,
+    PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection,
 };
+use lash::{PromptLayerSink, TurnInput};
 
 let template = PromptTemplate::new(vec![
     PromptTemplateSection::untitled(vec![
@@ -172,9 +173,14 @@ let template = PromptTemplate::new(vec![
 
 let core = lash::LashCore::standard()
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None, None).expect("valid model metadata"))
+    .model(
+        lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None)
+            .expect("valid model metadata"),
+    )
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .lashlang_artifact_store(Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .prompt_template(template)
     .prompt_contribution(PromptContribution::guidance(
@@ -213,7 +219,7 @@ let result = session
           </div>
           <div class="diagram">
             <div class="diagram-title">Plugin and tool pattern</div>
-            <pre><code>#[derive(Clone, Debug)]
+            <pre data-lang="rust" data-snippet="embedding_prompts#tone-plugin"><code>#[derive(Clone, Debug)]
 struct ToneConfig;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -239,12 +245,20 @@ impl lash::PluginBinding for TonePlugin {
 }
 
 impl lash::plugins::SessionPlugin for ToneSessionPlugin {
-    fn id(&amp;self) -&gt; &amp;'static str { TonePlugin::ID }
+    fn id(&amp;self) -&gt; &amp;'static str {
+        TonePlugin::ID
+    }
 
-    fn register(&amp;self, reg: &amp;mut lash::plugins::PluginRegistrar) -&gt; Result&lt;(), lash::plugins::PluginError&gt; {
+    fn register(
+        &amp;self,
+        reg: &amp;mut lash::plugins::PluginRegistrar,
+    ) -&gt; Result&lt;(), lash::plugins::PluginError&gt; {
         reg.prompt().contribute(Arc::new(|ctx| {
             Box::pin(async move {
-                let Some(input) = ctx.turn_context.plugin_input::&lt;ToneTurnInput&gt;(TonePlugin::ID) else {
+                let Some(input) = ctx
+                    .turn_context
+                    .plugin_input::&lt;ToneTurnInput&gt;(TonePlugin::ID)
+                else {
                     return Ok(Vec::new());
                 };
                 Ok(vec![lash::prompt::PromptContribution::environment(
@@ -269,7 +283,7 @@ impl lash::tools::ToolProvider for ToneTools {
     fn resolve_contract(&amp;self, name: &amp;str) -&gt; Option&lt;Arc&lt;lash::tools::ToolContract&gt;&gt; {
         tone_tool_definitions()
             .into_iter()
-            .find(|definition| definition.name == name)
+            .find(|definition| definition.name() == name)
             .map(|definition| Arc::new(definition.contract()))
     }
 
@@ -282,8 +296,9 @@ impl lash::tools::ToolProvider for ToneTools {
         let Some(input) = call.context.plugin_input::&lt;ToneTurnInput&gt;(TonePlugin::ID) else {
             return Err(lash::tools::ToolResult::err_fmt("missing tone input"));
         };
-        let prepared_payload = serde_json::to_value(input)
-            .map_err(|err| lash::tools::ToolResult::err_fmt(format!("invalid tone input: {err}")))?;
+        let prepared_payload = serde_json::to_value(input).map_err(|err| {
+            lash::tools::ToolResult::err_fmt(format!("invalid tone input: {err}"))
+        })?;
         Ok(lash::tools::PreparedToolCall::from_parts(
             call.pending.call_id,
             call.pending.tool_name,
@@ -296,7 +311,9 @@ impl lash::tools::ToolProvider for ToneTools {
     async fn execute(&amp;self, call: lash::tools::ToolCall&lt;'_&gt;) -&gt; lash::tools::ToolResult {
         let input = match call.context.decode_prepared_payload::&lt;ToneTurnInput&gt;() {
             Ok(input) =&gt; input,
-            Err(err) =&gt; return lash::tools::ToolResult::err_fmt(format!("missing tone input: {err}")),
+            Err(err) =&gt; {
+                return lash::tools::ToolResult::err_fmt(format!("missing tone input: {err}"));
+            }
         };
         run_tone_tool(call.name, call.args, &amp;input.tone)
     }
@@ -306,7 +323,7 @@ impl lash::tools::ToolProvider for ToneTools {
           <p>Human input follows the same rule: a host-supplied tool that waits inside its implementation and returns a normal tool result. No separate runtime prompt event.</p>
           <p>Per-turn plugin input is live host state. It is useful for local, synchronous turns, but durable workflow integrations that may resume a turn later should keep canonical app state in a store and have prompt hooks or tools reload it by session id. The <a href="./example-agent-service.html">agent-service example</a> uses that store-backed pattern for its board state.</p>
           <p>Plugin crates should export a domain extension trait wrapping the generic input primitive:</p>
-          <pre><code>trait ToneTurnExt {
+          <pre data-lang="rust" data-snippet="embedding_prompts#tone-turn-ext"><code>trait ToneTurnExt {
     fn with_tone(self, tone: impl Into&lt;String&gt;) -&gt; Self;
 }
 
@@ -316,12 +333,21 @@ impl ToneTurnExt for lash::TurnBuilder {
     }
 }</code></pre>
           <p>Install on the session; use the extension method before each run:</p>
-          <pre><code>let core = LashCore::rlm()
+          <pre data-lang="rust" data-snippet="embedding_prompts#tone-session"><code>let core = LashCore::rlm()
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
-    .effect_host(std::sync::Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(std::sync::Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
-    .attachment_store(std::sync::Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+    .model(
+        lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
+            .expect("valid model metadata"),
+    )
+    .effect_host(std::sync::Arc::new(
+        lash::durability::InlineEffectHost::default(),
+    ))
+    .lashlang_artifact_store(std::sync::Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
+    .attachment_store(std::sync::Arc::new(
+        lash::persistence::InMemoryAttachmentStore::new(),
+    ))
     .build()?;
 
 let session = core

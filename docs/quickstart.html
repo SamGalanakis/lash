@@ -80,9 +80,9 @@ tokio                = { version = "1", features = ["full"] }</code></pre>
     </div>
     <p>This example uses an OpenAI-compatible provider through OpenRouter. Substitute the provider crate, base URL, model id, and API key for your deployment.</p>
 
-<pre data-lang="rust"><code>use std::sync::Arc;
+<pre data-lang="rust" data-snippet="quickstart#hello-lash"><code>use std::sync::Arc;
 
-use lash::{provider::ProviderHandle, LashCore, TurnInput};
+use lash::{LashCore, TurnInput, provider::ProviderHandle};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
@@ -96,9 +96,14 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     // one LashCore per app, cloned freely.
     let core = LashCore::standard()
         .provider(provider)
-        .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
+        .model(
+            lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None)
+                .expect("valid model metadata"),
+        )
         .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-        .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+        .lashlang_artifact_store(Arc::new(
+            lash::persistence::InMemoryLashlangArtifactStore::new(),
+        ))
         .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 
@@ -126,7 +131,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
         <div class="listing__row">
           <div class="listing__label">live streaming</div>
           <div class="listing__body">
-            <p>Use <code>TurnBuilder::stream(&amp;sink)</code> instead of <code>run()</code> to emit <code>TurnActivity</code> items as the model produces them. The <a href="./embedding-turns.html#semantic-events">Lash API · turns guide</a> covers the full event taxonomy.</p>
+            <p>Use <code>TurnBuilder::stream_to(&amp;sink)</code> instead of <code>run()</code> to emit <code>TurnActivity</code> items as the model produces them. The <a href="./embedding-turns.html#semantic-events">Lash API · turns guide</a> covers the full event taxonomy.</p>
           </div>
         </div>
         <div class="listing__row">
@@ -144,7 +149,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
         <div class="listing__row">
           <div class="listing__label">tracing</div>
           <div class="listing__body">
-            <p>Attach a <code>TraceSink</code> via <code>.trace_sink(Some(Arc::new(sink)))</code> for JSONL traces of every turn. See the <a href="./tracing.html">Tracing guide</a>.</p>
+            <p>Attach a <code>TraceSink</code> via <code>.trace_sink(Arc::new(sink))</code> for JSONL traces of every turn. See the <a href="./tracing.html">Tracing guide</a>.</p>
           </div>
         </div>
         <div class="listing__row">

@@ -428,7 +428,7 @@ async fn handle_slash_command(
                 push_system_message(app, "Compaction is unavailable while a turn is running.");
                 return Ok(false);
             };
-            let effect_host = rt.effect_host().await;
+            let effect_host = rt.effect_host();
             let scoped_effect_controller = effect_host.scoped(EffectScope::runtime_operation(
                 format!("cli-compact:{}:{}", rt.session_id(), uuid::Uuid::new_v4()),
             ));

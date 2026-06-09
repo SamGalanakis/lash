@@ -30,7 +30,7 @@
         <h2>Run It</h2>
         <p>Run from the repo root. The entrypoint checks for Restate ingress/admin on the configured ports; if they are not already up it starts <code>restatedev/restate:1.6.2</code> with host networking, waits for it, launches the workbench and its in-process Restate endpoint, registers the endpoint, then opens the browser.</p>
       </div>
-      <pre><code>OPENROUTER_API_KEY=... just agent-workbench
+      <pre data-lang="console"><code>OPENROUTER_API_KEY=... just agent-workbench
 # then open http://127.0.0.1:3030</code></pre>
       <dl class="def-list">
         <dt><code>TAVILY_API_KEY</code></dt>
@@ -67,7 +67,7 @@
         <h2>Host-Event Buttons</h2>
         <p>The buttons are a zero-config trigger source — the source config is <code>{}</code>, and red/blue selection arrives in the event payload. The model registers a trigger that wakes a process when a button is pressed.</p>
       </div>
-      <pre><code>process on_button(event: ui.button.Pressed) {
+      <pre data-lang="lashlang"><code>process on_button(event: ui.button.Pressed) {
   wake { kind: "button_pressed", button: event.button, message: event.message }
   finish true
 }
@@ -87,7 +87,7 @@ submit { handle: handle, registrations: registrations }</code></pre>
         <h2>Cron Triggers</h2>
         <p>The cron card is the schedule-reference integration: there is no Lashlang <code>schedule</code> syntax and no UI tick button. Restate owns the timer policy. The plugin declares the <code>cron.Schedule</code> source; Lashlang builds a <code>cron.Schedule</code> value and registers it with the runtime trigger registry.</p>
       </div>
-      <pre><code>process daily_digest(tick: cron.Tick) {
+      <pre data-lang="lashlang"><code>process daily_digest(tick: cron.Tick) {
   wake { kind: "daily_digest_due", tick: tick }
   finish true
 }
@@ -108,24 +108,34 @@ submit { handle: handle, registrations: await triggers.list({ target: daily_dige
         <h2>Host Wiring</h2>
         <p>The host declares the trigger source constructors through the plugin's <code>lashlang_resources()</code> hook, and registers the button's event type through host-event registration. The button payload is a union of <code>Red</code> / <code>Blue</code> plus a message and timestamp.</p>
       </div>
-      <pre><code>fn workbench_lashlang_resources() -> lashlang::ResourceCatalog {
+      <pre data-lang="rust" data-snippet="example_agent_workbench#workbench-resources"><code>fn workbench_lashlang_resources() -&gt; lashlang::ResourceCatalog {
     let mut resources = lashlang::ResourceCatalog::new();
-    resources.add_trigger_source_constructor(
-        ["cron", "Schedule"],
-        schedule_config_type(),
-        cron_tick_event_type(),
-    ).expect("valid cron trigger source");
-    resources.add_trigger_source_constructor(
-        ["ui", "button", "pressed"],
-        lashlang::TypeExpr::Object(vec![]),
-        button_trigger_event_type(),
-    ).expect("valid button trigger source");
+    resources
+        .add_trigger_source_constructor(
+            ["cron", "Schedule"],
+            schedule_config_type(),
+            cron_tick_event_type(),
+        )
+        .expect("valid cron trigger source");
+    resources
+        .add_trigger_source_constructor(
+            ["ui", "button", "pressed"],
+            lashlang::TypeExpr::Object(vec![]),
+            button_trigger_event_type(),
+        )
+        .expect("valid button trigger source");
     resources
 }
 
-reg.host_events().declare(
-    HostEvent::new("Button", "ui.button", "pressed", button_trigger_event_type()),
-)?;</code></pre>
+fn declare_button_event(reg: &amp;mut PluginRegistrar) -&gt; Result&lt;(), PluginError&gt; {
+    reg.host_events().declare(HostEvent::new(
+        "Button",
+        "ui.button",
+        "pressed",
+        button_trigger_event_type(),
+    ))?;
+    Ok(())
+}</code></pre>
     </div>
 
     <div class="section" id="live-smoke">
@@ -133,7 +143,7 @@ reg.host_events().declare(
         <h2>Live Smoke</h2>
         <p>A model-free live check that starts Restate, registers the endpoint through Admin, schedules a fast cron, waits for a tick, and checks the JSONL trace.</p>
       </div>
-      <pre><code>just agent-workbench-restate-e2e</code></pre>
+      <pre data-lang="console"><code>just agent-workbench-restate-e2e</code></pre>
       <p>The recipe schedules <code>cron.Schedule({ expr: "*/2 * * * * *", tz: "UTC" })</code>, waits for the Restate virtual object to fire a <code>cron.Tick</code>, asserts the queued turn ran, and removes the container on exit.</p>
     </div>
   </main>

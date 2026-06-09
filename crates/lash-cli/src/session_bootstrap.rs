@@ -328,7 +328,7 @@ impl CliSessionOpener {
         let host_event_store = Arc::new(
             lash_sqlite_store::SqliteHostEventStore::open(&bootstrap.host_events_db_file()).await?,
         );
-        let core_builder = LashCore::builder()
+        let mut core_builder = LashCore::builder()
             .install_mode(ModePreset::standard())
             .install_mode(ModePreset::rlm())
             .default_mode(host_config.execution_mode.clone())
@@ -342,10 +342,12 @@ impl CliSessionOpener {
             .effect_host(effect_host)
             .lashlang_artifact_store(artifact_store)
             .attachment_store(Arc::clone(&self.attachment_store))
-            .trace_jsonl_path(self.trace_jsonl_path.clone())
             .trace_level(self.trace_level)
             .process_registry(process_registry)
             .host_event_store(host_event_store);
+        if let Some(trace_jsonl_path) = self.trace_jsonl_path.clone() {
+            core_builder = core_builder.trace_jsonl_path(trace_jsonl_path);
+        }
         let core = core_builder.build()?;
         let session = core
             .session(session_id)

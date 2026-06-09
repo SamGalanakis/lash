@@ -372,7 +372,7 @@ impl LashSession {
         self.parent_session_id.as_deref()
     }
 
-    pub async fn effect_host(&self) -> Arc<dyn EffectHost> {
+    pub fn effect_host(&self) -> Arc<dyn EffectHost> {
         Arc::clone(&self.effect_host)
     }
 
@@ -540,7 +540,7 @@ impl ObservableSession {
         self.snapshot().tool_state.clone()
     }
 
-    pub fn active_tool_definitions(&self) -> Vec<ToolManifest> {
+    pub fn active_tool_manifests(&self) -> Vec<ToolManifest> {
         self.snapshot()
             .tool_state
             .as_ref()

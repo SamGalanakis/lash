@@ -1179,6 +1179,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "docs-snippets"
+version = "0.1.0-alpha.42"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "lash-core",
+ "lash-plugin-mcp",
+ "lash-postgres-store",
+ "lash-protocol-rlm",
+ "lash-provider-openai",
+ "lash-runtime",
+ "lash-s3-store",
+ "lash-sqlite-store",
+ "lash-standard-plugins",
+ "lash-subagents",
+ "lashlang",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

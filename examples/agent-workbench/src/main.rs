@@ -21,8 +21,9 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use chrono::Utc;
+use lash::host_events::HostEvent;
 use lash::plugins::{
-    HostEvent, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash::prompt::PromptContribution;
 use lash::provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy};
@@ -187,8 +188,8 @@ async fn async_main() -> AnyhowResult<()> {
         )))
         .lashlang_artifact_store(artifact_store)
         .host_event_store(host_event_store)
-        .trace_sink(Some(Arc::clone(&trace_sink)))
-        .lashlang_execution_sink(Some(Arc::clone(&lashlang_execution_sink)))
+        .trace_sink(Arc::clone(&trace_sink))
+        .lashlang_execution_sink(Arc::clone(&lashlang_execution_sink))
         .trace_level(TraceLevel::Extended)
         .configure_plugins(|plugins| {
             plugins.push(Arc::new(
@@ -205,7 +206,7 @@ async fn async_main() -> AnyhowResult<()> {
         })
         .effect_host(Arc::new(lash_restate::RestateEffectHost::new()))
         .process_work_driver(process_deployment.process_work_driver())
-        .with_queued_work_runner(queued_work_poke.clone())
+        .queued_work_poke(queued_work_poke.clone())
         .build()
         .context("build Lash core")?;
     let process_worker = lash::durability::DurableProcessWorker::new(
@@ -736,7 +737,7 @@ async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Resul
     let tool_count = persisted
         .tool_state_snapshot
         .as_ref()
-        .map(lash::ToolState::len)
+        .map(lash::tools::ToolState::len)
         .unwrap_or_default();
     let store = state
         .session_store_factory
@@ -962,13 +963,13 @@ pub(crate) async fn enqueue_button_host_event_command(
     pressed_at: &str,
     operation_id: &str,
     scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
-) -> AnyhowResult<lash::HostEventEmitReport> {
+) -> AnyhowResult<lash::host_events::HostEventEmitReport> {
     let payload = json!({
         "pressed_at": pressed_at,
         "button": button.as_str(),
         "message": format!("user pressed the {} button", button.lower()),
     });
-    let source_key = lash::empty_host_event_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
+    let source_key = lash::host_events::empty_host_event_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
         .context("button source key")?;
     state.trace(
         "host_event.emit",
@@ -985,7 +986,7 @@ pub(crate) async fn enqueue_button_host_event_command(
         .core
         .host_events()
         .emit(
-            lash::HostEventOccurrenceRequest::new(
+            lash::host_events::HostEventOccurrenceRequest::new(
                 BUTTON_TRIGGER_SOURCE_TYPE,
                 source_key,
                 payload,
@@ -1003,14 +1004,14 @@ pub(crate) async fn enqueue_mail_received_host_event_command(
     message: &mail::MailDelivery,
     operation_id: &str,
     scoped_effect_controller: lash::runtime::ScopedEffectController<'_>,
-) -> AnyhowResult<lash::HostEventEmitReport> {
+) -> AnyhowResult<lash::host_events::HostEventEmitReport> {
     let payload = json!({
         "account": message.account,
         "title": message.title,
         "text": message.text,
     });
-    let source_key =
-        lash::empty_host_event_source_key(MAIL_RECEIVED_SOURCE_TYPE).context("mail source key")?;
+    let source_key = lash::host_events::empty_host_event_source_key(MAIL_RECEIVED_SOURCE_TYPE)
+        .context("mail source key")?;
     state.trace(
         "host_event.emit",
         json!({
@@ -1026,7 +1027,7 @@ pub(crate) async fn enqueue_mail_received_host_event_command(
         .core
         .host_events()
         .emit(
-            lash::HostEventOccurrenceRequest::new(
+            lash::host_events::HostEventOccurrenceRequest::new(
                 MAIL_RECEIVED_SOURCE_TYPE,
                 source_key,
                 payload,
@@ -2168,7 +2169,7 @@ mod tests {
 
         let tool_names = session
             .tools()
-            .active_definitions()
+            .active_manifests()
             .await
             .expect("active tools")
             .into_iter()
@@ -2280,7 +2281,7 @@ mod tests {
             .expect("reopen session");
         let tool_names = reopened
             .tools()
-            .active_definitions()
+            .active_manifests()
             .await
             .expect("active tools")
             .into_iter()
@@ -2347,7 +2348,7 @@ mod tests {
         register_test_trigger(&session).await;
         let tool_names = session
             .tools()
-            .active_definitions()
+            .active_manifests()
             .await
             .expect("active tools")
             .into_iter()
@@ -3005,13 +3006,13 @@ mod tests {
             )))
             .lashlang_artifact_store(artifact_store)
             .host_event_store(host_event_store)
-            .trace_sink(Some(Arc::clone(&trace_sink)))
-            .lashlang_execution_sink(Some(lashlang_execution_sink))
+            .trace_sink(Arc::clone(&trace_sink))
+            .lashlang_execution_sink(lashlang_execution_sink)
             .trace_level(TraceLevel::Extended)
             .plugin(Arc::new(WorkbenchPluginFactory::new("")))
             .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
             .process_work_driver(process_deployment.process_work_driver())
-            .with_queued_work_runner(queued_work_poke.clone())
+            .queued_work_poke(queued_work_poke.clone())
             .build()
             .expect("build core");
         let process_worker = lash::durability::DurableProcessWorker::new(
@@ -3305,9 +3306,9 @@ mod tests {
     async fn emit_test_button_trigger(
         core: &LashCore,
         button: ButtonChoice,
-    ) -> lash::HostEventEmitReport {
-        let source_key =
-            lash::empty_host_event_source_key(BUTTON_TRIGGER_SOURCE_TYPE).expect("source key");
+    ) -> lash::host_events::HostEventEmitReport {
+        let source_key = lash::host_events::empty_host_event_source_key(BUTTON_TRIGGER_SOURCE_TYPE)
+            .expect("source key");
         let idempotency_key = format!(
             "workbench-test-button-host-event:{}:{}",
             button.as_str(),
@@ -3320,7 +3321,7 @@ mod tests {
         .expect("inline host event effect scope");
         core.host_events()
             .emit(
-                lash::HostEventOccurrenceRequest::new(
+                lash::host_events::HostEventOccurrenceRequest::new(
                     BUTTON_TRIGGER_SOURCE_TYPE,
                     source_key,
                     json!({

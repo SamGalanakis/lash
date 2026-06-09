@@ -558,7 +558,7 @@ impl SessionControl {
         self.apply_tool_state(state).await
     }
 
-    async fn active_tool_definitions(&self) -> Result<Vec<ToolManifest>> {
+    async fn active_tool_manifests(&self) -> Result<Vec<ToolManifest>> {
         Ok(self.tool_state().await?.tool_manifests())
     }
 
@@ -751,8 +751,8 @@ impl ToolsControl {
             .await
     }
 
-    pub async fn active_definitions(&self) -> Result<Vec<ToolManifest>> {
-        self.control.active_tool_definitions().await
+    pub async fn active_manifests(&self) -> Result<Vec<ToolManifest>> {
+        self.control.active_tool_manifests().await
     }
 
     pub async fn add_provider(&self, provider: Arc<dyn ToolProvider>) -> Result<ToolSourceHandle> {

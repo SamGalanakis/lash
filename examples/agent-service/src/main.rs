@@ -119,10 +119,10 @@ async fn main() -> anyhow_like::Result<()> {
             data_dir.join("attachments"),
         )))
         .lashlang_artifact_store(artifact_store)
-        .trace_sink(Some(Arc::new(TeeTraceSink::new([
+        .trace_sink(Arc::new(TeeTraceSink::new([
             Arc::new(StderrTraceSink::default()) as Arc<dyn TraceSink>,
             Arc::new(JsonlTraceSink::new(trace_path)),
-        ]))))
+        ])))
         .trace_level(TraceLevel::Extended)
         .host_event_store(host_event_store);
     let process_registry = Arc::new(

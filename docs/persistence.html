@@ -58,23 +58,29 @@
         <h2>Minimal Example</h2>
         <p>Install one session-store factory plus explicit artifact and attachment stores on the core; every session inherits them.</p>
       </div>
-          <pre><code>use std::sync::Arc;
+          <pre data-lang="rust" data-snippet="persistence#sqlite-core"><code>use std::sync::Arc;
+
 use lash::{LashCore, ModeId, ModePreset};
 use lash_sqlite_store::{SqliteSessionStoreFactory, Store};
 
 let data_dir = std::path::PathBuf::from("./.lash-data");
 let store_factory = Arc::new(SqliteSessionStoreFactory::new(data_dir.join("sessions")));
-let artifact_store = Arc::new(Store::open(&amp;data_dir.join("artifacts.db"))?);
+let artifact_store = Arc::new(Store::open(&amp;data_dir.join("artifacts.db")).await?);
 
 let core = LashCore::builder()
     .install_mode(ModePreset::rlm())
     .default_mode(ModeId::rlm())
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
+    .model(
+        lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None)
+            .expect("valid model metadata"),
+    )
     .store_factory(store_factory)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
     .lashlang_artifact_store(artifact_store)
-    .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(data_dir.join("attachments"))))
+    .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
+        data_dir.join("attachments"),
+    )))
     .build()?;</code></pre>
     </div>
 
@@ -84,7 +90,7 @@ let core = LashCore::builder()
         <p>Use the core-level factory for app servers. Use a per-session override only for tests or hosts that already own a concrete store.</p>
       </div>
       <p>Per-session override:</p>
-          <pre><code>let session = core
+          <pre data-lang="rust" data-snippet="persistence#explicit-store"><code>let session = core
     .session(chat_id)
     .store(Arc::new(my_custom_persistence))
     .open()
@@ -97,7 +103,8 @@ let core = LashCore::builder()
         <h2>Distributed Backends</h2>
         <p>Use <code>lash-postgres-store</code> plus <code>lash-s3-store</code> when multiple workers must share one durable runtime state and one attachment byte store.</p>
       </div>
-      <pre><code>use std::sync::Arc;
+      <pre data-lang="rust" data-snippet="persistence#postgres-core"><code>use std::sync::Arc;
+
 use lash_postgres_store::PostgresStorage;
 use lash_s3_store::S3AttachmentStore;
 
@@ -121,7 +128,7 @@ let core = LashCore::builder()
       <p><code>PostgresStorage::connect</code> creates the exact supported schema on an empty database and rejects mismatched component versions. Runtime checkpoints, queued work, process rows, host events, attachment manifests, and Lashlang artifacts live in Postgres. Attachment bytes live in S3-compatible object storage under content-addressed keys; MinIO uses the same implementation with an endpoint URL and path-style mode.</p>
       <p><code>PostgresStoreConfig</code> applies connection-level backstops by default: a 10 second <code>lock_timeout</code> and a 30 second <code>statement_timeout</code>. Session commits are optimistic CAS writes on the head revision; Postgres serialization failures, deadlocks, and lock-acquisition timeouts on that write surface as <code>HeadRevisionConflict</code> so hosts can reload and retry instead of treating ordinary write contention as an opaque backend failure.</p>
       <p>The distributed integration harness is <code>just restate-postgres-workers-e2e</code>. It starts Postgres, MinIO, Restate, a deterministic OpenAI-compatible mock provider, two worker processes behind a Caddy h2c proxy, and a runner. The workers build a normal downstream-style <code>LashCore</code> with <code>PostgresStorage</code>, <code>S3AttachmentStore</code>, <code>PostgresLashlangArtifactStore</code>, <code>PostgresHostEventStore</code>, <code>PostgresProcessRegistry</code>, <code>RestateRuntimeEffectController</code>, <code>RestateProcessDeployment</code>, and JSONL trace sinks.</p>
-      <p>The scenario runs real <code>session.turn(input).stream(...)</code> turns through the public facade. It covers foreground tools, attachment creation through the configured attachment store, parent/nested/parallel Lashlang processes, durable sleep and wake paths, public trigger registration and delivery, live replay from a stored observation cursor, MinIO byte/metadata assertions, and a failover where worker A exits from the real turn path after a durable effect and worker B completes through Restate replay.</p>
+      <p>The scenario runs real <code>session.turn(input).stream_to(...)</code> turns through the public facade. It covers foreground tools, attachment creation through the configured attachment store, parent/nested/parallel Lashlang processes, durable sleep and wake paths, public trigger registration and delivery, live replay from a stored observation cursor, MinIO byte/metadata assertions, and a failover where worker A exits from the real turn path after a durable effect and worker B completes through Restate replay.</p>
     </div>
 
     <div class="section" id="delete-sessions">
@@ -129,10 +136,10 @@ let core = LashCore::builder()
         <h2>Delete Sessions</h2>
         <p>Use <code>LashCore::delete_session(..., scope)</code> when an app-level delete should remove factory-backed runtime state for a session id.</p>
       </div>
-      <pre><code>let effect_host = core.effect_host();
-let scope = effect_host.scoped(lash::runtime::EffectScope::runtime_operation(
-    format!("delete-session:{chat_id}"),
-))?;
+      <pre data-lang="rust" data-snippet="persistence#delete-session"><code>let effect_host = core.effect_host();
+let scope = effect_host.scoped(lash::runtime::EffectScope::runtime_operation(format!(
+    "delete-session:{chat_id}"
+)))?;
 let report = core.delete_session(chat_id, scope).await?;
 
 if let Some(process_report) = report.process {
@@ -165,11 +172,14 @@ if let Some(process_report) = report.process {
         <p>At most one turn per session commits at a time. Stores check the expected head revision in the same transaction as the commit; mismatch rolls back with no partial state.</p>
       </div>
       <p>Concurrent turns from two workers on the same session id race for the head. The loser receives a turn-level error such as <code>store_commit_failed</code>; it is not a <code>TurnStop</code> variant.</p>
-      <pre><code>match session.turn(input).run().await {
-    Ok(turn) =&gt; persist(turn),
-    Err(err) if err.code == "store_commit_failed" =&gt; {
+      <pre data-lang="rust" data-snippet="persistence#commit-conflict-retry"><code>use lash::runtime::RuntimeErrorCode;
+
+match session.turn(input).run().await {
+    Ok(turn) =&gt; persist(turn)?,
+    Err(lash::EmbedError::Runtime(err)) if err.code == RuntimeErrorCode::StoreCommitFailed =&gt; {
+        // Another writer won the head-revision race: reload and retry.
         let session = core.session(chat_id).open().await?;
-        retry_or_surface(err, session);
+        retry_or_surface(err, session)?;
     }
     Err(other) =&gt; bail!(other),
 }</code></pre>
@@ -198,19 +208,26 @@ if let Some(process_report) = report.process {
         <h2>End-To-End Example</h2>
         <p>The <code>agent-service</code> example keeps app storage and runtime storage separate: chat rows in one database, Lash sessions in the runtime store.</p>
       </div>
-          <pre><code>// One factory at boot, shared across every chat.
+          <pre data-lang="rust" data-snippet="persistence#shared-factory"><code>// One factory at boot, shared across every chat.
 let store_factory = Arc::new(SqliteSessionStoreFactory::new(
     data_dir.join("lash-sessions"),
 ));
-let artifact_store = Arc::new(lash_sqlite_store::Store::open(
-    &amp;data_dir.join("lash-artifacts.db"),
-)?);
+let artifact_store =
+    Arc::new(lash_sqlite_store::Store::open(&amp;data_dir.join("lash-artifacts.db")).await?);
 
 let core = LashCore::builder()
     .install_mode(ModePreset::rlm())
     .default_mode(ModeId::rlm())
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits(model.clone(), Some(model_variant.clone()), 200_000, None, None).expect("valid model metadata"))
+    .model(
+        lash::ModelSpec::from_token_limits(
+            model.clone(),
+            Some(model_variant.clone()),
+            200_000,
+            None,
+        )
+        .expect("valid model metadata"),
+    )
     .store_factory(store_factory)
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
     .lashlang_artifact_store(artifact_store)

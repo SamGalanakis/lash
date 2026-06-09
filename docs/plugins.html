@@ -62,14 +62,20 @@
         <h2>Minimal Example</h2>
         <p>Start from the runtime defaults and append one plugin factory. Preset builders include the default runtime stack; raw builders stay explicit.</p>
       </div>
-<pre data-lang="rust"><code>use std::sync::Arc;
-use lash::{plugins::PluginFactory, LashCore};
+<pre data-lang="rust" data-snippet="plugins#plugin-core"><code>use std::sync::Arc;
+
+use lash::{LashCore, plugins::PluginFactory};
 
 let core = LashCore::rlm()
     .provider(provider)
-    .model(lash::ModelSpec::from_token_limits(model_id, None, 200_000, None, None)?)
+    .model(
+        lash::ModelSpec::from_token_limits(model_id, None, 200_000, None)
+            .expect("valid model metadata"),
+    )
     .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
-    .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+    .lashlang_artifact_store(Arc::new(
+        lash::persistence::InMemoryLashlangArtifactStore::new(),
+    ))
     .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
     .configure_plugins(|plugins| {
         plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
@@ -83,10 +89,9 @@ let core = LashCore::rlm()
         <h2>Worked Example</h2>
         <p>The plan-mode plugin is a compact model: one factory, one session plugin, a session-local state object, one tool provider, and hooks that emit UI state after tool calls.</p>
       </div>
-<pre data-lang="rust"><code>use std::sync::{Arc, Mutex};
-use lash::plugins::{
-    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
-};
+<pre data-lang="rust" data-snippet="plugins#update-plan-plugin"><code>use std::sync::Mutex;
+
+use lash::plugins::PluginRegistrar;
 use lash::tools::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult};
 
 const PLUGIN_ID: &amp;str = "update_plan";
@@ -94,11 +99,11 @@ const PLUGIN_ID: &amp;str = "update_plan";
 pub struct UpdatePlanPluginFactory;
 
 impl PluginFactory for UpdatePlanPluginFactory {
-    fn id(&amp;self) -&gt; &amp;'static str { PLUGIN_ID }
+    fn id(&amp;self) -&gt; &amp;'static str {
+        PLUGIN_ID
+    }
 
-    fn build(&amp;self, ctx: &amp;PluginSessionContext)
-        -&gt; Result&lt;Arc&lt;dyn SessionPlugin&gt;, PluginError&gt;
-    {
+    fn build(&amp;self, ctx: &amp;PluginSessionContext) -&gt; Result&lt;Arc&lt;dyn SessionPlugin&gt;, PluginError&gt; {
         Ok(Arc::new(UpdatePlanPlugin {
             active: ctx.is_root_session(),
             state: Arc::new(Mutex::new(PlanState::default())),
@@ -112,10 +117,14 @@ struct UpdatePlanPlugin {
 }
 
 impl SessionPlugin for UpdatePlanPlugin {
-    fn id(&amp;self) -&gt; &amp;'static str { PLUGIN_ID }
+    fn id(&amp;self) -&gt; &amp;'static str {
+        PLUGIN_ID
+    }
 
     fn register(&amp;self, reg: &amp;mut PluginRegistrar) -&gt; Result&lt;(), PluginError&gt; {
-        if !self.active { return Ok(()); }
+        if !self.active {
+            return Ok(());
+        }
         reg.tools().provider(Arc::new(UpdatePlanTool {
             state: Arc::clone(&amp;self.state),
         }))?;

@@ -2732,7 +2732,7 @@ pub(crate) async fn run_once_embed(
             "run_turn",
             Some(cancel.clone()),
             async {
-                let effect_host = session.effect_host().await;
+                let effect_host = session.effect_host();
                 let scoped_effect_controller = effect_host
                     .scoped(lash::runtime::EffectScope::turn(
                         session.session_id(),

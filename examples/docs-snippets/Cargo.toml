@@ -1,0 +1,25 @@
+[package]
+name = "docs-snippets"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+description = "Compiled sources for the Rust code blocks in docs/*.html. cargo check fails when a doc snippet stops compiling; scripts/lint_docs.py fails when the HTML drifts from these files."
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+lash = { workspace = true }
+lash-core = { workspace = true, features = ["otel-trace"] }
+lash-plugin-mcp = { workspace = true }
+lash-postgres-store = { workspace = true }
+lash-protocol-rlm = { workspace = true }
+lash-provider-openai = { workspace = true }
+lash-s3-store = { workspace = true }
+lash-sqlite-store = { workspace = true }
+lash-standard-plugins = { workspace = true }
+lash-subagents = { workspace = true }
+lashlang = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

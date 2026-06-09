@@ -827,7 +827,7 @@ async fn emit_cron_occurrence(
         .core
         .host_events()
         .emit(
-            lash::HostEventOccurrenceRequest::new(
+            lash::host_events::HostEventOccurrenceRequest::new(
                 CRON_SCHEDULE_SOURCE_TYPE,
                 request.source_key.clone(),
                 json!({
@@ -926,7 +926,7 @@ fn next_cron_time(
 
 fn cron_request_from_registration(
     session_id: &str,
-    registration: &lash::TriggerRegistration,
+    registration: &lash::host_events::TriggerRegistration,
 ) -> Result<(String, WorkbenchCronRequest), String> {
     let source_type = registration.source_type.as_str();
     if source_type != CRON_SCHEDULE_SOURCE_TYPE {

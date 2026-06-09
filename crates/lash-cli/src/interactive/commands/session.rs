@@ -180,7 +180,7 @@ pub(super) async fn handle_retry(
             Some(session) => session
                 .control()
                 .tools()
-                .active_definitions()
+                .active_manifests()
                 .await
                 .unwrap_or_default(),
             None => Vec::new(),

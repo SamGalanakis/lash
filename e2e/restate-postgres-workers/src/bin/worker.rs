@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use lash::durability::DurableProcessWorker;
-use lash::{SessionResume, TurnActivity, TurnActivitySink, TurnEvent, TurnInput};
+use lash::observe::SessionResume;
+use lash::{TurnActivity, TurnActivitySink, TurnEvent, TurnInput};
 use lash_postgres_store::PostgresStorage;
 use lash_restate::{LashProcessWorkflow, RestateProcessDeployment, RestateRuntimeEffectController};
 use restate_sdk::errors::{HandlerResult, TerminalError};

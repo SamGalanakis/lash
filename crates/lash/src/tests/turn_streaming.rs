@@ -1212,9 +1212,7 @@ submit value
         .tools(Arc::new(BlockingAppTools::new(entered_tx, release_rx)))
         .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
         .process_registry(Arc::new(TestLocalProcessRegistry::default()))
-        .lashlang_execution_sink(Some(
-            Arc::clone(&graph_store) as Arc<dyn crate::tracing::TraceSink>
-        ))
+        .lashlang_execution_sink(Arc::clone(&graph_store) as Arc<dyn crate::tracing::TraceSink>)
         .build()?;
     let session = core.session("rlm-lashlang-graph-store").open().await?;
     let turn_session = session.clone();

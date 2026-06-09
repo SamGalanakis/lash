@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use lash::durability::EffectHost;
-use lash::modes::{LashlangAbilities, ModeId, ModePreset, RlmProtocolPluginConfig};
+use lash::modes::{LashlangAbilities, RlmProtocolPluginConfig};
 use lash::persistence::{AttachmentStore, LashlangArtifactStore, SessionStoreFactory};
 use lash::plugins::{PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin};
 use lash::process::{ProcessRegistry, ProcessWorkDriver};
@@ -8,6 +8,7 @@ use lash::tools::{
     StaticToolExecute, StaticToolProvider, ToolAgentSurface, ToolCall, ToolDefinition,
     ToolProvider, ToolResult,
 };
+use lash::{ModeId, ModePreset};
 use lash_provider_openai::OpenAiCompatibleProvider;
 use lash_restate::RestateEffectHost;
 use lash_s3_store::{S3AttachmentStore, S3AttachmentStoreConfig};
@@ -475,12 +476,10 @@ pub fn build_e2e_core(config: E2eCoreConfig) -> Result<lash::LashCore> {
         }));
     if let Some(trace_dir) = config.trace_dir {
         builder = builder
-            .trace_jsonl_path(Some(
-                trace_dir.join(format!("{}.trace.jsonl", config.worker_id)),
-            ))
-            .lashlang_execution_jsonl_path(Some(
+            .trace_jsonl_path(trace_dir.join(format!("{}.trace.jsonl", config.worker_id)))
+            .lashlang_execution_jsonl_path(
                 trace_dir.join(format!("{}.lashlang.jsonl", config.worker_id)),
-            ));
+            );
     }
     builder.build().context("build e2e LashCore")
 }
@@ -548,12 +547,13 @@ impl SessionPlugin for E2eSessionPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), lash::plugins::PluginError> {
-        reg.host_events().declare(lash::HostEvent::new(
-            "Button",
-            "ui.button",
-            "pressed",
-            button_pressed_event_type(),
-        ))?;
+        reg.host_events()
+            .declare(lash::host_events::HostEvent::new(
+                "Button",
+                "ui.button",
+                "pressed",
+                button_pressed_event_type(),
+            ))?;
         reg.tools()
             .provider(e2e_tool_provider(
                 self.pool.clone(),

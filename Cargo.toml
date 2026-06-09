@@ -47,6 +47,7 @@ members = [
     "crates/lashlang",
     "examples/agent-service",
     "examples/agent-workbench",
+    "examples/docs-snippets",
     "e2e/restate-postgres-workers",
 ]
 # `cargo build` from the repo root compiles only the publishable SDK surface.

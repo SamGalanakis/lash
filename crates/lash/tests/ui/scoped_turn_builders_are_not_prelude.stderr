@@ -1,0 +1,38 @@
+error[E0432]: unresolved imports `lash::prelude::ScopedQueuedTurnBuilder`, `lash::prelude::ScopedTurnBuilder`
+ --> tests/ui/scoped_turn_builders_are_not_prelude.rs:2:5
+  |
+2 |     ScopedQueuedTurnBuilder as PreludeScopedQueuedTurnBuilder,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ScopedQueuedTurnBuilder` in `prelude`
+3 |     ScopedTurnBuilder as PreludeScopedTurnBuilder,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ScopedTurnBuilder` in `prelude`
+  |
+help: a similar name exists in the module
+  |
+2 -     ScopedQueuedTurnBuilder as PreludeScopedQueuedTurnBuilder,
+2 +     QueuedTurnBuilder as PreludeScopedQueuedTurnBuilder,
+  |
+help: a similar name exists in the module
+  |
+3 -     ScopedTurnBuilder as PreludeScopedTurnBuilder,
+3 +     QueuedTurnBuilder as PreludeScopedTurnBuilder,
+  |
+
+error[E0432]: unresolved imports `lash::AdvancedTurn`, `lash::ScopedQueuedTurnBuilder`, `lash::ScopedTurnBuilder`
+ --> tests/ui/scoped_turn_builders_are_not_prelude.rs:5:12
+  |
+5 | use lash::{AdvancedTurn, ScopedQueuedTurnBuilder, ScopedTurnBuilder};
+  |            ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^ no `ScopedTurnBuilder` in the root
+  |            |             |
+  |            |             no `ScopedQueuedTurnBuilder` in the root
+  |            no `AdvancedTurn` in the root
+  |
+help: a similar name exists in the module
+  |
+5 - use lash::{AdvancedTurn, ScopedQueuedTurnBuilder, ScopedTurnBuilder};
+5 + use lash::{AdvancedTurn, QueuedTurnBuilder, ScopedTurnBuilder};
+  |
+help: a similar name exists in the module
+  |
+5 - use lash::{AdvancedTurn, ScopedQueuedTurnBuilder, ScopedTurnBuilder};
+5 + use lash::{AdvancedTurn, ScopedQueuedTurnBuilder, QueuedTurnBuilder};
+  |

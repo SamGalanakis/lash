@@ -28,7 +28,8 @@ pub(crate) use lash_core::{
     SessionHandle, SessionObservation, SessionObservationSubscription, SessionProcessEventKind,
     SessionReadView, SessionResume, SessionSnapshot, SessionStoreCreateRequest,
     SessionStoreFactory, SessionUsageReport, TerminationPolicy, ToolAvailability, ToolCallRecord,
-    ToolManifest, ToolProvider, ToolResult, ToolSourceHandle, TurnActivitySink, TurnOutcome,
+    ToolManifest, ToolProvider, ToolResult, ToolSourceHandle, ToolState, TurnActivitySink,
+    TurnOutcome,
 };
 pub(crate) use lash_core::{InputItem, TokenLedgerEntry, TokenUsage};
 pub(crate) use lash_core::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};
@@ -36,7 +37,6 @@ pub(crate) use lash_core::{TurnActivity, TurnInput};
 #[cfg(test)]
 pub(crate) use lash_core::{TurnActivityId, TurnEvent};
 
-pub(crate) use crate::ToolState;
 pub(crate) use crate::control::*;
 pub(crate) use crate::core::*;
 pub(crate) use crate::error::*;

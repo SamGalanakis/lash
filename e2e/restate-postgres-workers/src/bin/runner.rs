@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use lash::{HostEventOccurrenceRequest, empty_host_event_source_key};
+use lash::host_events::{HostEventOccurrenceRequest, empty_host_event_source_key};
 use lash_core::{
     EffectScope, InlineRuntimeEffectController, RuntimePersistence, ScopedEffectController,
 };
