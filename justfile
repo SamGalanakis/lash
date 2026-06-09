@@ -165,30 +165,52 @@ release-automation-test:
   python3 "{{repo}}/scripts/test_publish_workspace.py"
 
 # ── crates.io publishing ─────────────────────────────────────
-# Topological order of every publishable crate. Computed once via
-# `cargo metadata` then frozen here; edit by hand if a new internal
-# dep edge appears. Single space-separated line so bash for-loops
-# iterate cleanly when {{publish-crates}} is interpolated.
-publish-crates := "lash-provider-auth lash-sansio lash-trace lashlang lash-core lash-openai-schema lash-rlm-types lash-llm-tools lash-llm-transport lash-protocol-rlm lash-protocol-standard lash-plugin-mcp lash-plugin-observational-memory lash-plugin-prompt-context lash-plugin-rolling-history lash-plugin-tool-discovery lash-sqlite-store lash-tool-support lash-provider-anthropic lash-provider-codex lash-provider-google lash-provider-openai lash-runtime lash-subagents lash-tool-apply-patch lash-tool-files lash-tool-search lash-tool-shell lash-tool-web lash-plugin-plan-mode lash-providers-builtin lash-standard-plugins"
-
-# Show the publish order and current workspace version.
+# Show the current publishable workspace set and version. The release
+# publisher computes the real dependency order from cargo metadata.
 publish-order:
-  @echo "Workspace version: $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-  @echo
-  @echo "Publish order:"
-  @i=0; for c in {{publish-crates}}; do i=$((i+1)); printf '  %2d. %s\n' "$i" "$c"; done
+  #!/usr/bin/env bash
+  set -euo pipefail
+  python3 - <<'PY'
+  import json
+  import subprocess
+
+  metadata = json.loads(subprocess.check_output([
+      "cargo",
+      "metadata",
+      "--format-version",
+      "1",
+      "--locked",
+      "--no-deps",
+  ], text=True))
+  members = set(metadata["workspace_members"])
+  publishable = sorted(
+      package["name"]
+      for package in metadata["packages"]
+      if package["id"] in members and package.get("publish") != []
+  )
+  version = next(
+      package["version"]
+      for package in metadata["packages"]
+      if package["name"] == "lash-runtime"
+  )
+  print(f"Workspace version: {version}")
+  print()
+  print("Publishable crates:")
+  for index, name in enumerate(publishable, start=1):
+      print(f"  {index:2}. {name}")
+  PY
 
 # Dry-run the two leaf crates (no internal deps) — quick sanity check.
 # Non-leaf dry-runs only work after their deps are already on crates.io.
 publish-dry-run:
   @echo "Dry-run on leaf crates (lash-sansio, lashlang)..."
-  cargo publish --dry-run -p lash-sansio
-  cargo publish --dry-run -p lashlang
+  cargo publish --dry-run --locked -p lash-sansio
+  cargo publish --dry-run --locked -p lashlang
   @echo "OK."
 
 # Publish a single crate. Idempotent: returns success if the same
 # version is already on crates.io.
-publish-one CRATE:
+publish-one CRATE *args:
   #!/usr/bin/env bash
   set -euo pipefail
   version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
@@ -199,32 +221,13 @@ publish-one CRATE:
     exit 0
   fi
   echo "  → publishing {{CRATE}}@$version"
-  cargo publish -p "{{CRATE}}"
+  cargo publish -p "{{CRATE}}" --no-verify --locked "$@"
 
-# Publish every crate in dependency order. Re-runnable: each crate is
-# checked against crates.io and skipped if its version is already
-# there. Sleeps between publishes so the index settles before the next
-# dep tries to resolve.
-publish-all SLEEP="12":
-  #!/usr/bin/env bash
-  set -euo pipefail
-  version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-  echo "Publishing workspace at $version"
-  echo
-  for c in {{publish-crates}}; do
-    status=$(curl -s -o /dev/null -w "%{http_code}" \
-      "https://crates.io/api/v1/crates/$c/$version")
-    if [ "$status" = "200" ]; then
-      printf '  ✓ %-40s already on crates.io\n' "$c@$version"
-      continue
-    fi
-    printf '  → %-40s publishing...\n' "$c@$version"
-    cargo publish -p "$c"
-    echo "    sleeping {{SLEEP}}s for index..."
-    sleep {{SLEEP}}
-  done
-  echo
-  echo "Done."
+# Publish every publishable workspace crate in dependency order. Re-runnable:
+# already-published versions are skipped; transient crates.io/Cargo registry
+# failures are retried by the helper.
+publish-all *args:
+  python3 "{{repo}}/scripts/publish_workspace.py" "$@"
 
 check-file-size:
   ./scripts/check-production-file-size.sh

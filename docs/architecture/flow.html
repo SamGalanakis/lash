@@ -130,7 +130,7 @@ flowchart LR
             <div class="diagram-title">Read projection path</div>
             <div class="mermaid">
 flowchart LR
-  Store["Store<br/>SQLite + blobs + session_head"] --> State["PersistedSessionRead"]
+  Store["Store<br/>SQLite/Postgres state + blobs/attachments + session_head"] --> State["PersistedSessionRead"]
   State --> Graph["SessionGraph<br/>nodes + leaf_node_id"]
   Graph --> ReadModel["internal SessionReadModel cache<br/>active_events, messages"]
   ReadModel --> View["SessionReadView"]
@@ -158,7 +158,7 @@ flowchart TD
   Runtime --> Usage["SessionUsageReport<br/>ledger by source + model"]
   Usage --> Deltas["usage deltas<br/>host reports"]
   Runtime --> Trace["provider JSONL trace<br/>LLM started/completed"]
-  Runtime --> Store["SQLite session DB"]
+  Runtime --> Store["session store<br/>SQLite or Postgres"]
   Trace --> Export["lash-export prompt snapshots<br/>context %, cached %, token bars"]
   Store --> Export
             </div>

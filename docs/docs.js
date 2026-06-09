@@ -83,7 +83,7 @@
         {
           title: "Persistence",
           href: "persistence.html",
-          summary: "Install a session store, understand what persists, handle CAS conflicts, and garbage-collect durable state.",
+          summary: "Install local or distributed stores, understand what persists, handle CAS conflicts, and verify Postgres/S3/Restate E2E durability.",
           kind: "guide",
         },
         {
@@ -243,7 +243,7 @@
         {
           title: "Scaling",
           href: "architecture/scaling.html",
-          summary: "Running lash as a stateless, horizontally-scaling microservice: durable object per session, the RuntimePersistence seam, CAS, and session-agnostic ingress.",
+          summary: "Running lash as a stateless, horizontally-scaling microservice with Postgres, S3-compatible attachments, Restate replay, CAS, and session-agnostic ingress.",
           kind: "internal",
         },
       ],

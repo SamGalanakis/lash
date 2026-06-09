@@ -127,9 +127,11 @@ It:
   unleased processes and (re-)runs them.**
 
 **3. Host supplies the backend; lash owns the durability logic** — exactly as
-with turns. The host wires the SQLite registry and runs the worker (under
-Restate, the worker handler is a workflow Restate re-invokes). The host does not
-re-implement recovery, leasing, or idempotency per deployment.
+with turns. The host wires a durable registry (`SqliteProcessRegistry` for
+local deployments or `PostgresProcessRegistry` for distributed deployments) and
+runs the worker (under Restate, the worker handler is a workflow Restate
+re-invokes). The host does not re-implement recovery, leasing, or idempotency
+per deployment.
 
 This deletes the asymmetry: a trigger-started process is identically durable to a
 turn-started one, because both are just registered intent that the durable worker
@@ -144,8 +146,9 @@ A generalization of code that already existed for turns — not a new subsystem:
   `schema_version`, `process_id`, `owner_id`, `lease_token`, `fencing_token`,
   `claimed_at_epoch_ms`, `expires_at_epoch_ms`, plus `ProcessLeaseCompletion`.
   The owner / lease-token / fencing-token triple is the distributed
-  single-owner contract. Implemented on `SqliteProcessRegistry` (durable,
-  fencing CAS) and `TestLocalProcessRegistry` (in-memory).
+  single-owner contract. Implemented on `SqliteProcessRegistry` and
+  `PostgresProcessRegistry` (durable, fencing CAS) plus
+  `TestLocalProcessRegistry` (in-memory).
 - **`ProcessRegistry::list_non_terminal()`** — the worklist query: the
   non-terminal rows *are* the durable work queue, alongside the claim / renew /
   complete lease ops.

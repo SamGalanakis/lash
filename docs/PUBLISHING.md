@@ -10,28 +10,47 @@ publishes them all together, in dependency order.
 - **Published:** every workspace member without `publish = false`. The public
   entry point is `lash-runtime` (imported as `lash`); embedders also pull in
   provider crates (`lash-provider-*`), stores (`lash-sqlite-store`,
+  `lash-postgres-store`, `lash-s3-store`, `lash-local-store`,
   `lash-restate`), the remote-embedding DTOs (`lash-remote-protocol`), and
-  à-la-carte capability crates (`lash-plugin-mcp`, `lash-subagents`,
-  `lash-plugin-plan-mode`, `lash-llm-tools`).
+  a-la-carte capability crates (`lash-plugin-mcp`, `lash-subagents`,
+  `lash-plugin-plan-mode`, `lash-plugin-tool-output-budget`,
+  `lash-llm-tools`).
 - **Not published:** anything marked `publish = false` — the CLI (`lash-cli`),
-  TUI crates, examples, and dev/internal tooling (`lash-harness-opt`,
-  `lash-trace-viewer`, `lash-export`, `lash-file-index`, `lash-autoresearch`).
+  TUI crates, examples, E2E harnesses, and dev/internal tooling
+  (`lash-harness-opt`, `lash-trace-viewer`, `lash-export`,
+  `lash-file-index`, `lash-autoresearch`).
 
 Because of the exact `=` version pins, a published crate's internal deps must
 already be on crates.io at the same version — so it is **all-or-nothing**:
-`cargo publish --workspace` publishes the whole set in topological order and
-waits for index propagation between crates.
+`scripts/publish_workspace.py` publishes the whole set one crate at a time in
+dependency order and waits for crates.io visibility between crates.
 
 ## How a release runs (CI)
 
 1. Bump the version (`scripts/release_version.py set <version>` — edits the
-   root `[workspace.package]` version and the root `[workspace.dependencies]`
-   pins, the only places versions live now).
+   root `[workspace.package]` version, root `[workspace.dependencies]` pins,
+   checked-in docs snippets, and lockfile entries for workspace members that
+   use `version.workspace = true`). Private fixed-version members, such as E2E
+   harness crates at `0.0.0`, are intentionally left alone.
 2. Tag it `vX.Y.Z` and push (or use the `Release` workflow's
    `workflow_dispatch`).
-3. `.github/workflows/release.yml` → `publish-crates` job runs the core tests,
-   then `cargo publish --workspace --locked`. Already-published versions are
-   skipped, so a failed run can be re-run to resume.
+3. `.github/workflows/release.yml` validates `cargo metadata --locked`, then
+   the `publish-crates` job runs `python3 .release-tools/scripts/publish_workspace.py`.
+   Already-published versions are skipped, so a failed run can be re-run to
+   resume.
+4. The same release workflow builds the CLI release assets and publishes the
+   GitHub release. The normal CI workflow does not auto-release when its commit
+   message contains `[skip release]`.
+
+The main CI workflow also runs:
+
+```bash
+python3 scripts/test_release_version.py
+python3 scripts/test_publish_workspace.py
+```
+
+Those tests pin the lockstep/private-crate version behavior and the publisher's
+transient retry classification.
 
 ## Auth
 
@@ -42,19 +61,26 @@ A token (not Trusted Publishing) is required for the **first** publish of a
 brand-new crate, because crates.io Trusted Publishing can only be configured on
 a crate that already exists.
 
-### One-time bootstrap (creates the 30 not-yet-published crates)
+### First publish of a new crate
 
-All public crates except `lash-core`, `lashlang`, `lash-sansio`, `lash-trace`,
-and `lash-provider-auth` have never been published (the published five are also
-stale at `alpha.1`). To create them at the current version:
+New publishable crates inherit the lockstep version automatically
+(`version.workspace = true`) and reference internal deps through
+`{ workspace = true }`. Add the crate's own pin to root
+`[workspace.dependencies]` so dependents can use it, and keep internal-only
+crates `publish = false`.
+
+To publish the workspace at the current checked-out release version:
 
 ```bash
-# from a clean checkout at the release version, with a crates.io token:
+# from a clean checkout at the release tag, with a crates.io token:
 cargo login          # or export CARGO_REGISTRY_TOKEN=...
-cargo publish --workspace --locked
+python3 scripts/publish_workspace.py
 ```
 
-or set the `CARGO_REGISTRY_TOKEN` secret and run the `Release` workflow once.
+The helper asks crates.io whether each `(crate, version)` is already visible,
+skips published versions, publishes ready crates with `cargo publish -p <crate>
+--no-verify --locked`, retries transient registry/network failures, waits for
+API visibility, then continues to dependents.
 
 ### Upgrade to Trusted Publishing (recommended, after bootstrap)
 
@@ -66,10 +92,3 @@ Once every crate exists on crates.io, configure a trusted publisher for each
 - add a `rust-lang/crates-io-auth-action@v1` step (`id: auth`) before publish,
 - set `CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}`,
 - delete the long-lived `CARGO_REGISTRY_TOKEN` secret.
-
-## Adding a new crate
-
-New publishable crates inherit the version automatically (`version.workspace =
-true`) and reference internal deps via `{ workspace = true }`. Add the crate's
-own version pin to the root `[workspace.dependencies]` so dependents can use it.
-Keep internal-only crates `publish = false`.

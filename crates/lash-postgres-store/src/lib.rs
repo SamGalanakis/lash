@@ -99,7 +99,8 @@ pub struct PostgresStoreConfig {
     pub max_lifetime: Option<Duration>,
     /// Postgres `lock_timeout` applied to every connection. Default 10s.
     pub lock_timeout: Option<Duration>,
-    /// Postgres `statement_timeout` applied to every connection. Default off.
+    /// Postgres `statement_timeout` applied to every connection. Default 30s — a
+    /// backstop so a wedged query can never hold a connection indefinitely.
     pub statement_timeout: Option<Duration>,
 }
 
@@ -112,7 +113,7 @@ impl Default for PostgresStoreConfig {
             idle_timeout: Some(Duration::from_secs(600)),
             max_lifetime: Some(Duration::from_secs(1800)),
             lock_timeout: Some(Duration::from_secs(10)),
-            statement_timeout: None,
+            statement_timeout: Some(Duration::from_secs(30)),
         }
     }
 }
@@ -468,6 +469,19 @@ fn current_timestamp_string() -> String {
 
 fn store_sqlx_error(err: sqlx::Error) -> StoreError {
     StoreError::Backend(err.to_string())
+}
+
+/// Postgres SQLSTATEs that signal transient write contention rather than a hard
+/// failure: serialization failure, deadlock, and lock-acquisition timeout. On the
+/// session head these all mean "a concurrent committer got there first" — i.e. a
+/// revision conflict the caller should reload-and-retry, not a backend error.
+fn is_contention_error(err: &sqlx::Error) -> bool {
+    matches!(
+        err.as_database_error()
+            .and_then(|db| db.code())
+            .as_deref(),
+        Some("40001" | "40P01" | "55P03")
+    )
 }
 
 fn plugin_sqlx_error(err: sqlx::Error) -> PluginError {
@@ -1236,15 +1250,37 @@ impl RuntimePersistence for PostgresSessionStore {
         .bind(checkpoint_ref.as_str())
         .bind(actual_revision as i64)
         .execute(&mut *tx)
-        .await
-        .map_err(store_sqlx_error)?;
+        .await;
+        let head_write = match head_write {
+            Ok(result) => result,
+            Err(err) if is_contention_error(&err) => {
+                // The head row is contended by a concurrent committer (lock
+                // timeout / serialization failure / deadlock). That is a conflict,
+                // not an opaque backend error: surface it so the caller reloads
+                // and retries. The tx is now aborted; returning drops it.
+                return Err(StoreError::HeadRevisionConflict {
+                    expected: commit.expected_head_revision.or(Some(actual_revision)),
+                    actual: actual_revision,
+                });
+            }
+            Err(err) => return Err(store_sqlx_error(err)),
+        };
         if head_write.rows_affected() == 0 {
             // A concurrent commit won the race: the head no longer matches the
-            // revision we read. Returning drops `tx` (auto-rollback), discarding
-            // this attempt's node/usage writes; the caller reloads and retries.
+            // revision we read. Re-read the now-current revision for an accurate
+            // report, then drop `tx` (auto-rollback), discarding this attempt's
+            // node/usage writes; the caller reloads and retries.
+            let actual_now = sqlx::query_scalar::<_, i64>(
+                "SELECT head_revision FROM lash_sessions WHERE session_id = $1",
+            )
+            .bind(&commit.session_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?
+            .map_or(actual_revision, |revision| revision as u64);
             return Err(StoreError::HeadRevisionConflict {
                 expected: commit.expected_head_revision.or(Some(actual_revision)),
-                actual: actual_revision,
+                actual: actual_now,
             });
         }
         for completed in &commit.completed_queue_claims {
