@@ -2497,7 +2497,10 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       }
     }
 
-    function stopTurn() { if (controller) controller.abort(); }
+    function stopTurn() {
+      if (controller) controller.abort();
+      fetch("/api/turn/cancel", { method: "POST" }).catch(() => {});
+    }
     stopButton.addEventListener("click", stopTurn);
 
     /* reset — replaces the server-side session and clears the transcript, with a two-step confirm */

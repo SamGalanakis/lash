@@ -236,6 +236,7 @@ async fn async_main() -> AnyhowResult<()> {
         restate_ingress_url,
         restate_http,
         restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+        turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
         mail_world,
     };
     restate::spawn_restate_endpoint(
@@ -267,6 +268,7 @@ async fn async_main() -> AnyhowResult<()> {
         .route("/api/state", get(app_state))
         .route("/api/events", get(session_events))
         .route("/api/turn", post(send_turn))
+        .route("/api/turn/cancel", post(cancel_turn))
         .route("/api/reset", post(reset_chat))
         .route("/api/button-trigger", post(button_trigger))
         .route("/api/accounts", get(list_accounts).post(add_account))
@@ -305,6 +307,10 @@ struct AppState {
     restate_http: reqwest::Client,
     restate_cron_job_keys: Arc<Mutex<BTreeSet<String>>>,
     mail_world: mail::MailWorld,
+    /// Live cancellation tokens for in-flight user turns, keyed by turn id.
+    /// The Restate turn workflow runs in this same process, so cancelling a
+    /// token here interrupts the runtime's turn loop directly.
+    turn_cancels: Arc<Mutex<BTreeMap<String, (String, tokio_util::sync::CancellationToken)>>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -409,6 +415,27 @@ impl StreamItem {
         Self::Event {
             event: Box::new(event),
         }
+    }
+}
+
+struct TurnCancelGuard {
+    registry: Arc<Mutex<BTreeMap<String, (String, tokio_util::sync::CancellationToken)>>>,
+    turn_id: String,
+    token: tokio_util::sync::CancellationToken,
+}
+
+impl TurnCancelGuard {
+    fn token(&self) -> tokio_util::sync::CancellationToken {
+        self.token.clone()
+    }
+}
+
+impl Drop for TurnCancelGuard {
+    fn drop(&mut self) {
+        self.registry
+            .lock()
+            .expect("turn cancel lock")
+            .remove(&self.turn_id);
     }
 }
 
@@ -788,6 +815,18 @@ async fn inject_message(
     Ok(Json(CommandAccepted { accepted: true }))
 }
 
+async fn cancel_turn(State(state): State<AppState>) -> Result<Json<CommandAccepted>, AppError> {
+    let session_id = state.current_session_id();
+    let cancelled = state.cancel_turns_for_session(&session_id);
+    state.trace(
+        "api.turn.cancel",
+        json!({ "session_id": session_id, "cancelled": cancelled }),
+    );
+    Ok(Json(CommandAccepted {
+        accepted: cancelled > 0,
+    }))
+}
+
 async fn reset_chat(State(state): State<AppState>) -> Result<Json<StateSnapshot>, AppError> {
     let old_session_id = state.current_session_id();
     restate::cancel_cron_jobs_for_session(&state, &old_session_id, "reset").await?;
@@ -1102,6 +1141,34 @@ impl AppState {
                 .push(item.clone());
         }
         let _ = self.event_tx.send(item);
+    }
+
+    /// Register a cancellation token for an in-flight user turn. Dropping the
+    /// guard removes the entry, so abandoned workflows do not leak tokens.
+    fn register_turn_cancel(&self, session_id: &str, turn_id: &str) -> TurnCancelGuard {
+        let token = tokio_util::sync::CancellationToken::new();
+        self.turn_cancels
+            .lock()
+            .expect("turn cancel lock")
+            .insert(turn_id.to_string(), (session_id.to_string(), token.clone()));
+        TurnCancelGuard {
+            registry: Arc::clone(&self.turn_cancels),
+            turn_id: turn_id.to_string(),
+            token,
+        }
+    }
+
+    /// Cancel every in-flight user turn for `session_id`; returns how many.
+    fn cancel_turns_for_session(&self, session_id: &str) -> usize {
+        let registry = self.turn_cancels.lock().expect("turn cancel lock");
+        let mut cancelled = 0;
+        for (turn_session, token) in registry.values() {
+            if turn_session == session_id {
+                token.cancel();
+                cancelled += 1;
+            }
+        }
+        cancelled
     }
 
     fn push_message(&self, role: impl Into<String>, text: impl Into<String>) -> ChatMessage {
@@ -2072,6 +2139,7 @@ mod tests {
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
 
@@ -2234,6 +2302,7 @@ mod tests {
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail_world.clone(),
         };
 
@@ -2424,6 +2493,7 @@ mod tests {
             restate_ingress_url: "http://127.0.0.1:8080".to_string(),
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
         let target_scope_id = lash::process::ProcessScope::new(state.current_session_id()).id();
@@ -2552,6 +2622,7 @@ mod tests {
             restate_ingress_url,
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
         let session = state
@@ -2722,6 +2793,7 @@ mod tests {
             restate_ingress_url,
             restate_http: reqwest::Client::new(),
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
         let old_session_id = state.current_session_id();
@@ -3052,6 +3124,7 @@ mod tests {
             restate_ingress_url,
             restate_http,
             restate_cron_job_keys: Arc::new(Mutex::new(BTreeSet::new())),
+            turn_cancels: Arc::new(Mutex::new(BTreeMap::new())),
             mail_world: mail::MailWorld::new(),
         };
         LiveWorkbenchRestateHarness {
