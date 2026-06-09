@@ -55,8 +55,10 @@ jobs:
       - name: Enforce stack budget
         run: bash scripts/ci-stack-budget.sh
 
-      - name: Test release version helper
-        run: python3 scripts/test_release_version.py
+      - name: Test release automation scripts
+        run: |
+          python3 scripts/test_release_version.py
+          python3 scripts/test_publish_workspace.py
 
       - name: Test first-party standard plugins
         run: cargo test -p lash-standard-plugins --locked --features fff-zlob
@@ -365,7 +367,13 @@ jobs:
 
   prepare-release:
     name: Prepare release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[skip ci]')
+    # Allows release-automation-only fixes to run the full CI matrix without
+    # immediately cutting the next version.
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      !contains(github.event.head_commit.message, '[skip ci]') &&
+      !contains(github.event.head_commit.message, '[skip release]')
     needs:
       - test
       - build-release-assets

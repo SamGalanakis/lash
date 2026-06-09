@@ -160,6 +160,10 @@ stack-budget:
 release-version-test:
   python3 "{{repo}}/scripts/test_release_version.py"
 
+release-automation-test:
+  python3 "{{repo}}/scripts/test_release_version.py"
+  python3 "{{repo}}/scripts/test_publish_workspace.py"
+
 # ── crates.io publishing ─────────────────────────────────────
 # Topological order of every publishable crate. Computed once via
 # `cargo metadata` then frozen here; edit by hand if a new internal
