@@ -5,6 +5,35 @@ pub(crate) fn spans_display_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(Span::width).sum()
 }
 
+/// Terminal-cell display width of `text` (wide-character aware).
+pub(crate) fn display_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
+/// Center a `width`×`height` rectangle inside `area`, clamping to the
+/// available space. Shared by every popup/overlay layout.
+pub(crate) fn centered_rect(area: lash_tui::Rect, width: u16, height: u16) -> lash_tui::Rect {
+    lash_tui::Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+/// Normalize a text selection into `(start, end)` in reading order
+/// regardless of drag direction. Shared by the history and live-draw
+/// renderers.
+pub(crate) fn selection_ordered(sel: &crate::app::TextSelection) -> ((u16, usize), (u16, usize)) {
+    let (ax, ay) = sel.anchor;
+    let (ex, ey) = sel.end;
+    if ay < ey || (ay == ey && ax <= ex) {
+        ((ax, ay), (ex, ey))
+    } else {
+        ((ex, ey), (ax, ay))
+    }
+}
+
 pub(crate) fn line_text(line: &Line<'_>) -> String {
     let mut text = String::new();
     for span in &line.spans {

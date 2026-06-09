@@ -14,8 +14,8 @@ use lash_core::{
     JsonSchema, PluginMessage, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolResult,
     ToolScheduling,
 };
-use lash_tool_apply_patch::{PatchAction, inspect_patch_ops};
 use lash_tool_support::{StaticToolExecute, StaticToolProvider};
+use lash_tools::apply_patch::{PatchAction, inspect_patch_ops};
 
 mod prompt;
 mod state;

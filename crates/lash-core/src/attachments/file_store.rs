@@ -3,9 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use lash_core::{
-    AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef, AttachmentStore,
-    AttachmentStoreError, AttachmentStorePersistence, StoredAttachment,
+use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef};
+
+use super::{
+    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, StoredAttachment, content_id,
 };
 
 pub struct FileAttachmentStore {
@@ -90,7 +91,7 @@ impl AttachmentStore for FileAttachmentStore {
         meta: AttachmentCreateMeta,
     ) -> Result<AttachmentRef, AttachmentStoreError> {
         let meta = AttachmentMeta::new(
-            lash_core::attachments::content_id(&bytes),
+            content_id(&bytes),
             meta.media_type,
             bytes.len() as u64,
             meta.width,
@@ -155,7 +156,7 @@ impl AttachmentStore for FileAttachmentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::{ImageMediaType, MediaType};
+    use crate::{ImageMediaType, MediaType};
 
     fn meta() -> AttachmentCreateMeta {
         AttachmentCreateMeta::new(
@@ -217,7 +218,7 @@ mod tests {
     async fn file_store_overwrites_stale_temp_file() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileAttachmentStore::new(temp.path());
-        let content_id = lash_core::attachments::content_id(&[1, 1, 1]);
+        let content_id = content_id(&[1, 1, 1]);
         let id = AttachmentId::new(content_id.to_string());
         let final_path = store.path_for_id(&id);
         let parent = final_path.parent().expect("parent");
@@ -232,5 +233,32 @@ mod tests {
             .expect("put over stale tmp");
         let stored = store.get(&reference.id).await.expect("get");
         assert_eq!(stored.bytes, vec![1, 1, 1]);
+    }
+
+    // Runs the backend-agnostic `AttachmentStore` conformance suite against
+    // the file-backed implementation. The same suite runs against the
+    // in-memory store, so both backends are held to one contract.
+    #[tokio::test]
+    async fn file_attachment_store_satisfies_conformance() {
+        use std::sync::Arc;
+
+        use crate::testing::conformance::ReopenableAttachmentStore;
+
+        // Each `make()` call needs its own root that outlives the returned
+        // store. Keep the tempdirs alive for the duration of the suite.
+        let dirs: Arc<Mutex<Vec<tempfile::TempDir>>> = Arc::new(Mutex::new(Vec::new()));
+        crate::testing::conformance::attachment_store_reopenable(
+            || {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let open =
+                    Arc::new(FileAttachmentStore::new(dir.path())) as Arc<dyn AttachmentStore>;
+                let reopen =
+                    Arc::new(FileAttachmentStore::new(dir.path())) as Arc<dyn AttachmentStore>;
+                dirs.lock().expect("dirs lock").push(dir);
+                ReopenableAttachmentStore { open, reopen }
+            },
+            AttachmentStorePersistence::Durable,
+        )
+        .await;
     }
 }

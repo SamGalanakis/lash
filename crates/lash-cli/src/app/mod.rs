@@ -1017,7 +1017,8 @@ impl App {
     }
 
     pub fn set_execution_mode_label(&mut self, mode: &lash::ModeId) {
-        self.execution_mode_label = crate::execution_mode_label(mode).to_string();
+        self.execution_mode_label =
+            crate::execution_settings::execution_mode_label(mode).to_string();
         self.dirty = true;
     }
 }

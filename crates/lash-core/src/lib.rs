@@ -31,8 +31,8 @@ pub const SANSIO_VERSION: &str = lash_sansio::VERSION;
 
 // Re-exports
 pub use attachments::{
-    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, InMemoryAttachmentStore,
-    SessionScopedAttachmentStore, StoredAttachment,
+    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, FileAttachmentStore,
+    InMemoryAttachmentStore, SessionScopedAttachmentStore, StoredAttachment,
 };
 // The Lashlang artifact store is a host-owned durability dependency of
 // `RuntimeHostConfig`; re-export it so the `lash` facade can name it without a

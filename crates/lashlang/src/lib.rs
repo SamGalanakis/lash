@@ -22,8 +22,8 @@ pub use ast::{
     TypeExpr, TypeField, UnaryOp, fold_expr_children, format_type_expr, walk_expr,
 };
 pub use graph::{
-    LashlangMap, LashlangMapEdge, LashlangMapNode, LashlangMapOptions, linked_static_graph_json,
-    map_lashlang_main, map_lashlang_process, static_graph_json,
+    LashlangMap, LashlangMapEdge, LashlangMapNode, LashlangMapOptions, map_lashlang_main,
+    map_lashlang_process, static_graph_json,
 };
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{

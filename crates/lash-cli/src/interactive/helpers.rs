@@ -8,8 +8,9 @@ use tokio::sync::mpsc;
 
 use crate::app::{App, PreparedTurn};
 use crate::event::{AppEvent, AppEventTx};
+use crate::keybindings::{copy_binding, queued_turn_edit_binding};
+use crate::ui_effects::collect_ui_snapshot;
 use crate::ui_trace::{UiTraceRecorder, drain_aux_ops_into};
-use crate::{collect_ui_snapshot, copy_binding, queued_turn_edit_binding};
 
 #[derive(Clone)]
 pub(super) struct TurnReplayPayload {

@@ -22,21 +22,22 @@ use crate::Args;
 use crate::app::{self, App, PreparedTurn, UiTimelineItem};
 use crate::command;
 use crate::event::{AppEvent, AppEventPump};
+use crate::info::version_text;
 use crate::model_catalog::CachedModelCatalog;
 use crate::prompt_tool::CliPromptBridge;
 use crate::render;
 use crate::render::compositor;
 use crate::resume;
-use crate::session_bootstrap::CliSessionOpener;
 use crate::session_log::{self, SessionLogger};
+use crate::startup::session::CliSessionOpener;
+use crate::turn_has_visible_output;
 use crate::turn_runner::{RuntimeRunResult, make_turn_input};
+use crate::ui_effects::{apply_ui_host_effects, push_system_message};
 use crate::ui_trace::{
     UiTraceRecorder, disable_aux_op_recording, enable_aux_op_recording, render_screen_text,
 };
 use crate::update;
-use crate::{
-    apply_ui_host_effects, hash12, push_system_message, turn_has_visible_output, version_text,
-};
+use crate::util::hash12;
 
 use self::helpers::{
     TurnReplayPayload, UiSnapshotWorker, cleared_session_state, drain_aux_trace_ops,

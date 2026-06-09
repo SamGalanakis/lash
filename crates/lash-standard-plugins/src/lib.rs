@@ -1,3 +1,5 @@
+pub mod rolling_history;
+
 use std::sync::Arc;
 
 use lash_core::plugin::{PluginSpec, StaticPluginFactory};
@@ -5,15 +7,15 @@ use lash_core::{PluginStack, ToolProvider};
 pub use lash_plugin_observational_memory::ObservationalMemoryConfig;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_process_controls::ProcessControlsPluginFactory;
-pub use lash_plugin_rolling_history::RollingHistoryConfig;
-use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
 use lash_plugin_tool_output_budget::{ToolOutputBudgetPluginFactory, tool_output_budget_stack};
-use lash_tool_apply_patch::apply_patch_provider;
-use lash_tool_files::{glob_provider, ls_provider, read_file_provider};
-use lash_tool_search::grep_provider;
-use lash_tool_shell::StandardShellPluginFactory;
-use lash_tool_web::{fetch_url_provider, web_search_provider};
+use lash_tools::apply_patch::apply_patch_provider;
+use lash_tools::files::{glob_provider, ls_provider, read_file_provider};
+use lash_tools::search::grep_provider;
+use lash_tools::shell::StandardShellPluginFactory;
+use lash_tools::web::{fetch_url_provider, web_search_provider};
+pub use rolling_history::RollingHistoryConfig;
+use rolling_history::RollingHistoryPluginFactory;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StandardContextApproachKind {

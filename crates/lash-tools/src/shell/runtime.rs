@@ -2,7 +2,7 @@
 //! live PTY/pipe child processes, spawns them, drives the poll loops that
 //! wait for exit-or-timeout, and feeds incremental output to the surface
 //! layer. The output-buffer plumbing it relies on lives in
-//! [`crate::output`].
+//! [`crate::shell::output`].
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use lash_core::{ProgressSender, SandboxMessage};
 
-use crate::output::{
+use crate::shell::output::{
     OUTPUT_QUIET_PERIOD_MS, PollOutcome, ProcessState, ShellOutputSpill, activate_spill,
     clean_terminal_output, exit_status_code, kill_child, progress_chunk, render_buffer_output,
     spawn_async_reader, spawn_reader_thread, spawn_wait_thread, terminate_pipe_process,

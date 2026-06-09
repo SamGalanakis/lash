@@ -2,22 +2,24 @@ mod activity;
 mod app;
 mod assistant_text;
 mod autonomous;
-mod bootstrap;
 mod chrome_ui;
-mod cli_support;
 mod clipboard;
 mod command;
 mod config;
 mod diff;
 mod editor;
 mod event;
+mod execution_settings;
 mod fork;
 mod host_docs;
+mod info;
 mod input_items;
 mod instructions;
 mod interactive;
+mod keybindings;
 mod markdown;
 mod model_catalog;
+mod model_selection;
 mod overlay;
 mod paths;
 mod persistence;
@@ -29,11 +31,10 @@ mod provider_metadata;
 mod render;
 mod repo_status;
 mod resume;
-mod session_bootstrap;
 mod session_log;
-mod setup;
 mod skill_catalog;
 mod skill_prompt;
+mod startup;
 mod stream_markdown;
 #[cfg(test)]
 mod test_support;
@@ -42,6 +43,7 @@ mod text_layout;
 mod theme;
 mod tree;
 mod turn_runner;
+mod ui_effects;
 #[cfg(feature = "bench")]
 mod ui_perf;
 mod ui_trace;
@@ -59,7 +61,6 @@ use lash::{InputItem, TurnActivity, TurnEvent};
 use app::PreparedTurn;
 #[cfg(test)]
 use autonomous::AutonomousRenderer;
-pub(crate) use cli_support::*;
 #[cfg(test)]
 use input_items::insert_inline_marker;
 #[cfg(test)]
@@ -421,7 +422,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
         let log_dir = crate::paths::lash_home();
         std::fs::create_dir_all(&log_dir).ok();
         let log_file = std::fs::File::create(log_dir.join("lash.log"))?;
-        let filter_text = effective_lash_log_filter(args.debug);
+        let filter_text = startup::effective_lash_log_filter(args.debug);
 
         use tracing_subscriber::EnvFilter;
         let fallback = if args.debug { "debug" } else { "warn" };
@@ -445,7 +446,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             "initialized lash tracing"
         );
     }
-    bootstrap::run(args).await
+    startup::run(args).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -457,7 +458,7 @@ mod tests {
     use lash_core::session_model::MessageRole;
 
     use crate::app::App;
-    use crate::cli_support::{CopyBinding, copy_binding_from_env};
+    use crate::keybindings::{CopyBinding, copy_binding_from_env};
 
     fn skill_catalog_with(names: &[(&str, &str)]) -> SkillCatalog {
         let root = std::env::temp_dir().join(format!("lash-main-skills-{}", uuid::Uuid::new_v4()));
@@ -585,32 +586,24 @@ mod tests {
     }
 
     #[test]
-    fn normalize_prepared_turn_keeps_plain_slash_text() {
+    fn prepared_turn_keeps_plain_slash_text() {
         let skills = skill_catalog_with(&[("yolopush", "ship changes")]);
         let turn = PreparedTurn::new("/not-a-command details".into(), Vec::new());
 
-        let normalized = normalize_prepared_turn_for_dispatch(turn, &skills);
-
-        assert_eq!(normalized.display_text, "/not-a-command details");
-        assert_eq!(normalized.effective_text, "/not-a-command details");
-        assert!(command::parse(&normalized.display_text, &skills).is_none());
+        assert_eq!(turn.display_text, "/not-a-command details");
+        assert_eq!(turn.effective_text, "/not-a-command details");
+        assert!(command::parse(&turn.display_text, &skills).is_none());
     }
 
     #[test]
-    fn normalize_prepared_turn_rewrites_slash_skill_prompts() {
+    fn prepared_turn_rewrites_slash_skill_prompts() {
         let skills = skill_catalog_with(&[("yolopush", "ship changes")]);
         let turn = PreparedTurn::prepare("/yolopush merge staging".into(), Vec::new(), &skills);
 
-        let normalized = normalize_prepared_turn_for_dispatch(turn, &skills);
-
-        assert_eq!(normalized.display_text, "/yolopush merge staging");
-        assert!(
-            normalized
-                .effective_text
-                .starts_with("/yolopush merge staging")
-        );
-        assert!(normalized.input_metadata.transforms.is_empty());
-        assert!(normalized.effective_text.contains("<skill>"));
+        assert_eq!(turn.display_text, "/yolopush merge staging");
+        assert!(turn.effective_text.starts_with("/yolopush merge staging"));
+        assert!(turn.input_metadata.transforms.is_empty());
+        assert!(turn.effective_text.contains("<skill>"));
     }
 
     #[test]

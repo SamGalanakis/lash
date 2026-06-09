@@ -1515,11 +1515,11 @@ impl SessionPlugin for WorkbenchSessionPlugin {
             mail_received_event_type(),
         ))?;
         reg.tools()
-            .provider(Arc::new(lash_tool_web::web_search_provider(
+            .provider(Arc::new(lash_tools::web::web_search_provider(
                 self.tavily_api_key.clone(),
             )))?;
         reg.tools()
-            .provider(Arc::new(lash_tool_web::fetch_url_provider(
+            .provider(Arc::new(lash_tools::web::fetch_url_provider(
                 self.tavily_api_key.clone(),
             )))?;
         reg.tools().provider(Arc::new(mail::MockMailProvider::new(

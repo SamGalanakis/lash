@@ -31,8 +31,8 @@ use lash_tool_support::{
     parse_optional_usize_arg, require_str,
 };
 
-use crate::output::{PollOutcome, shell_io_result, timed_out_shell_io_result};
-use crate::runtime::{
+use crate::shell::output::{PollOutcome, shell_io_result, timed_out_shell_io_result};
+use crate::shell::runtime::{
     CommonCommandParams, DEFAULT_EXEC_COMMAND_TIMEOUT_MS, ExecCommandParams,
     PipeExecProcessRequest, ShellRuntime, StartCommandParams, WaitBehavior,
 };
@@ -711,7 +711,7 @@ impl PluginFactory for StandardShellPluginFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::{MAX_OUTPUT, SPILL_OUTPUT_THRESHOLD, clean_terminal_output};
+    use crate::shell::output::{MAX_OUTPUT, SPILL_OUTPUT_THRESHOLD, clean_terminal_output};
     use lash_core::ProcessRegistry as _;
     use serde_json::json;
     use std::fs;

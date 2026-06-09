@@ -20,6 +20,6 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 lash-sqlite-store = { workspace = true }
-lash-tool-shell = { workspace = true }
+lash-tools = { workspace = true }
 lash-plugin-process-controls = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

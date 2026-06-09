@@ -1,4 +1,13 @@
+use sha2::{Digest, Sha256};
+
 pub const MIN_VISIBLE_DURATION_MS: u64 = 1_000;
+
+/// First 12 hex chars of the SHA-256 of `bytes`; used for compact
+/// toolset-identity hashes.
+pub(crate) fn hash12(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("{:x}", digest)[..12].to_string()
+}
 
 /// Format a duration in milliseconds as a human-readable string.
 ///

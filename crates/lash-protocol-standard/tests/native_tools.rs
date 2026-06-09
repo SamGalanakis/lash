@@ -29,7 +29,7 @@ fn standard_protocol_owns_batch_not_process_controls() {
 fn process_controls_are_composed_with_standard_protocol() {
     let session = PluginHost::new(vec![
         Arc::new(lash_plugin_process_controls::ProcessControlsPluginFactory::new()),
-        Arc::new(lash_tool_shell::StandardShellPluginFactory::new()),
+        Arc::new(lash_tools::shell::StandardShellPluginFactory::new()),
         Arc::new(lash_protocol_standard::StandardProtocolPluginFactory),
     ])
     .build_session("root", None)

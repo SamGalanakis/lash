@@ -6,8 +6,8 @@ use crate::app::{App, CliRunState, format_tokens};
 use crate::chrome_ui::TurnStatusLabel;
 #[cfg(test)]
 use crate::chrome_ui::animated_lash_word;
-use crate::cli_support::{centered_rect, display_width, selection_ordered};
 use crate::editor::SuggestionKind;
+use crate::text_layout::{centered_rect, display_width, selection_ordered};
 use crate::{render, theme};
 
 const INPUT_HORIZONTAL_PADDING: u16 = 1;

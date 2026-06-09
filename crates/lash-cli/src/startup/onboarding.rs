@@ -13,7 +13,7 @@ use lash_provider_openai::{CodexProvider, OpenAiCompatibleProvider, OpenAiProvid
 use lash_tui::{Frame, Line, Modifier, Rect, Span, Style, Terminal};
 use unicode_width::UnicodeWidthStr;
 
-use crate::cli_support::centered_rect;
+use crate::text_layout::centered_rect;
 use crate::theme;
 
 fn kind_index(kind: &str) -> Option<usize> {

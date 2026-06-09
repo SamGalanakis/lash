@@ -7,8 +7,8 @@ mod queue;
 mod tests;
 
 use crate::SkillCatalog;
-use crate::cli_support::selection_ordered;
 use crate::skill_prompt::collect_skill_mentions_with_ranges;
+use crate::text_layout::selection_ordered;
 use lash_tui::{Line, Modifier, Rect, Span, Style};
 use lash_tui_extensions::TuiSurfaceSlot;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};

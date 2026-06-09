@@ -109,6 +109,7 @@ pub mod direct {
 }
 
 pub mod persistence {
+    pub use lash_core::FileAttachmentStore;
     pub use lash_core::runtime::{
         DeliveryPolicy, InMemorySessionStore, InMemorySessionStoreFactory, MergeKey,
         QueuedWorkBatch, QueuedWorkBatchDraft, QueuedWorkClaim, QueuedWorkClaimBoundary,
@@ -129,7 +130,6 @@ pub mod persistence {
         VacuumReport,
     };
     pub use lash_core::{InMemoryLashlangArtifactStore, LashlangArtifactStore};
-    pub use lash_local_store::FileAttachmentStore;
 }
 
 pub mod plugins {

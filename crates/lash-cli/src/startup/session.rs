@@ -1,3 +1,11 @@
+//! Opening and resuming CLI sessions: the on-disk session bootstrap (store +
+//! sidecar databases + host config) and the [`CliSessionOpener`] that builds
+//! a `LashCore` and opens the session on top of it.
+//!
+//! The bootstrap source (fresh / resume / fork-child) is matched exactly once
+//! in [`SessionBootstrap::open`]; everything downstream works from the
+//! resolved plan instead of re-matching the variants.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,8 +28,20 @@ pub(crate) enum SessionBootstrapSource {
     ForkChild { parent_session_id: String },
 }
 
+impl SessionBootstrapSource {
+    pub(crate) async fn from_resume_arg(resume: Option<String>) -> Self {
+        match resume {
+            Some(identifier) => Self::Resume(
+                session_log::filename_for_session_identifier(&identifier)
+                    .await
+                    .unwrap_or(identifier),
+            ),
+            None => Self::Fresh,
+        }
+    }
+}
+
 pub(crate) struct SessionBootstrap {
-    source: SessionBootstrapSource,
     sessions_dir: PathBuf,
     filename: String,
     store: Arc<Store>,
@@ -29,6 +49,10 @@ pub(crate) struct SessionBootstrap {
     resume_head: Option<SessionHead>,
     session_name: String,
     host_config: Option<CliSessionHostConfig>,
+    /// `Some` when this session was forked from a parent session.
+    fork_parent_session_id: Option<String>,
+    /// `true` when an existing session database was resumed.
+    resumed: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -101,54 +125,43 @@ fn save_host_config(
     Ok(())
 }
 
-impl SessionBootstrapSource {
-    pub(crate) async fn from_resume_arg(resume: Option<String>) -> Self {
-        match resume {
-            Some(identifier) => Self::Resume(
-                session_log::filename_for_session_identifier(&identifier)
-                    .await
-                    .unwrap_or(identifier),
-            ),
-            None => Self::Fresh,
-        }
-    }
-}
-
 impl SessionBootstrap {
     pub(crate) async fn open(source: SessionBootstrapSource) -> Result<Self> {
         let sessions_dir = session_log::sessions_dir();
         std::fs::create_dir_all(&sessions_dir)?;
-        let filename = match &source {
-            SessionBootstrapSource::Fresh | SessionBootstrapSource::ForkChild { .. } => {
-                session_log::new_session_filename()
-            }
-            SessionBootstrapSource::Resume(filename) => filename.clone(),
+        // The single place the bootstrap-source variants are matched: resolve
+        // them into a plan (filename + resume/fork markers) up front.
+        let (filename, fork_parent_session_id, resumed) = match source {
+            SessionBootstrapSource::Fresh => (session_log::new_session_filename(), None, false),
+            SessionBootstrapSource::ForkChild { parent_session_id } => (
+                session_log::new_session_filename(),
+                Some(parent_session_id),
+                false,
+            ),
+            SessionBootstrapSource::Resume(filename) => (filename, None, true),
         };
         let db_path = sessions_dir.join(&filename);
-        if matches!(source, SessionBootstrapSource::Resume(_)) && !db_path.is_file() {
+        if resumed && !db_path.is_file() {
             return Err(anyhow::anyhow!("Could not resolve session `{filename}`"));
         }
         let store = Arc::new(Store::open(&db_path).await?);
-        let resume_start = if matches!(source, SessionBootstrapSource::Resume(_)) {
-            store.load_session_meta().await.map(|meta| SessionStart {
-                session_id: meta.session_id,
-                session_name: meta.session_name,
-            })
+        let (resume_start, resume_head) = if resumed {
+            (
+                store.load_session_meta().await.map(|meta| SessionStart {
+                    session_id: meta.session_id,
+                    session_name: meta.session_name,
+                }),
+                store.load_session_head().await,
+            )
         } else {
-            None
+            (None, None)
         };
         let session_name = match resume_start.as_ref() {
             Some(start) => start.session_name.clone(),
             None => crate::generate_session_name(&sessions_dir).await,
         };
-        let resume_head = if matches!(source, SessionBootstrapSource::Resume(_)) {
-            store.load_session_head().await
-        } else {
-            None
-        };
         let host_config = load_host_config(&sessions_dir, &filename);
         Ok(Self {
-            source,
             sessions_dir,
             filename,
             store,
@@ -156,6 +169,8 @@ impl SessionBootstrap {
             resume_head,
             session_name,
             host_config,
+            fork_parent_session_id,
+            resumed,
         })
     }
 
@@ -227,33 +242,21 @@ impl SessionBootstrap {
         model: &str,
         session_id: Option<String>,
     ) -> Result<SessionLogger> {
-        match &self.source {
-            SessionBootstrapSource::Resume(_) => {
-                SessionLogger::resume(Arc::clone(&self.store), &self.filename).await
-            }
-            SessionBootstrapSource::Fresh => {
-                SessionLogger::new(
-                    Arc::clone(&self.store),
-                    self.filename.clone(),
-                    model,
-                    session_id,
-                    self.session_name(),
-                )
-                .await
-            }
-            SessionBootstrapSource::ForkChild { parent_session_id } => {
-                let logger = SessionLogger::new(
-                    Arc::clone(&self.store),
-                    self.filename.clone(),
-                    model,
-                    session_id,
-                    self.session_name(),
-                )
-                .await?;
-                logger.mark_as_child_of(parent_session_id).await?;
-                Ok(logger)
-            }
+        if self.resumed {
+            return SessionLogger::resume(Arc::clone(&self.store), &self.filename).await;
         }
+        let logger = SessionLogger::new(
+            Arc::clone(&self.store),
+            self.filename.clone(),
+            model,
+            session_id,
+            self.session_name(),
+        )
+        .await?;
+        if let Some(parent_session_id) = self.fork_parent_session_id.as_deref() {
+            logger.mark_as_child_of(parent_session_id).await?;
+        }
+        Ok(logger)
     }
 
     pub(crate) async fn fork_child(parent_session_id: &str, model: &str) -> Result<Self> {
@@ -287,14 +290,17 @@ impl CliSessionOpener {
         }
     }
 
-    pub(crate) async fn open(
+    /// Build the `LashCore` and open the session for an already-opened
+    /// bootstrap. The startup pipeline opens the bootstrap once (it needs the
+    /// persisted host config before this point) and hands it in here instead
+    /// of re-opening the store.
+    pub(crate) async fn open_prepared(
         &self,
-        source: SessionBootstrapSource,
+        bootstrap: SessionBootstrap,
         fallback_policy: SessionPolicy,
         fallback_execution_mode: ModeId,
         fallback_standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
-        let bootstrap = SessionBootstrap::open(source).await?;
         let session_id = bootstrap
             .run_session_id()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -368,8 +374,9 @@ impl CliSessionOpener {
         execution_mode: ModeId,
         standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
-        self.open(
-            SessionBootstrapSource::Fresh,
+        let bootstrap = SessionBootstrap::open(SessionBootstrapSource::Fresh).await?;
+        self.open_prepared(
+            bootstrap,
             fallback_policy,
             execution_mode,
             standard_context_approach,
@@ -384,8 +391,12 @@ impl CliSessionOpener {
         execution_mode: ModeId,
         standard_context_approach: Option<StandardContextApproach>,
     ) -> Result<OpenedCliLashSession> {
-        self.open(
+        let bootstrap = SessionBootstrap::open(
             SessionBootstrapSource::from_resume_arg(Some(identifier.to_string())).await,
+        )
+        .await?;
+        self.open_prepared(
+            bootstrap,
             fallback_policy,
             execution_mode,
             standard_context_approach,
@@ -398,6 +409,7 @@ impl CliSessionOpener {
 mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
+    use lash_core::SessionMeta;
 
     #[tokio::test]
     async fn fresh_cli_session_opens_with_durable_artifact_store() -> Result<()> {
@@ -438,5 +450,27 @@ mod tests {
         assert!(opened.bootstrap.processes_db_file().is_file());
         assert!(opened.bootstrap.host_events_db_file().is_file());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_backed_store_creates_wal_file() {
+        let _env_guard = env_lock().lock().await;
+        let temp = TempDirGuard::new("lash-cli-store-wal");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        let db_path = temp.path().join("session.db");
+        let store = Store::open(&db_path).await.expect("store");
+
+        store
+            .save_session_meta(SessionMeta {
+                session_id: "s1".to_string(),
+                session_name: "demo".to_string(),
+                created_at: "2026-03-26T10:00:00Z".to_string(),
+                model: "gpt-5".to_string(),
+                cwd: Some("/tmp/demo".to_string()),
+                relation: lash_core::SessionRelation::Root,
+            })
+            .await;
+
+        assert!(db_path.with_extension("db-wal").exists());
     }
 }

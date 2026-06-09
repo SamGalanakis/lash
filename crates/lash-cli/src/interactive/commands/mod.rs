@@ -7,8 +7,8 @@ use super::runtime::send_queued_work;
 use super::runtime::sync_runtime_tool_surface;
 use super::*;
 use crate::SkillCatalog;
+use crate::info::{controls_document, help_document, info_document};
 use crate::turn_runner::make_turn_input;
-use crate::{controls_document, help_document, info_document};
 use lash_core::runtime::{EffectScope, QueuedWorkBatch, QueuedWorkPayload, SlotPolicy};
 
 #[derive(Clone)]
@@ -31,7 +31,7 @@ pub(super) struct SlashCommandCtx<'a> {
     pub(super) args: &'a Args,
     pub(super) paused: &'a Arc<AtomicBool>,
     pub(super) ui_extensions: &'a TuiExtensions,
-    pub(super) runtime_factory: &'a crate::session_bootstrap::CliSessionOpener,
+    pub(super) runtime_factory: &'a crate::startup::session::CliSessionOpener,
     pub(super) lash_config: &'a crate::config::LashConfig,
     pub(super) runtime: &'a mut Option<LashSession>,
     pub(super) history: &'a mut Vec<Message>,
@@ -183,7 +183,7 @@ pub(super) async fn dispatch_queued_turn(
     _args: &Args,
     _paused: &Arc<AtomicBool>,
     _ui_extensions: &TuiExtensions,
-    _runtime_factory: &crate::session_bootstrap::CliSessionOpener,
+    _runtime_factory: &crate::startup::session::CliSessionOpener,
     _lash_config: &crate::config::LashConfig,
     runtime: &mut Option<LashSession>,
     _history: &mut Vec<Message>,

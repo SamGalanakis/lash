@@ -1,3 +1,7 @@
+mod file_store;
+
+pub use file_store::FileAttachmentStore;
+
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

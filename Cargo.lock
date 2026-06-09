@@ -69,7 +69,7 @@ dependencies = [
  "lash-runtime",
  "lash-sqlite-store",
  "lash-subagents",
- "lash-tool-web",
+ "lash-tools",
  "lashlang",
  "reqwest 0.13.3",
  "restate-sdk",
@@ -2541,6 +2541,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2624,17 +2625,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-local-store"
-version = "0.1.0-alpha.42"
-dependencies = [
- "async-trait",
- "lash-core",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "lash-perf"
 version = "0.1.0-alpha.42"
 dependencies = [
@@ -2693,8 +2683,8 @@ version = "0.1.0-alpha.42"
 dependencies = [
  "async-trait",
  "lash-core",
- "lash-tool-apply-patch",
  "lash-tool-support",
+ "lash-tools",
  "schemars",
  "serde",
  "serde_json",
@@ -2711,17 +2701,6 @@ dependencies = [
  "async-trait",
  "lash-core",
  "lash-tool-support",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "lash-plugin-rolling-history"
-version = "0.1.0-alpha.42"
-dependencies = [
- "async-trait",
- "lash-core",
- "serde",
  "serde_json",
  "tokio",
 ]
@@ -2794,7 +2773,7 @@ dependencies = [
  "lash-core",
  "lash-plugin-process-controls",
  "lash-sqlite-store",
- "lash-tool-shell",
+ "lash-tools",
  "serde_json",
  "tokio",
 ]
@@ -2935,7 +2914,6 @@ version = "0.1.0-alpha.42"
 dependencies = [
  "async-trait",
  "lash-core",
- "lash-local-store",
  "lash-plugin-tool-output-budget",
  "lash-protocol-rlm",
  "lash-protocol-standard",
@@ -3000,18 +2978,16 @@ dependencies = [
 name = "lash-standard-plugins"
 version = "0.1.0-alpha.42"
 dependencies = [
+ "async-trait",
  "lash-core",
  "lash-plugin-observational-memory",
  "lash-plugin-process-controls",
- "lash-plugin-rolling-history",
  "lash-plugin-tool-discovery",
  "lash-plugin-tool-output-budget",
- "lash-tool-apply-patch",
- "lash-tool-files",
- "lash-tool-search",
- "lash-tool-shell",
- "lash-tool-web",
+ "lash-tools",
  "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3032,60 +3008,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-tool-apply-patch"
-version = "0.1.0-alpha.42"
-dependencies = [
- "async-trait",
- "lash-core",
- "lash-tool-support",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "lash-tool-files"
-version = "0.1.0-alpha.42"
-dependencies = [
- "async-trait",
- "globset",
- "lash-core",
- "lash-tool-support",
- "pdf-extract",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "lash-tool-search"
-version = "0.1.0-alpha.42"
-dependencies = [
- "async-trait",
- "fff-search",
- "lash-core",
- "lash-tool-support",
- "regex",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "lash-tool-shell"
-version = "0.1.0-alpha.42"
-dependencies = [
- "async-trait",
- "lash-core",
- "lash-tool-support",
- "libc",
- "portable-pty",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "lash-tool-support"
 version = "0.1.0-alpha.42"
 dependencies = [
@@ -3100,14 +3022,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-tool-web"
+name = "lash-tools"
 version = "0.1.0-alpha.42"
 dependencies = [
  "async-trait",
+ "fff-search",
+ "globset",
  "lash-core",
  "lash-tool-support",
+ "libc",
+ "pdf-extract",
+ "portable-pty",
+ "regex",
  "reqwest 0.13.3",
  "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

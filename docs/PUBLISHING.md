@@ -10,7 +10,7 @@ publishes them all together, in dependency order.
 - **Published:** every workspace member without `publish = false`. The public
   entry point is `lash-runtime` (imported as `lash`); embedders also pull in
   provider crates (`lash-provider-*`), stores (`lash-sqlite-store`,
-  `lash-postgres-store`, `lash-s3-store`, `lash-local-store`,
+  `lash-postgres-store`, `lash-s3-store`,
   `lash-restate`), the remote-embedding DTOs (`lash-remote-protocol`), and
   a-la-carte capability crates (`lash-plugin-mcp`, `lash-subagents`,
   `lash-plugin-plan-mode`, `lash-plugin-tool-output-budget`,
