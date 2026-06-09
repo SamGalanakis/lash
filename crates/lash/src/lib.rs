@@ -28,20 +28,22 @@ pub use crate::mode::{ModeId, ModePreset};
 pub use crate::plugin_binding::PluginBinding;
 pub use crate::prompt_layer::PromptLayerSink;
 pub use crate::session::{
-    LashSession, ObservableSession, QueueInputBuilder, SessionBuilder, SessionConfigPatch,
+    EnqueueTurnBuilder, LashSession, ObservableSession, SessionBuilder, SessionConfigPatch,
 };
 pub use crate::turn::{
-    AdvancedTurn, QueuedTurnBuilder, TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult,
-    TurnStream, message_role, message_text,
+    AdvancedTurn, QueuedTurnBuilder, ScopedQueuedTurnBuilder, ScopedTurnBuilder,
+    TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream, message_role,
+    message_text,
 };
 pub use lash_core::{
     HostEvent, HostEventEmitReport, HostEventOccurrenceRequest, InputItem, ModelLimits, ModelSpec,
-    PluginStack, SessionCommand, SessionCommandReceipt, SessionCursor, SessionObservation,
-    SessionObservationEvent, SessionObservationEventPayload, SessionObservationSubscription,
-    SessionProcessEventKind, SessionQueueEventKind, SessionResume, SessionRevision, SessionSpec,
-    TriggerRegistration, TriggerSourceType, TriggerSubscriptionFilter, TriggerTargetSummary,
-    TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
-    empty_host_event_source_key, impl_unsupported_queued_work_methods,
+    PluginStack, ProcessHandleSummary, SessionCommand, SessionCommandReceipt, SessionCursor,
+    SessionObservation, SessionObservationEvent, SessionObservationEventPayload,
+    SessionObservationSubscription, SessionProcessEventKind, SessionQueueEventKind, SessionResume,
+    SessionRevision, SessionSpec, TriggerRegistration, TriggerSourceType,
+    TriggerSubscriptionFilter, TriggerTargetSummary, TurnActivity, TurnActivityId,
+    TurnActivitySink, TurnEvent, TurnInput, empty_host_event_source_key,
+    impl_unsupported_queued_work_methods,
 };
 
 pub mod prelude {
@@ -49,13 +51,14 @@ pub mod prelude {
         AdvancedToolsControl, EmbedError, HostEvent, HostEventEmitReport,
         HostEventOccurrenceRequest, HostEventsControl, InputItem, LashCore, LashCoreBuilder,
         LashSession, ModeId, ModePreset, ModelSpec, ObservableSession, PluginActions,
-        PluginBinding, PluginStack, PromptLayerSink, QueuedTurnBuilder, Result, SessionBuilder,
-        SessionCommand, SessionCommandReceipt, SessionCommandsControl, SessionCursor,
-        SessionObservation, SessionObservationEvent, SessionObservationEventPayload,
-        SessionObservationSubscription, SessionProcessEventKind, SessionQueueEventKind,
-        SessionResume, SessionRevision, SessionSpec, ToolsControl, TriggerRegistration,
-        TriggerSourceType, TriggerSubscriptionFilter, TriggerTargetSummary, TriggersControl,
-        TurnActivity, TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
+        PluginBinding, PluginStack, ProcessHandleSummary, PromptLayerSink, QueuedTurnBuilder,
+        Result, ScopedQueuedTurnBuilder, ScopedTurnBuilder, SessionBuilder, SessionCommand,
+        SessionCommandReceipt, SessionCommandsControl, SessionCursor, SessionObservation,
+        SessionObservationEvent, SessionObservationEventPayload, SessionObservationSubscription,
+        SessionProcessEventKind, SessionQueueEventKind, SessionResume, SessionRevision,
+        SessionSpec, ToolsControl, TriggerRegistration, TriggerSourceType,
+        TriggerSubscriptionFilter, TriggerTargetSummary, TriggersControl, TurnActivity,
+        TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
         empty_host_event_source_key,
     };
     pub use lash_core::TurnActivitySink;

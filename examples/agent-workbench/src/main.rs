@@ -721,16 +721,10 @@ async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Resul
         )
         .await
         .map_err(AppError::internal)?;
-    let effect_host = session.effect_host().await;
-    let scoped_effect_controller = effect_host
-        .scoped(lash::runtime::EffectScope::queue_drain(
-            session_id.clone(),
-            receipt.batch_id.clone(),
-        ))
-        .map_err(AppError::internal)?;
     let _ = session
-        .next_queued_turn()
-        .run(scoped_effect_controller)
+        .queued_turn()
+        .drain_id(receipt.batch_id.clone())
+        .run()
         .await
         .map_err(AppError::internal)?;
     let persisted = session
@@ -2187,16 +2181,8 @@ mod tests {
 
         let output = session
             .turn(lash::TurnInput::text("send a message"))
-            .run(
-                session
-                    .effect_host()
-                    .await
-                    .scoped(lash::runtime::EffectScope::turn(
-                        session.session_id(),
-                        format!("workbench-test-turn:{}", uuid::Uuid::new_v4()),
-                    ))
-                    .expect("test turn effect scope"),
-            )
+            .turn_id(format!("workbench-test-turn:{}", uuid::Uuid::new_v4()))
+            .run()
             .await
             .expect("turn should resolve inbox.test.send, not fail with unknown name");
         assert_eq!(output.submitted_value(), Some(&serde_json::json!("test-1")));
@@ -3306,16 +3292,8 @@ mod tests {
     async fn register_test_trigger(session: &lash::LashSession) {
         let output = session
             .turn(lash::TurnInput::text("register trigger"))
-            .run(
-                session
-                    .effect_host()
-                    .await
-                    .scoped(lash::runtime::EffectScope::turn(
-                        session.session_id(),
-                        format!("workbench-test-register:{}", uuid::Uuid::new_v4()),
-                    ))
-                    .expect("test trigger registration effect scope"),
-            )
+            .turn_id(format!("workbench-test-register:{}", uuid::Uuid::new_v4()))
+            .run()
             .await
             .expect("register trigger route");
         assert_eq!(

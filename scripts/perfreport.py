@@ -5,7 +5,7 @@ Usage:
   perfreport.py REPORT.json                  # human summary
   perfreport.py REPORT.json --diff BASELINE  # before/after comparison
   perfreport.py PROFILE.dhat.json --top 25   # top heap consumers
-  perfreport.py GUARD.json                    # runtime guard summary
+  perfreport.py GUARD.json                    # perf guard summary
 """
 
 from __future__ import annotations
@@ -68,6 +68,16 @@ def is_runtime_guard_report(payload: dict[str, Any]) -> bool:
         and "stack_sensitivity" in payload
         and isinstance(payload.get("normal_runtime"), dict)
         and isinstance(payload.get("stack_sensitivity"), dict)
+    )
+
+
+def is_profile_guard_report(payload: dict[str, Any]) -> bool:
+    return (
+        payload.get("kind") == "perf-guard"
+        and isinstance(payload.get("runtime"), dict)
+        and isinstance(payload.get("runtime_stack"), dict)
+        and isinstance(payload.get("ui"), dict)
+        and isinstance(payload.get("lashlang"), dict)
     )
 
 
@@ -212,6 +222,91 @@ def summarize_runtime(report: dict[str, Any]) -> str:
                 lines.append("")
 
         lines.append("")
+    return "\n".join(lines)
+
+
+def summarize_profile_guard(report: dict[str, Any]) -> str:
+    lines: list[str] = []
+    coverage = report.get("coverage") or {}
+    lines.append(
+        f"# perf guard report  ({report.get('created_at', '?')[:19]}, profile={report.get('profile', '?')})"
+    )
+    lines.append(
+        f"release={report.get('release', '?')}  coverage={'pass' if coverage.get('passed') else 'fail'}"
+    )
+    lines.append("")
+
+    findings = coverage.get("findings", [])
+    if findings:
+        lines.append("## coverage findings")
+        for finding in findings:
+            kind = finding.get("kind", "?")
+            section = finding.get("section", "?")
+            scenario = finding.get("scenario")
+            detail = f" scenario={scenario}" if scenario else ""
+            lines.append(f"  {section}: {kind}{detail}")
+        lines.append("")
+
+    runtime_report = report.get("runtime", {}).get("report", {})
+    summaries = runtime_report.get("summary", [])
+    if summaries:
+        lines.append("## runtime")
+        for item in summaries:
+            counters = item.get("sample_extra_counters") or {}
+            counter_text = ""
+            if counters:
+                counter_text = "  " + ", ".join(f"{k}={v}" for k, v in counters.items())
+            lines.append(
+                f"  {item.get('scenario', '?'):28s} "
+                f"total={fmt_ms(item.get('total_ms', {}).get('median')):>9s}  "
+                f"alloc={fmt_bytes(item.get('total_alloc_bytes', {}).get('median', 0)):>10s}"
+                f"{counter_text}"
+            )
+        lines.append("")
+
+    stack = report.get("runtime_stack", {})
+    first_success = stack.get("first_success_stack_bytes", {})
+    if first_success:
+        lines.append("## runtime stack")
+        for scenario, stack_bytes in sorted(first_success.items()):
+            label = fmt_bytes(stack_bytes) if isinstance(stack_bytes, int | float) else "n/a"
+            lines.append(f"  {scenario:28s} first_success={label}")
+        lines.append("")
+
+    ui_report = report.get("ui", {}).get("report", {})
+    ui_scenarios = ui_report.get("scenarios", [])
+    if ui_scenarios:
+        lines.append("## ui")
+        for item in ui_scenarios:
+            failed = [
+                budget for budget in item.get("budgets", []) if not budget.get("passed")
+            ]
+            status = "fail" if failed else "pass"
+            lines.append(f"  {item.get('scenario', '?'):28s} budgets={status}")
+        lines.append("")
+
+    lashlang_report = report.get("lashlang", {}).get("report", {})
+    if lashlang_report:
+        failed = [
+            budget
+            for budget in lashlang_report.get("budget_results", [])
+            if not budget.get("passed")
+        ]
+        lines.append("## lashlang")
+        lines.append(
+            f"  perf_results={len(lashlang_report.get('perf_results', []))}  "
+            f"profile_results={len(lashlang_report.get('profile_results', []))}  "
+            f"budgets={'fail' if failed else 'pass'}"
+        )
+        lines.append("")
+
+    dhat = report.get("dhat")
+    if dhat:
+        lines.append("## dhat")
+        lines.append(f"  runtime_perf_out={dhat.get('runtime_perf_out')}")
+        lines.append(f"  dhat_out={dhat.get('dhat_out')}")
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -681,7 +776,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "report",
         type=Path,
-        help="runtime-perf JSON, runtime guard JSON, ui-perf JSON, lashlang-perf JSON, or *.dhat.json",
+        help="runtime-perf JSON, perf guard JSON, ui-perf JSON, lashlang-perf JSON, or *.dhat.json",
     )
     parser.add_argument("--diff", type=Path, help="baseline JSON of the same report kind to diff against")
     parser.add_argument("--top", type=int, default=20, help="top-N call stacks for dhat output (default 20)")
@@ -709,6 +804,9 @@ def main() -> int:
         return 2
     if is_lashlang_report(payload):
         print(summarize_lashlang(payload))
+        return 0
+    if is_profile_guard_report(payload):
+        print(summarize_profile_guard(payload))
         return 0
     if is_runtime_guard_report(payload):
         print(summarize_runtime_guard(payload))

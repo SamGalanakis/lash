@@ -1,0 +1,15 @@
+{
+  "lashlang": {
+    "perf": {
+      "default": {
+        "allocated_bytes_per_iter_max": 2000000,
+        "allocations_per_iter_max": 50000
+      }
+    },
+    "profile": {
+      "default": {
+        "instructions_per_iter_max": 500000
+      }
+    }
+  }
+}

@@ -347,10 +347,10 @@ lash-provider-openai = "=0.1.0-alpha.41"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }</code></pre>
 
-        <p>One <code>LashCore</code> per app, cloned freely; one <code>LashSession</code> per chat or task; <code>.run(scope)</code> for a single collected turn, <code>.stream(&amp;sink, scope)</code> for live events.</p>
+        <p>One <code>LashCore</code> per app, cloned freely; one <code>LashSession</code> per chat or task; <code>.run()</code> for a single collected turn, <code>.stream_to(&amp;sink)</code> for live events.</p>
 <pre data-lang="rust"><code>use std::sync::Arc;
 
-use lash::{provider::ProviderHandle, runtime::EffectScope, LashCore, ModelSpec, TurnActivityId, TurnInput};
+use lash::{provider::ProviderHandle, LashCore, ModelSpec, TurnInput};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
@@ -376,20 +376,15 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
 
     // one session per chat / task; run one turn; read settled prose.
     let session = core.session("hello-1").open().await?;
-    let effect_host = session.effect_host().await;
-    let scope = effect_host.scoped(EffectScope::turn(
-        session.session_id(),
-        TurnActivityId::fresh().0,
-    ))?;
     let result = session
         .turn(TurnInput::text("Say hi in one short sentence."))
-        .run(scope)
+        .run()
         .await?;
 
     println!("{}", result.assistant_message().unwrap_or_default());
     Ok(())
 }</code></pre>
-        <p>From there the runtime hands a backend more: <code>session.next_queued_turn()</code> drives turns from an app-owned queue, <code>turn.provider(…)</code> / <code>turn.model(…)</code> override the model per turn, and durable workflow hosts run turns with handler-scoped effect controllers.</p>
+        <p>From there the runtime hands a backend more: <code>session.enqueue(...)</code> and <code>session.queued_turn()</code> drive app-owned queues, <code>turn.provider(…)</code> / <code>turn.model(…)</code> override the model per turn, and durable workflow hosts run turns with <code>.turn_id(...).effects(&amp;controller)</code>.</p>
         <a class="stanza__link" href="./quickstart.html">read the quickstart <span class="arrow" aria-hidden="true">→</span></a>
       </div>
     </section>

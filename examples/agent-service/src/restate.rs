@@ -210,12 +210,6 @@ async fn run_restate_chat_turn_and_persist(
         Arc::clone(&turn_state),
     );
 
-    let effect_scope = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::turn(
-            &request.chat_id,
-            &request.turn_id,
-        ))
-        .map_err(|err| AppError::internal(err.to_string()))?;
     let mut input = TurnInput::text(request.text.clone());
     input.trace_turn_id = Some(request.turn_id.clone());
     let turn_model = model_spec_for_chat_selection(&ChatModelSelection {
@@ -224,9 +218,11 @@ async fn run_restate_chat_turn_and_persist(
     })?;
     let output = session
         .turn(input)
+        .turn_id(request.turn_id.clone())
         .model(turn_model)
         .require_submit()?
-        .stream(&ui_events, effect_scope)
+        .effects(controller)
+        .stream_to(&ui_events)
         .await;
 
     match output {

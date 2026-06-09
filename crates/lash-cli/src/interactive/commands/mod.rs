@@ -175,7 +175,7 @@ fn display_turns_for_queued_batches(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn dispatch_next_queued_turn(
+pub(super) async fn dispatch_queued_turn(
     app: &mut App,
     ui_trace: &mut Option<UiTraceRecorder>,
     _terminal: &mut Terminal,

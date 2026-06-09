@@ -458,7 +458,8 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
                 })
                 .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?,
             )
-            .run(scoped_effect_controller)
+            .advanced()
+            .run_with_scope(scoped_effect_controller)
             .await
             .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
 

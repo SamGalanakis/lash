@@ -70,7 +70,8 @@ def parse_args() -> argparse.Namespace:
             "tool_discovery_search, openai_responses_sse_parse, "
             "direct_llm_client, process_list_stress, embed_standard, embed_rlm, "
             "scoped_effect_controller, store_reopen, sqlite_store_reopen, "
-            "turn_checkpoint, all."
+            "turn_checkpoint, live_replay_pressure, trace_jsonl_standard, "
+            "trace_jsonl_extended, all."
         ),
     )
     parser.add_argument(
@@ -98,6 +99,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=16,
         help="Trim dhat backtraces to this many frames (default: 16).",
+    )
+    parser.add_argument(
+        "--enforce-budgets",
+        action="store_true",
+        help="Exit non-zero when a runtime perf guard budget is exceeded.",
     )
     parser.add_argument(
         "--cargo-feature",
@@ -186,6 +192,8 @@ def main() -> int:
         if dhat_out:
             cmd.append(f"--runtime-perf-dhat-out={dhat_out}")
         cmd.append(f"--runtime-perf-dhat-frames={max(args.dhat_frames, 1)}")
+    if args.enforce_budgets:
+        cmd.append("--runtime-perf-enforce-budgets")
     for scenario in args.scenario:
         cmd.extend(["--runtime-perf-scenario", scenario])
 

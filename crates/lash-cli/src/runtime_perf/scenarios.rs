@@ -27,10 +27,13 @@ pub(crate) enum RuntimePerfScenario {
     StoreReopen,
     SqliteStoreReopen,
     TurnCheckpoint,
+    LiveReplayPressure,
+    TraceJsonlStandard,
+    TraceJsonlExtended,
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 22] = [
+    pub(crate) const DEFAULTS: [Self; 25] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -53,8 +56,11 @@ impl RuntimePerfScenario {
         Self::StoreReopen,
         Self::SqliteStoreReopen,
         Self::TurnCheckpoint,
+        Self::LiveReplayPressure,
+        Self::TraceJsonlStandard,
+        Self::TraceJsonlExtended,
     ];
-    pub(crate) const KNOWN: [Self; 22] = [
+    pub(crate) const KNOWN: [Self; 25] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -77,6 +83,9 @@ impl RuntimePerfScenario {
         Self::StoreReopen,
         Self::SqliteStoreReopen,
         Self::TurnCheckpoint,
+        Self::LiveReplayPressure,
+        Self::TraceJsonlStandard,
+        Self::TraceJsonlExtended,
     ];
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
@@ -103,6 +112,9 @@ impl RuntimePerfScenario {
             "store_reopen" => Some(Self::StoreReopen),
             "sqlite_store_reopen" => Some(Self::SqliteStoreReopen),
             "turn_checkpoint" => Some(Self::TurnCheckpoint),
+            "live_replay_pressure" => Some(Self::LiveReplayPressure),
+            "trace_jsonl_standard" => Some(Self::TraceJsonlStandard),
+            "trace_jsonl_extended" => Some(Self::TraceJsonlExtended),
             _ => None,
         }
     }
@@ -131,6 +143,9 @@ impl RuntimePerfScenario {
             Self::StoreReopen => "store_reopen",
             Self::SqliteStoreReopen => "sqlite_store_reopen",
             Self::TurnCheckpoint => "turn_checkpoint",
+            Self::LiveReplayPressure => "live_replay_pressure",
+            Self::TraceJsonlStandard => "trace_jsonl_standard",
+            Self::TraceJsonlExtended => "trace_jsonl_extended",
         }
     }
 
@@ -150,14 +165,17 @@ impl RuntimePerfScenario {
             | Self::ScopedEffectController
             | Self::StoreReopen
             | Self::SqliteStoreReopen
-            | Self::TurnCheckpoint => ModeId::standard(),
+            | Self::TurnCheckpoint
+            | Self::LiveReplayPressure
+            | Self::TraceJsonlStandard => ModeId::standard(),
             Self::Rlm
             | Self::RlmToolCalls
             | Self::RlmProcessHandles
             | Self::RlmLlmQuery
             | Self::RlmGlobals
             | Self::RlmLargeToolSurface
-            | Self::EmbedRlm => ModeId::rlm(),
+            | Self::EmbedRlm
+            | Self::TraceJsonlExtended => ModeId::rlm(),
         }
     }
 

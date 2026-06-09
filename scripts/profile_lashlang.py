@@ -36,6 +36,8 @@ DEFAULT_PERF_MODES = [
     "linked_program_cache",
 ]
 
+DEFAULT_BUDGET_FILE = Path(__file__).resolve().with_name("perf_guard_budgets.json")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -60,6 +62,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build", dest="build", action="store_true", default=True)
     parser.add_argument("--no-build", dest="build", action="store_false")
     parser.add_argument("--out", type=Path, help="Defaults under .benchmarks/lashlang-perf/.")
+    parser.add_argument(
+        "--budget-file",
+        type=Path,
+        default=DEFAULT_BUDGET_FILE,
+        help="JSON budget file for --enforce-budgets.",
+    )
+    parser.add_argument(
+        "--enforce-budgets",
+        action="store_true",
+        help="Exit non-zero when a Lashlang perf guard budget is exceeded.",
+    )
     return parser.parse_args()
 
 
@@ -197,6 +210,145 @@ def git_info(root: Path) -> dict[str, Any]:
     return {"sha": sha or "unknown", "dirty": dirty}
 
 
+def load_budget_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise SystemExit(f"error: Lashlang budget file not found: {path}")
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: invalid Lashlang budget JSON at {path}: {exc}") from exc
+
+
+def budget_value(
+    budgets: dict[str, Any],
+    section: str,
+    scenario: str,
+    metric: str,
+) -> float | None:
+    section_budgets = budgets.get("lashlang", {}).get(section, {})
+    if not isinstance(section_budgets, dict):
+        return None
+    scenario_budgets = section_budgets.get(scenario)
+    if not isinstance(scenario_budgets, dict):
+        scenario_budgets = section_budgets.get("default", {})
+    value = scenario_budgets.get(metric) if isinstance(scenario_budgets, dict) else None
+    if isinstance(value, int | float):
+        return float(value)
+    return None
+
+
+def budget_result(
+    *,
+    section: str,
+    scenario: str,
+    mode: str | None,
+    metric: str,
+    actual: float | None,
+    budget: float | None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    passed = actual is not None and (budget is None or actual <= budget)
+    if reason:
+        passed = False
+    return {
+        "section": section,
+        "scenario": scenario,
+        "mode": mode,
+        "metric": metric,
+        "actual": actual,
+        "budget": budget,
+        "passed": passed,
+        "reason": reason,
+    }
+
+
+def evaluate_lashlang_budgets(report: dict[str, Any], budgets: dict[str, Any]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    perf_results = report.get("perf_results", [])
+    profile_results = report.get("profile_results", [])
+    if not perf_results:
+        results.append(
+            budget_result(
+                section="perf",
+                scenario="all",
+                mode=None,
+                metric="perf_results",
+                actual=None,
+                budget=1.0,
+                reason="missing perf results",
+            )
+        )
+    if not profile_results:
+        results.append(
+            budget_result(
+                section="profile",
+                scenario="all",
+                mode=None,
+                metric="profile_results",
+                actual=None,
+                budget=1.0,
+                reason="missing profile results",
+            )
+        )
+
+    for row in perf_results:
+        scenario = str(row.get("scenario_arg", "unknown"))
+        mode = str(row.get("mode_arg", "unknown"))
+        for metric in ("allocated_bytes_per_iter", "allocations_per_iter"):
+            value = row.get(metric)
+            actual = float(value) if isinstance(value, int | float) else None
+            results.append(
+                budget_result(
+                    section="perf",
+                    scenario=scenario,
+                    mode=mode,
+                    metric=metric,
+                    actual=actual,
+                    budget=budget_value(budgets, "perf", scenario, f"{metric}_max"),
+                    reason=None if actual is not None else f"missing {metric}",
+                )
+            )
+
+    for row in profile_results:
+        scenario = str(row.get("scenario_arg", "unknown"))
+        iterations = row.get("iterations")
+        if not isinstance(iterations, int | float) or iterations <= 0:
+            results.append(
+                budget_result(
+                    section="profile",
+                    scenario=scenario,
+                    mode=None,
+                    metric="iterations",
+                    actual=None,
+                    budget=1.0,
+                    reason="missing profile iterations",
+                )
+            )
+            continue
+        instruction_count = sum(
+            hotspot.get("count", 0)
+            for hotspot in row.get("instruction_hotspots", [])
+            if isinstance(hotspot.get("count", 0), int | float)
+        )
+        instructions_per_iter = float(instruction_count) / float(iterations)
+        results.append(
+            budget_result(
+                section="profile",
+                scenario=scenario,
+                mode=None,
+                metric="instructions_per_iter",
+                actual=instructions_per_iter,
+                budget=budget_value(
+                    budgets,
+                    "profile",
+                    scenario,
+                    "instructions_per_iter_max",
+                ),
+            )
+        )
+    return results
+
+
 def main() -> int:
     args = parse_args()
     root = repo_root()
@@ -255,8 +407,22 @@ def main() -> int:
         "perf_results": perf_results,
         "profile_results": profile_results,
     }
+    budgets = load_budget_file(args.budget_file)
+    report["budget_results"] = evaluate_lashlang_budgets(report, budgets)
     out_path.write_text(json.dumps(report, indent=2))
     print(json.dumps({"out": str(out_path), "perf_results": len(perf_results), "profile_results": len(profile_results)}, indent=2))
+    if args.enforce_budgets:
+        failures = [item for item in report["budget_results"] if not item.get("passed")]
+        if failures:
+            for item in failures:
+                print(
+                    "Lashlang perf budget failed: "
+                    f"{item.get('section')} {item.get('scenario')} {item.get('mode') or ''} "
+                    f"{item.get('metric')} actual={item.get('actual')} budget={item.get('budget')} "
+                    f"reason={item.get('reason') or 'budget exceeded'}",
+                    file=sys.stderr,
+                )
+            return 1
     return 0
 
 

@@ -146,7 +146,7 @@ async fn main() -> anyhow_like::Result<()> {
                 // Deployment host for paths outside a Restate workflow scope;
                 // it fails loudly if an effect tries to execute without a
                 // handler. Restate-backed turns pass a handler-scoped
-                // controller per turn via `stream(..., scope)`. The
+                // controller per turn via `.effects(&controller)`. The
                 // Restate ingress runner is the sole executor of
                 // out-of-turn/background processes.
                 core_builder

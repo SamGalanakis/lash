@@ -45,7 +45,7 @@ sequenceDiagram
   participant Lang as RLM lashlang runtime
   participant Store as RuntimePersistence
 
-  Host->>Runtime: session.turn(TurnInput).stream(&sink, scope)
+  Host->>Runtime: session.turn(TurnInput).stream_to(&sink)
   Runtime->>Runtime: normalize InputItem text/image refs
   Runtime->>Plugins: prepare_turn + context transforms
   Runtime->>Plugins: build TurnDriverPreamble from ProtocolBuildInput(ToolSurface + LashlangSurface)
@@ -86,7 +86,7 @@ sequenceDiagram
         <div class="section">
           <div class="section-header">
             <h2>AgentFrameSwitch Continuations</h2>
-            <p>RLM's <code>continue_as</code> tool ends the current trajectory and creates a fresh AgentFrame in the same session with the packed <code>task</code> + <code>seed</code>. The low-level runtime exposes this as <code>TurnOutcome::AgentFrameSwitch { frame_id }</code>. App hosts call <code>TurnBuilder::stream</code>, <code>run</code>, or <code>collect_with</code>; the <code>lash</code> facade drives AgentFrame chains and returns the final turn result. The underlying runtime primitive is <code>stream_turn_with_agent_frames</code>.</p>
+            <p>RLM's <code>continue_as</code> tool ends the current trajectory and creates a fresh AgentFrame in the same session with the packed <code>task</code> + <code>seed</code>. The low-level runtime exposes this as <code>TurnOutcome::AgentFrameSwitch { frame_id }</code>. App hosts call <code>TurnBuilder::stream_to</code>, <code>run</code>, or pull-style <code>stream</code>; the <code>lash</code> facade drives AgentFrame chains and returns the final turn result. The underlying runtime primitive is <code>stream_turn_with_agent_frames</code>.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">AgentFrameSwitch drive loop (runtime internal)</div>
@@ -210,7 +210,7 @@ flowchart TD
             <li>
               <div>
                 <h3>AgentFrame switches are not a separate channel.</h3>
-                <p>An AgentFrame switch is an outcome of the same turn path. App hosts get chaining through <code>TurnBuilder::stream</code>, <code>run</code>, or <code>collect_with</code>; lower-level runtime callers opt in with <code>stream_turn_with_agent_frames</code>. The session id, turn index, attachment store, and trace ids carry across the boundary automatically.</p>
+                <p>An AgentFrame switch is an outcome of the same turn path. App hosts get chaining through <code>TurnBuilder::stream_to</code>, <code>run</code>, or pull-style <code>stream</code>; lower-level runtime callers opt in with <code>stream_turn_with_agent_frames</code>. The session id, turn index, attachment store, and trace ids carry across the boundary automatically.</p>
               </div>
             </li>
           </ol>

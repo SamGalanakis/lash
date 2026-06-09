@@ -113,12 +113,13 @@ pub(super) async fn enqueue_prepared_turn(
     slot_policy: lash_core::SlotPolicy,
 ) -> Result<(), String> {
     session
-        .queue(make_turn_input(turn))
+        .enqueue(make_turn_input(turn))
         .id(turn.draft_id.clone())
         .delivery_policy(delivery_policy)
         .slot_policy(slot_policy)
         .send()
         .await
+        .map(|_| ())
         .map_err(|err| err.to_string())
 }
 

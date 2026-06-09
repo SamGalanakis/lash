@@ -16,8 +16,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  runtime-perf:
-    name: Runtime Perf Full
+  perf-guard-full:
+    name: Perf Guard Full
     runs-on: ubuntu-latest
 
     steps:
@@ -36,165 +36,18 @@ jobs:
           cache-bin: false
 
       - name: Install system dependencies
+        run: scripts/ci-install-apt-packages.sh protobuf-compiler
+
+      - name: Run full performance guard
         run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          python3 scripts/profile_guard.py --profile full --release --cargo-feature fff-zlob --enforce --out .benchmarks/perf-guard/full.json
 
-      - name: Run full synthetic runtime performance benchmark
+      - name: Publish performance guard summary
         run: |
-          python3 scripts/profile_runtime.py --profile full --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/full.json
+          python3 scripts/perfreport.py .benchmarks/perf-guard/full.json >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish runtime performance summary
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          report = json.loads(Path(".benchmarks/runtime-perf/full.json").read_text())
-          lines = [
-              "## Runtime Perf Full",
-              "",
-              f"- runs: `{report['runs']}`",
-              f"- warmups: `{report['warmups']}`",
-              f"- turns: `{report['chat_turns']}`",
-              f"- scenarios: `{', '.join(report['scenarios'])}`",
-          ]
-          for item in report["summary"]:
-              lines.extend([
-                  "",
-                  f"### {item['scenario']}",
-                  f"- `total_ms` mean: `{item['total_ms']['mean']}ms`",
-                  f"- `run_turn_ms` mean: `{item['run_turn_ms']['mean']}ms`",
-                  f"- `total_alloc_bytes` mean: `{item['total_alloc_bytes']['mean']}`",
-                  f"- `total_live_bytes` mean: `{item['total_live_bytes']['mean']}`",
-              ])
-          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
-          PY
-
-      - name: Upload runtime performance artifact
+      - name: Upload performance guard artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: runtime-perf-full
-          path: .benchmarks/runtime-perf/full.json
-
-  ui-perf:
-    name: UI Perf Full
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Zig
-        uses: ./.github/actions/setup-ci-zig
-
-      - name: Restore cargo cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-
-      - name: Run full synthetic UI performance benchmark
-        run: |
-          python3 scripts/profile_ui.py --profile full --release --cargo-feature fff-zlob --runs 5 --warmups 1 --out .benchmarks/ui-perf/full.json
-
-      - name: Publish UI performance summary
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          report = json.loads(Path(".benchmarks/ui-perf/full.json").read_text())
-          params = report["parameters"]
-          scenarios = report.get("scenarios", [])
-
-          def metric_line(name, item, unit="ms"):
-              parts = []
-              for key in ("p50", "p95", "p99", "max", "mean"):
-                  if key in item:
-                      parts.append(f"{key} `{item[key]}{unit}`")
-              return f"- `{name}`: " + ", ".join(parts)
-
-          lines = [
-              "## UI Perf Full",
-              "",
-              f"- viewport: `{params['width']}x{params['height']}`",
-              f"- profile: `{params['profile']}`",
-              f"- measured runs: `{params['runs']}`",
-              f"- scenarios: `{', '.join(item['scenario'] for item in scenarios)}`",
-          ]
-          for item in scenarios:
-              summary = item["summary"]
-              lines.extend(["", f"### {item['scenario']}", ""])
-              for name in sorted(summary):
-                  lines.append(metric_line(name, summary[name]))
-          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
-          PY
-
-      - name: Upload UI performance artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ui-perf-full
-          path: .benchmarks/ui-perf/full.json
-
-  lashlang-perf:
-    name: Lashlang Perf Sweep
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Restore cargo cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-
-      - name: Run Lashlang performance sweep
-        run: |
-          python3 scripts/profile_lashlang.py --iterations 2500 --profile-iterations 2500 --out .benchmarks/lashlang-perf/full.json
-
-      - name: Publish Lashlang performance summary
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          report = json.loads(Path(".benchmarks/lashlang-perf/full.json").read_text())
-          params = report["parameters"]
-          lines = [
-              "## Lashlang Perf Sweep",
-              "",
-              f"- build mode: `{report['build_mode']}`",
-              f"- perf scenarios: `{len(params['scenarios'])}`",
-              f"- perf modes: `{', '.join(params['modes'])}`",
-              f"- perf samples: `{len(report['perf_results'])}`",
-              f"- profile samples: `{len(report['profile_results'])}`",
-          ]
-          for item in report["profile_results"]:
-              lines.extend(["", f"### profile: {item['scenario_arg']}"])
-              for hotspot in item.get("instruction_hotspots", [])[:8]:
-                  lines.append(
-                      f"- `{hotspot['name']}`: count `{hotspot.get('count', '?')}`, total_ns `{hotspot.get('total_ns', '?')}`"
-                  )
-          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
-          PY
-
-      - name: Upload Lashlang performance artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lashlang-perf-full
-          path: .benchmarks/lashlang-perf/full.json
+          name: perf-guard-full
+          path: .benchmarks/perf-guard/*

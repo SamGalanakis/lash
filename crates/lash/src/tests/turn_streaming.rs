@@ -50,6 +50,72 @@ impl lash_core::RuntimeEffectController for RecordingDurableEffectController {
     }
 }
 
+#[derive(Default)]
+struct RecordingInlineEffectController {
+    invocations: StdMutex<Vec<DurableEffectInvocation>>,
+}
+
+impl RecordingInlineEffectController {
+    fn invocations(&self) -> Vec<DurableEffectInvocation> {
+        self.invocations
+            .lock()
+            .expect("inline effect invocations")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl lash_core::RuntimeEffectController for RecordingInlineEffectController {
+    async fn execute_effect(
+        &self,
+        envelope: lash_core::RuntimeEffectEnvelope,
+        local_executor: lash_core::RuntimeEffectLocalExecutor<'_>,
+    ) -> std::result::Result<lash_core::RuntimeEffectOutcome, lash_core::RuntimeEffectControllerError>
+    {
+        self.invocations
+            .lock()
+            .expect("inline effect invocations")
+            .push(DurableEffectInvocation {
+                kind: envelope.invocation.effect_kind().expect("effect kind"),
+                turn_id: envelope.invocation.scope.turn_id.clone(),
+                replay_key: envelope.invocation.replay_key().map(ToOwned::to_owned),
+            });
+        local_executor.execute(envelope).await
+    }
+}
+
+#[derive(Default)]
+struct DurableNoopEffectHost;
+
+impl lash_core::EffectHost for DurableNoopEffectHost {
+    fn durability_tier(&self) -> DurabilityTier {
+        DurabilityTier::Durable
+    }
+
+    fn scoped<'run>(
+        &'run self,
+        scope: lash_core::EffectScope,
+    ) -> std::result::Result<lash_core::ScopedEffectController<'run>, lash_core::RuntimeError> {
+        lash_core::ScopedEffectController::shared(
+            Arc::new(lash_core::InlineRuntimeEffectController),
+            scope,
+        )
+    }
+
+    fn scoped_static(
+        &self,
+        scope: lash_core::EffectScope,
+    ) -> std::result::Result<
+        Option<lash_core::ScopedEffectController<'static>>,
+        lash_core::RuntimeError,
+    > {
+        Ok(Some(lash_core::ScopedEffectController::shared(
+            Arc::new(lash_core::InlineRuntimeEffectController),
+            scope,
+        )?))
+    }
+}
+
 struct BlockingAppTools {
     entered_tx: StdMutex<Option<oneshot::Sender<()>>>,
     release_rx: TokioMutex<Option<oneshot::Receiver<()>>>,
@@ -87,12 +153,178 @@ impl ToolProvider for BlockingAppTools {
 }
 
 #[tokio::test]
-async fn turn_builder_into_stream_emits_activities_and_finishes() -> Result<()> {
+async fn turn_run_uses_configured_inline_effect_host_without_explicit_effects() -> Result<()> {
+    let recorder = Arc::new(RecordingInlineEffectController::default());
+    let effect_controller: Arc<dyn lash_core::RuntimeEffectController> = recorder.clone();
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .effect_host(Arc::new(lash_core::InlineEffectHost::new(
+            effect_controller,
+        )))
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .build()?;
+    let session = core.session("inline-default-effect-host").open().await?;
+
+    let output = session.turn(TurnInput::text("inline")).run().await?;
+
+    assert_eq!(output.assistant_message(), Some("echo: inline"));
+    let invocations = recorder.invocations();
+    assert!(
+        invocations
+            .iter()
+            .any(|record| record.kind == lash_core::RuntimeEffectKind::LlmCall)
+    );
+    assert!(invocations.iter().all(|record| {
+        record
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| !turn_id.trim().is_empty())
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn durable_configured_effect_host_requires_explicit_handler_effects() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .effect_host(Arc::new(DurableNoopEffectHost))
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .build()?;
+    let session = core.session("durable-default-effect-host").open().await?;
+
+    let err = session
+        .turn(TurnInput::text("should fail before provider"))
+        .run()
+        .await
+        .expect_err("durable deployment host should require handler context");
+
+    assert!(matches!(
+        err,
+        EmbedError::DurableEffectHostRequiresHandlerContext { operation: "turn" }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_id_sets_effect_scope_and_trace_identity() -> Result<()> {
+    let recorder = Arc::new(RecordingInlineEffectController::default());
+    let effect_controller: Arc<dyn lash_core::RuntimeEffectController> = recorder.clone();
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .effect_host(Arc::new(lash_core::InlineEffectHost::new(
+            effect_controller,
+        )))
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .build()?;
+    let session = core.session("stable-turn-id").open().await?;
+
+    session
+        .turn(TurnInput::text("stable"))
+        .turn_id("stable-turn")
+        .run()
+        .await?;
+
+    let llm_invocation = recorder
+        .invocations()
+        .into_iter()
+        .find(|record| record.kind == lash_core::RuntimeEffectKind::LlmCall)
+        .expect("llm effect");
+    assert_eq!(llm_invocation.turn_id.as_deref(), Some("stable-turn"));
+    assert!(
+        llm_invocation
+            .replay_key
+            .as_deref()
+            .is_some_and(|key| key.contains("stable-turn"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_effect_controller_creates_turn_scope_internally() -> Result<()> {
+    let recorder = RecordingInlineEffectController::default();
+    let core = standard_core();
+    let session = core.session("explicit-handler-effects").open().await?;
+
+    session
+        .turn(TurnInput::text("handler"))
+        .turn_id("handler-turn")
+        .effects(&recorder)
+        .run()
+        .await?;
+
+    let llm_invocation = recorder
+        .invocations()
+        .into_iter()
+        .find(|record| record.kind == lash_core::RuntimeEffectKind::LlmCall)
+        .expect("llm effect");
+    assert_eq!(llm_invocation.turn_id.as_deref(), Some("handler-turn"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_turn_run_drains_ready_work_and_returns_none_when_idle() -> Result<()> {
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()?;
+    let session = core.session("queued-turn-run").open().await?;
+    let receipt = session
+        .enqueue(TurnInput::text("queued work"))
+        .id("queued-request")
+        .send()
+        .await?;
+
+    let output = session
+        .queued_turn()
+        .batch_ids([receipt.batch_id.clone()])
+        .run()
+        .await?
+        .expect("queued turn should run");
+
+    assert_eq!(output.assistant_message(), Some("echo: queued work"));
+    assert!(session.queued_turn().run().await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_turn_explicit_effects_create_queue_drain_scope_internally() -> Result<()> {
+    let recorder = RecordingInlineEffectController::default();
+    let core = explicit_ephemeral_facets(LashCore::standard())
+        .provider(mock_provider())
+        .model(mock_model_spec())
+        .store_factory(Arc::new(lash_core::InMemorySessionStoreFactory::new()))
+        .build()?;
+    let session = core.session("queued-explicit-effects").open().await?;
+    let receipt = session
+        .enqueue(TurnInput::text("queued handler"))
+        .send()
+        .await?;
+
+    let output = session
+        .queued_turn()
+        .batch_ids([receipt.batch_id])
+        .drain_id("handler-drain")
+        .effects(&recorder)
+        .run()
+        .await?
+        .expect("queued turn should run");
+
+    assert_eq!(output.assistant_message(), Some("echo: queued handler"));
+    let llm_invocation = recorder
+        .invocations()
+        .into_iter()
+        .find(|record| record.kind == lash_core::RuntimeEffectKind::LlmCall)
+        .expect("llm effect");
+    assert_eq!(llm_invocation.turn_id.as_deref(), Some("handler-drain"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_builder_stream_emits_activities_and_finishes() -> Result<()> {
     let core = standard_core();
     let session = core.session("turn-stream").open().await?;
-    let mut stream = session
-        .turn(TurnInput::text("stream me"))
-        .into_stream(turn_scope(&session.session_id()))?;
+    let mut stream = session.turn(TurnInput::text("stream me")).stream()?;
 
     let mut activities = Vec::new();
     while let Some(activity) = stream.next_activity().await {
@@ -119,10 +351,7 @@ async fn session_observation_replays_live_activity_and_commit() -> Result<()> {
     let session = core.session("session-observation-replay").open().await?;
     let cursor = session.observe().current_observation().cursor;
 
-    let output = session
-        .turn(TurnInput::text("observe me"))
-        .run(turn_scope(&session.session_id()))
-        .await?;
+    let output = session.turn(TurnInput::text("observe me")).run().await?;
     assert_eq!(assistant_prose(&output.activities), "echo: observe me");
 
     let replay = session.observe().resume_from_cursor(&cursor)?;
@@ -179,7 +408,7 @@ async fn session_observation_subscription_replays_buffered_events_before_live_ev
 
     session
         .turn(TurnInput::text("first observed"))
-        .run(turn_scope(&session.session_id()))
+        .run()
         .await?;
     let SessionObservationSubscription::Subscribed(mut subscription) =
         session.observe().subscribe_from_cursor(&cursor)?
@@ -200,7 +429,7 @@ async fn session_observation_subscription_replays_buffered_events_before_live_ev
 
     session
         .turn(TurnInput::text("second observed"))
-        .run(turn_scope(&session.session_id()))
+        .run()
         .await?;
     loop {
         let event =
@@ -234,9 +463,7 @@ async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
         .model(mock_model_spec())
         .build()?;
     let session = core.session("turn-stream-last-group").open().await?;
-    let mut stream = session
-        .turn(TurnInput::text("stream groups"))
-        .into_stream(turn_scope(&session.session_id()))?;
+    let mut stream = session.turn(TurnInput::text("stream groups")).stream()?;
 
     let mut activities = Vec::new();
     while let Some(activity) = stream.next_activity().await {
@@ -258,10 +485,7 @@ async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -
         .build()?;
     let session = core.session("turn-run-last-group").open().await?;
 
-    let collected = session
-        .turn(TurnInput::text("run groups"))
-        .run(turn_scope(&session.session_id()))
-        .await?;
+    let collected = session.turn(TurnInput::text("run groups")).run().await?;
 
     assert_eq!(assistant_prose(&collected.activities), "firstsecond");
     assert_eq!(collected.result.assistant_message(), Some("second"));
@@ -279,7 +503,7 @@ async fn retry_status_streams_as_semantic_turn_event() -> Result<()> {
 
     let result = session
         .turn(TurnInput::text("hello"))
-        .stream(&events, turn_scope(&session.session_id()))
+        .stream_to(&events)
         .await?;
 
     assert!(matches!(
@@ -315,13 +539,7 @@ async fn control_turn_accepts_prebuilt_turn_input() -> Result<()> {
     let mut input = TurnInput::text("raw input");
     input.trace_turn_id = Some("host-trace-id".to_string());
 
-    let result = session
-        .turn(input)
-        .run(inline_scope(lash_core::EffectScope::turn(
-            session.session_id(),
-            "host-trace-id",
-        )))
-        .await?;
+    let result = session.turn(input).turn_id("host-trace-id").run().await?;
 
     assert_eq!(assistant_prose(&result.activities), "echo: raw input");
     Ok(())
@@ -340,11 +558,10 @@ async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
     let events = Arc::new(RecordingEvents::default());
     let turn_session = session.clone();
     let turn_events = Arc::clone(&events);
-    let scoped_effect_controller = turn_scope(&turn_session.session_id());
     let turn = tokio::spawn(async move {
         turn_session
             .turn(TurnInput::text("hello"))
-            .stream(turn_events.as_ref(), scoped_effect_controller)
+            .stream_to(turn_events.as_ref())
             .await
     });
 
@@ -393,7 +610,7 @@ async fn turn_stream_receives_semantic_activities() -> Result<()> {
     let result = session
         .turn(TurnInput::text("semantic stream"))
         .cancel(CancellationToken::new())
-        .stream(&turn_events, turn_scope(&session.session_id()))
+        .stream_to(&turn_events)
         .await?;
 
     assert!(matches!(
@@ -415,12 +632,7 @@ async fn run_collects_ordered_assistant_prose_activity() -> Result<()> {
     let core = standard_core();
     let session = core.session("main").open().await?;
 
-    let result = session
-        .run(
-            TurnInput::text("visible"),
-            turn_scope(&session.session_id()),
-        )
-        .await?;
+    let result = session.turn(TurnInput::text("visible")).run().await?;
 
     assert_eq!(assistant_prose(&result.activities), "echo: visible");
     assert!(
@@ -525,7 +737,8 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
 
     let output = session
         .turn(TurnInput::text("use tool"))
-        .collect_with(live.as_ref(), turn_scope(&session.session_id()))
+        .advanced()
+        .collect_with_scope(live.as_ref(), turn_scope(&session.session_id()))
         .await?;
 
     assert!(matches!(
@@ -560,7 +773,7 @@ async fn stream_returns_terminal_metadata_without_prose() -> Result<()> {
 
     let result = session
         .turn(TurnInput::text("stream"))
-        .stream(&events, turn_scope(&session.session_id()))
+        .stream_to(&events)
         .await?;
 
     assert!(matches!(
@@ -598,7 +811,7 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
 
     let collected = session
         .turn(TurnInput::text("use tool"))
-        .stream(&events, turn_scope(&session.session_id()))
+        .stream_to(&events)
         .await?;
 
     assert!(matches!(
@@ -656,7 +869,7 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary_inner() -> Result<()> {
 
     let result = session
         .turn(TurnInput::text("use tool"))
-        .stream(events.as_ref(), turn_scope(&session.session_id()))
+        .stream_to(events.as_ref())
         .await?;
 
     assert!(matches!(
@@ -777,10 +990,7 @@ async fn continue_as_observation_emits_frame_switch_then_commit_inner() -> Resul
     let session = core.session("continue-as-observation").open().await?;
     let cursor = session.observe().current_observation().cursor;
 
-    let output = session
-        .turn(TurnInput::text("switch frames"))
-        .run(turn_scope(&session.session_id()))
-        .await?;
+    let output = session.turn(TurnInput::text("switch frames")).run().await?;
     assert_eq!(
         output.submitted_value(),
         Some(&serde_json::json!("done after continue_as"))
@@ -854,7 +1064,11 @@ async fn durable_agent_frame_follow_through_uses_distinct_turn_scopes_and_commit
     let mut input = TurnInput::text("switch frames");
     input.trace_turn_id = Some(root_turn_id.to_string());
 
-    let output = session.turn(input).run(scoped_effect_controller).await?;
+    let output = session
+        .turn(input)
+        .advanced()
+        .run_with_scope(scoped_effect_controller)
+        .await?;
 
     assert_eq!(output.assistant_message(), Some("done after frame switch"));
     let follow_turn_id = format!("{root_turn_id}:agent-frame:1");
@@ -937,7 +1151,8 @@ submit value
     let turn = tokio::spawn(async move {
         turn_session
             .turn(TurnInput::text("start tool"))
-            .run(scoped_effect_controller)
+            .advanced()
+            .run_with_scope(scoped_effect_controller)
             .await
     });
 
@@ -1007,7 +1222,8 @@ submit value
     let turn = tokio::spawn(async move {
         turn_session
             .turn(TurnInput::text("start tool"))
-            .run(scoped_effect_controller)
+            .advanced()
+            .run_with_scope(scoped_effect_controller)
             .await
     });
 
@@ -1053,7 +1269,7 @@ async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()>
     let result = session
         .turn(TurnInput::text("answer directly"))
         .allow_prose_or_submit()?
-        .stream(events.as_ref(), turn_scope(&session.session_id()))
+        .stream_to(events.as_ref())
         .await?;
 
     assert!(matches!(
@@ -1094,7 +1310,7 @@ async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
     let result = session
         .turn(TurnInput::text("submit"))
         .require_submit()?
-        .stream(events.as_ref(), turn_scope(&session.session_id()))
+        .stream_to(events.as_ref())
         .await?;
 
     assert!(matches!(
@@ -1132,7 +1348,7 @@ async fn rlm_failed_code_emits_failed_code_completion_without_fake_tools() -> Re
 
     let _result = session
         .turn(TurnInput::text("bad code"))
-        .stream(&events, turn_scope(&session.session_id()))
+        .stream_to(&events)
         .await?;
 
     let events = events.snapshot().await;

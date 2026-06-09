@@ -70,7 +70,9 @@ The library is still imported as `lash` — only the crate name on
 crates.io changes:
 
 ```rust
-use lash::{provider::ProviderHandle, runtime::EffectScope, LashCore, ModelSpec, TurnActivityId, TurnInput};
+use std::sync::Arc;
+
+use lash::{provider::ProviderHandle, LashCore, ModelSpec, TurnInput};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
@@ -92,17 +94,15 @@ async fn main() -> anyhow::Result<()> {
     let core = LashCore::standard()
         .provider(provider)
         .model(model)
+        .effect_host(Arc::new(lash::durability::InlineEffectHost::default()))
+        .lashlang_artifact_store(Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
         .build()?;
 
     let session = core.session("hello-1").open().await?;
-    let effect_host = session.effect_host().await;
-    let scope = effect_host.scoped(EffectScope::turn(
-        session.session_id(),
-        TurnActivityId::fresh().0,
-    ))?;
     let result = session
         .turn(TurnInput::text("Say hi in one short sentence."))
-        .run(scope)
+        .run()
         .await?;
 
     println!("{}", result.assistant_message().unwrap_or_default());
@@ -163,40 +163,36 @@ CLI reference: [`docs/cli.html`](https://lash.run/cli.html).
 
 ## Development
 
-The CI runtime-performance gate uses the quick synthetic profile:
+The CI performance gate uses the quick general guard:
 
 ```bash
-python3 scripts/profile_runtime.py --profile quick --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/ci.json
+just perf-guard
 ```
 
-That default matrix covers standard mode, RLM, RLM tool batches, large tool surfaces, observational-memory prompt and maintenance paths, embed paths, streaming, scoped effect-controller turns, store reopen, and sans-IO turn-checkpoint round trips. The nightly / manual `Performance` workflow runs the full runtime profile:
+That guard runs the quick runtime profile, runtime stack-sensitivity checks at the 2 MiB budget, UI perf budgets, and the Lashlang perf/profile sweep. Runtime coverage includes standard mode, RLM, RLM tool batches, large tool surfaces, observational-memory prompt and maintenance paths, embed paths, streaming, scoped effect-controller turns, store reopen, sans-IO turn-checkpoint round trips, live replay pressure, and JSONL trace-sink overhead. The nightly / manual `Performance` workflow runs the full guard, including DHAT runtime heap attribution:
+
+```bash
+python3 scripts/profile_guard.py --profile full --release --cargo-feature fff-zlob --enforce --out .benchmarks/perf-guard/full.json
+```
+
+For focused runtime, UI, or Lashlang regressions, the primitive profilers remain available:
 
 ```bash
 python3 scripts/profile_runtime.py --profile full --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/full.json
-```
-
-For focused runtime regressions, the guard runner combines the normal runtime profile, stack-sensitivity matrix, and optional DHAT heap attribution:
-
-```bash
-python3 scripts/profile_runtime_guard.py --profile quick --release --cargo-feature fff-zlob --out .benchmarks/runtime-guard/guard.json
+python3 scripts/profile_ui.py --profile full --release --cargo-feature fff-zlob --runs 5 --warmups 1 --out .benchmarks/ui-perf/full.json
+python3 scripts/profile_lashlang.py --iterations 2500 --profile-iterations 2500 --out .benchmarks/lashlang-perf/full.json
 ```
 
 Focused blocking gates:
 
 ```bash
+just perf-guard
 just stack-budget
 just release-automation-test
 just restate-postgres-workers-e2e
 ```
 
-`just stack-budget` runs `scripts/ci-stack-budget.sh` with the default 2 MiB stack budget (`LASH_STACK_BUDGET_KB=2048`, `RUST_MIN_STACK=2097152`) and executes the stack-sensitive Lashlang, runtime, and subagent seeds. `just release-automation-test` pins release-version handling for lockstep vs private workspace crates and publisher retry classification. `just restate-postgres-workers-e2e` is the heavy Docker E2E for the distributed Restate/Postgres/MinIO stack: mock OpenAI-compatible provider, two workers behind the h2c proxy, shared Postgres/S3 state, failover, host-event triggers, live replay, and JSONL trace assertions.
-
-It also runs the full UI profile and the Lashlang scenario sweep:
-
-```bash
-python3 scripts/profile_ui.py --profile full --release --cargo-feature fff-zlob --runs 5 --warmups 1 --out .benchmarks/ui-perf/full.json
-python3 scripts/profile_lashlang.py --iterations 2500 --profile-iterations 2500 --out .benchmarks/lashlang-perf/full.json
-```
+`just perf-guard` writes the combined report to `.benchmarks/perf-guard/local.json`. `just stack-budget` runs `scripts/ci-stack-budget.sh` with the default 2 MiB stack budget (`LASH_STACK_BUDGET_KB=2048`, `RUST_MIN_STACK=2097152`) and executes the stack-sensitive Lashlang, runtime, and subagent seeds. `just release-automation-test` pins release-version handling for lockstep vs private workspace crates and publisher retry classification. `just restate-postgres-workers-e2e` is the heavy Docker E2E for the distributed Restate/Postgres/MinIO stack: mock OpenAI-compatible provider, two workers behind the h2c proxy, shared Postgres/S3 state, failover, host-event triggers, live replay, and JSONL trace assertions.
 
 ## Contributing
 

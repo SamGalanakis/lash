@@ -165,13 +165,7 @@ if let Some(process_report) = report.process {
         <p>At most one turn per session commits at a time. Stores check the expected head revision in the same transaction as the commit; mismatch rolls back with no partial state.</p>
       </div>
       <p>Concurrent turns from two workers on the same session id race for the head. The loser receives a turn-level error such as <code>store_commit_failed</code>; it is not a <code>TurnStop</code> variant.</p>
-      <pre><code>let effect_host = session.effect_host().await;
-let scope = effect_host.scoped(lash::runtime::EffectScope::turn(
-    session.session_id(),
-    lash::TurnActivityId::fresh().0,
-))?;
-
-match session.turn(input).run(scope).await {
+      <pre><code>match session.turn(input).run().await {
     Ok(turn) =&gt; persist(turn),
     Err(err) if err.code == "store_commit_failed" =&gt; {
         let session = core.session(chat_id).open().await?;

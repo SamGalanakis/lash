@@ -12,7 +12,7 @@ async fn plugin_surface_streams_as_semantic_turn_event() -> Result<()> {
 
     session
         .turn(TurnInput::text("hello"))
-        .stream(&events, turn_scope(&session.session_id()))
+        .stream_to(&events)
         .await?;
 
     let surface = events
@@ -243,7 +243,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
         let standard_events = RecordingEvents::default();
         let _ = standard_session
             .turn(TurnInput::text("use tool"))
-            .stream(&standard_events, turn_scope(&standard_session.session_id()))
+            .stream_to(&standard_events)
             .await?;
         let standard_view = standard_events
             .snapshot()
@@ -281,7 +281,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
         let rlm_events = RecordingEvents::default();
         let _ = rlm_session
             .turn(TurnInput::text("use tool"))
-            .stream(&rlm_events, turn_scope(&rlm_session.session_id()))
+            .stream_to(&rlm_events)
             .await?;
         let rlm_view = rlm_events
             .snapshot()
