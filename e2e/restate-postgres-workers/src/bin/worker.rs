@@ -117,15 +117,11 @@ impl AppState {
                 "queued",
                 Some(cursor_text.clone()),
             );
-            let scope = controller
-                .scoped_effect_controller(lash_core::EffectScope::turn(
-                    DEFAULT_SESSION_ID,
-                    &request.workflow_id,
-                ))
-                .map_err(TerminalError::from_error)?;
             let turn = session
-                .next_queued_turn()
-                .stream(&sink, scope)
+                .queued_turn()
+                .drain_id(request.workflow_id.clone())
+                .effects(&controller)
+                .stream_to(&sink)
                 .await
                 .map_err(terminal_error)?;
             let submitted_value = turn
@@ -151,17 +147,13 @@ impl AppState {
             "main",
             Some(cursor_text.clone()),
         );
-        let scope = controller
-            .scoped_effect_controller(lash_core::EffectScope::turn(
-                DEFAULT_SESSION_ID,
-                &request.workflow_id,
-            ))
-            .map_err(TerminalError::from_error)?;
         let input = TurnInput::text(prompt_for_request(&request))
             .with_trace_turn_id(request.workflow_id.clone());
         let turn = session
             .turn(input)
-            .stream(&sink, scope)
+            .turn_id(request.workflow_id.clone())
+            .effects(&controller)
+            .stream_to(&sink)
             .await
             .map_err(terminal_error)?;
         let submitted_value = turn

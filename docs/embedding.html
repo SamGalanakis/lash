@@ -76,7 +76,7 @@
                 <dt><code>TurnInput</code></dt>
                 <dd>The user or host payload plus per-turn prompt/plugin context. It is data, not a running turn.</dd>
                 <dt><code>TurnBuilder</code></dt>
-                <dd>An ephemeral run request created by <code>session.turn(input)</code>. It layers cancellation, provider/model overrides, protocol turn options, prompt edits, and typed plugin input, then drives the turn through <code>stream</code>, <code>run</code>, <code>collect_with</code>, or <code>into_stream</code>.</dd>
+                <dd>An ephemeral run request created by <code>session.turn(input)</code>. It layers cancellation, provider/model overrides, protocol turn options, prompt edits, typed plugin input, and optional durable handler effects, then drives the turn through <code>run()</code>, <code>stream_to(...)</code>, or pull-style <code>stream()</code>.</dd>
                 <dt><code>TurnResult</code> / <code>TurnOutput</code></dt>
                 <dd>The committed result. <code>TurnResult</code> is the terminal outcome and usage; <code>TurnOutput</code> adds the collected semantic <code>TurnActivity</code> stream for app UIs and logs.</dd>
                 <dt><code>SessionObservation</code></dt>
@@ -144,12 +144,7 @@ let core = LashCore::builder()
     .build()?;
 
 let session = core.session("chat-123").rlm().open().await?;
-let effect_host = session.effect_host().await;
-let scope = effect_host.scoped(lash::runtime::EffectScope::turn(
-    session.session_id(),
-    lash::TurnActivityId::fresh().0,
-))?;
-let result = session.turn(TurnInput::text("Use the app tools.")).run(scope).await?;
+let result = session.turn(TurnInput::text("Use the app tools.")).run().await?;
 let assistant_text: String = result.activities.iter().filter_map(|activity| match &amp;activity.event {
     TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
     _ =&gt; None,
@@ -166,9 +161,9 @@ println!("{assistant_text}");</code></pre>
             <dt><code>PluginStack</code></dt>
             <dd>Ordered plugin factory list. <code>LashCore::standard()</code> / <code>::rlm()</code> ship with <code>plugins::runtime_plugin_stack()</code>; raw <code>::builder()</code> starts without modes or plugins. All paths still require explicit effect, artifact, and attachment facets before <code>build()</code>.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>run(...)</code>, <code>read_view()</code>, and <code>control()</code>.</dd>
+            <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>enqueue(TurnInput)</code>, <code>queued_turn()</code>, <code>read_view()</code>, and <code>control()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Per-turn config: cancellation, mode options, typed plugin input, RLM projected bindings. <code>.stream(&amp;sink, scope)</code> for live events; <code>.run(scope)</code> for a collected activity log.</dd>
+            <dd>Per-turn config: cancellation, mode options, typed plugin input, RLM projected bindings. <code>.stream_to(&amp;sink)</code> for live events; <code>.run()</code> for a collected activity log. Durable handlers add <code>.turn_id(...).effects(&amp;controller)</code>.</dd>
           </dl>
         </div>
 
@@ -223,20 +218,14 @@ let core = LashCore::builder()
         <div class="section" id="run-a-turn">
           <div class="section-header">
             <h2>Run A Turn</h2>
-            <p><code>TurnBuilder::run(scope)</code> returns a <code>TurnOutput</code>: terminal <code>TurnResult</code> plus ordered <code>Vec&lt;TurnActivity&gt;</code>.</p>
+            <p><code>TurnBuilder::run()</code> returns a <code>TurnOutput</code>: terminal <code>TurnResult</code> plus ordered <code>Vec&lt;TurnActivity&gt;</code>.</p>
           </div>
           <div class="two-col">
             <article class="panel">
               <h3>Collected result</h3>
-              <pre><code>let effect_host = session.effect_host().await;
-let scoped_effect_controller = effect_host.scoped(lash::runtime::EffectScope::turn(
-    session.session_id(),
-    lash::TurnActivityId::fresh().0,
-))?;
-
-let collected = session
+              <pre><code>let collected = session
     .turn(TurnInput::text("Summarize this task."))
-    .run(scoped_effect_controller)
+    .run()
     .await?;
 
 let live_preview: String = collected.activities.iter().filter_map(|activity| match &amp;activity.event {
@@ -252,15 +241,9 @@ let outcome = collected.result.outcome;</code></pre>
             <article class="panel">
               <h3>Live stream</h3>
               <pre><code>let ui_sink = Arc::new(AppEvents::new(tx));
-let effect_host = session.effect_host().await;
-let scoped_effect_controller = effect_host.scoped(lash::runtime::EffectScope::turn(
-    session.session_id(),
-    lash::TurnActivityId::fresh().0,
-))?;
-
 let turn = session
     .turn(TurnInput::text(user_text))
-    .stream(ui_sink.as_ref(), scoped_effect_controller)
+    .stream_to(ui_sink.as_ref())
     .await?;
 
 persist(turn.assistant_message().unwrap_or_default(), turn.total_usage())?;</code></pre>

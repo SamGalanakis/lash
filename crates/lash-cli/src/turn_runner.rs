@@ -1,6 +1,6 @@
 use lash::LashSession;
 use lash::{TurnActivitySink, TurnInput};
-use lash_core::runtime::{EffectScope, RuntimeSessionState};
+use lash_core::runtime::RuntimeSessionState;
 use lash_core::{
     AssistantOutput, ExecutionSummary, OutputState, TokenUsage, TurnIssue, TurnOutcome, TurnStop,
 };
@@ -42,20 +42,11 @@ where
 
     let task = tokio::spawn(async move {
         tracing::debug!(stream_id, "runtime turn task spawned");
-        let effect_host = task_session.effect_host().await;
-        let scoped_effect_controller = match effect_host.scoped(EffectScope::turn(
-            task_session.session_id(),
-            format!("cli-turn:{stream_id}"),
-        )) {
-            Ok(controller) => controller,
-            Err(err) => {
-                return runtime_error_turn_result(&task_session, err.to_string()).await;
-            }
-        };
         let result = match task_session
             .turn(turn_input)
+            .turn_id(format!("cli-turn:{stream_id}"))
             .cancel(task_cancel)
-            .stream(&sink, scoped_effect_controller)
+            .stream_to(&sink)
             .await
         {
             Ok(turn) => turn,
@@ -92,25 +83,16 @@ where
 
     let task = tokio::spawn(async move {
         tracing::debug!(stream_id, "queued runtime turn task spawned");
-        let effect_host = task_session.effect_host().await;
         let drain_id = batch_ids
             .first()
             .cloned()
             .unwrap_or_else(|| format!("cli-queue-drain:{stream_id}"));
-        let scoped_effect_controller = match effect_host.scoped(EffectScope::queue_drain(
-            task_session.session_id(),
-            drain_id,
-        )) {
-            Ok(controller) => controller,
-            Err(err) => {
-                return runtime_error_turn_result(&task_session, err.to_string()).await;
-            }
-        };
         let result = match task_session
-            .next_queued_turn()
+            .queued_turn()
             .batch_ids(batch_ids)
+            .drain_id(drain_id)
             .cancel(task_cancel)
-            .stream(&sink, scoped_effect_controller)
+            .stream_to(&sink)
             .await
         {
             Ok(Some(turn)) => turn,

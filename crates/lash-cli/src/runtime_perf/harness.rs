@@ -50,6 +50,12 @@ pub(crate) struct BenchmarkRuntime {
     _openai_compat_server: Option<OpenAiCompatBenchServer>,
 }
 
+pub(crate) struct RuntimePerfTraceConfig {
+    pub(crate) trace_jsonl_path: Option<PathBuf>,
+    pub(crate) lashlang_execution_jsonl_path: Option<PathBuf>,
+    pub(crate) trace_level: lash::tracing::TraceLevel,
+}
+
 impl BenchmarkRuntime {
     pub(crate) fn usage_report(&self) -> lash::usage::SessionUsageReport {
         self.session
@@ -145,7 +151,10 @@ impl BenchmarkRuntime {
             .turn(input)
             .cancel(cancel)
             .advanced()
-            .collect_session_events_with(&lash::runtime::NoopEventSink, scoped_effect_controller)
+            .collect_session_events_with_scope(
+                &lash::runtime::NoopEventSink,
+                scoped_effect_controller,
+            )
             .await
             .map_err(anyhow::Error::from)
     }
@@ -161,7 +170,8 @@ impl BenchmarkRuntime {
             .expect("benchmark session")
             .turn(input)
             .cancel(cancel)
-            .run(scoped_effect_controller)
+            .advanced()
+            .run_with_scope(scoped_effect_controller)
             .await
             .map(|output| output.result)
             .map_err(anyhow::Error::from)
@@ -409,12 +419,13 @@ pub(crate) fn build_embed_core(
 pub(crate) async fn build_runtime(
     scenario: RuntimePerfScenario,
 ) -> anyhow::Result<BenchmarkRuntime> {
-    build_runtime_with_store(scenario, None).await
+    build_runtime_with_store(scenario, None, None).await
 }
 
 pub(crate) async fn build_runtime_with_store(
     scenario: RuntimePerfScenario,
     store: Option<Arc<RuntimePerfStore>>,
+    trace_config: Option<RuntimePerfTraceConfig>,
 ) -> anyhow::Result<BenchmarkRuntime> {
     let execution_mode = scenario.execution_mode();
     let standard_context_approach = scenario.standard_context_approach();
@@ -467,6 +478,12 @@ pub(crate) async fn build_runtime_with_store(
         .provider(provider)
         .model(benchmark_model_spec())
         .plugins(plugin_stack);
+    if let Some(config) = trace_config {
+        builder = builder
+            .trace_jsonl_path(config.trace_jsonl_path)
+            .lashlang_execution_jsonl_path(config.lashlang_execution_jsonl_path)
+            .trace_level(config.trace_level);
+    }
     // RlmGlobals carries per-turn host values that are intentionally live-only.
     // Store-backed turns reject those extensions because they cannot be
     // checkpointed/resumed, and this scenario does not exercise process handles,
@@ -832,6 +849,18 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::StoreReopen | RuntimePerfScenario::SqliteStoreReopen => format!(
             "Turn {} in store reopen benchmark mode. Continue after persisted reload and reply with exactly: runtime perf benchmark ok",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::LiveReplayPressure => format!(
+            "Turn {} in live replay pressure benchmark mode. Append, replay, subscribe, trim, and verify gap handling.",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::TraceJsonlStandard => format!(
+            "Turn {} in standard JSONL trace benchmark mode. Continue the benchmark chat and reply with exactly: runtime perf benchmark ok",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::TraceJsonlExtended => format!(
+            "Turn {} in extended JSONL trace benchmark mode. Run the Lashlang block and submit exactly: runtime perf benchmark ok",
             turn_index + 1
         ),
     }

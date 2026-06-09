@@ -382,6 +382,11 @@ struct Args {
     #[arg(long, hide = true, value_name = "BYTES")]
     runtime_perf_worker_stack_bytes: Option<usize>,
 
+    /// Exit non-zero when a runtime perf budget is exceeded
+    #[cfg(feature = "bench")]
+    #[arg(long, hide = true)]
+    runtime_perf_enforce_budgets: bool,
+
     /// Export a persisted session `.db` path and exit
     #[arg(long, value_name = "DB")]
     export: Option<String>,
@@ -480,6 +485,7 @@ async fn async_main(args: Args) -> anyhow::Result<()> {
             args.runtime_perf_warmups,
             args.runtime_perf_scenario,
             args.runtime_perf_turns,
+            args.runtime_perf_enforce_budgets,
             APP_VERSION,
         )
         .await;

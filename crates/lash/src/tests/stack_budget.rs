@@ -31,7 +31,7 @@ submit {
 
         let turn = session
             .turn(TurnInput::text("run stack budget process fanout"))
-            .stream(&events, turn_scope(&session.session_id()))
+            .stream_to(&events)
             .await?;
         session.process_control().await_all().await?;
 

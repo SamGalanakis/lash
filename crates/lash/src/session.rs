@@ -267,6 +267,7 @@ impl SessionBuilder {
             env.process_registry.is_some(),
         )?;
         env.plugin_host = Some(Arc::new(plugin_host));
+        let effect_host = Arc::clone(&env.core.control.effect_host);
         // Lazily spawn the default process work runner (Decision 3: deferred to
         // the first open so a tokio runtime is guaranteed; idempotent via the
         // shared once-guard) and thread its poke onto this session's host so the
@@ -279,6 +280,7 @@ impl SessionBuilder {
         );
         Ok(LashSession {
             runtime: handle,
+            effect_host,
             mode,
             parent_session_id: self.parent_session_id,
             active_plugins: self.active_plugins,
@@ -327,6 +329,7 @@ impl PromptLayerSink for SessionBuilder {
 #[derive(Clone)]
 pub struct LashSession {
     pub(crate) runtime: RuntimeHandle,
+    pub(crate) effect_host: Arc<dyn EffectHost>,
     pub(crate) mode: ModeId,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
@@ -335,7 +338,7 @@ pub struct LashSession {
 #[derive(Clone, Debug, Default)]
 pub struct SessionConfigPatch {
     pub provider: Option<ProviderHandle>,
-    pub model: Option<lash_core::ModelSpec>,
+    pub model: Option<ModelSpec>,
     pub prompt: Option<PromptLayer>,
 }
 
@@ -370,34 +373,30 @@ impl LashSession {
     }
 
     pub async fn effect_host(&self) -> Arc<dyn EffectHost> {
-        self.runtime.writer().lock().await.effect_host()
-    }
-
-    pub async fn run(
-        &self,
-        input: TurnInput,
-        scoped_effect_controller: ScopedEffectController<'_>,
-    ) -> Result<TurnOutput> {
-        self.turn(input).run(scoped_effect_controller).await
+        Arc::clone(&self.effect_host)
     }
 
     pub fn turn(&self, input: TurnInput) -> TurnBuilder {
         TurnBuilder {
             runtime: self.runtime.clone(),
+            effect_host: Arc::clone(&self.effect_host),
             active_plugins: self.active_plugins.clone(),
             input,
             cancel: CancellationToken::new(),
             protocol_turn_options: None,
             provider: None,
             model: None,
+            turn_id: None,
         }
     }
 
-    pub fn next_queued_turn(&self) -> QueuedTurnBuilder {
+    pub fn queued_turn(&self) -> QueuedTurnBuilder {
         QueuedTurnBuilder {
             runtime: self.runtime.clone(),
+            effect_host: Arc::clone(&self.effect_host),
             cancel: CancellationToken::new(),
             batch_ids: Vec::new(),
+            drain_id: None,
         }
     }
 
@@ -433,8 +432,8 @@ impl LashSession {
         }
     }
 
-    pub fn queue(&self, input: TurnInput) -> QueueInputBuilder<'_> {
-        QueueInputBuilder {
+    pub fn enqueue(&self, input: TurnInput) -> EnqueueTurnBuilder<'_> {
+        EnqueueTurnBuilder {
             session: self,
             input,
             id: None,
@@ -549,11 +548,11 @@ impl ObservableSession {
             .unwrap_or_default()
     }
 
-    pub async fn list_process_handles(&self) -> Vec<lash_core::ProcessHandleSummary> {
+    pub async fn list_process_handles(&self) -> Vec<ProcessHandleSummary> {
         self.snapshot().list_process_handles().await
     }
 
-    pub async fn list_all_process_handles(&self) -> Vec<lash_core::ProcessHandleSummary> {
+    pub async fn list_all_process_handles(&self) -> Vec<ProcessHandleSummary> {
         self.snapshot().list_all_process_handles().await
     }
 
@@ -569,7 +568,7 @@ fn live_replay_error(err: lash_core::LiveReplayStoreError) -> EmbedError {
     ))
 }
 
-pub struct QueueInputBuilder<'a> {
+pub struct EnqueueTurnBuilder<'a> {
     session: &'a LashSession,
     input: TurnInput,
     id: Option<String>,
@@ -577,7 +576,7 @@ pub struct QueueInputBuilder<'a> {
     slot_policy: SlotPolicy,
 }
 
-impl<'a> QueueInputBuilder<'a> {
+impl<'a> EnqueueTurnBuilder<'a> {
     pub fn id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
         self
@@ -593,7 +592,7 @@ impl<'a> QueueInputBuilder<'a> {
         self
     }
 
-    pub async fn send(self) -> Result<()> {
+    pub async fn send(self) -> Result<QueuedWorkBatch> {
         let source_key = self.id.map(|id| format!("host:{id}"));
         self.session
             .runtime
@@ -604,14 +603,14 @@ impl<'a> QueueInputBuilder<'a> {
                 source_key,
             )
             .await
-            .map(|_| ())
             .map_err(EmbedError::Runtime)
     }
 }
 
-impl<'a> std::future::IntoFuture for QueueInputBuilder<'a> {
-    type Output = Result<()>;
-    type IntoFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>;
+impl<'a> std::future::IntoFuture for EnqueueTurnBuilder<'a> {
+    type Output = Result<QueuedWorkBatch>;
+    type IntoFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<QueuedWorkBatch>> + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.send())

@@ -84,7 +84,7 @@ let core = LashCore::builder()
 let session = core.session("task-42").rlm().open().await?;
 let output = session
     .turn(TurnInput::text("Inspect the task and submit a concise result."))
-    .run(scoped_effect_controller)
+    .run()
     .await?;</code></pre>
       <p>For a complete core/provider setup, start from <a href="./quickstart.html#minimal-example">Quickstart</a> and switch the mode to RLM.</p>
     </div>

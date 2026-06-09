@@ -515,20 +515,16 @@ async fn run_user_turn(
         state: state.clone(),
         turn_state: Arc::clone(&turn_state),
     };
-    let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::turn(
-            &request.session_id,
-            &request.turn_id,
-        ))
-        .map_err(AppError::internal)?;
     let mut input = TurnInput::text(request.text.clone());
     input.trace_turn_id = Some(request.turn_id.clone());
     let output = session
         .turn(input)
+        .turn_id(request.turn_id.clone())
         .model(turn_model)
         .require_submit()
         .map_err(AppError::internal)?
-        .stream(&ui_events, scoped_effect_controller)
+        .effects(controller)
+        .stream_to(&ui_events)
         .await
         .map_err(AppError::internal)?;
     record_turn_output(&state, output, turn_state, "restate_user_turn.completed");
@@ -689,15 +685,11 @@ async fn run_queued_turn(
             "model": serde_json::to_value(&selected_model).unwrap_or(Value::Null),
         }),
     );
-    let scoped_effect_controller = controller
-        .scoped_effect_controller(lash::runtime::EffectScope::queue_drain(
-            &request.session_id,
-            &request.turn_id,
-        ))
-        .map_err(AppError::internal)?;
     let Some(output) = session
-        .next_queued_turn()
-        .stream(&ui_events, scoped_effect_controller)
+        .queued_turn()
+        .drain_id(request.turn_id.clone())
+        .effects(controller)
+        .stream_to(&ui_events)
         .await
         .map_err(AppError::internal)?
     else {

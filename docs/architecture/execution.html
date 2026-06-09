@@ -58,7 +58,7 @@ flowchart TD
           </div>
           <div class="two-col">
             <article class="panel"><small>standard</small><h3>Native provider tool calls</h3><p>The Standard protocol interprets provider output through <code>StandardDriver</code> and emits <code>DriverAction::StartTools</code>. The runtime dispatches registered native tools first, then tools contributed by registered <code>ToolProvider</code>s.</p></article>
-            <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p>The RLM protocol extracts closed <code>lashlang</code> fences from the model output and runs them through a persistent VM. Read-only host bindings (e.g., <code>history</code>) are projected into Lashlang scope through <code>RlmProjectedBindings</code>; lazy bindings carry <code>ProjectionRef</code>s that resolve immediately before execution. They read like ordinary names but cannot be reassigned. The prompt renderer uses the effective <code>LashlangSurface</code>, so disabled process and trigger abilities are not advertised and fail during linking if emitted anyway. <code>continue_as</code> is an RLM native control tool, <code>llm_query</code> is supplied by <code>lash-llm-tools</code>, and the <code>stream_mask</code> plugin hides the still-streaming fence from live UI until execution completes. An RLM block ending with <code>continue_as { task, seed }</code> finishes the low-level turn as <code>TurnOutcome::AgentFrameSwitch { frame_id }</code>, appends a fresh AgentFrame inside the same session, and preserves turn index, trace continuity, process-scope decisions, and projected seed refs. App hosts call <code>session.turn(input).stream(&amp;sink, scope)</code> or <code>.run(scope)</code>; the facade follows AgentFrame switches and returns the final <code>TurnResult</code>.</p></article>
+            <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p>The RLM protocol extracts closed <code>lashlang</code> fences from the model output and runs them through a persistent VM. Read-only host bindings (e.g., <code>history</code>) are projected into Lashlang scope through <code>RlmProjectedBindings</code>; lazy bindings carry <code>ProjectionRef</code>s that resolve immediately before execution. They read like ordinary names but cannot be reassigned. The prompt renderer uses the effective <code>LashlangSurface</code>, so disabled process and trigger abilities are not advertised and fail during linking if emitted anyway. <code>continue_as</code> is an RLM native control tool, <code>llm_query</code> is supplied by <code>lash-llm-tools</code>, and the <code>stream_mask</code> plugin hides the still-streaming fence from live UI until execution completes. An RLM block ending with <code>continue_as { task, seed }</code> finishes the low-level turn as <code>TurnOutcome::AgentFrameSwitch { frame_id }</code>, appends a fresh AgentFrame inside the same session, and preserves turn index, trace continuity, process-scope decisions, and projected seed refs. App hosts call <code>session.turn(input).stream_to(&amp;sink)</code> or <code>.run()</code>; the facade follows AgentFrame switches and returns the final <code>TurnResult</code>.</p></article>
           </div>
           <p>Background work — subagents and async tool calls — is described in <a href="#background-work">Background Work</a> below. Either protocol can spawn handles when a process registry is installed; RLM additionally discovers visible runs via <code>processes.list</code> and resolves handles with <code>await</code>.</p>
         </div>
@@ -78,7 +78,7 @@ flowchart LR
   Advanced --> Env["runtime environment<br/>plugins + stores + tracing"]
   App --> Session["core.session(id)<br/>SessionBuilder"]
   Session --> Runtime["parked runtime handle<br/>per chat/session"]
-  Runtime --> Turn["turn(TurnInput).stream(&sink, scope) / .run(scope)"]
+  Runtime --> Turn["turn(TurnInput).stream_to(&sink) / .run()"]
   Runtime --> Observe["observe()<br/>SessionObservation + cursor"]
   Turn --> Result["TurnResult / TurnOutput<br/>result (+ activities)"]
   Turn --> Events["TurnActivitySink<br/>text, reasoning, tools, usage, done"]
@@ -92,7 +92,7 @@ flowchart LR
             <dt><code>LashSession</code></dt>
             <dd>One conversation. Parked/resumable handle exposing <code>run(...)</code>, <code>turn(...)</code>, <code>read_view()</code>, <code>observe()</code>, and <code>control()</code>. Carries an optional parent session id.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Per-turn config: cancellation token, mode options, plugin input, RLM bindings. <code>.stream(&amp;sink, scope)</code> drives against a <code>TurnActivitySink</code>; <code>.run(scope)</code> returns a <code>TurnOutput</code> with terminal result and ordered activities.</dd>
+            <dd>Per-turn config: cancellation token, mode options, plugin input, RLM bindings. <code>.stream_to(&amp;sink)</code> drives against a <code>TurnActivitySink</code>; <code>.run()</code> returns a <code>TurnOutput</code> with terminal result and ordered activities.</dd>
             <dt><code>TurnInput</code></dt>
             <dd>Text plus image refs. Hosts resolve UI syntax like <code>@path</code> before constructing the turn.</dd>
             <dt><code>TurnActivity</code></dt>
@@ -112,7 +112,7 @@ flowchart LR
 let session = core.session(chat_id).standard().open().await?;
 let result = session
     .turn(TurnInput::text(user_text))
-    .stream(&events, scoped_effect_controller)
+    .stream_to(&events)
     .await?;</code></pre>
           <div class="two-col">
             <article class="panel"><h3>Example shape</h3><p><code>examples/agent-service</code>: opens a session per chat id, records <code>TurnEvent</code>s through a sink, wires app DB + <code>SessionStoreFactory</code> + Axum + browser streaming. Walkthrough: <a href="../embedding.html">Lash API</a>.</p></article>

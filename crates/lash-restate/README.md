@@ -22,11 +22,7 @@ impl AgentTurnWorkflow for AgentTurnWorkflowImpl {
         Json(req): Json<TurnRequest>,
     ) -> HandlerResult<Json<TurnResponse>> {
         let effect_controller = RestateRuntimeEffectController::new(ctx);
-        let turn_id = req.turn_id.clone();
-        let scoped_effect_controller = effect_controller
-            .scoped_effect_controller(lash_core::EffectScope::turn(&req.session_id, &turn_id))
-            .map_err(TerminalError::from_error)?;
-        let response = run_lash_turn(scoped_effect_controller, req)
+        let response = run_lash_turn(&effect_controller, req)
             .await
             .map_err(TerminalError::from_error)?;
         Ok(Json(response))
@@ -36,7 +32,7 @@ impl AgentTurnWorkflow for AgentTurnWorkflowImpl {
 
 The application owns `run_lash_turn`: open the `LashSession` from stable
 request data and call
-`session.turn(input.with_trace_turn_id(turn_id)).run(scope)`
+`session.turn(input).turn_id(turn_id).effects(&controller).run()`
 for the Restate-backed turn. Restate recovery is handler replay with the same turn id
 and request data, not a Lash-owned in-flight checkpoint reload.
 

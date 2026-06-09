@@ -108,9 +108,7 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
     let core = standard_core();
     let session = core.session("session-ops").open().await?;
 
-    session
-        .run(TurnInput::text("usage"), turn_scope(&session.session_id()))
-        .await?;
+    session.turn(TurnInput::text("usage")).run().await?;
     let usage = session.usage_report();
     assert_eq!(usage.usage.output_tokens, 2);
     session
@@ -155,10 +153,8 @@ async fn compact_context_opens_compaction_frame_and_preserves_prior_frame() -> R
         .build()?;
     let session = core.session("compact-context").open().await?;
     session
-        .run(
-            TurnInput::text("old durable request"),
-            turn_scope(&session.session_id()),
-        )
+        .turn(TurnInput::text("old durable request"))
+        .run()
         .await?;
     let before = session.control().state().persist_current().await?;
     let previous_frame_id = before.current_agent_frame_id.clone();
@@ -297,7 +293,7 @@ async fn queue_enqueue_and_cancel_emit_typed_observation_events() -> Result<()> 
     let cursor = session.observe().current_observation().cursor;
 
     session
-        .queue(TurnInput::text("queued observation"))
+        .enqueue(TurnInput::text("queued observation"))
         .id("queue-observation")
         .send()
         .await?;
@@ -451,7 +447,9 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
     let scoped_effect_controller = turn_scope(&turn_session.session_id());
     let turn = tokio::spawn(async move {
         turn_session
-            .run(TurnInput::text("blocked"), scoped_effect_controller)
+            .turn(TurnInput::text("blocked"))
+            .advanced()
+            .run_with_scope(scoped_effect_controller)
             .await
     });
 
@@ -595,10 +593,8 @@ async fn observation_updates_after_completed_turn() -> Result<()> {
 
     assert!(session.read_view().messages().is_empty());
     session
-        .run(
-            TurnInput::text("hello observation"),
-            turn_scope(&session.session_id()),
-        )
+        .turn(TurnInput::text("hello observation"))
+        .run()
         .await?;
 
     let observed = session.observe();

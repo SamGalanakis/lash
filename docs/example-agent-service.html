@@ -104,7 +104,7 @@ let turn = session
     .model(lash::ModelSpec::from_token_limits(model_selection.model, model_selection.model_variant, 200_000, None, None).expect("valid model metadata"))
     .require_submit()?;
 
-let output = turn.collect_with(&amp;ui_events).await?;
+let output = turn.stream_to(&amp;ui_events).await?;
 let assistant_text = assistant_text_for_persistence(
     &amp;output,
     &amp;turn_state.lock().expect("turn state lock").assistant_prose,

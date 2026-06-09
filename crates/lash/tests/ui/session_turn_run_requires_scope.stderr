@@ -1,15 +1,16 @@
-error[E0061]: this method takes 1 argument but 0 arguments were supplied
- --> tests/ui/session_turn_run_requires_scope.rs:2:58
+error[E0061]: this method takes 0 arguments but 1 argument was supplied
+ --> tests/ui/session_turn_run_requires_scope.rs:5:58
   |
-2 |     let _ = session.turn(lash::TurnInput::text("hello")).run().await;
-  |                                                          ^^^-- argument #1 of type `ScopedEffectController<'_>` is missing
+5 |     let _ = session.turn(lash::TurnInput::text("hello")).run(scope).await;
+  |                                                          ^^^ ----- unexpected argument of type `ScopedEffectController<'_>`
   |
 note: method defined here
  --> src/turn.rs
   |
-  |     pub async fn run(
+  |     pub async fn run(self) -> Result<TurnOutput> {
   |                  ^^^
-help: provide the argument
+help: remove the extra argument
   |
-2 |     let _ = session.turn(lash::TurnInput::text("hello")).run(/* ScopedEffectController<'_> */).await;
-  |                                                              ++++++++++++++++++++++++++++++++
+5 -     let _ = session.turn(lash::TurnInput::text("hello")).run(scope).await;
+5 +     let _ = session.turn(lash::TurnInput::text("hello")).run().await;
+  |

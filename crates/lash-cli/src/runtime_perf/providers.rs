@@ -790,7 +790,8 @@ fn benchmark_stream_profile_for_request(
         }
         RuntimePerfScenario::Rlm
         | RuntimePerfScenario::RlmLargeToolSurface
-        | RuntimePerfScenario::EmbedRlm => {
+        | RuntimePerfScenario::EmbedRlm
+        | RuntimePerfScenario::TraceJsonlExtended => {
             let text = "```lashlang\nsubmit \"runtime perf benchmark ok\"\n```".to_string();
             text_profile(text)
         }

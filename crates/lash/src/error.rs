@@ -46,6 +46,14 @@ pub enum EmbedError {
     SessionDeleteProcess { session_id: String, message: String },
     #[error("missing required turn input for plugin `{plugin_id}`")]
     MissingPluginTurnInput { plugin_id: &'static str },
+    #[error(
+        "configured effect host for {operation} is durable and requires a handler context; use .effects(&controller) and provide .turn_id(...) for replayable foreground requests"
+    )]
+    DurableEffectHostRequiresHandlerContext { operation: &'static str },
+    #[error(
+        "pull-style turn streams require an effect host that can create a static scoped controller; use stream_to(...) inside the handler context"
+    )]
+    StaticTurnStreamRequiresStaticEffectHost,
     #[error("runtime session error: {0}")]
     Session(#[from] SessionError),
     #[error("runtime turn error: {0}")]

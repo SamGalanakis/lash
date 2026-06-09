@@ -10,7 +10,6 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, Response};
 use bytes::Bytes;
 use lash::modes::RlmTurnBuilderExt as _;
-use lash::runtime::EffectScope;
 use lash::{TurnActivity, TurnActivitySink, TurnEvent, TurnInput, TurnOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -223,21 +222,14 @@ pub(crate) async fn send_message(
         );
         let turn = session
             .turn(TurnInput::text(text))
+            .turn_id(format!("agent-service-local-turn:{}", uuid::Uuid::new_v4()))
             .model(turn_model)
             .require_submit();
-        let effect_host = session.effect_host().await;
-        let scoped_effect_controller = match effect_host.scoped(EffectScope::turn(
-            session.session_id(),
-            format!("agent-service-local-turn:{}", uuid::Uuid::new_v4()),
-        )) {
-            Ok(controller) => Ok(controller),
-            Err(err) => Err(lash::EmbedError::from(err)),
-        };
         let turn = match turn {
-            Ok(turn) => match scoped_effect_controller {
-                Ok(controller) => turn.collect_with(&ui_events, controller).await,
-                Err(err) => Err(err),
-            },
+            Ok(turn) => turn.stream_to(&ui_events).await.map(|result| TurnOutput {
+                result,
+                activities: Vec::new(),
+            }),
             Err(err) => Err(err),
         };
         match turn {

@@ -42,7 +42,7 @@ use self::helpers::{
     log_runtime_transition,
 };
 
-use self::commands::dispatch_next_queued_turn;
+use self::commands::dispatch_queued_turn;
 #[cfg(test)]
 pub(crate) use self::runtime::injected_image_part_indices;
 #[cfg(test)]
@@ -320,7 +320,7 @@ pub(crate) async fn run_app(
             && app.has_queued_messages()
             && runtime.is_some()
             && runtime_return_rx.is_none()
-            && dispatch_next_queued_turn(
+            && dispatch_queued_turn(
                 &mut app,
                 &mut ui_trace,
                 &mut terminal,
@@ -472,7 +472,7 @@ pub(crate) async fn run_app(
                         );
                         runtime_return_rx = None;
                         cancel_token = None;
-                        dispatch_next_queued_turn(
+                        dispatch_queued_turn(
                             &mut app,
                             &mut ui_trace,
                             &mut terminal,
@@ -510,7 +510,7 @@ pub(crate) async fn run_app(
                         cancel_token.is_some(),
                         active_stream_id,
                     );
-                    dispatch_next_queued_turn(
+                    dispatch_queued_turn(
                         &mut app,
                         &mut ui_trace,
                         &mut terminal,

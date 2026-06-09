@@ -104,7 +104,7 @@ match result.outcome {
           </div>
           <div class="callout">
             <strong>Turn streams are not reconnect cursors.</strong>
-            <p>Use <code>TurnBuilder::stream</code>, <code>collect_with</code>, and <code>into_stream</code> for one running turn. Hosts that need browser reconnect or service resume use <code>ObservableSession::current_observation()</code>, <code>resume_from_cursor</code>, and <code>subscribe_from_cursor</code>, which replay session-level <code>SessionObservationEvent</code>s or return a <code>LiveReplayGap</code>.</p>
+            <p>Use <code>TurnBuilder::stream_to</code>, <code>run</code>, and pull-style <code>stream</code> for one running turn. Hosts that need browser reconnect or service resume use <code>ObservableSession::current_observation()</code>, <code>resume_from_cursor</code>, and <code>subscribe_from_cursor</code>, which replay session-level <code>SessionObservationEvent</code>s or return a <code>LiveReplayGap</code>.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">TurnActivity sink</div>
@@ -241,13 +241,13 @@ impl TurnActivitySink for ChannelSink {
 let submitted = session
     .turn(TurnInput::text("Move on the board."))
     .require_submit()?
-    .stream(&amp;sink, scoped_effect_controller)
+    .stream_to(&amp;sink)
     .await?;
 
 let prose_or_submit = session
     .turn(TurnInput::text("Answer directly if no code is needed."))
     .allow_prose_or_submit()?
-    .run(scoped_effect_controller)
+    .run()
     .await?;</code></pre>
             </article>
             <article class="panel">
@@ -290,7 +290,7 @@ let result = session
         },
         "additionalProperties": false
     }))?
-    .run(scoped_effect_controller)
+    .run()
     .await?;</code></pre>
         </div>
   </main>

@@ -75,7 +75,7 @@ pub(super) async fn run_turn_case_without_success_assertions(
 
     let turn_output = session
         .turn(TurnInput::text(case.root_prompt))
-        .stream(events.as_ref(), turn_scope(&session.session_id()))
+        .stream_to(events.as_ref())
         .await?;
     session.process_control().await_all().await?;
     let prompt_captures_snapshot = prompt_captures.lock().expect("prompt captures").clone();

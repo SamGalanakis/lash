@@ -321,13 +321,7 @@ submit "registered"
             .expect("open session");
         let output = session
             .turn(lash_core::TurnInput::text(prompt))
-            .run(
-                lash_core::ScopedEffectController::shared(
-                    Arc::new(lash_core::InlineRuntimeEffectController),
-                    lash_core::EffectScope::turn(SESSION_ID, lash_core::TurnActivityId::fresh().0),
-                )
-                .expect("inline trigger registration effect scope"),
-            )
+            .run()
             .await
             .expect("register trigger route");
         assert_eq!(

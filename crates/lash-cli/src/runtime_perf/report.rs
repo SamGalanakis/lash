@@ -27,6 +27,18 @@ pub(crate) struct RuntimePerfReport {
     dhat_out: Option<PathBuf>,
     results: Vec<RuntimePerfRunResult>,
     summary: Vec<RuntimePerfScenarioSummary>,
+    budget_results: Vec<RuntimePerfBudgetResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RuntimePerfBudgetResult {
+    scenario: String,
+    metric: String,
+    statistic: String,
+    actual: Option<f64>,
+    budget: Option<f64>,
+    passed: bool,
+    reason: Option<String>,
 }
 
 pub(crate) fn default_output_path() -> PathBuf {
@@ -43,6 +55,7 @@ pub(crate) async fn run_cli(
     warmups: usize,
     scenario_filters: Vec<String>,
     chat_turns: usize,
+    enforce_budgets: bool,
     version: &str,
 ) -> anyhow::Result<()> {
     if dhat_out.is_some() && !enable_dhat {
@@ -76,6 +89,8 @@ pub(crate) async fn run_cli(
     }
     dhat::finish_dhat_profiler(profiler);
 
+    let summary = summarize(&results, &scenarios, chat_turns);
+    let budget_results = evaluate_budgets(&summary, &scenarios);
     let report = RuntimePerfReport {
         created_at: Utc::now().to_rfc3339(),
         version: version.to_string(),
@@ -87,7 +102,8 @@ pub(crate) async fn run_cli(
             .map(|scenario| scenario.name().to_string())
             .collect(),
         dhat_out: dhat_out_path.clone(),
-        summary: summarize(&results, &scenarios, chat_turns),
+        summary,
+        budget_results,
         results,
     };
 
@@ -99,8 +115,34 @@ pub(crate) async fn run_cli(
             "out": out_path,
             "dhat_out": report.dhat_out,
             "summary": report.summary,
+            "budget_results": report.budget_results,
         }))?
     );
+    if enforce_budgets {
+        let failures = report
+            .budget_results
+            .iter()
+            .filter(|budget| !budget.passed)
+            .map(|budget| {
+                let actual = budget
+                    .actual
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "missing".to_string());
+                let budget_value = budget
+                    .budget
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "required".to_string());
+                let reason = budget.reason.as_deref().unwrap_or("budget exceeded");
+                format!(
+                    "{} {} {} actual={} budget={} ({reason})",
+                    budget.scenario, budget.metric, budget.statistic, actual, budget_value
+                )
+            })
+            .collect::<Vec<_>>();
+        if !failures.is_empty() {
+            anyhow::bail!("Runtime perf budget exceeded:\n{}", failures.join("\n"));
+        }
+    }
     Ok(())
 }
 
@@ -299,9 +341,165 @@ fn summarize(
                 ),
                 sample_session_nodes: matching[0].session_nodes,
                 sample_active_path_messages: matching[0].active_path_messages,
+                sample_extra_counters: matching[0].extra_counters.clone(),
             })
         })
         .collect()
+}
+
+fn evaluate_budgets(
+    summaries: &[RuntimePerfScenarioSummary],
+    scenarios: &[RuntimePerfScenario],
+) -> Vec<RuntimePerfBudgetResult> {
+    let mut budgets = Vec::new();
+    for scenario in scenarios {
+        let Some(summary) = summaries
+            .iter()
+            .find(|summary| summary.scenario == scenario.name())
+        else {
+            budgets.push(RuntimePerfBudgetResult {
+                scenario: scenario.name().to_string(),
+                metric: "scenario_output".to_string(),
+                statistic: "present".to_string(),
+                actual: None,
+                budget: Some(1.0),
+                passed: false,
+                reason: Some("scenario did not produce a summary".to_string()),
+            });
+            continue;
+        };
+
+        for phase in required_phases(*scenario) {
+            let passed = summary.phase_summary.contains_key(*phase);
+            budgets.push(RuntimePerfBudgetResult {
+                scenario: scenario.name().to_string(),
+                metric: format!("phase:{phase}"),
+                statistic: "present".to_string(),
+                actual: if passed { Some(1.0) } else { None },
+                budget: Some(1.0),
+                passed,
+                reason: (!passed).then(|| "required phase metrics were missing".to_string()),
+            });
+        }
+
+        push_max_budget(
+            &mut budgets,
+            summary,
+            "total_alloc_bytes",
+            "median",
+            summary.total_alloc_bytes.median,
+            allocation_budget_bytes(*scenario),
+        );
+        push_max_budget(
+            &mut budgets,
+            summary,
+            "run_turn_alloc_bytes",
+            "median",
+            summary.run_turn_alloc_bytes.median,
+            run_turn_allocation_budget_bytes(*scenario),
+        );
+        push_max_budget(
+            &mut budgets,
+            summary,
+            "total_ms",
+            "median",
+            summary.total_ms.median,
+            wall_clock_budget_ms(*scenario),
+        );
+    }
+    budgets
+}
+
+fn push_max_budget(
+    budgets: &mut Vec<RuntimePerfBudgetResult>,
+    summary: &RuntimePerfScenarioSummary,
+    metric: &str,
+    statistic: &str,
+    actual: f64,
+    budget: f64,
+) {
+    budgets.push(RuntimePerfBudgetResult {
+        scenario: summary.scenario.clone(),
+        metric: metric.to_string(),
+        statistic: statistic.to_string(),
+        actual: Some(actual),
+        budget: Some(budget),
+        passed: actual <= budget,
+        reason: (actual > budget).then(|| "metric exceeded checked-in guard budget".to_string()),
+    });
+}
+
+fn required_phases(scenario: RuntimePerfScenario) -> &'static [&'static str] {
+    match scenario {
+        RuntimePerfScenario::OpenAiResponsesSseParse => &[
+            "openai_responses_sse_parse.parse_payload",
+            "openai_responses_sse_parse.project_parts",
+        ],
+        RuntimePerfScenario::DirectLlmClient => &["direct_llm_client.complete"],
+        RuntimePerfScenario::ProcessListStress => &[
+            "process_list_stress.list_live",
+            "process_list_stress.list_all",
+            "process_list_stress.render_live_json",
+            "process_list_stress.render_all_json",
+        ],
+        RuntimePerfScenario::TurnCheckpoint => &[
+            "standard_llm_checkpoint",
+            "standard_parallel_tools_checkpoint",
+            "rlm_exec_checkpoint",
+        ],
+        RuntimePerfScenario::LiveReplayPressure => &[
+            "live_replay.append",
+            "live_replay.current_cursor_parse",
+            "live_replay.replay_after_cursor",
+            "live_replay.subscribe_buffered",
+            "live_replay.trim_by_capacity",
+            "live_replay.gap_handling",
+        ],
+        RuntimePerfScenario::EmbedStandard | RuntimePerfScenario::EmbedRlm => &[],
+        _ => &[
+            "context_transform",
+            "before_turn_hooks",
+            "prompt_build",
+            "effect_loop",
+            "finalize_turn",
+            "persist_turn",
+            "final_commit",
+            "post_persist_hooks",
+        ],
+    }
+}
+
+fn allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
+    match scenario {
+        RuntimePerfScenario::ToolDiscoverySearch => 1_500_000_000.0,
+        RuntimePerfScenario::RlmLargeToolSurface => 1_000_000_000.0,
+        RuntimePerfScenario::LiveReplayPressure => 128_000_000.0,
+        RuntimePerfScenario::OpenAiResponsesSseParse
+        | RuntimePerfScenario::DirectLlmClient
+        | RuntimePerfScenario::TurnCheckpoint => 256_000_000.0,
+        _ => 1_000_000_000.0,
+    }
+}
+
+fn run_turn_allocation_budget_bytes(scenario: RuntimePerfScenario) -> f64 {
+    match scenario {
+        RuntimePerfScenario::ToolDiscoverySearch => 1_000_000_000.0,
+        RuntimePerfScenario::LiveReplayPressure => 96_000_000.0,
+        RuntimePerfScenario::OpenAiResponsesSseParse
+        | RuntimePerfScenario::DirectLlmClient
+        | RuntimePerfScenario::TurnCheckpoint => 192_000_000.0,
+        _ => 750_000_000.0,
+    }
+}
+
+fn wall_clock_budget_ms(scenario: RuntimePerfScenario) -> f64 {
+    match scenario {
+        RuntimePerfScenario::ToolDiscoverySearch | RuntimePerfScenario::RlmLargeToolSurface => {
+            20_000.0
+        }
+        RuntimePerfScenario::LiveReplayPressure => 5_000.0,
+        _ => 10_000.0,
+    }
 }
 
 fn summarize_phase_profiles(

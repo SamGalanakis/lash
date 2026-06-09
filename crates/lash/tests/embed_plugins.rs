@@ -19,14 +19,6 @@ fn assistant_prose(result: &lash::turn::TurnOutput) -> String {
         .to_string()
 }
 
-fn turn_scope(session_id: &str) -> lash::runtime::ScopedEffectController<'static> {
-    lash::runtime::ScopedEffectController::shared(
-        Arc::new(lash::runtime::InlineRuntimeEffectController),
-        lash::runtime::EffectScope::turn(session_id, lash_core::TurnActivityId::fresh().0),
-    )
-    .expect("inline effect scope")
-}
-
 #[derive(Clone, Debug)]
 struct TestPlugin;
 
@@ -242,7 +234,8 @@ async fn required_turn_input_missing_is_validated_before_execution() {
         .expect("session");
 
     let err = session
-        .run(TurnInput::text("hello"), turn_scope(&session.session_id()))
+        .turn(TurnInput::text("hello"))
+        .run()
         .await
         .expect_err("missing required context");
     assert!(matches!(
@@ -275,7 +268,7 @@ async fn prompt_hook_and_tool_provider_read_typed_turn_input() {
         .with_plugin_input::<TestPlugin>(TestTurnInput {
             label: "page-a".to_string(),
         })
-        .run(turn_scope(&session.session_id()))
+        .run()
         .await
         .expect("turn");
 
@@ -306,7 +299,8 @@ async fn optional_turn_input_can_be_absent() {
         .expect("session");
 
     let result = session
-        .run(TurnInput::text("hello"), turn_scope(&session.session_id()))
+        .turn(TurnInput::text("hello"))
+        .run()
         .await
         .expect("turn");
     assert_eq!(assistant_prose(&result), "ok");

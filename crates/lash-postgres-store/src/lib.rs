@@ -477,9 +477,7 @@ fn store_sqlx_error(err: sqlx::Error) -> StoreError {
 /// revision conflict the caller should reload-and-retry, not a backend error.
 fn is_contention_error(err: &sqlx::Error) -> bool {
     matches!(
-        err.as_database_error()
-            .and_then(|db| db.code())
-            .as_deref(),
+        err.as_database_error().and_then(|db| db.code()).as_deref(),
         Some("40001" | "40P01" | "55P03")
     )
 }

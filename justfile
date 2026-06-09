@@ -157,6 +157,9 @@ restate-postgres-workers-e2e:
 stack-budget:
   bash "{{repo}}/scripts/ci-stack-budget.sh"
 
+perf-guard:
+  python3 "{{repo}}/scripts/profile_guard.py" --profile quick --release --cargo-feature fff-zlob --skip-dhat --enforce --out "{{repo}}/.benchmarks/perf-guard/local.json"
+
 release-version-test:
   python3 "{{repo}}/scripts/test_release_version.py"
 
