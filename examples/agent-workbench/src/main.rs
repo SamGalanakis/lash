@@ -221,7 +221,6 @@ async fn async_main() -> AnyhowResult<()> {
     let state = AppState {
         core,
         process_observer,
-        session_store_factory: Arc::clone(&core_store_factory),
         session_ids,
         messages: Arc::new(Mutex::new(Vec::new())),
         timeline: Arc::new(Mutex::new(Vec::new())),
@@ -264,6 +263,7 @@ async fn async_main() -> AnyhowResult<()> {
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/healthz", get(healthz))
         .route("/api/state", get(app_state))
         .route("/api/events", get(session_events))
         .route("/api/turn", post(send_turn))
@@ -292,7 +292,6 @@ async fn async_main() -> AnyhowResult<()> {
 struct AppState {
     core: LashCore,
     process_observer: lash::process::ProcessWorkObserver,
-    session_store_factory: Arc<dyn lash::persistence::SessionStoreFactory>,
     session_ids: WorkbenchSessionIds,
     messages: Arc<Mutex<Vec<ChatMessage>>>,
     timeline: Arc<Mutex<Vec<StreamItem>>>,
@@ -525,6 +524,10 @@ struct WorkEvent {
     payload: Value,
 }
 
+async fn healthz() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "service": "agent-workbench", "status": "ok" }))
+}
+
 async fn index() -> Html<&'static str> {
     Html(ui::INDEX_HTML)
 }
@@ -648,7 +651,7 @@ async fn add_account(
         "api.accounts.add",
         json!({ "slug": summary.slug, "authority": summary.authority }),
     );
-    refresh_persisted_tool_surface(&state, "account_added").await?;
+    enqueue_tool_surface_refresh(&state, "account_added").await?;
     state.push_message(
         "event",
         format!("connected mock account `{}`", summary.authority),
@@ -665,7 +668,7 @@ async fn delete_account(
         .remove_account(&slug)
         .map_err(AppError::not_found)?;
     state.trace("api.accounts.remove", json!({ "slug": slug }));
-    refresh_persisted_tool_surface(&state, "account_removed").await?;
+    enqueue_tool_surface_refresh(&state, "account_removed").await?;
     state.push_message("event", format!("removed mock account `inbox.{slug}`"));
     Ok(Json(CommandAccepted { accepted: true }))
 }
@@ -693,7 +696,17 @@ async fn account_inbox(
     Ok(Json(inbox))
 }
 
-async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Result<(), AppError> {
+/// Enqueue a durable tool-surface refresh for the chat session.
+///
+/// The enqueue pokes the queued-work runner, which submits a Restate workflow
+/// for the batch; that workflow drains it with a durable handler context and
+/// the runtime commits the refreshed surface to the SQLite session store.
+/// Nothing here executes effects in the foreground — the workbench runs
+/// Restate + SQLite only.
+async fn enqueue_tool_surface_refresh(
+    state: &AppState,
+    reason: &str,
+) -> Result<lash::SessionCommandReceipt, AppError> {
     let session_id = state.current_session_id();
     let session = state
         .core
@@ -702,17 +715,14 @@ async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Resul
         .open()
         .await
         .map_err(AppError::internal)?;
-    let expected_generation = session
-        .tools()
-        .state()
-        .await
-        .map_err(AppError::internal)?
-        .generation();
+    // Unconditional refresh (no expected_generation): the command recomputes
+    // the surface from plugin state when it drains, and a generation guard
+    // taken here would only race the asynchronous drain.
     let receipt = session
         .commands()
         .refresh_tool_surface(
             reason,
-            Some(expected_generation),
+            None,
             format!(
                 "workbench-refresh-tool-surface:{}:{}:{}",
                 session_id,
@@ -722,53 +732,17 @@ async fn refresh_persisted_tool_surface(state: &AppState, reason: &str) -> Resul
         )
         .await
         .map_err(AppError::internal)?;
-    let _ = session
-        .queued_turn()
-        .drain_id(receipt.batch_id.clone())
-        .run()
-        .await
-        .map_err(AppError::internal)?;
-    let persisted = session
-        .control()
-        .state()
-        .persist_current()
-        .await
-        .map_err(AppError::internal)?;
-    let tool_count = persisted
-        .tool_state_snapshot
-        .as_ref()
-        .map(lash::tools::ToolState::len)
-        .unwrap_or_default();
-    let store = state
-        .session_store_factory
-        .create_store(&lash::persistence::SessionStoreCreateRequest {
-            session_id: session_id.clone(),
-            relation: lash::persistence::SessionRelation::default(),
-            policy: persisted.policy.clone(),
-        })
-        .await
-        .map_err(AppError::internal)?;
-    let result = store
-        .commit_runtime_state(lash::persistence::RuntimeCommit::persisted_state(
-            &persisted,
-            &[],
-        ))
-        .await
-        .map_err(AppError::internal)?;
     session.close().await.map_err(AppError::internal)?;
     state.trace(
-        "mail.tool_surface.refresh",
+        "mail.tool_surface.refresh_enqueued",
         json!({
             "reason": reason,
             "session_id": session_id,
             "command_batch_id": receipt.batch_id,
             "command_source_key": receipt.source_key,
-            "tool_state_generation": persisted.tool_state_generation,
-            "tool_count": tool_count,
-            "head_revision": result.head_revision,
         }),
     );
-    Ok(())
+    Ok(receipt)
 }
 
 async fn inject_message(
@@ -2082,7 +2056,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -2245,7 +2218,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -2264,13 +2236,15 @@ mod tests {
             mail_world: mail_world.clone(),
         };
 
-        refresh_persisted_tool_surface(&state, "initial_empty")
+        let receipt = enqueue_tool_surface_refresh(&state, "initial_empty")
             .await
-            .expect("persist initial empty surface");
+            .expect("enqueue initial empty refresh");
+        drain_refresh_batch(&state, &receipt).await;
         mail_world.add_account("Late Account").expect("add account");
-        refresh_persisted_tool_surface(&state, "account_added")
+        let receipt = enqueue_tool_surface_refresh(&state, "account_added")
             .await
-            .expect("refresh account surface");
+            .expect("enqueue account refresh");
+        drain_refresh_batch(&state, &receipt).await;
 
         let reopened = state
             .core
@@ -2292,6 +2266,39 @@ mod tests {
                 .iter()
                 .any(|name| name == "inbox__late_account__send"),
             "late account send tool should be active after persisted refresh: {tool_names:?}"
+        );
+        reopened.close().await.expect("close session");
+
+        // Removing the account must not poison the persisted session: the
+        // surface still references the account's tools until the refresh
+        // drains, and reopening (rebinding) has to succeed in that window.
+        mail_world
+            .remove_account("late_account")
+            .expect("remove account");
+        let receipt = enqueue_tool_surface_refresh(&state, "account_removed")
+            .await
+            .expect("enqueue removal refresh");
+        drain_refresh_batch(&state, &receipt).await;
+        let reopened = state
+            .core
+            .session(state.current_session_id())
+            .rlm()
+            .open()
+            .await
+            .expect("reopen session after account removal");
+        let tool_names = reopened
+            .tools()
+            .active_manifests()
+            .await
+            .expect("active tools")
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(
+            !tool_names
+                .iter()
+                .any(|name| name.starts_with("inbox__late_account__")),
+            "removed account tools should be gone after refresh: {tool_names:?}"
         );
         reopened.close().await.expect("close session");
         let _ = std::fs::remove_dir_all(data_dir);
@@ -2401,7 +2408,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -2530,7 +2536,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -2690,7 +2695,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids: WorkbenchSessionIds::fresh(),
             messages: Arc::new(Mutex::new(vec![ChatMessage {
                 id: "message".to_string(),
@@ -3027,7 +3031,6 @@ mod tests {
         let state = AppState {
             core,
             process_observer,
-            session_store_factory: Arc::clone(&core_store_factory),
             session_ids,
             messages: Arc::new(Mutex::new(Vec::new())),
             timeline: Arc::new(Mutex::new(Vec::new())),
@@ -3237,6 +3240,28 @@ mod tests {
             .expect("trigger process should finish");
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    /// Stand-in for the Restate queued-turn workflow: drains an enqueued
+    /// command batch in-process. The test cores' effect host permits
+    /// foreground drains; in production the same drain runs inside a Restate
+    /// handler context (`restate::run_queued_turn`).
+    async fn drain_refresh_batch(state: &AppState, receipt: &lash::SessionCommandReceipt) {
+        let session = state
+            .core
+            .session(receipt.session_id.clone())
+            .rlm()
+            .open()
+            .await
+            .expect("open session to drain refresh batch");
+        let _ = session
+            .queued_turn()
+            .batch_ids([receipt.batch_id.clone()])
+            .drain_id(receipt.batch_id.clone())
+            .run()
+            .await
+            .expect("drain refresh batch");
+        session.close().await.expect("close drain session");
     }
 
     fn test_workbench_core(
